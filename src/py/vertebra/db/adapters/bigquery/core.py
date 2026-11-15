@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import base64
-import inspect
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Final
-from urllib.parse import urlparse
 
 import msgspec
 
@@ -19,8 +17,6 @@ from vertebra._vertebra import (
 from vertebra.db.adapters.bigquery.config import (
     BigQueryConfig,
     BigQueryDryRunResult,
-    BigQueryTableIdentifier,
-    ObjectTableConfig,
 )
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor, write_arrow_shm
 from vertebra.telemetry.db_propagation import SqlTracePropagator
@@ -29,6 +25,7 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
 from vertebra.utils.serializers import encode_json
+from vertebra.utils.text import split_qualified_identifier, validate_identifier
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
@@ -40,7 +37,10 @@ if TYPE_CHECKING:
         SyncBigQueryClient as _RustSyncBigQueryClient,
     )
 
-__all__ = ("BigQueryCore",)
+__all__ = (
+    "BigQueryCore",
+    "BigQueryTableIdentifier",
+)
 
 _ON_DEMAND_TIB_PRICE_USD: Final[float] = 6.25
 _BYTES_PER_TIB: Final[float] = float(1 << 40)
@@ -381,83 +381,6 @@ class BigQueryCore:
         return f"LOAD DATA {verb} {table}\nFROM FILES (\n  format = '{fmt_upper}',\n  uris = [{escaped_uris}]\n)"
 
     @classmethod
-    def build_object_table_select_sql(
-        cls,
-        table_name: str,
-        *,
-        where: str | None = None,
-        limit: int | None = None,
-    ) -> str:
-        """Build a `SELECT` query against a BigQuery Object Table."""
-        quoted_table = cls.validate_and_quote_table(table_name)
-        sql = f"SELECT uri, generation, content_type, size, md5_hash, updated FROM {quoted_table}"
-        if where:
-            sql += f" WHERE {where}"
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
-        return sql
-
-    @classmethod
-    def list_objects_from_store_fallback_sync(
-        cls,
-        config: ObjectTableConfig,
-        store: Any,
-        *,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """List objects directly from `store` when the Object Table catalog query is unavailable."""
-        rows: list[dict[str, Any]] = []
-        list_fn = getattr(store, "list", None)
-        list_backend_fn = getattr(store, "list_objects_sync", None)
-        for pattern in config.uris:
-            scheme = urlparse(pattern).scheme or "gs"
-            bucket, prefix = cls._extract_bucket_prefix_from_uri(pattern)
-            if callable(list_fn):
-                items = list_fn(prefix or None)
-            elif callable(list_backend_fn):
-                items = list_backend_fn(prefix=prefix)
-            else:
-                items = []
-            for item in items:
-                rows.append(cls._normalize_store_item_to_row(item, scheme=scheme, bucket=bucket))
-                if limit is not None and len(rows) >= limit:
-                    return rows
-        return rows
-
-    @classmethod
-    async def list_objects_from_store_fallback_async(
-        cls,
-        config: ObjectTableConfig,
-        store: Any,
-        *,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Asynchronously list objects directly from `store` when the Object Table catalog query is unavailable."""
-        rows: list[dict[str, Any]] = []
-        list_fn = getattr(store, "list", None)
-        list_backend_async = getattr(store, "list_objects_async", None)
-        list_backend_sync = getattr(store, "list_objects_sync", None)
-        for pattern in config.uris:
-            scheme = urlparse(pattern).scheme or "gs"
-            bucket, prefix = cls._extract_bucket_prefix_from_uri(pattern)
-            if callable(list_backend_async):
-                items = await list_backend_async(prefix=prefix)
-            elif callable(list_backend_sync):
-                items = list_backend_sync(prefix=prefix)
-            elif callable(list_fn):
-                res = list_fn(prefix or None)
-                if inspect.isawaitable(res):
-                    res = await res
-                items = res
-            else:
-                items = []
-            for item in items:
-                rows.append(cls._normalize_store_item_to_row(item, scheme=scheme, bucket=bucket))
-                if limit is not None and len(rows) >= limit:
-                    return rows
-        return rows
-
-    @classmethod
     def validate_and_quote_table(cls, table: str, *, field_name: str = "table") -> str:
         """Validate a BigQuery table reference and return a canonical backtick-quoted SQL identifier."""
         return BigQueryTableIdentifier.validate_and_quote(table, field_name=field_name)
@@ -567,59 +490,6 @@ class BigQueryCore:
             result = ("l_" + result)[:63]
         return result
 
-    @staticmethod
-    def _extract_bucket_prefix_from_uri(uri: str) -> tuple[str, str]:
-        if "://" not in uri:
-            return "", uri.lstrip("/").rstrip("*")
-        parsed = urlparse(uri)
-        bucket = parsed.netloc
-        prefix = parsed.path.lstrip("/").rstrip("*")
-        return bucket, prefix
-
-    @staticmethod
-    def _normalize_store_item_to_row(
-        item: Any,
-        *,
-        scheme: str,
-        bucket: str,
-    ) -> dict[str, Any]:
-        if isinstance(item, str):
-            loc = item.lstrip("/")
-            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else f"{scheme}://{loc}"
-            return {
-                "uri": full_uri,
-                "generation": None,
-                "content_type": None,
-                "size": 0,
-                "md5_hash": None,
-                "updated": None,
-            }
-        if isinstance(item, Mapping):
-            loc = str(item.get("location") or item.get("path") or "").lstrip("/")
-            full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
-            return {
-                "uri": full_uri,
-                "generation": item.get("version") or item.get("e_tag") or item.get("etag"),
-                "content_type": item.get("content_type"),
-                "size": int(item.get("size", 0) or 0),
-                "md5_hash": item.get("e_tag") or item.get("etag"),
-                "updated": item.get("last_modified"),
-            }
-        loc = str(getattr(item, "path", None) or getattr(item, "location", "") or "").lstrip("/")
-        full_uri = f"{scheme}://{bucket}/{loc}" if bucket else loc
-        etag = getattr(item, "etag", None) or getattr(item, "e_tag", None)
-        version = getattr(item, "version", None) or etag
-        return {
-            "uri": full_uri,
-            "generation": version,
-            "content_type": getattr(item, "content_type", None),
-            "size": int(getattr(item, "size", 0) or 0),
-            "md5_hash": etag,
-            "updated": str(getattr(item, "last_modified", ""))
-            if getattr(item, "last_modified", None) is not None
-            else None,
-        }
-
     @classmethod
     def _serialize_pyarrow_for_append(cls, pa: Any, data: Any) -> bytes:
         if any(pa.types.is_dictionary(field.type) for field in data.schema):
@@ -668,3 +538,153 @@ class BigQueryCore:
         with pa.ipc.new_stream(sink, schema) as writer:
             writer.write_batch(batch)
         return int(sink.getvalue().size)
+
+
+class BigQueryTableIdentifier:
+    """Canonical BigQuery table identifier parser, validator, and GoogleSQL backtick quoter."""
+
+    @staticmethod
+    def split_parts(raw: str) -> list[str]:
+        """Split a BigQuery table reference into `[project, dataset, table]`, `[dataset, table]`, or `[table]`."""
+        cleaned = raw.strip().replace("`", "")
+        if not cleaned:
+            return []
+        if ":" in cleaned:
+            first, rest = cleaned.split(":", 1)
+            if "." in first:
+                if ":" in rest:
+                    proj_slug, ds_and_table = rest.split(":", 1)
+                    return [f"{first}:{proj_slug}", *split_qualified_identifier(ds_and_table)]
+                dot_parts = split_qualified_identifier(rest)
+                if dot_parts:
+                    return [f"{first}:{dot_parts[0]}", *dot_parts[1:]]
+                return [cleaned]
+            return [first, *split_qualified_identifier(rest)]
+        return split_qualified_identifier(cleaned)
+
+    @classmethod
+    def parse_parts(cls, table: str, *, field_name: str = "table") -> tuple[str, ...]:
+        """Validate a BigQuery table reference and return its normalized unquoted segments."""
+        stripped = table.strip()
+        if not stripped or any(ch.isspace() or ch in {";", "(", ")", "'", '"'} for ch in stripped):
+            msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+            raise ValueError(msg)
+        if "--" in stripped or "/*" in stripped or "*/" in stripped:
+            msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+            raise ValueError(msg)
+
+        if stripped.startswith("projects/"):
+            if "`" in stripped:
+                msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+                raise ValueError(msg)
+            segments = stripped.split("/")
+            if len(segments) != 6 or segments[0] != "projects" or segments[2] != "datasets" or segments[4] != "tables":
+                msg = f"Invalid BigQuery resource identifier for {field_name}: {table!r}"
+                raise ValueError(msg)
+            cls._validate_project_id(segments[1], field_name=field_name)
+            validate_identifier(segments[3], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(segments[5], field_name, allow_dots=False, allow_hyphens=True)
+            return (segments[1], segments[3], segments[5])
+
+        if "`" in stripped:
+            if stripped.startswith("`") and stripped.endswith("`") and "`" not in stripped[1:-1]:
+                parts = cls.split_parts(stripped[1:-1])
+            else:
+                parts = cls._split_backticked_segments(stripped, original=table, field_name=field_name)
+        else:
+            parts = cls.split_parts(stripped)
+
+        if len(parts) == 3:
+            cls._validate_project_id(parts[0], field_name=field_name)
+            validate_identifier(parts[1], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[2], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0], parts[1], parts[2])
+        if len(parts) == 2:
+            validate_identifier(parts[0], field_name, allow_dots=False, allow_hyphens=False)
+            validate_identifier(parts[1], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0], parts[1])
+        if len(parts) == 1:
+            validate_identifier(parts[0], field_name, allow_dots=False, allow_hyphens=True)
+            return (parts[0],)
+        msg = f"Invalid BigQuery identifier for {field_name}: {table!r}"
+        raise ValueError(msg)
+
+    @classmethod
+    def validate_and_quote(cls, table: str, *, field_name: str = "table") -> str:
+        """Validate a BigQuery table reference and return canonical per-segment backtick-quoted SQL."""
+        parts = cls.parse_parts(table, field_name=field_name)
+        return ".".join(f"`{part}`" for part in parts)
+
+    @staticmethod
+    def _validate_project_id(project_id: str, *, field_name: str) -> None:
+        if ":" in project_id:
+            if project_id.count(":") != 1:
+                msg = f"Invalid BigQuery project identifier for {field_name}: {project_id!r}"
+                raise ValueError(msg)
+            domain, proj_slug = project_id.split(":", 1)
+            validate_identifier(domain, field_name, allow_dots=True, allow_hyphens=True)
+            validate_identifier(proj_slug, field_name, allow_dots=False, allow_hyphens=True)
+            return
+        validate_identifier(project_id, field_name, allow_dots=False, allow_hyphens=True)
+
+    @staticmethod
+    def _split_backticked_segments(stripped: str, *, original: str, field_name: str) -> list[str]:
+        segments: list[str] = []
+        idx = 0
+        n = len(stripped)
+        first_bt = stripped.find("`")
+        colon = stripped.find(":")
+        if colon != -1 and (first_bt == -1 or colon < first_bt):
+            prefix = stripped[:colon]
+            rest = stripped[colon + 1 :]
+            if "." in prefix:
+                dot_after = rest.find(".")
+                if dot_after == -1 or dot_after + 1 >= len(rest):
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                proj_part = f"{prefix}:{rest[:dot_after]}"
+                if "`" in proj_part:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(proj_part)
+                stripped = rest[dot_after + 1 :]
+            else:
+                if not prefix or "`" in prefix or not rest:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(prefix)
+                stripped = rest
+            n = len(stripped)
+
+        while idx < n:
+            if stripped[idx] == "`":
+                end = stripped.find("`", idx + 1)
+                if end == -1:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segment = stripped[idx + 1 : end]
+                if not segment or "`" in segment:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(segment)
+                idx = end + 1
+                if idx < n:
+                    if stripped[idx] != "." or idx + 1 >= n:
+                        msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                        raise ValueError(msg)
+                    idx += 1
+            else:
+                dot = stripped.find(".", idx)
+                end = n if dot == -1 else dot
+                segment = stripped[idx:end]
+                if not segment or "`" in segment:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                segments.append(segment)
+                if dot == -1:
+                    break
+                if dot + 1 >= n:
+                    msg = f"Invalid BigQuery identifier for {field_name}: {original!r}"
+                    raise ValueError(msg)
+                idx = dot + 1
+        return segments

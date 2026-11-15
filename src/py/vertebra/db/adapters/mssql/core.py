@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -34,44 +35,6 @@ class MSSQLCore:
             extra="mssql",
         )
 
-    @staticmethod
-    def _resolve_dialer_fields(
-        config: MSSQLConfig,
-        dialer: Any = None,
-    ) -> tuple[str | None, str, str, bytes | None, bytes | None, bytes | None]:
-        """Extract Cloud SQL instance, IP type, auth mode, and optional mTLS PEMs from `config` and `dialer`."""
-        cloudsql_instance = config.cloud_sql_instance
-        cloudsql_ip_type = config.cloudsql_ip_type
-        cloudsql_auth_type = config.cloudsql_auth_type
-        ca_pem = config.ca_pem
-        client_cert_pem = config.client_cert_pem
-        client_key_pem = config.client_key_pem
-
-        if dialer is not None:
-            dialer_cfg = getattr(dialer, "config", None)
-            if dialer_cfg is not None and not cloudsql_instance:
-                cloudsql_instance = getattr(dialer_cfg, "instance_connection_name", None)
-                cloudsql_ip_type = str(getattr(dialer_cfg, "ip_type", cloudsql_ip_type))
-                if getattr(dialer_cfg, "enable_iam_auth", False):
-                    cloudsql_auth_type = "IAM"
-            bundle = getattr(dialer, "_cached_cert_bundle", None)
-            if bundle is not None:
-                if ca_pem is None:
-                    ca_pem = getattr(bundle, "ca_cert_pem", None)
-                if client_cert_pem is None:
-                    client_cert_pem = getattr(bundle, "client_cert_pem", None)
-                if client_key_pem is None:
-                    client_key_pem = getattr(bundle, "private_key_pem", None)
-
-        return (
-            cloudsql_instance,
-            cloudsql_ip_type,
-            cloudsql_auth_type,
-            ca_pem,
-            client_cert_pem,
-            client_key_pem,
-        )
-
     @classmethod
     def create_sync_rust_client(
         cls,
@@ -81,40 +44,8 @@ class MSSQLCore:
     ) -> SyncMSSQLClient:
         """Instantiate the native Rust `SyncMSSQLClient` from `config` and optional `dialer`."""
         mssql_mod = cls.require_native_module()
-        max_overflow = max(0, int(config.pool_max_size) - max(1, int(config.pool_min_size)))
-        (
-            cloudsql_instance,
-            cloudsql_ip_type,
-            cloudsql_auth_type,
-            ca_pem,
-            client_cert_pem,
-            client_key_pem,
-        ) = cls._resolve_dialer_fields(config, dialer)
-        client: SyncMSSQLClient = mssql_mod.SyncMSSQLClient(
-            config.dsn,
-            host=config.host,
-            port=int(config.port),
-            database=config.database,
-            user=config.user,
-            password=config.password,
-            application_name=config.application_name,
-            encryption=config.encryption,
-            trust_server_certificate=config.trust_server_certificate,
-            ca_pem=ca_pem,
-            client_cert_pem=client_cert_pem,
-            client_key_pem=client_key_pem,
-            server_name=config.server_name,
-            connect_timeout_ms=max(1, int(config.connect_timeout_ms)),
-            query_timeout_ms=max(1, int(config.query_timeout_ms)),
-            pool_size=max(1, int(config.pool_min_size)),
-            max_overflow=max_overflow,
-            statement_cache_capacity=max(0, int(config.statement_cache_size)),
-            read_only_intent=bool(config.read_only_intent),
-            cloudsql_instance=cloudsql_instance,
-            cloudsql_ip_type=cloudsql_ip_type,
-            cloudsql_auth_type=cloudsql_auth_type,
-            cloudsql_proxy_addr=config.cloudsql_proxy_addr,
-        )
+        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer)
+        client: SyncMSSQLClient = mssql_mod.SyncMSSQLClient(config.dsn, **kwargs)
         return client
 
     @classmethod
@@ -126,6 +57,62 @@ class MSSQLCore:
     ) -> AsyncMSSQLClient:
         """Instantiate the native Rust `AsyncMSSQLClient` from `config` and optional `dialer`."""
         mssql_mod = cls.require_native_module()
+        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer)
+        client: AsyncMSSQLClient = mssql_mod.AsyncMSSQLClient(config.dsn, **kwargs)
+        return client
+
+    @staticmethod
+    def prepare_and_lease(broker: Any, sql: str) -> tuple[str, Any]:
+        """Compile T-SQL `@P1` placeholders (caching via broker if enabled) and acquire a lease grant."""
+        sc_attr = getattr(broker, "statement_cache", None) if broker is not None else None
+        sc = sc_attr() if callable(sc_attr) else sc_attr
+        if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
+            sql_bytes = sql.encode("utf-8")
+            try:
+                cached = sc.lookup(MSSQL_DIALECT_TAG, sql)
+                use_bytes_key = False
+            except TypeError:
+                cached = sc.lookup(MSSQL_DIALECT_TAG, sql_bytes)
+                use_bytes_key = True
+            if cached is not None and cached.compiled_sql:
+                rewritten = cached.compiled_sql.decode("utf-8")
+            else:
+                rewritten, count = MSSQLCore.rewrite_placeholders(sql)
+                sc.insert(
+                    MSSQL_DIALECT_TAG,
+                    sql_bytes if use_bytes_key else sql,
+                    count,
+                    rewritten.encode("utf-8"),
+                    b"",
+                )
+        else:
+            rewritten, _ = MSSQLCore.rewrite_placeholders(sql)
+
+        if broker is not None and hasattr(broker, "lease_table") and broker.lease_table is not None:
+            return rewritten, broker.lease_table.acquire(os.getpid())
+        if broker is not None and hasattr(broker, "acquire"):
+            try:
+                return rewritten, broker.acquire(os.getpid())
+            except TypeError:
+                return rewritten, broker.acquire(bind_key="mssql")
+        return rewritten, None
+
+    @staticmethod
+    def release_broker_lease(broker: Any, grant: Any) -> None:
+        """Release a previously acquired SQL Server broker lease grant."""
+        if grant is not None and broker is not None:
+            if hasattr(broker, "lease_table") and broker.lease_table is not None:
+                broker.lease_table.release(grant.slot_index, grant.generation)
+            elif hasattr(broker, "release") and hasattr(grant, "slot_index"):
+                broker.release(grant.slot_index, grant.generation)
+
+    @classmethod
+    def _build_rust_client_kwargs(
+        cls,
+        config: MSSQLConfig,
+        *,
+        dialer: Any = None,
+    ) -> dict[str, Any]:
         max_overflow = max(0, int(config.pool_max_size) - max(1, int(config.pool_min_size)))
         (
             cloudsql_instance,
@@ -135,32 +122,30 @@ class MSSQLCore:
             client_cert_pem,
             client_key_pem,
         ) = cls._resolve_dialer_fields(config, dialer)
-        client: AsyncMSSQLClient = mssql_mod.AsyncMSSQLClient(
-            config.dsn,
-            host=config.host,
-            port=int(config.port),
-            database=config.database,
-            user=config.user,
-            password=config.password,
-            application_name=config.application_name,
-            encryption=config.encryption,
-            trust_server_certificate=config.trust_server_certificate,
-            ca_pem=ca_pem,
-            client_cert_pem=client_cert_pem,
-            client_key_pem=client_key_pem,
-            server_name=config.server_name,
-            connect_timeout_ms=max(1, int(config.connect_timeout_ms)),
-            query_timeout_ms=max(1, int(config.query_timeout_ms)),
-            pool_size=max(1, int(config.pool_min_size)),
-            max_overflow=max_overflow,
-            statement_cache_capacity=max(0, int(config.statement_cache_size)),
-            read_only_intent=bool(config.read_only_intent),
-            cloudsql_instance=cloudsql_instance,
-            cloudsql_ip_type=cloudsql_ip_type,
-            cloudsql_auth_type=cloudsql_auth_type,
-            cloudsql_proxy_addr=config.cloudsql_proxy_addr,
-        )
-        return client
+        return {
+            "host": config.host,
+            "port": int(config.port),
+            "database": config.database,
+            "user": config.user,
+            "password": config.password,
+            "application_name": config.application_name,
+            "encryption": config.encryption,
+            "trust_server_certificate": config.trust_server_certificate,
+            "ca_pem": ca_pem,
+            "client_cert_pem": client_cert_pem,
+            "client_key_pem": client_key_pem,
+            "server_name": config.server_name,
+            "connect_timeout_ms": max(1, int(config.connect_timeout_ms)),
+            "query_timeout_ms": max(1, int(config.query_timeout_ms)),
+            "pool_size": max(1, int(config.pool_min_size)),
+            "max_overflow": max_overflow,
+            "statement_cache_capacity": max(0, int(config.statement_cache_size)),
+            "read_only_intent": bool(config.read_only_intent),
+            "cloudsql_instance": cloudsql_instance,
+            "cloudsql_ip_type": cloudsql_ip_type,
+            "cloudsql_auth_type": cloudsql_auth_type,
+            "cloudsql_proxy_addr": config.cloudsql_proxy_addr,
+        }
 
     @staticmethod
     def coerce_arrow_source(
@@ -317,5 +302,45 @@ class MSSQLCore:
 
         return "".join(out), max_param
 
+    @staticmethod
+    def _resolve_dialer_fields(
+        config: MSSQLConfig,
+        dialer: Any = None,
+    ) -> tuple[str | None, str, str, bytes | None, bytes | None, bytes | None]:
+        """Extract Cloud SQL instance, IP type, auth mode, and optional mTLS PEMs from `config` and `dialer`."""
+        cloudsql_instance = config.cloud_sql_instance
+        cloudsql_ip_type = config.cloudsql_ip_type
+        cloudsql_auth_type = config.cloudsql_auth_type
+        ca_pem = config.ca_pem
+        client_cert_pem = config.client_cert_pem
+        client_key_pem = config.client_key_pem
 
-rewrite_mssql_placeholders = MSSQLCore.rewrite_placeholders
+        if dialer is not None:
+            dialer_cfg = getattr(dialer, "config", None)
+            if dialer_cfg is not None and not cloudsql_instance:
+                cloudsql_instance = getattr(dialer_cfg, "instance_connection_name", None)
+                cloudsql_ip_type = str(getattr(dialer_cfg, "ip_type", cloudsql_ip_type))
+                if getattr(dialer_cfg, "enable_iam_auth", False):
+                    cloudsql_auth_type = "IAM"
+            bundle = getattr(dialer, "_cached_cert_bundle", None)
+            if bundle is not None:
+                if ca_pem is None:
+                    ca_pem = getattr(bundle, "ca_cert_pem", None)
+                if client_cert_pem is None:
+                    client_cert_pem = getattr(bundle, "client_cert_pem", None)
+                if client_key_pem is None:
+                    client_key_pem = getattr(bundle, "private_key_pem", None)
+
+        return (
+            cloudsql_instance,
+            cloudsql_ip_type,
+            cloudsql_auth_type,
+            ca_pem,
+            client_cert_pem,
+            client_key_pem,
+        )
+
+
+def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]:
+    """Rewrite `?` and `$1`/`$2` placeholders to T-SQL `@P1, @P2, ...` outside quotes, brackets, and comments."""
+    return MSSQLCore.rewrite_placeholders(sql)

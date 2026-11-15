@@ -13,13 +13,13 @@ from vertebra.db.driver._common import MYSQL_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
-_vertebra = import_optional("vertebra._vertebra")
-
 __all__ = (
     "MySQLConfig",
     "MySQLPoolConfig",
     "MySQLStatementConfig",
 )
+
+_vertebra = import_optional("vertebra._vertebra")
 
 _ALLOWED_SSL_MODES = frozenset(
     {
@@ -224,6 +224,14 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                         msg = f"Unsupported MySQL {ssl_param} '{query_params[ssl_param][0]}'"
                         raise ImproperConfigurationError(msg)
 
+    def __repr__(self) -> str:
+        """Return a redacted representation that omits credentials and tokens."""
+        return (
+            f"MySQLConfig(host={self.host!r}, port={self.port}, "
+            f"user={self.user!r}, database={self.database!r}, "
+            f"ssl_mode={self.canonical_ssl_mode!r}, password='***')"
+        )
+
     @property
     def canonical_ssl_mode(self) -> str:
         """Return the normalized `ssl_mode` string (`disable`, `prefer`, `require`, `verify-ca`, `verify-full`)."""
@@ -289,6 +297,23 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     def parse_dsn_params(self) -> dict[str, Any]:
         """Extract normalized connection parameters from `dsn` and fields."""
+        params = self._parse_dsn_fields()
+        if self.enable_iam_auth:
+            iam_token = self.resolve_iam_password_sync()
+            if iam_token:
+                params["password"] = iam_token
+        return params
+
+    async def parse_dsn_params_async(self) -> dict[str, Any]:
+        """Extract normalized connection parameters asynchronously, refreshing IAM tokens if enabled."""
+        params = self._parse_dsn_fields()
+        if self.enable_iam_auth:
+            iam_token = await self.resolve_iam_password_async()
+            if iam_token:
+                params["password"] = iam_token
+        return params
+
+    def _parse_dsn_fields(self) -> dict[str, Any]:
         parsed = urlparse(self.dsn)
         has_dsn = bool(self.dsn and self.dsn != "mysql://localhost:3306/vertebra")
         query = parse_qs(parsed.query)
@@ -299,10 +324,6 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             (unquote(parsed.password) if parsed.password is not None else self.password) if has_dsn else self.password
         )
         database = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
-        if self.enable_iam_auth:
-            iam_token = self.resolve_iam_password_sync()
-            if iam_token:
-                password = iam_token
         ssl_mode = self.canonical_ssl_mode
         for ssl_key in ("ssl_mode", "ssl-mode", "sslmode", "ssl"):
             if ssl_key in query:
@@ -332,15 +353,6 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             "cloud_sql_instance": self.cloud_sql_instance,
             "statement_cache_size": self.statement_cache_size,
         }
-
-    async def parse_dsn_params_async(self) -> dict[str, Any]:
-        """Extract normalized connection parameters asynchronously, refreshing IAM tokens if enabled."""
-        params = self.parse_dsn_params()
-        if self.enable_iam_auth:
-            iam_token = await self.resolve_iam_password_async()
-            if iam_token:
-                params["password"] = iam_token
-        return params
 
     def to_cloud_dialer_config(self) -> CloudSQLConfig | None:
         """Return a `CloudSQLConfig` when `cloud_sql_instance` is set, else `None`."""
@@ -396,14 +408,6 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             else None
         )
         return async_cls(self, dialer=dialer, broker=broker)
-
-    def __repr__(self) -> str:
-        """Return a redacted representation that omits credentials and tokens."""
-        return (
-            f"MySQLConfig(host={self.host!r}, port={self.port}, "
-            f"user={self.user!r}, database={self.database!r}, "
-            f"ssl_mode={self.canonical_ssl_mode!r}, password='***')"
-        )
 
     def _build_iam_options(self) -> dict[str, str]:
         opts = dict(self.iam_auth_options)

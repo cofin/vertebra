@@ -15,9 +15,12 @@ generated:
   by: flow/0.26.0
   at: "2026-11-07T03:55:00Z"
 verified:
+  - by: agent:flow-completion
+    at: "2026-11-14T21:38:00Z"
+    commit: 8a836024
   - by: agent:flow-executor
     at: "2026-11-13T05:25:00Z"
-    commit: 77280bcb
+    commit: 93d7fb1f
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -70,12 +73,21 @@ sources:
   - id: src-db-bigquery-init-py
     resource: src/py/vertebra/db/adapters/bigquery/__init__.py
     title: BigQueryConfig, BigQueryCore, and Sync/AsyncBigQueryDriver exports
+  - id: src-db-bigquery-object-tables-py
+    resource: src/py/vertebra/db/adapters/bigquery/object_tables.py
+    title: ObjectRef, ObjectTableConfig, and presigned reference hydration helpers
   - id: src-db-bigquery-tools-py
     resource: src/py/vertebra/db/adapters/bigquery/tools.py
     title: BigQueryToolProvider operations and billing-cap enforcement
   - id: src-db-spanner-init-py
     resource: src/py/vertebra/db/adapters/spanner/__init__.py
     title: SpannerConfig, SpannerCore, and Sync/AsyncSpannerDriver exports
+  - id: src-db-spanner-mutations-py
+    resource: src/py/vertebra/db/adapters/spanner/mutations.py
+    title: Mutation, MutationGroup, and StalenessBound structs
+  - id: src-db-spanner-transactions-py
+    resource: src/py/vertebra/db/adapters/spanner/transactions.py
+    title: Sync/AsyncSpannerSnapshot and Sync/AsyncSpannerTransaction contexts
   - id: src-db-spanner-tools-py
     resource: src/py/vertebra/db/adapters/spanner/tools.py
     title: SpannerToolProvider operations and staleness snapshot policies
@@ -104,7 +116,7 @@ sources:
 
 ## `vertebra-bigquery` Submodules & Wire Pipeline (`vertebra._bigquery`)
 
-[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, `SyncBigQueryDriver`, `AsyncBigQueryDriver`) wraps the five-module `vertebra-bigquery` crate:
+[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, [`object_tables.py`](../../../../../src/py/vertebra/db/adapters/bigquery/object_tables.py)[^src-db-bigquery-object-tables-py] validating `limit > 0`, single-pass `_split_uri_bucket_and_key`, and `(DatabaseError, OSError)` fallback, plus `SyncBigQueryDriver` / `AsyncBigQueryDriver` in `_sync.py` / `_async.py`) wraps the five-module `vertebra-bigquery` crate:
 
 | Module | Key Types & Responsibilities |
 |---|---|
@@ -116,7 +128,7 @@ sources:
 
 ## `vertebra-spanner` Submodules & Wire Pipeline (`vertebra._spanner`)
 
-[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore`, `SyncSpannerDriver`, `AsyncSpannerDriver`) wraps the five-module `vertebra-spanner` crate across GoogleSQL and Spangres dialects:
+[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py] keeping `gc=True` on `Mutation`/`MutationGroup` and validating `Mutation.coerce` ops, [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py` with `0.01 * attempt` `SpannerAbortedError` async retry backoff) wraps the five-module `vertebra-spanner` crate across GoogleSQL and Spangres dialects:
 
 | Module | Key Types & Responsibilities |
 |---|---|
@@ -147,7 +159,10 @@ sources:
 [^src-vertebra-spanner-src-codec-rs]: `src/rs/vertebra-spanner/src/codec.rs` — SpannerDialect, mutations, staleness bounds, and Spangres placeholders.
 [^src-db-staging-py]: `src/py/vertebra/db/_staging.py` — Shared multicloud ObjectStoreStaging cursor serialization and URI resolution.
 [^src-db-bigquery-init-py]: `src/py/vertebra/db/adapters/bigquery/__init__.py` — BigQueryConfig, BigQueryCore, and Sync/AsyncBigQueryDriver exports.
+[^src-db-bigquery-object-tables-py]: `src/py/vertebra/db/adapters/bigquery/object_tables.py` — ObjectRef, ObjectTableConfig, and presigned reference hydration helpers.
 [^src-db-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — BigQueryToolProvider operations and billing-cap enforcement.
 [^src-db-spanner-init-py]: `src/py/vertebra/db/adapters/spanner/__init__.py` — SpannerConfig, SpannerCore, and Sync/AsyncSpannerDriver exports.
+[^src-db-spanner-mutations-py]: `src/py/vertebra/db/adapters/spanner/mutations.py` — Mutation, MutationGroup, and StalenessBound structs.
+[^src-db-spanner-transactions-py]: `src/py/vertebra/db/adapters/spanner/transactions.py` — Sync/AsyncSpannerSnapshot and Sync/AsyncSpannerTransaction contexts.
 [^src-db-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — SpannerToolProvider operations and staleness snapshot policies.
 [^src-typing-public-py]: `src/py/vertebra/typing.py` — Neutral ToolProvider protocol and ToolPolicyError exception.

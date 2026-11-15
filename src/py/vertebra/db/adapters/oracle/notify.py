@@ -32,15 +32,6 @@ __all__ = (
 _TRANSIENT_ORA_CODES: frozenset[int] = frozenset({3113, 3114, 3135, 4061, 4068, 12170, 12514, 12537, 12541, 12545})
 
 
-def _is_valid_aq_identifier(value: str) -> bool:
-    if not value or len(value) > 128:
-        return False
-    first = value[0]
-    if not (first.isascii() and (first.isalpha() or first == "_")):
-        return False
-    return all(ch.isascii() and (ch.isalnum() or ch in ("_", "$", "#")) for ch in value[1:])
-
-
 def validate_oracle_channel_name(channel: str, *, queue_prefix: str = "VTB_AQ_") -> str:
     """Validate a logical channel or queue name and return its uppercase Oracle AQ queue identifier.
 
@@ -56,13 +47,13 @@ def validate_oracle_channel_name(channel: str, *, queue_prefix: str = "VTB_AQ_")
     """
     cleaned = channel.strip() if isinstance(channel, str) else ""
     prefix_cleaned = queue_prefix.strip() if isinstance(queue_prefix, str) else ""
-    if not _is_valid_aq_identifier(cleaned):
+    if not OracleNotifyConfig._is_valid_aq_identifier(cleaned):
         err = ProgrammingError(
             f"Invalid Oracle AQ channel/queue identifier {channel!r}; expected ^[A-Za-z_][A-Za-z0-9_$#]{{0,127}}$"
         )
         err.sqlstate = "42602"
         raise err
-    if prefix_cleaned and not _is_valid_aq_identifier(prefix_cleaned):
+    if prefix_cleaned and not OracleNotifyConfig._is_valid_aq_identifier(prefix_cleaned):
         err = ProgrammingError(
             f"Invalid Oracle AQ queue_prefix {queue_prefix!r}; expected ^[A-Za-z_][A-Za-z0-9_$#]{{0,127}}$"
         )
@@ -76,7 +67,7 @@ def validate_oracle_channel_name(channel: str, *, queue_prefix: str = "VTB_AQ_")
         if not upper_prefix or upper_channel.startswith(upper_prefix)
         else f"{upper_prefix}{upper_channel}"
     )
-    if not _is_valid_aq_identifier(resolved):
+    if not OracleNotifyConfig._is_valid_aq_identifier(resolved):
         err = ProgrammingError(
             f"Invalid Oracle AQ resolved queue identifier {resolved!r}; exceeds 128-byte identifier limit"
         )
@@ -112,7 +103,7 @@ class OracleNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
     def __post_init__(self) -> None:
         if self.queue_prefix:
             validate_oracle_channel_name(" probe ", queue_prefix=self.queue_prefix)
-        if self.consumer_name is not None and not _is_valid_aq_identifier(self.consumer_name.strip()):
+        if self.consumer_name is not None and not self._is_valid_aq_identifier(self.consumer_name.strip()):
             err = ProgrammingError(
                 f"Invalid Oracle AQ consumer_name {self.consumer_name!r}; expected ^[A-Za-z_][A-Za-z0-9_$#]{{0,127}}$"
             )
@@ -128,6 +119,15 @@ class OracleNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
             raise ValueError("max_reconnect_attempts must be >= 0")
         if self.poll_timeout <= 0:
             raise ValueError("poll_timeout must be > 0")
+
+    @staticmethod
+    def _is_valid_aq_identifier(value: str) -> bool:
+        if not value or len(value) > 128:
+            return False
+        first = value[0]
+        if not (first.isascii() and (first.isalpha() or first == "_")):
+            return False
+        return all(ch.isascii() and (ch.isalnum() or ch in ("_", "$", "#")) for ch in value[1:])
 
 
 class OracleNotificationSource(NotificationSource):
@@ -211,7 +211,7 @@ class OracleNotificationSource(NotificationSource):
         """Subscribe directly to an Oracle AQ / TxEventQ queue with an optional consumer name."""
         resolved_queue = validate_oracle_channel_name(queue_name, queue_prefix=self._config.queue_prefix)
         resolved_consumer = consumer_name if consumer_name is not None else self._config.consumer_name
-        if resolved_consumer is not None and not _is_valid_aq_identifier(resolved_consumer.strip()):
+        if resolved_consumer is not None and not OracleNotifyConfig._is_valid_aq_identifier(resolved_consumer.strip()):
             err = ProgrammingError(
                 f"Invalid Oracle AQ consumer_name {resolved_consumer!r}; expected ^[A-Za-z_][A-Za-z0-9_$#]{{0,127}}$"
             )

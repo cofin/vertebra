@@ -13,8 +13,6 @@ if TYPE_CHECKING:
         DEFAULT_BIGQUERY_STORAGE_ENDPOINT,
         BigQueryConfig,
         BigQueryDryRunResult,
-        ObjectRef,
-        ObjectTableConfig,
     )
     from vertebra.db.adapters.bigquery.core import BigQueryCore
     from vertebra.db.adapters.bigquery.driver import (
@@ -22,6 +20,10 @@ if TYPE_CHECKING:
         SyncBigQueryDriver,
     )
     from vertebra.db.adapters.bigquery.embeddings import BigQueryEmbeddingPushdown
+    from vertebra.db.adapters.bigquery.object_tables import (
+        ObjectRef,
+        ObjectTableConfig,
+    )
     from vertebra.db.adapters.bigquery.tools import BigQueryToolProvider
 
 __all__ = (
@@ -44,6 +46,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.bigquery.embeddings",
     "vertebra.db.adapters.bigquery.config",
     "vertebra.db.adapters.bigquery.core",
+    "vertebra.db.adapters.bigquery.object_tables",
     "vertebra.db.adapters.bigquery.driver",
 ]
 
@@ -60,8 +63,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "BigQueryConfig": ("vertebra.db.adapters.bigquery.config", "BigQueryConfig"),
     "BigQueryCore": ("vertebra.db.adapters.bigquery.core", "BigQueryCore"),
     "BigQueryDryRunResult": ("vertebra.db.adapters.bigquery.config", "BigQueryDryRunResult"),
-    "ObjectRef": ("vertebra.db.adapters.bigquery.config", "ObjectRef"),
-    "ObjectTableConfig": ("vertebra.db.adapters.bigquery.config", "ObjectTableConfig"),
+    "ObjectRef": ("vertebra.db.adapters.bigquery.object_tables", "ObjectRef"),
+    "ObjectTableConfig": ("vertebra.db.adapters.bigquery.object_tables", "ObjectTableConfig"),
     "SyncBigQueryDriver": ("vertebra.db.adapters.bigquery.driver", "SyncBigQueryDriver"),
 }
 

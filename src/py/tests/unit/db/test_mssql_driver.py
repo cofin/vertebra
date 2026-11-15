@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import socket
 import struct
 import sys
@@ -749,3 +750,29 @@ async def test_mssql_cloudsql_dialer_wiring_to_driver_and_client() -> None:
         assert "proj:us-central1:sqlserver-prod" in repr(async_driver._client)
     finally:
         await async_driver.close()
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncMSSQLDriver", "vertebra.db.adapters.mssql", "vertebra.db.adapters.mssql._sync"),
+        ("SyncMSSQLDriver", "vertebra.db.adapters.mssql.driver", "vertebra.db.adapters.mssql._sync"),
+        ("SyncMSSQLDriver", "vertebra.db.adapters.mssql._sync", "vertebra.db.adapters.mssql._sync"),
+        ("AsyncMSSQLDriver", "vertebra.db.adapters.mssql", "vertebra.db.adapters.mssql._async"),
+        ("AsyncMSSQLDriver", "vertebra.db.adapters.mssql.driver", "vertebra.db.adapters.mssql._async"),
+        ("AsyncMSSQLDriver", "vertebra.db.adapters.mssql._async", "vertebra.db.adapters.mssql._async"),
+        ("SyncMSSQLPipeline", "vertebra.db.adapters.mssql", "vertebra.db.adapters.mssql.pipeline"),
+        ("SyncMSSQLPipeline", "vertebra.db.adapters.mssql.pipeline", "vertebra.db.adapters.mssql.pipeline"),
+        ("AsyncMSSQLPipeline", "vertebra.db.adapters.mssql", "vertebra.db.adapters.mssql.pipeline"),
+        ("AsyncMSSQLPipeline", "vertebra.db.adapters.mssql.pipeline", "vertebra.db.adapters.mssql.pipeline"),
+    ],
+)
+def test_mssql_driver_and_pipeline_resolution_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify SQL Server sync/async driver and pipeline classes resolve identically across import paths."""
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

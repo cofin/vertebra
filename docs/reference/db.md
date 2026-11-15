@@ -141,6 +141,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       heading_level: 3
       members:
         - register_table
+        - register_arrow_table
         - register_parquet_from_store
         - execute_arrow
         - execute_sql

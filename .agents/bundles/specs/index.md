@@ -1,6 +1,6 @@
 # Active Specifications & Research (`specs/`)
 
-Active specifications and promoted spec-scoped research notes anchored at `HEAD @ 104fd6fa` (`main @ 4773e2fc`); synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
+Active specifications and promoted spec-scoped research notes anchored at `HEAD @ 1b191388` (`main @ 1b191388`); synthesized documentation lives in [`../knowledge/`](../knowledge/index.md) and bundle activity is logged in [`../log.md`](../log.md).
 
 ## 1. Master PRDs (`state: planned`)
 
@@ -9,7 +9,6 @@ Active specifications and promoted spec-scoped research notes anchored at `HEAD 
 
 ## 2. Planned Executable Specifications (`state: planned`)
 
-- [`native-adapter-organization`](native-adapter-organization/spec.md) — BigQuery `object_tables.py` and Spanner `mutations.py` module separation plus `DataFusionEngine` vendor-wrapper and unimplemented `DataFusionConfig` `pgwire_fdw` removal (`has_chapters: false`, `4` tasks).
 - [`broker-pool-sharing`](broker-pool-sharing/spec.md) — Atomic `ShmOwnerHeader` supervision, `dbrpc` + `VTBARROW` SHM lease execution, cross-`.so` C-ABI `BrokerEngineCapsule`, crash quarantine `ROLLBACK`, neutral `vertebra.db.dbapi` extraction, and SQLAlchemy/SQLSpec shared broker pools ([`4 chapters`](broker-pool-sharing/chapters/index.md), `16` tasks; depends on `native-postgres-driver`; covers [#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96), [#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98)).
 - [`native-sqlite-driver`](native-sqlite-driver/spec.md) — Standalone `vertebra-sqlite` (`vertebra._sqlite`) over bundled `rusqlite` with `3.14t`/`3.15t` single-writer + multi-reader WAL pools, SQLite `JSONB`, `InterruptHandle` cancel, `VTBARROW`, delayed-commit pipelines, online backup, and stdlib `sqlite3` removal ([`3 chapters`](native-sqlite-driver/chapters/index.md), `12` tasks; depends on `broker-pool-sharing`).
 - [`native-redis-driver`](native-redis-driver/spec.md) — Standalone `vertebra-redis` (`vertebra._redis`) RESP3 wheel for Redis `7.2+`/`8.0` and Valkey `8.0+`/`9.0` (Cluster, Sentinel, client tracking, GCP Memorystore IAM, Streams, Pub/Sub) plus hoisted `SyncNotificationSource`/`AsyncNotificationSource` split across PostgreSQL, Oracle, Redis, and Valkey ([`4 chapters`](native-redis-driver/chapters/index.md), `16` tasks; depends on `native-postgres-driver`).

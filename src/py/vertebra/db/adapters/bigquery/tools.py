@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from vertebra.db.adapters.bigquery.config import BigQueryConfig, BigQueryTableIdentifier, ObjectTableConfig
-from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
+from vertebra.db.adapters.bigquery.core import BigQueryTableIdentifier
+from vertebra.db.adapters.bigquery.object_tables import ObjectTableConfig
 from vertebra.db.driver import AsyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry, provide_driver
 from vertebra.typing import ToolPolicyError, ToolProvider
 from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.bigquery.config import BigQueryConfig
+    from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
 
 __all__ = ("BigQueryToolProvider",)
 

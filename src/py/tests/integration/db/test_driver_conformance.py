@@ -90,7 +90,12 @@ from vertebra.db.adapters.valkey import (
     SyncValkeyDriver,
     ValkeyConfig,
 )
-from vertebra.typing import FrozenBaseStruct, MissingDependencyError, reset_dependency_cache
+from vertebra.typing import (
+    FrozenBaseStruct,
+    ImproperConfigurationError,
+    MissingDependencyError,
+    reset_dependency_cache,
+)
 from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -1429,9 +1434,6 @@ def test_datafusion_config_and_registry_conformance(
         "in_process",
         expected_partitions,
         expected_memory_mb,
-        parsed.pgwire_host,
-        parsed.pgwire_port,
-        parsed.require_mtls_for_pgwire,
     )
     assert parsed.resolve_driver_classes() == (DataFusionEngine, DataFusionEngine)
 
@@ -1441,6 +1443,23 @@ def test_datafusion_config_and_registry_conformance(
     assert isinstance(sync_engine, DataFusionEngine)
     assert isinstance(async_engine, DataFusionEngine)
     assert sync_engine.config == parsed
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "datafusion://pgwire_fdw",
+        "datafusion://localhost:5432",
+        "datafusion://in_process?mode=pgwire_fdw",
+        "datafusion://in_process?pgwire_host=127.0.0.1",
+        "datafusion://in_process?pgwire_port=5434",
+        "datafusion://in_process?require_mtls_for_pgwire=true",
+    ],
+)
+def test_datafusion_config_rejects_pgwire_conformance(bad_url: str) -> None:
+    """`DataFusionConfig` rejects pgwire_fdw URLs, hosts, and query parameters."""
+    with pytest.raises(ImproperConfigurationError):
+        DatabaseRegistry.parse_url(bad_url)
 
 
 def test_datafusion_fails_closed_when_optional_dependency_missing(

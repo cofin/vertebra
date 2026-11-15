@@ -36,7 +36,7 @@ from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryRes
 from vertebra.db.driver import DataError, NotificationSource, NotSupportedError
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
-from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
@@ -540,3 +540,83 @@ async def test_postgres_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any])
     )
     with pytest.raises(DataError, match="PostgreSQL embedding row"):
         await bad_pushdown.embed_documents(["alpha"])
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_partitions", "expected_memory_mb"),
+    [
+        ("datafusion://in_process", 4, 512),
+        ("datafusion://in_process?target_partitions=8&memory_limit_mb=1024", 8, 1024),
+        ("datafusion://?target_partitions=2&memory_limit_mb=256", 2, 256),
+    ],
+)
+def test_datafusion_config_from_url_valid(
+    url: str,
+    expected_partitions: int,
+    expected_memory_mb: int,
+) -> None:
+    """Verify DataFusionConfig.from_url succeeds for supported in-process configurations."""
+    cfg = DataFusionConfig.from_url(url)
+    assert cfg.mode == "in_process"
+    assert cfg.target_partitions == expected_partitions
+    assert cfg.memory_limit_mb == expected_memory_mb
+    assert cfg.pool_key() == ("datafusion", "in_process", expected_partitions, expected_memory_mb)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "datafusion://pgwire_fdw",
+        "datafusion://localhost:5432",
+        "datafusion://127.0.0.1:5434",
+        "datafusion://in_process?mode=pgwire_fdw",
+        "datafusion://in_process?pgwire_host=127.0.0.1",
+        "datafusion://in_process?pgwire_host=",
+        "datafusion://in_process?pgwire_port=5434",
+        "datafusion://in_process?require_mtls_for_pgwire=true",
+        "datafusion://in_process?require_mtls_for_pgwire=",
+        "datafusion:///pgwire_fdw",
+        "postgresql://in_process",
+        "datafusion://in_process?target_partitions=0",
+        "datafusion://in_process?target_partitions=-1",
+        "datafusion://in_process?memory_limit_mb=0",
+        "datafusion://in_process?memory_limit_mb=-512",
+    ],
+)
+def test_datafusion_config_from_url_rejects_unsupported_params(bad_url: str) -> None:
+    """Verify DataFusionConfig.from_url raises ImproperConfigurationError on unsupported URLs and params."""
+    with pytest.raises(ImproperConfigurationError):
+        DataFusionConfig.from_url(bad_url)
+
+
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"mode": "pgwire_fdw"},
+        {"target_partitions": 0},
+        {"target_partitions": False},
+        {"target_partitions": True},
+        {"memory_limit_mb": -1},
+        {"memory_limit_mb": False},
+        {"memory_limit_mb": True},
+    ],
+)
+def test_datafusion_config_post_init_validation(bad_kwargs: dict[str, Any]) -> None:
+    """Verify DataFusionConfig.__post_init__ rejects invalid modes, non-positive bounds, and booleans."""
+    with pytest.raises(ImproperConfigurationError):
+        DataFusionConfig(**bad_kwargs)
+
+
+def test_datafusion_removed_pgwire_and_vendor_wrappers_absent() -> None:
+    """Verify removed pgwire fields and vendor-specific registration wrappers are absent."""
+    cfg = DataFusionConfig()
+    assert not hasattr(cfg, "pgwire_host")
+    assert not hasattr(cfg, "pgwire_port")
+    assert not hasattr(cfg, "require_mtls_for_pgwire")
+    for removed in (
+        "register_bigquery_table",
+        "register_bigquery_query",
+        "register_spanner_table",
+        "register_spanner_query",
+    ):
+        assert not hasattr(DataFusionEngine, removed)

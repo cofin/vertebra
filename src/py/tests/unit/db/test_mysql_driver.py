@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import decimal
+import importlib
 import struct
 import sys
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
@@ -441,19 +444,56 @@ def test_mysql_cloudsql_and_iam_connect_kwargs_wiring() -> None:
     assert async_drv.dialer is async_dialer
 
 
-def test_mysql_missing_extension_raises_missing_dependency_error(
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_mysql_missing_extension_raises_missing_dependency_error(
     monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
 ) -> None:
     """Verify SyncMySQLDriver and AsyncMySQLDriver raise MissingDependencyError when vertebra._mysql is absent."""
-    monkeypatch.setattr(mysql_driver_mod, "_mysql_ext", None)
+    assert not hasattr(mysql_driver_mod, "_mysql_ext")
     monkeypatch.setitem(sys.modules, "vertebra._mysql", None)
     reset_dependency_cache("vertebra._mysql")
     try:
-        driver = SyncMySQLDriver(MySQLConfig(dsn="mysql://localhost:3306/app"))
-        with pytest.raises(MissingDependencyError, match="vertebra-core\\[mysql\\]"):
-            driver.select("SELECT 1")
+        cfg = MySQLConfig(dsn="mysql://localhost:3306/app")
+        if asynchronous:
+            async_driver = AsyncMySQLDriver(cfg)
+            with pytest.raises(MissingDependencyError, match="vertebra-core\\[mysql\\]"):
+                await async_driver.select("SELECT 1")
+        else:
+            driver = SyncMySQLDriver(cfg)
+            with pytest.raises(MissingDependencyError, match="vertebra-core\\[mysql\\]"):
+                driver.select("SELECT 1")
     finally:
         reset_dependency_cache("vertebra._mysql")
+
+
+@pytest.mark.anyio
+async def test_async_mysql_cancelled_error_not_swallowed() -> None:
+    """Verify AsyncMySQLDriver propagates asyncio.CancelledError without wrapping into OperationalError."""
+    client = MagicMock()
+    client.is_closed = False
+    client.fetch_all = AsyncMock(side_effect=asyncio.CancelledError())
+    driver = AsyncMySQLDriver(MySQLConfig(dsn="mysql://localhost:3306/app"), client=client)
+    with pytest.raises(asyncio.CancelledError):
+        await driver.select("SELECT 1")
+
+
+@pytest.mark.anyio
+async def test_mysql_parse_dsn_params_async_avoids_sync_iam_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify parse_dsn_params_async awaits resolve_iam_password_async without blocking on sync resolution."""
+    cfg = MySQLConfig(dsn="mysql://localhost:3306/app", enable_iam_auth=True)
+
+    def _fail_sync(_self: MySQLConfig, *, force_refresh: bool = False) -> str | None:
+        msg = f"sync IAM resolution called during async parse_dsn_params_async ({force_refresh})"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(MySQLConfig, "resolve_iam_password_sync", _fail_sync)
+    monkeypatch.setattr(MySQLConfig, "resolve_iam_password_async", AsyncMock(return_value="async-iam-token"))
+    params = await cfg.parse_dsn_params_async()
+    assert params["password"] == "async-iam-token"
 
 
 def test_dbapi_connection_routes_mysql_and_dialect_compilation(
@@ -489,3 +529,31 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
     assert SyncMySQLDialect.type_descriptor(vec) is vec
     assert SyncMySQLClient is not None
     assert AsyncMySQLClient is not None
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql._sync"),
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql._sync"),
+        ("SyncMySQLDriver", "vertebra.db.adapters.mysql._sync", "vertebra.db.adapters.mysql._sync"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql._async"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql._async"),
+        ("AsyncMySQLDriver", "vertebra.db.adapters.mysql._async", "vertebra.db.adapters.mysql._async"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql.pipeline"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql.pipeline"),
+        ("SyncMySQLPipeline", "vertebra.db.adapters.mysql.pipeline", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql.driver", "vertebra.db.adapters.mysql.pipeline"),
+        ("AsyncMySQLPipeline", "vertebra.db.adapters.mysql.pipeline", "vertebra.db.adapters.mysql.pipeline"),
+    ],
+)
+def test_mysql_driver_and_pipeline_resolution_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify MySQL sync/async driver and pipeline classes resolve identically across import paths."""
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)

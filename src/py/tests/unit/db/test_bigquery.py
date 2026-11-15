@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 import threading
@@ -9,10 +10,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
+import vertebra.db.adapters.bigquery as bq_pkg
+import vertebra.db.adapters.bigquery.config as bq_config_mod
+import vertebra.db.adapters.bigquery.object_tables as bq_object_tables_mod
 from vertebra._bigquery import (
     AsyncBigQueryClient,
     SyncBigQueryClient,
@@ -33,6 +38,10 @@ from vertebra.db.adapters.bigquery import (
     ObjectRef,
     ObjectTableConfig,
     SyncBigQueryDriver,
+)
+from vertebra.db.adapters.bigquery.object_tables import (
+    hydrate_object_refs_async,
+    hydrate_object_refs_sync,
 )
 from vertebra.db.adapters.datafusion import DataFusionEngine
 from vertebra.db.driver import DataError
@@ -508,7 +517,7 @@ async def test_async_bigquery_driver_arrow_object_store_and_object_tables(tmp_pa
 
 @pytest.mark.anyio
 async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify BigQueryEmbeddingPushdown ML.GENERATE_EMBEDDING and DataFusionEngine.register_bigquery_query."""
+    """Verify BigQueryEmbeddingPushdown ML.GENERATE_EMBEDDING and DataFusionEngine.register_arrow_table."""
     server = _MockBigQueryRestServer()
     try:
         cfg = BigQueryConfig(
@@ -540,11 +549,8 @@ async def test_bigquery_embedder_and_datafusion_registration(monkeypatch: pytest
 
         ctx = None if import_optional("datafusion") is not None else _BigQuerySessionContext()
         engine = DataFusionEngine(ctx=ctx)
-        engine.register_bigquery_query(
-            "bq_metrics",
-            sync_driver,
-            "SELECT id, name, score FROM metrics",
-        )
+        cursor = sync_driver.select_to_arrow("SELECT id, name, score FROM metrics")
+        engine.register_arrow_table("bq_metrics", cursor)
         rows = engine.execute_dicts("SELECT id, name FROM bq_metrics WHERE id = 1")
         assert rows == [{"id": 1, "name": "alpha"}]
         with pytest.raises(Exception, match="missing_bq_table"):
@@ -1033,3 +1039,205 @@ async def test_bigquery_pushdown_rejects_invalid_vector_rows(bad_vec: list[Any])
     )
     with pytest.raises(DataError, match="BigQuery embedding row"):
         await bad_embedder.embed_documents(["alpha"])
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "target_module", "expected_module"),
+    [
+        ("SyncBigQueryDriver", "vertebra.db.adapters.bigquery", "vertebra.db.adapters.bigquery._sync"),
+        ("SyncBigQueryDriver", "vertebra.db.adapters.bigquery.driver", "vertebra.db.adapters.bigquery._sync"),
+        ("SyncBigQueryDriver", "vertebra.db.adapters.bigquery._sync", "vertebra.db.adapters.bigquery._sync"),
+        ("AsyncBigQueryDriver", "vertebra.db.adapters.bigquery", "vertebra.db.adapters.bigquery._async"),
+        ("AsyncBigQueryDriver", "vertebra.db.adapters.bigquery.driver", "vertebra.db.adapters.bigquery._async"),
+        ("AsyncBigQueryDriver", "vertebra.db.adapters.bigquery._async", "vertebra.db.adapters.bigquery._async"),
+        ("BigQueryCore", "vertebra.db.adapters.bigquery", "vertebra.db.adapters.bigquery.core"),
+        ("BigQueryTableIdentifier", "vertebra.db.adapters.bigquery.core", "vertebra.db.adapters.bigquery.core"),
+        ("ObjectRef", "vertebra.db.adapters.bigquery", "vertebra.db.adapters.bigquery.object_tables"),
+        ("ObjectTableConfig", "vertebra.db.adapters.bigquery", "vertebra.db.adapters.bigquery.object_tables"),
+        (
+            "hydrate_object_refs_sync",
+            "vertebra.db.adapters.bigquery.object_tables",
+            "vertebra.db.adapters.bigquery.object_tables",
+        ),
+        (
+            "hydrate_object_refs_async",
+            "vertebra.db.adapters.bigquery.object_tables",
+            "vertebra.db.adapters.bigquery.object_tables",
+        ),
+    ],
+)
+def test_bigquery_submodule_import_identity(
+    symbol_name: str,
+    target_module: str,
+    expected_module: str,
+) -> None:
+    """Verify BigQuery package exports resolve identically to their owning submodules."""
+    mod = importlib.import_module(target_module)
+    exp_mod = importlib.import_module(expected_module)
+    assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
+
+
+def test_bigquery_package_import_is_lazy() -> None:
+    """Verify importing vertebra.db.adapters.bigquery defers driver and object_tables loading."""
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "vertebra.db.adapters.bigquery"
+        or name.startswith("vertebra.db.adapters.bigquery.")
+        or name == "vertebra._bigquery"
+    }
+    reset_dependency_cache("vertebra._bigquery")
+    try:
+        fresh_pkg = importlib.import_module("vertebra.db.adapters.bigquery")
+        assert "vertebra.db.adapters.bigquery.driver" not in sys.modules
+        assert "vertebra.db.adapters.bigquery.object_tables" not in sys.modules
+        assert "vertebra._bigquery" not in sys.modules
+        assert fresh_pkg.ObjectRef is importlib.import_module("vertebra.db.adapters.bigquery.object_tables").ObjectRef
+        assert fresh_pkg.ObjectRef is not None
+    finally:
+        for name in list(sys.modules):
+            if name == "vertebra.db.adapters.bigquery" or name.startswith("vertebra.db.adapters.bigquery."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        reset_dependency_cache("vertebra._bigquery")
+
+
+@pytest.mark.parametrize("symbol", ["ObjectRef", "ObjectTableConfig", "BigQueryTableIdentifier"])
+def test_bigquery_config_module_rejects_moved_symbols(symbol: str) -> None:
+    """Verify bigquery.config does not export or retain shims for moved domain symbols."""
+    with pytest.raises(AttributeError):
+        getattr(bq_config_mod, symbol)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bigquery_object_table_hydration_and_presigning(
+    tmp_path: Path,
+    asynchronous: bool,
+) -> None:
+    """Verify ObjectTableConfig and module functions hydrate and presign ObjectRef entries."""
+    signing = SigningConfig(
+        provider="hmac",
+        hmac_secret="test-secret-key-32-bytes-minimum!",
+        endpoint="https://storage.example.com",
+    )
+    store = SyncObjectStore(f"file://{tmp_path}", signing=signing)
+    raw_rows = [
+        {
+            "uri": "gs://test-bucket/docs/report.pdf",
+            "generation": 101,
+            "content_type": "application/pdf",
+            "size": 2048,
+            "md5_hash": "abc123md5",
+            "updated": "2026-11-14T00:00:00Z",
+        },
+        {
+            "uri": "gs://test-bucket/images/logo.png",
+            "generation": 102,
+            "content_type": "image/png",
+            "size": 4096,
+            "md5_hash": "def456md5",
+            "updated": "2026-11-14T01:00:00Z",
+        },
+    ]
+    cfg = ObjectTableConfig(
+        table_name="analytics.docs_obj",
+        connection_id="us.gcs-conn",
+        uris=("gs://test-bucket/docs/*",),
+    )
+    try:
+        if asynchronous:
+            async_store = store.to_async()
+            try:
+                refs = await cfg.hydrate_object_refs_async(raw_rows, async_store)
+                assert len(refs) == 2
+                assert refs[0].signed_url is not None
+                assert refs[0].signed_url.startswith("https://storage.example.com/")
+                assert "docs/report.pdf" in refs[0].signed_url
+                assert "X-Vtb-Signature=" in refs[0].signed_url
+                assert refs[0].uri == "gs://test-bucket/docs/report.pdf"
+                assert refs[0].size == 2048
+                unsigned_refs = [msgspec.structs.replace(r, signed_url=None) for r in refs]
+                fn_refs = await hydrate_object_refs_async(unsigned_refs, async_store)
+                assert len(fn_refs) == 2
+                assert fn_refs[1].signed_url is not None
+                assert fn_refs[1].signed_url.startswith("https://storage.example.com/")
+                assert "images/logo.png" in fn_refs[1].signed_url
+                assert "X-Vtb-Signature=" in fn_refs[1].signed_url
+                assert fn_refs[1].size == 4096
+            finally:
+                async_store.close()
+        else:
+            refs = cfg.hydrate_object_refs_sync(raw_rows, store)
+            assert len(refs) == 2
+            assert refs[0].signed_url is not None
+            assert refs[0].signed_url.startswith("https://storage.example.com/")
+            assert "docs/report.pdf" in refs[0].signed_url
+            assert "X-Vtb-Signature=" in refs[0].signed_url
+            assert refs[0].uri == "gs://test-bucket/docs/report.pdf"
+            assert refs[0].size == 2048
+            unsigned_refs = [msgspec.structs.replace(r, signed_url=None) for r in refs]
+            fn_refs = hydrate_object_refs_sync(unsigned_refs, store)
+            assert len(fn_refs) == 2
+            assert fn_refs[1].signed_url is not None
+            assert fn_refs[1].signed_url.startswith("https://storage.example.com/")
+            assert "images/logo.png" in fn_refs[1].signed_url
+            assert "X-Vtb-Signature=" in fn_refs[1].signed_url
+            assert fn_refs[1].size == 4096
+    finally:
+        store.close()
+
+
+def test_bigquery_object_table_limit_zero_and_empty_bucket_scheme(tmp_path: Path) -> None:
+    """Verify list_from_store_sync respects limit=0 and empty-bucket URIs retain URL scheme."""
+    store = SyncObjectStore(f"file://{tmp_path}")
+    try:
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "sample.parquet").write_bytes(b"PAR1")
+        cfg = ObjectTableConfig(
+            table_name="analytics.local_docs",
+            connection_id="us.file-conn",
+            uris=(f"file://{tmp_path}/docs/*",),
+        )
+        assert cfg.list_from_store_sync(store, limit=0) == []
+        row = ObjectTableConfig._normalize_store_item_to_row(
+            {"path": "docs/sample.parquet", "size": 4},
+            scheme="file",
+            bucket="",
+        )
+        assert row["uri"] == "file://docs/sample.parquet"
+        assert row["size"] == 4
+    finally:
+        store.close()
+
+
+def test_bigquery_select_one_forwards_maximum_bytes_billed() -> None:
+    """Verify select_one and select_one_or_none forward kwargs and preserve explicit zero billing cap."""
+    captured_caps: list[int | None] = []
+
+    class _RecordingBqClient:
+        def query(
+            self,
+            sql: str,
+            params_json: str | None,
+            session_id: str | None,
+            create_session: bool,
+            destination_table: str | None,
+            write_disposition: str | None,
+            maximum_bytes_billed: int | None,
+            job_timeout_ms: int,
+            priority: str,
+            labels: dict[str, str] | None,
+        ) -> dict[str, Any]:
+            captured_caps.append(maximum_bytes_billed)
+            return {"columns": ["id"], "rows": [[1]], "total_rows": 1}
+
+    cfg = BigQueryConfig(project_id="test-proj", maximum_bytes_billed=10_000)
+    driver = SyncBigQueryDriver(cfg)
+    driver._client = _RecordingBqClient()
+    row = driver.select_one("SELECT 1 AS id", maximum_bytes_billed=0)
+    assert row == {"id": 1}
+    row_opt = driver.select_one_or_none("SELECT 1 AS id", maximum_bytes_billed=250)
+    assert row_opt == {"id": 1}
+    assert captured_caps == [0, 250]
+    assert bq_pkg.ObjectRef is bq_object_tables_mod.ObjectRef

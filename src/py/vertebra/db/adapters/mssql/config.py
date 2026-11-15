@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, ClassVar, Final, Self
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
+import msgspec
+
 from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
     MSSQLCore,
@@ -40,27 +42,6 @@ _VALID_ENCRYPTION_MODES: Final[frozenset[str]] = frozenset(
         "no",
     }
 )
-
-
-def _redact_dsn(dsn: str) -> str:
-    """Return `dsn` with any embedded URI password replaced by `[REDACTED]`."""
-    parsed = urlparse(dsn)
-    if parsed.password is None:
-        return dsn
-    host_part = f"[{parsed.hostname}]" if parsed.hostname and ":" in parsed.hostname else (parsed.hostname or "")
-    if parsed.port is not None:
-        host_part = f"{host_part}:{parsed.port}"
-    user_part = f"{parsed.username}:[REDACTED]@" if parsed.username is not None else ":[REDACTED]@"
-    return urlunparse(parsed._replace(netloc=f"{user_part}{host_part}"))
-
-
-def _validate_pem_bytes(pem: bytes | None, field_name: str) -> None:
-    """Validate that optional PEM bytes contain PEM header and footer markers."""
-    if pem is None:
-        return
-    if not isinstance(pem, (bytes, bytearray, memoryview)) or b"-----BEGIN " not in pem or b"-----END " not in pem:
-        msg = f"Invalid PEM bundle in MSSQLConfig.{field_name}: missing PEM header/footer"
-        raise ImproperConfigurationError(msg)
 
 
 class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
@@ -143,12 +124,12 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if self.encryption.strip().lower() not in _VALID_ENCRYPTION_MODES:
             msg = f"Unsupported MSSQLConfig.encryption mode: {self.encryption!r}"
             raise ImproperConfigurationError(msg)
-        _validate_pem_bytes(self.ca_pem, "ca_pem")
-        _validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
-        _validate_pem_bytes(self.client_key_pem, "client_key_pem")
+        self._validate_pem_bytes(self.ca_pem, "ca_pem")
+        self._validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
+        self._validate_pem_bytes(self.client_key_pem, "client_key_pem")
 
     def __repr__(self) -> str:
-        redacted_dsn = _redact_dsn(self.dsn)
+        redacted_dsn = self._redact_dsn(self.dsn)
         return (
             f"MSSQLConfig(dsn={redacted_dsn!r}, host={self.host!r}, port={self.port!r}, "
             f"database={self.database!r}, user={self.user!r}, password='[REDACTED]', "
@@ -264,3 +245,59 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             else None
         )
         return async_cls(self, dialer=dialer, broker=broker)
+
+    @staticmethod
+    def _redact_dsn(dsn: str) -> str:
+        """Return `dsn` with any embedded URI password replaced by `[REDACTED]`."""
+        parsed = urlparse(dsn)
+        if parsed.password is None:
+            return dsn
+        host_part = f"[{parsed.hostname}]" if parsed.hostname and ":" in parsed.hostname else (parsed.hostname or "")
+        if parsed.port is not None:
+            host_part = f"{host_part}:{parsed.port}"
+        user_part = f"{parsed.username}:[REDACTED]@" if parsed.username is not None else ":[REDACTED]@"
+        return urlunparse(parsed._replace(netloc=f"{user_part}{host_part}"))
+
+    @staticmethod
+    def _validate_pem_bytes(pem: bytes | None, field_name: str) -> None:
+        """Validate that optional PEM bytes contain PEM header and footer markers."""
+        if pem is None:
+            return
+        if not isinstance(pem, (bytes, bytearray, memoryview)) or b"-----BEGIN " not in pem or b"-----END " not in pem:
+            msg = f"Invalid PEM bundle in MSSQLConfig.{field_name}: missing PEM header/footer"
+            raise ImproperConfigurationError(msg)
+
+    @classmethod
+    def _resolve_driver_config(
+        cls,
+        config: MSSQLConfig | str | None,
+        overrides: dict[str, Any],
+        dialer: Any = None,
+    ) -> MSSQLConfig:
+        """Resolve `config`, keyword `overrides`, and optional `dialer` into an `MSSQLConfig` instance."""
+        if isinstance(config, str):
+            resolved = cls.from_url(config, **overrides)
+        elif isinstance(config, MSSQLConfig):
+            resolved = msgspec.structs.replace(config, **overrides) if overrides else config
+        else:
+            dsn = overrides.pop("dsn", None)
+            if isinstance(dsn, str) and dsn.startswith(("mssql://", "sqlserver://")):
+                resolved = cls.from_url(dsn, **overrides)
+            else:
+                if dsn is not None:
+                    overrides["dsn"] = dsn
+                resolved = cls(**overrides)
+
+        if dialer is not None and not resolved.cloud_sql_instance:
+            dialer_cfg = getattr(dialer, "config", None)
+            instance_name = getattr(dialer_cfg, "instance_connection_name", None) if dialer_cfg is not None else None
+            if instance_name:
+                ip_type = str(getattr(dialer_cfg, "ip_type", resolved.cloudsql_ip_type))
+                auth_type = "IAM" if getattr(dialer_cfg, "enable_iam_auth", False) else resolved.cloudsql_auth_type
+                resolved = msgspec.structs.replace(
+                    resolved,
+                    cloud_sql_instance=str(instance_name),
+                    cloudsql_ip_type=ip_type,
+                    cloudsql_auth_type=auth_type,
+                )
+        return resolved

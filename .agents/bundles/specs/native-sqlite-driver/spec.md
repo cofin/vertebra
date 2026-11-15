@@ -18,7 +18,7 @@ parent_prd: native-data-platform
 depends_on_flows:
 - broker-pool-sharing
 plan_revision: 1
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 created_at: '2026-11-12T23:45:00Z'
 updated_at: '2026-11-14T18:50:00Z'
 generated:
@@ -27,7 +27,7 @@ generated:
 verified:
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
-  commit: 104fd6fa
+  commit: 1b191388
 tags:
 - sqlite
 - rust

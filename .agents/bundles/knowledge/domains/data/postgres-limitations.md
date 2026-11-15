@@ -10,7 +10,7 @@ generated:
 verified:
   - by: agent:executor
     at: "2026-11-14T01:15:00Z"
-    commit: 8c615b73
+    commit: 7116ba13
 sources:
   - id: pg-config-py
     resource: src/py/vertebra/db/adapters/postgres/config.py::PostgreSQLConfig

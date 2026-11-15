@@ -17,22 +17,26 @@ if TYPE_CHECKING:
         DEFAULT_SPANNER_ENDPOINT,
         SPANGRES_DIALECT_TAG,
         SPANNER_GOOGLESQL_DIALECT_TAG,
-        Mutation,
-        MutationGroup,
         SpannerConfig,
-        StalenessBound,
     )
     from vertebra.db.adapters.spanner.core import SpannerCore
     from vertebra.db.adapters.spanner.driver import (
         AsyncSpannerDriver,
+        SyncSpannerDriver,
+    )
+    from vertebra.db.adapters.spanner.embeddings import SpannerEmbeddingPushdown
+    from vertebra.db.adapters.spanner.mutations import (
+        Mutation,
+        MutationGroup,
+        StalenessBound,
+    )
+    from vertebra.db.adapters.spanner.tools import SpannerToolProvider
+    from vertebra.db.adapters.spanner.transactions import (
         AsyncSpannerSnapshot,
         AsyncSpannerTransaction,
-        SyncSpannerDriver,
         SyncSpannerSnapshot,
         SyncSpannerTransaction,
     )
-    from vertebra.db.adapters.spanner.embeddings import SpannerEmbeddingPushdown
-    from vertebra.db.adapters.spanner.tools import SpannerToolProvider
 
 __all__ = (
     "SpannerToolProvider",
@@ -63,6 +67,8 @@ __lazy_modules__ = [
     "vertebra.db.adapters.spanner.change_stream",
     "vertebra.db.adapters.spanner.config",
     "vertebra.db.adapters.spanner.core",
+    "vertebra.db.adapters.spanner.mutations",
+    "vertebra.db.adapters.spanner.transactions",
     "vertebra.db.adapters.spanner.driver",
 ]
 
@@ -71,22 +77,22 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SpannerEmbeddingPushdown": ("vertebra.db.adapters.spanner.embeddings", "SpannerEmbeddingPushdown"),
     "AsyncSpannerChangeStreamSource": ("vertebra.db.adapters.spanner.change_stream", "AsyncSpannerChangeStreamSource"),
     "AsyncSpannerDriver": ("vertebra.db.adapters.spanner.driver", "AsyncSpannerDriver"),
-    "AsyncSpannerSnapshot": ("vertebra.db.adapters.spanner.driver", "AsyncSpannerSnapshot"),
-    "AsyncSpannerTransaction": ("vertebra.db.adapters.spanner.driver", "AsyncSpannerTransaction"),
+    "AsyncSpannerSnapshot": ("vertebra.db.adapters.spanner.transactions", "AsyncSpannerSnapshot"),
+    "AsyncSpannerTransaction": ("vertebra.db.adapters.spanner.transactions", "AsyncSpannerTransaction"),
     "DEFAULT_SPANNER_ENDPOINT": ("vertebra.db.adapters.spanner.config", "DEFAULT_SPANNER_ENDPOINT"),
-    "Mutation": ("vertebra.db.adapters.spanner.config", "Mutation"),
-    "MutationGroup": ("vertebra.db.adapters.spanner.config", "MutationGroup"),
+    "Mutation": ("vertebra.db.adapters.spanner.mutations", "Mutation"),
+    "MutationGroup": ("vertebra.db.adapters.spanner.mutations", "MutationGroup"),
     "SPANGRES_DIALECT_TAG": ("vertebra.db.adapters.spanner.config", "SPANGRES_DIALECT_TAG"),
     "SPANNER_GOOGLESQL_DIALECT_TAG": ("vertebra.db.adapters.spanner.config", "SPANNER_GOOGLESQL_DIALECT_TAG"),
     "SpannerChangeStreamRecord": ("vertebra.db.adapters.spanner.change_stream", "SpannerChangeStreamRecord"),
     "SpannerChildPartition": ("vertebra.db.adapters.spanner.change_stream", "SpannerChildPartition"),
     "SpannerConfig": ("vertebra.db.adapters.spanner.config", "SpannerConfig"),
     "SpannerCore": ("vertebra.db.adapters.spanner.core", "SpannerCore"),
-    "StalenessBound": ("vertebra.db.adapters.spanner.config", "StalenessBound"),
+    "StalenessBound": ("vertebra.db.adapters.spanner.mutations", "StalenessBound"),
     "SyncSpannerChangeStreamSource": ("vertebra.db.adapters.spanner.change_stream", "SyncSpannerChangeStreamSource"),
     "SyncSpannerDriver": ("vertebra.db.adapters.spanner.driver", "SyncSpannerDriver"),
-    "SyncSpannerSnapshot": ("vertebra.db.adapters.spanner.driver", "SyncSpannerSnapshot"),
-    "SyncSpannerTransaction": ("vertebra.db.adapters.spanner.driver", "SyncSpannerTransaction"),
+    "SyncSpannerSnapshot": ("vertebra.db.adapters.spanner.transactions", "SyncSpannerSnapshot"),
+    "SyncSpannerTransaction": ("vertebra.db.adapters.spanner.transactions", "SyncSpannerTransaction"),
 }
 
 __getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

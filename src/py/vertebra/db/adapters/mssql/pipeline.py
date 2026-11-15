@@ -18,7 +18,7 @@ __all__ = (
 )
 
 
-class _QueuedMSSQLOperation(FrozenBaseStruct, frozen=True, gc=False):
+class _QueuedMSSQLOperation(FrozenBaseStruct, frozen=True, gc=True):
     """Single queued statement inside a SQL Server query pipeline."""
 
     kind: str

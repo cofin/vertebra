@@ -1,7 +1,10 @@
 """Oracle connection configuration, TNS connect descriptors, Cloud Wallets, and 26ai feature flags."""
 
+from __future__ import annotations
+
 import io
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Final, Self
 from urllib.parse import unquote, urlparse
@@ -457,3 +460,101 @@ class OracleConfig(BaseDatabaseConfig, frozen=True, gc=False):
         """Return the canonical shared-pool fingerprint tuple."""
         desc = self.connect_descriptor()
         return ("oracle", desc.host.lower(), int(desc.port), desc.service_name or desc.sid or "", self.user)
+
+    def to_client_kwargs(self) -> dict[str, Any]:
+        """Build keyword arguments for `SyncOracleClient` and `AsyncOracleClient` from this configuration."""
+        desc = self.connect_descriptor()
+        service_name = desc.service_name or self.service_name or "FREEPDB1"
+        wallet_location: str | None = str(self.wallet_path) if self.wallet_path is not None else None
+        if wallet_location is None and isinstance(self.wallet_zip, (str, Path)):
+            wallet_location = str(self.wallet_zip)
+        connect_descriptor: str | None = None
+        if (
+            self.connect_descriptor_str is not None
+            or self.topology is not None
+            or (self.tns_alias is not None and wallet_location is None)
+            or isinstance(self.wallet_zip, (bytes, bytearray))
+        ):
+            connect_descriptor = desc.to_tns_descriptor()
+        dsn_arg: str | None = None
+        if wallet_location is not None and self.tns_alias is not None:
+            dsn_arg = self.tns_alias
+        elif connect_descriptor is None and self.dsn and self.dsn != DEFAULT_ORACLE_DSN:
+            dsn_arg = self.dsn
+        token_opts = dict(self.token_auth_options) if self.token_auth_options is not None else None
+        connect_timeout = float(desc.transport_connect_timeout) if desc.transport_connect_timeout > 0 else 10.0
+        stmtcachesize = max(0, int(self.statement_cache_size))
+        return {
+            "user": self.user or None,
+            "password": self.password or None,
+            "dsn": dsn_arg,
+            "host": desc.host,
+            "port": desc.port,
+            "service_name": service_name,
+            "sid": desc.sid,
+            "tns_admin": None,
+            "connect_descriptor": connect_descriptor,
+            "protocol": desc.protocol.lower(),
+            "ssl_server_dn_match": desc.security_cert_dn is not None or desc.protocol.upper() == "TCPS",
+            "ssl_server_cert_dn": desc.security_cert_dn,
+            "wallet_location": wallet_location,
+            "wallet_password": None,
+            "pem_cert_data": None,
+            "cwallet_sso_data": bytes(self.wallet_zip) if isinstance(self.wallet_zip, (bytes, bytearray)) else None,
+            "auth_mode": self.auth_mode,
+            "access_token": self.access_token,
+            "token_auth_options": token_opts,
+            "cclass": self.drcp.cclass,
+            "purity": self.drcp.purity,
+            "connection_tag": self.drcp.connection_tag,
+            "stmtcachesize": stmtcachesize,
+            "prefetchrows": self.driver_features.prefetchrows,
+            "arraysize": self.driver_features.arraysize,
+            "call_timeout_ms": None,
+            "connect_timeout": connect_timeout,
+            "enable_lowercase_column_names": self.driver_features.enable_lowercase_column_names,
+            "client_identifier": self.client_identifier,
+            "module": self.module,
+            "action": self.action,
+            "ecid": self.ecid,
+        }
+
+    @classmethod
+    def resolve_pool_kwargs(
+        cls,
+        config: OracleConfig | None,
+        overrides: Mapping[str, Any],
+    ) -> tuple[OracleConfig, dict[str, Any]]:
+        """Resolve `OracleConfig` and native `_oracle` pool constructor keyword arguments."""
+        config_fields = set(cls.__struct_fields__)
+        cfg_overrides: dict[str, Any] = {k: v for k, v in overrides.items() if k in config_fields}
+        if "min_size" in overrides and "pool_min_size" not in cfg_overrides:
+            cfg_overrides["pool_min_size"] = int(overrides["min_size"])
+        if "max_size" in overrides and "pool_max_size" not in cfg_overrides:
+            cfg_overrides["pool_max_size"] = int(overrides["max_size"])
+        if config is None:
+            resolved_cfg = cls(**cfg_overrides)
+        elif cfg_overrides:
+            resolved_cfg = msgspec.structs.replace(config, **cfg_overrides)
+        else:
+            resolved_cfg = config
+
+        kw = resolved_cfg.to_client_kwargs()
+        kw.update(
+            {
+                "min_size": int(resolved_cfg.pool_min_size),
+                "max_size": int(resolved_cfg.pool_max_size),
+                "acquire_timeout": 30.0,
+                "reset_timeout": 10.0,
+                "close_timeout": 30.0,
+                "max_lifetime_seconds": 3600.0,
+                "idle_timeout_seconds": 600.0,
+                "health_check_interval_seconds": 30.0,
+            }
+        )
+        for k, v in overrides.items():
+            if k in kw:
+                kw[k] = v
+        if "min_size" not in overrides and "max_size" in overrides and int(kw["max_size"]) >= 1:
+            kw["min_size"] = min(int(kw["min_size"]), int(kw["max_size"]))
+        return resolved_cfg, kw

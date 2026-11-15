@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     )
     from vertebra.db.adapters.mysql.core import (
         MYSQL_TRANSIENT_ERRNOS,
+        MySQLCore,
         build_mysql_connect_kwargs,
         coerce_mysql_param,
         compile_mysql_statement,
@@ -30,6 +31,7 @@ __all__ = (
     "AsyncMySQLDriver",
     "AsyncMySQLPipeline",
     "MySQLConfig",
+    "MySQLCore",
     "MySQLPoolConfig",
     "MySQLStatementConfig",
     "SyncMySQLDriver",
@@ -55,6 +57,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AsyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "AsyncMySQLDriver"),
     "AsyncMySQLPipeline": ("vertebra.db.adapters.mysql.pipeline", "AsyncMySQLPipeline"),
     "MySQLConfig": ("vertebra.db.adapters.mysql.config", "MySQLConfig"),
+    "MySQLCore": ("vertebra.db.adapters.mysql.core", "MySQLCore"),
     "MySQLPoolConfig": ("vertebra.db.adapters.mysql.config", "MySQLPoolConfig"),
     "MySQLStatementConfig": ("vertebra.db.adapters.mysql.config", "MySQLStatementConfig"),
     "SyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "SyncMySQLDriver"),

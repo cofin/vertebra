@@ -15,10 +15,10 @@ generated:
 verified:
   - by: agent:flow-setup
     at: "2026-11-14T18:43:00Z"
-    commit: 104fd6fa
+    commit: 1b191388
   - by: agent:flow-executor
     at: "2026-11-14T18:05:00Z"
-    commit: 8290822e
+    commit: 1b191388
 sources:
   - id: src-makefile
     resource: Makefile

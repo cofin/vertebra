@@ -11,7 +11,7 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: implementation_first
-plan_commit: 104fd6fa
+plan_commit: 1b191388
 depends_on:
 - broker-pool-sharing:ch01-shm-ownership-and-broker-wire:t03
 files:

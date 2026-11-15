@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-14T21:38:30Z] archive | native-adapter-organization
+
+- Archived completed specification `native-adapter-organization` (`t01`–`t04` across `838c54d1..8a836024`) into permanent OKF knowledge chapters (`database-drivers-and-dialers.md`, `gcp-bigquery-and-spanner-drivers.md`, `query-pipeline-cdc-and-tenancy.md`, `module-and-class-layout.md`), updated Master PRD `native-data-platform` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-adapter-organization/`.
+
+## [2026-11-14T21:38:00Z] finish | native-adapter-organization
+
+- Completed `native-adapter-organization` (`t01`–`t04`) across `838c54d1..8a836024`: extracted `bigquery/object_tables.py` (`ObjectRef`, `ObjectTableConfig`, single-pass `_split_uri_bucket_and_key`, `(DatabaseError, OSError)` fallback) and `spanner/{mutations,transactions}.py` (`gc=True` on `Mutation`/`MutationGroup`, `_encode_parameters_payload`, async abort backoff), decomposed Oracle (`oracle/pipeline.py`), MySQL (`SyncMySQLPipeline`/`AsyncMySQLPipeline`, non-blocking `_parse_dsn_fields`, literal-safe `MySQLCore` bind compilation, `Exception` catching preserving `CancelledError`), MSSQL, and DuckDB (`_scan_sql_keywords_outside_literals` boundary fix, shared lease/invalidation helpers on `DuckDBCore`) into `_sync.py`/`_async.py`/`driver.py` barrels, narrowed `DataFusionConfig` (`mode="in_process"` with scheme/path/blank-query validation) and removed vendor registration wrappers from `DataFusionEngine`, and passed zero-context reviews, `ruff`, `mypy`, `stubtest`, `make docs`, `make review-check`, and `pytest` (`1144 passed`).
+
 ## [2026-11-14T20:02:00Z] align | flow-setup
 
 - Executed `/flow-setup` (`Align & True-Up`) against `fix/audit-remediation @ 104fd6fa` (`main @ 4773e2fc`): fixed OKF v0.2 tag/heading validation errors in `database-drivers-and-dialers.md` and `strict-typing-hygiene:t02`, updated `workflow.md` (`[dependency-groups].bench` `duckdb` isolation), reconciled unstarted spec blueprint drift across `native-adapter-organization` (`depends_on_flows`), `native-sqlite-driver` (`[all]` extra removal, `ConformanceGate`/`registry.py`, `py_async.rs`), `native-redis-driver` (`[all]` extra removal, workspace `Cargo.toml`), `broker-pool-sharing` (`MssqlBrokerBackend` in `src/rs/vertebra-mssql/src/broker.rs`), `sqlspec-adapter-parity` (`execute_with_description` reuse), and `queues-tasks-and-channels` (`MultiLaneWorkerRunner` `read_set`, preserved `SCAN`+`UNLINK`), and removed legacy untracked `.agents/studio-live-state.json`.

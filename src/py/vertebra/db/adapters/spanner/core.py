@@ -14,17 +14,13 @@ from vertebra._vertebra import (
     SpannerError,
     hydrate_rows_vectorcall,
 )
-from vertebra.db.adapters.spanner.config import (
-    Mutation,
-    MutationGroup,
-    SpannerConfig,
-)
+from vertebra.db.adapters.spanner.config import SpannerConfig
 from vertebra.db.arrow import ArrowCursor, write_arrow_shm
 from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.schema import to_schema
-from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.serializers import encode_json
 from vertebra.utils.type_converters import time_iso_convert
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
@@ -38,7 +34,6 @@ if TYPE_CHECKING:
 
 __all__ = ("SpannerCore",)
 
-_MAX_MUTATION_CELLS_PER_BATCH: Final[int] = 80_000
 _PARTITIONED_QUERY_FALLBACK_CODES: Final[frozenset[int]] = frozenset({3, 7, 9, 12, 14})
 
 
@@ -107,61 +102,6 @@ class SpannerCore:
         """
         return isinstance(exc, SpannerError) and getattr(exc, "code", None) in _PARTITIONED_QUERY_FALLBACK_CODES
 
-    @staticmethod
-    def coerce_mutation(item: Mutation | Mapping[str, Any]) -> Mutation:
-        """Coerce a `Mutation` or dictionary representation into a typed `Mutation` struct."""
-        if isinstance(item, Mutation):
-            return item
-        op_raw = str(item.get("op", "insert_or_update")).lower()
-        table = str(item.get("table", ""))
-        if op_raw == "delete":
-            return Mutation.delete(
-                table,
-                item.get("keys", ()),
-                all_rows=bool(item.get("all", item.get("all_rows", False))),
-            )
-        cols = [str(c) for c in item.get("columns", ())]
-        vals = [tuple(r) for r in item.get("values", ())]
-        if op_raw == "insert":
-            return Mutation.insert(table, cols, vals)
-        if op_raw == "update":
-            return Mutation.update(table, cols, vals)
-        if op_raw == "replace":
-            return Mutation.replace(table, cols, vals)
-        return Mutation.insert_or_update(table, cols, vals)
-
-    @classmethod
-    def coerce_mutation_group(
-        cls,
-        group: MutationGroup | Sequence[Mutation | Mapping[str, Any]],
-    ) -> MutationGroup:
-        """Coerce a `MutationGroup` or sequence of mutations into a `MutationGroup` struct."""
-        if isinstance(group, MutationGroup):
-            return group
-        return MutationGroup(mutations=tuple(cls.coerce_mutation(m) for m in group))
-
-    @staticmethod
-    def chunk_mutations_by_cell_limit(
-        mutations: Sequence[Mutation],
-        *,
-        max_cells: int = _MAX_MUTATION_CELLS_PER_BATCH,
-    ) -> list[list[Mutation]]:
-        """Partition `mutations` into batches that respect Spanner's per-commit cell limit."""
-        batches: list[list[Mutation]] = []
-        current: list[Mutation] = []
-        current_cells = 0
-        for mut in mutations:
-            cells = mut.cell_count()
-            if current and current_cells + cells > max_cells:
-                batches.append(current)
-                current = []
-                current_cells = 0
-            current.append(mut)
-            current_cells += cells
-        if current:
-            batches.append(current)
-        return batches
-
     @classmethod
     def encode_parameters_json(
         cls,
@@ -170,23 +110,8 @@ class SpannerCore:
         dialect: str = "googlesql",
     ) -> str | None:
         """Serialize positional or named Spanner parameters into a JSON object for the Rust client."""
-        if parameters is None:
-            return None
-        if isinstance(parameters, Mapping):
-            if not parameters:
-                return None
-            out: dict[str, Any] = {}
-            for k, v in parameters.items():
-                clean_key = str(k).lstrip("@$")
-                out[clean_key] = cls._encode_param_entry(v)
-            return encode_json(out)
-        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
-            if not parameters:
-                return None
-            _ = dialect
-            out_seq = {f"p{idx + 1}": cls._encode_param_entry(v) for idx, v in enumerate(parameters)}
-            return encode_json(out_seq)
-        return None
+        payload = cls._encode_parameters_payload(parameters, dialect=dialect)
+        return encode_json(payload) if payload is not None else None
 
     @classmethod
     def encode_batch_dml_json(
@@ -204,10 +129,10 @@ class SpannerCore:
             else:
                 sql = str(item[0])
                 raw_params = item[1]
-            params_json = cls.encode_parameters_json(raw_params, dialect=dialect)
+            encoded_params = cls._encode_parameters_payload(raw_params, dialect=dialect)
             entry: dict[str, Any] = {"sql": sql}
-            if params_json is not None:
-                entry["params"] = decode_json(params_json)
+            if encoded_params is not None:
+                entry["params"] = encoded_params
             payload.append(entry)
         return encode_json(payload)
 
@@ -262,6 +187,26 @@ class SpannerCore:
             return [dict(item) for item in data if isinstance(item, Mapping)]
         ipc_view = write_arrow_shm(data)
         return ArrowCursor(bytes(ipc_view)).to_pylist()
+
+    @classmethod
+    def _encode_parameters_payload(
+        cls,
+        parameters: Mapping[str, Any] | Sequence[Any] | None,
+        *,
+        dialect: str = "googlesql",
+    ) -> dict[str, Any] | None:
+        if parameters is None:
+            return None
+        if isinstance(parameters, Mapping):
+            if not parameters:
+                return None
+            return {str(k).lstrip("@$"): cls._encode_param_entry(v) for k, v in parameters.items()}
+        if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
+            if not parameters:
+                return None
+            _ = dialect
+            return {f"p{idx + 1}": cls._encode_param_entry(v) for idx, v in enumerate(parameters)}
+        return None
 
     @classmethod
     def _encode_param_entry(cls, val: Any) -> Any:
