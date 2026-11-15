@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
+import inspect
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
@@ -21,9 +20,13 @@ from vertebra.db.dbapi._sync import (
     ProgrammingError,
     Warning,
     _config_dialect,
+    coerce_dbapi_rows_and_desc,
+    is_insert_sql,
+    is_read_only_sql,
     is_row_returning_sql,
 )
 from vertebra.db.registry import DatabaseRegistry
+from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -77,31 +80,25 @@ class AsyncDBAPICursor:
     ) -> AsyncDBAPICursor:
         """Execute a SQL statement asynchronously."""
         self._require_open()
+        self.lastrowid = None
         params: Sequence[Any] | dict[str, Any] = () if parameters is None else parameters
         await self._conn.begin()
-        if not is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute"):
+        is_row_ret = is_row_returning_sql(operation)
+        if not is_row_ret and self._driver is not None and hasattr(self._driver, "execute_dml"):
+            affected, captured_rowid = await self._driver.execute_dml(operation, params)
+            self._rows = []
+            self.description = None
+            self.rowcount = int(affected)
+            self.lastrowid = captured_rowid
+        elif not is_row_ret and self._driver is not None and hasattr(self._driver, "execute"):
             affected = await self._driver.execute(operation, params)
             self._rows = []
             self.description = None
             self.rowcount = int(affected)
         elif self._driver is not None and hasattr(self._driver, "execute_with_description"):
             raw_res = await self._driver.execute_with_description(operation, params)
-            if isinstance(raw_res, tuple) and len(raw_res) >= 2:
-                self._rows = raw_res[0]
-                col_names = raw_res[1]
-                self.description = (
-                    tuple(
-                        (col[0] if isinstance(col, tuple) else str(col), None, None, None, None, None, None)
-                        for col in col_names
-                    )
-                    if col_names
-                    else None
-                )
-                self.rowcount = len(self._rows)
-            else:
-                self._rows = []
-                self.description = None
-                self.rowcount = -1
+            self._rows, self.description = coerce_dbapi_rows_and_desc(raw_res)
+            self.rowcount = len(self._rows) if (self._rows or self.description is not None) else -1
         elif self._driver is not None and hasattr(self._driver, "execute_tuples"):
             self._rows = await self._driver.execute_tuples(operation, params)
             self.description = (
@@ -128,24 +125,19 @@ class AsyncDBAPICursor:
             self.rowcount = -1
 
         self._pos = 0
-        if operation.lstrip().upper().startswith("INSERT"):
-            last_rowid_fn = getattr(self._driver, "last_insert_rowid", None)
-            if callable(last_rowid_fn):
-                res = last_rowid_fn()
-                self.lastrowid = await res if hasattr(res, "__await__") else res
-            elif hasattr(self._driver, "_sync"):
-                sync_drv = getattr(self._driver, "_sync", None)
-                sync_last_rowid = getattr(sync_drv, "last_insert_rowid", None)
-                if callable(sync_last_rowid):
-                    self.lastrowid = await asyncio.to_thread(sync_last_rowid)
-                else:
-                    raw_conn = getattr(sync_drv, "raw_connection", None)
-                    if raw_conn is not None:
-                        drv_lock = getattr(sync_drv, "_lock", None)
-                        row = await asyncio.to_thread(self._fetch_last_insert_rowid, raw_conn, drv_lock)
-                        if row:
-                            self.lastrowid = row[0]
-        if self._conn.autocommit:
+        if self.lastrowid is None and is_insert_sql(operation) and self._driver is not None:
+            direct = getattr(self._driver, "lastrowid", None)
+            if isinstance(direct, int) and not isinstance(direct, bool):
+                self.lastrowid = direct
+            else:
+                last_rowid_fn = getattr(self._driver, "last_insert_rowid", None)
+                if callable(last_rowid_fn):
+                    if inspect.iscoroutinefunction(last_rowid_fn):
+                        self.lastrowid = await last_rowid_fn()
+                    else:
+                        res = await SyncPool.default().submit_async(last_rowid_fn)
+                        self.lastrowid = await res if inspect.isawaitable(res) else res
+        if self._conn.autocommit and (self._conn._in_transaction or not is_read_only_sql(operation)):
             await self._conn.commit()
         return self
 
@@ -156,6 +148,7 @@ class AsyncDBAPICursor:
     ) -> AsyncDBAPICursor:
         """Execute parameterized SQL across multiple parameter sets asynchronously."""
         self._require_open()
+        self.lastrowid = None
         if not seq_of_parameters:
             self._rows = []
             self.description = None
@@ -232,14 +225,6 @@ class AsyncDBAPICursor:
         if self._conn.closed:
             raise InterfaceError("Cannot operate on a closed connection.")
 
-    @staticmethod
-    def _fetch_last_insert_rowid(raw_conn: Any, lock: Any = None) -> Any:
-        """Query ``last_insert_rowid()`` from a SQLite raw connection on a worker thread."""
-        ctx = lock if lock is not None else contextlib.nullcontext()
-        with ctx, contextlib.closing(raw_conn.cursor()) as cur:
-            cur.execute("SELECT last_insert_rowid()")
-            return cur.fetchone()
-
 
 class AsyncDBAPIConnection:
     """Standalone asynchronous PEP 249 connection backed by Vertebra async drivers."""
@@ -300,7 +285,15 @@ class AsyncDBAPIConnection:
         self._driver = driver
         self._owns_driver = driver is not None
         if self._driver is None:
-            if self._share_pool and broker is None and not lease_managed:
+            has_shared_key = self._config is not None and self._config.pool_key() is not None
+            has_custom_broker = broker is not None and broker is not DatabaseRegistry.default_broker()
+            if (
+                self._share_pool
+                and not lease_managed
+                and has_shared_key
+                and self._config is not None
+                and not has_custom_broker
+            ):
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
@@ -366,28 +359,35 @@ class AsyncDBAPIConnection:
     async def commit(self) -> None:
         """Commit the active asynchronous transaction."""
         self._require_open()
-        self._in_transaction = False
-        if self._driver is not None and hasattr(self._driver, "commit"):
-            await self._driver.commit()
+        try:
+            if self._driver is not None and hasattr(self._driver, "commit"):
+                await self._driver.commit()
+        finally:
+            self._in_transaction = False
 
     async def rollback(self) -> None:
         """Roll back the active asynchronous transaction."""
         self._require_open()
-        self._in_transaction = False
-        if self._driver is not None and hasattr(self._driver, "rollback"):
-            await self._driver.rollback()
+        try:
+            if self._driver is not None and hasattr(self._driver, "rollback"):
+                await self._driver.rollback()
+        finally:
+            self._in_transaction = False
 
     async def close(self) -> None:
         """Close the asynchronous driver connection."""
         if not self.closed:
-            if self._in_transaction:
-                if self._autocommit:
-                    await self.commit()
-                else:
-                    await self.rollback()
-            if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
-                await self._driver.close()
-            self.closed = True
+            try:
+                if self._in_transaction:
+                    if self._autocommit:
+                        await self.commit()
+                    else:
+                        await self.rollback()
+            finally:
+                self._in_transaction = False
+                if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
+                    await self._driver.close()
+                self.closed = True
 
     def _require_open(self) -> None:
         if self.closed:

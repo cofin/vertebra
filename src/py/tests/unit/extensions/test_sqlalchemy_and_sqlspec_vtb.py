@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import array
 import ast
+import asyncio
 import importlib
+import os
 import sqlite3
+import subprocess
+import sys
+import threading
 import warnings
 from pathlib import Path
 from typing import Any
@@ -26,6 +31,7 @@ from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
 from sqlspec.core.result._base import ArrowResult
 from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
+from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError
 from sqlspec.exceptions import StackExecutionError
 
 import vertebra.extensions.sqlspec as sqlspec_extension
@@ -99,7 +105,7 @@ from vertebra.extensions.sqlspec.provider import (
 )
 from vertebra.extensions.sqlspec.proxy import ProxyAsyncDriver, ProxySyncDriver
 from vertebra.storage import SyncObjectStore
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import ImproperConfigurationError, VertebraError
 
 
 @pytest.mark.parametrize("dialect_name", ["PostgreSQL", "SQLite", "MySQL", "Oracle", "MSSQL", "DuckDB"])
@@ -1888,9 +1894,11 @@ def test_sync_broker_pool_checkout_rollback_quarantine_and_recreate(tmp_path: Pa
         assert transport.quarantined_count() == 0
 
         recreated = pool.recreate()
-        assert isinstance(recreated, BrokerPool)
-        assert recreated.partition_key == expected_partition
-        recreated.dispose()
+        try:
+            assert isinstance(recreated, BrokerPool)
+            assert recreated.partition_key == expected_partition
+        finally:
+            recreated.dispose()
     finally:
         engine.dispose()
 
@@ -1974,15 +1982,20 @@ async def test_proxy_drivers_compile_sql_filters_stacks_and_common_driver_params
             supported_parameter_styles={ParameterStyle.NUMERIC},
         ),
     )
-    pg_proxy = ProxySyncDriver(SQLSpecSyncProvider(SyncSQLiteDriver()), statement_config=pg_cfg)
-    compiled_sql, compiled_params, _ = pg_proxy.compile_with_broker(
-        pg_proxy,
-        pg_proxy.broker,
-        "postgres",
-        SQL("SELECT id FROM items WHERE id = :id", id=42),
-    )
-    assert compiled_sql.strip() == "SELECT id FROM items WHERE id = $1"
-    assert compiled_params == [42]
+    pg_provider = SQLSpecSyncProvider(SyncSQLiteDriver())
+    pg_proxy = ProxySyncDriver(pg_provider, statement_config=pg_cfg)
+    try:
+        compiled_sql, compiled_params, _ = pg_proxy.compile_with_broker(
+            pg_proxy,
+            pg_proxy.broker,
+            "postgres",
+            SQL("SELECT id FROM items WHERE id = :id", id=42),
+        )
+        assert compiled_sql.strip() == "SELECT id FROM items WHERE id = $1"
+        assert compiled_params == [42]
+    finally:
+        pg_proxy.close()
+        pg_provider.close()
 
     sqlite_cfg = StatementConfig(
         dialect="sqlite",
@@ -1993,115 +2006,131 @@ async def test_proxy_drivers_compile_sql_filters_stacks_and_common_driver_params
     )
     sync_driver = SyncSQLiteDriver()
     sync_provider = SQLSpecSyncProvider(sync_driver)
-    proxy_sync = ProxySyncDriver(sync_provider, statement_config=sqlite_cfg)
-    proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
-    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
-    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
-
-    qb_sql, qb_params, _ = proxy_sync.compile_with_broker(
-        proxy_sync,
-        proxy_sync.broker,
-        "sqlite",
-        sql.select("id", "name").from_("items").where_eq("id", 2),
-        (LimitOffsetFilter(limit=2, offset=1),),
-    )
-    assert "WHERE" in qb_sql.upper()
-    assert "LIMIT" in qb_sql.upper()
-    assert qb_params == [2, 2, 1]
-
-    assert proxy_sync.select_value("SELECT ?", "hello") == "hello"
-    assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
-    assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
-
-    rows, total = proxy_sync.select_with_total(
-        "SELECT id, name FROM items ORDER BY id",
-        LimitOffsetFilter(limit=2, offset=1),
-        count_with_window=count_with_window,
-    )
-    assert total == 3
-    assert [row["id"] for row in rows] == [2, 3]
-
-    ok_stack = (
-        StatementStack()
-        .push_execute("INSERT INTO items VALUES (?, ?)", 4, "d")
-        .push_execute("INSERT INTO items VALUES (?, ?)", 5, "e")
-    )
-    ok_results = proxy_sync.execute_stack(ok_stack)
-    assert len(ok_results) == 2
-    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
-
-    fail_stack = (
-        StatementStack()
-        .push_execute("INSERT INTO items VALUES (?, ?)", 6, "f")
-        .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
-    )
-    with pytest.raises(StackExecutionError):
-        proxy_sync.execute_stack(fail_stack)
-    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
-
-    cont_stack = (
-        StatementStack()
-        .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
-        .push_execute("INSERT INTO items VALUES (?, ?)", 7, "g")
-    )
-    cont_results = proxy_sync.execute_stack(cont_stack, continue_on_error=True)
-    assert len(cont_results) == 2
-    assert isinstance(cont_results[0].error, StackExecutionError)
-    assert cont_results[1].error is None
-    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 6
-
     async_driver = AsyncSQLiteDriver()
     async_provider = SQLSpecAsyncProvider(async_driver)
-    proxy_async = ProxyAsyncDriver(async_provider, statement_config=sqlite_cfg)
-    await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
-    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
-    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
+    try:
+        proxy_sync = ProxySyncDriver(sync_provider, statement_config=sqlite_cfg)
+        try:
+            proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
+            proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
+            proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
 
-    assert await proxy_async.select_value("SELECT ?", "hello") == "hello"
-    assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
-    assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
+            qb_sql, qb_params, _ = proxy_sync.compile_with_broker(
+                proxy_sync,
+                proxy_sync.broker,
+                "sqlite",
+                sql.select("id", "name").from_("items").where_eq("id", 2),
+                (LimitOffsetFilter(limit=2, offset=1),),
+            )
+            assert "WHERE" in qb_sql.upper()
+            assert "LIMIT" in qb_sql.upper()
+            assert qb_params == [2, 2, 1]
 
-    arows, atotal = await proxy_async.select_with_total(
-        "SELECT id, name FROM items ORDER BY id",
-        LimitOffsetFilter(limit=2, offset=1),
-        count_with_window=count_with_window,
-    )
-    assert atotal == 3
-    assert [row["id"] for row in arows] == [2, 3]
+            assert proxy_sync.select_value("SELECT ?", "hello") == "hello"
+            assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
+            assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
 
-    aok_results = await proxy_async.execute_stack(ok_stack)
-    assert len(aok_results) == 2
-    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+            rows, total = proxy_sync.select_with_total(
+                "SELECT id, name FROM items ORDER BY id",
+                LimitOffsetFilter(limit=2, offset=1),
+                count_with_window=count_with_window,
+            )
+            assert total == 3
+            assert [row["id"] for row in rows] == [2, 3]
 
-    with pytest.raises(StackExecutionError):
-        await proxy_async.execute_stack(fail_stack)
-    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+            ok_stack = (
+                StatementStack()
+                .push_execute("INSERT INTO items VALUES (?, ?)", 4, "d")
+                .push_execute("INSERT INTO items VALUES (?, ?)", 5, "e")
+            )
+            ok_results = proxy_sync.execute_stack(ok_stack)
+            assert len(ok_results) == 2
+            assert ok_results[0].result is not None
+            assert ok_results[0].result.operation_type == "INSERT"
+            assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
 
-    acont_results = await proxy_async.execute_stack(cont_stack, continue_on_error=True)
-    assert len(acont_results) == 2
-    assert isinstance(acont_results[0].error, StackExecutionError)
-    assert acont_results[1].error is None
-    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 6
+            fail_stack = (
+                StatementStack()
+                .push_execute("INSERT INTO items VALUES (?, ?)", 6, "f")
+                .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
+            )
+            with pytest.raises(StackExecutionError):
+                proxy_sync.execute_stack(fail_stack)
+            assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
 
-    class WrappedCfg:
-        dialect = "sqlite"
-        bind_key = "primary"
-        statement_config = sqlite_cfg
-        driver_features: dict[str, Any] = {}
+            cont_stack = (
+                StatementStack()
+                .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
+                .push_execute("INSERT INTO items VALUES (?, ?)", 7, "g")
+            )
+            cont_results = proxy_sync.execute_stack(cont_stack, continue_on_error=True)
+            assert len(cont_results) == 2
+            assert isinstance(cont_results[0].error, StackExecutionError)
+            assert cont_results[1].error is None
+            assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 6
+        finally:
+            proxy_sync.close()
 
-        def provide_session(self) -> Any:
-            return self
+        proxy_async = ProxyAsyncDriver(async_provider, statement_config=sqlite_cfg)
+        try:
+            await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
+            await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
+            await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
 
-    proxy_sync_cfg = ProxySyncConfig(WrappedCfg(), provider=sync_provider)
-    proxy_async_cfg = ProxyAsyncConfig(WrappedCfg(), provider=async_provider)
-    with proxy_sync_cfg.provide_proxied_session() as sess:
-        assert isinstance(sess, ProxySyncDriver)
-        assert sess.select_value("SELECT ?", 11) == 11
-    async with proxy_async_cfg.provide_proxied_session() as asess:
-        assert isinstance(asess, ProxyAsyncDriver)
-        assert await asess.select_value("SELECT ?", 12) == 12
+            assert await proxy_async.select_value("SELECT ?", "hello") == "hello"
+            assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
+            assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
+
+            arows, atotal = await proxy_async.select_with_total(
+                "SELECT id, name FROM items ORDER BY id",
+                LimitOffsetFilter(limit=2, offset=1),
+                count_with_window=count_with_window,
+            )
+            assert atotal == 3
+            assert [row["id"] for row in arows] == [2, 3]
+
+            aok_results = await proxy_async.execute_stack(ok_stack)
+            assert len(aok_results) == 2
+            assert aok_results[0].result is not None
+            assert aok_results[0].result.operation_type == "INSERT"
+            assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+
+            with pytest.raises(StackExecutionError):
+                await proxy_async.execute_stack(fail_stack)
+            assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+
+            acont_results = await proxy_async.execute_stack(cont_stack, continue_on_error=True)
+            assert len(acont_results) == 2
+            assert isinstance(acont_results[0].error, StackExecutionError)
+            assert acont_results[1].error is None
+            assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 6
+        finally:
+            await proxy_async.close()
+
+        class WrappedCfg:
+            dialect = "sqlite"
+            bind_key = "primary"
+            statement_config = sqlite_cfg
+            driver_features: dict[str, Any] = {}
+
+            def provide_session(self) -> Any:
+                return self
+
+        proxy_sync_cfg = ProxySyncConfig(WrappedCfg(), provider=sync_provider)
+        proxy_async_cfg = ProxyAsyncConfig(WrappedCfg(), provider=async_provider)
+        with proxy_sync_cfg.provide_proxied_session() as sess:
+            assert isinstance(sess, ProxySyncDriver)
+            assert sess.select_value("SELECT ?", 11) == 11
+        async with proxy_async_cfg.provide_proxied_session() as asess:
+            assert isinstance(asess, ProxyAsyncDriver)
+            assert await asess.select_value("SELECT ?", 12) == 12
+    finally:
+        sync_provider.close()
+        sync_driver.close()
+        await async_provider.close()
+        await async_driver.close()
 
 
 @pytest.mark.anyio
@@ -2133,11 +2162,13 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
             c1.close()
 
         recreated = p1.recreate()
-        assert isinstance(recreated, BrokerPool)
-        inv_conn = recreated.connect()
-        inv_conn.invalidate()
-        assert sync_t.metrics().active_leases == 0
-        recreated.dispose()
+        try:
+            assert isinstance(recreated, BrokerPool)
+            inv_conn = recreated.connect()
+            inv_conn.invalidate()
+            assert sync_t.metrics().active_leases == 0
+        finally:
+            recreated.dispose()
     finally:
         mem_pool.dispose()
         p2.dispose()
@@ -2288,9 +2319,11 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         max_overflow=0,
         acquire_timeout_ms=50,
     )
-    active_conn = dispose_pool.connect()
-    _ = active_conn
-    dispose_pool.dispose()
+    try:
+        active_conn = dispose_pool.connect()
+        _ = active_conn
+    finally:
+        dispose_pool.dispose()
     assert dispose_t.quarantined_count() == 1
     assert dispose_t.metrics().active_leases == 0
 
@@ -2306,10 +2339,12 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         max_overflow=0,
         acquire_timeout_ms=50,
     )
-    with pytest.raises(RuntimeError, match="creator boom"):
-        fail_pool.connect()
-    assert fail_t.quarantined_count() == 1
-    fail_pool.dispose()
+    try:
+        with pytest.raises(RuntimeError, match="creator boom"):
+            fail_pool.connect()
+        assert fail_t.quarantined_count() == 1
+    finally:
+        fail_pool.dispose()
 
     with pytest.raises(ImproperConfigurationError):
         BrokerPool.bind_class(broker=None)
@@ -2397,12 +2432,15 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
         pool_size=2,
         max_overflow=0,
     )
-    conn_a = await greenlet_spawn(fake_pool.connect)
-    conn_b = await greenlet_spawn(fake_pool.connect)
-    fake_pool.dispose()
-    assert fake_broker.quarantined == [1, 2]
-    await greenlet_spawn(conn_a.close)
-    await greenlet_spawn(conn_b.close)
+    try:
+        conn_a = await greenlet_spawn(fake_pool.connect)
+        conn_b = await greenlet_spawn(fake_pool.connect)
+        await greenlet_spawn(fake_pool.dispose)
+        assert fake_broker.quarantined == [1, 2]
+        await greenlet_spawn(conn_a.close)
+        await greenlet_spawn(conn_b.close)
+    finally:
+        await greenlet_spawn(fake_pool.dispose)
 
     rollback_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
     should_fail = True
@@ -2466,71 +2504,79 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
     sync_driver = SyncSQLiteDriver()
     sync_provider = SQLSpecSyncProvider(sync_driver, arrow_threshold_rows=1)
     proxy_sync = ProxySyncDriver(sync_provider, statement_config=sqlite_cfg)
-    proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-    proxy_sync.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "named-1"})
-    assert proxy_sync.select_value("SELECT name FROM items WHERE id = :id", {"id": 1}) == "named-1"
+    try:
+        proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        proxy_sync.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "named-1"})
+        assert proxy_sync.select_value("SELECT name FROM items WHERE id = :id", {"id": 1}) == "named-1"
 
-    proxy_sync.begin()
-    assert proxy_sync._connection_in_transaction() is True
-    with proxy_sync.transaction():
-        proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "nested-2")
-    assert proxy_sync._connection_in_transaction() is True
-    proxy_sync.commit()
-    assert proxy_sync._connection_in_transaction() is False
-    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 2
+        proxy_sync.begin()
+        assert proxy_sync._connection_in_transaction() is True
+        with proxy_sync.transaction():
+            proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "nested-2")
+        assert proxy_sync._connection_in_transaction() is True
+        proxy_sync.commit()
+        assert proxy_sync._connection_in_transaction() is False
+        assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 2
 
-    stack = (
-        StatementStack()
-        .push_execute_many("INSERT INTO items VALUES (?, ?)", [(3, "many-3"), (4, "many-4")])
-        .push_execute_script("INSERT INTO items VALUES (5, 'script-5'); INSERT INTO items VALUES (6, 'script-6');")
-        .push_execute_arrow("SELECT id, name FROM items ORDER BY id")
-    )
-    stack_results = proxy_sync.execute_stack(stack)
-    assert len(stack_results) == 3
-    assert isinstance(stack_results[2].result, ArrowResult)
-    assert stack_results[2].result.num_rows == 6
+        stack = (
+            StatementStack()
+            .push_execute_many("INSERT INTO items VALUES (?, ?)", [(3, "many-3"), (4, "many-4")])
+            .push_execute_script("INSERT INTO items VALUES (5, 'script-5'); INSERT INTO items VALUES (6, 'script-6');")
+            .push_execute_arrow("SELECT id, name FROM items ORDER BY id")
+        )
+        stack_results = proxy_sync.execute_stack(stack)
+        assert len(stack_results) == 3
+        assert isinstance(stack_results[2].result, ArrowResult)
+        assert stack_results[2].result.num_rows == 6
 
-    with pytest.raises(TypeError):
-        proxy_sync.execute_stack("not-a-stack")
-    with pytest.raises(ValueError):
-        proxy_sync.execute_stack(StatementStack())
+        with pytest.raises(TypeError):
+            proxy_sync.execute_stack("not-a-stack")
+        with pytest.raises(ValueError):
+            proxy_sync.execute_stack(StatementStack())
 
-    with pytest.raises(ValueError, match="execute_many payload cannot be empty"):
-        StatementStack().push_execute_many("INSERT INTO items VALUES (?, ?)", [])
-    empty_args_op = type(
-        "BadOp", (), {"method": "execute_many", "statement": "SELECT 1", "arguments": (), "keyword_arguments": {}}
-    )()
-    with pytest.raises(ValueError, match="parameter sets"):
-        proxy_sync._execute_stack_operation_sync(empty_args_op)
+        with pytest.raises(ValueError, match="execute_many payload cannot be empty"):
+            StatementStack().push_execute_many("INSERT INTO items VALUES (?, ?)", [])
+        empty_args_op = type(
+            "BadOp", (), {"method": "execute_many", "statement": "SELECT 1", "arguments": (), "keyword_arguments": {}}
+        )()
+        with pytest.raises(ValueError, match="parameter sets"):
+            proxy_sync._execute_stack_operation_sync(empty_args_op)
 
-    stream = proxy_sync.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=2)
-    assert stream is not None
-    with stream as open_stream:
-        streamed_rows = list(open_stream)
-    assert [row["id"] for row in streamed_rows] == [1, 2, 3, 4, 5, 6]
+        assert proxy_sync.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=2) is None
+        with pytest.raises(SQLSpecImproperConfigurationError):
+            proxy_sync.select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=2, native_only=True)
+        with proxy_sync.select_stream(
+            SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=2, native_only=False
+        ) as open_stream:
+            streamed_rows = list(open_stream)
+        assert [row["id"] for row in streamed_rows] == [1, 2, 3, 4, 5, 6]
 
-    arrow_res = proxy_sync.select_to_arrow(
-        "SELECT id, name FROM items ORDER BY id",
-        native_only=True,
-        return_format=return_format,
-    )
-    assert isinstance(arrow_res, ArrowResult)
-    assert arrow_res.rows_affected == 6
-    arrow_payload = arrow_res.get_data()
-    if return_format == "table":
-        assert isinstance(arrow_payload, pa.Table)
-        assert arrow_payload.num_rows == 6
-    elif return_format == "batch":
-        assert isinstance(arrow_payload, pa.RecordBatch)
-        assert arrow_payload.num_rows == 6
-    elif return_format == "batches":
-        assert sum(batch.num_rows for batch in arrow_payload) == 6
-    else:
-        assert isinstance(arrow_payload, pa.RecordBatchReader)
-        assert arrow_payload.read_all().num_rows == 6
+        arrow_res = proxy_sync.select_to_arrow(
+            "SELECT id, name FROM items ORDER BY id",
+            native_only=True,
+            return_format=return_format,
+        )
+        assert isinstance(arrow_res, ArrowResult)
+        assert arrow_res.rows_affected == 6
+        arrow_payload = arrow_res.get_data()
+        if return_format == "table":
+            assert isinstance(arrow_payload, pa.Table)
+            assert arrow_payload.num_rows == 6
+        elif return_format == "batch":
+            assert isinstance(arrow_payload, pa.RecordBatch)
+            assert arrow_payload.num_rows == 6
+        elif return_format == "batches":
+            assert sum(batch.num_rows for batch in arrow_payload) == 6
+        else:
+            assert isinstance(arrow_payload, pa.RecordBatchReader)
+            assert arrow_payload.read_all().num_rows == 6
 
-    with pytest.raises(ValueError, match="Unsupported Arrow return_format"):
-        proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format="invalid")
+        with pytest.raises(ValueError, match="Unsupported Arrow return_format"):
+            proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format="invalid")
+    finally:
+        proxy_sync.close()
+        sync_provider.close()
+        sync_driver.close()
 
     non_shm_proxy = ProxySyncDriver(
         lambda req: BrokerRpcResponse(
@@ -2544,8 +2590,11 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         ),
         statement_config=sqlite_cfg,
     )
-    with pytest.raises(ImproperConfigurationError, match="native SHM Arrow"):
-        non_shm_proxy.select_to_arrow("SELECT id FROM items ORDER BY id", native_only=True)
+    try:
+        with pytest.raises(ImproperConfigurationError, match="native SHM Arrow"):
+            non_shm_proxy.select_to_arrow("SELECT id FROM items ORDER BY id", native_only=True)
+    finally:
+        non_shm_proxy.close()
 
     call_count = 0
 
@@ -2555,9 +2604,12 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         return 42
 
     bad_proxy = ProxySyncDriver(_bad_rpc_transport)
-    with pytest.raises(TypeError, match="Unexpected RPC transport response type"):
-        bad_proxy._send_rpc(BrokerRpcRequest(request_id=1, op="acquire", pool_name="default", worker_pid=1))
-    assert call_count == 1
+    try:
+        with pytest.raises(TypeError, match="Unexpected RPC transport response type"):
+            bad_proxy.acquire_lease()
+        assert call_count == 1
+    finally:
+        bad_proxy.close()
 
     class WorkerBrokerDouble:
         def __init__(self) -> None:
@@ -2583,46 +2635,295 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         ),
         broker=worker_broker,
     )
-    err_driver.acquire_lease()
-    with pytest.raises(LeaseQuarantinedError):
-        err_driver.release_lease()
-    assert worker_broker.quarantined == 1
+    try:
+        err_driver.acquire_lease()
+        with pytest.raises(LeaseQuarantinedError):
+            err_driver.release_lease()
+        assert worker_broker.quarantined == 1
+    finally:
+        err_driver.close()
 
     async_upstream = AsyncSQLiteDriver()
     async_provider = SQLSpecAsyncProvider(async_upstream, arrow_threshold_rows=1)
     proxy_async = ProxyAsyncDriver(async_provider, statement_config=sqlite_cfg)
-    await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-    await proxy_async.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "async-named"})
-    await proxy_async.begin()
-    assert proxy_async._connection_in_transaction() is True
-    async with proxy_async.transaction():
-        await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "async-nested")
-    assert proxy_async._connection_in_transaction() is True
-    await proxy_async.commit()
-    assert proxy_async._connection_in_transaction() is False
+    try:
+        await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        await proxy_async.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "async-named"})
+        await proxy_async.begin()
+        assert proxy_async._connection_in_transaction() is True
+        async with proxy_async.transaction():
+            await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "async-nested")
+        assert proxy_async._connection_in_transaction() is True
+        await proxy_async.commit()
+        assert proxy_async._connection_in_transaction() is False
 
-    astream = proxy_async.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1)
-    assert astream is not None
-    async with astream as open_astream:
-        astreamed = [row async for row in open_astream]
-    assert [row["id"] for row in astreamed] == [1, 2]
+        assert proxy_async.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1) is None
+        with pytest.raises(SQLSpecImproperConfigurationError):
+            await proxy_async.select_stream(
+                SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=True
+            )
+        async with proxy_async.select_stream(
+            SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=False
+        ) as open_astream:
+            astreamed = [row async for row in open_astream]
+        assert [row["id"] for row in astreamed] == [1, 2]
 
-    async_arrow = await proxy_async.select_to_arrow(
-        "SELECT id, name FROM items ORDER BY id",
-        native_only=True,
-        return_format=return_format,
+        async_arrow = await proxy_async.select_to_arrow(
+            "SELECT id, name FROM items ORDER BY id",
+            native_only=True,
+            return_format=return_format,
+        )
+        assert isinstance(async_arrow, ArrowResult)
+        assert async_arrow.rows_affected == 2
+        async_payload = async_arrow.get_data()
+        if return_format == "table":
+            assert isinstance(async_payload, pa.Table)
+            assert async_payload.num_rows == 2
+        elif return_format == "batch":
+            assert isinstance(async_payload, pa.RecordBatch)
+            assert async_payload.num_rows == 2
+        elif return_format == "batches":
+            assert sum(batch.num_rows for batch in async_payload) == 2
+        else:
+            assert isinstance(async_payload, pa.RecordBatchReader)
+            assert async_payload.read_all().num_rows == 2
+    finally:
+        await proxy_async.close()
+        await async_provider.close()
+        await async_upstream.close()
+
+
+@pytest.mark.anyio
+async def test_proxy_async_driver_contended_sync_shm_broker_does_not_block_event_loop() -> None:
+    """Verify ProxyAsyncDriver offloads contended SyncSHMBrokerTransport acquisition without blocking the loop."""
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
+    transport.register_partition("shared", pool_size=1, max_overflow=0)
+    async_upstream = AsyncSQLiteDriver()
+    async_provider = SQLSpecAsyncProvider(async_upstream)
+    proxy_async = ProxyAsyncDriver(async_provider, broker=transport, pool_name="shared")
+    held_lease = transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=500)
+    release_timer = threading.Timer(0.08, held_lease.release)
+    stop_event = asyncio.Event()
+    ticks = 0
+
+    async def _heartbeat() -> None:
+        nonlocal ticks
+        while not stop_event.is_set():
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+    try:
+        release_timer.start()
+        value = await proxy_async.select_value("SELECT 42")
+        assert value == 42
+        assert ticks >= 3
+        assert transport.metrics().active_leases == 0
+        assert async_provider.active_leases == 0
+    finally:
+        release_timer.cancel()
+        if release_timer.is_alive():
+            release_timer.join(timeout=1.0)
+        stop_event.set()
+        await heartbeat_task
+        await proxy_async.close()
+        await async_provider.close()
+        await async_upstream.close()
+        transport.close()
+
+
+@pytest.mark.anyio
+async def test_proxy_and_provider_post_failed_commit_transaction_release_and_rollback() -> None:
+    """Verify failed commit inside sync/async transaction() releases active provider leases cleanly."""
+    sqlite_cfg = StatementConfig(
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.QMARK,
+            supported_parameter_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
+        )
     )
-    assert isinstance(async_arrow, ArrowResult)
-    assert async_arrow.rows_affected == 2
-    async_payload = async_arrow.get_data()
-    if return_format == "table":
-        assert isinstance(async_payload, pa.Table)
-        assert async_payload.num_rows == 2
-    elif return_format == "batch":
-        assert isinstance(async_payload, pa.RecordBatch)
-        assert async_payload.num_rows == 2
-    elif return_format == "batches":
-        assert sum(batch.num_rows for batch in async_payload) == 2
-    else:
-        assert isinstance(async_payload, pa.RecordBatchReader)
-        assert async_payload.read_all().num_rows == 2
+
+    sync_upstream = SyncSQLiteDriver()
+    sync_provider = SQLSpecSyncProvider(sync_upstream)
+
+    def sync_failing_commit(req: BrokerRpcRequest) -> BrokerRpcResponse:
+        if req.op == "commit":
+            return BrokerRpcResponse(
+                request_id=req.request_id,
+                ok=False,
+                slot_idx=req.slot_idx,
+                generation=req.generation,
+                error_type="RuntimeError",
+                error_message="simulated sync commit failure",
+            )
+        return sync_provider.handle_request(req)
+
+    sync_proxy = ProxySyncDriver(sync_failing_commit, statement_config=sqlite_cfg)
+    try:
+        sync_proxy.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        with pytest.raises(VertebraError, match="simulated sync commit failure"), sync_proxy.transaction():
+            sync_proxy.execute("INSERT INTO items VALUES (1)")
+        assert sync_provider.active_leases == 0
+        assert sync_proxy.is_leased is False
+        assert sync_proxy._connection_in_transaction() is False
+        assert sync_proxy.select_value("SELECT COUNT(*) FROM items") == 0
+    finally:
+        sync_proxy.close()
+        sync_provider.close()
+        sync_upstream.close()
+
+    async_upstream = AsyncSQLiteDriver()
+    async_provider = SQLSpecAsyncProvider(async_upstream)
+
+    async def async_failing_commit(req: BrokerRpcRequest) -> BrokerRpcResponse:
+        if req.op == "commit":
+            return BrokerRpcResponse(
+                request_id=req.request_id,
+                ok=False,
+                slot_idx=req.slot_idx,
+                generation=req.generation,
+                error_type="RuntimeError",
+                error_message="simulated async commit failure",
+            )
+        return await async_provider.handle_request(req)
+
+    async_proxy = ProxyAsyncDriver(async_failing_commit, statement_config=sqlite_cfg)
+    try:
+        await async_proxy.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        with pytest.raises(VertebraError, match="simulated async commit failure"):
+            async with async_proxy.transaction():
+                await async_proxy.execute("INSERT INTO items VALUES (1)")
+        assert async_provider.active_leases == 0
+        assert async_proxy.is_leased is False
+        assert async_proxy._connection_in_transaction() is False
+        assert await async_proxy.select_value("SELECT COUNT(*) FROM items") == 0
+    finally:
+        await async_proxy.close()
+        await async_provider.close()
+        await async_upstream.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_error_propagates_unwrapped_from_release_lease_and_provider() -> None:
+    """Verify asyncio.CancelledError propagates unwrapped while still quarantining broker leases."""
+
+    class _CancelBrokerDouble:
+        def __init__(self) -> None:
+            self.quarantined = 0
+
+        def acquire(self, *, pool_name: str, worker_pid: int) -> tuple[int, int]:
+            _ = (pool_name, worker_pid)
+            return (0, 1)
+
+        def quarantine(self, lease: Any) -> None:
+            _ = lease
+            self.quarantined += 1
+
+    async def _cancel_on_release_transport(req: BrokerRpcRequest) -> BrokerRpcResponse:
+        if req.op == "release":
+            raise asyncio.CancelledError("loop cancelled")
+        return BrokerRpcResponse(request_id=req.request_id, ok=True, slot_idx=0, generation=1)
+
+    proxy_broker = _CancelBrokerDouble()
+    proxy_driver = ProxyAsyncDriver(_cancel_on_release_transport, broker=proxy_broker)
+    try:
+        await proxy_driver.acquire_lease()
+        with pytest.raises(asyncio.CancelledError):
+            await proxy_driver.release_lease()
+        assert proxy_broker.quarantined == 1
+    finally:
+        await proxy_driver.close()
+
+    class _CancellingRollbackUpstream:
+        async def begin(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            raise asyncio.CancelledError("upstream rollback cancelled")
+
+        async def close(self) -> None:
+            return None
+
+    provider_broker = _CancelBrokerDouble()
+    upstream = _CancellingRollbackUpstream()
+    provider = SQLSpecAsyncProvider(upstream, broker=provider_broker)
+    try:
+        acq_resp = await provider.handle_request(
+            BrokerRpcRequest(request_id=1, op="acquire", pool_name="default", worker_pid=os.getpid())
+        )
+        assert acq_resp.ok is True
+        begin_resp = await provider.handle_request(
+            BrokerRpcRequest(
+                request_id=2,
+                op="begin",
+                pool_name="default",
+                worker_pid=os.getpid(),
+                slot_idx=acq_resp.slot_idx,
+                generation=acq_resp.generation,
+            )
+        )
+        assert begin_resp.ok is True
+        with pytest.raises(asyncio.CancelledError):
+            await provider.handle_request(
+                BrokerRpcRequest(
+                    request_id=3,
+                    op="release",
+                    pool_name="default",
+                    worker_pid=os.getpid(),
+                    slot_idx=acq_resp.slot_idx,
+                    generation=acq_resp.generation,
+                    in_tx=True,
+                )
+            )
+        assert provider_broker.quarantined == 1
+        assert provider.active_leases == 0
+    finally:
+        await provider.close()
+
+
+@pytest.mark.parametrize(
+    ("is_async", "plain_url", "vtb_url"),
+    [
+        (False, "sqlite:///plain.db", "sqlite+vtb:///managed.db"),
+        (True, "sqlite+aiosqlite:///plain.db", "sqlite+vtb_async:///managed.db"),
+    ],
+    ids=["sync", "async"],
+)
+def test_alchemy_config_injects_broker_connect_args_only_for_vtb_urls(
+    is_async: bool,
+    plain_url: str,
+    vtb_url: str,
+) -> None:
+    """Verify standard SQLAlchemy dialects exclude Vertebra-specific connect_args while +vtb dialects inject them."""
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    factory = create_async_alchemy_config if is_async else create_sync_alchemy_config
+    try:
+        plain_cfg = factory(plain_url, broker=transport)
+        plain_connect_args = plain_cfg.engine_config.connect_args
+        assert not isinstance(plain_connect_args, dict) or not any(
+            key in plain_connect_args for key in ("url", "broker", "lease_managed")
+        )
+
+        vtb_cfg = factory(vtb_url, broker=transport)
+        vtb_connect_args = vtb_cfg.engine_config.connect_args
+        assert isinstance(vtb_connect_args, dict)
+        assert vtb_connect_args["url"] == vtb_url
+        assert vtb_connect_args["broker"] is transport
+        assert vtb_connect_args["lease_managed"] is True
+    finally:
+        transport.close()
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["vertebra.extensions.sqlalchemy.pool", "vertebra.extensions.alchemy"],
+)
+def test_sqlalchemy_and_alchemy_extensions_import_without_sqlspec(module_name: str) -> None:
+    """Verify SQLAlchemy and Advanced Alchemy extensions do not eagerly import optional sqlspec."""
+    script = f"import sys, {module_name}; assert 'sqlspec' not in sys.modules, list(sys.modules)"
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"

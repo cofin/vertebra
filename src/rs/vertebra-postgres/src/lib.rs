@@ -232,10 +232,36 @@ fn encode_postgres_err(request_id: u64, err: &PostgresError) -> Vec<u8> {
 
 type PinnedPgConn = Arc<tokio::sync::Mutex<Option<(u64, PooledConnection)>>>;
 
+#[derive(Clone, Copy)]
+struct LeaseTarget {
+    pool_id: u64,
+    slot: u32,
+    generation: u64,
+}
+
+enum PinnedOpControl {
+    Keep,
+    Take,
+}
+
+enum PinnedSqlOp {
+    Commit,
+    Rollback,
+    SimpleQuery(String),
+}
+
+struct PinnedActionSpec {
+    op_name: &'static str,
+    allow_missing_or_unleased: bool,
+    allow_newer_consume: bool,
+    control: PinnedOpControl,
+    sql_op: PinnedSqlOp,
+}
+
 /// Shared-memory broker backend managing broker-hosted `PostgresPool` instances (`DIALECT_TAG_POSTGRES = 1`).
 pub struct PostgresBrokerBackend {
     pools: RwLock<HashMap<u64, Arc<PostgresPool>>>,
-    pinned: Mutex<HashMap<(u64, u32), PinnedPgConn>>,
+    pinned: Mutex<HashMap<(u64, u32), (u64, PinnedPgConn)>>,
     next_pool_id: AtomicU64,
 }
 
@@ -268,14 +294,25 @@ impl PostgresBrokerBackend {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&(pool_id, lease_slot))
-            .cloned()
+            .map(|(_, entry)| Arc::clone(entry))
     }
 
-    fn take_pinned(&self, pool_id: u64, lease_slot: u32) -> Option<PinnedPgConn> {
-        self.pinned
+    fn take_pinned_if_not_newer(
+        &self,
+        pool_id: u64,
+        lease_slot: u32,
+        lease_generation: u64,
+    ) -> Result<Option<PinnedPgConn>, ()> {
+        let mut guard = self
+            .pinned
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(pool_id, lease_slot))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((pinned_gen, _)) = guard.get(&(pool_id, lease_slot))
+            && *pinned_gen > lease_generation
+        {
+            return Err(());
+        }
+        Ok(guard.remove(&(pool_id, lease_slot)).map(|(_, entry)| entry))
     }
 
     fn take_pinned_if_same(
@@ -290,24 +327,33 @@ impl PostgresBrokerBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard
             .get(&(pool_id, lease_slot))
-            .is_some_and(|existing| Arc::ptr_eq(existing, target))
+            .is_some_and(|(_, existing)| Arc::ptr_eq(existing, target))
         {
-            guard.remove(&(pool_id, lease_slot))
+            guard.remove(&(pool_id, lease_slot)).map(|(_, entry)| entry)
         } else {
             None
         }
     }
 
-    fn set_pinned_entry(
+    fn install_pinned_entry(
         &self,
         pool_id: u64,
         lease_slot: u32,
+        lease_generation: u64,
         entry: PinnedPgConn,
-    ) -> Option<PinnedPgConn> {
-        self.pinned
+    ) -> Result<Option<PinnedPgConn>, ()> {
+        let mut guard = self
+            .pinned
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((pool_id, lease_slot), entry)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((existing_gen, _)) = guard.get(&(pool_id, lease_slot))
+            && *existing_gen > lease_generation
+        {
+            return Err(());
+        }
+        Ok(guard
+            .insert((pool_id, lease_slot), (lease_generation, entry))
+            .map(|(_, prev)| prev))
     }
 
     fn drain_pool_pinned(&self, pool_id: u64) -> Vec<PinnedPgConn> {
@@ -320,16 +366,110 @@ impl PostgresBrokerBackend {
             .copied()
             .filter(|(pid, _)| *pid == pool_id)
             .collect();
-        keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
+        keys.into_iter()
+            .filter_map(|k| guard.remove(&k).map(|(_, entry)| entry))
+            .collect()
+    }
+
+    async fn rollback_and_release(mut conn: PooledConnection) {
+        let _ = conn.rollback().await;
+        let _ = conn.release().await;
     }
 
     async fn release_pinned_entry(entry: Option<PinnedPgConn>) {
         if let Some(pinned_conn) = entry {
             let mut guard = pinned_conn.lock().await;
-            if let Some((_, mut conn)) = guard.take() {
-                let _ = conn.rollback().await;
-                let _ = conn.release().await;
+            if let Some((_, conn)) = guard.take() {
+                drop(guard);
+                Self::rollback_and_release(conn).await;
             }
+        }
+    }
+
+    async fn run_pinned_action(
+        &self,
+        target: LeaseTarget,
+        spec: PinnedActionSpec,
+    ) -> Result<(), PostgresError> {
+        let PinnedActionSpec {
+            op_name,
+            allow_missing_or_unleased,
+            allow_newer_consume,
+            control,
+            sql_op,
+        } = spec;
+        let Some(pinned_conn) = self.get_pinned(target.pool_id, target.slot) else {
+            return if allow_missing_or_unleased {
+                Ok(())
+            } else {
+                Err(PostgresError::Interface(format!(
+                    "cannot {op_name}: no transaction is in progress"
+                )))
+            };
+        };
+        let mut guard = pinned_conn.lock().await;
+        let Some(pinned_gen) = guard.as_ref().map(|(g, _)| *g) else {
+            return if allow_missing_or_unleased {
+                Ok(())
+            } else {
+                Err(PostgresError::Interface(format!(
+                    "cannot {op_name}: no transaction is in progress"
+                )))
+            };
+        };
+        if pinned_gen > 0 && target.generation == 0 && allow_missing_or_unleased {
+            return Ok(());
+        }
+        let matches = pinned_gen == target.generation && target.generation > 0;
+        let newer = pinned_gen > 0 && target.generation > pinned_gen;
+        if matches || (newer && allow_newer_consume) {
+            return match control {
+                PinnedOpControl::Keep => {
+                    if let Some((_, conn)) = guard.as_mut() {
+                        Self::apply_pinned_sql_op(conn, &sql_op).await?;
+                    }
+                    Ok(())
+                }
+                PinnedOpControl::Take => {
+                    if let Some((_, mut conn)) = guard.take() {
+                        drop(guard);
+                        let _ = self.take_pinned_if_same(target.pool_id, target.slot, &pinned_conn);
+                        let out = Self::apply_pinned_sql_op(&mut conn, &sql_op).await;
+                        let _ = conn.release().await;
+                        out
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+        }
+        if newer {
+            if let Some((_, stale)) = guard.take() {
+                drop(guard);
+                let _ = self.take_pinned_if_same(target.pool_id, target.slot, &pinned_conn);
+                Self::rollback_and_release(stale).await;
+            }
+            return if allow_missing_or_unleased {
+                Ok(())
+            } else {
+                Err(PostgresError::Interface(format!(
+                    "cannot {op_name}: no transaction is in progress for lease generation"
+                )))
+            };
+        }
+        Err(PostgresError::Interface(
+            "stale lease generation for active pinned transaction".to_string(),
+        ))
+    }
+
+    async fn apply_pinned_sql_op(
+        conn: &mut PooledConnection,
+        sql_op: &PinnedSqlOp,
+    ) -> Result<(), PostgresError> {
+        match sql_op {
+            PinnedSqlOp::Commit => conn.commit().await.map(|_| ()),
+            PinnedSqlOp::Rollback => conn.rollback().await.map(|_| ()),
+            PinnedSqlOp::SimpleQuery(stmt) => conn.simple_query(stmt).await.map(|_| ()),
         }
     }
 }
@@ -396,21 +536,25 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                     .ok_or_else(|| "DBRPC Execute frame missing SQL".to_string())?;
                 let (norm_sql, _) = self.normalize_statement(raw_sql);
                 let params: Vec<Parameter> = req.params.iter().map(scalar_to_pg_param).collect();
-                let pinned = self.get_pinned(pool_id, req.lease_slot);
+                let pinned = if req.lease_generation > 0 {
+                    self.get_pinned(pool_id, req.lease_slot)
+                } else {
+                    None
+                };
                 let outcome: Result<QueryResult, PostgresError> = block_on_db(async move {
                     if let Some(pinned_conn) = pinned {
                         let mut stale_to_evict: Option<PooledConnection> = None;
                         {
                             let mut guard = pinned_conn.lock().await;
                             if let Some((pinned_gen, conn)) = guard.as_mut() {
-                                if *pinned_gen == req.lease_generation && req.lease_generation > 0 {
+                                if *pinned_gen == req.lease_generation {
                                     return conn.query(&norm_sql, &params, None).await;
                                 }
                                 if req.lease_generation > *pinned_gen && *pinned_gen > 0 {
                                     if let Some((_, c)) = guard.take() {
                                         stale_to_evict = Some(c);
                                     }
-                                } else if req.lease_generation > 0 {
+                                } else {
                                     return Err(PostgresError::Interface(
                                         "stale lease generation for active pinned transaction"
                                             .to_string(),
@@ -418,10 +562,9 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                                 }
                             }
                         }
-                        if let Some(mut stale) = stale_to_evict {
+                        if let Some(stale) = stale_to_evict {
                             let _ = self.take_pinned_if_same(pool_id, req.lease_slot, &pinned_conn);
-                            let _ = stale.rollback().await;
-                            let _ = stale.release().await;
+                            Self::rollback_and_release(stale).await;
                         }
                     }
                     let mut conn = pool.acquire().await?;
@@ -460,7 +603,21 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                 if req.lease_generation == 0 {
                     return Err("DBRPC Begin frame requires non-zero lease_generation".to_string());
                 }
-                let previous = self.take_pinned(pool_id, req.lease_slot);
+                let previous = match self.take_pinned_if_not_newer(
+                    pool_id,
+                    req.lease_slot,
+                    req.lease_generation,
+                ) {
+                    Ok(prev) => prev,
+                    Err(()) => {
+                        return Ok(encode_postgres_err(
+                            req_id,
+                            &PostgresError::Interface(
+                                "stale lease generation for active pinned transaction".to_string(),
+                            ),
+                        ));
+                    }
+                };
                 let outcome: Result<PooledConnection, PostgresError> = block_on_db(async move {
                     Self::release_pinned_entry(previous).await;
                     let mut conn = pool.acquire().await?;
@@ -474,8 +631,26 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                     Ok(conn) => {
                         let entry =
                             Arc::new(tokio::sync::Mutex::new(Some((req.lease_generation, conn))));
-                        let stale =
-                            self.set_pinned_entry(pool_id, req.lease_slot, Arc::clone(&entry));
+                        let stale = match self.install_pinned_entry(
+                            pool_id,
+                            req.lease_slot,
+                            req.lease_generation,
+                            Arc::clone(&entry),
+                        ) {
+                            Ok(prev) => prev,
+                            Err(()) => {
+                                block_on_db(async move {
+                                    Self::release_pinned_entry(Some(entry)).await;
+                                });
+                                return Ok(encode_postgres_err(
+                                    req_id,
+                                    &PostgresError::Interface(
+                                        "stale lease generation for active pinned transaction"
+                                            .to_string(),
+                                    ),
+                                ));
+                            }
+                        };
                         if !self.has_pool(pool_id) {
                             let raced = self.take_pinned_if_same(pool_id, req.lease_slot, &entry);
                             block_on_db(async move {
@@ -497,116 +672,68 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                 }
             }
             DbRpcOp::Commit => {
-                let pinned = self.get_pinned(pool_id, req.lease_slot);
+                let target = LeaseTarget {
+                    pool_id,
+                    slot: req.lease_slot,
+                    generation: req.lease_generation,
+                };
                 let outcome = block_on_db(async move {
-                    if let Some(pinned_conn) = pinned {
-                        let mut guard = pinned_conn.lock().await;
-                        if let Some((pinned_gen, _)) = guard.as_ref() {
-                            if *pinned_gen == req.lease_generation && req.lease_generation > 0 {
-                                let (_, mut conn) = guard.take().expect("checked");
-                                drop(guard);
-                                let _ =
-                                    self.take_pinned_if_same(pool_id, req.lease_slot, &pinned_conn);
-                                let res = conn.commit().await;
-                                let _ = conn.release().await;
-                                return res;
-                            }
-                            if req.lease_generation > *pinned_gen && *pinned_gen > 0 {
-                                let (_, mut stale) = guard.take().expect("checked");
-                                drop(guard);
-                                let _ =
-                                    self.take_pinned_if_same(pool_id, req.lease_slot, &pinned_conn);
-                                let _ = stale.rollback().await;
-                                let _ = stale.release().await;
-                                return Err(PostgresError::Interface(
-                                    "cannot COMMIT: no transaction is in progress for lease generation"
-                                        .to_string(),
-                                ));
-                            }
-                            return Err(PostgresError::Interface(
-                                "stale lease generation for active pinned transaction".to_string(),
-                            ));
-                        }
-                    }
-                    Err(PostgresError::Interface(
-                        "cannot COMMIT: no transaction is in progress".to_string(),
-                    ))
+                    self.run_pinned_action(
+                        target,
+                        PinnedActionSpec {
+                            op_name: "COMMIT",
+                            allow_missing_or_unleased: false,
+                            allow_newer_consume: false,
+                            control: PinnedOpControl::Take,
+                            sql_op: PinnedSqlOp::Commit,
+                        },
+                    )
+                    .await
                 });
                 match outcome {
-                    Ok(_) => Ok(encode_dbrpc_response_frame(
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
                         &DbRpcEncodedResponse::ok_count(req_id, 0, None),
                     )),
                     Err(err) => Ok(encode_postgres_err(req_id, &err)),
                 }
             }
             DbRpcOp::Rollback => {
+                let target = LeaseTarget {
+                    pool_id,
+                    slot: req.lease_slot,
+                    generation: req.lease_generation,
+                };
                 let outcome = if let Some(sp) = req.savepoint {
                     if !is_valid_savepoint_ident(&sp) {
                         return Err(format!("invalid savepoint identifier `{sp}`"));
                     }
                     let stmt = format!("ROLLBACK TO SAVEPOINT {sp}");
-                    let pinned = self.get_pinned(pool_id, req.lease_slot);
                     block_on_db(async move {
-                        if let Some(pinned_conn) = pinned {
-                            let mut guard = pinned_conn.lock().await;
-                            if let Some((pinned_gen, conn)) = guard.as_mut() {
-                                if *pinned_gen == req.lease_generation && req.lease_generation > 0 {
-                                    return conn.simple_query(&stmt).await.map(|_| ());
-                                }
-                                if req.lease_generation > *pinned_gen && *pinned_gen > 0 {
-                                    let (_, mut stale) = guard.take().expect("checked");
-                                    drop(guard);
-                                    let _ = self.take_pinned_if_same(
-                                        pool_id,
-                                        req.lease_slot,
-                                        &pinned_conn,
-                                    );
-                                    let _ = stale.rollback().await;
-                                    let _ = stale.release().await;
-                                    return Err(PostgresError::Interface(
-                                        "cannot ROLLBACK TO SAVEPOINT: no transaction is in progress for lease generation"
-                                            .to_string(),
-                                    ));
-                                }
-                                return Err(PostgresError::Interface(
-                                    "stale lease generation for active pinned transaction"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        Err(PostgresError::Interface(
-                            "cannot ROLLBACK TO SAVEPOINT: no transaction is in progress"
-                                .to_string(),
-                        ))
+                        self.run_pinned_action(
+                            target,
+                            PinnedActionSpec {
+                                op_name: "ROLLBACK TO SAVEPOINT",
+                                allow_missing_or_unleased: false,
+                                allow_newer_consume: false,
+                                control: PinnedOpControl::Keep,
+                                sql_op: PinnedSqlOp::SimpleQuery(stmt),
+                            },
+                        )
+                        .await
                     })
                 } else {
-                    let pinned = self.get_pinned(pool_id, req.lease_slot);
                     block_on_db(async move {
-                        if let Some(pinned_conn) = pinned {
-                            let mut guard = pinned_conn.lock().await;
-                            if let Some((pinned_gen, _)) = guard.as_ref() {
-                                if *pinned_gen > 0 && req.lease_generation >= *pinned_gen {
-                                    let (_, mut conn) = guard.take().expect("checked");
-                                    drop(guard);
-                                    let _ = self.take_pinned_if_same(
-                                        pool_id,
-                                        req.lease_slot,
-                                        &pinned_conn,
-                                    );
-                                    let res = conn.rollback().await.map(|_| ());
-                                    let _ = conn.release().await;
-                                    return res;
-                                }
-                                if req.lease_generation == 0 {
-                                    return Ok(());
-                                }
-                                return Err(PostgresError::Interface(
-                                    "stale lease generation for active pinned transaction"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        Ok(())
+                        self.run_pinned_action(
+                            target,
+                            PinnedActionSpec {
+                                op_name: "ROLLBACK",
+                                allow_missing_or_unleased: true,
+                                allow_newer_consume: true,
+                                control: PinnedOpControl::Take,
+                                sql_op: PinnedSqlOp::Rollback,
+                            },
+                        )
+                        .await
                     })
                 };
                 match outcome {
@@ -624,34 +751,23 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                     return Err(format!("invalid savepoint identifier `{sp}`"));
                 }
                 let stmt = format!("SAVEPOINT {sp}");
-                let pinned = self.get_pinned(pool_id, req.lease_slot);
+                let target = LeaseTarget {
+                    pool_id,
+                    slot: req.lease_slot,
+                    generation: req.lease_generation,
+                };
                 let outcome = block_on_db(async move {
-                    if let Some(pinned_conn) = pinned {
-                        let mut guard = pinned_conn.lock().await;
-                        if let Some((pinned_gen, conn)) = guard.as_mut() {
-                            if *pinned_gen == req.lease_generation && req.lease_generation > 0 {
-                                return conn.simple_query(&stmt).await.map(|_| ());
-                            }
-                            if req.lease_generation > *pinned_gen && *pinned_gen > 0 {
-                                let (_, mut stale) = guard.take().expect("checked");
-                                drop(guard);
-                                let _ =
-                                    self.take_pinned_if_same(pool_id, req.lease_slot, &pinned_conn);
-                                let _ = stale.rollback().await;
-                                let _ = stale.release().await;
-                                return Err(PostgresError::Interface(
-                                    "cannot SAVEPOINT: no transaction is in progress for lease generation"
-                                        .to_string(),
-                                ));
-                            }
-                            return Err(PostgresError::Interface(
-                                "stale lease generation for active pinned transaction".to_string(),
-                            ));
-                        }
-                    }
-                    Err(PostgresError::Interface(
-                        "cannot SAVEPOINT: no transaction is in progress".to_string(),
-                    ))
+                    self.run_pinned_action(
+                        target,
+                        PinnedActionSpec {
+                            op_name: "SAVEPOINT",
+                            allow_missing_or_unleased: false,
+                            allow_newer_consume: false,
+                            control: PinnedOpControl::Keep,
+                            sql_op: PinnedSqlOp::SimpleQuery(stmt),
+                        },
+                    )
+                    .await
                 });
                 match outcome {
                     Ok(()) => Ok(encode_dbrpc_response_frame(

@@ -81,8 +81,91 @@ class NotSupportedError(DatabaseError):
 Binary = bytes
 
 
+_NON_ROW_RETURNING_WITHOUT_RETURNING: Final[frozenset[str]] = frozenset({"INSERT", "UPDATE", "DELETE", "MERGE"})
+_READ_ONLY_LEADING_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"SELECT", "WITH", "VALUES", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE"}
+)
+
+
+def _first_sql_keyword(operation: str) -> str | None:
+    """Return the first top-level SQL keyword after whitespace, comments, and punctuation."""
+    length = len(operation)
+    idx = 0
+    while idx < length:
+        ch = operation[idx]
+        if ch.isspace():
+            idx += 1
+            continue
+        if ch == "-" and idx + 1 < length and operation[idx + 1] == "-":
+            newline = operation.find("\n", idx + 2)
+            idx = length if newline < 0 else newline + 1
+            continue
+        if ch == "/" and idx + 1 < length and operation[idx + 1] == "*":
+            depth = 1
+            idx += 2
+            while idx < length and depth > 0:
+                if operation[idx] == "/" and idx + 1 < length and operation[idx + 1] == "*":
+                    depth += 1
+                    idx += 2
+                elif operation[idx] == "*" and idx + 1 < length and operation[idx + 1] == "/":
+                    depth -= 1
+                    idx += 2
+                else:
+                    idx += 1
+            continue
+        if ch.isalpha() or ch == "_":
+            start = idx
+            idx += 1
+            while idx < length and (operation[idx].isalnum() or operation[idx] == "_"):
+                idx += 1
+            if start > 0 and operation[start - 1] in {":", "@", "$"}:
+                continue
+            return operation[start:idx].upper()
+        if ch in {"(", ";"}:
+            idx += 1
+            continue
+        return None
+    return None
+
+
+def is_insert_sql(operation: str) -> bool:
+    """Return True when the leading SQL verb in ``operation`` is INSERT."""
+    return _first_sql_keyword(operation) == "INSERT"
+
+
+def is_read_only_sql(operation: str) -> bool:
+    """Return True when the leading SQL verb is read-only query/introspection."""
+    return _first_sql_keyword(operation) in _READ_ONLY_LEADING_KEYWORDS
+
+
+def coerce_dbapi_rows_and_desc(
+    raw_res: Any,
+    fallback_cols: Sequence[str] = (),
+) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
+    """Normalize driver query results into PEP 249 tuple rows and column descriptions."""
+    if isinstance(raw_res, tuple) and len(raw_res) >= 2:
+        raw_rows = raw_res[0]
+        col_names = raw_res[1]
+        desc = (
+            tuple(
+                (col[0] if isinstance(col, tuple) else str(col), None, None, None, None, None, None)
+                for col in col_names
+            )
+            if col_names
+            else None
+        )
+        return [tuple(r) if not isinstance(r, tuple) else r for r in raw_rows], desc
+    _ = fallback_cols
+    return [], None
+
+
 def is_row_returning_sql(operation: str) -> bool:
     """Return True when ``operation`` starts with a query keyword or has a standalone ``RETURNING`` clause."""
+    first = _first_sql_keyword(operation)
+    if first in _ROW_RETURNING_LEADING_KEYWORDS:
+        return True
+    if first in _NON_ROW_RETURNING_WITHOUT_RETURNING and "returning" not in operation.lower():
+        return False
     length = len(operation)
     idx = 0
     first_keyword: str | None = None
@@ -187,20 +270,22 @@ class SyncDBAPICursor:
     def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> SyncDBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
         self._require_open()
+        self.lastrowid = None
         if self._raw_cursor is not None:
             self._raw_cursor.execute(operation, parameters)
             self.description = getattr(self._raw_cursor, "description", None)
             self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
-            self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
+            raw_rowid = getattr(self._raw_cursor, "lastrowid", None)
+            self.lastrowid = int(raw_rowid) if is_insert_sql(operation) and raw_rowid is not None else None
             return self
 
         if not is_row_returning_sql(operation):
-            affected = self._conn.execute_dml(operation, parameters)
+            affected, captured_rowid = self._conn.execute_dml_with_lastrowid(operation, parameters)
             self._rows = []
             self.description = None
             self._pos = 0
             self.rowcount = affected
-            self.lastrowid = self._resolve_driver_lastrowid(operation)
+            self.lastrowid = captured_rowid if captured_rowid is not None else self._resolve_driver_lastrowid(operation)
             return self
 
         self._rows, self.description = self._conn.execute_with_description(operation, parameters)
@@ -216,6 +301,7 @@ class SyncDBAPICursor:
     ) -> SyncDBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
         self._require_open()
+        self.lastrowid = None
         if self._raw_cursor is not None:
             self._raw_cursor.executemany(operation, seq_of_parameters)
             self.description = getattr(self._raw_cursor, "description", None)
@@ -304,22 +390,28 @@ class SyncDBAPICursor:
             raise InterfaceError("Cannot operate on a closed connection.")
 
     def _resolve_driver_lastrowid(self, operation: str) -> int | None:
-        if not operation.lstrip().upper().startswith("INSERT"):
-            return self.lastrowid
+        if not is_insert_sql(operation):
+            return None
         driver = self._conn.driver
+        if driver is None:
+            return None
+        direct = getattr(driver, "lastrowid", None)
+        if isinstance(direct, int) and not isinstance(direct, bool):
+            return direct
         last_rowid_fn = getattr(driver, "last_insert_rowid", None)
         if callable(last_rowid_fn):
             val = last_rowid_fn()
-            return int(val) if val is not None else 1
-        raw_conn = getattr(driver, "raw_connection", None)
-        if raw_conn is not None:
-            driver_lock = getattr(driver, "_lock", None)
-            ctx = driver_lock if driver_lock is not None else contextlib.nullcontext()
-            with ctx, contextlib.closing(raw_conn.cursor()) as cur:
-                cur.execute("SELECT last_insert_rowid()")
-                row = cur.fetchone()
-            return int(row[0]) if row and row[0] is not None else 1
-        return self.lastrowid
+            return int(val) if val is not None else None
+        if _config_dialect(self._conn.config) == "sqlite":
+            raw_conn = getattr(driver, "raw_connection", None)
+            if raw_conn is not None:
+                driver_lock = getattr(driver, "_lock", None)
+                ctx = driver_lock if driver_lock is not None else contextlib.nullcontext()
+                with ctx, contextlib.closing(raw_conn.cursor()) as cur:
+                    cur.execute("SELECT last_insert_rowid()")
+                    row = cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else None
+        return None
 
 
 class SyncDBAPIConnection:
@@ -384,13 +476,22 @@ class SyncDBAPIConnection:
         self._sqlite_conn: sqlite3.Connection | None = None
 
         if self._driver is None:
-            if dialect_name == "sqlite" and self._broker is None:
+            has_shared_key = self._config is not None and self._config.pool_key() is not None
+            has_custom_broker = broker is not None and broker is not DatabaseRegistry.default_broker()
+            if (
+                dialect_name == "sqlite"
+                and not lease_managed
+                and self._broker is None
+                and (not has_shared_key or not self._share_pool)
+            ):
                 db_target = str(getattr(self._config, "database", None) or ":memory:")
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
-                self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
-            elif self._share_pool and broker is None and not lease_managed:
+                self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False, autocommit=False)
+                self._owns_driver = True
+            elif self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
+                self._owns_driver = False
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
                 self._driver = self._config.build_sync_driver(target_registry)
@@ -456,21 +557,14 @@ class SyncDBAPIConnection:
 
         self.begin()
         if self._driver is not None:
+            should_autocommit = self._autocommit and (self._in_transaction or not is_read_only_sql(sql))
             if hasattr(self._driver, "execute_with_description"):
                 raw_res = self._driver.execute_with_description(sql, parameters)
-                if isinstance(raw_res, tuple) and len(raw_res) >= 2:
-                    col_names = raw_res[1]
-                    desc = (
-                        tuple(
-                            (col[0] if isinstance(col, tuple) else str(col), None, None, None, None, None, None)
-                            for col in col_names
-                        )
-                        if col_names
-                        else None
-                    )
-                    if self._autocommit:
+                rows, desc = coerce_dbapi_rows_and_desc(raw_res)
+                if rows or desc is not None:
+                    if should_autocommit:
                         self.commit()
-                    return raw_res[0], desc
+                    return rows, desc
                 return [], None
             if hasattr(self._driver, "execute_tuples"):
                 rows = self._driver.execute_tuples(sql, parameters)
@@ -479,7 +573,7 @@ class SyncDBAPIConnection:
                     if rows
                     else None
                 )
-                if self._autocommit:
+                if should_autocommit:
                     self.commit()
                 return rows, desc
             if hasattr(self._driver, "select"):
@@ -490,7 +584,7 @@ class SyncDBAPIConnection:
                 keys = tuple(dict_rows[0].keys())
                 desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
                 rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
-                if self._autocommit:
+                if should_autocommit:
                     self.commit()
                 return rows, desc
         return [], None
@@ -501,21 +595,36 @@ class SyncDBAPIConnection:
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> int:
         """Execute a non-row-returning SQL statement and return the affected row count."""
+        affected, _ = self.execute_dml_with_lastrowid(sql, parameters)
+        return affected
+
+    def execute_dml_with_lastrowid(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | dict[str, Any] = (),
+    ) -> tuple[int, int | None]:
+        """Execute a non-row-returning SQL statement and return ``(rowcount, lastrowid)``."""
         self._require_open()
         if self._sqlite_conn is not None:
             with contextlib.closing(self._sqlite_conn.cursor()) as cur:
                 cur.execute(sql, parameters)
-                return cur.rowcount
+                rowid = int(cur.lastrowid) if is_insert_sql(sql) and cur.lastrowid is not None else None
+                return cur.rowcount, rowid
         self.begin()
         if self._driver is not None:
+            if hasattr(self._driver, "execute_dml"):
+                affected, rowid = self._driver.execute_dml(sql, parameters)
+                if self._autocommit:
+                    self.commit()
+                return int(affected), rowid
             if hasattr(self._driver, "execute"):
                 affected = int(self._driver.execute(sql, parameters))
                 if self._autocommit:
                     self.commit()
-                return affected
+                return affected, None
             rows, _ = self.execute_with_description(sql, parameters)
-            return len(rows)
-        return -1
+            return len(rows), None
+        return -1, None
 
     def execute_many_dml(
         self,
@@ -563,34 +672,42 @@ class SyncDBAPIConnection:
     def commit(self) -> None:
         """Commit the active transaction."""
         self._require_open()
-        self._in_transaction = False
-        if self._sqlite_conn is not None:
-            self._sqlite_conn.commit()
-        elif self._driver is not None and hasattr(self._driver, "commit"):
-            self._driver.commit()
+        try:
+            if self._sqlite_conn is not None:
+                self._sqlite_conn.commit()
+            elif self._driver is not None and hasattr(self._driver, "commit"):
+                self._driver.commit()
+        finally:
+            self._in_transaction = False
 
     def rollback(self) -> None:
         """Roll back the active transaction."""
         self._require_open()
-        self._in_transaction = False
-        if self._sqlite_conn is not None:
-            self._sqlite_conn.rollback()
-        elif self._driver is not None and hasattr(self._driver, "rollback"):
-            self._driver.rollback()
+        try:
+            if self._sqlite_conn is not None:
+                self._sqlite_conn.rollback()
+            elif self._driver is not None and hasattr(self._driver, "rollback"):
+                self._driver.rollback()
+        finally:
+            self._in_transaction = False
 
     def close(self) -> None:
         """Close the underlying driver connection."""
         if not self.closed:
-            if self._in_transaction:
-                if self._autocommit:
-                    self.commit()
-                else:
-                    self.rollback()
-            if self._sqlite_conn is not None:
-                self._sqlite_conn.close()
-            if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
-                self._driver.close()
-            self.closed = True
+            try:
+                if self._in_transaction:
+                    if self._autocommit:
+                        self.commit()
+                    else:
+                        self.rollback()
+            finally:
+                self._in_transaction = False
+                if self._sqlite_conn is not None:
+                    self._sqlite_conn.close()
+                    self._sqlite_conn = None
+                elif self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
+                    self._driver.close()
+                self.closed = True
 
     def _require_open(self) -> None:
         if self.closed:

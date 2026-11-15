@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, ClassVar, Self
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import msgspec
 
@@ -47,6 +47,10 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """When True, use SQLite 3.45+ binary `JSONB` functions when available."""
 
     def __post_init__(self) -> None:
+        if isinstance(self.path, str) and unquote(self.path) == ":memory:":
+            msgspec.structs.force_setattr(self, "path", ":memory:")
+        if isinstance(self.database, str) and unquote(self.database) == ":memory:":
+            msgspec.structs.force_setattr(self, "database", ":memory:")
         if self.database is not None and self.path == ":memory:":
             msgspec.structs.force_setattr(self, "path", str(self.database))
         if self.database is None:
@@ -84,14 +88,16 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Construct a `SQLiteConfig` from a `sqlite://` URI."""
         parsed = urlparse(url)
-        if parsed.netloc == ":memory:" or (not parsed.netloc and parsed.path in ("", "/", "/:memory:", ":memory:")):
+        netloc = unquote(parsed.netloc)
+        raw_path = unquote(parsed.path)
+        if netloc == ":memory:" or (not netloc and raw_path in ("", "/", "/:memory:", ":memory:")):
             db_path = ":memory:"
-        elif parsed.netloc:
-            db_path = f"{parsed.netloc}{parsed.path}"
-        elif parsed.path.startswith("//"):
-            db_path = parsed.path[1:]
+        elif netloc:
+            db_path = f"{netloc}{raw_path}"
+        elif raw_path.startswith("//"):
+            db_path = raw_path[1:]
         else:
-            db_path = parsed.path.lstrip("/")
+            db_path = raw_path.lstrip("/")
         if parsed.query and (
             db_path.startswith("file:") or "mode=memory" in parsed.query or "cache=shared" in parsed.query
         ):

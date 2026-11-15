@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 import vertebra.db.dbapi as dbapi_pkg
-from vertebra.db.adapters.sqlite import SyncSQLiteDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.db.dbapi import (
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
@@ -177,21 +177,23 @@ async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
         async_mod.connect("unknown+vtb_async://host/db", share_pool=False)
 
     async_conn = async_mod.connect("sqlite+vtb_async:///:memory:", share_pool=False)
-    assert isinstance(async_conn, AsyncDBAPIConnection)
-    cur = async_conn.cursor()
     try:
-        await cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
-        await cur.executemany(
-            "INSERT INTO items (id, name) VALUES (?, ?)",
-            [(1, "alpha"), (2, "beta"), (3, "gamma")],
-        )
-        await cur.execute("SELECT id, name FROM items ORDER BY id")
-        assert await cur.fetchone() == (1, "alpha")
-        assert await cur.fetchmany(1) == [(2, "beta")]
-        assert await cur.fetchall() == [(3, "gamma")]
-        assert await cur.fetchone() is None
+        assert isinstance(async_conn, AsyncDBAPIConnection)
+        cur = async_conn.cursor()
+        try:
+            await cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            await cur.executemany(
+                "INSERT INTO items (id, name) VALUES (?, ?)",
+                [(1, "alpha"), (2, "beta"), (3, "gamma")],
+            )
+            await cur.execute("SELECT id, name FROM items ORDER BY id")
+            assert await cur.fetchone() == (1, "alpha")
+            assert await cur.fetchmany(1) == [(2, "beta")]
+            assert await cur.fetchall() == [(3, "gamma")]
+            assert await cur.fetchone() is None
+        finally:
+            await cur.close()
     finally:
-        await cur.close()
         await async_conn.close()
     assert async_conn.closed is True
 
@@ -200,27 +202,29 @@ async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
 async def test_dbapi_closed_state_errors_and_size_hints() -> None:
     """Verify PEP 249 closed cursor/connection errors and no-op input/output size hints for sync and async."""
     sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
-    sync_cur = sync_conn.cursor()
-    sync_cur.setinputsizes([1, 2])
-    sync_cur.setoutputsize(64, 0)
-    sync_cur.close()
-    with pytest.raises(ProgrammingError):
-        sync_cur.execute("SELECT 1")
-    with pytest.raises(ProgrammingError):
-        sync_cur.executemany("SELECT ?", [(1,)])
-    with pytest.raises(ProgrammingError):
-        sync_cur.fetchone()
-    with pytest.raises(ProgrammingError):
-        sync_cur.fetchmany(1)
-    with pytest.raises(ProgrammingError):
-        sync_cur.fetchall()
-    with pytest.raises(ProgrammingError):
-        sync_cur.setinputsizes([1])
-    with pytest.raises(ProgrammingError):
-        sync_cur.setoutputsize(8)
+    try:
+        sync_cur = sync_conn.cursor()
+        sync_cur.setinputsizes([1, 2])
+        sync_cur.setoutputsize(64, 0)
+        sync_cur.close()
+        with pytest.raises(ProgrammingError):
+            sync_cur.execute("SELECT 1")
+        with pytest.raises(ProgrammingError):
+            sync_cur.executemany("SELECT ?", [(1,)])
+        with pytest.raises(ProgrammingError):
+            sync_cur.fetchone()
+        with pytest.raises(ProgrammingError):
+            sync_cur.fetchmany(1)
+        with pytest.raises(ProgrammingError):
+            sync_cur.fetchall()
+        with pytest.raises(ProgrammingError):
+            sync_cur.setinputsizes([1])
+        with pytest.raises(ProgrammingError):
+            sync_cur.setoutputsize(8)
 
-    open_sync_cur = sync_conn.cursor()
-    sync_conn.close()
+        open_sync_cur = sync_conn.cursor()
+    finally:
+        sync_conn.close()
     with pytest.raises(InterfaceError):
         sync_conn.cursor()
     with pytest.raises(InterfaceError):
@@ -232,17 +236,19 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
 
     async_mod = AsyncDBAPIModule(paramstyle="qmark")
     async_conn = async_mod.connect("sqlite+vtb_async:///:memory:", share_pool=False)
-    async_cur = async_conn.cursor()
-    async_cur.setinputsizes([1, 2])
-    async_cur.setoutputsize(64, 0)
-    await async_cur.close()
-    with pytest.raises(ProgrammingError):
-        await async_cur.execute("SELECT 1")
-    with pytest.raises(ProgrammingError):
-        await async_cur.fetchone()
+    try:
+        async_cur = async_conn.cursor()
+        async_cur.setinputsizes([1, 2])
+        async_cur.setoutputsize(64, 0)
+        await async_cur.close()
+        with pytest.raises(ProgrammingError):
+            await async_cur.execute("SELECT 1")
+        with pytest.raises(ProgrammingError):
+            await async_cur.fetchone()
 
-    open_async_cur = async_conn.cursor()
-    await async_conn.close()
+        open_async_cur = async_conn.cursor()
+    finally:
+        await async_conn.close()
     with pytest.raises(InterfaceError):
         await async_conn.cursor()
     with pytest.raises(InterfaceError):
@@ -251,6 +257,20 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         await async_conn.rollback()
     with pytest.raises(InterfaceError):
         await open_async_cur.execute("SELECT 1")
+
+    default_mem_sync = SyncDBAPIConnection("sqlite+vtb:///:memory:")
+    try:
+        assert default_mem_sync._owns_driver is True
+    finally:
+        default_mem_sync.close()
+    assert default_mem_sync.closed is True
+
+    default_mem_async = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:")
+    try:
+        assert default_mem_async._owns_driver is True
+    finally:
+        await default_mem_async.close()
+    assert default_mem_async.closed is True
 
 
 def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
@@ -295,3 +315,148 @@ def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
             lease_conn.close()
     finally:
         DatabaseRegistry._DEFAULT_BROKER = prev_broker
+
+
+@pytest.mark.parametrize("use_driver", [False, True], ids=["sqlite_conn", "sync_driver"])
+def test_sync_dbapi_sqlite_comment_prefixed_insert_captures_and_clears_lastrowid(use_driver: bool) -> None:
+    """Verify comment-prefixed INSERT statements capture SQLite lastrowid and non-INSERT DML clears it."""
+    driver = SyncSQLiteDriver() if use_driver else None
+    conn = (
+        SyncDBAPIConnection(driver=driver, share_pool=False)
+        if driver is not None
+        else SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        assert cur.lastrowid is None
+
+        cur.execute("/* lead */ INSERT INTO items (name) VALUES (?)", ("alice",))
+        assert cur.rowcount == 1
+        assert cur.lastrowid == 1
+
+        cur.execute("-- second insert\nINSERT INTO items (name) VALUES (?)", ("bob",))
+        assert cur.rowcount == 1
+        assert cur.lastrowid == 2
+
+        cur.execute("UPDATE items SET name = ? WHERE id = ?", ("carol", 1))
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+
+        cur.execute("SELECT id, name FROM items ORDER BY id")
+        assert cur.fetchall() == [(1, "carol"), (2, "bob")]
+        assert cur.lastrowid is None
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_non_sqlite_lastrowid_none_and_autocommit_skips_select() -> None:
+    """Verify non-SQLite drivers return None for lastrowid and autocommit skips commit on read-only SELECT."""
+
+    class _FakePostgresDriver:
+        dialect = "postgres"
+
+        def __init__(self) -> None:
+            self.commit_calls = 0
+
+        def execute_with_description(
+            self,
+            sql: str,
+            parameters: Any = (),
+        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return ([(1,)], ("val",))
+
+        def execute(self, sql: str, parameters: Any = ()) -> int:
+            _ = (sql, parameters)
+            return 1
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    fake_driver = _FakePostgresDriver()
+    conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=fake_driver, share_pool=False)
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        assert cur.fetchall() == [(1,)]
+        assert cur.lastrowid is None
+        assert fake_driver.commit_calls == 0
+
+        cur.execute("INSERT INTO items VALUES (1)")
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+        assert fake_driver.commit_calls == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_non_sqlite_and_async_sqlite_driver_dml_lastrowid() -> None:
+    """Verify AsyncSQLiteDriver.execute_dml captures lastrowid and async non-SQLite skips SELECT autocommit."""
+    sqlite_driver = AsyncSQLiteDriver()
+    try:
+        rc0, id0 = await sqlite_driver.execute_dml(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)"
+        )
+        assert rc0 == 0
+        assert id0 is None
+        rc1, id1 = await sqlite_driver.execute_dml("/* lead */ INSERT INTO items (name) VALUES (?)", ("alice",))
+        assert (rc1, id1) == (1, 1)
+        assert sqlite_driver.lastrowid == 1
+        rc2, id2 = await sqlite_driver.execute_dml("UPDATE items SET name = ?", ("bob",))
+        assert (rc2, id2) == (1, None)
+        assert sqlite_driver.lastrowid is None
+    finally:
+        await sqlite_driver.close()
+
+    class _FakeAsyncPostgresDriver:
+        dialect = "postgres"
+
+        def __init__(self) -> None:
+            self.commit_calls = 0
+
+        async def execute_with_description(
+            self,
+            sql: str,
+            parameters: Any = (),
+        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            _ = (sql, parameters)
+            return ([(1,)], ("val",))
+
+        async def execute(self, sql: str, parameters: Any = ()) -> int:
+            _ = (sql, parameters)
+            return 1
+
+        async def commit(self) -> None:
+            self.commit_calls += 1
+
+        async def rollback(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    fake_driver = _FakeAsyncPostgresDriver()
+    conn = AsyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=fake_driver, share_pool=False)
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        await cur.execute("SELECT 1")
+        assert await cur.fetchall() == [(1,)]
+        assert cur.lastrowid is None
+        assert fake_driver.commit_calls == 0
+
+        await cur.execute("INSERT INTO items VALUES (1)")
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+        assert fake_driver.commit_calls == 1
+    finally:
+        await conn.close()

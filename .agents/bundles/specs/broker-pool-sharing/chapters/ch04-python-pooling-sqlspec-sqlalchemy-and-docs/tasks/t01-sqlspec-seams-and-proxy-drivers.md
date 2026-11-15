@@ -82,7 +82,10 @@ Replace signature reflection and suppressed release errors across sync and async
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q && uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec
+uv run --no-sync pytest \
+  src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q && \
+  uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && \
+  uv run --no-sync mypy src/py/vertebra/extensions/sqlspec
 ```
 
 ## Acceptance Criteria

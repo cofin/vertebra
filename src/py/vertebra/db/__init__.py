@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
+    from vertebra.db import dbapi
     from vertebra.db.arrow import (
         ARROW_SHM_THRESHOLD_ROWS,
         ArrowCursor,

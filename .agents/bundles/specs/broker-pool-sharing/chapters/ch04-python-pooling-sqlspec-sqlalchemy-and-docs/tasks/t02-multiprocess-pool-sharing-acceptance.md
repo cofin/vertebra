@@ -68,7 +68,10 @@ Expose `quarantined`, `total_quarantined`, `total_disposed`, and `total_reclaime
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py -q -k 'not docker'
+uv run --no-sync pytest \
+  src/py/tests/unit/extensions/test_shm_broker.py \
+  src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py \
+  -q -k 'not docker'
 ```
 
 ## Acceptance Criteria

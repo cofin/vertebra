@@ -229,7 +229,7 @@ else
 		VERTEBRA_CONFORMANCE_ENGINES=$(strip $(ENGINE))$(if $(strip $(VERSION)), \
 		VERTEBRA_CONFORMANCE_$(shell printf '%s' '$(strip $(ENGINE))' | tr '[:lower:]' '[:upper:]')_VERSION=$(strip $(VERSION)))$(if $(filter duckdb,$(strip $(ENGINE))), \
 		VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1); \
-	uv run --no-sync pytest src/py/tests/integration/db -v -rs
+	uv run --no-sync pytest src/py/tests/integration/db src/py/tests/integration/extensions -v -rs
 endif
 
 .PHONY: duckdb-test

@@ -69,6 +69,28 @@ pub const CHAN_MAX_NAME_BYTES: usize = 64;
 pub const CHAN_MAX_LEASE_ID_BYTES: usize = 32;
 pub const CHAN_MAX_PAYLOAD_BYTES: usize = 256;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseKind {
+    Release,
+    Reclaim,
+    DisposeQuarantined,
+    Expire,
+}
+
+impl ReleaseKind {
+    const fn is_quarantined_release(self) -> bool {
+        matches!(self, Self::DisposeQuarantined)
+    }
+
+    const fn is_release(self) -> bool {
+        matches!(self, Self::Release)
+    }
+
+    const fn is_reclaim(self) -> bool {
+        matches!(self, Self::Reclaim)
+    }
+}
+
 pub const DIALECT_TAG_POSTGRES: u16 = 1;
 pub const DIALECT_TAG_MYSQL: u16 = 2;
 pub const DIALECT_TAG_SQLITE: u16 = 3;
@@ -829,31 +851,25 @@ impl ShmLeaseTable {
 
     /// Read atomic cross-process counters for the registered partition matching `pool_key_hash`.
     pub fn partition_stats(&self, pool_key_hash: u64) -> Option<PartitionStats> {
-        let hdr = self.header();
-        for (idx, entry) in hdr.partitions.iter().enumerate() {
-            if entry.state.load(Ordering::Acquire) == PARTITION_READY
-                && entry.pool_key_hash.load(Ordering::Relaxed) == pool_key_hash
-            {
-                let quarantined = entry.quarantined.load(Ordering::Acquire);
-                let active_leases = entry
-                    .active_leases
-                    .load(Ordering::Acquire)
-                    .saturating_sub(quarantined);
-                return Some(PartitionStats {
-                    pool_id: idx as u16,
-                    pool_size: entry.pool_size.load(Ordering::Relaxed),
-                    max_overflow: entry.max_overflow.load(Ordering::Relaxed),
-                    active_leases,
-                    quarantined,
-                    total_acquired: u64::from(entry.total_acquired.load(Ordering::Relaxed)),
-                    total_released: u64::from(entry.total_released.load(Ordering::Relaxed)),
-                    total_reclaimed: u64::from(entry.total_reclaimed.load(Ordering::Relaxed)),
-                    total_quarantined: u64::from(entry.total_quarantined.load(Ordering::Relaxed)),
-                    total_disposed: u64::from(entry.total_disposed.load(Ordering::Relaxed)),
-                });
-            }
-        }
-        None
+        let pool_id = self.lookup_partition(pool_key_hash)?;
+        let entry = &self.header().partitions[usize::from(pool_id)];
+        let quarantined = entry.quarantined.load(Ordering::Acquire);
+        let active_leases = entry
+            .active_leases
+            .load(Ordering::Acquire)
+            .saturating_sub(quarantined);
+        Some(PartitionStats {
+            pool_id,
+            pool_size: entry.pool_size.load(Ordering::Relaxed),
+            max_overflow: entry.max_overflow.load(Ordering::Relaxed),
+            active_leases,
+            quarantined,
+            total_acquired: u64::from(entry.total_acquired.load(Ordering::Relaxed)),
+            total_released: u64::from(entry.total_released.load(Ordering::Relaxed)),
+            total_reclaimed: u64::from(entry.total_reclaimed.load(Ordering::Relaxed)),
+            total_quarantined: u64::from(entry.total_quarantined.load(Ordering::Relaxed)),
+            total_disposed: u64::from(entry.total_disposed.load(Ordering::Relaxed)),
+        })
     }
 
     fn try_acquire_slot(
@@ -1134,9 +1150,7 @@ impl ShmLeaseTable {
         slot: &LeaseSlot,
         raw: u64,
         counter: &AtomicU64,
-        from_quarantine: bool,
-        is_release: bool,
-        is_reclaim: bool,
+        kind: ReleaseKind,
     ) -> bool {
         let part_id = slot.partition_id.load(Ordering::Acquire);
         if slot
@@ -1151,14 +1165,14 @@ impl ShmLeaseTable {
         if part_id < MAX_POOL_PARTITIONS as u32 {
             let entry = &hdr.partitions[part_id as usize];
             entry.active_leases.fetch_sub(1, Ordering::AcqRel);
-            if from_quarantine {
+            if kind.is_quarantined_release() {
                 entry.quarantined.fetch_sub(1, Ordering::AcqRel);
                 entry.total_disposed.fetch_add(1, Ordering::Relaxed);
             }
-            if is_release {
+            if kind.is_release() {
                 entry.total_released.fetch_add(1, Ordering::Relaxed);
             }
-            if is_reclaim {
+            if kind.is_reclaim() {
                 entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1192,7 +1206,7 @@ impl ShmLeaseTable {
         }
 
         let hdr = self.header();
-        if !self.release_claimed_slot(slot, raw, &hdr.total_released, false, true, false) {
+        if !self.release_claimed_slot(slot, raw, &hdr.total_released, ReleaseKind::Release) {
             return Err(BrokerError::GenerationMismatch);
         }
 
@@ -1219,7 +1233,7 @@ impl ShmLeaseTable {
                 let last_hb = slot.last_heartbeat_ns.load(Ordering::Acquire);
                 if ttl > 0 && now_ns.saturating_sub(last_hb) > ttl {
                     slot.generation.fetch_add(1, Ordering::AcqRel);
-                    if self.release_claimed_slot(slot, raw, &hdr.total_expired, false, false, false)
+                    if self.release_claimed_slot(slot, raw, &hdr.total_expired, ReleaseKind::Expire)
                     {
                         reaped += 1;
                     }
@@ -1299,7 +1313,12 @@ impl ShmLeaseTable {
             return Err(BrokerError::GenerationMismatch);
         }
         let hdr = self.header();
-        if !self.release_claimed_slot(slot, raw, &hdr.total_disposed, true, false, false) {
+        if !self.release_claimed_slot(
+            slot,
+            raw,
+            &hdr.total_disposed,
+            ReleaseKind::DisposeQuarantined,
+        ) {
             if slot.generation.load(Ordering::Acquire) != generation {
                 return Err(BrokerError::GenerationMismatch);
             }
@@ -1385,7 +1404,8 @@ impl ShmLeaseTable {
 
             if (state == SLOT_STATE_PRIMARY || state == SLOT_STATE_OVERFLOW) && pid == worker_pid {
                 slot.generation.fetch_add(1, Ordering::AcqRel);
-                if self.release_claimed_slot(slot, raw, &hdr.total_reclaimed, false, false, true) {
+                if self.release_claimed_slot(slot, raw, &hdr.total_reclaimed, ReleaseKind::Reclaim)
+                {
                     reclaimed += 1;
                 }
             }

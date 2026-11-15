@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 from urllib.parse import urlparse
 
@@ -128,11 +129,13 @@ class DatabaseRegistry:
 
     _DEFAULT_REGISTRY: ClassVar[DatabaseRegistry | None] = None
     _DEFAULT_BROKER: ClassVar[Any] = None
+    _CLASS_LOCK: ClassVar[threading.RLock] = threading.RLock()
 
     __slots__ = (
         "_broker",
         "_configs",
         "_drivers",
+        "_lock",
         "_shared_async_drivers",
         "_shared_dialers",
         "_shared_sync_drivers",
@@ -150,28 +153,40 @@ class DatabaseRegistry:
             SyncCloudSQLDialer | AsyncCloudSQLDialer | SyncAlloyDBDialer | AsyncAlloyDBDialer,
         ] = {}
         self._broker = broker
+        self._lock = threading.RLock()
 
     @property
     def names(self) -> tuple[str, ...]:
         """Return registered database aliases."""
-        return tuple(self._configs.keys())
+        with self._lock:
+            return tuple(self._configs.keys())
 
     @classmethod
     def default_broker(cls, *, pool_size: int = 32, max_overflow: int = 16) -> Any:
         """Return the process-wide shared Rust SHM LeaseBroker."""
-        if cls._DEFAULT_BROKER is None:
-            env_broker = LeaseBroker.from_env()
-            cls._DEFAULT_BROKER = (
-                env_broker if env_broker is not None else LeaseBroker(pool_size=pool_size, max_overflow=max_overflow)
-            )
-        return cls._DEFAULT_BROKER
+        broker = cls._DEFAULT_BROKER
+        if broker is None:
+            with cls._CLASS_LOCK:
+                if cls._DEFAULT_BROKER is None:
+                    env_broker = LeaseBroker.from_env()
+                    cls._DEFAULT_BROKER = (
+                        env_broker
+                        if env_broker is not None
+                        else LeaseBroker(pool_size=pool_size, max_overflow=max_overflow)
+                    )
+                broker = cls._DEFAULT_BROKER
+        return broker
 
     @classmethod
     def default(cls) -> DatabaseRegistry:
         """Return the process-wide default DatabaseRegistry sharing pools across frameworks."""
-        if cls._DEFAULT_REGISTRY is None:
-            cls._DEFAULT_REGISTRY = cls(broker=cls.default_broker())
-        return cls._DEFAULT_REGISTRY
+        reg = cls._DEFAULT_REGISTRY
+        if reg is None:
+            with cls._CLASS_LOCK:
+                if cls._DEFAULT_REGISTRY is None:
+                    cls._DEFAULT_REGISTRY = cls(broker=cls.default_broker())
+                reg = cls._DEFAULT_REGISTRY
+        return reg
 
     @classmethod
     def pool_fingerprint(cls, config_or_url: AnyDatabaseConfig | BaseDatabaseConfig | str) -> tuple[Any, ...] | None:
@@ -211,35 +226,39 @@ class DatabaseRegistry:
     ) -> AnyDatabaseConfig | BaseDatabaseConfig:
         """Register a database alias from a typed config or URL."""
         config = self.parse_url(config_or_url) if isinstance(config_or_url, str) else config_or_url
-        self._configs[name] = config
-        self._drivers.pop(name, None)
-        self._sync_drivers.pop(name, None)
+        with self._lock:
+            self._configs[name] = config
+            self._drivers.pop(name, None)
+            self._sync_drivers.pop(name, None)
         return config
 
     def get_config(self, name: str = "default") -> AnyDatabaseConfig | BaseDatabaseConfig:
         """Retrieve a registered configuration by alias."""
-        if name not in self._configs:
-            msg = f"Database alias {name!r} is not registered"
-            raise KeyError(msg)
-        return self._configs[name]
+        with self._lock:
+            if name not in self._configs:
+                msg = f"Database alias {name!r} is not registered"
+                raise KeyError(msg)
+            return self._configs[name]
 
     def get_driver(self, name: str = "default") -> AnyDatabaseDriver:
         """Lazily instantiate and return the asynchronous driver for the given alias."""
-        if name in self._drivers:
-            return self._drivers[name]
-        config = self.get_config(name)
-        driver = self._build_async_driver(config)
-        self._drivers[name] = driver
-        return driver
+        with self._lock:
+            if name in self._drivers:
+                return self._drivers[name]
+            config = self.get_config(name)
+            driver = self._build_async_driver(config)
+            self._drivers[name] = driver
+            return driver
 
     def get_sync_driver(self, name: str = "default") -> AnySyncDatabaseDriver:
         """Lazily instantiate and return the synchronous driver for the given alias."""
-        if name in self._sync_drivers:
-            return self._sync_drivers[name]
-        config = self.get_config(name)
-        driver = self._build_sync_driver(config)
-        self._sync_drivers[name] = driver
-        return driver
+        with self._lock:
+            if name in self._sync_drivers:
+                return self._sync_drivers[name]
+            config = self.get_config(name)
+            driver = self._build_sync_driver(config)
+            self._sync_drivers[name] = driver
+            return driver
 
     @overload
     def get_dialer(
@@ -289,12 +308,13 @@ class DatabaseRegistry:
         with contextlib.suppress(RuntimeError):
             loop_id = id(asyncio.get_running_loop())
         key = (*base_key, loop_id)
-        cached = self._shared_async_drivers.get(key)
-        if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
-            return cached
-        driver = self._build_async_driver(config)
-        self._shared_async_drivers[key] = driver
-        return driver
+        with self._lock:
+            cached = self._shared_async_drivers.get(key)
+            if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
+                return cached
+            driver = self._build_async_driver(config)
+            self._shared_async_drivers[key] = driver
+            return driver
 
     def get_shared_sync_driver(
         self,
@@ -307,12 +327,13 @@ class DatabaseRegistry:
         key = config.pool_key()
         if key is None:
             return self._build_sync_driver(config)
-        cached = self._shared_sync_drivers.get(key)
-        if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
-            return cached
-        driver = self._build_sync_driver(config)
-        self._shared_sync_drivers[key] = driver
-        return driver
+        with self._lock:
+            cached = self._shared_sync_drivers.get(key)
+            if cached is not None and not getattr(cached, "_closed", False) and not getattr(cached, "closed", False):
+                return cached
+            driver = self._build_sync_driver(config)
+            self._shared_sync_drivers[key] = driver
+            return driver
 
     def _build_async_driver(self, config: AnyDatabaseConfig | BaseDatabaseConfig) -> AnyDatabaseDriver:
         if isinstance(config, (CloudSQLConfig, AlloyDBConfig)):

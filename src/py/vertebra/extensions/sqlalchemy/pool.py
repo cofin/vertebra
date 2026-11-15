@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import os
 import threading
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sqlalchemy import event as sa_event
@@ -19,12 +18,15 @@ from sqlalchemy.util.concurrency import in_greenlet
 
 from vertebra.db.dbapi import SyncDBAPIConnection
 from vertebra.db.registry import DatabaseRegistry
+from vertebra.extensions.broker import (
+    AsyncSHMBrokerTransport,
+    SyncSHMBrokerTransport,
+)
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
-from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, SyncSHMBrokerTransport
 from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
-from vertebra.extensions.sqlspec.provider import AsyncBrokerLeaseSource, SyncBrokerLeaseSource
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.sync_tools import SyncPool
+from vertebra.utils.sync_tools import SyncPool, run_
+from vertebra.utils.type_guards import is_coroutine_callable
 
 if TYPE_CHECKING:
     from sqlalchemy.pool.base import _ConnDialect
@@ -270,12 +272,18 @@ class BrokerPool(Pool):
         return value
 
     @staticmethod
-    def _run_coro_sync(coro: Any) -> Any:
+    def _run_coro_sync(coro: Coroutine[Any, Any, Any]) -> Any:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(coro)
-        return SyncPool.default().submit(asyncio.run, coro).result()
+
+            async def _runner() -> Any:
+                return await coro
+
+            return run_(_runner)()
+        coro.close()
+        msg = "Async broker operations cannot block an active event loop outside greenlet; dispose inside async greenlet or implement quarantine_sync"
+        raise ImproperConfigurationError(msg)
 
     @staticmethod
     def _on_connection_invalidate(
@@ -296,30 +304,27 @@ class BrokerPool(Pool):
         register_fn = getattr(target, "register_partition", None)
         if not callable(register_fn):
             return
-        reg_kwargs: dict[str, Any] = {}
-        pool_size = self._pool_size
-        if pool_size is None and self._config is not None:
-            pool_size = getattr(self._config, "pool_size", None)
-        max_overflow = self._max_overflow
-        if max_overflow is None and self._config is not None:
-            max_overflow = getattr(self._config, "max_overflow", None)
-        if isinstance(pool_size, int) and not isinstance(pool_size, bool):
-            reg_kwargs["pool_size"] = pool_size
-        if isinstance(max_overflow, int) and not isinstance(max_overflow, bool):
-            reg_kwargs["max_overflow"] = max_overflow
-        if reg_kwargs:
-            try:
-                self._await_if_needed(register_fn(self._partition_key, **reg_kwargs))
-                return
-            except TypeError:
-                pass
+        if isinstance(target, (SyncSHMBrokerTransport, AsyncSHMBrokerTransport)):
+            reg_kwargs: dict[str, Any] = {}
+            pool_size = self._pool_size
+            if pool_size is None and self._config is not None:
+                pool_size = getattr(self._config, "pool_size", None)
+            max_overflow = self._max_overflow
+            if max_overflow is None and self._config is not None:
+                max_overflow = getattr(self._config, "max_overflow", None)
+            if isinstance(pool_size, int) and not isinstance(pool_size, bool):
+                reg_kwargs["pool_size"] = pool_size
+            if isinstance(max_overflow, int) and not isinstance(max_overflow, bool):
+                reg_kwargs["max_overflow"] = max_overflow
+            register_fn(self._partition_key, **reg_kwargs)
+            return
         self._await_if_needed(register_fn(self._partition_key))
 
     def _ensure_partition_registered(self, target: Any) -> None:
-        with self._lease_lock:
-            if self._partition_registered:
-                return
-        if in_greenlet() and self._is_asyncio:
+        if self._partition_registered:
+            return
+        register_fn = getattr(target, "register_partition", None)
+        if callable(register_fn) and is_coroutine_callable(register_fn) and in_greenlet() and self._is_asyncio:
             loop = asyncio.get_running_loop()
             with self._lease_lock:
                 if self._partition_registered:
@@ -330,22 +335,17 @@ class BrokerPool(Pool):
                     self._async_register_locks[loop] = async_lock
             await_only(async_lock.acquire())
             try:
-                with self._lease_lock:
-                    if self._partition_registered:
-                        return
-                self._register_partition(target)
-                with self._lease_lock:
+                if not self._partition_registered:
+                    self._register_partition(target)
                     self._partition_registered = True
             finally:
                 async_lock.release()
             return
         with self._register_lock:
-            with self._lease_lock:
-                if self._partition_registered:
-                    return
+            if self._partition_registered:
+                return
             self._register_partition(target)
-            with self._lease_lock:
-                self._partition_registered = True
+            self._partition_registered = True
 
     def _acquire_partition_lease(self) -> Any:
         target = self._transport_target()
@@ -357,21 +357,27 @@ class BrokerPool(Pool):
             raise ImproperConfigurationError(
                 f"Configured broker {type(self._broker).__name__!r} does not implement acquire()"
             )
-        if isinstance(target, (SyncSHMBrokerTransport, AsyncSHMBrokerTransport)):
+        if isinstance(target, AsyncSHMBrokerTransport):
             kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
             if self._acquire_timeout_ms is not None:
                 kwargs["timeout_ms"] = self._acquire_timeout_ms
-            return self._await_if_needed(acquire_fn(**kwargs))
-        if isinstance(target, (SyncBrokerLeaseSource, AsyncBrokerLeaseSource)):
+            if self._is_asyncio or in_greenlet():
+                return self._await_if_needed(target.acquire(**kwargs))
+            return target.acquire_sync(**kwargs)
+        if isinstance(target, SyncSHMBrokerTransport):
+            kwargs = {"bind_key": self._partition_key, "worker_id": worker}
+            if self._acquire_timeout_ms is not None:
+                kwargs["timeout_ms"] = self._acquire_timeout_ms
+            if self._is_asyncio and in_greenlet():
+                return await_only(SyncPool.default().submit_async(target.acquire, **kwargs))
+            return target.acquire(**kwargs)
+        if is_coroutine_callable(acquire_fn):
             return self._await_if_needed(acquire_fn(pool_name=self._partition_key, worker_pid=worker))
-        kwargs = {"bind_key": self._partition_key, "worker_id": worker}
-        if self._acquire_timeout_ms is not None:
-            kwargs["timeout_ms"] = self._acquire_timeout_ms
-        try:
-            res = acquire_fn(**kwargs)
-        except TypeError:
-            res = acquire_fn(pool_name=self._partition_key, worker_pid=worker)
-        return self._await_if_needed(res)
+        if self._is_asyncio and in_greenlet():
+            return await_only(
+                SyncPool.default().submit_async(acquire_fn, pool_name=self._partition_key, worker_pid=worker)
+            )
+        return self._await_if_needed(acquire_fn(pool_name=self._partition_key, worker_pid=worker))
 
     def _release_lease(self, lease: Any) -> None:
         if not in_greenlet():
@@ -400,36 +406,26 @@ class BrokerPool(Pool):
 
     def _quarantine_lease(self, lease: Any, *, allow_sync_fallback: bool = False) -> None:
         target = self._transport_target()
-        if not in_greenlet():
-            quarantine_sync_fn = getattr(self._broker, "quarantine_sync", None) or getattr(
-                target, "quarantine_sync", None
-            )
-            if callable(quarantine_sync_fn):
-                try:
-                    quarantine_sync_fn(lease)
-                except TypeError:
-                    quarantine_sync_fn(self._extract_lease_coords(lease))
-                return
+        quarantine_sync_fn = getattr(self._broker, "quarantine_sync", None) or getattr(target, "quarantine_sync", None)
+        if callable(quarantine_sync_fn) and (
+            not in_greenlet() or not is_coroutine_callable(getattr(target, "quarantine", None))
+        ):
+            quarantine_sync_fn(lease)
+            return
 
         quarantine_fn = getattr(self._broker, "quarantine", None) or getattr(target, "quarantine", None)
         if not callable(quarantine_fn):
             return
 
-        if not in_greenlet() and allow_sync_fallback and inspect.iscoroutinefunction(quarantine_fn):
-            try:
+        if not in_greenlet():
+            if allow_sync_fallback and is_coroutine_callable(quarantine_fn):
                 self._run_coro_sync(quarantine_fn(lease))
-            except TypeError:
-                self._run_coro_sync(quarantine_fn(self._extract_lease_coords(lease)))
-            return
+                return
+            if is_coroutine_callable(quarantine_fn):
+                msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
+                raise ImproperConfigurationError(msg)
 
-        if not in_greenlet() and inspect.iscoroutinefunction(quarantine_fn):
-            msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
-            raise ImproperConfigurationError(msg)
-
-        try:
-            self._await_if_needed(quarantine_fn(lease))
-        except TypeError:
-            self._await_if_needed(quarantine_fn(self._extract_lease_coords(lease)))
+        self._await_if_needed(quarantine_fn(lease))
 
     @staticmethod
     def _extract_lease_coords(lease: Any) -> tuple[int, int]:
@@ -476,7 +472,7 @@ class BrokerPool(Pool):
             return
         _, lease = entry_pair
         if exception is not None:
-            self._quarantine_lease(lease)
+            self._quarantine_lease(lease, allow_sync_fallback=True)
             if self._on_dispose is not None:
                 self._on_dispose(lease)
         else:
@@ -488,7 +484,9 @@ class BrokerPool(Pool):
         try:
             entry = self._create_connection()
         except BaseException:
-            self._quarantine_lease(lease)
+            self._quarantine_lease(lease, allow_sync_fallback=True)
+            if self._on_dispose is not None:
+                self._on_dispose(lease)
             raise
         with self._lease_lock:
             self._entry_leases[id(entry)] = (entry, lease)

@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn shm_arrow_stream_writer_resize_and_finish_unregistered() {
-        let shm_name = format!("test-vtb-arrow-unit-resize-{}", std::process::id());
+        let shm_name = format!("vtb-arw-rsz-{:x}", std::process::id());
         let _ = release_shm_arrow_frame(&shm_name);
 
         let schema = vec![0x33u8; 45];
@@ -507,6 +507,7 @@ mod tests {
 
         let (norm, byte_len, region) = writer.finish_unregistered().expect("finish unregistered");
         assert!(!ACTIVE_ARROW_SHM_REGIONS.contains_key(&norm));
+        // SAFETY: `region` is exclusively owned after `finish_unregistered` and remains immutable while `slice` is borrowed.
         let slice = unsafe { region.as_slice() };
         let hdr = ShmArrowFrameHeader::from_slice(&slice[0..16]).expect("header");
         assert_eq!(hdr.byte_len as usize, byte_len);

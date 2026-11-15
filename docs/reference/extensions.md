@@ -45,7 +45,8 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 
 ::: vertebra.extensions.sqlspec.provider.SQLSpecAsyncProvider
     options:
-      heading_level: 3
+      heading_level: 4
+      members: false
 
 ## SQLAlchemy & Advanced Alchemy (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
@@ -97,7 +98,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 
 ::: vertebra.extensions.broker.plugin.BrokerPlugin
     options:
-      heading_level: 4
+      heading_level: 3
       members: false
       summary: false
 

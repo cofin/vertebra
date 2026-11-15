@@ -98,7 +98,7 @@ Multi-worker Vertebra deployments wrapping upstream `sqlspec` configs (`ProxySyn
 
 | Area | Primary Anchors | Public Seam & Integration |
 | --- | --- | --- |
-| SHM & cleanup | `vertebra-core/src/{shm,cleanup,broker,broker_attach}.rs`, `vertebra-http/src/workers/factory.rs` [^core-shm] [^core-cleanup] [^worker-factory] | Atomic owner headers, signal/panic cleanup, 64 pool partitions, `Quarantined` slots, `0600` UDS `SCM_RIGHTS` |
+| SHM & cleanup | `vertebra-core/src/{shm,cleanup,broker,broker_attach}.rs`, `vertebra-http/src/workers/factory.rs` [^core-shm] [^core-cleanup] [^worker-factory] [^core-broker] | Atomic owner headers, signal/panic cleanup, 64 pool partitions, `Quarantined` slots, `0600` UDS `SCM_RIGHTS` |
 | Cross-wheel FFI | `vertebra-db/src/lib.rs`, `vertebra-py/src/broker.rs`, `vertebra-{mysql,duckdb,oracle,mssql,postgres}` [^db-registry] [^gcp-capsule] [^postgres-rs] | `#[repr(C)] BrokerEngineCapsule` -> `vertebra._vertebra.BrokerEngineRegistry` |
 | SQLSpec proxy | `extensions/sqlspec/{provider,proxy,plugin}.py` [^sqlspec-provider] [^sqlspec-proxy] | Typed lease/session Protocols, quarantine-on-error, `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` |
 | DB-API & Pool | `vertebra/db/dbapi/*`, `extensions/sqlalchemy/{async_adapter,dialects,pool}.py` [^sa-dialects] | Framework-neutral PEP 249 package + SQLAlchemy/Advanced Alchemy `BrokerPool` |
@@ -164,9 +164,9 @@ class LeaseQuarantinedError(VertebraError): ...
 
 | Chapter | Title | Tasks | Verification |
 | --- | --- | --- | --- |
-| `ch01` | Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, and DBRPC Wire Protocol | `4` tasks | `pytest shm.rs` |
-| `ch02` | Chapter 02: BrokerEngineCapsule ABI v1, Python Discovery, and Relational/OLAP Engine Capsules | `4` tasks | `pytest broker_engine_capsule_tests.rs` |
-| `ch03` | Chapter 03: Quarantine Reclamation, Authenticated UDS Broker Attach, Session Affinity, and CLI | `4` tasks | `pytest broker.rs` |
+| `ch01` | Chapter 01: Atomic SHM Ownership, Supervisor Lifecycle, Pool Identity, and DBRPC Wire Protocol | `4` tasks | `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it shm` |
+| `ch02` | Chapter 02: BrokerEngineCapsule ABI v1, Python Discovery, and Relational/OLAP Engine Capsules | `4` tasks | `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db --test broker_engine_capsule_tests` |
+| `ch03` | Chapter 03: Quarantine Reclamation, Authenticated UDS Broker Attach, Session Affinity, and CLI | `4` tasks | `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core --test it broker` |
 | `ch04` | Chapter 04: Proxy Drivers, Multi-Process SQLSpec & SQLAlchemy Pool Sharing, and Docs/OKF | `4` tasks | `pytest test_sqlalchemy_and_sqlspec_vtb.py` |
 
 ## 5. Implementation Plan

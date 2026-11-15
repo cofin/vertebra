@@ -64,6 +64,9 @@ sources:
 - id: src-extensions-alchemy-plugin-py
   resource: src/py/vertebra/extensions/alchemy/plugin.py
   title: Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py)
+- id: src-extensions-broker-transport-py
+  resource: src/py/vertebra/extensions/broker/transport.py
+  title: Python implementation module (src/py/vertebra/extensions/broker/transport.py)
 - id: src-extensions-alchemy-broker-py
   resource: src/py/vertebra/extensions/alchemy/broker.py
   title: Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)
@@ -124,15 +127,15 @@ BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` befo
 
 Pool defaults: `create_sync_alchemy_config` and `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` (`pool_key()`-partitioned SHM leasing with rollback-or-quarantine on check-in) when a broker is supplied, while direct `+vtb` dialects default to `NullPool` under explicit `shm_broker` URL parameters so per-process `QueuePool` does not multiply connections.
 
-## 2. Connection Broker (`extensions/broker/`, `alchemy/broker.py`, & `sqlalchemy/pool.py`)
+## 2. Connection Broker (`extensions/broker/{transport,host,plugin}.py`, `alchemy/broker.py`, & `sqlalchemy/pool.py`)
 
 | Symbol | Responsibility |
 |---|---|
-| [`BrokerConfig`](../../../../../src/py/vertebra/extensions/alchemy/broker.py)[^src-extensions-alchemy-broker-py] / `BrokerMetrics` / `ChannelMessage` | Config (`pool_size`, `max_overflow`, `acquire_timeout`, `lease_ttl`, state keys), counters, and an array-like pub/sub envelope. |
+| [`BrokerConfig`](../../../../../src/py/vertebra/extensions/broker/transport.py)[^src-extensions-broker-transport-py] / `BrokerMetrics` / `ChannelMessage` | Config (`pool_size`, `max_overflow`, `acquire_timeout`, `lease_ttl`, state keys), counters, and an array-like pub/sub envelope (re-exported alongside `SyncSHMSessionBroker` / `AsyncSHMSessionBroker` in [`alchemy/broker.py`](../../../../../src/py/vertebra/extensions/alchemy/broker.py)[^src-extensions-alchemy-broker-py]). |
 | `SyncBrokerTransport` / `AsyncBrokerTransport` | Runtime-checkable protocol: `acquire` / `async def acquire`, `release`, `publish`, `drain_channel`, `metrics`, `close`. |
 | `SyncConnectionLease` / `AsyncConnectionLease` | TTL-bound slot lease usable as a sync or async context manager. `release` is idempotent. |
 | `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` | Bind to `LeaseBroker` and its co-located `StatementCache` + `ShmChannelSlot` ring in POSIX shared memory (via named segment or UDS `SCM_RIGHTS` attach) with `BrokerHost` owner supervision and `LeaseQuarantinedError` crash/failure isolation. |
-| `BrokerPlugin` | Installs the broker transport and metrics snapshot under `db_broker` / `db_broker_metrics`, registers DI providers, and closes the transport in `lifespan` / `server_lifespan`. |
+| `BrokerPlugin` / `BrokerHost` / `BrokerPool` | Installs the broker transport and metrics snapshot under `db_broker` / `db_broker_metrics`, manages worker reclamation (`BrokerHost`), and coordinates SQLAlchemy / Advanced Alchemy SHM lease pools (`BrokerPool` / `AsyncBrokerPool`). |
 
 ## 3. Object-Storage & Caching Adapters
 
@@ -173,6 +176,7 @@ Provenance sources: [^src-extensions-sqlspec-init-py], [^src-extensions-sqlspec-
 [^src-extensions-sqlspec-events-py]: `src/py/vertebra/extensions/sqlspec/events.py` — Python implementation module (src/py/vertebra/extensions/sqlspec/events.py).
 [^src-extensions-alchemy-init-py]: `src/py/vertebra/extensions/alchemy/__init__.py` — Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py).
 [^src-extensions-alchemy-plugin-py]: `src/py/vertebra/extensions/alchemy/plugin.py` — Python implementation module (src/py/vertebra/extensions/alchemy/plugin.py).
+[^src-extensions-broker-transport-py]: `src/py/vertebra/extensions/broker/transport.py` — Python implementation module (src/py/vertebra/extensions/broker/transport.py).
 [^src-extensions-alchemy-broker-py]: `src/py/vertebra/extensions/alchemy/broker.py` — Python implementation module (src/py/vertebra/extensions/alchemy/broker.py).
 [^src-extensions-alchemy-storage-py]: `src/py/vertebra/extensions/alchemy/storage.py` — Python implementation module (src/py/vertebra/extensions/alchemy/storage.py).
 [^src-extensions-sqlalchemy-dialects-py]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py).

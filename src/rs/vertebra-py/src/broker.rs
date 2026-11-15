@@ -237,9 +237,12 @@ impl From<vertebra_core::broker::ReclaimedLease> for ReclaimedLease {
 #[pymethods]
 impl ReclaimedLease {
     fn __repr__(&self) -> String {
+        let pool_id = self
+            .pool_id
+            .map_or_else(|| "None".to_string(), |id| id.to_string());
         format!(
-            "ReclaimedLease(slot_index={}, generation={}, pool_id={:?})",
-            self.slot_index, self.generation, self.pool_id
+            "ReclaimedLease(slot_index={}, generation={}, pool_id={pool_id})",
+            self.slot_index, self.generation
         )
     }
 }

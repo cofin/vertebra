@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import types
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -593,14 +594,14 @@ def _child_hold_partition_lease(
     pool_name: str,
     child_conn: Any,
 ) -> None:
-    """Attach to a named broker segment, acquire one partitioned lease, notify parent, and sleep."""
-    cfg = BrokerConfig(pool_size=pool_size, max_overflow=max_overflow, shm_name=shm_name)
+    """Attach to a named broker segment, acquire one partitioned lease, notify parent, and pause."""
+    cfg = BrokerConfig(pool_size=pool_size, max_overflow=max_overflow, shm_name=shm_name, role="worker")
     transport = SyncSHMBrokerTransport(cfg)
     transport.register_partition(pool_name, pool_size=pool_size, max_overflow=max_overflow)
     lease = transport.acquire(worker_id=os.getpid(), bind_key=pool_name, timeout_ms=1000)
     child_conn.send((os.getpid(), lease.slot_index, lease.generation))
     child_conn.close()
-    time.sleep(15)
+    signal.pause()
 
 
 def test_lease_broker_partition_lookup_stats_and_unpartitioned_reclaim() -> None:
@@ -657,8 +658,7 @@ def test_lease_broker_partition_lookup_stats_and_unpartitioned_reclaim() -> None
 
 def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
     """Verify BrokerPlugin and Transport.metrics report exact SHM counters after child SIGKILL reclaim."""
-    shm_name = f"/vtb-mp-plugin-{os.getpid()}-{int(time.time() * 1000)}"
-    shm_path = Path(f"/dev/shm/{shm_name.lstrip('/')}")
+    shm_name = f"/vtb-mp-plugin-{uuid.uuid4().hex[:8]}"
     zpages = ZPagesRegistry("broker-mp-plugin-test")
     recorder = DbPoolRecorder()
     plugin = BrokerPlugin(
@@ -667,8 +667,9 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
         otel_recorder=recorder,
         name="crash_pool",
     )
-    plugin.transport.register_partition("crash_pool", pool_size=2, max_overflow=0)
+    proc: Any = None
     try:
+        plugin.transport.register_partition("crash_pool", pool_size=2, max_overflow=0)
         ctx = mp.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=False)
         proc = ctx.Process(
@@ -677,8 +678,11 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
         )
         proc.start()
         child_conn.close()
-        dead_pid, slot_idx, gen = parent_conn.recv()
-        parent_conn.close()
+        try:
+            assert parent_conn.poll(10.0)
+            dead_pid, slot_idx, gen = parent_conn.recv()
+        finally:
+            parent_conn.close()
 
         before_sample = plugin.snapshot_metrics()
         assert before_sample.active_leases == 1
@@ -723,6 +727,8 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
         assert body["brokers"]["crash_pool"]["total_disposed"] == 1
         assert body["brokers"]["crash_pool"]["active_leases"] == 0
     finally:
+        if proc is not None and proc.is_alive():
+            proc.kill()
+            proc.join(timeout=5)
+        plugin.transport.unlink()
         plugin.transport.close()
-        if shm_path.exists():
-            shm_path.unlink()

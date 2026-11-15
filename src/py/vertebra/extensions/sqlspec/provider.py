@@ -10,14 +10,19 @@ import threading
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar
 
 import msgspec
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 from vertebra.db.driver import CommonDriverMixin
+from vertebra.extensions.broker import (
+    AsyncBrokerLeaseSource,
+    AsyncSHMBrokerTransport,
+    SyncBrokerLeaseSource,
+    SyncSHMBrokerTransport,
+)
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
-from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, SyncSHMBrokerTransport
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import (
@@ -27,7 +32,7 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
-from vertebra.utils.type_guards import is_msgspec_struct
+from vertebra.utils.type_guards import is_coroutine_callable, is_msgspec_struct
 
 __all__ = (
     "AsyncBrokerLeaseSource",
@@ -39,28 +44,6 @@ __all__ = (
     "SQLSpecSyncProvider",
     "SyncBrokerLeaseSource",
 )
-
-
-@runtime_checkable
-class SyncBrokerLeaseSource(Protocol):
-    """Protocol for synchronous shared-memory broker lease acquisition and quarantine."""
-
-    def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a leased connection slot for ``pool_name`` and ``worker_pid``."""
-
-    def quarantine(self, lease: Any) -> None:
-        """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
-
-
-@runtime_checkable
-class AsyncBrokerLeaseSource(Protocol):
-    """Protocol for asynchronous shared-memory broker lease acquisition and quarantine."""
-
-    async def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a leased connection slot asynchronously for ``pool_name`` and ``worker_pid``."""
-
-    async def quarantine(self, lease: Any) -> Any:
-        """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
 
 
 class BrokerRpcRequest(msgspec.Struct, frozen=True):
@@ -426,6 +409,10 @@ class _BaseSQLSpecProvider:
         with self._lock:
             return self._tx_states.get((slot_idx, generation), False)
 
+    def _tx_state_for(self, key: tuple[int, int], default: bool) -> bool:
+        with self._lock:
+            return self._tx_states.get(key, default)
+
     def get_leased_session(self, slot_idx: int, generation: int) -> Any | None:
         """Return the pinned upstream session for (slot_idx, generation) if leased."""
         with self._lock:
@@ -501,19 +488,10 @@ class _BaseSQLSpecProvider:
                     in_tx=False,
                 )
 
-            session = self._ensure_session_sync(key, request.pool_name)
-
-            if op == "begin":
-                self._exec_begin_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=True,
-                )
-
             if op == "commit":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
                 self._exec_commit_sync(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -524,6 +502,17 @@ class _BaseSQLSpecProvider:
                 )
 
             if op == "rollback":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    with self._lock:
+                        self._tx_states[key] = False
+                    return BrokerRpcResponse(
+                        request_id=request.request_id,
+                        ok=True,
+                        slot_idx=request.slot_idx,
+                        generation=request.generation,
+                        in_tx=False,
+                    )
                 self._exec_rollback_sync(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -531,6 +520,18 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     in_tx=False,
+                )
+
+            session = self._ensure_session_sync(key, request.pool_name)
+
+            if op == "begin":
+                self._exec_begin_sync(session, key)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=True,
                 )
 
             if op == "execute":
@@ -544,7 +545,7 @@ class _BaseSQLSpecProvider:
                     rows=rows,
                     columns=columns,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "execute_many":
@@ -555,7 +556,7 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select":
@@ -573,7 +574,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
@@ -586,7 +587,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op in {"select_value", "select_value_or_none"}:
@@ -599,7 +600,7 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -667,19 +668,10 @@ class _BaseSQLSpecProvider:
                     in_tx=False,
                 )
 
-            session = await self._ensure_session_async(key, request.pool_name)
-
-            if op == "begin":
-                await self._exec_begin_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=True,
-                )
-
             if op == "commit":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
                 await self._exec_commit_async(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -690,6 +682,17 @@ class _BaseSQLSpecProvider:
                 )
 
             if op == "rollback":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    with self._lock:
+                        self._tx_states[key] = False
+                    return BrokerRpcResponse(
+                        request_id=request.request_id,
+                        ok=True,
+                        slot_idx=request.slot_idx,
+                        generation=request.generation,
+                        in_tx=False,
+                    )
                 await self._exec_rollback_async(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -697,6 +700,18 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     in_tx=False,
+                )
+
+            session = await self._ensure_session_async(key, request.pool_name)
+
+            if op == "begin":
+                await self._exec_begin_async(session, key)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=True,
                 )
 
             if op == "execute":
@@ -710,7 +725,7 @@ class _BaseSQLSpecProvider:
                     rows=rows,
                     columns=columns,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "execute_many":
@@ -721,13 +736,13 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select":
                 raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
                 rows, columns, _ = await self._extract_result_async(raw_res)
-                return self._build_select_response(request, key, rows, columns)
+                return await self._build_select_response_async(request, key, rows, columns)
 
             if op == "select_one":
                 row, columns = await self._exec_select_one_async(session, request.sql, request.params, allow_none=False)
@@ -739,7 +754,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
@@ -752,7 +767,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op in {"select_value", "select_value_or_none"}:
@@ -767,7 +782,7 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -832,9 +847,9 @@ class _BaseSQLSpecProvider:
             arrow_names = list(self._active_arrow_buffers)
             self._active_arrow_buffers.clear()
         for key in keys:
-            await self._release_session_async(key, in_tx=self._tx_states.get(key, False))
+            await self._release_session_async(key, in_tx=self._tx_state_for(key, False))
         for name in arrow_names:
-            SharedArrowBuffer.unlink(name)
+            await SyncPool.default().submit_async(SharedArrowBuffer.unlink, name)
 
     def _resolve_upstream(self, pool_name: str) -> Any:
         """Resolve the upstream config, driver, or factory for pool_name."""
@@ -891,16 +906,20 @@ class _BaseSQLSpecProvider:
         pid = worker_pid if worker_pid > 0 else os.getpid()
         target = getattr(self.broker, "transport", self.broker)
         if isinstance(target, AsyncSHMBrokerTransport):
-            res = target.acquire(bind_key=pool_name, worker_id=pid)
-            return await res if isinstance(res, Awaitable) else res
+            return await target.acquire(bind_key=pool_name, worker_id=pid)
         if isinstance(target, SyncSHMBrokerTransport):
             return await SyncPool.default().submit_async(target.acquire, bind_key=pool_name, worker_id=pid)
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
-            res = acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
+            if is_coroutine_callable(acquire_lease_fn):
+                return await acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
+            res = await SyncPool.default().submit_async(acquire_lease_fn, pool_name=pool_name, worker_pid=pid)
             return await res if isinstance(res, Awaitable) else res
-        if isinstance(target, (AsyncBrokerLeaseSource, SyncBrokerLeaseSource)):
-            res = target.acquire(pool_name=pool_name, worker_pid=pid)
+        acquire_fn = getattr(target, "acquire", None)
+        if callable(acquire_fn):
+            if is_coroutine_callable(acquire_fn):
+                return await acquire_fn(pool_name=pool_name, worker_pid=pid)
+            res = await SyncPool.default().submit_async(acquire_fn, pool_name=pool_name, worker_pid=pid)
             return await res if isinstance(res, Awaitable) else res
         raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
 
@@ -967,7 +986,7 @@ class _BaseSQLSpecProvider:
             session = await ctx_mgr.__aenter__()
         elif hasattr(candidate, "__enter__") and candidate is not upstream:
             ctx_mgr = candidate
-            session = ctx_mgr.__enter__()
+            session = await SyncPool.default().submit_async(ctx_mgr.__enter__)
         else:
             session = candidate
 
@@ -1024,10 +1043,18 @@ class _BaseSQLSpecProvider:
 
         if cleanup_exc is not None:
             try:
-                raise cleanup_exc
-            except BaseException as exc:
                 self._quarantine_broker_lease(lease, key)
-                raise LeaseQuarantinedError(key[0], key[1], str(exc)) from exc
+            except BaseException as quarantine_exc:
+                if isinstance(cleanup_exc, Exception):
+                    msg = (
+                        f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
+                        f"after cleanup error: {cleanup_exc}"
+                    )
+                    raise RuntimeError(msg) from cleanup_exc
+                raise
+            if isinstance(cleanup_exc, Exception) and not isinstance(cleanup_exc, LeaseQuarantinedError):
+                raise LeaseQuarantinedError(key[0], key[1], str(cleanup_exc)) from cleanup_exc
+            raise cleanup_exc
 
         if lease is not None:
             self._release_broker_lease(lease, key, in_tx=False)
@@ -1059,10 +1086,18 @@ class _BaseSQLSpecProvider:
 
         if cleanup_exc is not None:
             try:
-                raise cleanup_exc
-            except BaseException as exc:
                 await self._quarantine_broker_lease_async(lease, key)
-                raise LeaseQuarantinedError(key[0], key[1], str(exc)) from exc
+            except BaseException as quarantine_exc:
+                if isinstance(cleanup_exc, Exception):
+                    msg = (
+                        f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
+                        f"after cleanup error: {cleanup_exc}"
+                    )
+                    raise RuntimeError(msg) from cleanup_exc
+                raise
+            if isinstance(cleanup_exc, Exception) and not isinstance(cleanup_exc, LeaseQuarantinedError):
+                raise LeaseQuarantinedError(key[0], key[1], str(cleanup_exc)) from cleanup_exc
+            raise cleanup_exc
 
         if lease is not None:
             await self._release_broker_lease_async(lease, key, in_tx=False)
@@ -1392,7 +1427,7 @@ class _BaseSQLSpecProvider:
             generation=request.generation,
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_states.get(key, request.in_tx),
+            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1410,11 +1445,15 @@ class _BaseSQLSpecProvider:
             raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
             if isinstance(raw_arrow, Awaitable):
                 raw_arrow = await raw_arrow
-            shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
+            shm_name, byte_len, columns, rowcount = await SyncPool.default().submit_async(
+                self._spill_arrow_object, raw_arrow
+            )
         else:
             raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
             rows, columns, _ = await self._extract_result_async(raw_res)
-            shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
+            shm_name, byte_len = await SyncPool.default().submit_async(
+                SharedArrowBuffer.write_table, rows, columns=columns
+            )
             with self._lock:
                 self._active_arrow_buffers.add(shm_name)
             rowcount = len(rows)
@@ -1425,7 +1464,7 @@ class _BaseSQLSpecProvider:
             generation=request.generation,
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_states.get(key, request.in_tx),
+            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1447,7 +1486,7 @@ class _BaseSQLSpecProvider:
         columns: list[str],
     ) -> BrokerRpcResponse:
         """Construct a BrokerRpcResponse for select, spilling to SharedArrowBuffer when thresholds are met."""
-        in_tx = self._tx_states.get(key, request.in_tx)
+        in_tx = self._tx_state_for(key, request.in_tx)
         row_count = len(rows)
         should_spill = row_count >= self.arrow_threshold_rows
         if not should_spill and row_count > 0 and self.arrow_threshold_bytes > 0:
@@ -1481,8 +1520,17 @@ class _BaseSQLSpecProvider:
             columns=columns,
             rowcount=row_count,
             in_tx=in_tx,
-            is_arrow_shm=False,
         )
+
+    async def _build_select_response_async(
+        self,
+        request: BrokerRpcRequest,
+        key: tuple[int, int],
+        rows: list[dict[str, Any] | list[Any]],
+        columns: list[str],
+    ) -> BrokerRpcResponse:
+        """Async wrapper offloading select response msgpack sizing and SharedArrowBuffer writes off the loop."""
+        return await SyncPool.default().submit_async(self._build_select_response, request, key, rows, columns)
 
     def _invoke_sync(self, session: Any, method_names: tuple[str, ...], sql: str, params: Any) -> Any:
         """Invoke the first available method in method_names on session synchronously."""

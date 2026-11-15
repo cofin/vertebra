@@ -857,15 +857,25 @@ class PartitionStats:
     """Per-partition shared-memory lease counters."""
 
     pool_id: int
+    """Partition slot identifier (`0..MAX_POOL_PARTITIONS`)."""
     pool_size: int
+    """Primary connection capacity configured for this partition."""
     max_overflow: int
+    """Maximum overflow connection capacity configured for this partition."""
     active_leases: int
+    """Number of currently leased slots belonging to this partition."""
     quarantined: int
+    """Number of slots in this partition held in quarantine awaiting disposal."""
     total_acquired: int
+    """Cumulative successful lease acquisitions recorded for this partition."""
     total_released: int
+    """Cumulative explicit lease releases recorded for this partition."""
     total_reclaimed: int
+    """Cumulative crashed-worker leases reclaimed from this partition."""
     total_quarantined: int
+    """Cumulative leases moved into quarantine in this partition."""
     total_disposed: int
+    """Cumulative quarantined slots returned to the free pool in this partition."""
 
 @final
 class BrokerAttachServer:

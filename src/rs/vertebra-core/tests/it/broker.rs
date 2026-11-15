@@ -496,3 +496,40 @@ fn test_lookup_partition_partition_stats_and_unpartitioned_reclaim() {
             .unwrap();
     }
 }
+
+#[test]
+fn test_shm_lease_table_direct_quarantine_partition_stats() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let key_hash = 0xCAFE_BABE_0001_0002;
+    let pool_id = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_hash,
+            pool_size: 2,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    let g1 = table
+        .try_acquire_in(pool_id, 9101, 0, key_hash)
+        .unwrap()
+        .unwrap();
+    table.quarantine(g1.slot_index, g1.generation).unwrap();
+
+    let during = table.partition_stats(key_hash).unwrap();
+    assert_eq!(during.active_leases, 0);
+    assert_eq!(during.quarantined, 1);
+    assert_eq!(during.total_acquired, 1);
+    assert_eq!(during.total_quarantined, 1);
+    assert_eq!(during.total_disposed, 0);
+
+    table
+        .dispose_quarantined(g1.slot_index, g1.generation)
+        .unwrap();
+    let after = table.partition_stats(key_hash).unwrap();
+    assert_eq!(after.active_leases, 0);
+    assert_eq!(after.quarantined, 0);
+    assert_eq!(after.total_disposed, 1);
+}

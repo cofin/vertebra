@@ -204,16 +204,20 @@ def _prepare_engine_config(
         if cfg.pool_recycle is Empty or cfg.pool_recycle is None:
             cfg.pool_recycle = 1800
 
+    resolved_url = connection_string
+    scheme = resolved_url.split("://", 1)[0].lower() if "://" in resolved_url else ""
+    is_vtb_dialect = any(marker in scheme for marker in ("+vtb", "+vertebra"))
     if broker is not None:
         pool_cls = AsyncBrokerPool if is_async else BrokerPool
-        cfg.poolclass = pool_cls.bind_class(broker=broker, url=connection_string)
-        existing_args = cfg.connect_args if isinstance(cfg.connect_args, dict) else {}
-        connect_args = dict(existing_args)
-        connect_args.setdefault("url", connection_string)
-        if "broker" not in connect_args:
-            connect_args["broker"] = broker
-            connect_args.setdefault("lease_managed", True)
-        cfg.connect_args = connect_args
+        cfg.poolclass = pool_cls.bind_class(broker=broker, url=resolved_url)
+        if is_vtb_dialect:
+            existing_args = cfg.connect_args if isinstance(cfg.connect_args, dict) else {}
+            connect_args = dict(existing_args)
+            connect_args.setdefault("url", resolved_url)
+            if "broker" not in connect_args:
+                connect_args["broker"] = broker
+                connect_args.setdefault("lease_managed", True)
+            cfg.connect_args = connect_args
 
     kwargs["engine_config"] = cfg
 

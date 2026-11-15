@@ -271,6 +271,50 @@ def _worker_acquire_lease_and_pause(
     signal.pause()
 
 
+def _start_and_join_workers(
+    ctx: Any,
+    target: Any,
+    args_list: list[tuple[Any, ...]],
+    tracked_procs: list[Any],
+    *,
+    timeout: float = 20.0,
+) -> None:
+    """Spawn worker processes, register them for cleanup, and verify zero exit codes."""
+    procs = [ctx.Process(target=target, args=args) for args in args_list]
+    tracked_procs.extend(procs)
+    for proc in procs:
+        proc.start()
+    failures: list[tuple[int | None, int | None]] = []
+    for proc in procs:
+        proc.join(timeout=timeout)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2)
+        if proc.exitcode != 0:
+            failures.append((proc.pid, proc.exitcode))
+    assert not failures, f"Worker process failures: {failures}"
+
+
+def _recv_worker_coords(parent_conn: Any, *, timeout: float = 15.0) -> tuple[int, int, int]:
+    """Wait with bounded timeout for worker (pid, slot, gen) readiness tuple and close pipe."""
+    try:
+        assert parent_conn.poll(timeout), f"Worker readiness pipe timed out after {timeout}s"
+        return tuple(parent_conn.recv())  # type: ignore[return-value]
+    finally:
+        parent_conn.close()
+
+
+def _cleanup_processes(procs: list[Any]) -> None:
+    """Terminate and reap any still-alive child processes."""
+    for proc in procs:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+
+
 def _start_host_with_plugin(
     sock_dir: Path,
     *,
@@ -318,6 +362,7 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
             dsn=dsn,
         )
         rpc_server = _EngineRpcServer(rpc_sock, _DIALECT_DUCKDB, pool_id, host.transport)
+        tracked_procs: list[Any] = []
         try:
             ddl_resp = decode_dbrpc_response(
                 BrokerEngineRegistry.execute(
@@ -329,7 +374,7 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                             op=int(DbRpcOp.EXECUTE),
                             request_id=1,
                             lease_slot=0,
-                            lease_generation=1,
+                            lease_generation=0,
                             sql="CREATE TABLE work_log (id BIGINT PRIMARY KEY, worker_pid BIGINT)",
                         )
                     ),
@@ -340,10 +385,11 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
             rpc_server.start()
             ctx = mp.get_context("spawn")
             barrier = ctx.Barrier(4)
-            workers = [
-                ctx.Process(
-                    target=_worker_commit_rows,
-                    args=(
+            _start_and_join_workers(
+                ctx,
+                _worker_commit_rows,
+                [
+                    (
                         worker_idx,
                         attach_sock,
                         secret,
@@ -351,15 +397,12 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                         "INSERT INTO work_log VALUES (?, ?)",
                         3,
                         barrier,
-                    ),
-                )
-                for worker_idx in range(4)
-            ]
-            for proc in workers:
-                proc.start()
-            for proc in workers:
-                proc.join(timeout=20)
-                assert proc.exitcode == 0
+                    )
+                    for worker_idx in range(4)
+                ],
+                tracked_procs,
+                timeout=20.0,
+            )
 
             assert rpc_server.peak_active_leases == 1
             assert host.transport.metrics().active_leases == 0
@@ -372,7 +415,7 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                     op=int(DbRpcOp.EXECUTE),
                     request_id=9001,
                     lease_slot=0,
-                    lease_generation=1,
+                    lease_generation=0,
                     sql="SELECT count(*), count(DISTINCT worker_pid) FROM work_log",
                 ),
             )
@@ -391,10 +434,10 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                     child_conn,
                 ),
             )
+            tracked_procs.append(killer_proc)
             killer_proc.start()
             child_conn.close()
-            dead_pid, _slot_idx, _gen = parent_conn.recv()
-            parent_conn.close()
+            dead_pid, _slot_idx, _gen = _recv_worker_coords(parent_conn)
             assert host.transport.metrics().active_leases == 1
             with pytest.raises(TimeoutError):
                 host.transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=30)
@@ -414,7 +457,7 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                     op=int(DbRpcOp.EXECUTE),
                     request_id=9002,
                     lease_slot=0,
-                    lease_generation=1,
+                    lease_generation=0,
                     sql="SELECT count(*) FROM work_log WHERE id = 999999",
                 ),
             )
@@ -446,10 +489,10 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                 target=_worker_acquire_lease_and_pause,
                 args=(attach_sock, secret, child_err_conn),
             )
+            tracked_procs.append(fail_proc)
             fail_proc.start()
             child_err_conn.close()
-            fail_pid, fail_slot, _fail_gen = parent_err_conn.recv()
-            parent_err_conn.close()
+            fail_pid, fail_slot, _fail_gen = _recv_worker_coords(parent_err_conn)
 
             os.kill(fail_pid, signal.SIGKILL)
             fail_proc.join(timeout=5)
@@ -462,20 +505,13 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
             assert after_eviction.total_disposed == 2
             assert after_eviction.quarantined == 0
 
-            healthy_proc = ctx.Process(
-                target=_worker_commit_rows,
-                args=(
-                    8,
-                    attach_sock,
-                    secret,
-                    rpc_sock,
-                    "INSERT INTO work_log VALUES (?, ?)",
-                    1,
-                ),
+            _start_and_join_workers(
+                ctx,
+                _worker_commit_rows,
+                [(8, attach_sock, secret, rpc_sock, "INSERT INTO work_log VALUES (?, ?)", 1)],
+                tracked_procs,
+                timeout=15.0,
             )
-            healthy_proc.start()
-            healthy_proc.join(timeout=15)
-            assert healthy_proc.exitcode == 0
 
             quarantined_lease = host.transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=100)
             host.transport.quarantine(quarantined_lease)
@@ -487,6 +523,7 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
             with host.transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=100):
                 pass
         finally:
+            _cleanup_processes(tracked_procs)
             rpc_server.stop()
             report = host.stop(timeout=5.0)
             assert report.completed is True
@@ -541,6 +578,7 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
         )
         rpc_server = _EngineRpcServer(rpc_sock, dialect_tag, pool_id, host.transport)
         inspector: Any = SyncPostgreSQLDriver(cfg) if engine == "postgres" else SyncMySQLDriver(cfg)
+        tracked_procs: list[Any] = []
         try:
             col_type = "INTEGER" if engine == "postgres" else "INT"
             inspector.execute(
@@ -551,10 +589,11 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
             rpc_server.start()
             ctx = mp.get_context("spawn")
             barrier = ctx.Barrier(4)
-            workers = [
-                ctx.Process(
-                    target=_worker_commit_rows,
-                    args=(
+            _start_and_join_workers(
+                ctx,
+                _worker_commit_rows,
+                [
+                    (
                         worker_idx,
                         attach_sock,
                         secret,
@@ -562,15 +601,12 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
                         insert_sql,
                         3,
                         barrier,
-                    ),
-                )
-                for worker_idx in range(4)
-            ]
-            for proc in workers:
-                proc.start()
-            for proc in workers:
-                proc.join(timeout=30)
-                assert proc.exitcode == 0
+                    )
+                    for worker_idx in range(4)
+                ],
+                tracked_procs,
+                timeout=30.0,
+            )
 
             assert rpc_server.peak_active_leases == 1
             if engine == "postgres":
@@ -598,10 +634,10 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
                     child_conn,
                 ),
             )
+            tracked_procs.append(killer_proc)
             killer_proc.start()
             child_conn.close()
-            dead_pid, _slot_idx, _gen = parent_conn.recv()
-            parent_conn.close()
+            dead_pid, _slot_idx, _gen = _recv_worker_coords(parent_conn)
 
             os.kill(dead_pid, signal.SIGKILL)
             killer_proc.join(timeout=5)
@@ -621,6 +657,7 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
             assert metrics.total_reclaimed >= 1
             assert metrics.total_disposed >= 1
         finally:
+            _cleanup_processes(tracked_procs)
             inspector.close()
             rpc_server.stop()
             host.stop(timeout=5.0)
