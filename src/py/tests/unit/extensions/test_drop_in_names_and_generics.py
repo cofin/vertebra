@@ -51,8 +51,7 @@ from vertebra.extensions.alchemy import (
     BrokerConfig,
     ChannelMessage,
     ObjectStoreBackend,
-    StatementCache,
-    SyncInMemoryBrokerTransport,
+    SyncSHMBrokerTransport,
     SyncSHMSessionBroker,
     create_alchemy_plugin,
     create_async_alchemy_config,
@@ -398,15 +397,17 @@ def test_alchemy_generic_configs_and_attachment_storage() -> None:
 
 
 def test_broker_transport_leasing_and_channel_message() -> None:
-    """Verify SyncInMemoryBrokerTransport, AsyncSHMBrokerTransport, lease TTL expiration, and ChannelMessage."""
+    """Verify SyncSHMBrokerTransport, AsyncSHMBrokerTransport, clean break removals, and ChannelMessage."""
+    assert not hasattr(alchemy_ext, "StatementCache")
+    assert not hasattr(alchemy_ext, "SyncInMemoryBrokerTransport")
+    assert not hasattr(alchemy_ext, "AsyncInMemoryBrokerTransport")
+
     msg = ChannelMessage(channel="events", payload=b"123", timestamp_ns=42)
     encoded = msgspec.msgpack.encode(msg)
     decoded = msgspec.msgpack.decode(encoded, type=ChannelMessage)
     assert decoded == msg
 
-    transport = SyncInMemoryBrokerTransport(
-        BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=0.05)
-    )
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=5.0))
     with transport.acquire() as lease1:
         assert lease1.is_overflow is False
         lease2 = transport.acquire()
@@ -532,30 +533,6 @@ async def test_shm_session_broker_concurrency_and_lock_safety() -> None:
 
     await async_broker.release()
     assert async_broker.in_use == 0
-
-
-def test_statement_cache_compilation() -> None:
-    """Verify StatementCache compiles ClauseElement-like objects and extracts parameter order."""
-    cache = StatementCache()
-
-    class FakeCompiled:
-        def __init__(self) -> None:
-            self.positiontup = ("user_id", "status")
-
-        def __str__(self) -> str:
-            return "SELECT id FROM users WHERE user_id = :user_id AND status = :status"
-
-    class FakeStatement:
-        def compile(self) -> FakeCompiled:
-            return FakeCompiled()
-
-    sql_text, params = cache.compile_and_encode(FakeStatement())
-    assert "SELECT id FROM users" in sql_text
-    assert params == ("user_id", "status")
-
-    raw_sql, empty_params = cache.compile_and_encode("SELECT 1")
-    assert raw_sql == "SELECT 1"
-    assert empty_params == ()
 
 
 @pytest.mark.anyio

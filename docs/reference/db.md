@@ -5,6 +5,7 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 | Category | Classes | Highlights |
 | --- | --- | --- |
 | **SQLSpec Adapters (Litestar)** | `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, `SQLiteAsyncConfig`, `OracleAsyncConfig`, `MSSQLAsyncConfig`, `DuckDBAsyncConfig`, `BigQueryAsyncConfig`, `SpannerAsyncConfig` | Canonical Litestar adapter configurations (`vertebra.extensions.sqlspec`) backed by engine drivers and connection leasing |
+| **Standalone PEP 249 DB-API** | `SyncDBAPIModule`, `AsyncDBAPIModule`, `SyncDBAPIConnection`, `AsyncDBAPIConnection` | Standalone synchronous and asynchronous DB-API 2.0 interfaces (`vertebra.db.dbapi`) with zero SQLAlchemy dependency |
 | **Registry, Contracts & Native Pipelines** | `DatabaseRegistry`, `provide_driver`, `BaseDatabaseConfig`, `SyncDatabaseDriver`, `AsyncDatabaseDriver`, `DatabaseError`, `NotFoundError`, `ArrowCursor` | Polymorphic URL scheme resolution, shared endpoint pool keys, uniform sync/async execution contracts, capability-based `driver.pipeline()` batching, and zero-copy Arrow IPC cursors |
 | **Capability Protocols** | `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, `EmbeddingPushdown` | `@runtime_checkable` structural protocols for query pipelining, pub/sub notifications, CDC streams, `SKIP LOCKED` job queues, and in-database embedding pushdown |
 | **Relational & OLAP Configs** | `PostgreSQLConfig`, `MySQLConfig`, `SQLiteConfig`, `OracleConfig`, `MSSQLConfig`, `DuckDBConfig`, `BigQueryConfig`, `SpannerConfig` | Pooler-aware statement caching, WAL/mmap pragmas, Oracle 26ai `VECTOR`/`OSON` & Cloud Wallets, SQL Server `@P1` placeholder rewriting, DuckDB Arrow streaming (`vertebra-core[duckdb]`), BigQuery Storage Read/Write v1 + Object Tables, and Cloud Spanner Multiplexed Sessions + `BatchWrite` |
@@ -68,6 +69,32 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
 ::: vertebra.db.arrow.ArrowCursor
     options:
       heading_level: 4
+      members: false
+      summary: false
+
+## Standalone PEP 249 DB-API (`vertebra.db.dbapi`)
+
+::: vertebra.db.dbapi.SyncDBAPIConnection
+    options:
+      heading_level: 3
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.AsyncDBAPIConnection
+    options:
+      heading_level: 3
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.SyncDBAPIModule
+    options:
+      heading_level: 3
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.AsyncDBAPIModule
+    options:
+      heading_level: 3
       members: false
       summary: false
 

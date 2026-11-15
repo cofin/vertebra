@@ -84,11 +84,13 @@ from vertebra.db.adapters.sqlite import (
     SQLiteConfig,
     SyncSQLiteDriver,
 )
+from vertebra.db.dbapi import (
+    SyncDBAPIConnection,
+    SyncDBAPICursor,
+)
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
     NullPool,
-    SyncDBAPIConnection,
-    SyncDBAPICursor,
     SyncDuckDBDialect,
     SyncMSSQLDialect,
 )

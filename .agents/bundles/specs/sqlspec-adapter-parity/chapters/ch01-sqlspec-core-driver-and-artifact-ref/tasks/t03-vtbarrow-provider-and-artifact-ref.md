@@ -16,6 +16,8 @@ depends_on:
 - sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t02
 files:
 - src/py/vertebra/extensions/sqlspec/provider.py
+- src/py/vertebra/extensions/sqlspec/proxy.py
+- src/py/vertebra/extensions/sqlspec/__init__.py
 - src/py/vertebra/storage/_store.py
 - src/py/vertebra/storage/__init__.py
 tests:
@@ -23,6 +25,8 @@ tests:
 - src/py/tests/unit/storage/test_storage_store.py
 read_set:
 - src/py/vertebra/extensions/sqlspec/provider.py
+- src/py/vertebra/extensions/sqlspec/proxy.py
+- src/py/vertebra/extensions/sqlspec/__init__.py
 - src/py/vertebra/storage/_store.py
 - src/py/vertebra/storage/__init__.py
 - src/py/vertebra/db/arrow.py
@@ -49,13 +53,14 @@ Replace `SharedArrowBuffer`/`SharedArrowTable` with Rust `VTBARROW` `ArrowCursor
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/provider.py` — `SQLSpecSyncProvider`, `SQLSpecAsyncProvider`, `BrokerRpcRequest`, `BrokerRpcResponse`.
+- `src/py/vertebra/extensions/sqlspec/provider.py` — `SQLSpecSyncProvider`, `SQLSpecAsyncProvider`, `BrokerRpcRequest`, `BrokerRpcResponse`, and legacy `SharedArrowBuffer`/`SharedArrowTable`.
+- `src/py/vertebra/extensions/sqlspec/proxy.py` & `__init__.py` — cutover call sites and package exports from `SharedArrowBuffer`/`SharedArrowTable` to `ArrowCursor`.
 - `src/py/vertebra/storage/_store.py` & `__init__.py` — `ObjectMeta`, `PutResult`, and public exports.
 - `src/py/vertebra/db/arrow.py` — `ArrowCursor` `VTBARROW` SHM framing.
 
 ## Contracts & Edge Cases
 
-- Replace `SharedArrowBuffer` and `SharedArrowTable` in `provider.py` with `ArrowCursor` (`VTBARROW` SHM frames whose unlink lifecycle is tied strictly to lease release), and remove `gc=False` from `BrokerRpcRequest` and `BrokerRpcResponse`.
+- Replace `SharedArrowBuffer` and `SharedArrowTable` across `provider.py`, `proxy.py`, and `extensions/sqlspec/__init__.py` with `ArrowCursor` (`VTBARROW` SHM frames whose unlink lifecycle is tied strictly to lease release), and remove `gc=False` from `BrokerRpcRequest` and `BrokerRpcResponse`.
 - Remove `gc=False` from `ObjectMeta` and `PutResult` in `storage/_store.py` (which hold container metadata dicts).
 - Define `class ArtifactReference(msgspec.Struct, frozen=True):` (`uri: str`, `version: int`, `content_type: str | None = None`, `size: int | None = None`, `updated: datetime | None = None`, `signed_url: str | None = None`) in `storage/_store.py` and export from `vertebra.storage` with zero SQL or SQLSpec imports.
 

@@ -1,15 +1,20 @@
 //! PyO3 bindings for shared-memory connection broker and statement cache.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyBytes};
+use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyCapsule, PyString};
 use vertebra_core::broker::{
-    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, ShmLeaseHeader, ShmLeaseTable,
-    ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
+    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PartitionStats as RsPartitionStats,
+    PoolPartitionSpec, ShmLeaseTable, ShmStatementCache,
+    StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
+use vertebra_db::{BROKER_ENGINE_CAPSULE_NAME, BrokerEngineCapsule, ForeignEngineCapsule};
 
 type PyChannelFrame<'py> = (String, Bound<'py, PyBytes>, u64, Option<String>);
 
@@ -23,18 +28,57 @@ fn extract_bytes_or_str(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
+/// Compute a deterministic unseeded XXH3-64 digest across Python worker processes.
+#[pyfunction]
+pub fn stable_hash64(data: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if let Ok(b) = data.cast::<PyBytes>() {
+        return Ok(vertebra_core::broker::stable_hash64(b.as_bytes()));
+    }
+    if let Ok(s) = data.cast::<PyString>() {
+        let utf8 = s.to_str()?;
+        return Ok(vertebra_core::broker::stable_hash64(utf8.as_bytes()));
+    }
+    if let Ok(ba) = data.cast::<PyByteArray>() {
+        // SAFETY: GIL or immutable borrow within Python scope holds `ba` alive cleanly.
+        let bytes = unsafe { ba.as_bytes() };
+        return Ok(vertebra_core::broker::stable_hash64(bytes));
+    }
+    if let Ok(buf) = PyBuffer::<u8>::get(data)
+        && let Ok(vec) = buf.to_vec(data.py())
+    {
+        return Ok(vertebra_core::broker::stable_hash64(&vec));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "stable_hash64 expects bytes, bytearray, memoryview, or str",
+    ))
+}
+
 fn broker_err_to_py(err: BrokerError) -> PyErr {
     match err {
-        BrokerError::InvalidCapacity => pyo3::exceptions::PyValueError::new_err(err.to_string()),
+        BrokerError::InvalidCapacity | BrokerError::InvalidPartition(_) => {
+            pyo3::exceptions::PyValueError::new_err(err.to_string())
+        }
         BrokerError::RegionTooSmall { .. } => {
             pyo3::exceptions::PyValueError::new_err(err.to_string())
         }
-        BrokerError::InvalidMagic(_) | BrokerError::UnsupportedAbi(_) => {
-            pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
+        BrokerError::PoolExhausted | BrokerError::InitTimeout => {
+            pyo3::exceptions::PyTimeoutError::new_err(err.to_string())
         }
-        BrokerError::PoolExhausted => pyo3::exceptions::PyTimeoutError::new_err(err.to_string()),
         BrokerError::LeaseNotFound => pyo3::exceptions::PyKeyError::new_err(err.to_string()),
-        BrokerError::GenerationMismatch => {
+        BrokerError::SegmentInUse { owner_pid } => pyo3::exceptions::PyFileExistsError::new_err(
+            format!("shared memory segment in use by owner_pid={owner_pid}"),
+        ),
+        BrokerError::NotFound => pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string()),
+        BrokerError::PermissionDenied => {
+            pyo3::exceptions::PyPermissionError::new_err(err.to_string())
+        }
+        BrokerError::SystemError(errno) => PyErr::from(std::io::Error::from_raw_os_error(errno)),
+        BrokerError::InvalidMagic(_)
+        | BrokerError::UnsupportedAbi(_)
+        | BrokerError::GenerationMismatch
+        | BrokerError::StaleGeneration
+        | BrokerError::InvalidState
+        | BrokerError::PartitionsExhausted => {
             pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
         }
     }
@@ -89,6 +133,8 @@ pub struct BrokerStats {
     #[pyo3(get)]
     pub waiting_threads: u32,
     #[pyo3(get)]
+    pub quarantined: u32,
+    #[pyo3(get)]
     pub total_acquired: u64,
     #[pyo3(get)]
     pub total_released: u64,
@@ -98,6 +144,10 @@ pub struct BrokerStats {
     pub total_timeouts: u64,
     #[pyo3(get)]
     pub total_reclaimed: u64,
+    #[pyo3(get)]
+    pub total_quarantined: u64,
+    #[pyo3(get)]
+    pub total_disposed: u64,
 }
 
 impl From<LeaseTableStats> for BrokerStats {
@@ -109,11 +159,286 @@ impl From<LeaseTableStats> for BrokerStats {
             primary_in_use: s.primary_in_use,
             overflow_in_use: s.overflow_in_use,
             waiting_threads: s.waiting_threads,
+            quarantined: s.quarantined,
             total_acquired: s.total_acquired,
             total_released: s.total_released,
             total_expired: s.total_expired,
             total_timeouts: s.total_timeouts,
             total_reclaimed: s.total_reclaimed,
+            total_quarantined: s.total_quarantined,
+            total_disposed: s.total_disposed,
+        }
+    }
+}
+
+#[pyclass(frozen, immutable_type, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionStats {
+    #[pyo3(get)]
+    pub pool_id: u16,
+    #[pyo3(get)]
+    pub pool_size: u32,
+    #[pyo3(get)]
+    pub max_overflow: u32,
+    #[pyo3(get)]
+    pub active_leases: u32,
+    #[pyo3(get)]
+    pub quarantined: u32,
+    #[pyo3(get)]
+    pub total_acquired: u64,
+    #[pyo3(get)]
+    pub total_released: u64,
+    #[pyo3(get)]
+    pub total_reclaimed: u64,
+    #[pyo3(get)]
+    pub total_quarantined: u64,
+    #[pyo3(get)]
+    pub total_disposed: u64,
+}
+
+impl From<RsPartitionStats> for PartitionStats {
+    fn from(s: RsPartitionStats) -> Self {
+        Self {
+            pool_id: s.pool_id,
+            pool_size: s.pool_size,
+            max_overflow: s.max_overflow,
+            active_leases: s.active_leases,
+            quarantined: s.quarantined,
+            total_acquired: s.total_acquired,
+            total_released: s.total_released,
+            total_reclaimed: s.total_reclaimed,
+            total_quarantined: s.total_quarantined,
+            total_disposed: s.total_disposed,
+        }
+    }
+}
+
+#[pyclass(frozen, immutable_type, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimedLease {
+    #[pyo3(get)]
+    pub slot_index: u32,
+    #[pyo3(get)]
+    pub generation: u64,
+    #[pyo3(get)]
+    pub pool_id: Option<u16>,
+}
+
+impl From<vertebra_core::broker::ReclaimedLease> for ReclaimedLease {
+    fn from(r: vertebra_core::broker::ReclaimedLease) -> Self {
+        Self {
+            slot_index: r.slot_index,
+            generation: r.generation,
+            pool_id: r.pool_id,
+        }
+    }
+}
+
+#[pymethods]
+impl ReclaimedLease {
+    fn __repr__(&self) -> String {
+        let pool_id = self
+            .pool_id
+            .map_or_else(|| "None".to_string(), |id| id.to_string());
+        format!(
+            "ReclaimedLease(slot_index={}, generation={}, pool_id={pool_id})",
+            self.slot_index, self.generation
+        )
+    }
+}
+
+fn extract_secret_bytes(secret: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = secret.extract::<Vec<u8>>() {
+        return Ok(bytes);
+    }
+    if let Ok(text) = secret.extract::<String>() {
+        return Ok(text.into_bytes());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "secret must be bytes or str",
+    ))
+}
+
+fn lease_quarantined_error(py: Python<'_>, slot_index: u32, generation: u64, msg: String) -> PyErr {
+    if let Ok(errors_mod) = py.import("vertebra.extensions.broker.errors")
+        && let Ok(exc_cls) = errors_mod.getattr("LeaseQuarantinedError")
+        && let Ok(inst) = exc_cls.call1((slot_index, generation, msg.as_str()))
+    {
+        return PyErr::from_value(inst);
+    }
+    pyo3::exceptions::PyRuntimeError::new_err(msg)
+}
+
+fn attach_err_to_py(py: Python<'_>, err: vertebra_core::broker_attach::AttachError) -> PyErr {
+    use vertebra_core::broker_attach::AttachError;
+    let msg = err.to_string();
+    match err {
+        AttachError::AuthFailed(_) | AttachError::InsecurePermissions(_) => {
+            if let Ok(errors_mod) = py.import("vertebra.extensions.broker.errors")
+                && let Ok(exc_cls) = errors_mod.getattr("BrokerAuthenticationError")
+                && let Ok(inst) = exc_cls.call1((msg.as_str(),))
+            {
+                return PyErr::from_value(inst);
+            }
+            pyo3::exceptions::PyPermissionError::new_err(msg)
+        }
+        AttachError::Timeout(_) => pyo3::exceptions::PyTimeoutError::new_err(msg),
+        AttachError::Protocol(_) | AttachError::Io(_) | AttachError::UnsupportedPlatform => {
+            pyo3::exceptions::PyRuntimeError::new_err(msg)
+        }
+    }
+}
+
+#[pyclass(immutable_type)]
+pub struct BrokerAttachServer {
+    server: std::sync::Mutex<Option<vertebra_core::broker_attach::BrokerAttachServer>>,
+    handle: std::sync::Mutex<Option<vertebra_core::broker_attach::AttachServerHandle>>,
+    socket_path: String,
+}
+
+#[pymethods]
+impl BrokerAttachServer {
+    #[new]
+    #[pyo3(signature = (socket_path, secret, shm_fd, shm_size = 0))]
+    pub fn new(
+        py: Python<'_>,
+        socket_path: &str,
+        secret: &Bound<'_, PyAny>,
+        shm_fd: i32,
+        shm_size: usize,
+    ) -> PyResult<Self> {
+        let secret_bytes = extract_secret_bytes(secret)?;
+        let path_owned = socket_path.to_string();
+        let bound = py
+            .detach(|| {
+                vertebra_core::broker_attach::BrokerAttachServer::bind(
+                    &path_owned,
+                    &secret_bytes,
+                    shm_fd,
+                    shm_size,
+                )
+            })
+            .map_err(|err| attach_err_to_py(py, err))?;
+        Ok(Self {
+            socket_path: bound.socket_path().to_string_lossy().into_owned(),
+            server: std::sync::Mutex::new(Some(bound)),
+            handle: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[pyo3(signature = (timeout_ms = 5000))]
+    pub fn serve_one(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<()> {
+        let dur = Duration::from_millis(timeout_ms);
+        let result = py.detach(|| {
+            let guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(srv) = guard.as_ref() else {
+                return Err(vertebra_core::broker_attach::AttachError::Protocol(
+                    "attach server already started in background".to_string(),
+                ));
+            };
+            srv.serve_one(dur)
+        });
+        result.map_err(|err| attach_err_to_py(py, err))
+    }
+
+    pub fn start(&self, py: Python<'_>) -> PyResult<()> {
+        let srv = {
+            let mut guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        let Some(srv) = srv else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "attach server already started",
+            ));
+        };
+        let handle = py
+            .detach(|| srv.start_background())
+            .map_err(|err| attach_err_to_py(py, err))?;
+        let mut h_guard = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *h_guard = Some(handle);
+        Ok(())
+    }
+
+    pub fn stop(&self, py: Python<'_>) {
+        let handle = {
+            let mut h_guard = self
+                .handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            h_guard.take()
+        };
+        let srv = {
+            let mut s_guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s_guard.take()
+        };
+        let socket_path = self.socket_path.clone();
+        py.detach(move || {
+            if let Some(h) = handle {
+                h.stop();
+            }
+            drop(srv);
+            let _ = std::fs::remove_file(socket_path);
+        });
+    }
+
+    #[getter]
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "BrokerAttachServer(socket_path={:?}, secret='[REDACTED]')",
+            self.socket_path
+        )
+    }
+}
+
+#[pyclass(frozen, immutable_type)]
+pub struct BrokerAttachClient;
+
+#[pymethods]
+impl BrokerAttachClient {
+    #[staticmethod]
+    #[pyo3(signature = (socket_path, secret, timeout_ms = 5000))]
+    pub fn attach(
+        py: Python<'_>,
+        socket_path: &str,
+        secret: &Bound<'_, PyAny>,
+        timeout_ms: u64,
+    ) -> PyResult<(i32, usize)> {
+        let secret_bytes = extract_secret_bytes(secret)?;
+        let path_owned = socket_path.to_string();
+        let dur = Duration::from_millis(timeout_ms);
+        let result = py.detach(|| {
+            vertebra_core::broker_attach::BrokerAttachClient::attach(
+                &path_owned,
+                &secret_bytes,
+                dur,
+            )
+        });
+        match result {
+            Ok((owned_fd, shm_size)) => {
+                #[cfg(unix)]
+                let raw_fd =
+                    vertebra_core::broker_attach::BrokerAttachClient::into_raw_fd(owned_fd);
+                #[cfg(not(unix))]
+                let raw_fd = owned_fd;
+                Ok((raw_fd, shm_size))
+            }
+            Err(err) => Err(attach_err_to_py(py, err)),
         }
     }
 }
@@ -129,15 +454,18 @@ impl LeaseBroker {
     #[new]
     #[pyo3(signature = (pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn new(pool_size: u32, max_overflow: u32, stmt_capacity: u32) -> PyResult<Self> {
+        let eff_stmt =
+            ShmLeaseTable::validate_capacities(pool_size, max_overflow, stmt_capacity, false)
+                .map_err(broker_err_to_py)?;
         let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, eff_stmt);
         let region = ShmRegion::create(req_size)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let table = ShmLeaseTable::init_in_region_with_statements(
             region,
             pool_size,
             max_overflow,
-            stmt_capacity,
+            eff_stmt,
         )
         .map_err(broker_err_to_py)?;
         Ok(Self {
@@ -148,31 +476,67 @@ impl LeaseBroker {
     #[staticmethod]
     #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn create_named(
+        py: Python<'_>,
         name: &str,
         pool_size: u32,
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> PyResult<Self> {
-        let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::create_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let table = ShmLeaseTable::init_in_region_with_statements(
-                region,
-                pool_size,
-                max_overflow,
-                stmt_capacity,
-            )
-            .map_err(broker_err_to_py)?;
+            let table = py
+                .detach(|| {
+                    ShmLeaseTable::create_with_statements(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?
+                .0;
             Ok(Self {
                 table: Arc::new(table),
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "named SHM regions only supported on Unix",
+            ))
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (name, pool_size=None, max_overflow=None, stmt_capacity=None))]
+    pub fn open_named(
+        py: Python<'_>,
+        name: &str,
+        pool_size: Option<u32>,
+        max_overflow: Option<u32>,
+        stmt_capacity: Option<u32>,
+    ) -> PyResult<Self> {
+        #[cfg(unix)]
+        {
+            let table = py
+                .detach(|| {
+                    ShmLeaseTable::open_with_statements_matching_opt(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?
+                .0;
+            Ok(Self {
+                table: Arc::new(table),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -181,39 +545,61 @@ impl LeaseBroker {
 
     #[staticmethod]
     #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
-    pub fn open_named(
+    pub fn open_or_create_named(
+        py: Python<'_>,
         name: &str,
         pool_size: u32,
         max_overflow: u32,
         stmt_capacity: u32,
-    ) -> PyResult<Self> {
-        let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
+    ) -> PyResult<(Self, bool)> {
         #[cfg(unix)]
         {
-            let mut region = ShmRegion::open_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            if region.len() >= std::mem::size_of::<ShmLeaseHeader>() {
-                let total_size =
-                    unsafe { (*(region.as_ptr() as *const ShmLeaseHeader)).total_size as usize };
-                if total_size > region.len() {
-                    drop(region);
-                    region = ShmRegion::open_named(name, total_size)
-                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-                }
-            }
-            let table = ShmLeaseTable::attach_region(region).map_err(broker_err_to_py)?;
-            Ok(Self {
-                table: Arc::new(table),
-            })
+            let (table, _, created) = py
+                .detach(|| {
+                    ShmLeaseTable::open_or_create_with_statements(
+                        name,
+                        pool_size,
+                        max_overflow,
+                        stmt_capacity,
+                    )
+                })
+                .map_err(broker_err_to_py)?;
+            Ok((
+                Self {
+                    table: Arc::new(table),
+                },
+                created,
+            ))
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, pool_size, max_overflow, stmt_capacity, req_size);
+            let _ = (py, name, pool_size, max_overflow, stmt_capacity);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
         }
+    }
+
+    #[staticmethod]
+    pub fn probe_owner_pid(name: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            vertebra_core::shm::probe_owner_pid(name)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            None
+        }
+    }
+
+    pub fn unlink(&self) -> bool {
+        self.table.unlink()
+    }
+
+    #[getter]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.table.owner_pid()
     }
 
     #[staticmethod]
@@ -386,12 +772,107 @@ impl LeaseBroker {
         }
     }
 
-    pub fn release(&self, slot_index: u32, generation: u64) -> PyResult<bool> {
+    #[pyo3(signature = (pool_key_hash, pool_size, max_overflow=0))]
+    pub fn register_partition(
+        &self,
+        pool_key_hash: u64,
+        pool_size: u32,
+        max_overflow: u32,
+    ) -> PyResult<u16> {
+        self.table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash,
+                pool_size,
+                max_overflow,
+            })
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn lookup_partition(&self, pool_key_hash: u64) -> Option<u16> {
+        self.table.lookup_partition(pool_key_hash)
+    }
+
+    pub fn partition_stats(&self, pool_key_hash: u64) -> Option<PartitionStats> {
+        self.table
+            .partition_stats(pool_key_hash)
+            .map(PartitionStats::from)
+    }
+
+    #[pyo3(signature = (partition, worker_pid, ttl_ns=0, bind_key_hash=0))]
+    pub fn try_acquire_in(
+        &self,
+        partition: u16,
+        worker_pid: u32,
+        ttl_ns: u64,
+        bind_key_hash: u64,
+    ) -> PyResult<Option<LeaseGrant>> {
+        self.table
+            .try_acquire_in(partition, worker_pid, ttl_ns, bind_key_hash)
+            .map(|opt| opt.map(LeaseGrant::from))
+            .map_err(broker_err_to_py)
+    }
+
+    #[pyo3(signature = (partition, worker_pid, ttl_ns=0, timeout_ms=5000, bind_key_hash=0))]
+    pub fn acquire_in(
+        &self,
+        py: Python<'_>,
+        partition: u16,
+        worker_pid: u32,
+        ttl_ns: u64,
+        timeout_ms: u64,
+        bind_key_hash: u64,
+    ) -> PyResult<Option<LeaseGrant>> {
+        let table = Arc::clone(&self.table);
+        let result = py.detach(move || {
+            table.acquire_in(
+                partition,
+                worker_pid,
+                ttl_ns,
+                Duration::from_millis(timeout_ms),
+                bind_key_hash,
+            )
+        });
+        match result {
+            Ok(grant) => Ok(Some(LeaseGrant::from(grant))),
+            Err(BrokerError::PoolExhausted) => Ok(None),
+            Err(err) => Err(broker_err_to_py(err)),
+        }
+    }
+
+    pub fn heartbeat(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .heartbeat(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn release(&self, py: Python<'_>, slot_index: u32, generation: u64) -> PyResult<bool> {
         match self.table.release(slot_index, generation) {
             Ok(()) => Ok(true),
             Err(BrokerError::LeaseNotFound) | Err(BrokerError::GenerationMismatch) => Ok(false),
+            Err(BrokerError::InvalidState) => Err(lease_quarantined_error(
+                py,
+                slot_index,
+                generation,
+                BrokerError::InvalidState.to_string(),
+            )),
             Err(err) => Err(broker_err_to_py(err)),
         }
+    }
+
+    pub fn quarantine(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .quarantine(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn dispose_quarantined(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .dispose_quarantined(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn quarantined_count(&self) -> u32 {
+        self.table.quarantined_count()
     }
 
     pub fn reap_expired(&self) -> u32 {
@@ -401,6 +882,16 @@ impl LeaseBroker {
 
     pub fn reclaim_worker(&self, worker_pid: u32) -> u32 {
         self.table.reclaim_worker(worker_pid)
+    }
+
+    pub fn reclaim_worker_leases(&self, py: Python<'_>, worker_pid: u32) -> Vec<ReclaimedLease> {
+        py.detach(|| {
+            self.table
+                .reclaim_worker_leases(worker_pid)
+                .into_iter()
+                .map(ReclaimedLease::from)
+                .collect()
+        })
     }
 
     pub fn stats(&self) -> BrokerStats {
@@ -531,12 +1022,26 @@ impl StatementCache {
 
     #[staticmethod]
     #[pyo3(signature = (name, capacity=512))]
-    pub fn create_named(name: &str, capacity: u32) -> PyResult<Self> {
+    pub fn create_named(py: Python<'_>, name: &str, capacity: u32) -> PyResult<Self> {
         let req_size = ShmStatementCache::required_size(capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::create_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let region = py
+                .detach(|| ShmRegion::create_named(name, req_size))
+                .map_err(|e| match e {
+                    vertebra_core::shm::ShmError::InUse { owner_pid } => {
+                        broker_err_to_py(BrokerError::SegmentInUse { owner_pid })
+                    }
+                    vertebra_core::shm::ShmError::InitTimeout => {
+                        broker_err_to_py(BrokerError::InitTimeout)
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::PermissionDenied =>
+                    {
+                        broker_err_to_py(BrokerError::PermissionDenied)
+                    }
+                    other => pyo3::exceptions::PyRuntimeError::new_err(other.to_string()),
+                })?;
             let cache =
                 ShmStatementCache::init_in_region(region, capacity).map_err(broker_err_to_py)?;
             Ok(Self {
@@ -545,7 +1050,7 @@ impl StatementCache {
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, capacity, req_size);
+            let _ = (py, name, capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
@@ -554,12 +1059,28 @@ impl StatementCache {
 
     #[staticmethod]
     #[pyo3(signature = (name, capacity=512))]
-    pub fn open_named(name: &str, capacity: u32) -> PyResult<Self> {
+    pub fn open_named(py: Python<'_>, name: &str, capacity: u32) -> PyResult<Self> {
         let req_size = ShmStatementCache::required_size(capacity);
         #[cfg(unix)]
         {
-            let region = ShmRegion::open_named(name, req_size)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let region = py
+                .detach(|| ShmRegion::open_named(name, req_size))
+                .map_err(|e| match e {
+                    vertebra_core::shm::ShmError::InUse { owner_pid } => {
+                        broker_err_to_py(BrokerError::SegmentInUse { owner_pid })
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        broker_err_to_py(BrokerError::NotFound)
+                    }
+                    vertebra_core::shm::ShmError::Sys(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::PermissionDenied =>
+                    {
+                        broker_err_to_py(BrokerError::PermissionDenied)
+                    }
+                    other => pyo3::exceptions::PyRuntimeError::new_err(other.to_string()),
+                })?;
             let cache =
                 ShmStatementCache::attach_region(region, capacity).map_err(broker_err_to_py)?;
             Ok(Self {
@@ -568,11 +1089,48 @@ impl StatementCache {
         }
         #[cfg(not(unix))]
         {
-            let _ = (name, capacity, req_size);
+            let _ = (py, name, capacity, req_size);
             Err(pyo3::exceptions::PyNotImplementedError::new_err(
                 "named SHM regions only supported on Unix",
             ))
         }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (name, capacity=512))]
+    pub fn open_or_create_named(
+        py: Python<'_>,
+        name: &str,
+        capacity: u32,
+    ) -> PyResult<(Self, bool)> {
+        #[cfg(unix)]
+        {
+            let (cache, created) = py
+                .detach(|| ShmStatementCache::open_or_create_named(name, capacity))
+                .map_err(broker_err_to_py)?;
+            Ok((
+                Self {
+                    cache: Arc::new(cache),
+                },
+                created,
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (py, name, capacity);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "named SHM regions only supported on Unix",
+            ))
+        }
+    }
+
+    pub fn unlink(&self) -> bool {
+        self.cache.unlink()
+    }
+
+    #[getter]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.cache.owner_pid()
     }
 
     pub fn lookup(&self, dialect_tag: u8, raw_sql: &[u8]) -> Option<StatementPlan> {
@@ -604,5 +1162,106 @@ impl StatementCache {
     #[getter]
     pub fn capacity(&self) -> u32 {
         self.cache.capacity()
+    }
+}
+
+static ENGINE_REGISTRY: OnceLock<RwLock<BTreeMap<u16, ForeignEngineCapsule>>> = OnceLock::new();
+
+fn engine_registry() -> &'static RwLock<BTreeMap<u16, ForeignEngineCapsule>> {
+    ENGINE_REGISTRY.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn lookup_engine_handle(dialect_tag: u16) -> PyResult<ForeignEngineCapsule> {
+    let guard = engine_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.get(&dialect_tag).cloned().ok_or_else(|| {
+        PyRuntimeError::new_err(format!(
+            "no broker engine registered for dialect_tag {dialect_tag}"
+        ))
+    })
+}
+
+/// Process-wide registry of imported `BrokerEngineCapsule` vtables keyed by dialect tag.
+#[pyclass(module = "vertebra._vertebra", frozen, immutable_type)]
+pub struct BrokerEngineRegistry;
+
+#[pymethods]
+impl BrokerEngineRegistry {
+    #[staticmethod]
+    #[pyo3(signature = (capsule))]
+    pub fn register(capsule: &Bound<'_, PyAny>) -> PyResult<u16> {
+        let cap = capsule.cast::<PyCapsule>().map_err(|_| {
+            PyTypeError::new_err("capsule must be a vertebra.BrokerEngineCapsule PyCapsule")
+        })?;
+        let ptr = cap
+            .pointer_checked(Some(BROKER_ENGINE_CAPSULE_NAME))
+            .map_err(|_| {
+                PyTypeError::new_err(
+                    "PyCapsule name mismatch; expected vertebra.BrokerEngineCapsule",
+                )
+            })?
+            .as_ptr()
+            .cast::<BrokerEngineCapsule>();
+        // SAFETY: `pointer_checked` verified `BROKER_ENGINE_CAPSULE_NAME` on a live `PyCapsule`
+        // holding a `BrokerEngineCapsule` value initialized by `new_broker_engine_pycapsule`.
+        let handle = unsafe { ForeignEngineCapsule::from_capsule_ptr(ptr) }
+            .map_err(PyRuntimeError::new_err)?;
+        let tag = handle.dialect_tag();
+        let replaced = {
+            let mut guard = engine_registry()
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.insert(tag, handle)
+        };
+        drop(replaced);
+        Ok(tag)
+    }
+
+    #[staticmethod]
+    pub fn registered_tags() -> Vec<u16> {
+        let guard = engine_registry()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.keys().copied().collect()
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, sql))]
+    pub fn normalize(py: Python<'_>, dialect_tag: u16, sql: &str) -> PyResult<(String, usize)> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.normalize(sql))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, dsn, max_size))]
+    pub fn open_pool(py: Python<'_>, dialect_tag: u16, dsn: &str, max_size: u32) -> PyResult<u64> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.open_pool(dsn, max_size))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, pool_id, frame))]
+    pub fn execute<'py>(
+        py: Python<'py>,
+        dialect_tag: u16,
+        pool_id: u64,
+        frame: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        let response = py
+            .detach(|| handle.execute(pool_id, frame))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyBytes::new(py, &response))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (dialect_tag, pool_id))]
+    pub fn close_pool(py: Python<'_>, dialect_tag: u16, pool_id: u64) -> PyResult<()> {
+        let handle = lookup_engine_handle(dialect_tag)?;
+        py.detach(|| handle.close_pool(pool_id));
+        Ok(())
     }
 }

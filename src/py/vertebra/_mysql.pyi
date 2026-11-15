@@ -16,6 +16,7 @@ __all__ = [
     "MySQLWireTestServer",
     "SyncMySQLClient",
     "__version__",
+    "broker_engine_capsule",
     "compute_caching_sha2_scramble",
     "compute_mysql_native_scramble",
     "encrypt_caching_sha2_rsa_password",
@@ -23,6 +24,7 @@ __all__ = [
     "next_mysql_shm_name",
 ]
 
+def broker_engine_capsule() -> object: ...
 def compute_caching_sha2_scramble(password: bytes, nonce: bytes) -> bytes: ...
 def compute_mysql_native_scramble(password: bytes, nonce: bytes) -> bytes: ...
 def encrypt_caching_sha2_rsa_password(password: bytes, nonce: bytes, public_key_pem: str) -> bytes: ...

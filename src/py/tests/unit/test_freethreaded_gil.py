@@ -67,6 +67,8 @@ _IMMUTABLE_PYCLASSES: tuple[tuple[str, str], ...] = (
             "RsgiScope",
             "RsgiHttpProtocol",
             "LeaseBroker",
+            "ReclaimedLease",
+            "PartitionStats",
             "CloudSQLDialer",
             "ArrowCursor",
         )

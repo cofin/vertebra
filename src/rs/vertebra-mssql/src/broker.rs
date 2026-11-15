@@ -3,23 +3,38 @@
 //! Coordinates cross-worker connection slot leases (`ShmLeaseTable`) and caches `@P1`-rewritten
 //! SQL plans in `ShmStatementCache` under [`DIALECT_TAG_MSSQL`] (`5`).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub use vertebra_core::broker::DIALECT_TAG_MSSQL;
 use vertebra_core::broker::{
     LeaseGrant, LeaseTableStats, ShmLeaseTable, ShmStatementCache, StatementCacheStats,
 };
+use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::shm::ShmRegion;
-use vertebra_db::rewrite_mssql_placeholders;
+use vertebra_core::text::classify_mssql_statement;
+use vertebra_db::py_async::block_on_db;
+use vertebra_db::{
+    BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar,
+    decode_dbrpc_request_frame, encode_dbrpc_response_frame, rewrite_mssql_placeholders,
+};
 
+use crate::client::MssqlClient;
+use crate::codecs::MssqlCellValue;
+use crate::config::MssqlClientConfig;
 use crate::errors::MssqlError;
+use crate::params::MssqlParam;
 
-/// Shared-memory broker backend managing MSSQL connection leases and `@P1` statement plans.
+/// Shared-memory broker backend managing MSSQL connection leases, `@P1` statement plans, and
+/// broker-hosted TDS connection pools.
 #[derive(Clone)]
 pub struct MssqlBrokerBackend {
-    lease_table: Arc<ShmLeaseTable>,
+    lease_table: Option<Arc<ShmLeaseTable>>,
     stmt_cache: Option<Arc<ShmStatementCache>>,
+    pools: Arc<RwLock<HashMap<u64, Arc<MssqlClient>>>>,
+    next_pool_id: Arc<AtomicU64>,
 }
 
 impl MssqlBrokerBackend {
@@ -39,8 +54,28 @@ impl MssqlBrokerBackend {
         )?;
         let cache = table.statement_cache().map(Arc::new);
         Ok(Self {
-            lease_table: Arc::new(table),
+            lease_table: Some(Arc::new(table)),
             stmt_cache: cache,
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            next_pool_id: Arc::new(AtomicU64::new(1)),
+        })
+    }
+
+    /// Construct a lightweight capsule backend that manages broker-hosted TDS pools lazily without
+    /// eagerly allocating a client-side `ShmLeaseTable`.
+    #[must_use]
+    pub fn new_capsule_backend() -> Self {
+        Self {
+            lease_table: None,
+            stmt_cache: None,
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            next_pool_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn require_lease_table(&self) -> Result<&Arc<ShmLeaseTable>, MssqlError> {
+        self.lease_table.as_ref().ok_or_else(|| {
+            MssqlError::config("MssqlBrokerBackend capsule instance has no client ShmLeaseTable")
         })
     }
 
@@ -51,14 +86,14 @@ impl MssqlBrokerBackend {
         ttl_ns: u64,
         timeout: Duration,
     ) -> Result<LeaseGrant, MssqlError> {
-        self.lease_table
+        self.require_lease_table()?
             .acquire(worker_pid, ttl_ns, timeout, u64::from(DIALECT_TAG_MSSQL))
             .map_err(MssqlError::from)
     }
 
     /// Release a previously acquired connection lease.
     pub fn release_lease(&self, grant: LeaseGrant) -> Result<(), MssqlError> {
-        self.lease_table
+        self.require_lease_table()?
             .release(grant.slot_index, grant.generation)
             .map_err(MssqlError::from)
     }
@@ -91,7 +126,25 @@ impl MssqlBrokerBackend {
 
     /// Return current lease table telemetry counters.
     pub fn lease_stats(&self) -> LeaseTableStats {
-        self.lease_table.stats()
+        match self.lease_table.as_ref() {
+            Some(table) => table.stats(),
+            None => LeaseTableStats {
+                pool_size: 0,
+                max_overflow: 0,
+                active_leases: 0,
+                primary_in_use: 0,
+                overflow_in_use: 0,
+                waiting_threads: 0,
+                quarantined: 0,
+                total_acquired: 0,
+                total_released: 0,
+                total_expired: 0,
+                total_timeouts: 0,
+                total_reclaimed: 0,
+                total_quarantined: 0,
+                total_disposed: 0,
+            },
+        }
     }
 
     /// Return current statement cache telemetry counters, if statement caching is enabled.
@@ -107,6 +160,203 @@ impl MssqlBrokerBackend {
     /// Return the broker dialect name (`"mssql"`).
     pub const fn dialect(&self) -> &'static str {
         "mssql"
+    }
+}
+
+fn scalar_to_mssql_param(scalar: &DbRpcScalar) -> MssqlParam {
+    match scalar {
+        DbRpcScalar::Null => MssqlParam::null(),
+        DbRpcScalar::Bool(b) => MssqlParam::Bool(*b),
+        DbRpcScalar::Int(v) => MssqlParam::I64(*v),
+        DbRpcScalar::UInt(v) => match i64::try_from(*v) {
+            Ok(i) => MssqlParam::I64(i),
+            Err(_) => MssqlParam::String(v.to_string()),
+        },
+        DbRpcScalar::Float(v) => MssqlParam::F64(*v),
+        DbRpcScalar::Str(s) => MssqlParam::String(s.clone()),
+        DbRpcScalar::Bytes(b) => MssqlParam::Bytes(b.clone()),
+    }
+}
+
+fn mssql_cell_to_scalar(cell: &MssqlCellValue) -> DbRpcScalar {
+    match cell {
+        MssqlCellValue::Null => DbRpcScalar::Null,
+        MssqlCellValue::Bool(b) => DbRpcScalar::Bool(*b),
+        MssqlCellValue::Int64(v) => DbRpcScalar::Int(*v),
+        MssqlCellValue::Float64(v) => DbRpcScalar::Float(*v),
+        MssqlCellValue::String(s) | MssqlCellValue::Xml(s) => DbRpcScalar::Str(s.clone()),
+        MssqlCellValue::Bytes(b) => DbRpcScalar::Bytes(b.clone()),
+        MssqlCellValue::Decimal(d) => DbRpcScalar::Str(d.to_string()),
+        MssqlCellValue::Uuid(u) => DbRpcScalar::Str(u.to_string()),
+        MssqlCellValue::Date(d) => DbRpcScalar::Str(d.to_string()),
+        MssqlCellValue::Time(t) => DbRpcScalar::Str(t.to_string()),
+        MssqlCellValue::DateTime(dt) => DbRpcScalar::Str(dt.to_string()),
+        MssqlCellValue::DateTimeOffset(dto) => DbRpcScalar::Str(dto.to_rfc3339()),
+    }
+}
+
+fn mssql_sql_returns_rows(sql: &str) -> bool {
+    classify_mssql_statement(sql).0
+}
+
+fn encode_mssql_err(request_id: u64, err: &MssqlError) -> Vec<u8> {
+    encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+        request_id,
+        "MssqlError",
+        err.to_string(),
+    ))
+}
+
+impl BrokerEngineBackend for MssqlBrokerBackend {
+    fn dialect_tag(&self) -> u16 {
+        DIALECT_TAG_MSSQL
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "mssql"
+    }
+
+    fn normalize_statement(&self, sql: &str) -> (String, usize) {
+        self.resolve_or_rewrite_sql(sql)
+    }
+}
+
+impl BrokerPoolBackend for MssqlBrokerBackend {
+    fn open_pool(&self, dsn: &str, max_size: u32) -> Result<u64, String> {
+        if max_size == 0 {
+            return Err("MSSQL pool max_size must be >= 1".to_string());
+        }
+        let mut cfg = MssqlClientConfig::from_dsn(dsn).map_err(|e| e.to_string())?;
+        cfg.pool_size = max_size;
+        let client = Arc::new(MssqlClient::new(cfg).map_err(|e| e.to_string())?);
+        let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self
+            .pools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(pool_id, client);
+        Ok(pool_id)
+    }
+
+    fn execute(&self, pool_id: u64, frame: &[u8]) -> Result<Vec<u8>, String> {
+        let client = {
+            let guard = self
+                .pools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.get(&pool_id).cloned()
+        }
+        .ok_or_else(|| format!("unknown pool id {pool_id}"))?;
+
+        let req = decode_dbrpc_request_frame(frame)?;
+        let req_id = req.request_id;
+        match req.op {
+            DbRpcOp::Execute => {
+                let raw_sql = req
+                    .sql
+                    .ok_or_else(|| "DBRPC Execute frame missing SQL".to_string())?;
+                let params: Vec<MssqlParam> =
+                    req.params.iter().map(scalar_to_mssql_param).collect();
+                if mssql_sql_returns_rows(&raw_sql) {
+                    match block_on_db(async move { client.query(raw_sql, params).await }) {
+                        Ok(res) => {
+                            let cols = res.columns.into_iter().map(|c| c.name).collect();
+                            let rows = res
+                                .rows
+                                .iter()
+                                .map(|r| r.iter().map(mssql_cell_to_scalar).collect())
+                                .collect();
+                            Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::ok_rows(
+                                req_id,
+                                i64::try_from(res.rows_affected).unwrap_or(i64::MAX),
+                                cols,
+                                rows,
+                            )))
+                        }
+                        Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                    }
+                } else {
+                    match block_on_db(async move { client.execute(raw_sql, params).await }) {
+                        Ok(affected) => Ok(encode_dbrpc_response_frame(
+                            &DbRpcEncodedResponse::ok_count(
+                                req_id,
+                                i64::try_from(affected).unwrap_or(i64::MAX),
+                                None,
+                            ),
+                        )),
+                        Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                    }
+                }
+            }
+            DbRpcOp::Begin => {
+                match block_on_db(async move { client.begin_transaction(None).await }) {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Commit => {
+                match block_on_db(async move { client.commit_transaction().await }) {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Rollback => {
+                let res = if let Some(sp) = req.savepoint {
+                    block_on_db(async move { client.rollback_to_savepoint(sp).await })
+                } else {
+                    block_on_db(async move { client.rollback_transaction().await })
+                };
+                match res {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Savepoint => {
+                let sp = req
+                    .savepoint
+                    .ok_or_else(|| "DBRPC Savepoint frame missing savepoint name".to_string())?;
+                match block_on_db(async move { client.savepoint(sp).await }) {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                    )),
+                    Err(err) => Ok(encode_mssql_err(req_id, &err)),
+                }
+            }
+            DbRpcOp::Cancel => match block_on_db(async move { client.cancel().await }) {
+                Ok(()) => Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                )),
+                Err(err) => Ok(encode_mssql_err(req_id, &err)),
+            },
+            DbRpcOp::Close => {
+                self.close_pool(pool_id);
+                Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                ))
+            }
+            other => Err(format!(
+                "unsupported DBRPC op {other:?} in MSSQL broker pool"
+            )),
+        }
+    }
+
+    fn close_pool(&self, pool_id: u64) {
+        let removed = {
+            let mut guard = self
+                .pools
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.remove(&pool_id)
+        };
+        if let Some(client) = removed {
+            let _ = block_on_db(async move { client.close().await });
+        }
     }
 }
 
@@ -140,5 +390,20 @@ mod tests {
         assert_eq!(broker.lease_stats().active_leases, 1);
         broker.release_lease(grant).expect("release lease");
         assert_eq!(broker.lease_stats().active_leases, 0);
+    }
+
+    #[test]
+    fn mssql_sql_returns_rows_handles_comments_quotes_and_output() {
+        assert!(mssql_sql_returns_rows("/* lead */ SELECT 1"));
+        assert!(mssql_sql_returns_rows(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+        assert!(mssql_sql_returns_rows(
+            "INSERT INTO t OUTPUT INSERTED.id VALUES (1)"
+        ));
+        assert!(!mssql_sql_returns_rows("INSERT INTO t VALUES (' OUTPUT ')"));
+        assert!(!mssql_sql_returns_rows(
+            "UPDATE t SET t.output = 1 WHERE t.output = 2"
+        ));
     }
 }

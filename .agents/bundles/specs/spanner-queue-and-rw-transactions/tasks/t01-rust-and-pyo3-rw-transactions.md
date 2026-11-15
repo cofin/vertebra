@@ -50,37 +50,30 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement interactive multi-statement `ReadWrite` transaction session handles in `src/rs/vertebra-spanner/src/{client,errors}.rs` per [`../spec.md`](spec.md) [^spn-client-rs] [^spn-errors-rs].
-
-Expose `@final SyncSpannerReadWriteTransaction` and `@final AsyncSpannerReadWriteTransaction` plus `begin_read_write_transaction` on `SyncSpannerClient` and `AsyncSpannerClient` in `src/rs/vertebra-spanner/src/lib.rs` and `src/py/vertebra/_spanner.pyi` per [`../spec.md`](spec.md) [^spn-lib-rs] [^spn-pyi].
+Implement interactive multi-statement `ReadWrite` transaction session handles in `src/rs/vertebra-spanner/src/{client,errors}.rs` and expose `@final SyncSpannerReadWriteTransaction` and `@final AsyncSpannerReadWriteTransaction` plus `begin_read_write_transaction` on `SyncSpannerClient` and `AsyncSpannerClient` in `src/rs/vertebra-spanner/src/lib.rs` and `src/py/vertebra/_spanner.pyi` per [`../spec.md`](../spec.md) [^spn-client-rs] [^spn-errors-rs] [^spn-lib-rs] [^spn-pyi].
 
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-spanner/src/client.rs` — `SpannerClient` multiplexed session lifecycle and `read_write_transaction()` usage.
-- `src/rs/vertebra-spanner/src/errors.rs` — `SpannerAbortedError` (`code = 10`, `retry_delay_ms` from `google.rpc.RetryInfo`).
-
+- `src/rs/vertebra-spanner/src/codec.rs` — query/DML parameter serialization and row/mutation JSON codecs.
+- `src/rs/vertebra-spanner/src/errors.rs` — `SpannerError` -> `SpannerAbortedError` (`Code::Aborted`, `retry_delay_ms`) exception mapping.
 - `src/rs/vertebra-spanner/src/lib.rs` — `block_on_db` sync execution and `spawn_rust_db_task_with_attr` Tokio completion bridge.
 - `src/py/vertebra/_spanner.pyi` — `@final` stub declarations and `__all__`.
 
 ## Contracts & Edge Cases
 
-- Implement `SpannerReadWriteTx` acquiring an interactive `ReadWrite` transaction (`BeginTransaction` / inline begin with optional `multiplexed_session_previous_transaction_id` for wound-wait lock priority and `transaction_tag`).
-- Route `query`, `execute_dml`, and `execute_batch_dml` over the pinned `TransactionSelector::Id` with monotonic 1-based `seqno`, `x-goog-spanner-route-to-leader: true`, `ExecuteBatchDmlResponse.status` inspection, and highest-`seq_num` `MultiplexedSessionPrecommitToken` tracking.
-- Implement `commit(mutations)` (attaching latest `precommit_token`, `max_commit_delay_ms`, `exclude_txn_from_change_streams`, and replaying `CommitResponse.MultiplexedSessionRetry` with empty mutations) and `rollback()`, surfacing `SpannerAbortedError` with server `retry_delay_ms`.
-
-- Expose `begin_read_write_transaction(transaction_tag=None, previous_transaction_id=None, exclude_txn_from_change_streams=False, max_commit_delay_ms=None)` on `SyncSpannerClient` and `AsyncSpannerClient`.
-- Expose `query`, `execute_dml`, `execute_batch_dml`, `commit(mutations_json=None)`, `rollback()`, and `transaction_id: bytes` on `SyncSpannerReadWriteTransaction` and `AsyncSpannerReadWriteTransaction`, detaching the GIL across every RPC and supporting 3.14t/3.15t (`gil_used = false`).
+- Implement `SpannerReadWriteTx` acquiring an interactive `ReadWrite` transaction (`BeginTransaction` / inline begin with optional `multiplexed_session_previous_transaction_id` for wound-wait lock priority and `transaction_tag`), routing `query`, `execute_dml`, and `execute_batch_dml` over the pinned `TransactionSelector::Id` with monotonic 1-based `seqno`, `x-goog-spanner-route-to-leader: true`, `ExecuteBatchDmlResponse.status` inspection, and highest-`seq_num` `MultiplexedSessionPrecommitToken` tracking.
+- Implement `commit(mutations)` (attaching latest `precommit_token`, `max_commit_delay_ms`, `exclude_txn_from_change_streams`, and replaying `CommitResponse.MultiplexedSessionRetry` with empty mutations) and `rollback()`, surfacing `SpannerAbortedError` with server `retry_delay_ms` through existing `errors.rs::spanner_error_to_py`.
+- Expose `begin_read_write_transaction(transaction_tag=None, previous_transaction_id=None, exclude_txn_from_change_streams=False, max_commit_delay_ms=None)` on `SyncSpannerClient` and `AsyncSpannerClient`, and expose `query`, `execute_dml`, `execute_batch_dml`, `commit(mutations_json=None)`, `rollback()`, and `transaction_id: bytes` on `SyncSpannerReadWriteTransaction` and `AsyncSpannerReadWriteTransaction` (detaching the GIL across every RPC with `gil_used = false`).
 
 ## Test Matrix
 
-- Rust stub/unit tests (`Spanner::from_stub`) verifying `BeginTransaction` -> `ExecuteStreamingSql` (`SELECT ... FOR UPDATE`) -> `ExecuteSql` (`UPDATE`) -> `Commit` carries one `transaction_id`, increments `seqno` `1, 2`, forwards highest `precommit_token`, replays `MultiplexedSessionRetry`, and extracts `ABORTED` `retry_delay_ms`.
-
-- Python unit tests + `uv run --no-sync python -m mypy.stubtest vertebra._spanner` verifying exact stub parity and GIL-detached execution.
+- Rust stub/unit tests (`Spanner::from_stub`) verifying `BeginTransaction` -> `ExecuteStreamingSql` (`SELECT ... FOR UPDATE`) -> `ExecuteSql` (`UPDATE`) -> `Commit` carries one `transaction_id`, increments `seqno` `1, 2`, forwards highest `precommit_token`, replays `MultiplexedSessionRetry`, and extracts `ABORTED` `retry_delay_ms`, alongside Python unit tests and `mypy.stubtest vertebra._spanner`.
 
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-spanner && uv run --no-sync ruff check src/py/vertebra/_spanner.pyi src/py/vertebra/db/adapters/spanner && uv run --no-sync mypy src/py/vertebra/db/adapters/spanner && uv run --no-sync pytest src/py/tests/unit/db/test_spanner.py
+cargo test --manifest-path src/rs/Cargo.toml -p vertebra-spanner && uv run --no-sync maturin develop --uv --manifest-path src/rs/vertebra-spanner/Cargo.toml && uv run --no-sync ruff check src/py/vertebra/_spanner.pyi src/py/vertebra/db/adapters/spanner && uv run --no-sync mypy src/py/vertebra/db/adapters/spanner && uv run --no-sync python -m mypy.stubtest vertebra._spanner && uv run --no-sync pytest src/py/tests/unit/db/test_spanner.py
 ```
 
 ## Acceptance Criteria

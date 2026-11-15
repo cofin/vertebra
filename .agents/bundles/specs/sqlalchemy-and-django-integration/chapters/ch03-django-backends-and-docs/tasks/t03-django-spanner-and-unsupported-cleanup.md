@@ -25,10 +25,10 @@ tests:
 read_set:
 - src/py/vertebra/extensions/django/db/backends/spanner/base.py
 - src/py/vertebra/db/adapters/spanner/config.py
-- src/py/vertebra/db/adapters/spanner/driver.py
 - src/py/vertebra/utils/module_loader.py
 - src/py/vertebra/extensions/django/db/backends/__init__.py
 - src/py/vertebra/extensions/django/db/backends/bigquery/base.py
+- src/py/vertebra/extensions/django/plugin.py
 estimated_loc: 220
 tags:
 - django
@@ -57,33 +57,27 @@ sources:
 
 ## Objective & Scope Boundary
 
-Rebase `extensions/django/db/backends/spanner/base.py::DatabaseWrapper` onto `django_spanner.base.DatabaseWrapper` (`django-google-spanner`) over `vertebra.db.dbapi` per [`../spec.md`](../spec.md) [^dj-spanner] [^spn-config].
-
-Delete unsupported `extensions/django/db/backends/{bigquery,duckdb,mssql}/` packages, strip vendor dispatch from `backends/__init__.py`, and fail loud in `extensions/django/plugin.py` per [`../spec.md`](../spec.md) [^dj-backends] [^dj-bq] [^dj-plugin].
+Rebase `extensions/django/db/backends/spanner/base.py::DatabaseWrapper` onto `django_spanner.base.DatabaseWrapper` (`django-google-spanner`) over `vertebra.db.dbapi`, delete unsupported `extensions/django/db/backends/{bigquery,duckdb,mssql}/` packages, strip vendor dispatch from `backends/__init__.py`, and fail loud in `extensions/django/plugin.py` per [`../spec.md`](../spec.md) [^dj-spanner] [^spn-config] [^dj-backends] [^dj-bq] [^dj-plugin].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/django/db/backends/spanner/base.py` — current stub backend.
-- `src/py/vertebra/db/adapters/spanner/config.py` & `driver.py` — `SpannerConfig` (`PROJECT`, `INSTANCE`, `NAME`, `OPTIONS`) and native `SyncSpannerDriver`.
+- `src/py/vertebra/db/adapters/spanner/config.py` — `SpannerConfig` (`PROJECT`, `INSTANCE`, `NAME`, `OPTIONS`) mapped into `SyncDBAPIModule`.
 - `src/py/vertebra/utils/module_loader.py` — `ensure_module` optional dependency guard.
-
-- `src/py/vertebra/extensions/django/db/backends/{bigquery,duckdb,mssql}/` — six files (`__init__.py`, `base.py`) to delete via `git rm`.
 - `src/py/vertebra/extensions/django/db/backends/__init__.py` — remove `_build_native_config` vendor dispatch and fallback backend.
+- `src/py/vertebra/extensions/django/db/backends/bigquery/base.py` — representative unsupported stub package (`{bigquery,duckdb,mssql}/{__init__,base}.py` slated for `git rm`).
 - `src/py/vertebra/extensions/django/plugin.py` — `DATABASES` engine validation.
 
 ## Contracts & Edge Cases
 
 - Guard `django_spanner.base` via `ensure_module('django_spanner', package='vertebra-core[django-spanner]', extra='django-spanner')` -> `MissingDependencyError`.
-- `DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper`, sets `Database = SyncDBAPIModule`, constructs `SpannerConfig` locally in `get_connection_params()` from Django `DATABASES` (`PROJECT`, `INSTANCE`, `NAME`, `OPTIONS`), and opens `SyncDBAPIConnection` backed by `vertebra._spanner` instead of `google.cloud.spanner_dbapi`.
-
+- `DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper`, sets `Database = SyncDBAPIModule`, constructs `SpannerConfig` locally in `get_connection_params()` from Django `DATABASES` (`PROJECT`, `INSTANCE`, `NAME`, `OPTIONS`), preserves bit-reversed sequence, `INTERLEAVE IN PARENT`, and schema editor support, and opens `SyncDBAPIConnection` backed by `vertebra._spanner` instead of `google.cloud.spanner_dbapi`.
 - Delete `src/py/vertebra/extensions/django/db/backends/{bigquery,duckdb,mssql}/{__init__,base}.py` completely (BigQuery has no Django DB backend; DuckDB and MSSQL are not built-in Django backends).
-- `backends/__init__.py` exports only the 5 supported engine paths (`postgresql`, `mysql`, `oracle`, `sqlite3`, `spanner`) and shared DB-API cursor helpers with zero vendor dispatch.
-- `extensions/django/plugin.py` raises `ImproperConfigurationError` with guidance toward SQLSpec or SQLAlchemy when `bigquery`, `duckdb`, or `mssql` is configured in Django `DATABASES`.
+- `backends/__init__.py` exports only the 5 supported engine paths (`postgresql`, `mysql`, `oracle`, `sqlite3`, `spanner`) and shared DB-API cursor helpers with zero vendor dispatch, and `extensions/django/plugin.py` raises `ImproperConfigurationError` with guidance toward SQLSpec or SQLAlchemy when `bigquery`, `duckdb`, or `mssql` is configured in Django `DATABASES`.
 
 ## Test Matrix
 
 - Unit tests verifying `MissingDependencyError` when `django_spanner` is uninstalled and verifying `get_connection_params` / `get_new_connection` swap in `SyncDBAPIModule` (`SyncDBAPIConnection`) with schema DDL routing to `update_ddl`.
-
 - Parametrized negative tests asserting `bigquery`, `duckdb`, and `mssql` Django `DATABASES` entries raise `ImproperConfigurationError` and deleted backend modules raise `ModuleNotFoundError`.
 
 ## Verification

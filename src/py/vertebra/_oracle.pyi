@@ -598,4 +598,7 @@ __all__ = [
     "SyncOracleClient",
     "SyncOraclePool",
     "__version__",
+    "broker_engine_capsule",
 ]
+
+def broker_engine_capsule() -> object: ...

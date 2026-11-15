@@ -29,9 +29,9 @@ read_set:
 - src/py/vertebra/extensions/sqlspec/_driver.py
 - src/py/vertebra/db/adapters/bigquery/driver.py
 - src/py/vertebra/db/adapters/bigquery/core.py
+- src/py/vertebra/db/adapters/bigquery/object_tables.py
 - src/py/vertebra/extensions/sqlspec/bigquery.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
 - sqlspec
@@ -60,41 +60,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{core,driver,data_dictionary}.py` (`BigQuerySyncDriver`, `BigQueryAsyncDriver`, `BigQuerySyncDataDictionary`, `BigQueryAsyncDataDictionary`) per [`../spec.md`](../spec.md) [^bigquery-drv] [^bigquery-core] [^sqlspec-bq].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{adk,events,litestar}.py` over upstream SDK-free base classes per [`../spec.md`](../spec.md) [^bigquery-drv] [^storage-art] [^sqlspec-bq].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{config,__init__}.py` declaring `adapter_name = 'vertebra_bigquery'` and explicit store class attributes per [`../spec.md`](../spec.md) [^bigquery-drv] [^sqlspec-bq].
+Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` SQLSpec adapter package (`BigQuerySyncDriver`/`BigQueryAsyncDriver`, `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary`, SDK-free ADK/Events/Litestar stores, and `BigQuerySyncConfig`/`BigQueryAsyncConfig`) per [`../spec.md`](../spec.md) [^bigquery-drv] [^bigquery-core] [^sqlspec-bq] [^storage-art].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template.
-- `src/py/vertebra/db/adapters/bigquery/driver.py` & `src/py/vertebra/db/adapters/bigquery/core.py` — native Google BigQuery execution and parameter encoding.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py` & `src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py` — Google BigQuery SQLSpec session and dialect helpers.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` contract.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/bigquery/adk.py`, `src/py/vertebra/extensions/sqlspec/adapters/bigquery/events.py`, `src/py/vertebra/extensions/sqlspec/adapters/bigquery/litestar.py` — adapter driver and store classes.
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — shared config lifecycle and refcounted pool close.
+- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
+- `src/py/vertebra/db/adapters/bigquery/driver.py` — native Google BigQuery sync/async execution, Storage Read/Write Arrow, and session IDs.
+- `src/py/vertebra/db/adapters/bigquery/core.py` — native BigQuery `@name` parameter and `STRUCT`/`ARRAY`/`NUMERIC`/`GEOGRAPHY`/`JSON` wire helpers.
+- `src/py/vertebra/db/adapters/bigquery/object_tables.py` — native `ObjectRef` struct retained for Object Tables.
+- `src/py/vertebra/extensions/sqlspec/bigquery.py` — current top-level BigQuery SQLSpec module to migrate cleanly.
+- `src/py/vertebra/storage/_store.py` — storage-neutral `ArtifactReference` value struct.
 
 ## Contracts & Edge Cases
 
-- Lift BigQuery SQLSpec logic onto `BaseSyncDriver`/`BaseAsyncDriver` with `StatementConfig(dialect='bigquery')` and `ParameterStyle.NAMED_AT` (`@name`, preserving `TypedParameter` `STRUCT`/`ARRAY`/`NUMERIC`/`GEOGRAPHY`/`JSON` hints), unsplit procedural `BEGIN ... END` script execution, `session_id` transactions, `dry_run`, zero-copy `VTBARROW` `select_to_arrow`, Storage Write `PENDING` atomic `load_from_arrow`, and `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary`. Keep all helpers local to `adapters/bigquery/core.py`.
-- `BigQuerySyncDataDictionary(SyncDataDictionaryBase)` and `BigQueryAsyncDataDictionary(AsyncDataDictionaryBase)` execute upstream `sqlspec/data_dictionary/dialects/bigquery/sql/*.sql` catalog queries (`get_version`, `get_feature_flag`, `get_optimal_type`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`).
-
-- Implement zero-SDK `BigQuerySyncADKStore`/`BigQueryAsyncADKStore`, `VECTOR_SEARCH` / `SEARCH` `BigQuerySyncADKMemoryStore`/`BigQueryAsyncADKMemoryStore`, `BigQuerySyncADKArtifactStore`/`BigQueryAsyncADKArtifactStore` translating native `vertebra.db.adapters.bigquery.ObjectRef` into `vertebra.storage.ArtifactReference` on the shared artifact surface (while keeping `ObjectRef` on native Object Tables), partitioned/clustered `BigQueryEventQueueStore`, and `BigQueryLitestarStore` (`MERGE`).
-- Never import `sqlspec.adapters.<third_party>.*` or third-party DB SDKs; execute all DDL and DML through `self._config.provide_session()`.
-
-- Define `BigQuerySyncConfig` and `BigQueryAsyncConfig` declaring `adapter_name = 'vertebra_bigquery'`, fixing `BigQueryConnectionShim.query` to honor `job_config.query_parameters` and `BigQueryAsyncConfig.create_connection` to reuse a single driver, plus explicit `*_store_class` attributes and PEP 562 lazy `__init__.py`.
-- Verify `sqlspec.utils.adapters.resolve_adapter_name` returns `'vertebra_bigquery'` and `resolve_extension_store_class` resolves every store without `_compat.py`.
+- Lift BigQuery SQLSpec logic onto `BaseSyncDriver`/`BaseAsyncDriver` with `StatementConfig(dialect='bigquery')` and `ParameterStyle.NAMED_AT` (`@name`, preserving `TypedParameter` `STRUCT`/`ARRAY`/`NUMERIC`/`GEOGRAPHY`/`JSON` hints), unsplit procedural `BEGIN ... END` script execution, `session_id` transactions, `dry_run`, zero-copy `VTBARROW` `select_to_arrow`, Storage Write `PENDING` atomic `load_from_arrow`, and `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary` executing upstream `sqlspec/data_dictionary/dialects/bigquery/sql/*.sql` catalog queries. Keep all helpers local to `adapters/bigquery/core.py`.
+- Implement zero-SDK `BigQuerySyncADKStore`/`BigQueryAsyncADKStore`, `VECTOR_SEARCH` / `SEARCH` `BigQuerySyncADKMemoryStore`/`BigQueryAsyncADKMemoryStore`, `BigQuerySyncADKArtifactStore`/`BigQueryAsyncADKArtifactStore` translating native `vertebra.db.adapters.bigquery.ObjectRef` into `vertebra.storage.ArtifactReference` on the shared artifact surface (while keeping `ObjectRef` on native Object Tables), partitioned/clustered `BigQueryEventQueueStore`, and `BigQueryLitestarStore` (`MERGE`) executing via `self._config.provide_session()` with zero `google.cloud.bigquery` or `sqlspec.adapters.*` imports.
+- Define `BigQuerySyncConfig` and `BigQueryAsyncConfig` declaring `adapter_name = 'vertebra_bigquery'`, fixing `BigQueryConnectionShim.query` to honor `job_config.query_parameters` and `BigQueryAsyncConfig.create_connection` to reuse a single driver, plus explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (and lazy `*ADKArtifactStore`) via PEP 562 `__init__.py` (verified via `resolve_adapter_name` and `resolve_extension_store_class` without `_compat.py`).
 
 ## Test Matrix
 
-- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, and `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary` catalog tests.
-
-- Parametrized unit/contract tests for `BigQuerySyncADKStore`/`BigQueryAsyncADKStore`, memory search, `ArtifactReference` metadata, `BigQueryEventQueueStore`, and `BigQueryLitestarStore` TTL/upsert/delete.
-
-- Resolver contract tests (`resolve_adapter_name`, `resolve_extension_store_class`, `_validate_adk_extension_config`), PEP 562 lazy import tests (zero eager `google.adk` import), and isolated `provide_session` transaction tests.
+- Parametrized `@name` compilation, `TypedParameter` hints, unsplit `BEGIN ... END` procedures, zero-row `SELECT`, `dry_run`, `BigQuerySyncDataDictionary`/`BigQueryAsyncDataDictionary` catalog tests, store contract tests (`VECTOR_SEARCH`, `ObjectRef` -> `ArtifactReference`, partitioned events, Litestar `MERGE`), connection shim tests, PEP 562 lazy `google.adk` import tests, and resolver checks.
 
 ## Verification
 

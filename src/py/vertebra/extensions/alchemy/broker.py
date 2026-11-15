@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from vertebra.extensions.broker import (
     AsyncConnectionLease,
-    AsyncInMemoryBrokerTransport,
     AsyncSHMBrokerTransport,
     BrokerConfig,
     BrokerMetrics,
@@ -21,7 +20,6 @@ from vertebra.extensions.broker import (
     ChannelMessage,
     StatementPlan,
     SyncConnectionLease,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
 )
 from vertebra.utils.module_loader import import_optional
@@ -32,18 +30,15 @@ if TYPE_CHECKING:
 __all__ = (
     "AsyncBrokerTransport",
     "AsyncConnectionLease",
-    "AsyncInMemoryBrokerTransport",
     "AsyncSHMBrokerTransport",
     "AsyncSHMSessionBroker",
     "BrokerConfig",
     "BrokerMetrics",
     "BrokerPlugin",
     "ChannelMessage",
-    "StatementCache",
     "StatementPlan",
     "SyncBrokerTransport",
     "SyncConnectionLease",
-    "SyncInMemoryBrokerTransport",
     "SyncSHMBrokerTransport",
     "SyncSHMSessionBroker",
 )
@@ -595,24 +590,3 @@ class AsyncSHMSessionBroker(_BaseSHMSessionBroker):
                         await res
             if not released:
                 await self.release_lease(lease, in_tx=False, pool_name=pool_name)
-
-
-class StatementCache:
-    """Pre-compilation and parameter ordering cache for SQLAlchemy statements."""
-
-    __slots__ = ("_cache",)
-
-    def __init__(self) -> None:
-        """Initialize empty statement plan cache."""
-        self._cache: dict[str, tuple[str, tuple[str, ...]]] = {}
-
-    def compile_and_encode(self, statement: Any) -> tuple[str, tuple[str, ...]]:
-        """Compile a statement or ClauseElement and extract SQL text and parameter order."""
-        compile_fn = getattr(statement, "compile", None)
-        if callable(compile_fn):
-            compiled = compile_fn()
-            sql_text = str(compiled)
-            param_order = tuple(getattr(compiled, "positiontup", None) or tuple(getattr(compiled, "params", {}).keys()))
-            return sql_text, param_order
-        sql_text = str(statement)
-        return sql_text, ()

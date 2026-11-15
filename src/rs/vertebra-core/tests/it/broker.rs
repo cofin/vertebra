@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use vertebra_core::broker::{BrokerError, ShmLeaseTable, ShmStatementCache};
+use vertebra_core::broker::{
+    BrokerError, PoolPartitionSpec, ShmLeaseTable, ShmStatementCache, stable_hash64,
+};
 use vertebra_core::shm::ShmRegion;
 
 #[test]
@@ -266,4 +268,361 @@ fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_
     assert_eq!(vertebra_core::broker::DIALECT_TAG_BIGQUERY, 7);
     assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANNER, 8);
     assert_eq!(vertebra_core::broker::DIALECT_TAG_SPANGRES, 9);
+}
+
+#[test]
+fn test_stable_hash64_and_partition_admission_bounds() {
+    use vertebra_core::broker::{MAX_POOL_PARTITIONS, PoolPartitionSpec, stable_hash64};
+
+    let empty = stable_hash64(b"");
+    assert_eq!(empty, stable_hash64(b""));
+    assert_ne!(empty, stable_hash64(b"primary"));
+    assert_eq!(
+        ShmStatementCache::compute_sql_hash(1, b"SELECT 1"),
+        stable_hash64(b"\x01SELECT 1")
+    );
+
+    let req_size = ShmLeaseTable::required_size(8, 2);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 8, 2).unwrap();
+
+    let h_a = stable_hash64(b"part_a");
+    let h_b = stable_hash64(b"part_b");
+    let p_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_a,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: h_a,
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap(),
+        p_a
+    );
+    let p_b = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_b,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_ne!(p_a, p_b);
+
+    let g_a = table.try_acquire_in(p_a, 1001, 0, h_a).unwrap().unwrap();
+    assert!(table.try_acquire_in(p_a, 1002, 0, h_a).unwrap().is_none());
+    let g_b = table.try_acquire_in(p_b, 1003, 0, h_b).unwrap().unwrap();
+
+    table.release(g_a.slot_index, g_a.generation).unwrap();
+    table.release(g_b.slot_index, g_b.generation).unwrap();
+
+    for idx in 2..MAX_POOL_PARTITIONS {
+        let key = format!("extra_part_{idx}");
+        table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: stable_hash64(key.as_bytes()),
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        table.register_partition(PoolPartitionSpec {
+            pool_key_hash: stable_hash64(b"overflow_65th"),
+            pool_size: 1,
+            max_overflow: 0,
+        }),
+        Err(BrokerError::PartitionsExhausted)
+    );
+}
+
+#[test]
+fn test_heartbeat_extends_lease_and_rejects_stale_generation() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let g = table.try_acquire(2001, 30_000_000, 0).unwrap();
+    let t0 = g.acquired_ns;
+    while vertebra_core::broker::monotonic_now_ns() <= t0 {
+        std::thread::yield_now();
+    }
+    table.heartbeat(g.slot_index, g.generation).unwrap();
+    let t_hb = vertebra_core::broker::monotonic_now_ns();
+    assert_eq!(table.reap_expired(t0.saturating_add(30_000_001)), 0);
+
+    assert_eq!(table.reap_expired(t_hb.saturating_add(30_000_001)), 1);
+    assert_eq!(
+        table.heartbeat(g.slot_index, g.generation),
+        Err(BrokerError::StaleGeneration)
+    );
+}
+
+#[test]
+fn test_quarantine_blocks_slot_until_dispose_and_reclaim_worker_leases_isolates_pids() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let h = stable_hash64(b"pool-quarantine-test");
+    let part = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    let dead_grant = table.try_acquire_in(part, 7001, 0, h).unwrap().unwrap();
+    let live_grant = table.try_acquire(7002, 0, 0).unwrap();
+
+    // Quarantining the dead_grant slot keeps partition capacity (1) reserved.
+    table
+        .quarantine(dead_grant.slot_index, dead_grant.generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 1);
+    assert_eq!(table.stats().quarantined, 1);
+    assert_eq!(table.stats().total_quarantined, 1);
+    assert!(table.try_acquire_in(part, 7003, 0, h).unwrap().is_none());
+
+    // Wrong generation fails with GenerationMismatch; disposing Free/Leased fails with InvalidState.
+    assert_eq!(
+        table.quarantine(live_grant.slot_index, live_grant.generation + 9),
+        Err(BrokerError::GenerationMismatch)
+    );
+    assert_eq!(
+        table.dispose_quarantined(live_grant.slot_index, live_grant.generation),
+        Err(BrokerError::InvalidState)
+    );
+
+    // Explicit dispose returns the slot to Free so a new acquisition succeeds.
+    table
+        .dispose_quarantined(dead_grant.slot_index, dead_grant.generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 0);
+    assert_eq!(table.stats().total_disposed, 1);
+    let reused = table.try_acquire_in(part, 7003, 0, h).unwrap().unwrap();
+
+    // Reclaiming pid 7003 isolates its leased slots into Quarantined without touching live pid 7002.
+    let reclaimed = table.reclaim_worker_leases(7003);
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].slot_index, reused.slot_index);
+    assert_eq!(reclaimed[0].generation, reused.generation + 1);
+    assert_eq!(reclaimed[0].pool_id, Some(part));
+    assert_eq!(table.quarantined_count(), 1);
+    assert!(table.try_acquire_in(part, 7004, 0, h).unwrap().is_none());
+
+    // Reclaim completes cleanup via dispose_quarantined after rollback, while live_grant stays intact.
+    table
+        .dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 0);
+    table
+        .release(live_grant.slot_index, live_grant.generation)
+        .unwrap();
+    assert_eq!(table.stats().active_leases, 0);
+}
+
+#[test]
+fn test_lookup_partition_partition_stats_and_unpartitioned_reclaim() {
+    let req_size = ShmLeaseTable::required_size(4, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 4, 0).unwrap();
+
+    let h_a = stable_hash64(b"partition-a");
+    let h_missing = stable_hash64(b"partition-missing");
+    assert_eq!(table.lookup_partition(h_a), None);
+    assert_eq!(table.partition_stats(h_a), None);
+
+    let part_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_a,
+            pool_size: 2,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_eq!(table.lookup_partition(h_a), Some(part_a));
+    assert_eq!(table.lookup_partition(h_missing), None);
+
+    let g1 = table.try_acquire_in(part_a, 8001, 0, h_a).unwrap().unwrap();
+    table.release(g1.slot_index, g1.generation).unwrap();
+    let g2 = table.try_acquire_in(part_a, 8002, 0, h_a).unwrap().unwrap();
+    let unpart_small = table.try_acquire(8003, 0, 42).unwrap();
+    let unpart_large = table.try_acquire(8003, 0, 123_456_789).unwrap();
+
+    let stats_mid = table
+        .partition_stats(h_a)
+        .expect("registered partition stats");
+    assert_eq!(stats_mid.pool_id, part_a);
+    assert_eq!(stats_mid.active_leases, 1);
+    assert_eq!(stats_mid.total_acquired, 2);
+    assert_eq!(stats_mid.total_released, 1);
+
+    let reclaimed_a = table.reclaim_worker_leases(8002);
+    assert_eq!(reclaimed_a.len(), 1);
+    assert_eq!(reclaimed_a[0].pool_id, Some(part_a));
+    let stats_q = table.partition_stats(h_a).unwrap();
+    assert_eq!(stats_q.active_leases, 0);
+    assert_eq!(stats_q.quarantined, 1);
+    assert_eq!(stats_q.total_quarantined, 1);
+    assert_eq!(stats_q.total_reclaimed, 1);
+
+    table
+        .dispose_quarantined(reclaimed_a[0].slot_index, reclaimed_a[0].generation)
+        .unwrap();
+    let stats_end = table.partition_stats(h_a).unwrap();
+    assert_eq!(stats_end.active_leases, 0);
+    assert_eq!(stats_end.quarantined, 0);
+    assert_eq!(stats_end.total_disposed, 1);
+
+    let reclaimed_unpart = table.reclaim_worker_leases(8003);
+    assert_eq!(reclaimed_unpart.len(), 2);
+    assert!(reclaimed_unpart.iter().all(|item| item.pool_id.is_none()));
+    assert_eq!(g2.worker_pid, 8002);
+    assert_eq!(unpart_small.worker_pid, 8003);
+    assert_eq!(unpart_large.worker_pid, 8003);
+    for item in reclaimed_unpart {
+        table
+            .dispose_quarantined(item.slot_index, item.generation)
+            .unwrap();
+    }
+}
+
+#[test]
+fn test_shm_lease_table_direct_quarantine_partition_stats() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let key_hash = 0xCAFE_BABE_0001_0002;
+    let pool_id = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_hash,
+            pool_size: 2,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    let g1 = table
+        .try_acquire_in(pool_id, 9101, 0, key_hash)
+        .unwrap()
+        .unwrap();
+    table.quarantine(g1.slot_index, g1.generation).unwrap();
+
+    let during = table.partition_stats(key_hash).unwrap();
+    assert_eq!(during.active_leases, 0);
+    assert_eq!(during.quarantined, 1);
+    assert_eq!(during.total_acquired, 1);
+    assert_eq!(during.total_quarantined, 1);
+    assert_eq!(during.total_disposed, 0);
+
+    table
+        .dispose_quarantined(g1.slot_index, g1.generation)
+        .unwrap();
+    let after = table.partition_stats(key_hash).unwrap();
+    assert_eq!(after.active_leases, 0);
+    assert_eq!(after.quarantined, 0);
+    assert_eq!(after.total_disposed, 1);
+}
+
+#[test]
+fn test_shm_lease_table_aba_cross_partition_release_and_partition_wakeup() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = Arc::new(ShmLeaseTable::init_in_region(region, 2, 0).unwrap());
+
+    let key_a = 0x1111_2222_3333_4444;
+    let key_b = 0x5555_6666_7777_8888;
+    let part_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_a,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    let part_b = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_b,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    // Hold one slot so `part_a` and `part_b` deterministically contend for the sole remaining slot.
+    let hold = table.try_acquire(1000, 0, 0).unwrap();
+    let g_a1 = table
+        .try_acquire_in(part_a, 7777, 0, key_a)
+        .unwrap()
+        .unwrap();
+    table.release(g_a1.slot_index, g_a1.generation).unwrap();
+
+    let g_b = table
+        .try_acquire_in(part_b, 7777, 0, key_b)
+        .unwrap()
+        .unwrap();
+    assert_eq!(g_b.slot_index, g_a1.slot_index);
+    assert_eq!(
+        table.release(g_a1.slot_index, g_a1.generation),
+        Err(BrokerError::GenerationMismatch)
+    );
+    assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 1);
+    table.release(g_b.slot_index, g_b.generation).unwrap();
+    assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 0);
+    table.release(hold.slot_index, hold.generation).unwrap();
+
+    // Competing waiters on `part_b` and `part_a`: releasing `held_a` must wake `part_a`
+    // immediately via `wake_all()` even while `part_b` remains full (well under 25ms fallback).
+    let held_a = table
+        .acquire_in(part_a, 8001, 0, Duration::from_millis(50), key_a)
+        .unwrap();
+    let held_b = table
+        .acquire_in(part_b, 8002, 0, Duration::from_millis(50), key_b)
+        .unwrap();
+
+    let ready = Arc::new(std::sync::Barrier::new(3));
+    let t_wait_b = Arc::clone(&table);
+    let ready_b = Arc::clone(&ready);
+    let waiter_b = std::thread::spawn(move || {
+        ready_b.wait();
+        t_wait_b.acquire_in(part_b, 8004, 0, Duration::from_secs(2), key_b)
+    });
+
+    let t_wait_a = Arc::clone(&table);
+    let ready_a = Arc::clone(&ready);
+    let waiter_a = std::thread::spawn(move || {
+        ready_a.wait();
+        t_wait_a.acquire_in(part_a, 8003, 0, Duration::from_secs(2), key_a)
+    });
+
+    ready.wait();
+    let spin_start = Instant::now();
+    while table.stats().waiting_threads < 2 {
+        assert!(spin_start.elapsed() < Duration::from_secs(1));
+        std::thread::yield_now();
+    }
+    let release_start = Instant::now();
+    table.release(held_a.slot_index, held_a.generation).unwrap();
+
+    let acquired_a = waiter_a.join().unwrap().unwrap();
+    assert!(
+        release_start.elapsed() < Duration::from_millis(20),
+        "partition waiter stalled instead of waking via wake_all(): {:?}",
+        release_start.elapsed()
+    );
+    assert_eq!(acquired_a.worker_pid, 8003);
+
+    table.release(held_b.slot_index, held_b.generation).unwrap();
+    let acquired_b = waiter_b.join().unwrap().unwrap();
+    assert_eq!(acquired_b.worker_pid, 8004);
+    table
+        .release(acquired_a.slot_index, acquired_a.generation)
+        .unwrap();
+    table
+        .release(acquired_b.slot_index, acquired_b.generation)
+        .unwrap();
 }

@@ -29,9 +29,9 @@ read_set:
 - src/py/vertebra/extensions/sqlspec/_driver.py
 - src/py/vertebra/db/adapters/sqlite/driver.py
 - src/py/vertebra/db/adapters/sqlite/core.py
+- src/py/vertebra/db/adapters/sqlite/config.py
 - src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/driver.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
 - sqlspec
@@ -60,41 +60,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `src/py/vertebra/extensions/sqlspec/adapters/sqlite/{core,driver,data_dictionary}.py` (`SQLiteSyncDriver`, `SQLiteAsyncDriver`, `SQLiteSyncDataDictionary`, `SQLiteAsyncDataDictionary`) per [`../spec.md`](../spec.md) [^sqlite-drv] [^sqlite-core] [^sqlspec-adapters].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/sqlite/{adk,events,litestar}.py` over upstream SDK-free base classes per [`../spec.md`](../spec.md) [^sqlite-drv] [^storage-art] [^sqlspec-adapters].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/sqlite/{config,__init__}.py` declaring `adapter_name = 'vertebra_sqlite'` and explicit store class attributes per [`../spec.md`](../spec.md) [^sqlite-drv] [^sqlspec-adapters].
+Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/sqlite/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` SQLSpec adapter package (`SQLiteSyncDriver`/`SQLiteAsyncDriver`, `SQLiteSyncDataDictionary`/`SQLiteAsyncDataDictionary`, SDK-free ADK/Events/Litestar stores, and `SQLiteSyncConfig`/`SQLiteAsyncConfig`) per [`../spec.md`](../spec.md) [^sqlite-drv] [^sqlite-core] [^sqlspec-adapters] [^storage-art].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template.
-- `src/py/vertebra/db/adapters/sqlite/driver.py` & `src/py/vertebra/db/adapters/sqlite/core.py` — native SQLite execution and parameter encoding.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/sqlite/driver.py` & `src/py/vertebra/extensions/sqlspec/adapters/sqlite/core.py` — SQLite SQLSpec session and dialect helpers.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` contract.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/sqlite/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/sqlite/adk.py`, `src/py/vertebra/extensions/sqlspec/adapters/sqlite/events.py`, `src/py/vertebra/extensions/sqlspec/adapters/sqlite/litestar.py` — adapter driver and store classes.
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — shared config lifecycle and refcounted pool close.
+- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
+- `src/py/vertebra/db/adapters/sqlite/driver.py` — native SQLite sync and async execution drivers.
+- `src/py/vertebra/db/adapters/sqlite/core.py` — native SQLite parameter and pragma helpers.
+- `src/py/vertebra/db/adapters/sqlite/config.py` — `SQLiteConfig` connection and `:memory:` options.
+- `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy SQLite SQLSpec logic to replace cleanly.
+- `src/py/vertebra/storage/_store.py` — storage-neutral `ArtifactReference` value struct.
 
 ## Contracts & Edge Cases
 
-- Set `StatementConfig(dialect='sqlite')` supporting execution `{ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}` (`?` tuples and `:name` dicts without unnecessary rewriting), `PRAGMA` row-returning classification, WAL/foreign_keys/busy_timeout pragmas, and savepoints. Keep all SQLite SQL/parameter helpers strictly inside `adapters/sqlite/core.py`.
-- `SQLiteSyncDataDictionary(SyncDataDictionaryBase)` and `SQLiteAsyncDataDictionary(AsyncDataDictionaryBase)` execute upstream `sqlspec/data_dictionary/dialects/sqlite/sql/*.sql` catalog queries (`get_version`, `get_feature_flag`, `get_optimal_type`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`).
-
-- Implement `SQLiteSyncADKStore`/`SQLiteAsyncADKStore`, `FTS5`-backed `SQLiteSyncADKMemoryStore`/`SQLiteAsyncADKMemoryStore`, `SQLiteSyncADKArtifactStore`/`SQLiteAsyncADKArtifactStore` (`ArtifactReference`), `SQLiteEventQueueStore`, and `SQLiteLitestarStore` (`ON CONFLICT(key) DO UPDATE`) executing exclusively via `provide_session()` over native `SyncSQLiteDriver`/`AsyncSQLiteDriver`.
-- Never import `sqlspec.adapters.<third_party>.*` or third-party DB SDKs; execute all DDL and DML through `self._config.provide_session()`.
-
-- Define `SQLiteSyncConfig` and `SQLiteAsyncConfig` declaring `adapter_name = 'vertebra_sqlite'`, explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class`, shared `:memory:` URI handling, and PEP 562 lazy `__init__.py`.
-- Verify `sqlspec.utils.adapters.resolve_adapter_name` returns `'vertebra_sqlite'` and `resolve_extension_store_class` resolves every store without `_compat.py`.
+- Set `StatementConfig(dialect='sqlite')` supporting execution `{ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}` (`?` tuples and `:name` dicts without unnecessary rewriting), `PRAGMA` row-returning classification, WAL/foreign_keys/busy_timeout pragmas, savepoints, and `SQLiteSyncDataDictionary`/`SQLiteAsyncDataDictionary` executing upstream `sqlspec/data_dictionary/dialects/sqlite/sql/*.sql` catalog queries. Keep all SQLite SQL/parameter helpers strictly inside `adapters/sqlite/core.py`.
+- Implement `SQLiteSyncADKStore`/`SQLiteAsyncADKStore`, `FTS5`-backed `SQLiteSyncADKMemoryStore`/`SQLiteAsyncADKMemoryStore`, `SQLiteSyncADKArtifactStore`/`SQLiteAsyncADKArtifactStore` (`ArtifactReference`), `SQLiteEventQueueStore`, and `SQLiteLitestarStore` (`ON CONFLICT(key) DO UPDATE`) executing exclusively via `self._config.provide_session()` over native `SyncSQLiteDriver`/`AsyncSQLiteDriver` with zero `sqlspec.adapters.*` or third-party DB SDK imports.
+- Define `SQLiteSyncConfig` and `SQLiteAsyncConfig` declaring `adapter_name = 'vertebra_sqlite'`, explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class`, shared `:memory:` URI handling, and PEP 562 lazy `__init__.py` (verified via `resolve_adapter_name` and `resolve_extension_store_class` without `_compat.py`).
 
 ## Test Matrix
 
-- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, and `SQLiteSyncDataDictionary`/`SQLiteAsyncDataDictionary` catalog tests.
-
-- Parametrized unit/contract tests for `SQLiteSyncADKStore`/`SQLiteAsyncADKStore`, memory search, `ArtifactReference` metadata, `SQLiteEventQueueStore`, and `SQLiteLitestarStore` TTL/upsert/delete.
-
-- Resolver contract tests (`resolve_adapter_name`, `resolve_extension_store_class`, `_validate_adk_extension_config`), PEP 562 lazy import tests (zero eager `google.adk` import), and isolated `provide_session` transaction tests.
+- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, `SQLiteSyncDataDictionary`/`SQLiteAsyncDataDictionary` catalog tests, store contract tests (ADK/FTS5 memory/`ArtifactReference`/events/Litestar TTL/upsert), PEP 562 lazy `google.adk` import tests, and resolver contract checks.
 
 ## Verification
 

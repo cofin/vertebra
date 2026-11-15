@@ -46,7 +46,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` (`PGDialect`) and `SyncSQLiteDialect` / `AsyncSQLiteDialect` (`SQLiteDialect`) per [`../spec.md`](../spec.md) [^sa-dialects] [^pg-driver] [^sqlite-driver]. Out of scope: MySQL, Oracle, and MSSQL dialects (`t02`–`t03`).
+Implement `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` (`PGDialect`) and `SyncSQLiteDialect` / `AsyncSQLiteDialect` (`SQLiteDialect`) per [`../spec.md`](../spec.md) [^sa-dialects] [^pg-driver] [^sqlite-driver]. Out of scope: MySQL, Oracle, and MSSQL dialects (`t04`).
 
 ## Bounded Read Manifest
 

@@ -52,17 +52,13 @@ sources:
 # Chapter 01: Sync/AsyncQueueStore Protocols, Native PG/Oracle Stores, and Auto-Wired Queue Backends
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `QueueStore` in `db/driver/capabilities.py` is a single unprefixed async protocol with zero concrete implementations [^queue-cap].
-- **Target Architecture**: `@runtime_checkable SyncQueueStore` and `AsyncQueueStore` (zero aliases) are implemented natively by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`vertebra._postgres`) and `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`vertebra._oracle`), consuming `Sync*NotificationSource`/`Async*NotificationSource` from upstream `native-redis-driver:ch03` [^pg-drv] [^ora-drv].
-- **Baseline (`18baadcd`)**: `PostgreSQLQueueBackend` and `OracleQueueBackend` fail without manual `executor=` injection, `OracleQueueBackend` probes `oracledb`, `base.py` duplicates cron parsing, and `TaskEnvelope` sets `gc=False` on container fields [^queue-base] [^queue-pg] [^queue-ora].
-- **Target Architecture**: `QueueService` selects backends via `QueueBackendSettings`; `PostgreSQLQueueBackend` and `OracleQueueBackend` auto-construct `Sync*QueueStore`/`Async*QueueStore` from configured drivers; `RedisQueueBackend`/`ValkeyQueueBackend` run on `vertebra._redis` streams/sorted-sets [^queue-redis].
+- **Baseline (`18baadcd`)**: `QueueStore` in `db/driver/capabilities.py` is a single unprefixed async protocol with zero implementations; `PostgreSQLQueueBackend` and `OracleQueueBackend` fail without manual `executor=`, `OracleQueueBackend` probes `oracledb`, `base.py` duplicates cron parsing, and `TaskEnvelope` / `DeadLetterEntry` set `gc=False` on container fields [^queue-cap] [^queue-base] [^queue-pg] [^queue-ora].
+- **Target Architecture**: `@runtime_checkable SyncQueueStore` and `AsyncQueueStore` (zero aliases) are implemented natively by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`vertebra._postgres`) and `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`vertebra._oracle`) consuming `Sync*NotificationSource`/`Async*NotificationSource` from `native-redis-driver:ch03`; `QueueService` selects backends via `QueueBackendSettings`; `PostgreSQLQueueBackend`/`OracleQueueBackend` auto-construct native stores; `RedisQueueBackend`/`ValkeyQueueBackend` run on `vertebra._redis` streams/sorted-sets [^pg-drv] [^ora-drv] [^queue-redis].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter splits `QueueStore` into `SyncQueueStore` and `AsyncQueueStore` (per User Decision `A3`) and builds the SQL-backed PostgreSQL and Oracle queue stores inside `vertebra.db.adapters.{postgres,oracle}.queue` [^queue-cap].
-
-This chapter wires Vertebra's first-party `QueueService` and backend implementations (`postgres`, `oracle`, `redis`, `valkey`, `shm`, `memory`) directly onto native drivers and queue stores with zero third-party client probes [^queue-base].
+This chapter splits `QueueStore` into `SyncQueueStore` and `AsyncQueueStore`, delivers native PostgreSQL and Oracle SQL queue stores inside `vertebra.db.adapters.{postgres,oracle}.queue`, and wires `QueueService` and first-party backends (`postgres`, `oracle`, `redis`, `valkey`, `shm`, `memory`) onto native drivers and queue stores with zero third-party client probes [^queue-cap] [^queue-base].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -117,9 +113,7 @@ class TaskEnvelope(msgspec.Struct, frozen=True):
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Protocol and store capabilities are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
-
-First-party queue settings and backend options are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
+Protocol, store capabilities, `QueueBackendSettings`, and backend configuration options are documented in `ch03-distributed-channels-stores-and-docs` (`t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -144,7 +138,7 @@ Chapter `ch01-queue-stores-and-first-party-backends` is `planned` behind [`../..
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync mypy src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py
+uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync mypy src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_native_queries.py src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/unit/framework/test_distributed_queues.py
 ```
 
 [^queue-cap]: `src/py/vertebra/db/driver/capabilities.py::QueueStore` — Current async-only QueueStore protocol.

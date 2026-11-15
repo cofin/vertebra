@@ -29,6 +29,7 @@ from django.db.models.fields.files import FieldFile
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
 from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.db.dbapi import SyncDBAPIConnection
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django import (
     ArrowManager,
@@ -71,7 +72,6 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 )
 from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
-from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
 from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
 from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (

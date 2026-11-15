@@ -30,8 +30,8 @@ read_set:
 - src/py/vertebra/db/adapters/postgres/driver.py
 - src/py/vertebra/db/adapters/postgres/core.py
 - src/py/vertebra/db/adapters/postgres/notify.py
-- src/py/vertebra/extensions/sqlspec/adapters/postgres/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/postgres/driver.py
+- src/py/vertebra/extensions/sqlspec/adapters.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
 - sqlspec
@@ -60,41 +60,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `src/py/vertebra/extensions/sqlspec/adapters/postgres/{core,driver,data_dictionary}.py` (`PostgresSyncDriver`, `PostgresAsyncDriver`, `PostgresSyncDataDictionary`, `PostgresAsyncDataDictionary`) per [`../spec.md`](../spec.md) [^postgres-drv] [^postgres-core] [^pg-notify].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/postgres/{adk,events,litestar}.py` over upstream SDK-free base classes per [`../spec.md`](../spec.md) [^postgres-drv] [^storage-art] [^pg-notify].
-
-Implement `src/py/vertebra/extensions/sqlspec/adapters/postgres/{config,__init__}.py` declaring `adapter_name = 'vertebra_postgres'` and explicit store class attributes per [`../spec.md`](../spec.md) [^postgres-drv] [^pg-notify].
+Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/postgres/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` SQLSpec adapter package (`PostgresSyncDriver`/`PostgresAsyncDriver`, `PostgresSyncDataDictionary`/`PostgresAsyncDataDictionary`, SDK-free ADK/Events/Litestar stores, and `PostgresSyncConfig`/`PostgresAsyncConfig`) per [`../spec.md`](../spec.md) [^postgres-drv] [^postgres-core] [^pg-notify] [^storage-art].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template.
-- `src/py/vertebra/db/adapters/postgres/driver.py` & `src/py/vertebra/db/adapters/postgres/core.py` — native PostgreSQL execution and parameter encoding.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/postgres/driver.py` & `src/py/vertebra/extensions/sqlspec/adapters/postgres/core.py` — PostgreSQL SQLSpec session and dialect helpers.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` contract.
-
-- `src/py/vertebra/extensions/sqlspec/adapters/postgres/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py`, `src/py/vertebra/extensions/sqlspec/adapters/postgres/events.py`, `src/py/vertebra/extensions/sqlspec/adapters/postgres/litestar.py` — adapter driver and store classes.
-- `src/py/vertebra/extensions/sqlspec/_driver.py` — shared config lifecycle and refcounted pool close.
+- `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
+- `src/py/vertebra/db/adapters/postgres/driver.py` — native PostgreSQL sync and async execution drivers.
+- `src/py/vertebra/db/adapters/postgres/core.py` — native PostgreSQL parameter and wire helpers.
+- `src/py/vertebra/db/adapters/postgres/notify.py` — `SyncPostgresNotificationSource` and `AsyncPostgresNotificationSource` channels.
+- `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy PostgreSQL SQLSpec logic to replace and duplicate cleanly into `adapters/postgres/`.
+- `src/py/vertebra/storage/_store.py` — storage-neutral `ArtifactReference` value struct.
 
 ## Contracts & Edge Cases
 
-- Set `StatementConfig(dialect='postgres')` with default and execution `ParameterStyle.NUMERIC` (`$1, $2` positional sequences matching `vertebra._postgres` instead of legacy `%s`), native Arrow `COPY BINARY` `select_to_arrow`, server-side portal `dispatch_select_stream`, pipeline `execute_stack`, and savepoints. Duplicate all PostgreSQL SQL/parameter helpers locally inside `adapters/postgres/core.py` (zero cross-adapter helper modules).
-- `PostgresSyncDataDictionary(SyncDataDictionaryBase)` and `PostgresAsyncDataDictionary(AsyncDataDictionaryBase)` execute upstream `sqlspec/data_dictionary/dialects/postgres/sql/*.sql` catalog queries (`get_version`, `get_feature_flag`, `get_optimal_type`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`).
-
-- Subclass SDK-free upstream bases (`BaseSyncADKStore`/`BaseAsyncADKStore`, pgvector cosine/HNSW + `tsvector` `BaseSyncADKMemoryStore`/`BaseAsyncADKMemoryStore`, `BaseSyncADKArtifactStore`/`BaseAsyncADKArtifactStore` returning `ArtifactReference` on the shared surface, `BaseEventQueueStore` + `PostgresSyncEventsBackend`/`PostgresAsyncEventsBackend` over `SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource`, and `BaseSQLSpecStore` `ON CONFLICT (key) DO UPDATE`) with zero `psycopg` imports.
-- Never import `sqlspec.adapters.<third_party>.*` or third-party DB SDKs; execute all DDL and DML through `self._config.provide_session()`.
-
-- Define `PostgresSyncConfig` and `PostgresAsyncConfig` declaring `adapter_name = 'vertebra_postgres'`, `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class`, using PEP 562 `__getattr__` in `__init__.py` so `google.adk` is loaded lazily and guarded via `MissingDependencyError`.
-- Verify `sqlspec.utils.adapters.resolve_adapter_name` returns `'vertebra_postgres'` and `resolve_extension_store_class` resolves every store without `_compat.py`.
+- Set `StatementConfig(dialect='postgres')` with default and execution `ParameterStyle.NUMERIC` (`$1, $2` positional sequences matching `vertebra._postgres` instead of legacy `%s`), native Arrow `COPY BINARY` `select_to_arrow`, server-side portal `dispatch_select_stream`, pipeline `execute_stack`, savepoints, and `PostgresSyncDataDictionary`/`PostgresAsyncDataDictionary` executing upstream `sqlspec/data_dictionary/dialects/postgres/sql/*.sql` catalog queries. Keep all PostgreSQL SQL/parameter helpers strictly inside `adapters/postgres/core.py` (zero cross-adapter helper modules).
+- Subclass SDK-free upstream bases (`BaseSyncADKStore`/`BaseAsyncADKStore`, pgvector cosine/HNSW + `tsvector` `BaseSyncADKMemoryStore`/`BaseAsyncADKMemoryStore`, `BaseSyncADKArtifactStore`/`BaseAsyncADKArtifactStore` returning `ArtifactReference` on the shared surface, `BaseEventQueueStore` + `PostgresSyncEventsBackend`/`PostgresAsyncEventsBackend` over `SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource`, and `BaseSQLSpecStore` `ON CONFLICT (key) DO UPDATE`) executing exclusively via `self._config.provide_session()` with zero `psycopg` or `sqlspec.adapters.*` imports.
+- Define `PostgresSyncConfig` and `PostgresAsyncConfig` declaring `adapter_name = 'vertebra_postgres'`, `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class`, using PEP 562 `__getattr__` in `__init__.py` so `google.adk` loads lazily and guards via `MissingDependencyError`, verified via `resolve_adapter_name` and `resolve_extension_store_class` without `_compat.py`.
 
 ## Test Matrix
 
-- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, and `PostgresSyncDataDictionary`/`PostgresAsyncDataDictionary` catalog tests.
-
-- Parametrized unit/contract tests for `PostgresSyncADKStore`/`PostgresAsyncADKStore`, memory search, `ArtifactReference` metadata, `PostgresEventQueueStore`, and `PostgresLitestarStore` TTL/upsert/delete.
-
-- Resolver contract tests (`resolve_adapter_name`, `resolve_extension_store_class`, `_validate_adk_extension_config`), PEP 562 lazy import tests (zero eager `google.adk` import), and isolated `provide_session` transaction tests.
+- Parametrized placeholder compilation, `TypedParameter` execution, zero-row `SELECT`, `RETURNING`/DML, `StatementConfig` override preservation, `PostgresSyncDataDictionary`/`PostgresAsyncDataDictionary` catalog tests, store contract tests (ADK session/memory search, `ArtifactReference`, events, Litestar TTL/upsert), PEP 562 lazy import tests (zero eager `google.adk` import), and `resolve_adapter_name` / `resolve_extension_store_class` resolver checks.
 
 ## Verification
 

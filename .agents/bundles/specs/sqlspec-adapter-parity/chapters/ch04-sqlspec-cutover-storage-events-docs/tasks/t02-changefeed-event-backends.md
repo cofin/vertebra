@@ -21,8 +21,10 @@ tests:
 read_set:
 - src/py/vertebra/extensions/sqlspec/events.py
 - src/py/vertebra/db/cdc.py
+- src/py/vertebra/db/driver/capabilities.py
 - src/py/vertebra/db/adapters/postgres/notify.py
 - src/py/vertebra/db/adapters/oracle/notify.py
+- src/py/vertebra/storage/_store.py
 estimated_loc: 195
 tags:
 - sqlspec
@@ -34,19 +36,26 @@ sources:
   title: ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend
 - id: db-cdc
   resource: src/py/vertebra/db/cdc.py
-  title: SyncChangeSource and AsyncChangeSource CDC primitives
+  title: CDCConfig, ChangeEvent, and ChangeFeed CDC primitives
+- id: db-capabilities
+  resource: src/py/vertebra/db/driver/capabilities.py
+  title: SyncChangeSource, AsyncChangeSource, and notification protocols
 ---
 
 # Task `t02`: Harden ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend with Checkpoints & Object Spill
 
 ## Objective & Scope Boundary
 
-Harden `src/py/vertebra/extensions/sqlspec/events.py` (`ChangeFeedSyncEventBackend`, `ChangeFeedAsyncEventBackend`) per [`../spec.md`](../spec.md) [^sqlspec-events] [^db-cdc].
+Harden `src/py/vertebra/extensions/sqlspec/events.py` (`ChangeFeedSyncEventBackend`, `ChangeFeedAsyncEventBackend`) per [`../spec.md`](../spec.md) [^sqlspec-events] [^db-cdc] [^db-capabilities].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/events.py` — generic CDC event backend bridge (zero engine-specific SQL inside generic module).
-- `src/py/vertebra/db/cdc.py` — `SyncChangeSource` and `AsyncChangeSource` resume-token contracts.
+- `src/py/vertebra/db/cdc.py` — `CDCConfig`, `ChangeEvent`, and `ChangeFeed` resume-token contracts.
+- `src/py/vertebra/db/driver/capabilities.py` — `SyncChangeSource`, `AsyncChangeSource`, and `NotificationSource` protocols.
+- `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification source ceiling (`8000`B `NOTIFY` payload).
+- `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification source contract.
+- `src/py/vertebra/storage/_store.py` — `ArtifactReference` metadata struct for large-payload spill references.
 
 ## Contracts & Edge Cases
 
@@ -70,4 +79,5 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec && uv run --no-sy
 - [ ] Zero regressions in the fast verification gate.
 
 [^sqlspec-events]: `src/py/vertebra/extensions/sqlspec/events.py` — ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend.
-[^db-cdc]: `src/py/vertebra/db/cdc.py` — SyncChangeSource and AsyncChangeSource CDC primitives.
+[^db-cdc]: `src/py/vertebra/db/cdc.py` — CDCConfig, ChangeEvent, and ChangeFeed CDC primitives.
+[^db-capabilities]: `src/py/vertebra/db/driver/capabilities.py` — SyncChangeSource, AsyncChangeSource, and notification protocols.

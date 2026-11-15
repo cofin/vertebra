@@ -99,7 +99,7 @@ def is_postgres_conformance_nodeid(nodeid: str) -> bool:
     lowered = nodeid.lower()
     if "postgres" not in lowered:
         return False
-    if "test_driver_conformance.py" in lowered:
+    if "test_driver_conformance.py" in lowered or "test_multiprocess_pool_sharing.py" in lowered:
         return "[postgres" in lowered or "-postgres" in lowered
     return (
         "test_postgres_replication_live.py" in lowered

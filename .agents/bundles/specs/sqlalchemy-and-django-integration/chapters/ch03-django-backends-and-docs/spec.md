@@ -11,6 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
+depends_on_chapters:
+- ch02-cloud-dialects-alembic-and-advanced-alchemy
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -69,21 +71,13 @@ sources:
 # Chapter 03: Django 5.1–6.0 Database Backends, Unsupported Dialect Cleanup, and Docs/OKF
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `extensions/django/db/backends/{postgresql,sqlite3,mysql,oracle}/base.py` wrap a generic `DatabaseWrapperMixin._build_native_config` dispatcher rather than subclassing Django's built-in `DatabaseWrapper` classes directly over `vertebra.db.dbapi` [^dj-backends].
-- **Target Architecture**: Each `<vendor>/base.py::DatabaseWrapper` subclasses Django `6.0+`'s built-in backend (`django.db.backends.<vendor>.base.DatabaseWrapper`), constructs its owning `<Engine>Config` locally, and swaps `Database` for `vertebra.db.dbapi.SyncDBAPIModule` [^dj-pg] [^dj-sqlite] [^dj-mysql] [^dj-oracle].
-- **Baseline (`18baadcd`)**: `extensions/django/db/backends/` ships hollow stub packages for `spanner`, `bigquery`, `duckdb`, and `mssql` alongside vendor-dispatching `DatabaseWrapperMixin._build_native_config` [^dj-spanner] [^dj-bq] [^dj-backends].
-- **Target Architecture**: `spanner/base.py::DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper` over `vertebra.db.dbapi`; `bigquery`, `duckdb`, and `mssql` Django backends are deleted; `django/plugin.py` raises `ImproperConfigurationError` for unsupported engines [^dj-plugin].
-- **Baseline (`18baadcd`)**: Public docs and OKF chapters still reference monolithic `extensions/sqlalchemy/{dialects,alembic,cache}.py`, `shm://` cache URLs, and unsupported `bigquery`/`duckdb`/`mssql` Django DB backends [^doc-ext] [^okf-dialects].
-- **Target Architecture**: Present-tense `docs/` and `<= 200`-line OKF chapters document the 36 split `Sync<Engine>Dialect`/`Async<Engine>Dialect` entry points, `dogpile.cache` regions, 5 Django `6.0+` backends, and explicit limitations [^okf-litestar] [^okf-limits].
+- **Baseline (`18baadcd`)**: `extensions/django/db/backends/{postgresql,sqlite3,mysql,oracle}/base.py` wrap a generic `DatabaseWrapperMixin._build_native_config` dispatcher alongside hollow `spanner`, `bigquery`, `duckdb`, and `mssql` stub packages, while public docs and OKF chapters still reference monolithic `extensions/sqlalchemy/{dialects,alembic,cache}.py`, `shm://` cache URLs, and unsupported `bigquery`/`duckdb`/`mssql` Django DB backends [^dj-backends] [^dj-spanner] [^dj-bq] [^doc-ext] [^okf-dialects].
+- **Target Architecture**: `{postgresql,sqlite3,mysql,oracle}/base.py::DatabaseWrapper` subclass Django `6.0+` built-in backends and `spanner/base.py::DatabaseWrapper` subclasses `django_spanner.base.DatabaseWrapper` over `vertebra.db.dbapi.SyncDBAPIModule`; `bigquery`/`duckdb`/`mssql` Django stubs are deleted and `django/plugin.py` raises `ImproperConfigurationError`; present-tense `docs/` and `<= 200`-line OKF chapters document the 36 split `Sync<Engine>Dialect`/`Async<Engine>Dialect` entry points, `dogpile.cache` regions, 5 Django `6.0+` backends, and explicit limitations [^dj-pg] [^dj-sqlite] [^dj-mysql] [^dj-oracle] [^dj-plugin] [^okf-litestar] [^okf-limits].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter rebases the four relational Django `6.0+` database backends (`postgresql`, `sqlite3`, `mysql`, `oracle`) onto Django's built-in `DatabaseWrapper` classes backed by `vertebra.db.dbapi` (`SyncDBAPIModule` / `SyncDBAPIConnection`) with zero SQLAlchemy imports [^dj-backends].
-
-This chapter wires the official Google Cloud Spanner Django backend (`django_spanner`) onto Vertebra's Rust-backed `SyncDBAPIModule` and removes the unsupported `bigquery`, `duckdb`, and `mssql` Django backend stubs [^dj-spanner] [^dj-bq].
-
-This chapter synchronizes user-facing guides, API references, and OKF v0.2 knowledge chapters with the completed SQLAlchemy, Advanced Alchemy `1.12.0+`, Alembic, and Django `6.0+` architecture [^doc-ext] [^okf-dialects].
+This chapter rebases the relational (`postgresql`, `sqlite3`, `mysql`, `oracle`) and Google Cloud Spanner (`django_spanner`) Django `6.0+` database backends onto `vertebra.db.dbapi` (`SyncDBAPIModule` / `SyncDBAPIConnection`) with zero SQLAlchemy imports, deletes unsupported `bigquery`, `duckdb`, and `mssql` Django stub packages, and synchronizes user-facing docs and OKF v0.2 chapters with the completed architecture [^dj-backends] [^dj-spanner] [^dj-bq] [^doc-ext] [^okf-dialects].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -131,11 +125,7 @@ Django 6.0+ Supported ENGINE Paths (5 backends):
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Django `DATABASES` configuration guides are updated in `ch03-django-backends-and-docs` (`t04`).
-
-Supported Django `ENGINE` paths and BigQuery/DuckDB/MSSQL exclusions are documented in `ch03-django-backends-and-docs` (`t04`).
-
-Updates `docs/usage/extensions.md`, `docs/usage/databases.md`, `docs/reference/extensions.md`, [sqlspec-alchemy-and-dialects.md](../../../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), [litestar.md](../../../../knowledge/domains/extensions/litestar.md), and [database-driver-limitations.md](../../../../knowledge/domains/data/database-driver-limitations.md), keeping every OKF chapter `<= 200` lines.
+Updates `docs/usage/extensions.md`, `docs/usage/databases.md`, `docs/reference/extensions.md`, [sqlspec-alchemy-and-dialects.md](../../../../knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md), [litestar.md](../../../../knowledge/domains/extensions/litestar.md), and [database-driver-limitations.md](../../../../knowledge/domains/data/database-driver-limitations.md) in `t04`, covering Django `DATABASES` configuration, the 5 supported Django `ENGINE` paths, BigQuery/DuckDB/MSSQL exclusions, and keeping every OKF chapter `<= 200` lines.
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -151,16 +141,16 @@ Updates `docs/usage/extensions.md`, `docs/usage/databases.md`, `docs/reference/e
 - [ ] [t01-django-postgresql-and-sqlite3.md](tasks/t01-django-postgresql-and-sqlite3.md) — Implement full DatabaseWrapper, DatabaseFeatures, DatabaseOperations, and DatabaseIntrospection for PostgreSQL and SQLite3.
 - [ ] [t02-django-mysql-and-oracle.md](tasks/t02-django-mysql-and-oracle.md) — Implement full Django MySQL and Oracle backends including RETURNING INTO VariableWrapper out-binds and schema introspection.
 - [ ] [t03-django-spanner-and-unsupported-cleanup.md](tasks/t03-django-spanner-and-unsupported-cleanup.md) — Upgrade the Django Spanner backend (bit-reversed sequences, INTERLEAVE IN PARENT, schema editor) and delete unsupported mssql/duckdb/bigquery Django backend packages.
-- [ ] [t04-sqlalchemy-django-docs-and-okf.md](tasks/t04-sqlalchemy-django-docs-and-okf.md) — Update docs/usage/extensions.md and docs/reference/extensions.md and sync sqlspec-alchemy-and-dialects.md, django.md, and database-driver-limitations.md.
+- [ ] [t04-sqlalchemy-django-docs-and-okf.md](tasks/t04-sqlalchemy-django-docs-and-okf.md) — Update docs/usage/extensions.md, docs/usage/databases.md, and docs/reference/extensions.md and sync sqlspec-alchemy-and-dialects.md, litestar.md, and database-driver-limitations.md.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch03-django-backends-and-docs` (`t04`) is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing` and `native-sqlite-driver`).
+Chapter `ch03-django-backends-and-docs` (`t04`) is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisite `native-sqlite-driver` (`broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+uv run --no-sync ruff check src/py/vertebra/extensions/django && uv run --no-sync mypy src/py/vertebra/extensions/django && uv run --no-sync python -m tools.docs.scan_public_docstrings && uv run --no-sync python -m tools.scripts.review_setup validate && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/extensions/test_vite_and_docs_portal.py src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 ```
 
 [^dj-backends]: `src/py/vertebra/extensions/django/db/backends/__init__.py` — Current generic Django DatabaseWrapperMixin with vendor config dispatch.

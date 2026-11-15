@@ -53,32 +53,25 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `WorkerRunner` (`src/py/vertebra/framework/queues/worker.py`) resolving task dependencies inside a per-attempt `Container.scope()` per [`../spec.md`](../spec.md) [^fw-di] [^queue-base].
-
-Upgrade `CronScheduler` (`src/py/vertebra/framework/queues/scheduler.py`) with distributed lease coordination and slot-keyed idempotency per [`../spec.md`](../spec.md) [^queue-sched] [^queue-cap].
+Implement `WorkerRunner` (`src/py/vertebra/framework/queues/worker.py`) resolving task dependencies inside a per-attempt `Container.scope()` and upgrade `CronScheduler` (`src/py/vertebra/framework/queues/scheduler.py`) with distributed lease coordination and slot-keyed idempotency per [`../spec.md`](../spec.md) [^fw-di] [^queue-base] [^queue-sched] [^queue-cap].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/framework/di.py` — `Container` sync/async scope entry and parameter injection.
 - `src/py/vertebra/framework/queues/base.py` — `QueueService` handler registry and result persistence.
 - `src/py/vertebra/server/lanes.py` — `MultiLaneWorkerRunner` lane concurrency primitives.
-
+- `src/py/vertebra/framework/di.py` — `Container` sync/async scope entry and parameter injection.
+- `src/py/vertebra/framework/_app.py` — app-level container and worker lifespan wiring.
 - `src/py/vertebra/framework/queues/scheduler.py` — `CronExpression` and `CronScheduler`.
 - `src/py/vertebra/db/driver/capabilities.py` — `acquire_lease` and `reserve_unique_key`.
 
 ## Contracts & Edge Cases
 
-- `WorkerRunner` enters a fresh `async with container.scope():` (or sync `with container.sync_scope():` for sync workers) per claimed task attempt, injecting typed dependencies into task handlers and tearing scoped resources down deterministically on completion/failure.
-- Maintain background lease heartbeats (`heartbeat`), stale-claim reaping (`reap_stale`), per-lane concurrency semaphores (`io`, `cpu`, `admin`), and graceful in-flight drain on shutdown.
-
-- `CronExpression` serves as the single cron parser across Vertebra queues.
-- `CronScheduler` acquires a token-fenced scheduler lease and reserves `{schedule_name}:{slot_epoch}` idempotency keys before enqueuing so multi-worker clusters fire each cron tick at most once.
+- `WorkerRunner` enters a fresh `async with container.scope():` (or sync `with container.sync_scope():` for sync workers) per claimed task attempt, injecting typed dependencies into task handlers, tearing scoped resources down deterministically on completion/failure, and maintaining background lease heartbeats (`heartbeat`), stale-claim reaping (`reap_stale`), per-lane concurrency semaphores (`io`, `cpu`, `admin`), and graceful in-flight drain on shutdown.
+- `CronExpression` serves as the sole cron parser across Vertebra queues; `CronScheduler` acquires a token-fenced scheduler lease and reserves `{schedule_name}:{slot_epoch}` idempotency keys before enqueuing so multi-worker clusters fire each cron tick at most once.
 
 ## Test Matrix
 
-- Unit tests verifying per-task DI scope isolation (distinct scoped instances per task, deterministic cleanup on error), lane starvation prevention, heartbeat renewal, and graceful drain.
-
-- Parametrized `CronExpression` boundary tests and multi-scheduler race tests proving a cron window enqueues exactly once across concurrent workers.
+- Unit tests verifying per-task DI scope isolation (distinct scoped instances per task, deterministic cleanup on error), lane starvation prevention, heartbeat renewal, and graceful drain, alongside parametrized `CronExpression` boundary and multi-scheduler concurrent race tests.
 
 ## Verification
 

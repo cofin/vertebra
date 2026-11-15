@@ -50,6 +50,7 @@ def _build_cli() -> Any:
     js_mod = ensure_module("vertebra.cli.js")
     run_mod = ensure_module("vertebra.cli.run")
     workers_mod = ensure_module("vertebra.cli.workers")
+    broker_mod = ensure_module("vertebra.cli.broker")
 
     config_mod.configure_rich_click()
 
@@ -85,6 +86,7 @@ def _build_cli() -> Any:
     root_cli.add_command(init_mod.init)
     root_cli.add_command(ai_mod.ai)
     root_cli.add_command(workers_mod.workers)
+    root_cli.add_command(broker_mod.broker)
     root_cli.add_command(build_mod.build, name="build")
     plugin_registry.discover_entry_point_commands(root_cli)
     return root_cli

@@ -46,6 +46,7 @@ from vertebra.extensions.alchemy import (
     create_sync_alchemy_config,
     normalize_alchemy_url,
 )
+from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
 from vertebra.extensions.django.db.backends.bigquery.base import (
     DatabaseWrapper as BigQueryDjangoDatabaseWrapper,
 )
@@ -97,6 +98,8 @@ from vertebra.extensions.sqlalchemy import (
     SyncSpannerDialect,
     Vector,
 )
+from vertebra.extensions.sqlalchemy import dialects as sqlalchemy_dialects_mod
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
 from vertebra.extensions.starlette import (
     provide_driver as starlette_provide_driver,
 )
@@ -1265,3 +1268,43 @@ async def test_native_provider_preserves_driver_exception_identity(
         assert exc.value.__cause__ is failure
     else:
         assert exc.value is failure
+
+
+@pytest.mark.anyio
+async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
+    """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
+    assert not hasattr(sqlalchemy_dialects_mod, "SyncDBAPIConnection")
+    assert not hasattr(sqlalchemy_dialects_mod, "AsyncDBAPIConnection")
+    assert SyncBigQueryDialect.dbapi().paramstyle == "named"
+    assert AsyncSpannerDialect.dbapi().paramstyle == "named"
+
+    sync_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    bq_engine = None
+    sp_engine = None
+    try:
+        bq_cfg = create_sync_alchemy_config("bigquery://analytics-proj/ds", broker=sync_broker)
+        sp_cfg = create_async_alchemy_config("spanner://core-proj/prod-inst/orders", broker=async_broker)
+        assert issubclass(bq_cfg.engine_config.poolclass, BrokerPool)
+        assert issubclass(sp_cfg.engine_config.poolclass, AsyncBrokerPool)
+        assert bq_cfg.engine_config.connect_args["broker"] is sync_broker
+        assert sp_cfg.engine_config.connect_args["broker"] is async_broker
+        bq_engine = bq_cfg.get_engine()
+        sp_engine = sp_cfg.get_engine()
+        assert isinstance(bq_engine.pool, BrokerPool)
+        assert isinstance(sp_engine.pool, AsyncBrokerPool)
+        assert SyncBigQueryDialect().create_connect_args(bq_engine.url) == (
+            [],
+            {"url": "bigquery+vtb://analytics-proj/ds"},
+        )
+        assert AsyncSpannerDialect().create_connect_args(sp_engine.url) == (
+            [],
+            {"url": "spanner+vtb_async://core-proj/prod-inst/orders"},
+        )
+    finally:
+        if bq_engine is not None:
+            bq_engine.dispose()
+        if sp_engine is not None:
+            await sp_engine.dispose()
+        sync_broker.close()
+        await async_broker.close()

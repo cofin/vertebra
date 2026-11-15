@@ -31,9 +31,13 @@ __all__ = [
     "AsyncGcpTokenCache",
     "BigQueryError",
     "BigQueryRowError",
+    "BrokerAttachClient",
+    "BrokerAttachServer",
+    "BrokerEngineRegistry",
     "BrokerStats",
     "CloudSQLDialer",
     "ConnectionFailure",
+    "classify_sql_statement",
     "DataError",
     "DatabaseError",
     "GcpIdTokenSnapshot",
@@ -47,11 +51,13 @@ __all__ = [
     "InternalError",
     "JWTGuard",
     "LeaseBroker",
+    "ReclaimedLease",
     "LeaseGrant",
     "LogSink",
     "NotFoundError",
     "NotSupportedError",
     "OperationalError",
+    "PartitionStats",
     "PoolExhaustedError",
     "ProgrammingError",
     "PyEmptyAwaitable",
@@ -172,6 +178,7 @@ __all__ = [
     "splice_prefix_tokens",
     "split_qualified_identifier",
     "sqlite_initialization_pragmas",
+    "stable_hash64",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
     "submit_batch_raw",
@@ -753,6 +760,7 @@ def drive_rsgi_batch(
 def parse_traceparent(header: str) -> tuple[str, str, int] | None: ...
 def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ...
 def sanitize_sql(sql: str) -> str: ...
+def classify_sql_statement(operation: str) -> tuple[bool, bool, bool]: ...
 def instantiate_struct_vectorcall(
     cls: Any,
     args: tuple[Any, ...] | None = None,
@@ -818,6 +826,8 @@ class BrokerStats:
     """Number of overflow pool slots currently leased."""
     waiting_threads: int
     """Number of worker threads currently parked on the futex wait queue."""
+    quarantined: int
+    """Number of pool slots currently quarantined pending rollback/disposal."""
     total_acquired: int
     """Cumulative count of leases granted since broker initialization."""
     total_released: int
@@ -828,6 +838,74 @@ class BrokerStats:
     """Cumulative count of `acquire` calls that timed out waiting for a slot."""
     total_reclaimed: int
     """Cumulative count of leases reclaimed from crashed worker PIDs."""
+    total_quarantined: int
+    """Cumulative count of leases placed into quarantine."""
+    total_disposed: int
+    """Cumulative count of quarantined slots disposed back to free state."""
+
+@final
+class ReclaimedLease:
+    """Descriptor identifying a worker-reclaimed slot awaiting host disposal."""
+
+    slot_index: int
+    """Slot index within the shared-memory lease table."""
+    generation: int
+    """Monotonic generation of the reclaimed slot in `Quarantined` state."""
+    pool_id: int | None
+    """Partition identifier (`pool_id`) owning the reclaimed slot, or `None` when unpartitioned."""
+
+@final
+class PartitionStats:
+    """Per-partition shared-memory lease counters."""
+
+    pool_id: int
+    """Partition slot identifier (`0..MAX_POOL_PARTITIONS`)."""
+    pool_size: int
+    """Primary connection capacity configured for this partition."""
+    max_overflow: int
+    """Maximum overflow connection capacity configured for this partition."""
+    active_leases: int
+    """Number of currently leased slots belonging to this partition."""
+    quarantined: int
+    """Number of slots in this partition held in quarantine awaiting disposal."""
+    total_acquired: int
+    """Cumulative successful lease acquisitions recorded for this partition."""
+    total_released: int
+    """Cumulative explicit lease releases recorded for this partition."""
+    total_reclaimed: int
+    """Cumulative crashed-worker leases reclaimed from this partition."""
+    total_quarantined: int
+    """Cumulative leases moved into quarantine in this partition."""
+    total_disposed: int
+    """Cumulative quarantined slots returned to the free pool in this partition."""
+
+@final
+class BrokerAttachServer:
+    """Authenticated Unix domain socket server delivering the broker SHM FD via `SCM_RIGHTS`."""
+
+    def __new__(
+        cls,
+        socket_path: str,
+        secret: bytes | str,
+        shm_fd: int,
+        shm_size: int = 0,
+    ) -> Self: ...
+    def serve_one(self, timeout_ms: int = 5000) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    @property
+    def socket_path(self) -> str: ...
+
+@final
+class BrokerAttachClient:
+    """Client helper authenticating over UDS to receive the broker SHM FD."""
+
+    @staticmethod
+    def attach(
+        socket_path: str,
+        secret: bytes | str,
+        timeout_ms: int = 5000,
+    ) -> tuple[int, int]: ...
 
 @final
 class LeaseBroker:
@@ -847,16 +925,32 @@ class LeaseBroker:
     @staticmethod
     def open_named(
         name: str,
+        pool_size: int | None = None,
+        max_overflow: int | None = None,
+        stmt_capacity: int | None = None,
+    ) -> LeaseBroker: ...
+    @staticmethod
+    def open_or_create_named(
+        name: str,
         pool_size: int = 20,
         max_overflow: int = 10,
         stmt_capacity: int = 512,
-    ) -> LeaseBroker: ...
+    ) -> tuple[LeaseBroker, bool]: ...
+    @staticmethod
+    def probe_owner_pid(name: str) -> int | None: ...
+    def unlink(self) -> bool: ...
+    @property
+    def owner_pid(self) -> int | None: ...
     @staticmethod
     def from_fd(fd: int, size: int = 0) -> LeaseBroker: ...
     @staticmethod
     def from_env() -> LeaseBroker | None: ...
     def statement_cache(self) -> StatementCache | None: ...
     def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]: ...
+    def quarantine(self, slot_index: int, generation: int) -> None: ...
+    def dispose_quarantined(self, slot_index: int, generation: int) -> None: ...
+    def quarantined_count(self) -> int: ...
+    def reclaim_worker_leases(self, worker_pid: int) -> list[ReclaimedLease]: ...
     def publish_channel(
         self,
         channel: Any,
@@ -882,6 +976,30 @@ class LeaseBroker:
         ttl_ns: int = 0,
         bind_key_hash: int = 0,
     ) -> LeaseGrant | None: ...
+    def register_partition(
+        self,
+        pool_key_hash: int,
+        pool_size: int,
+        max_overflow: int = 0,
+    ) -> int: ...
+    def lookup_partition(self, pool_key_hash: int) -> int | None: ...
+    def partition_stats(self, pool_key_hash: int) -> PartitionStats | None: ...
+    def try_acquire_in(
+        self,
+        partition: int,
+        worker_pid: int,
+        ttl_ns: int = 0,
+        bind_key_hash: int = 0,
+    ) -> LeaseGrant | None: ...
+    def acquire_in(
+        self,
+        partition: int,
+        worker_pid: int,
+        ttl_ns: int = 0,
+        timeout_ms: int = 5000,
+        bind_key_hash: int = 0,
+    ) -> LeaseGrant | None: ...
+    def heartbeat(self, slot_index: int, generation: int) -> None: ...
     def release(self, slot_index: int, generation: int) -> bool: ...
     def reap_expired(self) -> int: ...
     def reclaim_worker(self, worker_pid: int) -> int: ...
@@ -938,6 +1056,11 @@ class StatementCache:
     def create_named(name: str, capacity: int = 512) -> StatementCache: ...
     @staticmethod
     def open_named(name: str, capacity: int = 512) -> StatementCache: ...
+    @staticmethod
+    def open_or_create_named(name: str, capacity: int = 512) -> tuple[StatementCache, bool]: ...
+    def unlink(self) -> bool: ...
+    @property
+    def owner_pid(self) -> int | None: ...
     def lookup(self, dialect_tag: int, raw_sql: bytes) -> StatementPlan | None: ...
     def insert(
         self,
@@ -952,6 +1075,22 @@ class StatementCache:
     @property
     def capacity(self) -> int: ...
 
+@final
+class BrokerEngineRegistry:
+    @staticmethod
+    def register(capsule: object) -> int: ...
+    @staticmethod
+    def registered_tags() -> list[int]: ...
+    @staticmethod
+    def normalize(dialect_tag: int, sql: str) -> tuple[str, int]: ...
+    @staticmethod
+    def open_pool(dialect_tag: int, dsn: str, max_size: int) -> int: ...
+    @staticmethod
+    def execute(dialect_tag: int, pool_id: int, frame: bytes) -> bytes: ...
+    @staticmethod
+    def close_pool(dialect_tag: int, pool_id: int) -> None: ...
+
+def stable_hash64(data: bytes | str) -> int: ...
 def classify_jsonrpc_frame(
     payload: bytes,
 ) -> tuple[int, str | None, str | None]: ...

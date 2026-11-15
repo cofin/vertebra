@@ -4,7 +4,7 @@ id: native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t04
 flow_id: native-sqlite-driver
 chapter_id: ch02-rust-engine-arrow-and-pyo3-clients
 title: Expose SyncSQLiteClient, AsyncSQLiteClient, Broker Capsule, and Free-Threaded Verification
-description: Bind SyncSQLiteClient, AsyncSQLiteClient, and broker_engine_capsule (tag 3) in vertebra._sqlite and verify GIL_USED = False and interrupt cancellation.
+description: Bind SyncSQLiteClient, AsyncSQLiteClient, and broker_engine_capsule (tag 3) in vertebra._sqlite, register BrokerEngineDiscovery, and verify GIL_USED = False and interrupt cancellation.
 status: stable
 state: pending
 planning_quality: standard
@@ -26,7 +26,7 @@ read_set:
 - src/rs/vertebra-db/src/py_async.rs
 - src/rs/vertebra-db/src/lib.rs
 - src/py/vertebra/_sqlite.pyi
-- src/rs/vertebra-sqlite/src/py_client.rs
+- src/py/vertebra/extensions/broker/engines.py
 - src/py/tests/unit/test_freethreaded_gil.py
 estimated_loc: 245
 tags:
@@ -53,45 +53,40 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`) in `vertebra-sqlite` and synchronize `src/py/vertebra/_sqlite.pyi` per [`../spec.md` §2](../spec.md) [^py-async] [^duckdb-pyi].
-
-Add `"vertebra._sqlite"` to `BrokerEngineDiscovery.ENGINE_MODULES`, register `vertebra._sqlite` in `test_freethreaded_gil.py`, and verify recursive-CTE `InterruptHandle` cancellation and multi-thread WAL concurrency per [`../spec.md` §2](../spec.md) [^ft-gil-test].
+Implement `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`) in `vertebra-sqlite`, register `"vertebra._sqlite"` in `BrokerEngineDiscovery.ENGINE_MODULES`, synchronize `src/py/vertebra/_sqlite.pyi`, register `vertebra._sqlite` in `test_freethreaded_gil.py`, and verify recursive-CTE `InterruptHandle` cancellation plus multi-thread WAL concurrency per [`../spec.md` §2](../spec.md) [^py-async] [^duckdb-pyi] [^ft-gil-test].
 
 ## Bounded Read Manifest
 
 - `src/rs/vertebra-db/src/py_async.rs` — `SyncCompletionQueue`, `AsyncCompletionQueue`, and `Notifier`.
 - `src/rs/vertebra-db/src/lib.rs` — `BrokerPoolBackend` and `new_broker_engine_pycapsule`.
 - `src/py/vertebra/_sqlite.pyi` — Type stubs for `vertebra._sqlite`.
-
-- `src/rs/vertebra-sqlite/src/py_client.rs` — PyO3 SQLite client classes from `t03`.
+- `src/py/vertebra/extensions/broker/engines.py` — `BrokerEngineDiscovery.ENGINE_MODULES`.
 - `src/py/tests/unit/test_freethreaded_gil.py` — Extension `GIL_USED == False` and `frozen` class checks (`TEST-10`).
 
 ## Contracts & Edge Cases
 
 - Release the GIL (`py.detach`) on all `SyncSQLiteClient` waits and drive `AsyncSQLiteClient` completions via `AsyncCompletionQueue` + `Notifier` + `cancel_operation(op_id)`.
-- Export `broker_engine_capsule()` implementing `BrokerPoolBackend` (`DIALECT_TAG_SQLITE = 3`) from `broker-pool-sharing`.
+- Export `broker_engine_capsule()` implementing `BrokerPoolBackend` (`DIALECT_TAG_SQLITE = 3`) and add `"vertebra._sqlite"` to `BrokerEngineDiscovery.ENGINE_MODULES`.
+- Register `vertebra._sqlite` (`SyncSQLiteClient`, `AsyncSQLiteClient`) in `test_freethreaded_gil.py` (`TEST-10`).
 - **Edge Case**: Dropping or closing a client shuts down worker threads deterministically without leaking `Notifier` file descriptors.
-
-- Include `vertebra._sqlite` (`SyncSQLiteClient`, `AsyncSQLiteClient`) in `test_freethreaded_gil.py`.
-- Assert `BrokerEngineDiscovery.register_installed()` registers `DIALECT_TAG_SQLITE = 3`.
 - **Edge Case**: Recursive CTE `WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) SELECT count(*) FROM cnt` aborts within `< 50ms` via `cancel()` / `cancel_operation(op_id)` without corrupting subsequent queries on the connection.
 
 ## Test Matrix
 
-- `mypy.stubtest vertebra._sqlite` verifies 100% signature parity across `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule`.
-
-- Barrier-synchronized multi-thread WAL read/write test (zero `sleep` synchronization, `TEST-04`), recursive-CTE interrupt test, and `test_freethreaded_gil.py`.
+- `mypy.stubtest vertebra._sqlite` passes with 100% signature parity across `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule`.
+- Barrier-synchronized multi-thread WAL read/write test (zero `sleep` synchronization, `TEST-04`), recursive-CTE interrupt test, and `BrokerEngineDiscovery.register_installed()` (`DIALECT_TAG_SQLITE = 3`) pass.
+- `test_freethreaded_gil.py` passes verifying `GIL_USED == False`.
 
 ## Verification
 
 ```bash
-make sqlite-test && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -q
+make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-sqlite --locked && uv run --no-sync python -m mypy.stubtest vertebra._sqlite --concise && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -q
 ```
 
 ## Acceptance Criteria
 
 - [ ] `SyncSQLiteClient`, `AsyncSQLiteClient`, and `broker_engine_capsule()` pass `stubtest` and Rust client tests.
-- [ ] `make sqlite-test` and `test_freethreaded_gil.py` pass with `GIL_USED == False`.
+- [ ] `BrokerEngineDiscovery` registers `DIALECT_TAG_SQLITE = 3` and `test_freethreaded_gil.py` verifies `GIL_USED == False`.
 - [ ] Zero regressions in the fast verification gate.
 
 [^py-async]: `src/rs/vertebra-db/src/py_async.rs` — AsyncCompletionQueue and Notifier PyO3 bridge.

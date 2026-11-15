@@ -44,7 +44,7 @@ Implement bounded LRU `CLIENT TRACKING ON [PREFIX ...] BCAST` push invalidation 
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-redis/src/client_core.rs` — Core RESP3 connection manager from `t01`.
+- `src/rs/vertebra-redis/src/client_core.rs` — Core RESP3 connection manager from `t02`.
 - `src/py/vertebra/db/adapters/redis/config.py` — Tracking, Cluster, and Sentinel config contracts.
 
 ## Contracts & Edge Cases

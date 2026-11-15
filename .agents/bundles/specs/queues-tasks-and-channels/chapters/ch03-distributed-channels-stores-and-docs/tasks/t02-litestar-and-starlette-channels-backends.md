@@ -26,6 +26,7 @@ read_set:
 - src/py/vertebra/extensions/starlette/channels.py
 - src/py/vertebra/extensions/flask/channels.py
 - src/py/vertebra/server/_channels.py
+- src/py/vertebra/db/driver/capabilities.py
 estimated_loc: 210
 tags:
 - channels
@@ -52,8 +53,11 @@ Replace `swap_channels_backend` monkeypatching in `extensions/litestar/channels.
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/litestar/channels.py` — `ChannelsBackend(litestar.channels.backends.base.ChannelsBackend)` and `ChannelsPlugin` builder.
-- `src/py/vertebra/extensions/starlette/channels.py` & `flask/channels.py` — ASGI and synchronous WSGI channel adapters.
+- `src/py/vertebra/extensions/litestar/channels.py` — `ChannelsBackend(litestar.channels.backends.base.ChannelsBackend)` and `ChannelsPlugin` builder (`swap_channels_backend` slated for removal).
+- `src/py/vertebra/extensions/starlette/channels.py` — ASGI Starlette channels adapter.
+- `src/py/vertebra/extensions/flask/channels.py` — WSGI synchronous Flask channels adapter.
+- `src/py/vertebra/server/_channels.py` — `ChannelBus` pub/sub fan-out.
+- `src/py/vertebra/db/driver/capabilities.py` — `SyncNotificationSource` and `AsyncNotificationSource` protocols.
 
 ## Contracts & Edge Cases
 

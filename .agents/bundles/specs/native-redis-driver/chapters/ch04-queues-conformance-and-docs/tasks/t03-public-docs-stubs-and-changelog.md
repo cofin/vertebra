@@ -3,8 +3,8 @@ type: Task
 id: native-redis-driver:ch04-queues-conformance-and-docs:t03
 flow_id: native-redis-driver
 chapter_id: ch04-queues-conformance-and-docs
-title: Update Public Databases/Installation Docs, Native Stubs Test, Changelog, and Tech Stack
-description: Update docs/usage/databases.md, docs/getting-started/installation.md, test_native_stubs.py, docs/changelog/index.md, AGENTS.md, and product/tech-stack.md.
+title: Update Public Docs, Native Stubs, Changelog, AGENTS.md, and Product Definition
+description: Update docs/usage/databases.md, docs/usage/queues-and-realtime.md, docs/reference/native-stubs.md, docs/changelog/index.md, AGENTS.md, and .agents/bundles/product/product.md.
 status: stable
 state: pending
 planning_quality: standard
@@ -58,20 +58,17 @@ sources:
   title: OKF product definition and crate capability table
 ---
 
-# Task `t03`: Update Public Databases/Installation Docs, Native Stubs Test, Changelog, and Tech Stack
+# Task `t03`: Update Public Docs, Native Stubs, Changelog, AGENTS.md, and Product Definition
 
 ## Objective & Scope Boundary
 
-Update `docs/usage/databases.md`, `docs/usage/queues-and-realtime.md`, and `docs/reference/native-stubs.md` per [`../spec.md` §2](../spec.md) [^docs-db] [^docs-queues] [^docs-stubs].
-
-Update `docs/changelog/index.md`, `AGENTS.md`, and `.agents/bundles/product/product.md` per [`../spec.md` §2](../spec.md) [^docs-changelog] [^agents-md] [^product-md].
+Update `docs/usage/databases.md`, `docs/usage/queues-and-realtime.md`, `docs/reference/native-stubs.md`, `docs/changelog/index.md` (`Unreleased`), `AGENTS.md`, and `.agents/bundles/product/product.md` per [`../spec.md` §2](../spec.md) [^docs-db] [^docs-queues] [^docs-stubs] [^docs-changelog] [^agents-md] [^product-md].
 
 ## Bounded Read Manifest
 
 - `docs/usage/databases.md` — Redis and Valkey configuration, tracking, and topology docs.
 - `docs/usage/queues-and-realtime.md` — Queue install tabs (`redis` PyPI removal) and notification sources.
 - `docs/reference/native-stubs.md` — TOC budget (`<= 14`) and `heading_level: 4` stub blocks.
-
 - `docs/changelog/index.md` — `Unreleased` section.
 - `AGENTS.md` — Crate list and Quick Verification Commands (`make redis-test`, `make redis-wheel-check`).
 - `.agents/bundles/product/product.md` — `vertebra-db` row referencing `parse_resp3_frame`/`crc16_xmodem`/`redis_hash_slot`.
@@ -80,28 +77,25 @@ Update `docs/changelog/index.md`, `AGENTS.md`, and `.agents/bundles/product/prod
 
 - Replace third-party `redis` PyPI install instructions with tabbed `vertebra-core[redis]` and `vertebra-core[valkey]` blocks (`uv`, `pip`, `pdm`, `poetry`).
 - Document `SyncNotificationSource` / `AsyncNotificationSource` and keep `docs/reference/native-stubs.md` at `heading_level: 4` (`<= 14` TOC items, `< 120_000` bytes).
-- **Edge Case**: Ensure zero stale references to `NotificationSource`, `PostgresNotificationSource`, or `OracleNotificationSource` remain in touched docs.
-
-- Remove `parse_resp3_frame`, `crc16_xmodem`, and `redis_hash_slot` from the `vertebra-db` row in `product.md` and add `vertebra-redis`.
-- Add `vertebra-redis`, `make redis-test`, and `make redis-wheel-check` to `AGENTS.md`.
-- **Edge Case**: Keep `product.md` `<= 200` lines and verify `verified[].commit` is a valid ancestor SHA.
+- Remove `parse_resp3_frame`, `crc16_xmodem`, and `redis_hash_slot` from the `vertebra-db` row in `.agents/bundles/product/product.md`, add `vertebra-redis`, and sync `make redis-test` and `make redis-wheel-check` in `AGENTS.md` (`DOC-08`).
+- **Edge Case**: Ensure zero stale references to unprefixed `NotificationSource`, `PostgresNotificationSource`, or `OracleNotificationSource` remain in touched docs.
+- **Edge Case**: Keep `.agents/bundles/product/product.md` `<= 200` lines with a valid `verified[].commit` ancestor SHA.
 
 ## Test Matrix
 
-- `make docs` builds cleanly and passes `verify_docs_artifacts.py`.
-
-- `make review-check && make docs` exits `0`.
+- `uv run --no-sync python -m tools.docs.scan_public_docstrings` and Zensical artifact budget checks pass cleanly.
+- `make review-check` exits `0`.
 
 ## Verification
 
 ```bash
-make review-check && make docs
+uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-check
 ```
 
 ## Acceptance Criteria
 
-- [ ] Public docs and `native-stubs.md` render cleanly via `make docs`.
-- [ ] `changelog`, `AGENTS.md`, and `product.md` reflect shipped `vertebra-redis` and `Sync*`/`Async*` notification contracts.
+- [ ] Public docs, `native-stubs.md`, and `Unreleased` changelog render cleanly.
+- [ ] `AGENTS.md` and `.agents/bundles/product/product.md` reflect shipped `vertebra-redis` and `Sync*`/`Async*` notification contracts.
 - [ ] Zero regressions in the fast verification gate.
 
 [^docs-db]: `docs/usage/databases.md` — Database and cache drivers usage guide.

@@ -9,7 +9,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 | **SQLSpec** | `create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
 | **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and transactional file attachments |
 | **Oracle APEX** | `ApexIslandRegistry`, `ApexGateway` | Reverse-proxy Oracle ORDS/APEX sessions, verify ECID/session state, and hydrate TypeScript UI islands |
-| **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerPlugin` | Dispatch HTTP/2 gRPC methods and attach cross-worker `DatabaseBroker` connection/statement leasing |
+| **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerHost`, `SyncSHMBrokerTransport`, `BrokerPlugin`, `BrokerPool`, `LeaseQuarantinedError` | Dispatch HTTP/2 gRPC methods and share cross-worker SHM broker connection pools and statement caches |
 
 ## Litestar Integration (`vertebra.extensions.litestar`)
 
@@ -45,7 +45,8 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 
 ::: vertebra.extensions.sqlspec.provider.SQLSpecAsyncProvider
     options:
-      heading_level: 3
+      heading_level: 4
+      members: false
 
 ## SQLAlchemy & Advanced Alchemy (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
@@ -61,6 +62,23 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
         - get_content_async
         - delete_object
         - delete_object_async
+
+::: vertebra.extensions.sqlalchemy.pool.BrokerPool
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.sqlalchemy.pool.AsyncBrokerPool
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.sqlalchemy.pool.broker_creator
+    options:
+      heading_level: 4
+      summary: false
 
 ## Oracle APEX Gateway & Island Bridge (`vertebra.extensions.apex`)
 
@@ -81,3 +99,29 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 ::: vertebra.extensions.broker.plugin.BrokerPlugin
     options:
       heading_level: 3
+      members: false
+      summary: false
+
+::: vertebra.extensions.broker.host.BrokerHost
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.broker.engines.BrokerEngineDiscovery
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.broker.transport.SyncSHMBrokerTransport
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.broker.errors.LeaseQuarantinedError
+    options:
+      heading_level: 4
+      members: false
+      summary: false

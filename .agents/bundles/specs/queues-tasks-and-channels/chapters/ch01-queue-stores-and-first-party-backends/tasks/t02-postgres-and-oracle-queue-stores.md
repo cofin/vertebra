@@ -54,33 +54,26 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `SyncPostgresQueueStore` and `AsyncPostgresQueueStore` in `src/py/vertebra/db/adapters/postgres/queue.py` per [`../spec.md`](../spec.md) [^pg-drv] [^pg-notify].
-
-Implement `SyncOracleQueueStore` and `AsyncOracleQueueStore` in `src/py/vertebra/db/adapters/oracle/queue.py` per [`../spec.md`](../spec.md) [^ora-drv] [^ora-notify].
+Implement `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` in `src/py/vertebra/db/adapters/postgres/queue.py` and `SyncOracleQueueStore`/`AsyncOracleQueueStore` in `src/py/vertebra/db/adapters/oracle/queue.py` (with public re-exports in each adapter `__init__.py`) per [`../spec.md`](../spec.md) [^pg-drv] [^pg-notify] [^ora-drv] [^ora-notify].
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncQueueStore` and `AsyncQueueStore` protocols.
-- `src/py/vertebra/db/adapters/postgres/{driver,notify,__init__}.py` — `$1` extended query binds and `pg_notify` wakeups.
-
-- `src/py/vertebra/db/driver/capabilities.py` — `SyncQueueStore` and `AsyncQueueStore` protocols.
-- `src/py/vertebra/db/adapters/oracle/{driver,notify,__init__}.py` — `:name` binds, `MERGE INTO`, and TxEventQ notifications.
+- `src/py/vertebra/db/adapters/postgres/driver.py` — `$1` extended query binds and transaction semantics.
+- `src/py/vertebra/db/adapters/postgres/notify.py` — `pg_notify` wakeup channels.
+- `src/py/vertebra/db/adapters/postgres/__init__.py` — adapter public exports (mirrored in `oracle/__init__.py`).
+- `src/py/vertebra/db/adapters/oracle/driver.py` — `:name` binds, `MERGE INTO`, and transactions.
+- `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification sources.
 
 ## Contracts & Edge Cases
 
-- Execute single-roundtrip atomic claims via CTE + `FOR UPDATE OF q SKIP LOCKED` + `UPDATE ... RETURNING` (zero correlated scalar subqueries in `SELECT` lists).
-- Enforce `(job_id, attempt)` fencing on `ack`, `nack`, and `heartbeat`; implement exponential retry backoff, dead-letter movement, uniqueness reservations, token-fenced cron/maintenance leases, and compact `pg_notify` wakeup emission (`< 8000` bytes) via `SyncPostgresNotificationSource` / `AsyncPostgresNotificationSource`.
-- Import zero `psycopg`, `vertebra.framework`, or `vertebra.extensions` modules inside `vertebra.db`.
-
-- Claim ready jobs using `FETCH FIRST :limit ROWS ONLY FOR UPDATE SKIP LOCKED` followed by fenced status/lease update inside the driver transaction; enforce `(job_id, attempt)` fencing on `ack`, `nack`, and `heartbeat`.
-- Support `ORA-00955` idempotent `ensure_schema`, `MERGE INTO` uniqueness and cron leases, DLQ movement, and optional `SyncOracleNotificationSource` / `AsyncOracleNotificationSource` TxEventQ wakeups with adaptive `MIN(scheduled_at)` polling fallback when notifications are unconfigured.
-- Import zero `oracledb` or framework modules.
+- Implement `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`: single-roundtrip atomic claims via CTE + `FOR UPDATE OF q SKIP LOCKED` + `UPDATE ... RETURNING` (zero correlated scalar subqueries in `SELECT` lists), `(job_id, attempt)` fencing on `ack`/`nack`/`heartbeat`, exponential retry backoff, DLQ movement, uniqueness reservations, token-fenced cron/maintenance leases, compact `< 8000`B `pg_notify` wakeup emission via `SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource`, and zero `psycopg`, `vertebra.framework`, or `vertebra.extensions` imports.
+- Implement `SyncOracleQueueStore`/`AsyncOracleQueueStore`: claim ready jobs via `FETCH FIRST :limit ROWS ONLY FOR UPDATE SKIP LOCKED` + fenced status/lease update inside transaction, `(job_id, attempt)` fencing, `ORA-00955`-idempotent `ensure_schema`, `MERGE INTO` uniqueness and cron leases, DLQ movement, optional TxEventQ wakeups via `SyncOracleNotificationSource`/`AsyncOracleNotificationSource` with adaptive `MIN(scheduled_at)` polling fallback when unconfigured, and zero `oracledb` or framework imports.
 
 ## Test Matrix
 
-- Parametrized unit tests verifying SQL bind compilation (`$1..$N`), atomic `SKIP LOCKED` claim, stale-attempt fencing rejection, DLQ transition on retry exhaustion, cron lease contention, and `isinstance(..., SyncQueueStore | AsyncQueueStore)`.
-
-- Parametrized unit tests covering `:name` bind shapes, `FOR UPDATE SKIP LOCKED` claim + fenced update, retry/DLQ transitions, cron lease reservation, TxEventQ wakeup vs polling fallback, and `SyncQueueStore`/`AsyncQueueStore` protocol checks.
+- Parametrized PostgreSQL unit tests (`$1..$N` SQL binds, atomic `SKIP LOCKED` claim, stale-attempt rejection, DLQ transition, cron lease contention, `SyncQueueStore`/`AsyncQueueStore` conformance).
+- Parametrized Oracle unit tests (`:name` binds, `FOR UPDATE SKIP LOCKED` claim + fenced update, retry/DLQ transitions, cron lease reservation, TxEventQ wakeup vs polling fallback, `SyncQueueStore`/`AsyncQueueStore` conformance).
 
 ## Verification
 

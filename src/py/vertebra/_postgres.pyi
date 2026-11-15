@@ -958,4 +958,7 @@ __all__ = [
     "SyncPostgresPool",
     "SyncPostgresPortal",
     "__version__",
+    "broker_engine_capsule",
 ]
+
+def broker_engine_capsule() -> object: ...

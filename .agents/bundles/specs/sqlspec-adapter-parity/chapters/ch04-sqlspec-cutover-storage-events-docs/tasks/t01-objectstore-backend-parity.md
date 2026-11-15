@@ -44,12 +44,13 @@ Upgrade `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` to s
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlspec/storage.py` — existing `ObjectStoreBackend` methods.
-- `src/py/vertebra/storage/_store.py` & `_arrow.py` — native Tokio awaitables (zero `asyncio.to_thread` per `PYO3-01`) and Arrow Parquet streaming.
+- `src/py/vertebra/extensions/sqlspec/storage.py` — existing `ObjectStoreBackend` methods and `register_storage_alias`.
+- `src/py/vertebra/storage/_store.py` — native Tokio awaitables (zero `asyncio.to_thread` per `PYO3-01`).
+- `src/py/vertebra/storage/_arrow.py` — Arrow Parquet streaming and batch helpers.
 
 ## Contracts & Edge Cases
 
-- Subclass `ObjectStoreBase` implementing full sync/async surface (`glob_*`, `is_object_*`, `is_path_*`, `move_*`, `copy_*`, `stream_arrow_sync`/`stream_arrow_async`, overloaded `sign_sync`/`sign_async` for `str | list[str]`, and `register_storage_alias` integration with `SyncStoragePipeline` / `AsyncStoragePipeline`).
+- Subclass `ObjectStoreBase` implementing the full sync/async surface (`glob_sync`, `is_object_sync`, `is_path_sync`, `move_sync`, `move_async`, `copy_sync`, `copy_async`, `stream_arrow_sync`/`stream_arrow_async`, `supports_signing`, overloaded `sign_sync`/`sign_async` for `str | list[str]`, and `register_storage_alias` integration against `sqlspec.storage.registry.storage_registry` with `SyncStoragePipeline` / `AsyncStoragePipeline`).
 - Use native `AsyncObjectStore` Rust Tokio awaitables on all `*_async` methods (`PYO3-01`).
 
 ## Test Matrix

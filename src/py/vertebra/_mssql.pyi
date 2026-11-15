@@ -15,9 +15,11 @@ __all__ = [
     "AsyncMSSQLClient",
     "SyncMSSQLClient",
     "__version__",
+    "broker_engine_capsule",
     "rewrite_mssql_placeholders",
 ]
 
+def broker_engine_capsule() -> object: ...
 def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]: ...
 
 @final

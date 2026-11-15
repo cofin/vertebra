@@ -32,7 +32,8 @@ pub use asgi::{
 };
 pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
 pub use broker::{
-    BrokerStats, LeaseBroker, LeaseGrant, StatementCache, StatementCacheStats, StatementPlan,
+    BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry, BrokerStats, LeaseBroker,
+    LeaseGrant, PartitionStats, ReclaimedLease, StatementCache, StatementCacheStats, StatementPlan,
 };
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{
@@ -100,12 +101,18 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<telemetry::LogSink>()?;
     m.add_class::<telemetry::JWTGuard>()?;
     m.add_class::<telemetry::RateLimiter>()?;
+    m.add_class::<broker::BrokerAttachClient>()?;
+    m.add_class::<broker::BrokerAttachServer>()?;
+    m.add_class::<broker::BrokerEngineRegistry>()?;
     m.add_class::<broker::LeaseGrant>()?;
     m.add_class::<broker::BrokerStats>()?;
     m.add_class::<broker::LeaseBroker>()?;
+    m.add_class::<broker::PartitionStats>()?;
+    m.add_class::<broker::ReclaimedLease>()?;
     m.add_class::<broker::StatementPlan>()?;
     m.add_class::<broker::StatementCacheStats>()?;
     m.add_class::<broker::StatementCache>()?;
+    m.add_function(wrap_pyfunction!(broker::stable_hash64, m)?)?;
     m.add_class::<agent::SchemaDigestCache>()?;
 
     // Agentic JSON-RPC fastpath

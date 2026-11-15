@@ -75,12 +75,20 @@ impl WaitWord {
         self.word.load(Ordering::Acquire)
     }
 
+    pub fn load_seqcst(&self) -> u32 {
+        self.word.load(Ordering::SeqCst)
+    }
+
     pub fn store(&self, value: u32) {
         self.word.store(value, Ordering::Release);
     }
 
     pub fn fetch_add(&self, val: u32) -> u32 {
         self.word.fetch_add(val, Ordering::AcqRel)
+    }
+
+    pub fn fetch_add_seqcst(&self, val: u32) -> u32 {
+        self.word.fetch_add(val, Ordering::SeqCst)
     }
 
     pub fn wait(&self, expected: u32) -> Result<(), SyncError> {

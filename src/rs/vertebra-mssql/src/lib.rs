@@ -21,12 +21,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString};
+use pyo3::types::{PyBytes, PyCapsule, PyDict, PyList, PyString};
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, db_runtime_handle, spawn_rust_db_task_with_attr,
 };
-use vertebra_db::{AuthType, CloudSqlInstanceUri, IpType, rewrite_mssql_placeholders};
+use vertebra_db::{
+    AuthType, CloudSqlInstanceUri, IpType, new_broker_engine_pycapsule, rewrite_mssql_placeholders,
+};
+
+use crate::broker::MssqlBrokerBackend;
 
 use crate::client::MssqlClient;
 use crate::codecs::{
@@ -1287,11 +1291,18 @@ fn py_rewrite_mssql_placeholders(sql: &str) -> (String, usize) {
     rewrite_mssql_placeholders(sql)
 }
 
+/// Export the `vertebra.BrokerEngineCapsule` PyCapsule for SQL Server (`DIALECT_TAG_MSSQL = 5`).
+#[pyfunction]
+pub fn broker_engine_capsule(py: Python<'_>) -> PyResult<Bound<'_, PyCapsule>> {
+    new_broker_engine_pycapsule(py, Arc::new(MssqlBrokerBackend::new_capsule_backend()))
+}
+
 #[pymodule(gil_used = false)]
 pub fn _mssql(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("FREE_THREADED", FREE_THREADED)?;
     m.add("GIL_USED", false)?;
+    m.add_function(wrap_pyfunction!(broker_engine_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_mssql_placeholders, m)?)?;
     m.add_class::<PySyncMSSQLClient>()?;
     m.add_class::<PyAsyncMSSQLClient>()?;

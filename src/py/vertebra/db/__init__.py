@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
+    from vertebra.db import dbapi
     from vertebra.db.arrow import (
         ARROW_SHM_THRESHOLD_ROWS,
         ArrowCursor,
@@ -114,12 +115,14 @@ __all__ = (
     "TenantPredicate",
     "TenantScopeConfig",
     "ThreadOffloadAsyncDatabaseDriver",
+    "dbapi",
     "provide_driver",
 )
 
 __lazy_modules__ = [
     "vertebra.db.arrow",
     "vertebra.db.cdc",
+    "vertebra.db.dbapi",
     "vertebra.db.dialer",
     "vertebra.db.driver",
     "vertebra.db.registry",
@@ -173,6 +176,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "TenantPredicate": ("vertebra.db.rls", "TenantPredicate"),
     "TenantScopeConfig": ("vertebra.db.rls", "TenantScopeConfig"),
     "ThreadOffloadAsyncDatabaseDriver": ("vertebra.db.driver", "ThreadOffloadAsyncDatabaseDriver"),
+    "dbapi": ("vertebra.db.dbapi", ""),
     "provide_driver": ("vertebra.db.registry", "provide_driver"),
 }
 

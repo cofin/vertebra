@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-15T17:48:00Z] archive | broker-pool-sharing
+
+- Archived completed specification `broker-pool-sharing` (`ch01`–`ch04`, `16/16` tasks across `936110fc..28415b3f`) into permanent OKF knowledge chapters (`broker-and-shm-leases.md`, `shm-broker-limitations.md`, `sqlspec-alchemy-and-dialects.md`, `cli.md`), aligned Master PRDs (`native-data-platform`, `integration-remediation`), downstream specifications (`native-sqlite-driver`, `native-redis-driver`, `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels`, `spanner-queue-and-rw-transactions`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/broker-pool-sharing/`.
+
+## [2026-11-15T17:47:30Z] finish | broker-pool-sharing
+
+- Completed `broker-pool-sharing` (`ch01`–`ch04`, `16/16` tasks covering `#95`, `#96`, `#97`, `#98`) across `936110fc..28415b3f`: implemented atomic `ShmOwnerHeader` create-or-attach with `SHM_INIT_REAPING` and magic-publication waiting, async-signal-safe `cleanup_all` and `reap_dead_owner_segments`, unseeded XXH3-64 `stable_hash64` keys and `64` `pool_key()` partitions, `SLOT_STATE_CLAIMING`/`SLOT_STATE_RECLAIMING`/`LeaseState::Quarantined` state transitions, authenticated `0600` UDS `SCM_RIGHTS` attach (`BrokerAttachServer`, `BrokerAttachClient`), versioned C-ABI `BrokerEngineCapsule` + `BrokerEngineRegistry` across PostgreSQL, MySQL, Oracle, MSSQL, and DuckDB, `BrokerHost` (`vtb broker serve|status`) crash `ROLLBACK` cleanup, typed SQLSpec `ProxySyncDriver`/`ProxyAsyncDriver` (`SyncDriverAdapterBase`/`AsyncDriverAdapterBase`), standalone `vertebra.db.dbapi`, isolated `SQLAlchemyAsyncDBAPI`, SQLAlchemy `BrokerPool`/`AsyncBrokerPool`, and verified `make lint`, `make dev`, `make rs-test`, `make postgres-test`, `make docs`, and `766` unit tests cleanly.
+
 ## [2026-11-14T22:49:30Z] archive | http3-and-http-hygiene
 
 - Archived completed specification `http3-and-http-hygiene` (`t01`–`t03` across `9b44d409..f277a29b`) into permanent OKF knowledge and product chapters (`ingress-and-routing.md`, `protocol-and-offload-modules.md`, `server-and-dispatch.md`, `lock-free-shm-and-sharding.md`, `polyglot-test-matrix.md`, `workflow.md`, `product.md`, `tech-stack.md`), updated Master PRD `integration-remediation` and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/http3-and-http-hygiene/`.

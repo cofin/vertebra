@@ -22,11 +22,11 @@ tests:
 - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
 - src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
+- src/py/vertebra/extensions/sqlalchemy/types.py
 - src/py/vertebra/db/adapters/mysql/driver.py
 - src/py/vertebra/db/adapters/mysql/core.py
-- src/py/vertebra/extensions/sqlalchemy/types.py
 - src/py/vertebra/db/adapters/oracle/driver.py
+- src/py/vertebra/db/adapters/mssql/driver.py
 estimated_loc: 230
 tags:
 - sqlalchemy
@@ -53,44 +53,36 @@ sources:
 
 ## Objective & Scope Boundary
 
-Implement `SyncMySQLDialect` and `AsyncMySQLDialect` subclassing `sqlalchemy.dialects.mysql.base.MySQLDialect` per [`../spec.md`](../spec.md) [^sa-dialects] [^mysql-driver]. Out of scope: SQLSpec MySQL adapter (`sqlspec-adapter-parity`).
-
-Implement `SyncOracleDialect` / `AsyncOracleDialect` (`OracleDialect`) and `SyncMSSQLDialect` / `AsyncMSSQLDialect` (`MSDialect`) per [`../spec.md`](../spec.md) [^oracle-driver] [^mssql-driver]. Out of scope: analytical/cloud dialects (`ch03`).
+Implement `SyncMySQLDialect`/`AsyncMySQLDialect` (`MySQLDialect`), `SyncOracleDialect`/`AsyncOracleDialect` (`OracleDialect`), and `SyncMSSQLDialect`/`AsyncMSSQLDialect` (`MSDialect`) in `dialects/{mysql,oracle,mssql}.py` per [`../spec.md` §2](../spec.md) [^sa-dialects] [^mysql-driver] [^oracle-driver] [^mssql-driver]. Out of scope: SQLSpec adapters (`sqlspec-adapter-parity`) and analytical/cloud dialects (`ch02`).
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlalchemy/dialects/_base.py` — shared dialect mixins.
+- `src/py/vertebra/extensions/sqlalchemy/types.py` — `OracleVector` type registration.
 - `src/py/vertebra/db/adapters/mysql/driver.py` — `vertebra._mysql` binary `?` prepared statement execution and `lastrowid` metadata.
 - `src/py/vertebra/db/adapters/mysql/core.py` — MySQL / MariaDB version and charset helpers.
-
-- `src/py/vertebra/extensions/sqlalchemy/dialects/_base.py` — shared dialect mixins.
-- `src/py/vertebra/extensions/sqlalchemy/types.py` — `OracleVector` type registration.
 - `src/py/vertebra/db/adapters/oracle/driver.py` — `:name` named binds and 23ai `VECTOR` / `BOOLEAN` / `OSON` capabilities.
 - `src/py/vertebra/db/adapters/mssql/driver.py` — `qmark` `?` -> `@P1` placeholder rewriting and `OUTPUT INSERTED` handling.
 
 ## Contracts & Edge Cases
 
 - `SyncMySQLDialect(_SyncDialectMixin, MySQLDialect)` and `AsyncMySQLDialect(_AsyncDialectMixin, MySQLDialect)` set `paramstyle = 'qmark'` matching `vertebra._mysql` binary prepared statements, parse MySQL 8/9 vs MariaDB server versions for `RETURNING`, and propagate `lastrowid`.
-
 - `SyncOracleDialect(_SyncDialectMixin, OracleDialect)` and `AsyncOracleDialect(_AsyncDialectMixin, OracleDialect)` use `paramstyle = 'named'` (`:name`), handle `RETURNING ... INTO` outbinds, and register 23ai `VECTOR` (`OracleVector`), `BOOLEAN`, and `JSON` reflection.
 - `SyncMSSQLDialect(_SyncDialectMixin, MSDialect)` and `AsyncMSSQLDialect(_AsyncDialectMixin, MSDialect)` use `paramstyle = 'qmark'` (rewritten to `@P1..@Pn` by `MSSQLCore`), `OUTPUT INSERTED`, and `NVARCHAR` / `UNIQUEIDENTIFIER` reflection.
 
 ## Test Matrix
 
-- Parametrized compilation (`?` qmark binds, backtick quoting, MariaDB vs MySQL 8 `RETURNING`) and `create_connect_args` tests for `SyncMySQLDialect` and `AsyncMySQLDialect`.
-
-- Parametrized compilation, parameter bind style, `RETURNING`/`OUTPUT`, and vector/UUID type reflection tests across `SyncOracleDialect`, `AsyncOracleDialect`, `SyncMSSQLDialect`, and `AsyncMSSQLDialect`.
+- Parametrized compilation (`?` qmark vs `:name` binds, backtick vs identifier quoting, MariaDB vs MySQL 8 `RETURNING`, `RETURNING INTO` out-binds, `OUTPUT INSERTED`), `create_connect_args`, and `OracleVector`/UUID reflection tests across all three dialect pairs.
 
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/sqlalchemy/dialects && uv run --no-sync mypy src/py/vertebra/extensions/sqlalchemy/dialects && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+uv run --no-sync ruff check src/py/vertebra/extensions/sqlalchemy/dialects && uv run --no-sync mypy src/py/vertebra/extensions/sqlalchemy/dialects && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py -q
 ```
 
 ## Acceptance Criteria
 
-- [ ] `SyncMySQLDialect` and `AsyncMySQLDialect` compile `?` placeholders and pass strict Mypy/Ruff checks.
-- [ ] `dialects/oracle.py` and `dialects/mssql.py` subclass built-in `OracleDialect` and `MSDialect` with leading `Sync*`/`Async*` names.
+- [ ] `dialects/{mysql,oracle,mssql}.py` subclass built-in `MySQLDialect`, `OracleDialect`, and `MSDialect` with leading `Sync*`/`Async*` names and pass Ruff/Mypy/pytest checks.
 - [ ] Zero regressions in the fast verification gate.
 
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current MySQL dialect definitions.

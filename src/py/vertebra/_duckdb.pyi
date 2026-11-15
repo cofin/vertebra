@@ -15,7 +15,10 @@ __all__ = [
     "AsyncDuckDBClient",
     "SyncDuckDBClient",
     "__version__",
+    "broker_engine_capsule",
 ]
+
+def broker_engine_capsule() -> object: ...
 
 @final
 class SyncDuckDBClient:

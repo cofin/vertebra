@@ -12,11 +12,10 @@ import pytest
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 
 from vertebra.extensions.alchemy import (
-    AsyncInMemoryBrokerTransport,
+    AsyncSHMBrokerTransport,
     AsyncSHMSessionBroker,
     BrokerConfig,
     BrokerPlugin,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
     SyncSHMSessionBroker,
     create_alchemy_plugin,
@@ -38,14 +37,6 @@ from vertebra.extensions.sqlspec.proxy import (
 from vertebra.typing import VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
-
-
-def _create_broker(config: BrokerConfig) -> SyncSHMBrokerTransport | SyncInMemoryBrokerTransport:
-    """Create a SyncSHMBrokerTransport when native signature matches or fall back to SyncInMemoryBrokerTransport."""
-    try:
-        return SyncSHMBrokerTransport(config)
-    except TypeError:
-        return SyncInMemoryBrokerTransport(config)
 
 
 class ItemRow(msgspec.Struct, frozen=True, gc=False):
@@ -156,7 +147,7 @@ def test_proxy_sync_driver_small_inline_results() -> None:
         driver_instance=upstream,
         provide_session=lambda: upstream,
     )
-    broker = SyncInMemoryBrokerTransport(BrokerConfig(pool_size=4, max_overflow=2))
+    broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=2))
     provider = SQLSpecSyncProvider(cfg, broker=broker, pool_name="primary", arrow_threshold_rows=256)
 
     with ProxySyncSessionContext(provider, broker=broker, pool_name="primary") as driver:
@@ -219,7 +210,7 @@ async def test_proxy_async_driver_small_inline_results() -> None:
         driver_instance=upstream,
         provide_session=lambda: upstream,
     )
-    broker = _create_broker(BrokerConfig(pool_size=4, max_overflow=2))
+    broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=2))
     provider = SQLSpecAsyncProvider(cfg, broker=broker, pool_name="async_pool", arrow_threshold_rows=256)
 
     async with ProxyAsyncSessionContext(provider, broker=broker, pool_name="async_pool") as driver:
@@ -263,7 +254,7 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
     batch = [(idx, f"item-{idx}") for idx in range(1, 301)]
     upstream.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", batch)
 
-    broker = _create_broker(BrokerConfig(pool_size=4, max_overflow=1))
+    broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=1))
     provider = SQLSpecSyncProvider(upstream, broker=broker, arrow_threshold_rows=256)
 
     with ProxySyncDriver(provider, broker=broker) as sync_driver:
@@ -279,10 +270,10 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert not SharedArrowBuffer.exists(spilled_shm_name)
         assert len(provider.active_arrow_buffers) == 0
 
-        arrow_table = sync_driver.select_to_arrow("SELECT id, name FROM items WHERE id <= 5 ORDER BY id")
-        assert arrow_table.num_rows == 5
-        assert arrow_table.column_names == ["id", "name"]
-        assert arrow_table.to_pylist() == [
+        arrow_result = sync_driver.select_to_arrow("SELECT id, name FROM items WHERE id <= 5 ORDER BY id")
+        assert arrow_result.num_rows == 5
+        assert arrow_result.column_names == ["id", "name"]
+        assert arrow_result.to_dict() == [
             {"id": 1, "name": "item-1"},
             {"id": 2, "name": "item-2"},
             {"id": 3, "name": "item-3"},
@@ -309,8 +300,14 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
     async_upstream = _SQLiteAsyncUpstreamDriver(upstream)
     async_provider = SQLSpecAsyncProvider(async_upstream, broker=broker, arrow_threshold_rows=256)
     async with ProxyAsyncDriver(async_provider, broker=broker) as async_driver:
-        async_table = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
-        assert async_table.num_rows == 300
+        async_result = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
+        assert async_result.num_rows == 300
+        assert async_result.column_names == ["id", "name"]
+        async_rows = async_result.to_dict()
+        assert len(async_rows) == 300
+        assert async_rows[0] == {"id": 1, "name": "item-1"}
+        assert async_rows[-1] == {"id": 300, "name": "item-300"}
+        assert async_result.get_data() is not None
         assert async_driver.last_response is not None
         assert async_driver.last_response.is_arrow_shm is True
         assert not SharedArrowBuffer.exists(async_driver.last_response.arrow_shm_name)
@@ -336,7 +333,7 @@ async def test_multi_statement_transaction_pinning_sync_and_async() -> None:
         session_instances.append(shared_db)
         return shared_db
 
-    broker = _create_broker(BrokerConfig(pool_size=2, max_overflow=1))
+    broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=1))
     provider = SQLSpecSyncProvider(session_factory, broker=broker)
 
     with ProxySyncDriver(provider, broker=broker) as driver:
@@ -404,7 +401,7 @@ def test_raw_frame_serialization_and_error_handling() -> None:
 @pytest.mark.anyio
 async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     """Verify AlchemyPlugin and SHMSessionBroker acquire leases, roll back on error, and release cleanly."""
-    transport = _create_broker(BrokerConfig(pool_size=3, max_overflow=1))
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=3, max_overflow=1))
     session_broker = SyncSHMSessionBroker(transport=transport, capacity=3, bind_key="primary")
     async_session_broker = AsyncSHMSessionBroker(transport=transport, capacity=3, bind_key="primary_async")
 
@@ -507,7 +504,7 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
     sa_mod = import_optional("sqlalchemy")
     if sa_mod is not None:
         engine = sa_mod.create_engine("sqlite:///:memory:")
-        broker_plugin = BrokerPlugin(BrokerConfig(pool_size=4, max_overflow=1), use_shm=True)
+        broker_plugin = BrokerPlugin(BrokerConfig(pool_size=4, max_overflow=1))
         sa_session_broker = SyncSHMSessionBroker(transport=broker_plugin.transport, bind_key="sa_engine")
         sa_session_broker.attach_to_engine(engine)
 
@@ -530,14 +527,14 @@ async def test_alchemy_plugin_and_shm_session_broker_proxied_sessions() -> None:
 
 @pytest.mark.anyio
 async def test_proxy_async_driver_and_provider_reclaim_async_broker_leases() -> None:
-    """Verify ProxyAsyncDriver and SQLSpecAsyncProvider await async lease releases on AsyncInMemoryBrokerTransport."""
+    """Verify ProxyAsyncDriver and SQLSpecAsyncProvider await async lease releases on AsyncSHMBrokerTransport."""
     upstream = _SQLiteAsyncUpstreamDriver()
     cfg = SimpleNamespace(
         bind_key="single_slot_async",
         driver_instance=upstream,
         provide_session=lambda: upstream,
     )
-    async_broker = AsyncInMemoryBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout=0.05))
+    async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout=0.05))
     provider = SQLSpecAsyncProvider(cfg, broker=async_broker, pool_name="single_slot_async")
 
     with warnings.catch_warnings(record=True) as caught:
@@ -555,3 +552,30 @@ async def test_proxy_async_driver_and_provider_reclaim_async_broker_leases() -> 
 
     runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
     assert runtime_warnings == []
+
+
+@pytest.mark.anyio
+async def test_proxy_sync_driver_releases_and_quarantines_async_shm_transport_synchronously() -> None:
+    """Verify ProxySyncDriver routes direct lease release and quarantine via sync helpers."""
+    async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout=0.1))
+    try:
+        upstream = _SQLiteSyncUpstreamDriver()
+        provider = SQLSpecSyncProvider(upstream)
+        driver = ProxySyncDriver(provider, broker=async_broker)
+        lease = async_broker.acquire_sync(bind_key="sync_fallback")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            driver._release_broker_lease(lease)
+            assert async_broker.metrics().active_leases == 0
+
+            bad_lease = async_broker.acquire_sync(bind_key="sync_quarantine")
+            driver._quarantine_broker_lease(bad_lease)
+            assert bad_lease.quarantined is True
+            assert async_broker.quarantined_count() == 1
+            await async_broker.dispose_quarantined(bad_lease)
+            assert async_broker.quarantined_count() == 0
+
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert runtime_warnings == []
+    finally:
+        await async_broker.close()

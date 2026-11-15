@@ -1,5 +1,7 @@
 """Zero-overhead W3C Trace Context, SpanExporter, and GenAI telemetry histograms."""
 
+from __future__ import annotations
+
 import math
 import secrets
 import time
@@ -38,7 +40,7 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_ha
     version: int = 0
 
     @classmethod
-    def parse(cls, header: str) -> "TraceContext | None":
+    def parse(cls, header: str) -> TraceContext | None:
         """Parse a W3C traceparent header string using native Rust parser."""
         result = parse_traceparent(header)
         if result is None:
@@ -52,7 +54,7 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_ha
         )
 
     @classmethod
-    def generate(cls, *, sampled: bool = True) -> "TraceContext":
+    def generate(cls, *, sampled: bool = True) -> TraceContext:
         """Generate a new root TraceContext."""
         return cls(
             trace_id=secrets.token_hex(16),
@@ -61,16 +63,16 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_ha
         )
 
     @staticmethod
-    def current() -> "TraceContext | None":
+    def current() -> TraceContext | None:
         """Return the active TraceContext from the current execution context."""
         return _ACTIVE_TRACE_CTX.get()
 
     @staticmethod
-    def set_current(ctx: "TraceContext | None") -> "Token[TraceContext | None]":
+    def set_current(ctx: TraceContext | None) -> Token[TraceContext | None]:
         """Bind ctx as the active W3C trace context for the current execution context."""
         return _ACTIVE_TRACE_CTX.set(ctx)
 
-    def new_child(self) -> "TraceContext":
+    def new_child(self) -> TraceContext:
         """Create a child span context sharing trace_id."""
         return TraceContext(
             trace_id=self.trace_id,
@@ -382,6 +384,9 @@ class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     total_reclaimed: int
     statement_cache_hits: int
     statement_cache_misses: int
+    quarantined: int = 0
+    total_quarantined: int = 0
+    total_disposed: int = 0
     wait_duration_ms: float = 0.0
     timestamp: float = msgspec.field(default_factory=time.time)
 

@@ -19,6 +19,7 @@
 //! - Shared credential and TLS wiring for the official Google Cloud Rust clients (`gcp`).
 
 pub mod arrow_shm;
+pub mod broker_capsule;
 pub mod connection;
 pub mod dialer;
 pub mod duckdb;
@@ -37,6 +38,14 @@ pub use arrow_shm::{
     ShmArrowStreamWriter, normalize_shm_name, open_shm_arrow_region, read_shm_arrow_frame,
     read_shm_arrow_frame_with, release_shm_arrow_frame, write_shm_arrow_frame,
     write_shm_arrow_region, write_shm_arrow_region_unregistered,
+};
+#[cfg(feature = "pyo3")]
+pub use broker_capsule::new_broker_engine_pycapsule;
+pub use broker_capsule::{
+    BROKER_ENGINE_ABI_VERSION, BROKER_ENGINE_CAPSULE_NAME, BrokerBytesVisitFn, BrokerEngineBackend,
+    BrokerEngineCapsule, BrokerPoolBackend, DbRpcDecodedRequest, DbRpcEncodedResponse, DbRpcScalar,
+    ForeignEngineCapsule, PlaceholderStyle, decode_dbrpc_request_frame,
+    encode_dbrpc_response_frame, new_broker_engine_capsule, normalize_placeholders,
 };
 pub use connection::{
     BoxFuture, CancelHandle, ConnectOptions, Connection, EndpointTarget, TlsMode, TransportError,
@@ -71,34 +80,3 @@ pub use resp3::{
     parse_cluster_redirect, parse_resp3_frame, redis_hash_slot,
 };
 pub use sqlite::SqliteConfig;
-
-use std::sync::{Arc, LazyLock};
-
-use dashmap::DashMap;
-
-/// Pluggable native database engine backend registered with the shared-memory broker by dialect tag.
-pub trait BrokerEngineBackend: Send + Sync {
-    /// Canonical dialect tag (`vertebra_core::broker::DIALECT_TAG_*`).
-    fn dialect_tag(&self) -> u16;
-
-    /// Canonical lowercase dialect identifier (for example `"mysql"`).
-    fn dialect_name(&self) -> &'static str;
-
-    /// Normalize SQL placeholders for `ShmStatementCache` plan storage, returning `(normalized_sql, param_count)`.
-    fn normalize_statement(&self, sql: &str) -> (String, usize);
-}
-
-static BROKER_ENGINE_BACKENDS: LazyLock<DashMap<u16, Arc<dyn BrokerEngineBackend>>> =
-    LazyLock::new(DashMap::new);
-
-/// Register a [`BrokerEngineBackend`] for its [`BrokerEngineBackend::dialect_tag`].
-pub fn register_broker_engine_backend(backend: Arc<dyn BrokerEngineBackend>) {
-    BROKER_ENGINE_BACKENDS.insert(backend.dialect_tag(), backend);
-}
-
-/// Look up a registered [`BrokerEngineBackend`] by dialect tag.
-pub fn lookup_broker_engine_backend(dialect_tag: u16) -> Option<Arc<dyn BrokerEngineBackend>> {
-    BROKER_ENGINE_BACKENDS
-        .get(&dialect_tag)
-        .map(|entry| Arc::clone(entry.value()))
-}

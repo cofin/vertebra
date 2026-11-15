@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import logging
+from collections.abc import Awaitable
 from typing import Any, ClassVar, cast
 
 from vertebra.extensions.broker import (
-    AsyncInMemoryBrokerTransport,
     AsyncSHMBrokerTransport,
     BrokerPlugin,
     ChannelMessage,
-    SyncInMemoryBrokerTransport,
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.sqlspec.provider import (
+    AsyncBrokerLeaseSource,
     SQLSpecAsyncProvider,
     SQLSpecSyncProvider,
+    SyncBrokerLeaseSource,
     _BaseSQLSpecProvider,
 )
 from vertebra.extensions.sqlspec.proxy import (
@@ -36,8 +36,8 @@ try:
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
-type SyncBrokerTransport = SyncSHMBrokerTransport | SyncInMemoryBrokerTransport | Any
-type AsyncBrokerTransport = AsyncSHMBrokerTransport | AsyncInMemoryBrokerTransport | Any
+type SyncBrokerTransport = SyncSHMBrokerTransport | SyncBrokerLeaseSource
+type AsyncBrokerTransport = AsyncSHMBrokerTransport | AsyncBrokerLeaseSource
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class _BaseProxyConfig:
     def connection_type(self, value: type[Any]) -> None:
         """Set connection type annotation."""
         with contextlib.suppress(AttributeError):
-            setattr(self.config, _CONN_TYPE_ATTR, value)
+            self.config.connection_type = value
 
     @property
     def driver_type(self) -> type[Any]:
@@ -110,7 +110,7 @@ class _BaseProxyConfig:
     def driver_type(self, value: type[Any]) -> None:
         """Set driver type annotation."""
         with contextlib.suppress(AttributeError):
-            setattr(self.config, _DRIVER_TYPE_ATTR, value)
+            self.config.driver_type = value
 
     @property
     def pool_config(self) -> dict[str, Any]:
@@ -172,7 +172,7 @@ class _BaseProxyConfig:
 class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any, Any]):
     """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
 
-    __slots__ = ("_statement_cache", "broker", "config", "provider")
+    __slots__ = ("broker", "config", "provider")
     _DEFAULT_DSN: ClassVar[str] = "sqlite:///:memory:"
     is_async: ClassVar[bool] = False
     supports_connection_pooling: ClassVar[bool] = True
@@ -192,7 +192,7 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
         self.config: SyncConfigT = config
         self.provider: SQLSpecSyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or cast(SQLSpecSyncProvider, broker)
+            self.provider = provider or broker
             self.broker: Any = broker.broker
         else:
             self.provider = provider
@@ -223,6 +223,8 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
             broker=self.broker,
             pool_name=resolved_bind_key,
             worker_pid=worker_pid,
+            statement_config=self.statement_config,
+            dialect=getattr(self.config, "dialect", None),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
@@ -234,6 +236,8 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
                 self.provider,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
+                statement_config=self.statement_config,
+                dialect=getattr(self.config, "dialect", None),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
@@ -270,7 +274,7 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
 class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, Any, Any]):
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
-    __slots__ = ("_statement_cache", "broker", "config", "provider")
+    __slots__ = ("broker", "config", "provider")
     _DEFAULT_DSN: ClassVar[str] = "sqlite+aiosqlite:///:memory:"
     is_async: ClassVar[bool] = True
     supports_connection_pooling: ClassVar[bool] = True
@@ -290,7 +294,7 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         self.config: AsyncConfigT = config
         self.provider: SQLSpecAsyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or cast(SQLSpecAsyncProvider, broker)
+            self.provider = provider or broker
             self.broker: Any = broker.broker
         else:
             self.provider = provider
@@ -321,6 +325,8 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
             broker=self.broker,
             pool_name=resolved_bind_key,
             worker_pid=worker_pid,
+            statement_config=self.statement_config,
+            dialect=getattr(self.config, "dialect", None),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
@@ -332,6 +338,8 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
                 self.provider,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
+                statement_config=self.statement_config,
+                dialect=getattr(self.config, "dialect", None),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
@@ -363,7 +371,7 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
         if callable(fn):
             res = fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
 
 
@@ -405,10 +413,6 @@ def _is_in_memory_dsn(dsn: str | None) -> bool:
         return False
     lowered = dsn.lower()
     return ":memory:" in lowered or "mode=memory" in lowered
-
-
-_CONN_TYPE_ATTR = "connection_type"
-_DRIVER_TYPE_ATTR = "driver_type"
 
 
 def _inject_sqlspec_pool_defaults(config: Any) -> None:

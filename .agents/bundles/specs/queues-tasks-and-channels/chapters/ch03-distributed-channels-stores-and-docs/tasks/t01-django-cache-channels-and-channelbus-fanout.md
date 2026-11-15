@@ -56,37 +56,31 @@ sources:
 
 ## Objective & Scope Boundary
 
-Upgrade `extensions/django/cache.py` and `extensions/django/channels.py` onto native `SyncValkeyDriver`/`AsyncValkeyDriver` (`vertebra._redis`) and `SyncNotificationSource`/`AsyncNotificationSource` per [`../spec.md`](../spec.md) [^dj-cache] [^dj-channels].
-
-Wire `SyncNotificationSource` and `AsyncNotificationSource` (from upstream `native-redis-driver:ch03`) into `ChannelBus` (`server/_channels.py`) and `ChannelsBackend` (`framework/channels.py`) across Memory, Redis, Valkey, PostgreSQL, and Oracle per [`../spec.md`](../spec.md) [^channel-bus] [^fw-channels].
+Upgrade `extensions/django/cache.py` and `extensions/django/channels.py` onto native `SyncValkeyDriver`/`AsyncValkeyDriver` (`vertebra._redis`) and `SyncNotificationSource`/`AsyncNotificationSource`, and wire `SyncNotificationSource` and `AsyncNotificationSource` (from `native-redis-driver:ch03`) into `ChannelBus` (`server/_channels.py`) and `ChannelsBackend` (`framework/channels.py`) across Memory, Redis, Valkey, PostgreSQL, and Oracle per [`../spec.md`](../spec.md) [^dj-cache] [^dj-channels] [^channel-bus] [^fw-channels].
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/django/cache.py` & `channels.py` — existing stubs.
-- `src/py/vertebra/db/adapters/valkey/driver.py` & `server/_channels.py` — native Valkey/Redis drivers and `ChannelBus`.
-
+- `src/py/vertebra/extensions/django/cache.py` — existing in-memory `CacheBackend` stub.
+- `src/py/vertebra/extensions/django/channels.py` — existing in-memory `ChannelLayer` stub.
+- `src/py/vertebra/db/adapters/valkey/driver.py` — native `SyncValkeyDriver`/`AsyncValkeyDriver` (`SCAN`+`UNLINK`).
 - `src/py/vertebra/server/_channels.py` — `ChannelBus` local/SHM subscriber fan-out and backpressure.
 - `src/py/vertebra/framework/channels.py` — `ChannelsBackend` configuration and backend factory.
-- `src/py/vertebra/db/driver/capabilities.py` — `SyncNotificationSource` and `AsyncNotificationSource`.
+- `src/py/vertebra/db/driver/capabilities.py` — `SyncNotificationSource` and `AsyncNotificationSource` protocols.
 
 ## Contracts & Edge Cases
 
 - `CacheBackend(BaseCache)` executes `add`, `get`, `set`, `touch`, `delete`, `get_many`, `set_many`, `delete_many`, `incr`, `decr`, `clear` (prefix-scoped `SCAN`+`UNLINK`), plus `aget`/`aset`/`adelete` over `SyncValkeyDriver`/`AsyncValkeyDriver` or `SyncRedisDriver`/`AsyncRedisDriver` (or explicit SHM cache), with zero silent dict fallback.
 - `ChannelLayer` routes `send`, `receive`, `new_channel`, `group_add`, `group_discard`, and `group_send` over `ChannelBus` + `AsyncNotificationSource` (plus sync `publish_sync` via `SyncNotificationSource`).
-
-- Attach optional `AsyncNotificationSource` (and `SyncNotificationSource` for synchronous publishers/CLI listeners) to `ChannelBus` and `ChannelsBackend`, supporting `memory`, `redis`, `valkey`, `postgres`, and `oracle` backends.
-- Stamp cross-node envelopes with `origin_node_id` so local subscribers receive each message exactly once while remote nodes fan incoming frames into their local subscriber rings with bounded backpressure and clean `aclose()` / `close()` teardown.
+- Attach optional `AsyncNotificationSource` (and `SyncNotificationSource` for synchronous publishers/CLI listeners) to `ChannelBus` and `ChannelsBackend` across `memory`, `redis`, `valkey`, `postgres`, and `oracle`, stamping cross-node envelopes with `origin_node_id` so local subscribers receive each message once while remote nodes fan incoming frames cleanly with bounded backpressure and `aclose()` / `close()` teardown.
 
 ## Test Matrix
 
-- Parametrized sync/async Django `CacheBackend` TTL/atomic `incr`/prefix `clear` tests and `ChannelLayer` group fan-out tests.
-
-- Parametrized multi-node `ChannelBus` fan-out, origin-node deduplication, bounded queue backpressure, and sync/async `NotificationSource` tests across Memory, Redis, Valkey, PostgreSQL, and Oracle sources.
+- Parametrized sync/async Django `CacheBackend` TTL/atomic `incr`/prefix `clear` tests and `ChannelLayer` group fan-out tests, alongside parametrized multi-node `ChannelBus` fan-out, origin-node deduplication, bounded queue backpressure, and `SyncNotificationSource`/`AsyncNotificationSource` tests across Memory, Redis, Valkey, PostgreSQL, and Oracle sources.
 
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py src/py/vertebra/framework/stores.py src/py/vertebra/extensions/litestar src/py/vertebra/extensions/starlette src/py/vertebra/extensions/flask/channels.py && uv run --no-sync mypy src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py src/py/vertebra/framework/stores.py src/py/vertebra/extensions/litestar src/py/vertebra/extensions/starlette src/py/vertebra/extensions/flask/channels.py && uv run --no-sync pytest src/py/tests/unit/server/test_realtime_backpressure.py src/py/tests/unit/extensions/test_litestar_plugin.py src/py/tests/unit/extensions/test_starlette_plugin.py
+uv run --no-sync ruff check src/py/vertebra/extensions/django/cache.py src/py/vertebra/extensions/django/channels.py src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py && uv run --no-sync mypy src/py/vertebra/extensions/django/cache.py src/py/vertebra/extensions/django/channels.py src/py/vertebra/server/_channels.py src/py/vertebra/framework/channels.py && uv run --no-sync pytest src/py/tests/unit/extensions/test_django_plugin.py src/py/tests/unit/server/test_realtime_backpressure.py
 ```
 
 ## Acceptance Criteria

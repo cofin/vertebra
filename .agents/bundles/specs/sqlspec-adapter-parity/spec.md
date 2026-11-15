@@ -17,13 +17,12 @@ current_chapter: ch01-sqlspec-core-driver-and-artifact-ref
 current_task: sqlspec-adapter-parity:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-- broker-pool-sharing
 - native-sqlite-driver
 - native-redis-driver
 plan_revision: 3
 plan_commit: 1b191388
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-14T18:50:00Z'
+updated_at: '2026-11-15T17:52:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -31,6 +30,9 @@ verified:
 - by: agent:plan-generator
   at: '2026-11-14T18:50:00Z'
   commit: 1b191388
+- by: agent:flow-archive-realign
+  at: '2026-11-15T17:52:00Z'
+  commit: 28415b3f
 tags:
 - sqlspec
 - adapters
@@ -65,7 +67,7 @@ sources:
 
 <!-- truth: start -->
 - **Baseline (`18baadcd`)**: `extensions/sqlspec/adapters.py` overrides `execute`/`select`, sets MySQL execution binds to `%s` instead of `?`, lacks relational/DuckDB data dictionaries, defines `SharedArrowBuffer`/`SharedArrowTable` in `provider.py`, and sets invalid `sqlglot` dialect names (`"googlesql"`/`"spangres"`) plus a cross-engine BigQuery `ObjectRef` import in `spanner.py` [^sqlspec-adapters] [^sqlspec-spn] [^sqlspec-provider].
-- **Zero Monkeypatching on `sqlspec>=0.71.1`**: `[project.optional-dependencies].sqlspec` bumps to `sqlspec>=0.71.1` with optional `adk = ["google-adk>=1.0.0"]`; `_compat.py` does NOT exist and never patches MyPyC-compiled `sqlspec` functions—each config declares `adapter_name = "vertebra_<engine>"` and explicit `adk_store_class` / `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` attributes [^pyproject-sqlspec].
+- **Zero Monkeypatching on `sqlspec>=0.71.1`**: `[project.optional-dependencies].sqlspec` bumps to `sqlspec>=0.71.1` with optional `adk = ["google-adk>=1.0.0"]`; `_compat.py` does NOT exist and never patches MyPyC-compiled `sqlspec` functions—each config declares `adapter_name = "vertebra_<engine>"` and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (with `<Engine>SyncADKArtifactStore` / `<Engine>AsyncADKArtifactStore` exported in `adk.py`) [^pyproject-sqlspec].
 - **Zero Cross-Adapter Shared SQL Helpers**: Per-engine packages `extensions/sqlspec/adapters/{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}/` duplicate adapter-family SQL/parameter helpers strictly inside each adapter's own `core.py`.
 - **`VTBARROW` & `ArtifactReference`**: `provider.py` cuts over to `VTBARROW` `ArrowCursor` frames, and offloaded ADK artifacts share `vertebra.storage.ArtifactReference` (`storage/_store.py`) while native BigQuery Object Tables retain `ObjectRef` [^sqlspec-bq] [^storage-store].
 <!-- truth: end -->
@@ -83,7 +85,7 @@ Primary-source verification against `sqlspec==0.71.1` (MyPyC-compiled) confirms:
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- **R1 (`sqlspec>=0.71.1`, `adk` Extra & Zero Monkeypatching)**: Bump `sqlspec>=0.71.1`, add `adk = ["google-adk>=1.0.0"]`, forbid `_compat.py`, and declare `adapter_name = "vertebra_<engine>"` plus explicit `adk_store_class`, `adk_session_store_class`, `adk_memory_store_class`, `adk_artifact_store_class`, `events_store_class`, and `litestar_store_class` attributes on every `<Engine>SyncConfig` / `<Engine>AsyncConfig` (and `SpangresSyncConfig` / `SpangresAsyncConfig`).
+- **R1 (`sqlspec>=0.71.1`, `adk` Extra & Zero Monkeypatching)**: Bump `sqlspec>=0.71.1`, add `adk = ["google-adk>=1.0.0"]`, forbid `_compat.py`, and declare `adapter_name = "vertebra_<engine>"` plus explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes on every `<Engine>SyncConfig` / `<Engine>AsyncConfig` (and `SpangresSyncConfig` / `SpangresAsyncConfig`), exporting `*ADKArtifactStore` for `SQLSpecArtifactService`.
 - **R2 (`_driver.py` Dispatch Contract & Parameter Fidelity)**: Inherit `execute`/`select*` and `@final dispatch_statement_execution` from `SyncDriverAdapterBase`/`AsyncDriverAdapterBase`; implement `dispatch_execute*`, `query_with_columns` (delegating to existing `execute_with_description` + `hydrate_rows` to preserve columns on zero-row `SELECT`/`RETURNING`), `execute_stack` over `SyncPipelineCapable`/`AsyncPipelineCapable`, non-mutating `StatementConfig` merge, `TypedParameter` unwrapping, `DatabaseError` -> `sqlspec.exceptions.*` mapping, and reference-counted `DatabaseRegistry` pool `close()`.
 - **R3 (Engine Placeholder & Dialect Fixes, Zero Shared Helpers)**: PostgreSQL `$1` (`NUMERIC`), SQLite `?`/`:name`, MySQL `?` (`ParameterStyle.QMARK`), Oracle `:name`/`:1`, MSSQL `? -> @P1` (`dialect="tsql"`), DuckDB `?`/`$1` (2.0+ lexical `COPY` order + `fetchall()` for Arrow-divergent types), BigQuery `@name` (`NAMED_AT`), Spanner GoogleSQL `dialect="spanner"` (`@name`) and Spangres `dialect="postgres"` (`$1 -> p1`). Duplicate adapter-family helpers inside each `adapters/<engine>/core.py` (zero cross-adapter SQL helper modules).
 - **R4 (`SyncDataDictionaryBase` / `AsyncDataDictionaryBase`)**: Implement `<Engine>SyncDataDictionary` and `<Engine>AsyncDataDictionary` across all 8 engines reusing upstream `sqlspec/data_dictionary/dialects/<engine>/sql/*.sql`.
@@ -114,7 +116,7 @@ Primary-source verification against `sqlspec==0.71.1` (MyPyC-compiled) confirms:
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Current Frontier**: `state: planned` at `ch01-sqlspec-core-driver-and-artifact-ref` (`sqlspec-adapter-parity:ch01:t01`, `0/15` tasks completed across `4` chapters; `ch02`–`ch03` are mutually independent after `ch01`).
-- **Upstream Flow Gates**: Requires `broker-pool-sharing` (pooled `Proxy*Driver` and `VTBARROW` lease lifecycles), `native-sqlite-driver`, and `native-redis-driver`.
+- **Upstream Flow Gates**: `broker-pool-sharing` (pooled `Proxy*Driver` and `VTBARROW` lease lifecycles) is complete and archived at `28415b3f`; awaits `native-sqlite-driver` and `native-redis-driver`.
 - **Full `/flow:finish` Gate**: `make lint-all && make py-test && make docs`.
 
 [^pyproject-sqlspec]: `pyproject.toml` — sqlspec floor and optional adk extra.

@@ -22,7 +22,7 @@ tests:
 read_set:
 - src/py/vertebra/extensions/sqlalchemy/dialects.py
 - src/py/vertebra/extensions/sqlalchemy/types.py
-- src/py/vertebra/utils/serializers.py
+- src/py/vertebra/utils/serializers/__init__.py
 - src/py/vertebra/extensions/alchemy/broker.py
 estimated_loc: 220
 tags:
@@ -42,18 +42,18 @@ sources:
 
 ## Objective & Scope Boundary
 
-Create shared `_SyncDialectMixin` / `_AsyncDialectMixin` in `dialects/_base.py` and complete `extensions/sqlalchemy/types.py` per [`../spec.md`](../spec.md) [^sa-types] [^sa-dialects-base]. Out of scope: concrete per-engine dialect subclasses (`ch02`–`ch03`).
+Create shared `_SyncDialectMixin` / `_AsyncDialectMixin` in `dialects/_base.py` and complete `extensions/sqlalchemy/types.py` per [`../spec.md`](../spec.md) [^sa-types] [^sa-dialects-base]. Out of scope: concrete per-engine dialect subclasses (`t03`–`t04`, `ch02`).
 
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlalchemy/dialects.py` — existing `import_dbapi`, `get_pool_class`, `create_connect_args`, and `is_disconnect` logic.
 - `src/py/vertebra/extensions/sqlalchemy/types.py` — custom SQLAlchemy `TypeDecorator` and `UserDefinedType` classes.
-- `src/py/vertebra/utils/serializers.py` — centralized `encode_json` / `decode_json` helpers.
+- `src/py/vertebra/utils/serializers/__init__.py` — centralized `encode_json` / `decode_json` helpers.
 - `src/py/vertebra/extensions/alchemy/broker.py` — broker transport pool hooks.
 
 ## Contracts & Edge Cases
 
-- `_SyncDialectMixin` (`import_dbapi -> SyncDBAPIModule`) and `_AsyncDialectMixin` (`is_async = True`, `import_dbapi` wrapping `AsyncDBAPIModule` via `async_adapter`) pass the full rendered Vertebra URL through `create_connect_args(url)` and select `BrokerSyncPool` / `BrokerAsyncPool` when `broker` is present or native pool classes otherwise.
+- `_SyncDialectMixin` (`import_dbapi -> SyncDBAPIModule`) and `_AsyncDialectMixin` (`is_async = True`, `import_dbapi` wrapping `AsyncDBAPIModule` via `async_adapter`) pass the full rendered Vertebra URL through `create_connect_args(url)` and select `BrokerPool` / `AsyncBrokerPool` when `broker` is present or native pool classes otherwise.
 - Implement `PgVector`, `HalfVector`, `SparseVector`, `OracleVector` (`VECTOR(dim, FLOAT32)` + `array('f')`), `SpannerVector` (`ARRAY<FLOAT32>`), `BigQueryGeography` (`GEOGRAPHY` WKT), and `MsgspecJSON` (routing strictly through `encode_json` / `decode_json`).
 - Enforce leading `Sync*` / `Async*` naming and zero `Vertebra*` / `*Vtb*` / `Native*` class names (`PY-07`).
 

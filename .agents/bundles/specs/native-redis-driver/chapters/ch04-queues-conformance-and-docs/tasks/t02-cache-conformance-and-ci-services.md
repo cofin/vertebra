@@ -4,7 +4,7 @@ id: native-redis-driver:ch04-queues-conformance-and-docs:t02
 flow_id: native-redis-driver
 chapter_id: ch04-queues-conformance-and-docs
 title: Wire Redis 8.0 and Valkey 9.0 Live Conformance and CI Services
-description: Register redis and valkey native_extension_module in conformance registry/gate and add Redis 8.0 and Valkey 9.0 CI jobs.
+description: Enforce fail-loud vertebra._redis checks on CACHE_ENGINE_SPECS in test_driver_conformance.py and add Redis 8.0 and Valkey 9.0 CI jobs.
 status: stable
 state: pending
 planning_quality: standard
@@ -15,6 +15,7 @@ plan_commit: 1b191388
 depends_on:
 - native-redis-driver:ch04-queues-conformance-and-docs:t01
 files:
+- src/py/tests/integration/db/test_driver_conformance.py
 - .github/workflows/ci.yml
 tests:
 - src/py/tests/integration/db/test_driver_conformance.py

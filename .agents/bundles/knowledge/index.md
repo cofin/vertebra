@@ -56,6 +56,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Object Storage, Streaming & Presigning](domains/storage/object-storage.md)
   - [Object Storage Implementation Limitations](domains/storage/object-storage-limitations.md)
   - [Shared-Memory Connection Broker & Statement Cache](domains/data/broker-and-shm-leases.md)
+  - [Shared-Memory Broker & Cross-Process Limitations](domains/data/shm-broker-limitations.md)
   - [Database Drivers & Cloud Dialers](domains/data/database-drivers-and-dialers.md)
   - [PostgreSQL Native Extension (`vertebra-postgres`)](domains/data/postgres-native-driver.md)
   - [PostgreSQL Native Driver Limitations](domains/data/postgres-limitations.md)

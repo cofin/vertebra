@@ -1757,7 +1757,7 @@ def _compile_postgres_numeric_transport(
 
 
 def _prepare_many_statement(
-    driver: BaseSyncDriver | BaseAsyncDriver,
+    driver: SyncDriverAdapterBase | AsyncDriverAdapterBase,
     statement: Any,
     parameters: Sequence[Any],
     filters: tuple[Any, ...] = (),
@@ -1784,7 +1784,7 @@ def _prepare_many_statement(
 
 
 def _compile_many_transport(
-    driver: BaseSyncDriver | BaseAsyncDriver,
+    driver: SyncDriverAdapterBase | AsyncDriverAdapterBase,
     statement: Any,
     parameters: Sequence[Any],
     filters: tuple[Any, ...] = (),

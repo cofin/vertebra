@@ -20,7 +20,7 @@ from vertebra.db.adapters.postgres import PostgreSQLConfig
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    from vertebra.extensions.sqlalchemy.dialects import SyncDBAPIConnection
+    from vertebra.db.dbapi import SyncDBAPIConnection
 
 __all__ = (
     "AlembicImpl",

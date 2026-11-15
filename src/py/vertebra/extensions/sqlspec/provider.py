@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-import contextlib
-import inspect
 import mmap
 import os
+import sqlite3
 import tempfile
 import threading
 import uuid
+from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import msgspec
+from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
+from vertebra.db.driver import CommonDriverMixin
+from vertebra.extensions.broker import (
+    AsyncBrokerLeaseSource,
+    AsyncSHMBrokerTransport,
+    SyncBrokerLeaseSource,
+    SyncSHMBrokerTransport,
+)
+from vertebra.extensions.broker.errors import LeaseQuarantinedError
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import (
@@ -22,22 +31,22 @@ from vertebra.utils.serializers import (
     encode_json_bytes,
     encode_msgpack_bytes,
 )
-from vertebra.utils.type_guards import is_msgspec_struct
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from vertebra.utils.sync_tools import SyncPool
+from vertebra.utils.type_guards import is_coroutine_callable, is_msgspec_struct
 
 __all__ = (
+    "AsyncBrokerLeaseSource",
     "BrokerRpcRequest",
     "BrokerRpcResponse",
     "SharedArrowBuffer",
     "SharedArrowTable",
     "SQLSpecAsyncProvider",
     "SQLSpecSyncProvider",
+    "SyncBrokerLeaseSource",
 )
 
 
-class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
+class BrokerRpcRequest(msgspec.Struct, frozen=True):
     """RPC request frame dispatched from a worker proxy driver to SQLSpecSyncProvider or SQLSpecAsyncProvider."""
 
     request_id: int = 0
@@ -53,7 +62,7 @@ class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
     arrow_shm_name: str = ""
 
 
-class BrokerRpcResponse(msgspec.Struct, frozen=True, gc=False):
+class BrokerRpcResponse(msgspec.Struct, frozen=True):
     """RPC response frame returned from SQLSpecSyncProvider or SQLSpecAsyncProvider to a worker proxy driver."""
 
     request_id: int = 0
@@ -251,11 +260,17 @@ class SharedArrowBuffer:
             return table.to_pylist(), table.column_names
         if hasattr(table, "to_pylist") and callable(table.to_pylist):
             py_rows = list(table.to_pylist())
-            raw_cols = getattr(table, "column_names", columns)
+            raw_cols = getattr(table, "column_names", getattr(table, "columns", columns))
             cols = [str(c) for c in raw_cols] if isinstance(raw_cols, (list, tuple)) else []
             if not cols and py_rows and isinstance(py_rows[0], dict):
                 cols = list(py_rows[0].keys())
             return [dict(r) for r in py_rows], cols
+        for arrow_attr in ("to_arrow_table", "to_pyarrow", "to_arrow"):
+            arrow_fn = getattr(table, arrow_attr, None)
+            if callable(arrow_fn):
+                converted = arrow_fn()
+                if converted is not table:
+                    return cls._coerce_fallback_rows(converted, columns=columns)
         if isinstance(table, list):
             if not table:
                 return [], list(columns) if columns else []
@@ -288,11 +303,19 @@ class SharedArrowBuffer:
             if isinstance(table, pa.RecordBatch):
                 return pa.Table.from_batches([table])
             return table
-        if hasattr(table, "to_arrow") and callable(table.to_arrow):
-            converted = table.to_arrow()
-            if isinstance(converted, pa.RecordBatch):
-                return pa.Table.from_batches([converted])
-            return converted
+        for arrow_attr in ("to_arrow", "to_arrow_table", "to_pyarrow"):
+            arrow_fn = getattr(table, arrow_attr, None)
+            if callable(arrow_fn):
+                converted = arrow_fn()
+                if converted is table:
+                    continue
+                if hasattr(converted, "schema") and hasattr(converted, "num_rows"):
+                    if isinstance(converted, pa.RecordBatch):
+                        return pa.Table.from_batches([converted])
+                    return converted
+                return cls._coerce_arrow_table(pa, converted, columns=columns)
+        if hasattr(table, "to_pylist") and callable(table.to_pylist):
+            return cls._coerce_arrow_table(pa, table.to_pylist(), columns=columns)
         if isinstance(table, list):
             if not table:
                 if columns:
@@ -391,13 +414,41 @@ class _BaseSQLSpecProvider:
         with self._lock:
             return self._leased_sessions.get((slot_idx, generation))
 
+    def resolve_upstream_optional(self, pool_name: str) -> Any:
+        """Return registered upstream config or driver for pool_name when present."""
+        with self._lock:
+            if pool_name in self._upstreams:
+                return self._upstreams[pool_name]
+            if self.default_pool_name in self._upstreams:
+                return self._upstreams[self.default_pool_name]
+            if "default" in self._upstreams:
+                return self._upstreams["default"]
+            if self._upstreams:
+                return next(iter(self._upstreams.values()))
+        return None
+
+    def _tx_state_for(self, key: tuple[int, int], default: bool) -> bool:
+        with self._lock:
+            return self._tx_states.get(key, default)
+
+    @staticmethod
+    def _format_error_message(exc: BaseException) -> str:
+        msg = str(exc)
+        chained = exc.__cause__ or exc.__context__
+        if chained is not None:
+            detail = f"{type(chained).__name__}: {chained}"
+            if detail not in msg and str(chained) not in msg:
+                return f"{msg} (caused by {detail})" if msg else detail
+        return msg
+
     def _handle_request_sync(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
         key = (request.slot_idx, request.generation)
         try:
-            if op in {"arrow_release", "_arrow_release"}:
-                SharedArrowBuffer.unlink(request.arrow_shm_name)
+            if op == "arrow_release":
+                if request.arrow_shm_name:
+                    SharedArrowBuffer.unlink(request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
@@ -412,7 +463,14 @@ class _BaseSQLSpecProvider:
             if op == "acquire":
                 slot_idx, generation = self._acquire_slot_sync(request)
                 lease_key = (slot_idx, generation)
-                self._ensure_session_sync(lease_key, request.pool_name)
+                try:
+                    self._ensure_session_sync(lease_key, request.pool_name)
+                except BaseException:
+                    with self._lock:
+                        lease = self._broker_leases.pop(lease_key, None)
+                    if lease is not None:
+                        self._release_broker_lease(lease, lease_key, in_tx=False)
+                    raise
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -423,6 +481,40 @@ class _BaseSQLSpecProvider:
 
             if op == "release":
                 self._release_session_sync(key, request.in_tx)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=False,
+                )
+
+            if op == "commit":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
+                self._exec_commit_sync(session, key)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=False,
+                )
+
+            if op == "rollback":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    with self._lock:
+                        self._tx_states[key] = False
+                    return BrokerRpcResponse(
+                        request_id=request.request_id,
+                        ok=True,
+                        slot_idx=request.slot_idx,
+                        generation=request.generation,
+                        in_tx=False,
+                    )
+                self._exec_rollback_sync(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -443,26 +535,6 @@ class _BaseSQLSpecProvider:
                     in_tx=True,
                 )
 
-            if op == "commit":
-                self._exec_commit_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
-
-            if op == "rollback":
-                self._exec_rollback_sync(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
-
             if op == "execute":
                 raw_res = self._invoke_sync(session, ("execute",), request.sql, request.params)
                 rows, columns, rowcount = self._extract_result_sync(raw_res)
@@ -474,7 +546,7 @@ class _BaseSQLSpecProvider:
                     rows=rows,
                     columns=columns,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "execute_many":
@@ -485,7 +557,7 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select":
@@ -503,7 +575,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
@@ -516,11 +588,12 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
-            if op == "select_value":
-                scalar = self._exec_select_value_sync(session, request.sql, request.params)
+            if op in {"select_value", "select_value_or_none"}:
+                allow_none = op == "select_value_or_none"
+                scalar = self._exec_select_value_sync(session, request.sql, request.params, allow_none=allow_none)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -528,7 +601,7 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -546,16 +619,17 @@ class _BaseSQLSpecProvider:
                 generation=request.generation,
                 in_tx=in_tx,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=self._format_error_message(exc),
             )
 
-    async def _handle_request_async_impl(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
+    async def _handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute an asynchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
         key = (request.slot_idx, request.generation)
         try:
-            if op in {"arrow_release", "_arrow_release"}:
-                SharedArrowBuffer.unlink(request.arrow_shm_name)
+            if op == "arrow_release":
+                if request.arrow_shm_name:
+                    await SyncPool.default().submit_async(SharedArrowBuffer.unlink, request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
@@ -570,7 +644,14 @@ class _BaseSQLSpecProvider:
             if op == "acquire":
                 slot_idx, generation = await self._acquire_slot_async(request)
                 lease_key = (slot_idx, generation)
-                await self._ensure_session_async(lease_key, request.pool_name)
+                try:
+                    await self._ensure_session_async(lease_key, request.pool_name)
+                except BaseException:
+                    with self._lock:
+                        lease = self._broker_leases.pop(lease_key, None)
+                    if lease is not None:
+                        await self._release_broker_lease_async(lease, lease_key, in_tx=False)
+                    raise
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -581,6 +662,40 @@ class _BaseSQLSpecProvider:
 
             if op == "release":
                 await self._release_session_async(key, request.in_tx)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=False,
+                )
+
+            if op == "commit":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    raise RuntimeError(f"Cannot commit without an active leased session for slot {key}")
+                await self._exec_commit_async(session, key)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=False,
+                )
+
+            if op == "rollback":
+                session = self.get_leased_session(key[0], key[1])
+                if session is None:
+                    with self._lock:
+                        self._tx_states[key] = False
+                    return BrokerRpcResponse(
+                        request_id=request.request_id,
+                        ok=True,
+                        slot_idx=request.slot_idx,
+                        generation=request.generation,
+                        in_tx=False,
+                    )
+                await self._exec_rollback_async(session, key)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -601,26 +716,6 @@ class _BaseSQLSpecProvider:
                     in_tx=True,
                 )
 
-            if op == "commit":
-                await self._exec_commit_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
-
-            if op == "rollback":
-                await self._exec_rollback_async(session, key)
-                return BrokerRpcResponse(
-                    request_id=request.request_id,
-                    ok=True,
-                    slot_idx=request.slot_idx,
-                    generation=request.generation,
-                    in_tx=False,
-                )
-
             if op == "execute":
                 raw_res = await self._invoke_async(session, ("execute",), request.sql, request.params)
                 rows, columns, rowcount = await self._extract_result_async(raw_res)
@@ -632,7 +727,7 @@ class _BaseSQLSpecProvider:
                     rows=rows,
                     columns=columns,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "execute_many":
@@ -643,13 +738,13 @@ class _BaseSQLSpecProvider:
                     slot_idx=request.slot_idx,
                     generation=request.generation,
                     rowcount=rowcount,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select":
                 raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
                 rows, columns, _ = await self._extract_result_async(raw_res)
-                return self._build_select_response(request, key, rows, columns)
+                return await self._build_select_response_async(request, key, rows, columns)
 
             if op == "select_one":
                 row, columns = await self._exec_select_one_async(session, request.sql, request.params, allow_none=False)
@@ -661,7 +756,7 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_one_or_none":
@@ -674,11 +769,14 @@ class _BaseSQLSpecProvider:
                     rows=[row] if row is not None else [],
                     columns=columns,
                     rowcount=1 if row is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
-            if op == "select_value":
-                scalar = await self._exec_select_value_async(session, request.sql, request.params)
+            if op in {"select_value", "select_value_or_none"}:
+                allow_none = op == "select_value_or_none"
+                scalar = await self._exec_select_value_async(
+                    session, request.sql, request.params, allow_none=allow_none
+                )
                 return BrokerRpcResponse(
                     request_id=request.request_id,
                     ok=True,
@@ -686,7 +784,7 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     scalar=scalar,
                     rowcount=1 if scalar is not None else 0,
-                    in_tx=self._tx_states.get(key, request.in_tx),
+                    in_tx=self._tx_state_for(key, request.in_tx),
                 )
 
             if op == "select_to_arrow":
@@ -704,12 +802,8 @@ class _BaseSQLSpecProvider:
                 generation=request.generation,
                 in_tx=in_tx,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=self._format_error_message(exc),
             )
-
-    async def _handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
-        """Execute an asynchronous BrokerRpcRequest."""
-        return await self._handle_request_async_impl(request)
 
     def _handle_raw_frame_sync(self, payload: bytes | bytearray | memoryview) -> bytes:
         """Decode a serialized RPC request frame (MessagePack or JSON), execute it, and encode the response."""
@@ -755,21 +849,15 @@ class _BaseSQLSpecProvider:
             arrow_names = list(self._active_arrow_buffers)
             self._active_arrow_buffers.clear()
         for key in keys:
-            await self._release_session_async(key, in_tx=self._tx_states.get(key, False))
+            await self._release_session_async(key, in_tx=self._tx_state_for(key, False))
         for name in arrow_names:
-            SharedArrowBuffer.unlink(name)
+            await SyncPool.default().submit_async(SharedArrowBuffer.unlink, name)
 
     def _resolve_upstream(self, pool_name: str) -> Any:
         """Resolve the upstream config, driver, or factory for pool_name."""
-        with self._lock:
-            if pool_name in self._upstreams:
-                return self._upstreams[pool_name]
-            if self.default_pool_name in self._upstreams:
-                return self._upstreams[self.default_pool_name]
-            if "default" in self._upstreams:
-                return self._upstreams["default"]
-            if self._upstreams:
-                return next(iter(self._upstreams.values()))
+        upstream = self.resolve_upstream_optional(pool_name)
+        if upstream is not None:
+            return upstream
         raise ImproperConfigurationError(f"No upstream SQLSpec config or driver registered for pool {pool_name!r}")
 
     def _acquire_slot_sync(self, request: BrokerRpcRequest) -> tuple[int, int]:
@@ -802,50 +890,45 @@ class _BaseSQLSpecProvider:
             self._next_generation += 1
             return request.slot_idx, gen
 
+    @staticmethod
+    async def _invoke_async_or_offload(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a coroutine callable directly or offload a synchronous callable onto SyncPool."""
+        if is_coroutine_callable(fn):
+            return await fn(*args, **kwargs)
+        res = await SyncPool.default().submit_async(fn, *args, **kwargs)
+        return await res if isinstance(res, Awaitable) else res
+
     def _acquire_from_broker_sync(self, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a lease from self.broker synchronously."""
+        """Acquire a lease from self.broker synchronously via typed lease source contracts."""
+        pid = worker_pid if worker_pid > 0 else os.getpid()
         target = getattr(self.broker, "transport", self.broker)
+        if isinstance(target, SyncSHMBrokerTransport):
+            return target.acquire(bind_key=pool_name, worker_id=pid)
+        if isinstance(target, AsyncSHMBrokerTransport):
+            return target.acquire_sync(bind_key=pool_name, worker_id=pid)
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
-            return self._call_broker_acquire(acquire_lease_fn, pool_name, worker_pid)
-        acquire_fn = getattr(target, "acquire", None)
-        if callable(acquire_fn):
-            return self._call_broker_acquire(acquire_fn, pool_name, worker_pid)
+            return acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
+        if isinstance(target, SyncBrokerLeaseSource):
+            return target.acquire(bind_key=pool_name, worker_id=pid)
         raise ImproperConfigurationError("Configured broker does not support synchronous lease acquisition")
 
     async def _acquire_from_broker_async(self, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a lease from self.broker asynchronously."""
-        target = getattr(self.broker, "transport", self.broker)
-        for attr in ("acquire_lease", "acquire"):
-            fn = getattr(self.broker, attr, None) or getattr(target, attr, None)
-            if callable(fn):
-                res = self._call_broker_acquire(fn, pool_name, worker_pid)
-                if inspect.isawaitable(res):
-                    return await res
-                return res
-        raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
-
-    @staticmethod
-    def _call_broker_acquire(fn: Any, pool_name: str, worker_pid: int) -> Any:
-        """Invoke a broker acquire function matching its accepted keyword or positional parameters."""
+        """Acquire a lease from self.broker asynchronously via typed lease source contracts."""
         pid = worker_pid if worker_pid > 0 else os.getpid()
-        try:
-            sig = inspect.signature(fn)
-            params = sig.parameters
-            kwargs: dict[str, Any] = {}
-            if "pool_name" in params:
-                kwargs["pool_name"] = pool_name
-            elif "bind_key" in params:
-                kwargs["bind_key"] = pool_name
-            if "worker_pid" in params:
-                kwargs["worker_pid"] = pid
-            elif "worker_id" in params:
-                kwargs["worker_id"] = pid
-            if kwargs or not params:
-                return fn(**kwargs)
-        except (ValueError, TypeError):
-            pass
-        return fn()
+        target = getattr(self.broker, "transport", self.broker)
+        if isinstance(target, AsyncSHMBrokerTransport):
+            return await target.acquire(bind_key=pool_name, worker_id=pid)
+        if isinstance(target, SyncSHMBrokerTransport):
+            return await SyncPool.default().submit_async(target.acquire, bind_key=pool_name, worker_id=pid)
+        candidates: tuple[tuple[Any, dict[str, Any]], ...] = (
+            (getattr(self.broker, "acquire_lease", None), {"pool_name": pool_name, "worker_pid": pid}),
+            (getattr(target, "acquire", None), {"bind_key": pool_name, "worker_id": pid}),
+        )
+        for fn, call_kwargs in candidates:
+            if callable(fn):
+                return await self._invoke_async_or_offload(fn, **call_kwargs)
+        raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
 
     def _extract_lease_coords(self, lease: Any) -> tuple[int, int]:
         """Extract (slot_idx, generation) from a broker lease object or tuple."""
@@ -873,7 +956,7 @@ class _BaseSQLSpecProvider:
             else (upstream() if callable(upstream) else upstream)
         )
         ctx_mgr = None
-        if hasattr(candidate, "__enter__") and not hasattr(candidate, "execute"):
+        if hasattr(candidate, "__enter__") and candidate is not upstream:
             ctx_mgr = candidate
             session = ctx_mgr.__enter__()
         else:
@@ -901,16 +984,16 @@ class _BaseSQLSpecProvider:
         else:
             candidate = upstream
 
-        if inspect.isawaitable(candidate):
+        if isinstance(candidate, Awaitable):
             candidate = await candidate
 
         ctx_mgr = None
-        if hasattr(candidate, "__aenter__") and not hasattr(candidate, "execute"):
+        if hasattr(candidate, "__aenter__") and candidate is not upstream:
             ctx_mgr = candidate
             session = await ctx_mgr.__aenter__()
-        elif hasattr(candidate, "__enter__") and not hasattr(candidate, "execute"):
+        elif hasattr(candidate, "__enter__") and candidate is not upstream:
             ctx_mgr = candidate
-            session = ctx_mgr.__enter__()
+            session = await SyncPool.default().submit_async(ctx_mgr.__enter__)
         else:
             session = candidate
 
@@ -921,91 +1004,152 @@ class _BaseSQLSpecProvider:
             self._tx_states.setdefault(key, False)
         return session
 
+    def _quarantine_broker_lease(self, lease: Any, key: tuple[int, int]) -> None:
+        """Quarantine a lease or coordinate pair on self.broker without releasing it."""
+        if self.broker is None:
+            return
+        target = getattr(self.broker, "transport", self.broker)
+        lease_arg = lease if lease is not None else key
+        quarantine_sync_fn = getattr(self.broker, "quarantine_sync", None) or getattr(target, "quarantine_sync", None)
+        if callable(quarantine_sync_fn):
+            quarantine_sync_fn(lease_arg)
+            return
+        quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
+        if callable(quarantine_fn):
+            quarantine_fn(lease_arg)
+
+    async def _quarantine_broker_lease_async(self, lease: Any, key: tuple[int, int]) -> None:
+        """Quarantine a lease or coordinate pair asynchronously without releasing it."""
+        if self.broker is None:
+            return
+        target = getattr(self.broker, "transport", self.broker)
+        lease_arg = lease if lease is not None else key
+        quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
+        if callable(quarantine_fn):
+            await self._invoke_async_or_offload(quarantine_fn, lease_arg)
+
     def _release_session_sync(self, key: tuple[int, int], in_tx: bool) -> None:
-        """Release a pinned session synchronously, rolling back any uncommitted transaction."""
+        """Release a pinned session synchronously, quarantining on rollback or context-exit error."""
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
             was_in_tx = self._tx_states.pop(key, False) or in_tx
             lease = self._broker_leases.pop(key, None)
 
-        if session is not None and was_in_tx:
-            with contextlib.suppress(Exception):
+        cleanup_exc: BaseException | None = None
+        try:
+            if session is not None and was_in_tx:
                 self._exec_rollback_sync(session, key)
+        except BaseException as exc:
+            cleanup_exc = exc
+        finally:
+            if ctx_mgr is not None and hasattr(ctx_mgr, "__exit__"):
+                try:
+                    ctx_mgr.__exit__(None, None, None)
+                except BaseException as exit_exc:
+                    if cleanup_exc is None:
+                        cleanup_exc = exit_exc
 
-        if ctx_mgr is not None and hasattr(ctx_mgr, "__exit__"):
-            with contextlib.suppress(Exception):
-                ctx_mgr.__exit__(None, None, None)
+        if cleanup_exc is not None:
+            try:
+                self._quarantine_broker_lease(lease, key)
+            except BaseException as quarantine_exc:
+                if isinstance(cleanup_exc, Exception) and isinstance(quarantine_exc, Exception):
+                    msg = (
+                        f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
+                        f"after cleanup error: {cleanup_exc}"
+                    )
+                    raise RuntimeError(msg) from cleanup_exc
+                raise
+            if isinstance(cleanup_exc, Exception) and not isinstance(cleanup_exc, LeaseQuarantinedError):
+                raise LeaseQuarantinedError(key[0], key[1], str(cleanup_exc)) from cleanup_exc
+            raise cleanup_exc
 
         if lease is not None:
             self._release_broker_lease(lease, key, in_tx=False)
 
     async def _release_session_async(self, key: tuple[int, int], in_tx: bool) -> None:
-        """Release a pinned session asynchronously, rolling back any uncommitted transaction."""
+        """Release a pinned session asynchronously, quarantining on rollback or context-exit error."""
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
             was_in_tx = self._tx_states.pop(key, False) or in_tx
             lease = self._broker_leases.pop(key, None)
 
-        if session is not None and was_in_tx:
-            with contextlib.suppress(Exception):
+        cleanup_exc: BaseException | None = None
+        try:
+            if session is not None and was_in_tx:
                 await self._exec_rollback_async(session, key)
+        except BaseException as exc:
+            cleanup_exc = exc
+        finally:
+            if ctx_mgr is not None:
+                try:
+                    if hasattr(ctx_mgr, "__aexit__"):
+                        await ctx_mgr.__aexit__(None, None, None)
+                    elif hasattr(ctx_mgr, "__exit__"):
+                        await SyncPool.default().submit_async(ctx_mgr.__exit__, None, None, None)
+                except BaseException as exit_exc:
+                    if cleanup_exc is None:
+                        cleanup_exc = exit_exc
 
-        if ctx_mgr is not None:
-            if hasattr(ctx_mgr, "__aexit__"):
-                with contextlib.suppress(Exception):
-                    await ctx_mgr.__aexit__(None, None, None)
-            elif hasattr(ctx_mgr, "__exit__"):
-                with contextlib.suppress(Exception):
-                    ctx_mgr.__exit__(None, None, None)
+        if cleanup_exc is not None:
+            try:
+                await self._quarantine_broker_lease_async(lease, key)
+            except BaseException as quarantine_exc:
+                if isinstance(cleanup_exc, Exception) and isinstance(quarantine_exc, Exception):
+                    msg = (
+                        f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
+                        f"after cleanup error: {cleanup_exc}"
+                    )
+                    raise RuntimeError(msg) from cleanup_exc
+                raise
+            if isinstance(cleanup_exc, Exception) and not isinstance(cleanup_exc, LeaseQuarantinedError):
+                raise LeaseQuarantinedError(key[0], key[1], str(cleanup_exc)) from cleanup_exc
+            raise cleanup_exc
 
         if lease is not None:
             await self._release_broker_lease_async(lease, key, in_tx=False)
 
     def _release_broker_lease(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker."""
-        if hasattr(lease, "release") and callable(lease.release):
-            with contextlib.suppress(Exception):
-                lease.release()
+        lease_release_sync = getattr(lease, "release_sync", None)
+        if callable(lease_release_sync):
+            lease_release_sync()
+            return
+        if hasattr(lease, "release") and callable(lease.release) and not is_coroutine_callable(lease.release):
+            lease.release()
             return
         if self.broker is None:
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            with contextlib.suppress(Exception):
-                release_lease_fn(key[0], key[1], in_tx=in_tx)
+            release_lease_fn(key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
+        release_sync_fn = getattr(self.broker, "release_sync", None) or getattr(target, "release_sync", None)
+        if callable(release_sync_fn):
+            release_sync_fn(f"{key[0]}:{key[1]}")
+            return
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            with contextlib.suppress(Exception):
-                release_fn(f"{key[0]}:{key[1]}")
+            release_fn(f"{key[0]}:{key[1]}")
 
     async def _release_broker_lease_async(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker asynchronously."""
         if hasattr(lease, "release") and callable(lease.release):
-            with contextlib.suppress(Exception):
-                res = lease.release()
-                if inspect.isawaitable(res):
-                    await res
+            await self._invoke_async_or_offload(lease.release)
             return
         if self.broker is None:
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            with contextlib.suppress(Exception):
-                res = release_lease_fn(key[0], key[1], in_tx=in_tx)
-                if inspect.isawaitable(res):
-                    await res
+            await self._invoke_async_or_offload(release_lease_fn, key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            with contextlib.suppress(Exception):
-                res = release_fn(f"{key[0]}:{key[1]}")
-                if inspect.isawaitable(res):
-                    await res
+            await self._invoke_async_or_offload(release_fn, f"{key[0]}:{key[1]}")
 
     def _exec_begin_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Begin a transaction on session synchronously and mark key as in-transaction."""
@@ -1022,11 +1166,11 @@ class _BaseSQLSpecProvider:
         begin_fn = getattr(session, "begin", None)
         if callable(begin_fn):
             res = begin_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute") and not getattr(session, "in_transaction", False):
             res = session.execute("BEGIN")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
             self._tx_states[key] = True
@@ -1039,21 +1183,23 @@ class _BaseSQLSpecProvider:
         elif hasattr(session, "execute"):
             session.execute("COMMIT")
         with self._lock:
-            self._tx_states[key] = False
+            if key in self._leased_sessions:
+                self._tx_states[key] = False
 
     async def _exec_commit_async(self, session: Any, key: tuple[int, int]) -> None:
         """Commit an active transaction on session asynchronously and clear transaction state."""
         commit_fn = getattr(session, "commit", None)
         if callable(commit_fn):
             res = commit_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute"):
             res = session.execute("COMMIT")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
-            self._tx_states[key] = False
+            if key in self._leased_sessions:
+                self._tx_states[key] = False
 
     def _exec_rollback_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Roll back an active transaction on session synchronously and clear transaction state."""
@@ -1063,21 +1209,23 @@ class _BaseSQLSpecProvider:
         elif hasattr(session, "execute"):
             session.execute("ROLLBACK")
         with self._lock:
-            self._tx_states[key] = False
+            if key in self._leased_sessions:
+                self._tx_states[key] = False
 
     async def _exec_rollback_async(self, session: Any, key: tuple[int, int]) -> None:
         """Roll back an active transaction on session asynchronously and clear transaction state."""
         rollback_fn = getattr(session, "rollback", None)
         if callable(rollback_fn):
             res = rollback_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute"):
             res = session.execute("ROLLBACK")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
-            self._tx_states[key] = False
+            if key in self._leased_sessions:
+                self._tx_states[key] = False
 
     def _exec_many_sync(
         self,
@@ -1114,7 +1262,7 @@ class _BaseSQLSpecProvider:
             fn = getattr(session, attr, None)
             if callable(fn):
                 res = fn(sql, list(many_params))
-                if inspect.isawaitable(res):
+                if isinstance(res, Awaitable):
                     res = await res
                 if isinstance(res, int):
                     return res
@@ -1141,7 +1289,7 @@ class _BaseSQLSpecProvider:
         method_name = "select_one_or_none" if allow_none else "select_one"
         direct_fn = getattr(session, method_name, None)
         if callable(direct_fn):
-            res = self._call_with_params(direct_fn, sql, params)
+            res = self._dispatch_sql(session, direct_fn, sql, params)
             if res is None:
                 if not allow_none:
                     msg = "No row found for select_one"
@@ -1175,8 +1323,8 @@ class _BaseSQLSpecProvider:
         method_name = "select_one_or_none" if allow_none else "select_one"
         direct_fn = getattr(session, method_name, None)
         if callable(direct_fn):
-            res = self._call_with_params(direct_fn, sql, params)
-            if inspect.isawaitable(res):
+            res = self._dispatch_sql(session, direct_fn, sql, params)
+            if isinstance(res, Awaitable):
                 res = await res
             if res is None:
                 if not allow_none:
@@ -1199,27 +1347,70 @@ class _BaseSQLSpecProvider:
         row_dict = self._coerce_single_row(rows[0], columns)
         return row_dict, columns or list(row_dict.keys())
 
-    def _exec_select_value_sync(self, session: Any, sql: str, params: Any) -> Any:
-        """Execute select_value synchronously and return a scalar value."""
-        for attr in ("select_value", "fetch_val"):
-            fn = getattr(session, attr, None)
-            if callable(fn):
-                return self._call_with_params(fn, sql, params)
+    def _exec_select_value_sync(
+        self,
+        session: Any,
+        sql: str,
+        params: Any,
+        *,
+        allow_none: bool = False,
+    ) -> Any:
+        """Execute select_value or select_value_or_none synchronously and return a scalar value."""
+        if allow_none:
+            direct_or_none = getattr(session, "select_value_or_none", None)
+            if callable(direct_or_none):
+                return self._dispatch_sql(session, direct_or_none, sql, params)
+        else:
+            for attr in ("select_value", "fetch_val"):
+                fn = getattr(session, attr, None)
+                if callable(fn):
+                    return self._dispatch_sql(session, fn, sql, params)
         raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), sql, params)
         rows, _, _ = self._extract_result_sync(raw_res)
+        if not rows:
+            if allow_none:
+                return None
+            msg = "No row found for select_value"
+            raise ValueError(msg)
+        if len(rows) > 1:
+            msg = f"Expected at most 1 row, got {len(rows)}"
+            raise ValueError(msg)
         return self._extract_scalar(rows)
 
-    async def _exec_select_value_async(self, session: Any, sql: str, params: Any) -> Any:
-        """Execute select_value asynchronously and return a scalar value."""
-        for attr in ("select_value", "fetch_val"):
-            fn = getattr(session, attr, None)
-            if callable(fn):
-                res = self._call_with_params(fn, sql, params)
-                if inspect.isawaitable(res):
+    async def _exec_select_value_async(
+        self,
+        session: Any,
+        sql: str,
+        params: Any,
+        *,
+        allow_none: bool = False,
+    ) -> Any:
+        """Execute select_value or select_value_or_none asynchronously and return a scalar value."""
+        if allow_none:
+            direct_or_none = getattr(session, "select_value_or_none", None)
+            if callable(direct_or_none):
+                res = self._dispatch_sql(session, direct_or_none, sql, params)
+                if isinstance(res, Awaitable):
                     return await res
                 return res
+        else:
+            for attr in ("select_value", "fetch_val"):
+                fn = getattr(session, attr, None)
+                if callable(fn):
+                    res = self._dispatch_sql(session, fn, sql, params)
+                    if isinstance(res, Awaitable):
+                        return await res
+                    return res
         raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), sql, params)
         rows, _, _ = await self._extract_result_async(raw_res)
+        if not rows:
+            if allow_none:
+                return None
+            msg = "No row found for select_value"
+            raise ValueError(msg)
+        if len(rows) > 1:
+            msg = f"Expected at most 1 row, got {len(rows)}"
+            raise ValueError(msg)
         return self._extract_scalar(rows)
 
     def _exec_select_to_arrow_sync(
@@ -1231,7 +1422,7 @@ class _BaseSQLSpecProvider:
         """Execute select_to_arrow synchronously and spill the result table into SharedArrowBuffer."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
-            raw_arrow = self._call_with_params(arrow_fn, request.sql, request.params)
+            raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
             shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
         else:
             raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), request.sql, request.params)
@@ -1247,7 +1438,7 @@ class _BaseSQLSpecProvider:
             generation=request.generation,
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_states.get(key, request.in_tx),
+            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1262,14 +1453,18 @@ class _BaseSQLSpecProvider:
         """Execute select_to_arrow asynchronously and spill the result table into SharedArrowBuffer."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
-            raw_arrow = self._call_with_params(arrow_fn, request.sql, request.params)
-            if inspect.isawaitable(raw_arrow):
+            raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
+            if isinstance(raw_arrow, Awaitable):
                 raw_arrow = await raw_arrow
-            shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
+            shm_name, byte_len, columns, rowcount = await SyncPool.default().submit_async(
+                self._spill_arrow_object, raw_arrow
+            )
         else:
             raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
             rows, columns, _ = await self._extract_result_async(raw_res)
-            shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
+            shm_name, byte_len = await SyncPool.default().submit_async(
+                SharedArrowBuffer.write_table, rows, columns=columns
+            )
             with self._lock:
                 self._active_arrow_buffers.add(shm_name)
             rowcount = len(rows)
@@ -1280,7 +1475,7 @@ class _BaseSQLSpecProvider:
             generation=request.generation,
             columns=columns,
             rowcount=rowcount,
-            in_tx=self._tx_states.get(key, request.in_tx),
+            in_tx=self._tx_state_for(key, request.in_tx),
             is_arrow_shm=True,
             arrow_shm_name=shm_name,
             arrow_byte_len=byte_len,
@@ -1294,6 +1489,41 @@ class _BaseSQLSpecProvider:
             self._active_arrow_buffers.add(shm_name)
         return shm_name, byte_len, list(table.column_names), int(table.num_rows)
 
+    def _should_spill_select(self, rows: list[dict[str, Any] | list[Any]]) -> bool:
+        """Return True when result rows exceed row-count or byte thresholds for SHM Arrow spill."""
+        row_count = len(rows)
+        if row_count >= self.arrow_threshold_rows:
+            return True
+        if row_count > 0 and self.arrow_threshold_bytes > 0:
+            encoded = encode_msgpack_bytes(rows)
+            return len(encoded) >= self.arrow_threshold_bytes
+        return False
+
+    def _build_spilled_select_response(
+        self,
+        request: BrokerRpcRequest,
+        in_tx: bool,
+        columns: list[str],
+        row_count: int,
+        shm_name: str,
+        byte_len: int,
+    ) -> BrokerRpcResponse:
+        """Record an active SHM segment and return its Arrow SHM BrokerRpcResponse."""
+        with self._lock:
+            self._active_arrow_buffers.add(shm_name)
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=True,
+            slot_idx=request.slot_idx,
+            generation=request.generation,
+            columns=columns,
+            rowcount=row_count,
+            in_tx=in_tx,
+            is_arrow_shm=True,
+            arrow_shm_name=shm_name,
+            arrow_byte_len=byte_len,
+        )
+
     def _build_select_response(
         self,
         request: BrokerRpcRequest,
@@ -1302,31 +1532,11 @@ class _BaseSQLSpecProvider:
         columns: list[str],
     ) -> BrokerRpcResponse:
         """Construct a BrokerRpcResponse for select, spilling to SharedArrowBuffer when thresholds are met."""
-        in_tx = self._tx_states.get(key, request.in_tx)
+        in_tx = self._tx_state_for(key, request.in_tx)
         row_count = len(rows)
-        should_spill = row_count >= self.arrow_threshold_rows
-        if not should_spill and row_count > 0 and self.arrow_threshold_bytes > 0:
-            encoded = encode_msgpack_bytes(rows)
-            if len(encoded) >= self.arrow_threshold_bytes:
-                should_spill = True
-
-        if should_spill:
+        if rows and self._should_spill_select(rows):
             shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
-            with self._lock:
-                self._active_arrow_buffers.add(shm_name)
-            return BrokerRpcResponse(
-                request_id=request.request_id,
-                ok=True,
-                slot_idx=request.slot_idx,
-                generation=request.generation,
-                columns=columns,
-                rowcount=row_count,
-                in_tx=in_tx,
-                is_arrow_shm=True,
-                arrow_shm_name=shm_name,
-                arrow_byte_len=byte_len,
-            )
-
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
@@ -1336,7 +1546,32 @@ class _BaseSQLSpecProvider:
             columns=columns,
             rowcount=row_count,
             in_tx=in_tx,
-            is_arrow_shm=False,
+        )
+
+    async def _build_select_response_async(
+        self,
+        request: BrokerRpcRequest,
+        key: tuple[int, int],
+        rows: list[dict[str, Any] | list[Any]],
+        columns: list[str],
+    ) -> BrokerRpcResponse:
+        """Construct a select BrokerRpcResponse inline when small, offloading only SHM Arrow spills."""
+        in_tx = self._tx_state_for(key, request.in_tx)
+        row_count = len(rows)
+        if rows and self._should_spill_select(rows):
+            shm_name, byte_len = await SyncPool.default().submit_async(
+                SharedArrowBuffer.write_table, rows, columns=columns
+            )
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=True,
+            slot_idx=request.slot_idx,
+            generation=request.generation,
+            rows=rows,
+            columns=columns,
+            rowcount=row_count,
+            in_tx=in_tx,
         )
 
     def _invoke_sync(self, session: Any, method_names: tuple[str, ...], sql: str, params: Any) -> Any:
@@ -1344,7 +1579,7 @@ class _BaseSQLSpecProvider:
         for name in method_names:
             fn = getattr(session, name, None)
             if callable(fn):
-                return self._call_with_params(fn, sql, params)
+                return self._dispatch_sql(session, fn, sql, params)
         msg = f"Upstream session {type(session).__name__!r} does not implement any of {method_names}"
         raise AttributeError(msg)
 
@@ -1353,31 +1588,33 @@ class _BaseSQLSpecProvider:
         for name in method_names:
             fn = getattr(session, name, None)
             if callable(fn):
-                res = self._call_with_params(fn, sql, params)
-                if inspect.isawaitable(res):
+                res = self._dispatch_sql(session, fn, sql, params)
+                if isinstance(res, Awaitable):
                     return await res
                 return res
         msg = f"Upstream session {type(session).__name__!r} does not implement any of {method_names}"
         raise AttributeError(msg)
 
     @staticmethod
-    def _call_with_params(fn: Any, sql: str, params: Any) -> Any:
-        """Call a driver method with sql and either unpacked varargs or a parameter collection."""
+    def _dispatch_sql(session: Any, fn: Any, sql: str, params: Any) -> Any:
+        """Dispatch SQL execution across None, empty sequence, Mapping, and Sequence parameter forms."""
         if params is None or params == () or params == []:
             return fn(sql)
-        if isinstance(params, dict):
+        if isinstance(params, Mapping):
             return fn(sql, params)
-        if isinstance(params, (tuple, list)):
-            has_varargs = False
-            with contextlib.suppress(ValueError, TypeError):
-                sig = inspect.signature(fn)
-                has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
-            if has_varargs:
-                return fn(sql, *params)
-            try:
+        if isinstance(params, Sequence) and not isinstance(params, str | bytes | bytearray):
+            if isinstance(session, CommonDriverMixin):
                 return fn(sql, params)
-            except TypeError:
+            if isinstance(session, (SyncDriverAdapterBase, AsyncDriverAdapterBase)):
                 return fn(sql, *params)
+            if isinstance(session, (sqlite3.Connection, sqlite3.Cursor)) or hasattr(session, "cursor"):
+                return fn(sql, params)
+            if getattr(type(session), "dialect", None) is not None and not hasattr(session, "execute_many"):
+                return fn(sql, params)
+            try:
+                return fn(sql, *params)
+            except TypeError:
+                return fn(sql, params)
         return fn(sql, params)
 
     def _extract_result_sync(
@@ -1414,7 +1651,7 @@ class _BaseSQLSpecProvider:
             if desc is not None:
                 columns = [str(col[0]) for col in desc]
                 fetched = raw_res.fetchall()
-                if inspect.isawaitable(fetched):
+                if isinstance(fetched, Awaitable):
                     fetched = await fetched
                 rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, columns) for row in fetched]
                 return rows, columns, len(rows)

@@ -11,6 +11,8 @@ planning_quality: standard
 planning_degraded_reason: null
 plan_commit: 1b191388
 updated_at: '2026-11-14T18:50:00Z'
+depends_on_chapters:
+- ch01-dbapi-foundation-and-relational-dialects
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -57,17 +59,13 @@ sources:
 # Chapter 02: Analytical/Cloud SQLAlchemy Dialects, Alembic Operations, dogpile.cache, and Advanced Alchemy
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `DuckDB`, `BigQuery`, `Spanner`, and `Spangres` dialects hand-roll partial `DefaultDialect` stubs inside `dialects.py`, and `pyproject.toml` points all 36 entry points at `vertebra.extensions.sqlalchemy.dialects` [^sa-dialects] [^entry-points].
-- **Target Architecture**: `dialects/{duckdb,bigquery,spanner}.py` subclass `duckdb_engine.Dialect`, `sqlalchemy_bigquery.BigQueryDialect`, and `google.cloud.sqlalchemy_spanner.SpannerDialect` over `vertebra.db.dbapi`, `dialects.py` is deleted, and all 36 entry points target `Sync<Engine>Dialect` / `Async<Engine>Dialect` [^bq-config] [^spn-config].
-- **Baseline (`18baadcd`)**: `alembic.py` checks `isinstance(cfg, (PostgreSQLConfig, MySQLConfig))`, `alchemy/cache.py` passes raw URLs as `dogpile` backend names and exposes a process-local `shm://` scheme, `sqlalchemy/cache.py` is a duplicate re-export shim, and `normalize_alchemy_url` hardcodes only GCP schemes [^sa-alembic] [^aa-cache] [^aa-plugin] [^sa-cache-shim].
-- **Target Architecture**: Modular `extensions/sqlalchemy/alembic/{__init__,impl,ops,hooks}.py` provides `DefaultImpl` + autogenerate hooks; `extensions/alchemy/cache.py` registers `dogpile.cache>=1.3.3` backends (`vertebra.valkey`, `vertebra.redis`, `vertebra.memory`); `sqlalchemy/cache.py` is deleted; `normalize_alchemy_url` reads `BaseDatabaseConfig.url_schemes`.
+- **Baseline (`18baadcd`)**: `DuckDB`, `BigQuery`, `Spanner`, and `Spangres` dialects hand-roll partial `DefaultDialect` stubs inside `dialects.py`, `alembic.py` checks `isinstance(cfg, (PostgreSQLConfig, MySQLConfig))`, `alchemy/cache.py` passes raw URLs as `dogpile` backend names and retains a process-local `shm://` scheme alongside the `sqlalchemy/cache.py` shim, `normalize_alchemy_url` hardcodes only GCP schemes, and `pyproject.toml` points all 36 entry points at `vertebra.extensions.sqlalchemy.dialects` [^sa-dialects] [^entry-points] [^sa-alembic] [^aa-cache] [^aa-plugin] [^sa-cache-shim].
+- **Target Architecture**: `dialects/{duckdb,bigquery,spanner}.py` subclass `duckdb_engine.Dialect`, `sqlalchemy_bigquery.BigQueryDialect`, and `google.cloud.sqlalchemy_spanner.SpannerDialect` over `vertebra.db.dbapi`, `dialects.py` is deleted, and all 36 entry points target `Sync<Engine>Dialect` / `Async<Engine>Dialect`; modular `extensions/sqlalchemy/alembic/{__init__,impl,ops,hooks}.py` implements `DefaultImpl` and autogenerate hooks; `extensions/alchemy/cache.py` registers `dogpile.cache>=1.3.3` backends (`vertebra.valkey`, `vertebra.redis`, `vertebra.memory`); `sqlalchemy/cache.py` is deleted; `normalize_alchemy_url` reads `BaseDatabaseConfig.url_schemes` [^bq-config] [^spn-config].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter completes the per-engine SQLAlchemy dialect split across `DuckDB`, `BigQuery`, `Spanner`, and `Spangres`, deletes monolithic `dialects.py`, and repoints all 36 `<engine>+{vertebra,vtb,vertebra_async,vtb_async}` entry points in `pyproject.toml` [^entry-points].
-
-This chapter splits `alembic.py` into a modular Alembic DDL and autogenerate package, integrates `dogpile.cache>=1.3.3` region backends for Advanced Alchemy `1.12.0+` (`SQLAlchemySyncConfig`, `SQLAlchemyAsyncConfig`, `ZeroCopyServiceMixin`, `CacheManager`, `AsyncCacheManager`), removes `sqlalchemy/cache.py`, and generalizes `normalize_alchemy_url` [^aa-cache] [^aa-plugin].
+This chapter completes the per-engine SQLAlchemy dialect split across `DuckDB`, `BigQuery`, `Spanner`, and `Spangres`, deletes monolithic `dialects.py`, and repoints all 36 `<engine>+{vertebra,vtb,vertebra_async,vtb_async}` entry points in `pyproject.toml` [^entry-points]. It also splits `alembic.py` into `extensions/sqlalchemy/alembic/{__init__,impl,ops,hooks}.py`, integrates `dogpile.cache>=1.3.3` region backends for Advanced Alchemy `1.12.0+` (`SQLAlchemySyncConfig`, `SQLAlchemyAsyncConfig`, `ZeroCopyServiceMixin`, `CacheManager`, `AsyncCacheManager`), removes `sqlalchemy/cache.py`, and generalizes `normalize_alchemy_url` across all registered engines [^aa-cache] [^aa-plugin].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -115,29 +113,27 @@ def create_cache_config(
 
 ## 3. Documentation & OKF Knowledge Plan
 
-Entry-point mappings and optional extra install tables are documented in `ch03-django-backends-and-docs` (`t04`).
-
-Advanced Alchemy `1.12.0+` caching and Alembic migration guides are updated in `ch03-django-backends-and-docs` (`t04`).
+Entry-point mappings, optional extra install tables, and Advanced Alchemy `1.12.0+` caching and Alembic migration guides are updated in `ch03-django-backends-and-docs` (`t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
 | Task | Title | Primary Files | Verification |
 | --- | --- | --- | --- |
 | `t01` | Implement Native DuckDB and BigQuery Sync/Async SQLAlchemy Dialects | `src/py/vertebra/extensions/sqlalchemy/dialects/duckdb.py`, `src/py/vertebra/extensions/sqlalchemy/dialects/bigquery.py`, `src/py/vertebra/db/adapters/bigquery/config.py` | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` |
-| `t02` | Implement Spanner/Spangres Dialects, Dialect Barrel, and 18 Entrypoints | `src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py`, `src/py/vertebra/db/adapters/spanner/config.py`, `src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py` (+2 more) | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
-| `t03` | Implement Alembic DefaultImpl Subclasses and dogpile.cache Region Backends | `src/py/vertebra/extensions/sqlalchemy/alembic/__init__.py`, `src/py/vertebra/extensions/sqlalchemy/alembic/impl.py`, `src/py/vertebra/extensions/sqlalchemy/alembic/ops.py` (+2 more) | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py` |
+| `t02` | Implement Spanner/Spangres Dialects, Dialect Barrel, and 36 Entrypoints | `src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py`, `src/py/vertebra/db/adapters/spanner/config.py`, `src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py` (+2 more) | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
+| `t03` | Implement Alembic DefaultImpl Subclasses and dogpile.cache Region Backends | `src/py/vertebra/extensions/sqlalchemy/alembic/__init__.py`, `src/py/vertebra/extensions/sqlalchemy/alembic/impl.py`, `src/py/vertebra/extensions/sqlalchemy/alembic/ops.py` (+3 more) | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/extensions/test_alchemy_cache_backend.py` |
 | `t04` | Wire Advanced Alchemy Engine Configs, Lifespan Session Hooks, and Repository Tests | `src/py/vertebra/extensions/sqlalchemy/alembic/hooks.py`, `src/py/vertebra/extensions/alchemy/plugin.py`, `src/py/vertebra/extensions/alchemy/storage.py` | `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py`, `src/py/tests/unit/extensions/test_data_storage_integrations.py` |
 
 ## 5. Implementation Plan
 
 - [ ] [t01-duckdb-and-bigquery-dialects.md](tasks/t01-duckdb-and-bigquery-dialects.md) — Build dialects/duckdb.py and dialects/bigquery.py with STRUCT/ARRAY/JSON reflection and named @param binds.
-- [ ] [t02-spanner-dialects-and-entrypoints.md](tasks/t02-spanner-dialects-and-entrypoints.md) — Build dialects/spanner.py (GoogleSQL and Spangres), convert dialects/__init__.py barrel, and register all 18 sqlalchemy.dialects entrypoints in pyproject.toml.
-- [ ] [t03-alembic-impl-and-dogpile-cache.md](tasks/t03-alembic-impl-and-dogpile-cache.md) — Register Alembic dialect implementations (including Spanner batch DDL and BigQuery DDL) and build native Valkey/Redis/SHM dogpile.cache backends.
+- [ ] [t02-spanner-dialects-and-entrypoints.md](tasks/t02-spanner-dialects-and-entrypoints.md) — Build dialects/spanner.py (GoogleSQL and Spangres), convert dialects/__init__.py barrel, delete dialects.py, and repoint all 36 sqlalchemy.dialects entrypoints in pyproject.toml.
+- [ ] [t03-alembic-impl-and-dogpile-cache.md](tasks/t03-alembic-impl-and-dogpile-cache.md) — Register Alembic dialect implementations (including Spanner batch DDL and BigQuery DDL), build native Valkey/Redis/Memory dogpile.cache backends, and delete sqlalchemy/cache.py.
 - [ ] [t04-advanced-alchemy-config-and-hooks.md](tasks/t04-advanced-alchemy-config-and-hooks.md) — Integrate Vertebra Sync/Async SQLAlchemy dialects with SQLAlchemySyncConfig, SQLAlchemyAsyncConfig, and SQLAlchemyAsyncRepositoryService.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch02-cloud-dialects-alembic-and-advanced-alchemy` is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisites (`broker-pool-sharing` and `native-sqlite-driver`).
+Chapter `ch02-cloud-dialects-alembic-and-advanced-alchemy` is `planned` behind upstream [`../../spec.md`](../../spec.md) prerequisite `native-sqlite-driver` (`broker-pool-sharing` complete and archived at `28415b3f`).
 
 Fast Chapter Gate (`< 60s` offline):
 

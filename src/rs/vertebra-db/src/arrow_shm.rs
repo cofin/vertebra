@@ -336,7 +336,7 @@ impl ShmArrowStreamWriter {
         let next_capacity = page_align(doubled.max(self.capacity.saturating_mul(2)))?;
 
         #[cfg(unix)]
-        self.region.disarm_unlink();
+        let _ = self.region.unlink_now();
 
         let mut next_region = allocate_shm_region(&self.shm_name, next_capacity)?;
         // SAFETY: Both `self.region` and `next_region` are exclusively owned by `self` and have
@@ -355,7 +355,11 @@ impl ShmArrowStreamWriter {
         if bytes.is_empty() {
             return Ok(());
         }
-        let padded_len = (bytes.len() + 7) & !7;
+        let padded_len = bytes
+            .len()
+            .checked_add(7)
+            .ok_or_else(|| "SHM Arrow frame size overflow".to_string())?
+            & !7;
         let pad_bytes = padded_len - bytes.len();
         self.ensure_capacity(padded_len)?;
         // SAFETY: `ensure_capacity` guarantees `self.write_offset + padded_len <= self.capacity`.
@@ -487,5 +491,36 @@ mod tests {
             assert!(read_shm_arrow_frame_with(&name, |s| s.len()).is_err());
             drop(named);
         }
+    }
+
+    #[test]
+    fn shm_arrow_stream_writer_resize_and_finish_unregistered() {
+        let shm_name = format!("vtb-arw-rsz-{:x}", std::process::id());
+        let _ = release_shm_arrow_frame(&shm_name);
+
+        let schema = vec![0x33u8; 45];
+        let mut writer =
+            ShmArrowStreamWriter::create(&shm_name, 4096, &schema).expect("create writer");
+        let batch = vec![0x44u8; 5000];
+        writer.append_ipc_frame(&batch, 10).expect("batch 1");
+        writer.append_ipc_frame(&batch, 10).expect("batch 2 resize");
+
+        let (norm, byte_len, region) = writer.finish_unregistered().expect("finish unregistered");
+        assert!(!ACTIVE_ARROW_SHM_REGIONS.contains_key(&norm));
+        // SAFETY: `region` is exclusively owned after `finish_unregistered` and remains immutable while `slice` is borrowed.
+        let slice = unsafe { region.as_slice() };
+        let hdr = ShmArrowFrameHeader::from_slice(&slice[0..16]).expect("header");
+        assert_eq!(hdr.byte_len as usize, byte_len);
+        assert_eq!(
+            &slice[16 + byte_len - ARROW_IPC_EOS_MARKER.len()..16 + byte_len],
+            &ARROW_IPC_EOS_MARKER
+        );
+        drop(region);
+
+        let mut writer2 =
+            ShmArrowStreamWriter::create(&shm_name, 4096, &schema).expect("recreate after drop");
+        writer2.append_ipc_frame(&batch, 5).expect("batch");
+        let (norm2, _, _region2) = writer2.finish().expect("finish");
+        assert!(release_shm_arrow_frame(&norm2));
     }
 }
