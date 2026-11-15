@@ -525,7 +525,8 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
     cfg, table_name, dialect_tag, insert_sql = _resolve_live_engine_config(request, engine)
     pool_size = 1
     app_tag = f"vtb-mp-{engine}-{os.getpid()}"
-    dsn = f"{cfg.dsn}?application_name={app_tag}" if engine == "postgres" else cfg.dsn
+    sep = "&" if "?" in cfg.dsn else "?"
+    dsn = f"{cfg.dsn}{sep}application_name={app_tag}" if engine == "postgres" else cfg.dsn
 
     with tempfile.TemporaryDirectory(dir="/tmp", prefix=f"vtb-mp-{engine}-") as raw_dir:
         sock_dir = Path(raw_dir)

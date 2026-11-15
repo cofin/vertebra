@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from typing import TYPE_CHECKING, Any, Final
 
@@ -39,10 +40,6 @@ paramstyle: Final[str] = "qmark"
 
 class Error(Exception):
     """Base PEP 249 DBAPI exception."""
-
-    def __getattr__(self, key: str) -> Any:
-        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
-        raise AttributeError(msg)
 
 
 class Warning(Exception):
@@ -82,46 +79,6 @@ class NotSupportedError(DatabaseError):
 
 
 Binary = bytes
-
-_AUTOCOMMIT_ONLY_DIALECTS: frozenset[str] = frozenset({"bigquery", "googlesql", "spangres", "spanner"})
-
-_ROW_RETURNING_LEADING_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "SELECT",
-        "WITH",
-        "PRAGMA",
-        "SHOW",
-        "DESCRIBE",
-        "DESC",
-        "EXPLAIN",
-        "VALUES",
-    }
-)
-
-
-def _config_dialect(config: Any) -> str:
-    """Resolve the lowercase dialect identifier exposed by a database configuration object."""
-    cls_dialect = getattr(type(config), "dialect", "")
-    raw = getattr(config, "dialect", cls_dialect)
-    return str(raw).lower()
-
-
-def _parse_dollar_tag(sql: str, start: int) -> str | None:
-    """Parse a PostgreSQL dollar-quote delimiter starting at ``$`` or return None."""
-    length = len(sql)
-    idx = start + 1
-    if idx < length and sql[idx] == "$":
-        return "$$"
-    while idx < length:
-        ch = sql[idx]
-        if ch == "$":
-            return sql[start : idx + 1] if idx > start + 1 else None
-        if not (ch.isalnum() or ch == "_"):
-            return None
-        if idx == start + 1 and ch.isdigit():
-            return None
-        idx += 1
-    return None
 
 
 def is_row_returning_sql(operation: str) -> bool:
@@ -203,12 +160,23 @@ def is_row_returning_sql(operation: str) -> bool:
 class SyncDBAPICursor:
     """PEP 249 DBAPI 2.0 cursor returning plain Python tuples."""
 
-    __slots__ = ("_conn", "_pos", "_raw_cursor", "_rows", "arraysize", "description", "lastrowid", "rowcount")
+    __slots__ = (
+        "_closed",
+        "_conn",
+        "_pos",
+        "_raw_cursor",
+        "_rows",
+        "arraysize",
+        "description",
+        "lastrowid",
+        "rowcount",
+    )
 
     def __init__(self, connection: SyncDBAPIConnection, raw_cursor: Any = None) -> None:
         """Initialize PEP 249 cursor with connection and optional underlying DBAPI cursor."""
         self._conn = connection
         self._raw_cursor = raw_cursor
+        self._closed: bool = False
         self._rows: list[tuple[Any, ...]] = []
         self._pos: int = 0
         self.description: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
@@ -218,6 +186,7 @@ class SyncDBAPICursor:
 
     def execute(self, operation: str, parameters: Sequence[Any] | dict[str, Any] = ()) -> SyncDBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
+        self._require_open()
         if self._raw_cursor is not None:
             self._raw_cursor.execute(operation, parameters)
             self.description = getattr(self._raw_cursor, "description", None)
@@ -231,11 +200,13 @@ class SyncDBAPICursor:
             self.description = None
             self._pos = 0
             self.rowcount = affected
+            self.lastrowid = self._resolve_driver_lastrowid(operation)
             return self
 
         self._rows, self.description = self._conn.execute_with_description(operation, parameters)
         self._pos = 0
         self.rowcount = len(self._rows)
+        self.lastrowid = self._resolve_driver_lastrowid(operation)
         return self
 
     def executemany(
@@ -244,6 +215,7 @@ class SyncDBAPICursor:
         seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
     ) -> SyncDBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
+        self._require_open()
         if self._raw_cursor is not None:
             self._raw_cursor.executemany(operation, seq_of_parameters)
             self.description = getattr(self._raw_cursor, "description", None)
@@ -275,6 +247,7 @@ class SyncDBAPICursor:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         """Fetch the next plain-tuple row or None."""
+        self._require_open()
         if self._raw_cursor is not None:
             row = self._raw_cursor.fetchone()
             return tuple(row) if row is not None and not isinstance(row, tuple) else row
@@ -286,6 +259,7 @@ class SyncDBAPICursor:
 
     def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
         """Fetch up to ``size`` plain-tuple rows."""
+        self._require_open()
         if self._raw_cursor is not None:
             rows = self._raw_cursor.fetchmany(size if size is not None else self.arraysize)
             return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
@@ -296,6 +270,7 @@ class SyncDBAPICursor:
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Fetch all remaining plain-tuple rows."""
+        self._require_open()
         if self._raw_cursor is not None:
             rows = self._raw_cursor.fetchall()
             return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
@@ -303,12 +278,48 @@ class SyncDBAPICursor:
         self._pos = len(self._rows)
         return rest
 
+    def setinputsizes(self, sizes: Any) -> None:
+        """Accept PEP 249 input buffer size hints as a no-op."""
+        self._require_open()
+        _ = sizes
+
+    def setoutputsize(self, size: int, column: int | None = None) -> None:
+        """Accept PEP 249 output column buffer size hints as a no-op."""
+        self._require_open()
+        _ = (size, column)
+
     def close(self) -> None:
         """Close the cursor."""
-        if self._raw_cursor is not None and hasattr(self._raw_cursor, "close"):
-            self._raw_cursor.close()
-        self._rows = []
-        self._pos = 0
+        if not self._closed:
+            if self._raw_cursor is not None and hasattr(self._raw_cursor, "close"):
+                self._raw_cursor.close()
+            self._rows = []
+            self._pos = 0
+            self._closed = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise ProgrammingError("Cannot operate on a closed cursor.")
+        if self._conn.closed:
+            raise InterfaceError("Cannot operate on a closed connection.")
+
+    def _resolve_driver_lastrowid(self, operation: str) -> int | None:
+        if not operation.lstrip().upper().startswith("INSERT"):
+            return self.lastrowid
+        driver = self._conn.driver
+        last_rowid_fn = getattr(driver, "last_insert_rowid", None)
+        if callable(last_rowid_fn):
+            val = last_rowid_fn()
+            return int(val) if val is not None else 1
+        raw_conn = getattr(driver, "raw_connection", None)
+        if raw_conn is not None:
+            driver_lock = getattr(driver, "_lock", None)
+            ctx = driver_lock if driver_lock is not None else contextlib.nullcontext()
+            with ctx, contextlib.closing(raw_conn.cursor()) as cur:
+                cur.execute("SELECT last_insert_rowid()")
+                row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 1
+        return self.lastrowid
 
 
 class SyncDBAPIConnection:
@@ -347,7 +358,9 @@ class SyncDBAPIConnection:
         self._url = resolved_url
         self._share_pool = bool(share_pool)
         self._broker = (
-            broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
+            broker
+            if broker is not None
+            else (DatabaseRegistry.default_broker() if self._share_pool and not lease_managed else None)
         )
         self._in_transaction = False
         self.closed: bool = False
@@ -376,7 +389,7 @@ class SyncDBAPIConnection:
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
                 self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
-            elif self._share_pool and broker is None:
+            elif self._share_pool and broker is None and not lease_managed:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
@@ -422,6 +435,7 @@ class SyncDBAPIConnection:
 
     def cursor(self) -> SyncDBAPICursor:
         """Create a new plain-tuple DBAPI cursor."""
+        self._require_open()
         if self._sqlite_conn is not None:
             return SyncDBAPICursor(self, raw_cursor=self._sqlite_conn.cursor())
         return SyncDBAPICursor(self)
@@ -432,11 +446,12 @@ class SyncDBAPIConnection:
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Execute a query returning rows and column descriptions."""
+        self._require_open()
         if self._sqlite_conn is not None:
-            cur = self._sqlite_conn.cursor()
-            cur.execute(sql, parameters)
-            rows = [tuple(r) for r in cur.fetchall()]
-            desc = cur.description
+            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
+                cur.execute(sql, parameters)
+                rows = [tuple(r) for r in cur.fetchall()]
+                desc = cur.description
             return rows, desc
 
         self.begin()
@@ -468,8 +483,8 @@ class SyncDBAPIConnection:
                     self.commit()
                 return rows, desc
             if hasattr(self._driver, "select"):
-                dict_params = parameters if isinstance(parameters, dict) else None
-                dict_rows = self._driver.select(sql, dict_params)
+                select_params = parameters if parameters else None
+                dict_rows = self._driver.select(sql, select_params)
                 if not dict_rows:
                     return [], None
                 keys = tuple(dict_rows[0].keys())
@@ -486,10 +501,11 @@ class SyncDBAPIConnection:
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> int:
         """Execute a non-row-returning SQL statement and return the affected row count."""
+        self._require_open()
         if self._sqlite_conn is not None:
-            cur = self._sqlite_conn.cursor()
-            cur.execute(sql, parameters)
-            return cur.rowcount
+            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
+                cur.execute(sql, parameters)
+                return cur.rowcount
         self.begin()
         if self._driver is not None:
             if hasattr(self._driver, "execute"):
@@ -507,12 +523,13 @@ class SyncDBAPIConnection:
         seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
     ) -> int:
         """Execute a non-row-returning SQL statement across multiple parameter sets and return affected rows."""
+        self._require_open()
         if not seq_of_parameters:
             return 0
         if self._sqlite_conn is not None:
-            cur = self._sqlite_conn.cursor()
-            cur.executemany(sql, seq_of_parameters)
-            return cur.rowcount
+            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
+                cur.executemany(sql, seq_of_parameters)
+                return cur.rowcount
         self.begin()
         if self._driver is not None:
             if hasattr(self._driver, "execute_many"):
@@ -536,6 +553,7 @@ class SyncDBAPIConnection:
 
     def begin(self) -> None:
         """Begin a native transaction when implicit commit is disabled."""
+        self._require_open()
         if self._autocommit or self._in_transaction or self._sqlite_conn is not None:
             return
         if self._driver is not None and hasattr(self._driver, "begin"):
@@ -544,6 +562,7 @@ class SyncDBAPIConnection:
 
     def commit(self) -> None:
         """Commit the active transaction."""
+        self._require_open()
         self._in_transaction = False
         if self._sqlite_conn is not None:
             self._sqlite_conn.commit()
@@ -552,6 +571,7 @@ class SyncDBAPIConnection:
 
     def rollback(self) -> None:
         """Roll back the active transaction."""
+        self._require_open()
         self._in_transaction = False
         if self._sqlite_conn is not None:
             self._sqlite_conn.rollback()
@@ -571,6 +591,10 @@ class SyncDBAPIConnection:
             if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
                 self._driver.close()
             self.closed = True
+
+    def _require_open(self) -> None:
+        if self.closed:
+            raise InterfaceError("Cannot operate on a closed connection.")
 
 
 class SyncDBAPIModule:
@@ -599,10 +623,6 @@ class SyncDBAPIModule:
         """Initialize PEP 249 DBAPI module with target parameter style."""
         self.paramstyle = paramstyle
 
-    def __getattr__(self, key: str) -> Any:
-        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
-        raise AttributeError(msg)
-
     def connect(self, *args: Any, **kwargs: Any) -> SyncDBAPIConnection:
         """Open a synchronous PEP 249 connection."""
         url_arg = "sqlite+vtb:///:memory:"
@@ -616,3 +636,44 @@ class SyncDBAPIModule:
 def connect(url: str = "sqlite+vtb:///:memory:", **kwargs: Any) -> SyncDBAPIConnection:
     """Open a standalone synchronous PEP 249 DB-API connection."""
     return SyncDBAPIConnection(url, **kwargs)
+
+
+_AUTOCOMMIT_ONLY_DIALECTS: frozenset[str] = frozenset({"bigquery", "googlesql", "spangres", "spanner"})
+
+_ROW_RETURNING_LEADING_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "PRAGMA",
+        "SHOW",
+        "DESCRIBE",
+        "DESC",
+        "EXPLAIN",
+        "VALUES",
+    }
+)
+
+
+def _config_dialect(config: Any) -> str:
+    """Resolve the lowercase dialect identifier exposed by a database configuration object."""
+    cls_dialect = getattr(type(config), "dialect", "")
+    raw = getattr(config, "dialect", cls_dialect)
+    return str(raw).lower()
+
+
+def _parse_dollar_tag(sql: str, start: int) -> str | None:
+    """Parse a PostgreSQL dollar-quote delimiter starting at ``$`` or return None."""
+    length = len(sql)
+    idx = start + 1
+    if idx < length and sql[idx] == "$":
+        return "$$"
+    while idx < length:
+        ch = sql[idx]
+        if ch == "$":
+            return sql[start : idx + 1] if idx > start + 1 else None
+        if not (ch.isalnum() or ch == "_"):
+            return None
+        if idx == start + 1 and ch.isdigit():
+            return None
+        idx += 1
+    return None

@@ -2,73 +2,78 @@
 
 from __future__ import annotations
 
-from vertebra.extensions.sqlalchemy.alembic import (
-    AlembicImpl,
-    BigQueryAlembicImpl,
-    CreateVectorIndexOp,
-    CreateViewOp,
-    DropVectorIndexOp,
-    DropViewOp,
-    DuckDBAlembicImpl,
-    MSSQLAlembicImpl,
-    MySQLAlembicImpl,
-    OracleAlembicImpl,
-    PostgreSQLAlembicImpl,
-    SpannerAlembicImpl,
-    SQLiteAlembicImpl,
-)
-from vertebra.extensions.sqlalchemy.async_adapter import (
-    AsyncAdapt_dbapi_connection,
-    SQLAlchemyAsyncDBAPI,
-)
-from vertebra.extensions.sqlalchemy.cache import (
-    CacheEntry,
-    CacheStats,
-    SQLAlchemyCacheBackend,
-)
-from vertebra.extensions.sqlalchemy.dialects import (
-    ALL_DIALECT_SCHEMES,
-    DIALECT_DESCRIPTORS,
-    DIALECT_SCHEMES,
-    AsyncBigQueryDialect,
-    AsyncDuckDBDialect,
-    AsyncMSSQLDialect,
-    AsyncMySQLDialect,
-    AsyncOracleDialect,
-    AsyncPostgreSQLDialect,
-    AsyncSpangresDialect,
-    AsyncSpannerDialect,
-    AsyncSQLiteDialect,
-    NullPool,
-    SyncBigQueryDialect,
-    SyncDuckDBDialect,
-    SyncEngineAdapter,
-    SyncMSSQLDialect,
-    SyncMySQLDialect,
-    SyncOracleDialect,
-    SyncPostgreSQLDialect,
-    SyncSpangresDialect,
-    SyncSpannerDialect,
-    SyncSQLiteDialect,
-    attach_serverless_disconnect_guard,
-    is_free_threaded,
-)
-from vertebra.extensions.sqlalchemy.pool import (
-    AsyncBrokerPool,
-    BrokerPool,
-    broker_creator,
-)
-from vertebra.extensions.sqlalchemy.types import (
-    BinaryJSON,
-    DeleteUsingClause,
-    InsertSentinelSpec,
-    ParameterizedSQL,
-    SelectInLoadSpec,
-    Vector,
-    VectorDistanceExpr,
-    VectorDistanceMetric,
-    VectorStorageFormat,
-)
+from typing import TYPE_CHECKING
+
+from vertebra.utils.module_loader import lazy_exports
+
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlalchemy.alembic import (
+        AlembicImpl,
+        BigQueryAlembicImpl,
+        CreateVectorIndexOp,
+        CreateViewOp,
+        DropVectorIndexOp,
+        DropViewOp,
+        DuckDBAlembicImpl,
+        MSSQLAlembicImpl,
+        MySQLAlembicImpl,
+        OracleAlembicImpl,
+        PostgreSQLAlembicImpl,
+        SpannerAlembicImpl,
+        SQLiteAlembicImpl,
+    )
+    from vertebra.extensions.sqlalchemy.async_adapter import (
+        AsyncAdapt_dbapi_connection,
+        SQLAlchemyAsyncDBAPI,
+    )
+    from vertebra.extensions.sqlalchemy.cache import (
+        CacheEntry,
+        CacheStats,
+        SQLAlchemyCacheBackend,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        ALL_DIALECT_SCHEMES,
+        DIALECT_DESCRIPTORS,
+        DIALECT_SCHEMES,
+        AsyncBigQueryDialect,
+        AsyncDuckDBDialect,
+        AsyncMSSQLDialect,
+        AsyncMySQLDialect,
+        AsyncOracleDialect,
+        AsyncPostgreSQLDialect,
+        AsyncSpangresDialect,
+        AsyncSpannerDialect,
+        AsyncSQLiteDialect,
+        NullPool,
+        SyncBigQueryDialect,
+        SyncDuckDBDialect,
+        SyncEngineAdapter,
+        SyncMSSQLDialect,
+        SyncMySQLDialect,
+        SyncOracleDialect,
+        SyncPostgreSQLDialect,
+        SyncSpangresDialect,
+        SyncSpannerDialect,
+        SyncSQLiteDialect,
+        attach_serverless_disconnect_guard,
+        is_free_threaded,
+    )
+    from vertebra.extensions.sqlalchemy.pool import (
+        AsyncBrokerPool,
+        BrokerPool,
+        broker_creator,
+    )
+    from vertebra.extensions.sqlalchemy.types import (
+        BinaryJSON,
+        DeleteUsingClause,
+        InsertSentinelSpec,
+        ParameterizedSQL,
+        SelectInLoadSpec,
+        Vector,
+        VectorDistanceExpr,
+        VectorDistanceMetric,
+        VectorStorageFormat,
+    )
 
 __all__ = (
     "ALL_DIALECT_SCHEMES",
@@ -127,3 +132,69 @@ __all__ = (
     "broker_creator",
     "is_free_threaded",
 )
+
+_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "ALL_DIALECT_SCHEMES": ("vertebra.extensions.sqlalchemy.dialects", "ALL_DIALECT_SCHEMES"),
+    "DIALECT_DESCRIPTORS": ("vertebra.extensions.sqlalchemy.dialects", "DIALECT_DESCRIPTORS"),
+    "DIALECT_SCHEMES": ("vertebra.extensions.sqlalchemy.dialects", "DIALECT_SCHEMES"),
+    "AlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "AlembicImpl"),
+    "AsyncAdapt_dbapi_connection": (
+        "vertebra.extensions.sqlalchemy.async_adapter",
+        "AsyncAdapt_dbapi_connection",
+    ),
+    "AsyncBigQueryDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncBigQueryDialect"),
+    "AsyncBrokerPool": ("vertebra.extensions.sqlalchemy.pool", "AsyncBrokerPool"),
+    "AsyncDuckDBDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncDuckDBDialect"),
+    "AsyncMSSQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncMSSQLDialect"),
+    "AsyncMySQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncMySQLDialect"),
+    "AsyncOracleDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncOracleDialect"),
+    "AsyncPostgreSQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncPostgreSQLDialect"),
+    "AsyncSQLiteDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncSQLiteDialect"),
+    "AsyncSpangresDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncSpangresDialect"),
+    "AsyncSpannerDialect": ("vertebra.extensions.sqlalchemy.dialects", "AsyncSpannerDialect"),
+    "BigQueryAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "BigQueryAlembicImpl"),
+    "BinaryJSON": ("vertebra.extensions.sqlalchemy.types", "BinaryJSON"),
+    "BrokerPool": ("vertebra.extensions.sqlalchemy.pool", "BrokerPool"),
+    "CacheEntry": ("vertebra.extensions.sqlalchemy.cache", "CacheEntry"),
+    "CacheStats": ("vertebra.extensions.sqlalchemy.cache", "CacheStats"),
+    "CreateVectorIndexOp": ("vertebra.extensions.sqlalchemy.alembic", "CreateVectorIndexOp"),
+    "CreateViewOp": ("vertebra.extensions.sqlalchemy.alembic", "CreateViewOp"),
+    "DeleteUsingClause": ("vertebra.extensions.sqlalchemy.types", "DeleteUsingClause"),
+    "DropVectorIndexOp": ("vertebra.extensions.sqlalchemy.alembic", "DropVectorIndexOp"),
+    "DropViewOp": ("vertebra.extensions.sqlalchemy.alembic", "DropViewOp"),
+    "DuckDBAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "DuckDBAlembicImpl"),
+    "InsertSentinelSpec": ("vertebra.extensions.sqlalchemy.types", "InsertSentinelSpec"),
+    "MSSQLAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "MSSQLAlembicImpl"),
+    "MySQLAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "MySQLAlembicImpl"),
+    "NullPool": ("vertebra.extensions.sqlalchemy.dialects", "NullPool"),
+    "OracleAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "OracleAlembicImpl"),
+    "ParameterizedSQL": ("vertebra.extensions.sqlalchemy.types", "ParameterizedSQL"),
+    "PostgreSQLAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "PostgreSQLAlembicImpl"),
+    "SQLAlchemyAsyncDBAPI": ("vertebra.extensions.sqlalchemy.async_adapter", "SQLAlchemyAsyncDBAPI"),
+    "SQLAlchemyCacheBackend": ("vertebra.extensions.sqlalchemy.cache", "SQLAlchemyCacheBackend"),
+    "SQLiteAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "SQLiteAlembicImpl"),
+    "SelectInLoadSpec": ("vertebra.extensions.sqlalchemy.types", "SelectInLoadSpec"),
+    "SpannerAlembicImpl": ("vertebra.extensions.sqlalchemy.alembic", "SpannerAlembicImpl"),
+    "SyncBigQueryDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncBigQueryDialect"),
+    "SyncDuckDBDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncDuckDBDialect"),
+    "SyncEngineAdapter": ("vertebra.extensions.sqlalchemy.dialects", "SyncEngineAdapter"),
+    "SyncMSSQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncMSSQLDialect"),
+    "SyncMySQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncMySQLDialect"),
+    "SyncOracleDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncOracleDialect"),
+    "SyncPostgreSQLDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncPostgreSQLDialect"),
+    "SyncSQLiteDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncSQLiteDialect"),
+    "SyncSpangresDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncSpangresDialect"),
+    "SyncSpannerDialect": ("vertebra.extensions.sqlalchemy.dialects", "SyncSpannerDialect"),
+    "Vector": ("vertebra.extensions.sqlalchemy.types", "Vector"),
+    "VectorDistanceExpr": ("vertebra.extensions.sqlalchemy.types", "VectorDistanceExpr"),
+    "VectorDistanceMetric": ("vertebra.extensions.sqlalchemy.types", "VectorDistanceMetric"),
+    "VectorStorageFormat": ("vertebra.extensions.sqlalchemy.types", "VectorStorageFormat"),
+    "attach_serverless_disconnect_guard": (
+        "vertebra.extensions.sqlalchemy.dialects",
+        "attach_serverless_disconnect_guard",
+    ),
+    "broker_creator": ("vertebra.extensions.sqlalchemy.pool", "broker_creator"),
+    "is_free_threaded": ("vertebra.extensions.sqlalchemy.dialects", "is_free_threaded"),
+}
+
+__getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

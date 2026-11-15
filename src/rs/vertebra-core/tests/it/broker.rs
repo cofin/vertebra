@@ -417,7 +417,7 @@ fn test_quarantine_blocks_slot_until_dispose_and_reclaim_worker_leases_isolates_
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].slot_index, reused.slot_index);
     assert_eq!(reclaimed[0].generation, reused.generation + 1);
-    assert_eq!(reclaimed[0].pool_id, part);
+    assert_eq!(reclaimed[0].pool_id, Some(part));
     assert_eq!(table.quarantined_count(), 1);
     assert!(table.try_acquire_in(part, 7004, 0, h).unwrap().is_none());
 
@@ -430,4 +430,69 @@ fn test_quarantine_blocks_slot_until_dispose_and_reclaim_worker_leases_isolates_
         .release(live_grant.slot_index, live_grant.generation)
         .unwrap();
     assert_eq!(table.stats().active_leases, 0);
+}
+
+#[test]
+fn test_lookup_partition_partition_stats_and_unpartitioned_reclaim() {
+    let req_size = ShmLeaseTable::required_size(4, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 4, 0).unwrap();
+
+    let h_a = stable_hash64(b"partition-a");
+    let h_missing = stable_hash64(b"partition-missing");
+    assert_eq!(table.lookup_partition(h_a), None);
+    assert_eq!(table.partition_stats(h_a), None);
+
+    let part_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h_a,
+            pool_size: 2,
+            max_overflow: 0,
+        })
+        .unwrap();
+    assert_eq!(table.lookup_partition(h_a), Some(part_a));
+    assert_eq!(table.lookup_partition(h_missing), None);
+
+    let g1 = table.try_acquire_in(part_a, 8001, 0, h_a).unwrap().unwrap();
+    table.release(g1.slot_index, g1.generation).unwrap();
+    let g2 = table.try_acquire_in(part_a, 8002, 0, h_a).unwrap().unwrap();
+    let unpart_small = table.try_acquire(8003, 0, 42).unwrap();
+    let unpart_large = table.try_acquire(8003, 0, 123_456_789).unwrap();
+
+    let stats_mid = table
+        .partition_stats(h_a)
+        .expect("registered partition stats");
+    assert_eq!(stats_mid.pool_id, part_a);
+    assert_eq!(stats_mid.active_leases, 1);
+    assert_eq!(stats_mid.total_acquired, 2);
+    assert_eq!(stats_mid.total_released, 1);
+
+    let reclaimed_a = table.reclaim_worker_leases(8002);
+    assert_eq!(reclaimed_a.len(), 1);
+    assert_eq!(reclaimed_a[0].pool_id, Some(part_a));
+    let stats_q = table.partition_stats(h_a).unwrap();
+    assert_eq!(stats_q.active_leases, 0);
+    assert_eq!(stats_q.quarantined, 1);
+    assert_eq!(stats_q.total_quarantined, 1);
+    assert_eq!(stats_q.total_reclaimed, 1);
+
+    table
+        .dispose_quarantined(reclaimed_a[0].slot_index, reclaimed_a[0].generation)
+        .unwrap();
+    let stats_end = table.partition_stats(h_a).unwrap();
+    assert_eq!(stats_end.active_leases, 0);
+    assert_eq!(stats_end.quarantined, 0);
+    assert_eq!(stats_end.total_disposed, 1);
+
+    let reclaimed_unpart = table.reclaim_worker_leases(8003);
+    assert_eq!(reclaimed_unpart.len(), 2);
+    assert!(reclaimed_unpart.iter().all(|item| item.pool_id.is_none()));
+    assert_eq!(g2.worker_pid, 8002);
+    assert_eq!(unpart_small.worker_pid, 8003);
+    assert_eq!(unpart_large.worker_pid, 8003);
+    for item in reclaimed_unpart {
+        table
+            .dispose_quarantined(item.slot_index, item.generation)
+            .unwrap();
+    }
 }

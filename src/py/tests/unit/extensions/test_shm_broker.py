@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -16,7 +17,14 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import ArrowCursor, BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry
+from vertebra._vertebra import (
+    ArrowCursor,
+    BrokerAttachClient,
+    BrokerAttachServer,
+    BrokerEngineRegistry,
+    LeaseBroker,
+    PartitionStats,
+)
 from vertebra.extensions.broker import (
     DBRPC_VERSION,
     BrokerAuthenticationError,
@@ -576,3 +584,145 @@ def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None
     assert body["brokers"]["telemetry_pool"]["total_disposed"] == 1
     assert body["brokers"]["telemetry_pool"]["quarantined"] == 0
     assert body["brokers"]["telemetry_pool"]["active_leases"] == 0
+
+
+def _child_hold_partition_lease(
+    shm_name: str,
+    pool_size: int,
+    max_overflow: int,
+    pool_name: str,
+    child_conn: Any,
+) -> None:
+    """Attach to a named broker segment, acquire one partitioned lease, notify parent, and sleep."""
+    cfg = BrokerConfig(pool_size=pool_size, max_overflow=max_overflow, shm_name=shm_name)
+    transport = SyncSHMBrokerTransport(cfg)
+    transport.register_partition(pool_name, pool_size=pool_size, max_overflow=max_overflow)
+    lease = transport.acquire(worker_id=os.getpid(), bind_key=pool_name, timeout_ms=1000)
+    child_conn.send((os.getpid(), lease.slot_index, lease.generation))
+    child_conn.close()
+    time.sleep(15)
+
+
+def test_lease_broker_partition_lookup_stats_and_unpartitioned_reclaim() -> None:
+    """Verify lookup_partition, partition_stats counters, and pool_id presence on reclaim_worker_leases."""
+    broker = LeaseBroker(pool_size=3, max_overflow=1)
+    key_hash = 0x1A2B3C4D5E6F7788
+    assert broker.lookup_partition(key_hash) is None
+    assert broker.partition_stats(key_hash) is None
+
+    pool_id = broker.register_partition(key_hash, pool_size=1, max_overflow=0)
+    assert broker.lookup_partition(key_hash) == pool_id
+
+    part_grant = broker.try_acquire_in(pool_id, worker_pid=71001, bind_key_hash=key_hash)
+    assert part_grant is not None
+    mid_stats = broker.partition_stats(key_hash)
+    assert isinstance(mid_stats, PartitionStats)
+    assert mid_stats.pool_id == pool_id
+    assert mid_stats.pool_size == 1
+    assert mid_stats.max_overflow == 0
+    assert mid_stats.active_leases == 1
+    assert mid_stats.total_acquired == 1
+
+    unpart_grant = broker.try_acquire(worker_pid=71002)
+    assert unpart_grant is not None
+    unpart_reclaimed = broker.reclaim_worker_leases(71002)
+    assert len(unpart_reclaimed) == 1
+    assert unpart_reclaimed[0].slot_index == unpart_grant.slot_index
+    assert unpart_reclaimed[0].generation == unpart_grant.generation + 1
+    assert unpart_reclaimed[0].pool_id is None
+    broker.dispose_quarantined(unpart_reclaimed[0].slot_index, unpart_reclaimed[0].generation)
+
+    part_reclaimed = broker.reclaim_worker_leases(71001)
+    assert len(part_reclaimed) == 1
+    assert part_reclaimed[0].generation == part_grant.generation + 1
+    assert part_reclaimed[0].pool_id == pool_id
+    quar_stats = broker.partition_stats(key_hash)
+    assert quar_stats is not None
+    assert quar_stats.active_leases == 0
+    assert quar_stats.quarantined == 1
+    assert quar_stats.total_quarantined == 1
+    assert quar_stats.total_reclaimed == 1
+    assert quar_stats.total_disposed == 0
+
+    broker.dispose_quarantined(part_reclaimed[0].slot_index, part_reclaimed[0].generation)
+    end_stats = broker.partition_stats(key_hash)
+    assert end_stats is not None
+    assert end_stats.active_leases == 0
+    assert end_stats.quarantined == 0
+    assert end_stats.total_acquired == 1
+    assert end_stats.total_reclaimed == 1
+    assert end_stats.total_quarantined == 1
+    assert end_stats.total_disposed == 1
+
+
+def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
+    """Verify BrokerPlugin and Transport.metrics report exact SHM counters after child SIGKILL reclaim."""
+    shm_name = f"/vtb-mp-plugin-{os.getpid()}-{int(time.time() * 1000)}"
+    shm_path = Path(f"/dev/shm/{shm_name.lstrip('/')}")
+    zpages = ZPagesRegistry("broker-mp-plugin-test")
+    recorder = DbPoolRecorder()
+    plugin = BrokerPlugin(
+        BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100, shm_name=shm_name),
+        zpages=zpages,
+        otel_recorder=recorder,
+        name="crash_pool",
+    )
+    plugin.transport.register_partition("crash_pool", pool_size=2, max_overflow=0)
+    try:
+        ctx = mp.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        proc = ctx.Process(
+            target=_child_hold_partition_lease,
+            args=(shm_name, 2, 0, "crash_pool", child_conn),
+        )
+        proc.start()
+        child_conn.close()
+        dead_pid, slot_idx, gen = parent_conn.recv()
+        parent_conn.close()
+
+        before_sample = plugin.snapshot_metrics()
+        assert before_sample.active_leases == 1
+        assert before_sample.total_reclaimed == 0
+
+        os.kill(dead_pid, signal.SIGKILL)
+        proc.join(timeout=5)
+        reclaimed = plugin.transport.reclaim_worker_leases(dead_pid)
+        assert len(reclaimed) == 1
+        assert reclaimed[0].slot_index == slot_idx
+        assert reclaimed[0].generation == gen + 1
+        assert reclaimed[0].pool_id == plugin.transport.metrics().pools["crash_pool"].pool_id
+
+        mid_sample = plugin.snapshot_metrics()
+        mid_pool = plugin.transport.metrics().pools["crash_pool"]
+        assert mid_sample.active_leases == 0
+        assert mid_sample.quarantined == 1
+        assert mid_sample.total_reclaimed == 1
+        assert mid_sample.total_quarantined == 1
+        assert mid_pool.active_leases == 0
+        assert mid_pool.quarantined == 1
+        assert mid_pool.total_reclaimed == 1
+        assert mid_pool.total_acquired == 1
+
+        plugin.transport.dispose_quarantined(slot_idx, reclaimed[0].generation)
+        end_sample = plugin.snapshot_metrics()
+        end_pool = plugin.transport.metrics().pools["crash_pool"]
+        assert end_sample.active_leases == 0
+        assert end_sample.quarantined == 0
+        assert end_sample.total_reclaimed == 1
+        assert end_sample.total_quarantined == 1
+        assert end_sample.total_disposed == 1
+        assert end_pool.active_leases == 0
+        assert end_pool.total_reclaimed == 1
+        assert end_pool.total_disposed == 1
+
+        status_code, payload = zpages.handle_zpage("/brokerz")
+        assert status_code == 200
+        body = decode_json(payload)
+        assert body["brokers"]["crash_pool"]["total_reclaimed"] == 1
+        assert body["brokers"]["crash_pool"]["total_quarantined"] == 1
+        assert body["brokers"]["crash_pool"]["total_disposed"] == 1
+        assert body["brokers"]["crash_pool"]["active_leases"] == 0
+    finally:
+        plugin.transport.close()
+        if shm_path.exists():
+            shm_path.unlink()

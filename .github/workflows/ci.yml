@@ -328,12 +328,13 @@ jobs:
           VERTEBRA_CONFORMANCE_ENGINES: postgres
           VERTEBRA_CONFORMANCE_POSTGRES_VERSION: ${{ matrix.pg_version }}
         run: uv run --no-sync pytest src/py/tests/integration/db/test_driver_conformance.py -v
-      - name: Run live replication, feature, and deadline suites (PG18)
+      - name: Run live replication, feature, deadline, and pool-sharing suites (PG18)
         if: matrix.pg_version == '18'
         env:
           VERTEBRA_CONFORMANCE_DOCKER: "1"
           VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS: "1"
-        run: uv run --no-sync pytest src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py src/py/tests/integration/db/test_postgres_command_deadlines.py -v
+          VERTEBRA_CONFORMANCE_ENGINES: postgres
+        run: uv run --no-sync pytest src/py/tests/integration/db/test_postgres_replication_live.py src/py/tests/integration/db/test_postgres_native_features_live.py src/py/tests/integration/db/test_postgres_command_deadlines.py src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py -k "postgres or not docker" -v
 
   test-db-conformance:
     runs-on: ubuntu-latest

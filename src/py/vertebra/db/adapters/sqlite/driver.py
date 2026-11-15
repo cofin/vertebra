@@ -249,6 +249,13 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         finally:
             self._release_sqlite_broker_lease(lease)
 
+    def last_insert_rowid(self) -> int | None:
+        """Return the last inserted SQLite rowid under the driver lock."""
+        with self._lock, closing(self._conn.cursor()) as cur:
+            cur.execute("SELECT last_insert_rowid()")
+            row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
     def _acquire_sqlite_broker_lease(self, sql: str) -> Any:
         """Acquire a lease and statement cache plan from the attached broker if present."""
         if self._broker is None:

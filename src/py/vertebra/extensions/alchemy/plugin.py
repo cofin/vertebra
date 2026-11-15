@@ -68,79 +68,6 @@ def normalize_alchemy_url(connection_string: str, *, is_async: bool = True) -> s
     return connection_string
 
 
-def _prepare_engine_config(
-    connection_string: str,
-    broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None),
-    kwargs: dict[str, Any],
-    engine_config_cls: type[Any] = EngineConfig,
-    *,
-    is_async: bool = False,
-) -> None:
-    """Configure EngineConfig defaults, broker leasing connection args, and BrokerPool/AsyncBrokerPool."""
-    is_memory = ":memory:" in connection_string or "memory://" in connection_string
-    existing = kwargs.get("engine_config")
-    if isinstance(existing, engine_config_cls):
-        cfg = existing
-    elif isinstance(existing, dict):
-        cfg_dict = dict(existing)
-        if not is_memory:
-            cfg_dict.setdefault("pool_pre_ping", True)
-            cfg_dict.setdefault("pool_recycle", 1800)
-        cfg = engine_config_cls(**cfg_dict)
-    else:
-        cfg = engine_config_cls(pool_pre_ping=True, pool_recycle=1800) if not is_memory else engine_config_cls()
-
-    if not is_memory:
-        if cfg.pool_pre_ping is Empty or cfg.pool_pre_ping is None:
-            cfg.pool_pre_ping = True
-        if cfg.pool_recycle is Empty or cfg.pool_recycle is None:
-            cfg.pool_recycle = 1800
-
-    if broker is not None:
-        pool_cls = AsyncBrokerPool if is_async else BrokerPool
-        cfg.poolclass = pool_cls.bind_class(broker=broker, url=connection_string)
-        existing_args = cfg.connect_args if isinstance(cfg.connect_args, dict) else {}
-        if "broker" not in existing_args:
-            cfg.connect_args = {**existing_args, "broker": broker, "lease_managed": True}
-
-    kwargs["engine_config"] = cfg
-
-
-def _prepare_cache_config(
-    cache_config: CacheConfig | SQLAlchemyCacheBackend | str | None,
-    kwargs: dict[str, Any],
-) -> None:
-    """Normalize `cache_config` into a `CacheConfig` and attach `AsyncCacheManager`."""
-    if cache_config is None:
-        return
-    if isinstance(cache_config, SQLAlchemyCacheBackend):
-        resolved_cfg = create_cache_config(backend=cache_config)
-        manager = AsyncCacheManager(resolved_cfg, backend=cache_config)
-    elif isinstance(cache_config, str):
-        resolved_cfg = create_cache_config(url=cache_config)
-        manager = AsyncCacheManager(resolved_cfg)
-    else:
-        resolved_cfg = cache_config
-        existing_mgr = kwargs.get("cache_manager")
-        manager = existing_mgr if isinstance(existing_mgr, AsyncCacheManager) else AsyncCacheManager(resolved_cfg)
-    setup_cache_listeners()
-    kwargs["cache_config"] = resolved_cfg
-    kwargs.setdefault("cache_manager", manager)
-
-
-def _register_storage_if_provided(
-    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None,
-    storage_key: str,
-) -> None:
-    """Register `storage_backend` in Advanced Alchemy's `storages` registry when provided."""
-    if storage_backend is None:
-        return
-    if isinstance(storage_backend, ObjectStoreBackend):
-        storages.register_backend(storage_backend)
-    else:
-        register_storage_backend(storage_backend, key=storage_key)
-
-
 def create_async_alchemy_config(
     connection_string: str,
     *,
@@ -247,3 +174,80 @@ def create_flask_alchemy(
     _register_storage_if_provided(storage_backend, storage_key)
     cfg_arg = configs[0] if len(configs) == 1 else list(configs)
     return mod.AdvancedAlchemy(config=cfg_arg, app=app, **kwargs)
+
+
+def _prepare_engine_config(
+    connection_string: str,
+    broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None),
+    kwargs: dict[str, Any],
+    engine_config_cls: type[Any] = EngineConfig,
+    *,
+    is_async: bool = False,
+) -> None:
+    """Configure EngineConfig defaults, broker leasing connection args, and BrokerPool/AsyncBrokerPool."""
+    is_memory = ":memory:" in connection_string or "memory://" in connection_string
+    existing = kwargs.get("engine_config")
+    if isinstance(existing, engine_config_cls):
+        cfg = existing
+    elif isinstance(existing, dict):
+        cfg_dict = dict(existing)
+        if not is_memory:
+            cfg_dict.setdefault("pool_pre_ping", True)
+            cfg_dict.setdefault("pool_recycle", 1800)
+        cfg = engine_config_cls(**cfg_dict)
+    else:
+        cfg = engine_config_cls(pool_pre_ping=True, pool_recycle=1800) if not is_memory else engine_config_cls()
+
+    if not is_memory:
+        if cfg.pool_pre_ping is Empty or cfg.pool_pre_ping is None:
+            cfg.pool_pre_ping = True
+        if cfg.pool_recycle is Empty or cfg.pool_recycle is None:
+            cfg.pool_recycle = 1800
+
+    if broker is not None:
+        pool_cls = AsyncBrokerPool if is_async else BrokerPool
+        cfg.poolclass = pool_cls.bind_class(broker=broker, url=connection_string)
+        existing_args = cfg.connect_args if isinstance(cfg.connect_args, dict) else {}
+        connect_args = dict(existing_args)
+        connect_args.setdefault("url", connection_string)
+        if "broker" not in connect_args:
+            connect_args["broker"] = broker
+            connect_args.setdefault("lease_managed", True)
+        cfg.connect_args = connect_args
+
+    kwargs["engine_config"] = cfg
+
+
+def _prepare_cache_config(
+    cache_config: CacheConfig | SQLAlchemyCacheBackend | str | None,
+    kwargs: dict[str, Any],
+) -> None:
+    """Normalize `cache_config` into a `CacheConfig` and attach `AsyncCacheManager`."""
+    if cache_config is None:
+        return
+    if isinstance(cache_config, SQLAlchemyCacheBackend):
+        resolved_cfg = create_cache_config(backend=cache_config)
+        manager = AsyncCacheManager(resolved_cfg, backend=cache_config)
+    elif isinstance(cache_config, str):
+        resolved_cfg = create_cache_config(url=cache_config)
+        manager = AsyncCacheManager(resolved_cfg)
+    else:
+        resolved_cfg = cache_config
+        existing_mgr = kwargs.get("cache_manager")
+        manager = existing_mgr if isinstance(existing_mgr, AsyncCacheManager) else AsyncCacheManager(resolved_cfg)
+    setup_cache_listeners()
+    kwargs["cache_config"] = resolved_cfg
+    kwargs.setdefault("cache_manager", manager)
+
+
+def _register_storage_if_provided(
+    storage_backend: ObjectStoreBackend | SyncObjectStore | AsyncObjectStore | str | None,
+    storage_key: str,
+) -> None:
+    """Register `storage_backend` in Advanced Alchemy's `storages` registry when provided."""
+    if storage_backend is None:
+        return
+    if isinstance(storage_backend, ObjectStoreBackend):
+        storages.register_backend(storage_backend)
+    else:
+        register_storage_backend(storage_backend, key=storage_key)

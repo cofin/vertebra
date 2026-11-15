@@ -6,15 +6,18 @@ import ast
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import vertebra.db.dbapi as dbapi_pkg
+from vertebra.db.adapters.sqlite import SyncSQLiteDriver
 from vertebra.db.dbapi import (
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
     InterfaceError,
     NotSupportedError,
+    ProgrammingError,
     SyncDBAPIConnection,
     SyncDBAPIModule,
     apilevel,
@@ -23,6 +26,7 @@ from vertebra.db.dbapi import (
     paramstyle,
     threadsafety,
 )
+from vertebra.db.registry import DatabaseRegistry
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
 
@@ -190,3 +194,104 @@ async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
         await cur.close()
         await async_conn.close()
     assert async_conn.closed is True
+
+
+@pytest.mark.anyio
+async def test_dbapi_closed_state_errors_and_size_hints() -> None:
+    """Verify PEP 249 closed cursor/connection errors and no-op input/output size hints for sync and async."""
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    sync_cur = sync_conn.cursor()
+    sync_cur.setinputsizes([1, 2])
+    sync_cur.setoutputsize(64, 0)
+    sync_cur.close()
+    with pytest.raises(ProgrammingError):
+        sync_cur.execute("SELECT 1")
+    with pytest.raises(ProgrammingError):
+        sync_cur.executemany("SELECT ?", [(1,)])
+    with pytest.raises(ProgrammingError):
+        sync_cur.fetchone()
+    with pytest.raises(ProgrammingError):
+        sync_cur.fetchmany(1)
+    with pytest.raises(ProgrammingError):
+        sync_cur.fetchall()
+    with pytest.raises(ProgrammingError):
+        sync_cur.setinputsizes([1])
+    with pytest.raises(ProgrammingError):
+        sync_cur.setoutputsize(8)
+
+    open_sync_cur = sync_conn.cursor()
+    sync_conn.close()
+    with pytest.raises(InterfaceError):
+        sync_conn.cursor()
+    with pytest.raises(InterfaceError):
+        sync_conn.commit()
+    with pytest.raises(InterfaceError):
+        sync_conn.rollback()
+    with pytest.raises(InterfaceError):
+        open_sync_cur.execute("SELECT 1")
+
+    async_mod = AsyncDBAPIModule(paramstyle="qmark")
+    async_conn = async_mod.connect("sqlite+vtb_async:///:memory:", share_pool=False)
+    async_cur = async_conn.cursor()
+    async_cur.setinputsizes([1, 2])
+    async_cur.setoutputsize(64, 0)
+    await async_cur.close()
+    with pytest.raises(ProgrammingError):
+        await async_cur.execute("SELECT 1")
+    with pytest.raises(ProgrammingError):
+        await async_cur.fetchone()
+
+    open_async_cur = async_conn.cursor()
+    await async_conn.close()
+    with pytest.raises(InterfaceError):
+        await async_conn.cursor()
+    with pytest.raises(InterfaceError):
+        await async_conn.commit()
+    with pytest.raises(InterfaceError):
+        await async_conn.rollback()
+    with pytest.raises(InterfaceError):
+        await open_async_cur.execute("SELECT 1")
+
+
+def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
+    """Verify driver INSERT lastrowid, positional tuple bind preservation in select, and lease_managed isolation."""
+    driver = SyncSQLiteDriver()
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        cur.execute("INSERT INTO items (name) VALUES (?)", ("first",))
+        assert cur.lastrowid == 1
+        cur.execute("INSERT INTO items (name) VALUES (?)", ("second",))
+        assert cur.lastrowid == 2
+        conn.commit()
+    finally:
+        conn.close()
+
+    seen_select_params: list[tuple[str, Any]] = []
+
+    class _SelectOnlyDriver:
+        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            seen_select_params.append((sql, params))
+            return [{"name": params[0]}] if isinstance(params, tuple) else []
+
+    select_conn = SyncDBAPIConnection(driver=_SelectOnlyDriver(), share_pool=False)
+    try:
+        select_cur = select_conn.cursor()
+        select_cur.execute("SELECT name FROM items WHERE name = ?", ("beta",))
+        assert select_cur.fetchone() == ("beta",)
+        assert seen_select_params == [("SELECT name FROM items WHERE name = ?", ("beta",))]
+    finally:
+        select_conn.close()
+
+    prev_broker = DatabaseRegistry._DEFAULT_BROKER
+    sentinel_broker = object()
+    DatabaseRegistry._DEFAULT_BROKER = sentinel_broker
+    try:
+        lease_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=True, lease_managed=True, broker=None)
+        try:
+            assert lease_conn.broker is None
+        finally:
+            lease_conn.close()
+    finally:
+        DatabaseRegistry._DEFAULT_BROKER = prev_broker

@@ -99,7 +99,7 @@ class _BaseProxyConfig:
     def connection_type(self, value: type[Any]) -> None:
         """Set connection type annotation."""
         with contextlib.suppress(AttributeError):
-            setattr(self.config, _CONN_TYPE_ATTR, value)
+            self.config.connection_type = value
 
     @property
     def driver_type(self) -> type[Any]:
@@ -110,7 +110,7 @@ class _BaseProxyConfig:
     def driver_type(self, value: type[Any]) -> None:
         """Set driver type annotation."""
         with contextlib.suppress(AttributeError):
-            setattr(self.config, _DRIVER_TYPE_ATTR, value)
+            self.config.driver_type = value
 
     @property
     def pool_config(self) -> dict[str, Any]:
@@ -172,7 +172,7 @@ class _BaseProxyConfig:
 class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any, Any]):
     """Generic synchronous SQLSpec proxy configuration preserving inner SyncConfigT types."""
 
-    __slots__ = ("_statement_cache", "broker", "config", "provider")
+    __slots__ = ("broker", "config", "provider")
     _DEFAULT_DSN: ClassVar[str] = "sqlite:///:memory:"
     is_async: ClassVar[bool] = False
     supports_connection_pooling: ClassVar[bool] = True
@@ -274,7 +274,7 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
 class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, Any, Any]):
     """Generic asynchronous SQLSpec proxy configuration preserving inner AsyncConfigT types."""
 
-    __slots__ = ("_statement_cache", "broker", "config", "provider")
+    __slots__ = ("broker", "config", "provider")
     _DEFAULT_DSN: ClassVar[str] = "sqlite+aiosqlite:///:memory:"
     is_async: ClassVar[bool] = True
     supports_connection_pooling: ClassVar[bool] = True
@@ -413,10 +413,6 @@ def _is_in_memory_dsn(dsn: str | None) -> bool:
         return False
     lowered = dsn.lower()
     return ":memory:" in lowered or "mode=memory" in lowered
-
-
-_CONN_TYPE_ATTR = "connection_type"
-_DRIVER_TYPE_ATTR = "driver_type"
 
 
 def _inject_sqlspec_pool_defaults(config: Any) -> None:

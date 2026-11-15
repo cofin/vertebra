@@ -50,8 +50,8 @@ tags:
 - pool
 sources:
 - id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule
-  title: SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes
+  resource: src/py/vertebra/db/dbapi/__init__.py::SyncDBAPIModule
+  title: Standalone PEP 249 DB-API module, connection, cursor, and exports
 - id: db-config
   resource: src/py/vertebra/db/driver/_common.py::BaseDatabaseConfig
   title: BaseDatabaseConfig with dialect ClassVar and pool_key
@@ -101,7 +101,19 @@ Create framework-neutral `vertebra.db.dbapi` (`__init__.py` with `lazy_exports`,
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/db/test_dbapi_standalone.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py -q && uv run --no-sync ruff check src/py/vertebra/db/dbapi src/py/vertebra/extensions/sqlalchemy src/py/vertebra/extensions/alchemy && uv run --no-sync mypy src/py/vertebra/db/dbapi src/py/vertebra/extensions/sqlalchemy src/py/vertebra/extensions/alchemy
+uv run --no-sync pytest \
+  src/py/tests/unit/db/test_dbapi_standalone.py \
+  src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py \
+  src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py \
+  -q && \
+  uv run --no-sync ruff check \
+    src/py/vertebra/db/dbapi \
+    src/py/vertebra/extensions/sqlalchemy \
+    src/py/vertebra/extensions/alchemy && \
+  uv run --no-sync mypy \
+    src/py/vertebra/db/dbapi \
+    src/py/vertebra/extensions/sqlalchemy \
+    src/py/vertebra/extensions/alchemy
 ```
 
 ## Acceptance Criteria
@@ -111,7 +123,7 @@ uv run --no-sync pytest src/py/tests/unit/db/test_dbapi_standalone.py src/py/tes
 - [x] `BrokerPool` and `AsyncBrokerPool` share broker pools cleanly across SQLAlchemy and Advanced Alchemy.
 - [x] Zero regressions in the fast verification gate.
 
-[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule` — SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes.
+[^sa-dialects]: `src/py/vertebra/db/dbapi/__init__.py::SyncDBAPIModule` — Standalone PEP 249 DB-API module, connection, cursor, and exports.
 [^db-config]: `src/py/vertebra/db/driver/_common.py::BaseDatabaseConfig` — BaseDatabaseConfig with dialect ClassVar and pool_key.
 [^py-db-registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry` — DatabaseRegistry URL parsing and driver resolution.
 [^alchemy-plugin]: `src/py/vertebra/extensions/alchemy/plugin.py::create_sync_alchemy_config` — Advanced Alchemy config factory and broker connect_args wiring.

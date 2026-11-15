@@ -116,7 +116,7 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 
 `vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `SQLAlchemyAsyncDBAPI`), using `NullPool` when `?shm_broker=true` is passed on dialect URLs (`StaticPool` for `:memory:` SQLite, `QueuePool` / `AsyncAdaptedQueuePool` otherwise) and wiring `BrokerPool` / `AsyncBrokerPool` + `broker_creator` through `create_sync_alchemy_config` / `create_async_alchemy_config` when a shared-memory broker is attached. Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
+- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `SQLAlchemyAsyncDBAPI`). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` unconditionally return `NullPool`, `?shm_broker=true` selects `NullPool` on relational dialects, `:memory:` SQLite uses `StaticPool`, and relational file/TCP URLs otherwise default to `QueuePool` / `AsyncAdaptedQueuePool`, while `create_sync_alchemy_config` / `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` + `broker_creator` when a shared-memory broker is attached. Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
@@ -195,10 +195,15 @@ Modernize Oracle APEX applications incrementally without a full rewrite using `v
 
 ```mermaid
 flowchart LR
-    W["Worker Processes (SQLSpec Proxy / BrokerPool)"] --> T["SyncSHMBrokerTransport / AsyncSHMBrokerTransport"]
-    T --> SHM["UDS SCM_RIGHTS Attach & ShmLeaseTable"]
-    SHM --> H["BrokerHost (vtb broker serve)"]
-    H --> C["BrokerEngineCapsule / Server Pools"]
+    W["Worker Processes (SQLSpec Proxy / BrokerPool)"]
+    T["SyncSHMBrokerTransport / AsyncSHMBrokerTransport"]
+    SHM["UDS SCM_RIGHTS Attach & ShmLeaseTable"]
+    H["BrokerHost (vtb broker serve)"]
+    C["BrokerEngineCapsule / Server Pools"]
+    W --> T
+    T --> SHM
+    SHM --> H
+    H --> C
 ```
 
 - **Named SHM & Authenticated UDS Attach**: Owner segments write `ShmOwnerHeader` generation and PID ownership metadata; cross-process workers attach either by name or through `BrokerAttachClient` / `BrokerAttachServer` over a `0600` Unix domain socket inside a `0700` directory authenticated with `VERTEBRA_BROKER_SECRET` (`SCM_RIGHTS` FD passing).

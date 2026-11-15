@@ -56,6 +56,7 @@ __all__ = [
     "NotFoundError",
     "NotSupportedError",
     "OperationalError",
+    "PartitionStats",
     "PoolExhaustedError",
     "ProgrammingError",
     "PyEmptyAwaitable",
@@ -848,8 +849,23 @@ class ReclaimedLease:
     """Slot index within the shared-memory lease table."""
     generation: int
     """Monotonic generation of the reclaimed slot in `Quarantined` state."""
+    pool_id: int | None
+    """Partition identifier (`pool_id`) owning the reclaimed slot, or `None` when unpartitioned."""
+
+@final
+class PartitionStats:
+    """Per-partition shared-memory lease counters."""
+
     pool_id: int
-    """Partition identifier (`pool_id`) owning the reclaimed slot."""
+    pool_size: int
+    max_overflow: int
+    active_leases: int
+    quarantined: int
+    total_acquired: int
+    total_released: int
+    total_reclaimed: int
+    total_quarantined: int
+    total_disposed: int
 
 @final
 class BrokerAttachServer:
@@ -955,6 +971,7 @@ class LeaseBroker:
         max_overflow: int = 0,
     ) -> int: ...
     def lookup_partition(self, pool_key_hash: int) -> int | None: ...
+    def partition_stats(self, pool_key_hash: int) -> PartitionStats | None: ...
     def try_acquire_in(
         self,
         partition: int,

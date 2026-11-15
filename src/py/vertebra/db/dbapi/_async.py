@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ class AsyncDBAPICursor:
     """Asynchronous cursor wrapping Vertebra async drivers."""
 
     __slots__ = (
+        "_closed",
         "_conn",
         "_driver",
         "_pos",
@@ -52,6 +54,7 @@ class AsyncDBAPICursor:
         """Initialize asynchronous cursor."""
         self._conn = connection
         self._driver = connection.driver
+        self._closed: bool = False
         self._rows: list[tuple[Any, ...]] = []
         self._pos: int = 0
         self.description: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
@@ -73,6 +76,7 @@ class AsyncDBAPICursor:
         parameters: Sequence[Any] | dict[str, Any] | None = None,
     ) -> AsyncDBAPICursor:
         """Execute a SQL statement asynchronously."""
+        self._require_open()
         params: Sequence[Any] | dict[str, Any] = () if parameters is None else parameters
         await self._conn.begin()
         if not is_row_returning_sql(operation) and self._driver is not None and hasattr(self._driver, "execute"):
@@ -107,8 +111,8 @@ class AsyncDBAPICursor:
             )
             self.rowcount = len(self._rows)
         elif self._driver is not None and hasattr(self._driver, "select"):
-            dict_params = params if isinstance(params, dict) else None
-            dict_rows = await self._driver.select(operation, dict_params)
+            select_params = params if params else None
+            dict_rows = await self._driver.select(operation, select_params)
             if dict_rows:
                 keys = tuple(dict_rows[0].keys())
                 self.description = tuple((str(k), None, None, None, None, None, None) for k in keys)
@@ -124,13 +128,23 @@ class AsyncDBAPICursor:
             self.rowcount = -1
 
         self._pos = 0
-        if operation.strip().upper().startswith("INSERT") and hasattr(self._driver, "_sync"):
-            sync_drv = getattr(self._driver, "_sync", None)
-            raw_conn = getattr(sync_drv, "raw_connection", None)
-            if raw_conn is not None:
-                row = await asyncio.to_thread(self._fetch_last_insert_rowid, raw_conn)
-                if row:
-                    self.lastrowid = row[0]
+        if operation.lstrip().upper().startswith("INSERT"):
+            last_rowid_fn = getattr(self._driver, "last_insert_rowid", None)
+            if callable(last_rowid_fn):
+                res = last_rowid_fn()
+                self.lastrowid = await res if hasattr(res, "__await__") else res
+            elif hasattr(self._driver, "_sync"):
+                sync_drv = getattr(self._driver, "_sync", None)
+                sync_last_rowid = getattr(sync_drv, "last_insert_rowid", None)
+                if callable(sync_last_rowid):
+                    self.lastrowid = await asyncio.to_thread(sync_last_rowid)
+                else:
+                    raw_conn = getattr(sync_drv, "raw_connection", None)
+                    if raw_conn is not None:
+                        drv_lock = getattr(sync_drv, "_lock", None)
+                        row = await asyncio.to_thread(self._fetch_last_insert_rowid, raw_conn, drv_lock)
+                        if row:
+                            self.lastrowid = row[0]
         if self._conn.autocommit:
             await self._conn.commit()
         return self
@@ -141,6 +155,7 @@ class AsyncDBAPICursor:
         seq_of_parameters: Sequence[Sequence[Any] | dict[str, Any]],
     ) -> AsyncDBAPICursor:
         """Execute parameterized SQL across multiple parameter sets asynchronously."""
+        self._require_open()
         if not seq_of_parameters:
             self._rows = []
             self.description = None
@@ -173,6 +188,7 @@ class AsyncDBAPICursor:
 
     async def fetchone(self) -> tuple[Any, ...] | None:
         """Fetch the next row asynchronously."""
+        self._require_open()
         if self._pos >= len(self._rows):
             return None
         row = self._rows[self._pos]
@@ -181,6 +197,7 @@ class AsyncDBAPICursor:
 
     async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
         """Fetch up to ``size`` rows asynchronously."""
+        self._require_open()
         batch_size = self.arraysize if size is None else size
         batch = self._rows[self._pos : self._pos + batch_size]
         self._pos += len(batch)
@@ -188,21 +205,40 @@ class AsyncDBAPICursor:
 
     async def fetchall(self) -> list[tuple[Any, ...]]:
         """Fetch all remaining rows asynchronously."""
+        self._require_open()
         rest = self._rows[self._pos :]
         self._pos = len(self._rows)
         return rest
+
+    def setinputsizes(self, sizes: Any) -> None:
+        """Accept PEP 249 input buffer size hints as a no-op."""
+        self._require_open()
+        _ = sizes
+
+    def setoutputsize(self, size: int, column: int | None = None) -> None:
+        """Accept PEP 249 output column buffer size hints as a no-op."""
+        self._require_open()
+        _ = (size, column)
 
     async def close(self) -> None:
         """Close the asynchronous cursor."""
         self._rows = []
         self._pos = 0
+        self._closed = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise ProgrammingError("Cannot operate on a closed cursor.")
+        if self._conn.closed:
+            raise InterfaceError("Cannot operate on a closed connection.")
 
     @staticmethod
-    def _fetch_last_insert_rowid(raw_conn: Any) -> Any:
+    def _fetch_last_insert_rowid(raw_conn: Any, lock: Any = None) -> Any:
         """Query ``last_insert_rowid()`` from a SQLite raw connection on a worker thread."""
-        cur = raw_conn.cursor()
-        cur.execute("SELECT last_insert_rowid()")
-        return cur.fetchone()
+        ctx = lock if lock is not None else contextlib.nullcontext()
+        with ctx, contextlib.closing(raw_conn.cursor()) as cur:
+            cur.execute("SELECT last_insert_rowid()")
+            return cur.fetchone()
 
 
 class AsyncDBAPIConnection:
@@ -240,7 +276,9 @@ class AsyncDBAPIConnection:
         self._url = resolved_url
         self._share_pool = bool(share_pool)
         self._broker = (
-            broker if broker is not None else (DatabaseRegistry.default_broker() if self._share_pool else None)
+            broker
+            if broker is not None
+            else (DatabaseRegistry.default_broker() if self._share_pool and not lease_managed else None)
         )
         self._in_transaction = False
         self.closed: bool = False
@@ -262,7 +300,7 @@ class AsyncDBAPIConnection:
         self._driver = driver
         self._owns_driver = driver is not None
         if self._driver is None:
-            if self._share_pool and broker is None:
+            if self._share_pool and broker is None and not lease_managed:
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
@@ -310,11 +348,13 @@ class AsyncDBAPIConnection:
 
     def cursor(self, *args: Any, **kwargs: Any) -> AsyncDBAPICursor:
         """Create a new asynchronous DBAPI cursor."""
+        self._require_open()
         _ = (args, kwargs)
         return AsyncDBAPICursor(self)
 
     async def begin(self) -> None:
         """Begin a native transaction when implicit commit is disabled."""
+        self._require_open()
         if self._autocommit:
             if self._in_transaction:
                 await self.commit()
@@ -325,12 +365,14 @@ class AsyncDBAPIConnection:
 
     async def commit(self) -> None:
         """Commit the active asynchronous transaction."""
+        self._require_open()
         self._in_transaction = False
         if self._driver is not None and hasattr(self._driver, "commit"):
             await self._driver.commit()
 
     async def rollback(self) -> None:
         """Roll back the active asynchronous transaction."""
+        self._require_open()
         self._in_transaction = False
         if self._driver is not None and hasattr(self._driver, "rollback"):
             await self._driver.rollback()
@@ -346,6 +388,10 @@ class AsyncDBAPIConnection:
             if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
                 await self._driver.close()
             self.closed = True
+
+    def _require_open(self) -> None:
+        if self.closed:
+            raise InterfaceError("Cannot operate on a closed connection.")
 
 
 class AsyncDBAPIModule:
@@ -373,10 +419,6 @@ class AsyncDBAPIModule:
     def __init__(self, *, paramstyle: str = "qmark") -> None:
         """Initialize asynchronous DBAPI module."""
         self.paramstyle = paramstyle
-
-    def __getattr__(self, key: str) -> Any:
-        msg = f"{type(self).__name__!r} object has no attribute {key!r}"
-        raise AttributeError(msg)
 
     def connect(self, *args: Any, **kwargs: Any) -> Any:
         """Open a standalone ``AsyncDBAPIConnection`` instance."""

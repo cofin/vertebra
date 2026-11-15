@@ -354,7 +354,7 @@ class BrokerHost:
             reg = self._lease_sessions.pop((lease.slot_index, lease.generation), None)
             if reg is None and lease.generation > 0:
                 reg = self._lease_sessions.pop((lease.slot_index, lease.generation - 1), None)
-            pool_binding = self._pools.get(lease.pool_id)
+            pool_binding = self._pools.get(lease.pool_id) if lease.pool_id is not None else None
             default_rollback = self._default_rollback
             default_dispose = self._default_dispose
 

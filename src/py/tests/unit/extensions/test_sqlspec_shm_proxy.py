@@ -307,6 +307,11 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
     async with ProxyAsyncDriver(async_provider, broker=broker) as async_driver:
         async_result = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
         assert async_result.num_rows == 300
+        assert async_result.column_names == ["id", "name"]
+        async_rows = async_result.to_dict()
+        assert len(async_rows) == 300
+        assert async_rows[0] == {"id": 1, "name": "item-1"}
+        assert async_rows[-1] == {"id": 300, "name": "item-300"}
         assert async_result.get_data() is not None
         assert async_driver.last_response is not None
         assert async_driver.last_response.is_arrow_shm is True

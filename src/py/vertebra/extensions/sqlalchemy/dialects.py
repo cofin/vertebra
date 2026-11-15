@@ -56,12 +56,6 @@ __all__ = (
 )
 
 
-def is_free_threaded() -> bool:
-    """Return True when the CPython GIL is disabled."""
-    checker = getattr(sys, "_is_gil_enabled", None)
-    return bool(checker and not checker())
-
-
 DIALECT_SCHEMES: tuple[str, ...] = (
     "postgresql+vertebra",
     "postgresql+vtb",
@@ -107,9 +101,14 @@ ALL_DIALECT_SCHEMES: tuple[str, ...] = (
 
 
 class _NativeTransactionDialect:
-    """Forward SQLAlchemy transaction begin to the owning DBAPI connection."""
+    """Forward SQLAlchemy connection arguments and transaction begin to the owning DBAPI connection."""
 
     __slots__ = ()
+
+    def create_connect_args(self, url: URL) -> tuple[list[Any], dict[str, Any]]:
+        """Pass the rendered URL explicitly so non-SQLite connections do not fall back to SQLite."""
+        clean_url = url.difference_update_query(["shm_broker"]) if "shm_broker" in url.query else url
+        return [], {"url": clean_url.render_as_string(hide_password=False)}
 
     def do_begin(self, dbapi_connection: Any) -> None:
         """Begin through the sync connection or SQLAlchemy's async adaptation."""
@@ -652,6 +651,12 @@ class SyncEngineAdapter:
     async def run_sync[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Execute a synchronous SQLAlchemy callable on the free-threaded worker pool."""
         return await self._pool.submit_async(fn, *args, **kwargs)
+
+
+def is_free_threaded() -> bool:
+    """Return True when the CPython GIL is disabled."""
+    checker = getattr(sys, "_is_gil_enabled", None)
+    return bool(checker and not checker())
 
 
 def attach_serverless_disconnect_guard(engine: Any) -> None:

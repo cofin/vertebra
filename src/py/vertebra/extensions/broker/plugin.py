@@ -53,42 +53,6 @@ class BrokerPlugin:
         state_mapping[self.config.metrics_state_key] = self._transport.metrics()
         return self._transport
 
-    def _pool_metrics_fields(self, m: Any) -> dict[str, int]:
-        pool_m = m.pools.get(self.name)
-        if pool_m is not None:
-            has_pool_activity = (
-                pool_m.active_leases > 0
-                or pool_m.quarantined > 0
-                or pool_m.total_acquired > 0
-                or pool_m.total_released > 0
-                or pool_m.total_reclaimed > 0
-                or pool_m.total_quarantined > 0
-                or pool_m.total_disposed > 0
-            )
-            has_other_pool_activity = any(
-                name != self.name and (counts.active_leases > 0 or counts.quarantined > 0 or counts.total_acquired > 0)
-                for name, counts in m.pools.items()
-            )
-            if has_pool_activity or has_other_pool_activity:
-                return {
-                    "active_leases": pool_m.active_leases,
-                    "quarantined": pool_m.quarantined,
-                    "total_acquired": pool_m.total_acquired,
-                    "total_released": pool_m.total_released,
-                    "total_reclaimed": pool_m.total_reclaimed,
-                    "total_quarantined": pool_m.total_quarantined,
-                    "total_disposed": pool_m.total_disposed,
-                }
-        return {
-            "active_leases": m.active_leases,
-            "quarantined": m.quarantined,
-            "total_acquired": m.total_acquired,
-            "total_released": m.total_released,
-            "total_reclaimed": m.total_reclaimed,
-            "total_quarantined": m.total_quarantined,
-            "total_disposed": m.total_disposed,
-        }
-
     def snapshot_metrics(self) -> DbPoolMetricSample:
         """Create a point-in-time OpenTelemetry metric sample and record it."""
         m = self._transport.metrics()
@@ -144,6 +108,42 @@ class BrokerPlugin:
 
             dependencies.setdefault(self.config.state_key, provide_broker)
             dependencies.setdefault(self.config.metrics_state_key, provide_broker_metrics)
+
+    def _pool_metrics_fields(self, m: Any) -> dict[str, int]:
+        pool_m = m.pools.get(self.name)
+        if pool_m is not None:
+            has_pool_activity = (
+                pool_m.active_leases > 0
+                or pool_m.quarantined > 0
+                or pool_m.total_acquired > 0
+                or pool_m.total_released > 0
+                or pool_m.total_reclaimed > 0
+                or pool_m.total_quarantined > 0
+                or pool_m.total_disposed > 0
+            )
+            has_other_pool_activity = any(
+                name != self.name and (counts.active_leases > 0 or counts.quarantined > 0 or counts.total_acquired > 0)
+                for name, counts in m.pools.items()
+            )
+            if has_pool_activity or has_other_pool_activity:
+                return {
+                    "active_leases": pool_m.active_leases,
+                    "quarantined": pool_m.quarantined,
+                    "total_acquired": pool_m.total_acquired,
+                    "total_released": pool_m.total_released,
+                    "total_reclaimed": pool_m.total_reclaimed,
+                    "total_quarantined": pool_m.total_quarantined,
+                    "total_disposed": pool_m.total_disposed,
+                }
+        return {
+            "active_leases": m.active_leases,
+            "quarantined": m.quarantined,
+            "total_acquired": m.total_acquired,
+            "total_released": m.total_released,
+            "total_reclaimed": m.total_reclaimed,
+            "total_quarantined": m.total_quarantined,
+            "total_disposed": m.total_disposed,
+        }
 
     def _register_zpages(self, zpages: ZPagesRegistry) -> None:
         """Register broker telemetry snapshot provider with ZPagesRegistry."""

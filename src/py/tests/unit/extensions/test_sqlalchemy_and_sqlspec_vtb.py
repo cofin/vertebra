@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import array
+import ast
 import importlib
 import sqlite3
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from sqlalchemy.util.concurrency import greenlet_spawn
 from sqlspec import SQL, StatementStack, sql
 from sqlspec.core.filters import LimitOffsetFilter, NullFilter
 from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
+from sqlspec.core.result._base import ArrowResult
 from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 from sqlspec.exceptions import StackExecutionError
@@ -63,7 +66,7 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
     dialects,
 )
-from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
+from vertebra.extensions.sqlalchemy.async_adapter import AsyncAdapt_dbapi_connection, SQLAlchemyAsyncDBAPI
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool, broker_creator
 from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
@@ -1736,6 +1739,7 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
     assert sync_sessions[0].exit_called is True
     if failure_mode == "quarantine_error":
         assert "quarantine backend unreachable" in str(exc_info.value.__cause__)
+        assert "dirty rollback failure" in str(exc_info.value.__cause__)
     assert sync_broker.quarantined_calls == 1
     assert sync_broker.leases[0].released == 0
 
@@ -1794,6 +1798,7 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
     assert async_sessions[0].exit_called is True
     if failure_mode == "quarantine_error":
         assert "async quarantine failure" in str(a_exc_info.value.__cause__)
+        assert "async rollback failure" in str(a_exc_info.value.__cause__)
     assert async_broker.quarantined_calls == 1
     assert async_broker.leases[0].released == 0
 
@@ -2214,3 +2219,410 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
         assert alchemy_async_t.metrics().total_released == 1
     finally:
         await async_engine.dispose()
+
+
+def _assert_no_inspect_signature(source_path: Path) -> None:
+    """Assert that a Python source module does not reference inspect or inspect.signature."""
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name != "inspect"
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module != "inspect"
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "signature"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "inspect"
+        ):
+            raise AssertionError(f"Unexpected inspect.signature in {source_path}")
+
+
+@pytest.mark.parametrize("filename", ["provider.py", "proxy.py"])
+def test_sqlspec_proxy_and_provider_have_no_inspect_signature(filename: str) -> None:
+    """Verify extensions/sqlspec provider and proxy modules avoid runtime inspect.signature calls."""
+    sqlspec_dir = Path(__file__).resolve().parents[3] / "vertebra" / "extensions" / "sqlspec"
+    _assert_no_inspect_signature(sqlspec_dir / filename)
+
+
+def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_non_sqlite_url(
+    tmp_path: Path,
+) -> None:
+    """Verify shared file pool contention, active dispose, creator failure quarantine, bind_class, and non-SQLite URL."""
+    shared_db = tmp_path / "shared_sync.db"
+    shared_url = f"sqlite+vtb:///{shared_db}"
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    e1 = create_engine(
+        shared_url,
+        pool=BrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+    )
+    e2 = create_engine(
+        shared_url,
+        pool=BrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+    )
+    try:
+        with e1.connect() as c1:
+            c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
+            with pytest.raises(TimeoutError):
+                e2.connect()
+        with e2.connect() as c2:
+            assert c2.exec_driver_sql("SELECT 1").fetchone() == (1,)
+
+        with e1.connect() as inv_conn:
+            inv_lease = inv_conn.info["vtb_broker_lease"]
+            inv_conn.invalidate(RuntimeError("boom"))
+        assert transport.quarantined_count() == 1
+        transport.dispose_quarantined(inv_lease.slot_index, inv_lease.generation)
+        assert transport.quarantined_count() == 0
+        e1.dispose()
+    finally:
+        e1.dispose()
+        e2.dispose()
+
+    dispose_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    dispose_pool = BrokerPool(
+        broker=dispose_t,
+        url=f"sqlite+vtb:///{tmp_path / 'dispose.db'}",
+        pool_size=1,
+        max_overflow=0,
+        acquire_timeout_ms=50,
+    )
+    active_conn = dispose_pool.connect()
+    _ = active_conn
+    dispose_pool.dispose()
+    assert dispose_t.quarantined_count() == 1
+    assert dispose_t.metrics().active_leases == 0
+
+    def _failing_creator() -> Any:
+        raise RuntimeError("creator boom")
+
+    fail_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    fail_pool = BrokerPool(
+        creator=_failing_creator,
+        broker=fail_t,
+        pool_key="failing-creator",
+        pool_size=1,
+        max_overflow=0,
+        acquire_timeout_ms=50,
+    )
+    with pytest.raises(RuntimeError, match="creator boom"):
+        fail_pool.connect()
+    assert fail_t.quarantined_count() == 1
+    fail_pool.dispose()
+
+    with pytest.raises(ImproperConfigurationError):
+        BrokerPool.bind_class(broker=None)
+
+    async def _sample_coro() -> int:
+        return 1
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        coro = _sample_coro()
+        with pytest.raises(ImproperConfigurationError):
+            BrokerPool._await_if_needed(coro)
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+
+    pg_cfg = create_sync_alchemy_config(
+        "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true",
+        broker=fail_t,
+    )
+    pg_engine = pg_cfg.get_engine()
+    try:
+        assert pg_cfg.connection_string == "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true"
+        assert SyncPostgreSQLDialect().create_connect_args(pg_engine.url) == (
+            [],
+            {"url": "postgresql+vtb://user:secret@db.internal:5432/orders"},
+        )
+    finally:
+        pg_engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_failure(
+    tmp_path: Path,
+) -> None:
+    """Verify shared async contention, fake double dispose without quarantine_sync, and async rollback quarantine."""
+    async_db = tmp_path / "shared_async.db"
+    async_url = f"sqlite+vtb_async:///{async_db}"
+    async_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    e1 = create_async_engine(
+        async_url,
+        pool=AsyncBrokerPool(broker=async_t, url=async_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+    )
+    e2 = create_async_engine(
+        async_url,
+        pool=AsyncBrokerPool(broker=async_t, url=async_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+    )
+    try:
+        async with e1.connect() as c1:
+            await c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
+            with pytest.raises(TimeoutError):
+                await e2.connect()
+        async with e2.connect() as c2:
+            res = await c2.exec_driver_sql("SELECT 2")
+            assert res.fetchone() == (2,)
+    finally:
+        await e1.dispose()
+        await e2.dispose()
+
+    class MinimalAsyncLease:
+        def __init__(self, slot: int, gen: int) -> None:
+            self.slot_index = slot
+            self.generation = gen
+
+        async def release(self) -> None:
+            return None
+
+    class MinimalAsyncBrokerDouble:
+        def __init__(self) -> None:
+            self.next_slot = 0
+            self.quarantined: list[int] = []
+
+        async def acquire(self, *, pool_name: str, worker_pid: int) -> MinimalAsyncLease:
+            _ = (pool_name, worker_pid)
+            self.next_slot += 1
+            return MinimalAsyncLease(self.next_slot, 1)
+
+        async def quarantine(self, lease: MinimalAsyncLease) -> None:
+            self.quarantined.append(lease.slot_index)
+
+    fake_broker = MinimalAsyncBrokerDouble()
+    assert isinstance(fake_broker, AsyncBrokerLeaseSource)
+    fake_pool = AsyncBrokerPool(
+        creator=lambda: SyncDBAPIConnection(driver=SyncSQLiteDriver(), share_pool=False),
+        broker=fake_broker,
+        pool_key="minimal-async-double",
+        pool_size=2,
+        max_overflow=0,
+    )
+    conn_a = await greenlet_spawn(fake_pool.connect)
+    conn_b = await greenlet_spawn(fake_pool.connect)
+    fake_pool.dispose()
+    assert fake_broker.quarantined == [1, 2]
+    await greenlet_spawn(conn_a.close)
+    await greenlet_spawn(conn_b.close)
+
+    rollback_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
+    should_fail = True
+
+    class FailingAsyncRollbackConnection(AsyncDBAPIConnection):
+        async def rollback(self) -> None:
+            if should_fail:
+                raise RuntimeError("real async rollback failed")
+            await super().rollback()
+
+    async_dbapi = SQLAlchemyAsyncDBAPI()
+
+    def _create_failing_async() -> Any:
+        return AsyncAdapt_dbapi_connection(
+            async_dbapi,
+            FailingAsyncRollbackConnection(
+                driver=AsyncSQLiteDriver(),
+                broker=rollback_t,
+                lease_managed=True,
+            ),
+        )
+
+    rollback_pool = AsyncBrokerPool(
+        creator=_create_failing_async,
+        broker=rollback_t,
+        pool_key="async-real-rollback",
+        pool_size=1,
+        max_overflow=0,
+        acquire_timeout_ms=50,
+        reset_on_return="rollback",
+    )
+    try:
+        bad_conn = await greenlet_spawn(rollback_pool.connect)
+        with pytest.raises(LeaseQuarantinedError) as q_exc:
+            await greenlet_spawn(bad_conn.close)
+        assert isinstance(q_exc.value.__cause__, RuntimeError)
+        assert rollback_t.quarantined_count() == 1
+        with pytest.raises(TimeoutError):
+            await greenlet_spawn(rollback_pool.connect)
+        should_fail = False
+        await rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
+        ok_conn = await greenlet_spawn(rollback_pool.connect)
+        await greenlet_spawn(ok_conn.close)
+    finally:
+        await greenlet_spawn(rollback_pool.dispose)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("return_format", ["table", "batch", "batches", "reader"])
+async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type_error(
+    return_format: str,
+) -> None:
+    """Verify streams, Arrow formats/native_only, named/mapping params, nested tx, worker quarantine, and _send_rpc."""
+    sqlite_cfg = StatementConfig(
+        dialect="sqlite",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.QMARK,
+            supported_parameter_styles={ParameterStyle.QMARK, ParameterStyle.NAMED_COLON},
+        ),
+    )
+    sync_driver = SyncSQLiteDriver()
+    sync_provider = SQLSpecSyncProvider(sync_driver, arrow_threshold_rows=1)
+    proxy_sync = ProxySyncDriver(sync_provider, statement_config=sqlite_cfg)
+    proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    proxy_sync.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "named-1"})
+    assert proxy_sync.select_value("SELECT name FROM items WHERE id = :id", {"id": 1}) == "named-1"
+
+    proxy_sync.begin()
+    assert proxy_sync._connection_in_transaction() is True
+    with proxy_sync.transaction():
+        proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "nested-2")
+    assert proxy_sync._connection_in_transaction() is True
+    proxy_sync.commit()
+    assert proxy_sync._connection_in_transaction() is False
+    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 2
+
+    stack = (
+        StatementStack()
+        .push_execute_many("INSERT INTO items VALUES (?, ?)", [(3, "many-3"), (4, "many-4")])
+        .push_execute_script("INSERT INTO items VALUES (5, 'script-5'); INSERT INTO items VALUES (6, 'script-6');")
+        .push_execute_arrow("SELECT id, name FROM items ORDER BY id")
+    )
+    stack_results = proxy_sync.execute_stack(stack)
+    assert len(stack_results) == 3
+    assert isinstance(stack_results[2].result, ArrowResult)
+    assert stack_results[2].result.num_rows == 6
+
+    with pytest.raises(TypeError):
+        proxy_sync.execute_stack("not-a-stack")
+    with pytest.raises(ValueError):
+        proxy_sync.execute_stack(StatementStack())
+
+    with pytest.raises(ValueError, match="execute_many payload cannot be empty"):
+        StatementStack().push_execute_many("INSERT INTO items VALUES (?, ?)", [])
+    empty_args_op = type(
+        "BadOp", (), {"method": "execute_many", "statement": "SELECT 1", "arguments": (), "keyword_arguments": {}}
+    )()
+    with pytest.raises(ValueError, match="parameter sets"):
+        proxy_sync._execute_stack_operation_sync(empty_args_op)
+
+    stream = proxy_sync.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=2)
+    assert stream is not None
+    with stream as open_stream:
+        streamed_rows = list(open_stream)
+    assert [row["id"] for row in streamed_rows] == [1, 2, 3, 4, 5, 6]
+
+    arrow_res = proxy_sync.select_to_arrow(
+        "SELECT id, name FROM items ORDER BY id",
+        native_only=True,
+        return_format=return_format,
+    )
+    assert isinstance(arrow_res, ArrowResult)
+    assert arrow_res.rows_affected == 6
+    arrow_payload = arrow_res.get_data()
+    if return_format == "table":
+        assert isinstance(arrow_payload, pa.Table)
+        assert arrow_payload.num_rows == 6
+    elif return_format == "batch":
+        assert isinstance(arrow_payload, pa.RecordBatch)
+        assert arrow_payload.num_rows == 6
+    elif return_format == "batches":
+        assert sum(batch.num_rows for batch in arrow_payload) == 6
+    else:
+        assert isinstance(arrow_payload, pa.RecordBatchReader)
+        assert arrow_payload.read_all().num_rows == 6
+
+    with pytest.raises(ValueError, match="Unsupported Arrow return_format"):
+        proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format="invalid")
+
+    non_shm_proxy = ProxySyncDriver(
+        lambda req: BrokerRpcResponse(
+            request_id=req.request_id,
+            ok=True,
+            slot_idx=req.slot_idx,
+            generation=max(1, req.generation),
+            rows=[[1]] if req.op == "select_to_arrow" else [],
+            columns=["id"] if req.op == "select_to_arrow" else [],
+            is_arrow_shm=False,
+        ),
+        statement_config=sqlite_cfg,
+    )
+    with pytest.raises(ImproperConfigurationError, match="native SHM Arrow"):
+        non_shm_proxy.select_to_arrow("SELECT id FROM items ORDER BY id", native_only=True)
+
+    call_count = 0
+
+    def _bad_rpc_transport(_req: BrokerRpcRequest) -> int:
+        nonlocal call_count
+        call_count += 1
+        return 42
+
+    bad_proxy = ProxySyncDriver(_bad_rpc_transport)
+    with pytest.raises(TypeError, match="Unexpected RPC transport response type"):
+        bad_proxy._send_rpc(BrokerRpcRequest(request_id=1, op="acquire", pool_name="default", worker_pid=1))
+    assert call_count == 1
+
+    class WorkerBrokerDouble:
+        def __init__(self) -> None:
+            self.quarantined = 0
+
+        def acquire(self, *, pool_name: str, worker_pid: int) -> tuple[int, int]:
+            _ = (pool_name, worker_pid)
+            return (1, 1)
+
+        def quarantine(self, lease: Any) -> None:
+            _ = lease
+            self.quarantined += 1
+
+    worker_broker = WorkerBrokerDouble()
+    err_driver = ProxySyncDriver(
+        lambda req: BrokerRpcResponse(
+            request_id=req.request_id,
+            ok=req.op != "release",
+            slot_idx=1,
+            generation=1,
+            error_type="RuntimeError" if req.op == "release" else "",
+            error_message="release boom" if req.op == "release" else "",
+        ),
+        broker=worker_broker,
+    )
+    err_driver.acquire_lease()
+    with pytest.raises(LeaseQuarantinedError):
+        err_driver.release_lease()
+    assert worker_broker.quarantined == 1
+
+    async_upstream = AsyncSQLiteDriver()
+    async_provider = SQLSpecAsyncProvider(async_upstream, arrow_threshold_rows=1)
+    proxy_async = ProxyAsyncDriver(async_provider, statement_config=sqlite_cfg)
+    await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    await proxy_async.execute("INSERT INTO items VALUES (:id, :name)", {"id": 1, "name": "async-named"})
+    await proxy_async.begin()
+    assert proxy_async._connection_in_transaction() is True
+    async with proxy_async.transaction():
+        await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "async-nested")
+    assert proxy_async._connection_in_transaction() is True
+    await proxy_async.commit()
+    assert proxy_async._connection_in_transaction() is False
+
+    astream = proxy_async.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1)
+    assert astream is not None
+    async with astream as open_astream:
+        astreamed = [row async for row in open_astream]
+    assert [row["id"] for row in astreamed] == [1, 2]
+
+    async_arrow = await proxy_async.select_to_arrow(
+        "SELECT id, name FROM items ORDER BY id",
+        native_only=True,
+        return_format=return_format,
+    )
+    assert isinstance(async_arrow, ArrowResult)
+    assert async_arrow.rows_affected == 2
+    async_payload = async_arrow.get_data()
+    if return_format == "table":
+        assert isinstance(async_payload, pa.Table)
+        assert async_payload.num_rows == 2
+    elif return_format == "batch":
+        assert isinstance(async_payload, pa.RecordBatch)
+        assert async_payload.num_rows == 2
+    elif return_format == "batches":
+        assert sum(batch.num_rows for batch in async_payload) == 2
+    else:
+        assert isinstance(async_payload, pa.RecordBatchReader)
+        assert async_payload.read_all().num_rows == 2

@@ -9,8 +9,9 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyCapsule, PyString};
 use vertebra_core::broker::{
-    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PoolPartitionSpec, ShmLeaseTable,
-    ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
+    BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PartitionStats as RsPartitionStats,
+    PoolPartitionSpec, ShmLeaseTable, ShmStatementCache,
+    StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::{BROKER_ENGINE_CAPSULE_NAME, BrokerEngineCapsule, ForeignEngineCapsule};
@@ -172,13 +173,55 @@ impl From<LeaseTableStats> for BrokerStats {
 
 #[pyclass(frozen, immutable_type, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionStats {
+    #[pyo3(get)]
+    pub pool_id: u16,
+    #[pyo3(get)]
+    pub pool_size: u32,
+    #[pyo3(get)]
+    pub max_overflow: u32,
+    #[pyo3(get)]
+    pub active_leases: u32,
+    #[pyo3(get)]
+    pub quarantined: u32,
+    #[pyo3(get)]
+    pub total_acquired: u64,
+    #[pyo3(get)]
+    pub total_released: u64,
+    #[pyo3(get)]
+    pub total_reclaimed: u64,
+    #[pyo3(get)]
+    pub total_quarantined: u64,
+    #[pyo3(get)]
+    pub total_disposed: u64,
+}
+
+impl From<RsPartitionStats> for PartitionStats {
+    fn from(s: RsPartitionStats) -> Self {
+        Self {
+            pool_id: s.pool_id,
+            pool_size: s.pool_size,
+            max_overflow: s.max_overflow,
+            active_leases: s.active_leases,
+            quarantined: s.quarantined,
+            total_acquired: s.total_acquired,
+            total_released: s.total_released,
+            total_reclaimed: s.total_reclaimed,
+            total_quarantined: s.total_quarantined,
+            total_disposed: s.total_disposed,
+        }
+    }
+}
+
+#[pyclass(frozen, immutable_type, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReclaimedLease {
     #[pyo3(get)]
     pub slot_index: u32,
     #[pyo3(get)]
     pub generation: u64,
     #[pyo3(get)]
-    pub pool_id: u16,
+    pub pool_id: Option<u16>,
 }
 
 impl From<vertebra_core::broker::ReclaimedLease> for ReclaimedLease {
@@ -195,7 +238,7 @@ impl From<vertebra_core::broker::ReclaimedLease> for ReclaimedLease {
 impl ReclaimedLease {
     fn __repr__(&self) -> String {
         format!(
-            "ReclaimedLease(slot_index={}, generation={}, pool_id={})",
+            "ReclaimedLease(slot_index={}, generation={}, pool_id={:?})",
             self.slot_index, self.generation, self.pool_id
         )
     }
@@ -741,6 +784,12 @@ impl LeaseBroker {
 
     pub fn lookup_partition(&self, pool_key_hash: u64) -> Option<u16> {
         self.table.lookup_partition(pool_key_hash)
+    }
+
+    pub fn partition_stats(&self, pool_key_hash: u64) -> Option<PartitionStats> {
+        self.table
+            .partition_stats(pool_key_hash)
+            .map(PartitionStats::from)
     }
 
     #[pyo3(signature = (partition, worker_pid, ttl_ns=0, bind_key_hash=0))]

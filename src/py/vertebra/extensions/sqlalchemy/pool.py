@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
 import threading
+import weakref
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -18,8 +20,11 @@ from sqlalchemy.util.concurrency import in_greenlet
 from vertebra.db.dbapi import SyncDBAPIConnection
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
+from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, SyncSHMBrokerTransport
 from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
+from vertebra.extensions.sqlspec.provider import AsyncBrokerLeaseSource, SyncBrokerLeaseSource
 from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
     from sqlalchemy.pool.base import _ConnDialect
@@ -72,6 +77,7 @@ class BrokerPool(Pool):
     _bound_on_rollback: ClassVar[Callable[[Any], None] | None] = None
     _bound_on_dispose: ClassVar[Callable[[Any], None] | None] = None
     _bound_counter: ClassVar[int] = 0
+    _bound_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
         self,
@@ -143,6 +149,10 @@ class BrokerPool(Pool):
         self._max_overflow: int | None = pool_kw.pop("max_overflow", None)
         self._reset_mode: Any = reset_on_return
         self._lease_lock = threading.Lock()
+        self._register_lock = threading.Lock()
+        self._async_register_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+            weakref.WeakKeyDictionary()
+        )
         self._partition_registered = False
         self._entry_leases: dict[int, tuple[ConnectionPoolEntry, Any]] = {}
 
@@ -171,8 +181,9 @@ class BrokerPool(Pool):
         """Bind broker parameters onto a subclass compatible with SQLAlchemy's ``poolclass`` API."""
         if broker is None:
             raise ImproperConfigurationError("BrokerPool.bind_class requires a non-None broker")
-        cls._bound_counter += 1
-        sub_name = f"{cls.__name__}Bound{cls._bound_counter}"
+        with BrokerPool._bound_lock:
+            BrokerPool._bound_counter += 1
+            sub_name = f"{cls.__name__}Bound{BrokerPool._bound_counter}"
         bound_cls: Any = type(
             sub_name,
             (cls,),
@@ -223,12 +234,19 @@ class BrokerPool(Pool):
         with self._lease_lock:
             remaining = list(self._entry_leases.values())
             self._entry_leases.clear()
+        first_error: BaseException | None = None
         for entry, lease in remaining:
             entry.info.pop("vtb_broker_pool", None)
             self._close_entry_safely(entry)
-            self._quarantine_lease(lease)
-            if self._on_dispose is not None:
-                self._on_dispose(lease)
+            try:
+                self._quarantine_lease(lease, allow_sync_fallback=True)
+                if self._on_dispose is not None:
+                    self._on_dispose(lease)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _format_pool_key(raw_key: Any) -> str | None:
@@ -243,10 +261,21 @@ class BrokerPool(Pool):
     def _await_if_needed(value: Any) -> Any:
         if isinstance(value, Awaitable):
             if not in_greenlet():
+                close_fn = getattr(value, "close", None)
+                if callable(close_fn):
+                    close_fn()
                 msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
                 raise ImproperConfigurationError(msg)
             return await_only(value)
         return value
+
+    @staticmethod
+    def _run_coro_sync(coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        return SyncPool.default().submit(asyncio.run, coro).result()
 
     @staticmethod
     def _on_connection_invalidate(
@@ -286,14 +315,41 @@ class BrokerPool(Pool):
                 pass
         self._await_if_needed(register_fn(self._partition_key))
 
-    def _acquire_partition_lease(self) -> Any:
-        target = self._transport_target()
+    def _ensure_partition_registered(self, target: Any) -> None:
         with self._lease_lock:
-            registered = self._partition_registered
-        if not registered:
+            if self._partition_registered:
+                return
+        if in_greenlet() and self._is_asyncio:
+            loop = asyncio.get_running_loop()
+            with self._lease_lock:
+                if self._partition_registered:
+                    return
+                async_lock = self._async_register_locks.get(loop)
+                if async_lock is None:
+                    async_lock = asyncio.Lock()
+                    self._async_register_locks[loop] = async_lock
+            await_only(async_lock.acquire())
+            try:
+                with self._lease_lock:
+                    if self._partition_registered:
+                        return
+                self._register_partition(target)
+                with self._lease_lock:
+                    self._partition_registered = True
+            finally:
+                async_lock.release()
+            return
+        with self._register_lock:
+            with self._lease_lock:
+                if self._partition_registered:
+                    return
             self._register_partition(target)
             with self._lease_lock:
                 self._partition_registered = True
+
+    def _acquire_partition_lease(self) -> Any:
+        target = self._transport_target()
+        self._ensure_partition_registered(target)
 
         worker = self._worker_id if self._worker_id is not None else os.getpid()
         acquire_fn = getattr(target, "acquire", None)
@@ -301,51 +357,84 @@ class BrokerPool(Pool):
             raise ImproperConfigurationError(
                 f"Configured broker {type(self._broker).__name__!r} does not implement acquire()"
             )
-        kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
+        if isinstance(target, (SyncSHMBrokerTransport, AsyncSHMBrokerTransport)):
+            kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
+            if self._acquire_timeout_ms is not None:
+                kwargs["timeout_ms"] = self._acquire_timeout_ms
+            return self._await_if_needed(acquire_fn(**kwargs))
+        if isinstance(target, (SyncBrokerLeaseSource, AsyncBrokerLeaseSource)):
+            return self._await_if_needed(acquire_fn(pool_name=self._partition_key, worker_pid=worker))
+        kwargs = {"bind_key": self._partition_key, "worker_id": worker}
         if self._acquire_timeout_ms is not None:
             kwargs["timeout_ms"] = self._acquire_timeout_ms
-        return self._await_if_needed(acquire_fn(**kwargs))
+        try:
+            res = acquire_fn(**kwargs)
+        except TypeError:
+            res = acquire_fn(pool_name=self._partition_key, worker_pid=worker)
+        return self._await_if_needed(res)
 
     def _release_lease(self, lease: Any) -> None:
+        if not in_greenlet():
+            lease_release_sync = getattr(lease, "release_sync", None)
+            if callable(lease_release_sync):
+                lease_release_sync()
+                return
+            target = self._transport_target()
+            lease_id = getattr(lease, "lease_id", None)
+            transport_release_sync = getattr(self._broker, "release_sync", None) or getattr(
+                target, "release_sync", None
+            )
+            if lease_id is not None and callable(transport_release_sync):
+                transport_release_sync(lease_id)
+                return
+
         release_fn = getattr(lease, "release", None)
         if callable(release_fn):
-            if inspect.iscoroutinefunction(release_fn) and not in_greenlet():
-                lease_transport = getattr(lease, "_transport", None)
-                release_impl = getattr(lease_transport, "_release_impl", None)
-                lease_id = getattr(lease, "lease_id", None)
-                if callable(release_impl) and lease_id is not None:
-                    release_impl(lease_id)
-                    return
             self._await_if_needed(release_fn())
             return
         target = self._transport_target()
         lease_id = getattr(lease, "lease_id", None)
         transport_release = getattr(target, "release", None)
         if lease_id is not None and callable(transport_release):
-            if inspect.iscoroutinefunction(transport_release) and not in_greenlet():
-                release_impl = getattr(target, "_release_impl", None)
-                if callable(release_impl):
-                    release_impl(lease_id)
-                    return
             self._await_if_needed(transport_release(lease_id))
 
-    def _quarantine_lease(self, lease: Any) -> None:
+    def _quarantine_lease(self, lease: Any, *, allow_sync_fallback: bool = False) -> None:
         target = self._transport_target()
-        quarantine_fn = getattr(self._broker, "quarantine", None) or getattr(target, "quarantine", None)
-        if callable(quarantine_fn):
-            if inspect.iscoroutinefunction(quarantine_fn) and not in_greenlet():
-                quarantine_impl = getattr(target, "_quarantine_impl", None)
-                if callable(quarantine_impl):
-                    quarantine_impl(lease)
-                    return
-            try:
-                self._await_if_needed(quarantine_fn(lease))
-            except TypeError:
-                coords = (int(lease.slot_index), int(lease.generation))
-                self._await_if_needed(quarantine_fn(coords))
+        if not in_greenlet():
+            quarantine_sync_fn = getattr(self._broker, "quarantine_sync", None) or getattr(
+                target, "quarantine_sync", None
+            )
+            if callable(quarantine_sync_fn):
+                try:
+                    quarantine_sync_fn(lease)
+                except TypeError:
+                    quarantine_sync_fn(self._extract_lease_coords(lease))
+                return
 
-    def _extract_lease_coords(self, lease: Any) -> tuple[int, int]:
-        slot_idx = int(getattr(lease, "slot_index", 0))
+        quarantine_fn = getattr(self._broker, "quarantine", None) or getattr(target, "quarantine", None)
+        if not callable(quarantine_fn):
+            return
+
+        if not in_greenlet() and allow_sync_fallback and inspect.iscoroutinefunction(quarantine_fn):
+            try:
+                self._run_coro_sync(quarantine_fn(lease))
+            except TypeError:
+                self._run_coro_sync(quarantine_fn(self._extract_lease_coords(lease)))
+            return
+
+        if not in_greenlet() and inspect.iscoroutinefunction(quarantine_fn):
+            msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
+            raise ImproperConfigurationError(msg)
+
+        try:
+            self._await_if_needed(quarantine_fn(lease))
+        except TypeError:
+            self._await_if_needed(quarantine_fn(self._extract_lease_coords(lease)))
+
+    @staticmethod
+    def _extract_lease_coords(lease: Any) -> tuple[int, int]:
+        raw_slot = getattr(lease, "slot_index", None)
+        slot_idx = int(getattr(lease, "slot_idx", 0) if raw_slot is None else raw_slot)
         generation = int(getattr(lease, "generation", 0))
         return slot_idx, generation
 
@@ -417,26 +506,26 @@ class BrokerPool(Pool):
             return
         _, lease = entry_pair
 
-        rollback_exc: BaseException | None = None
         try:
             self._run_rollback(record)
         except BaseException as exc:
-            rollback_exc = exc
-
-        if rollback_exc is not None:
             self._close_entry_safely(record)
-            self._quarantine_lease(lease)
+            self._quarantine_lease(lease, allow_sync_fallback=True)
             if self._on_dispose is not None:
                 self._on_dispose(lease)
-            if isinstance(rollback_exc, Exception):
+            if isinstance(exc, Exception):
                 slot_idx, generation = self._extract_lease_coords(lease)
-                raise LeaseQuarantinedError(slot_idx, generation, str(rollback_exc)) from rollback_exc
-            raise rollback_exc
+                raise LeaseQuarantinedError(slot_idx, generation, str(exc)) from exc
+            raise
 
         try:
             record.close()
-        finally:
-            self._release_lease(lease)
+        except BaseException:
+            self._quarantine_lease(lease, allow_sync_fallback=True)
+            if self._on_dispose is not None:
+                self._on_dispose(lease)
+            raise
+        self._release_lease(lease)
 
 
 class AsyncBrokerPool(BrokerPool):

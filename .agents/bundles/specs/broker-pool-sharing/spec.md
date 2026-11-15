@@ -68,8 +68,8 @@ sources:
   resource: src/py/vertebra/extensions/sqlspec/proxy.py::ProxySyncDriver
   title: Worker-side SQLSpec proxy drivers
 - id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule
-  title: SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes
+  resource: src/py/vertebra/db/dbapi/__init__.py::SyncDBAPIModule
+  title: Standalone PEP 249 DB-API module, connection, cursor, and exports
 - id: postgres-rs
   resource: src/rs/vertebra-postgres/src/pool.rs::PostgresPool
   title: PostgreSQL native Protocol 3.0 pool
@@ -120,7 +120,10 @@ pub enum NamedAttach { Created(ShmRegion), Attached(ShmRegion) }
 #[repr(u32)] pub enum LeaseState { Free = 0, Leased = 1, Quarantined = 2 }
 pub const BROKER_ENGINE_CAPSULE_NAME: &CStr = c"vertebra.BrokerEngineCapsule";
 pub const BROKER_ENGINE_ABI_VERSION: u32 = 1;
-#[repr(C)] pub struct BrokerEngineCapsule { /* abi_version, dialect_tag, ctx, normalize/open_pool/execute/close_pool vtable */ }
+#[repr(C)]
+pub struct BrokerEngineCapsule {
+    /* abi_version, dialect_tag, ctx, open/execute/close vtable */
+}
 ```
 
 ```python
@@ -190,6 +193,6 @@ class LeaseQuarantinedError(VertebraError): ...
 [^broker-transport]: `src/py/vertebra/extensions/broker/transport.py::_BaseSHMBrokerTransport` — Python SHM broker transports and lease objects.
 [^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py::_BaseSQLSpecProvider` — Broker-side SQLSpec provider session and lease management.
 [^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py::ProxySyncDriver` — Worker-side SQLSpec proxy drivers.
-[^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule` — SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes.
+[^sa-dialects]: `src/py/vertebra/db/dbapi/__init__.py::SyncDBAPIModule` — Standalone PEP 249 DB-API module, connection, cursor, and exports.
 [^postgres-rs]: `src/rs/vertebra-postgres/src/pool.rs::PostgresPool` — PostgreSQL native Protocol 3.0 pool.
 [^broker-okf]: `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — Broker and SHM leases OKF chapter.

@@ -198,8 +198,19 @@ def test_span_ring_genai_metrics_cgroup_and_zpages(tmp_path: Path) -> None:
     assert decoded_pool["quarantined"] == 1
     assert decoded_pool["total_quarantined"] == 3
     assert decoded_pool["total_disposed"] == 2
-    for item in (trace_sample, usage_sample, sample, span_sample):
-        assert isinstance(decode_json(encode_json_bytes(item)), dict)
+    decoded_trace = decode_json(encode_json_bytes(trace_sample))
+    assert decoded_trace["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert decoded_trace["span_id"] == "00f067aa0ba902b7"
+    decoded_usage = decode_json(encode_json_bytes(usage_sample))
+    assert decoded_usage["input_tokens"] == 10
+    assert decoded_usage["output_tokens"] == 5
+    decoded_genai = decode_json(encode_json_bytes(sample))
+    assert decoded_genai["model"] == "gemini-2.5-pro"
+    assert decoded_genai["input_tokens"] == 120
+    assert decoded_genai["output_tokens"] == 45
+    decoded_span = decode_json(encode_json_bytes(span_sample))
+    assert decoded_span["name"] == "GET /orders"
+    assert decoded_span["duration_ns"] == 500
     assert isinstance(hash(trace_sample), int)
     assert isinstance(hash(usage_sample), int)
 

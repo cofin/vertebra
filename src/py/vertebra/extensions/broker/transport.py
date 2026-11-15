@@ -222,7 +222,9 @@ class SyncConnectionLease(_BaseConnectionLease):
         if not self._released:
             self._released = True
             if self._transport is not None:
-                release_sync_fn = getattr(self._transport, "_release_sync", None)
+                release_sync_fn = getattr(self._transport, "release_sync", None) or getattr(
+                    self._transport, "_release_sync", None
+                )
                 if callable(release_sync_fn):
                     release_sync_fn(self.lease_id)
                 else:
@@ -258,6 +260,29 @@ class AsyncConnectionLease(_BaseConnectionLease):
                 res = self._transport.release(self.lease_id)
                 if inspect.isawaitable(res):
                     await res
+
+    def release_sync(self) -> None:
+        """Release the connection lease synchronously from non-greenlet teardown paths."""
+        if self._quarantined:
+            raise LeaseQuarantinedError(
+                self.slot_index,
+                self.generation,
+                "quarantined lease cannot be released without disposal",
+            )
+        if not self._released:
+            self._released = True
+            if self._transport is not None:
+                release_sync_fn = getattr(self._transport, "release_sync", None) or getattr(
+                    self._transport, "_release_sync", None
+                )
+                if callable(release_sync_fn):
+                    release_sync_fn(self.lease_id)
+                else:
+                    res = self._transport.release(self.lease_id)
+                    if inspect.isawaitable(res):
+                        close_fn = getattr(res, "close", None)
+                        if callable(close_fn):
+                            close_fn()
 
     async def __aenter__(self) -> AsyncConnectionLease:
         return self
@@ -735,11 +760,31 @@ class _BaseSHMBrokerTransport:
         """Return live metrics snapshot across processes."""
         stats = self._native.stats()
         stmt_stats = self._stmt_cache.stats()
+        partition_stats_fn = getattr(self._native, "partition_stats", None)
         with self._lock:
-            pools = {
-                pool_name: PoolMetrics(
+            partition_items = [
+                (pool_name, pool_id, dict(self._pool_counters.get(pool_name, self._empty_pool_counters())))
+                for pool_name, pool_id in self._partitions.items()
+            ]
+        pools: dict[str, PoolMetrics] = {}
+        for pool_name, pool_id, counts in partition_items:
+            shm_stats = partition_stats_fn(self._bind_key_hash(pool_name)) if callable(partition_stats_fn) else None
+            if shm_stats is not None:
+                pools[pool_name] = PoolMetrics(
                     pool_name=pool_name,
-                    pool_id=self._partitions[pool_name],
+                    pool_id=pool_id,
+                    active_leases=shm_stats.active_leases,
+                    quarantined=shm_stats.quarantined,
+                    total_acquired=shm_stats.total_acquired,
+                    total_released=shm_stats.total_released,
+                    total_reclaimed=shm_stats.total_reclaimed,
+                    total_quarantined=shm_stats.total_quarantined,
+                    total_disposed=shm_stats.total_disposed,
+                )
+            else:
+                pools[pool_name] = PoolMetrics(
+                    pool_name=pool_name,
+                    pool_id=pool_id,
                     active_leases=counts["active_leases"],
                     quarantined=counts["quarantined"],
                     total_acquired=counts["total_acquired"],
@@ -748,9 +793,6 @@ class _BaseSHMBrokerTransport:
                     total_quarantined=counts["total_quarantined"],
                     total_disposed=counts["total_disposed"],
                 )
-                for pool_name, counts in self._pool_counters.items()
-                if pool_name in self._partitions
-            }
         return BrokerMetrics(
             active_leases=stats.active_leases,
             primary_in_use=stats.primary_in_use,
@@ -1106,8 +1148,16 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         """Release an acquired connection lease synchronously."""
         return self._release_sync(lease_id)
 
+    def release_sync(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously."""
+        return self._release_sync(lease_id)
+
     def quarantine(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
         """Move an active lease into quarantine until its session is explicitly disposed."""
+        self._quarantine_impl(target)
+
+    def quarantine_sync(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
+        """Move an active lease into quarantine synchronously until explicitly disposed."""
         self._quarantine_impl(target)
 
     def dispose_quarantined(
@@ -1442,8 +1492,16 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         """Release an acquired connection lease asynchronously."""
         return self._release_impl(lease_id)
 
+    def release_sync(self, lease_id: str) -> bool:
+        """Release an acquired connection lease synchronously without awaiting the event loop."""
+        return self._release_impl(lease_id)
+
     async def quarantine(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
         """Move an active lease into quarantine asynchronously."""
+        self._quarantine_impl(target)
+
+    def quarantine_sync(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
+        """Move an active lease into quarantine synchronously without awaiting the event loop."""
         self._quarantine_impl(target)
 
     async def dispose_quarantined(

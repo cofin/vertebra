@@ -26,6 +26,7 @@ from vertebra.utils.serializers import (
     encode_json_bytes,
     encode_msgpack_bytes,
 )
+from vertebra.utils.sync_tools import SyncPool
 from vertebra.utils.type_guards import is_msgspec_struct
 
 __all__ = (
@@ -276,11 +277,17 @@ class SharedArrowBuffer:
             return table.to_pylist(), table.column_names
         if hasattr(table, "to_pylist") and callable(table.to_pylist):
             py_rows = list(table.to_pylist())
-            raw_cols = getattr(table, "column_names", columns)
+            raw_cols = getattr(table, "column_names", getattr(table, "columns", columns))
             cols = [str(c) for c in raw_cols] if isinstance(raw_cols, (list, tuple)) else []
             if not cols and py_rows and isinstance(py_rows[0], dict):
                 cols = list(py_rows[0].keys())
             return [dict(r) for r in py_rows], cols
+        for arrow_attr in ("to_arrow_table", "to_pyarrow", "to_arrow"):
+            arrow_fn = getattr(table, arrow_attr, None)
+            if callable(arrow_fn):
+                converted = arrow_fn()
+                if converted is not table:
+                    return cls._coerce_fallback_rows(converted, columns=columns)
         if isinstance(table, list):
             if not table:
                 return [], list(columns) if columns else []
@@ -313,11 +320,19 @@ class SharedArrowBuffer:
             if isinstance(table, pa.RecordBatch):
                 return pa.Table.from_batches([table])
             return table
-        if hasattr(table, "to_arrow") and callable(table.to_arrow):
-            converted = table.to_arrow()
-            if isinstance(converted, pa.RecordBatch):
-                return pa.Table.from_batches([converted])
-            return converted
+        for arrow_attr in ("to_arrow", "to_arrow_table", "to_pyarrow"):
+            arrow_fn = getattr(table, arrow_attr, None)
+            if callable(arrow_fn):
+                converted = arrow_fn()
+                if converted is table:
+                    continue
+                if hasattr(converted, "schema") and hasattr(converted, "num_rows"):
+                    if isinstance(converted, pa.RecordBatch):
+                        return pa.Table.from_batches([converted])
+                    return converted
+                return cls._coerce_arrow_table(pa, converted, columns=columns)
+        if hasattr(table, "to_pylist") and callable(table.to_pylist):
+            return cls._coerce_arrow_table(pa, table.to_pylist(), columns=columns)
         if isinstance(table, list):
             if not table:
                 if columns:
@@ -416,12 +431,35 @@ class _BaseSQLSpecProvider:
         with self._lock:
             return self._leased_sessions.get((slot_idx, generation))
 
+    def resolve_upstream_optional(self, pool_name: str) -> Any:
+        """Return registered upstream config or driver for pool_name when present."""
+        with self._lock:
+            if pool_name in self._upstreams:
+                return self._upstreams[pool_name]
+            if self.default_pool_name in self._upstreams:
+                return self._upstreams[self.default_pool_name]
+            if "default" in self._upstreams:
+                return self._upstreams["default"]
+            if self._upstreams:
+                return next(iter(self._upstreams.values()))
+        return None
+
+    @staticmethod
+    def _format_error_message(exc: BaseException) -> str:
+        msg = str(exc)
+        chained = exc.__cause__ or exc.__context__
+        if chained is not None:
+            detail = f"{type(chained).__name__}: {chained}"
+            if detail not in msg and str(chained) not in msg:
+                return f"{msg} (caused by {detail})" if msg else detail
+        return msg
+
     def _handle_request_sync(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         op = request.op
         key = (request.slot_idx, request.generation)
         try:
-            if op in {"arrow_release", "_arrow_release"}:
+            if op == "arrow_release":
                 SharedArrowBuffer.unlink(request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
@@ -579,7 +617,7 @@ class _BaseSQLSpecProvider:
                 generation=request.generation,
                 in_tx=in_tx,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=self._format_error_message(exc),
             )
 
     async def _handle_request_async(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
@@ -587,7 +625,7 @@ class _BaseSQLSpecProvider:
         op = request.op
         key = (request.slot_idx, request.generation)
         try:
-            if op in {"arrow_release", "_arrow_release"}:
+            if op == "arrow_release":
                 SharedArrowBuffer.unlink(request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
@@ -747,7 +785,7 @@ class _BaseSQLSpecProvider:
                 generation=request.generation,
                 in_tx=in_tx,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=self._format_error_message(exc),
             )
 
     def _handle_raw_frame_sync(self, payload: bytes | bytearray | memoryview) -> bytes:
@@ -797,19 +835,6 @@ class _BaseSQLSpecProvider:
             await self._release_session_async(key, in_tx=self._tx_states.get(key, False))
         for name in arrow_names:
             SharedArrowBuffer.unlink(name)
-
-    def resolve_upstream_optional(self, pool_name: str) -> Any:
-        """Return registered upstream config or driver for pool_name when present."""
-        with self._lock:
-            if pool_name in self._upstreams:
-                return self._upstreams[pool_name]
-            if self.default_pool_name in self._upstreams:
-                return self._upstreams[self.default_pool_name]
-            if "default" in self._upstreams:
-                return self._upstreams["default"]
-            if self._upstreams:
-                return next(iter(self._upstreams.values()))
-        return None
 
     def _resolve_upstream(self, pool_name: str) -> Any:
         """Resolve the upstream config, driver, or factory for pool_name."""
@@ -869,7 +894,7 @@ class _BaseSQLSpecProvider:
             res = target.acquire(bind_key=pool_name, worker_id=pid)
             return await res if isinstance(res, Awaitable) else res
         if isinstance(target, SyncSHMBrokerTransport):
-            return target.acquire(bind_key=pool_name, worker_id=pid)
+            return await SyncPool.default().submit_async(target.acquire, bind_key=pool_name, worker_id=pid)
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
             res = acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
