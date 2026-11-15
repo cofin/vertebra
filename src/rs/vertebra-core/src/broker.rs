@@ -504,6 +504,7 @@ impl ShmLeaseTable {
             hdr.partition_count.0.store(0, Ordering::Release);
         }
 
+        // SAFETY: `header_ptr` starts at the allocated SHM region base, which spans `req_size >= sizeof(ShmLeaseHeader) + (pool_size + max_overflow) * sizeof(LeaseSlot)`.
         let slots_ptr = unsafe {
             (header_ptr as *mut u8).add(std::mem::size_of::<ShmLeaseHeader>()) as *mut LeaseSlot
         };
@@ -567,6 +568,7 @@ impl ShmLeaseTable {
             });
         }
 
+        // SAFETY: `header_ptr` starts at the allocated SHM region base, which spans `req_size >= sizeof(ShmLeaseHeader) + (pool_size + max_overflow) * sizeof(LeaseSlot)`.
         let slots_ptr = unsafe {
             (header_ptr as *mut u8).add(std::mem::size_of::<ShmLeaseHeader>()) as *mut LeaseSlot
         };
