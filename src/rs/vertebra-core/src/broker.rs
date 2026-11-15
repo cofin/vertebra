@@ -24,6 +24,24 @@ pub const SLOT_STATE_FREE: u32 = 0;
 pub const SLOT_STATE_PRIMARY: u32 = 1;
 pub const SLOT_STATE_OVERFLOW: u32 = 2;
 const SLOT_STATE_CLAIMING: u32 = 3;
+pub const SLOT_STATE_QUARANTINED: u32 = 4;
+
+/// Public lifecycle state of a broker lease slot.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseState {
+    Free = 0,
+    Leased = 1,
+    Quarantined = 2,
+}
+
+/// Quarantined lease metadata recovered when reclaiming a dead worker process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimedLease {
+    pub slot_index: u32,
+    pub generation: u64,
+    pub pool_id: u16,
+}
 
 pub const STMT_SLOT_PAYLOAD_BYTES: usize = 224;
 pub const CLOCK_REF_BIT: u32 = 1 << 8;
@@ -70,6 +88,8 @@ pub enum BrokerError {
     GenerationMismatch,
     #[error("stale lease generation")]
     StaleGeneration,
+    #[error("invalid lease state for operation")]
+    InvalidState,
     #[error("partition registry capacity exhausted")]
     PartitionsExhausted,
     #[error("invalid pool partition id: {0}")]
@@ -189,7 +209,9 @@ pub struct ShmLeaseHeader {
     pub total_expired: AtomicU64,
     pub total_timeouts: AtomicU64,
     pub total_reclaimed: AtomicU64,
-    pub _pad1: [u8; 24],
+    pub total_quarantined: AtomicU64,
+    pub total_disposed: AtomicU64,
+    pub _pad1: [u8; 8],
 
     // Cache line 6 (64B): Partition directory count
     pub partition_count: CacheLine<AtomicU32>,
@@ -277,6 +299,9 @@ pub struct LeaseTableStats {
     pub total_expired: u64,
     pub total_timeouts: u64,
     pub total_reclaimed: u64,
+    pub quarantined: u32,
+    pub total_quarantined: u64,
+    pub total_disposed: u64,
 }
 
 pub struct ShmLeaseTable {
@@ -1066,6 +1091,9 @@ impl ShmLeaseTable {
 
         let raw = slot.state_and_pid.load(Ordering::Acquire);
         let (state, _) = unpack_state_pid(raw);
+        if state == SLOT_STATE_QUARANTINED {
+            return Err(BrokerError::InvalidState);
+        }
         if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
             return Err(BrokerError::LeaseNotFound);
         }
@@ -1115,6 +1143,138 @@ impl ShmLeaseTable {
         }
 
         reaped
+    }
+
+    /// Transition a leased slot into [`LeaseState::Quarantined`] while keeping its capacity
+    /// admission reserved until [`Self::dispose_quarantined`] completes.
+    pub fn quarantine(&self, slot_index: u32, generation: u64) -> Result<(), BrokerError> {
+        let total = self.total_capacity();
+        if slot_index >= total {
+            return Err(BrokerError::LeaseNotFound);
+        }
+        let slot = self.slot(slot_index);
+        if slot.generation.load(Ordering::Acquire) != generation {
+            return Err(BrokerError::GenerationMismatch);
+        }
+        let raw = slot.state_and_pid.load(Ordering::Acquire);
+        let (state, pid) = unpack_state_pid(raw);
+        if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
+            return Err(BrokerError::InvalidState);
+        }
+        if slot.generation.load(Ordering::Acquire) != generation {
+            return Err(BrokerError::GenerationMismatch);
+        }
+        if slot
+            .state_and_pid
+            .compare_exchange(
+                raw,
+                pack_state_pid(SLOT_STATE_QUARANTINED, pid),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            if slot.generation.load(Ordering::Acquire) != generation {
+                return Err(BrokerError::GenerationMismatch);
+            }
+            return Err(BrokerError::InvalidState);
+        }
+        self.header()
+            .total_quarantined
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Dispose a quarantined slot, returning it to [`LeaseState::Free`] and waking one waiter.
+    pub fn dispose_quarantined(&self, slot_index: u32, generation: u64) -> Result<(), BrokerError> {
+        let total = self.total_capacity();
+        if slot_index >= total {
+            return Err(BrokerError::LeaseNotFound);
+        }
+        let slot = self.slot(slot_index);
+        if slot.generation.load(Ordering::Acquire) != generation {
+            return Err(BrokerError::GenerationMismatch);
+        }
+        let raw = slot.state_and_pid.load(Ordering::Acquire);
+        let (state, _) = unpack_state_pid(raw);
+        if state != SLOT_STATE_QUARANTINED {
+            return Err(BrokerError::InvalidState);
+        }
+        if slot.generation.load(Ordering::Acquire) != generation {
+            return Err(BrokerError::GenerationMismatch);
+        }
+        let hdr = self.header();
+        if !self.release_claimed_slot(slot, raw, &hdr.total_disposed) {
+            if slot.generation.load(Ordering::Acquire) != generation {
+                return Err(BrokerError::GenerationMismatch);
+            }
+            return Err(BrokerError::InvalidState);
+        }
+        if hdr.waiters.0.load(Ordering::Acquire) > 0 {
+            hdr.wake_seq.0.fetch_add(1);
+            let _ = hdr.wake_seq.0.wake_one();
+        }
+        Ok(())
+    }
+
+    /// Count slots currently in [`LeaseState::Quarantined`].
+    #[must_use]
+    pub fn quarantined_count(&self) -> u32 {
+        let total = self.total_capacity();
+        let mut count = 0u32;
+        for idx in 0..total {
+            let (state, _) = unpack_state_pid(self.slot(idx).state_and_pid.load(Ordering::Acquire));
+            if state == SLOT_STATE_QUARANTINED {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Transition every live slot held by `worker_pid` into [`LeaseState::Quarantined`] with bumped
+    /// generation counters so [`BrokerHost`] can execute server-side `ROLLBACK` before disposal.
+    pub fn reclaim_worker_leases(&self, worker_pid: u32) -> Vec<ReclaimedLease> {
+        let total = self.total_capacity();
+        let hdr = self.header();
+        let mut reclaimed = Vec::new();
+
+        for idx in 0..total {
+            let slot = self.slot(idx);
+            let raw = slot.state_and_pid.load(Ordering::Acquire);
+            let (state, pid) = unpack_state_pid(raw);
+            if (state == SLOT_STATE_PRIMARY || state == SLOT_STATE_OVERFLOW)
+                && pid == worker_pid
+                && slot
+                    .state_and_pid
+                    .compare_exchange(
+                        raw,
+                        pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                let next_gen = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
+                hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                let part = slot.partition_id.load(Ordering::Relaxed);
+                let bind_hash = slot.bind_key_hash.load(Ordering::Relaxed);
+                let pool_id = if part < MAX_POOL_PARTITIONS as u32 {
+                    part as u16
+                } else if bind_hash <= u16::MAX as u64 {
+                    bind_hash as u16
+                } else {
+                    0u16
+                };
+                reclaimed.push(ReclaimedLease {
+                    slot_index: idx,
+                    generation: next_gen,
+                    pool_id,
+                });
+            }
+        }
+
+        reclaimed
     }
 
     pub fn reclaim_worker(&self, worker_pid: u32) -> u32 {
@@ -1500,6 +1660,7 @@ impl ShmLeaseTable {
         let total = self.total_capacity();
         let mut primary_in_use = 0u32;
         let mut overflow_in_use = 0u32;
+        let mut quarantined = 0u32;
 
         for idx in 0..total {
             let slot = self.slot(idx);
@@ -1507,6 +1668,7 @@ impl ShmLeaseTable {
             match state {
                 SLOT_STATE_PRIMARY => primary_in_use += 1,
                 SLOT_STATE_OVERFLOW => overflow_in_use += 1,
+                SLOT_STATE_QUARANTINED => quarantined += 1,
                 _ => {}
             }
         }
@@ -1523,6 +1685,9 @@ impl ShmLeaseTable {
             total_expired: hdr.total_expired.load(Ordering::Relaxed),
             total_timeouts: hdr.total_timeouts.load(Ordering::Relaxed),
             total_reclaimed: hdr.total_reclaimed.load(Ordering::Relaxed),
+            quarantined,
+            total_quarantined: hdr.total_quarantined.load(Ordering::Relaxed),
+            total_disposed: hdr.total_disposed.load(Ordering::Relaxed),
         }
     }
 }

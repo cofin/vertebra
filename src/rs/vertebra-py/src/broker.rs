@@ -76,6 +76,7 @@ fn broker_err_to_py(err: BrokerError) -> PyErr {
         | BrokerError::UnsupportedAbi(_)
         | BrokerError::GenerationMismatch
         | BrokerError::StaleGeneration
+        | BrokerError::InvalidState
         | BrokerError::PartitionsExhausted => {
             pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
         }
@@ -131,6 +132,8 @@ pub struct BrokerStats {
     #[pyo3(get)]
     pub waiting_threads: u32,
     #[pyo3(get)]
+    pub quarantined: u32,
+    #[pyo3(get)]
     pub total_acquired: u64,
     #[pyo3(get)]
     pub total_released: u64,
@@ -140,6 +143,10 @@ pub struct BrokerStats {
     pub total_timeouts: u64,
     #[pyo3(get)]
     pub total_reclaimed: u64,
+    #[pyo3(get)]
+    pub total_quarantined: u64,
+    #[pyo3(get)]
+    pub total_disposed: u64,
 }
 
 impl From<LeaseTableStats> for BrokerStats {
@@ -151,11 +158,241 @@ impl From<LeaseTableStats> for BrokerStats {
             primary_in_use: s.primary_in_use,
             overflow_in_use: s.overflow_in_use,
             waiting_threads: s.waiting_threads,
+            quarantined: s.quarantined,
             total_acquired: s.total_acquired,
             total_released: s.total_released,
             total_expired: s.total_expired,
             total_timeouts: s.total_timeouts,
             total_reclaimed: s.total_reclaimed,
+            total_quarantined: s.total_quarantined,
+            total_disposed: s.total_disposed,
+        }
+    }
+}
+
+#[pyclass(frozen, immutable_type, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimedLease {
+    #[pyo3(get)]
+    pub slot_index: u32,
+    #[pyo3(get)]
+    pub generation: u64,
+    #[pyo3(get)]
+    pub pool_id: u16,
+}
+
+impl From<vertebra_core::broker::ReclaimedLease> for ReclaimedLease {
+    fn from(r: vertebra_core::broker::ReclaimedLease) -> Self {
+        Self {
+            slot_index: r.slot_index,
+            generation: r.generation,
+            pool_id: r.pool_id,
+        }
+    }
+}
+
+#[pymethods]
+impl ReclaimedLease {
+    fn __repr__(&self) -> String {
+        format!(
+            "ReclaimedLease(slot_index={}, generation={}, pool_id={})",
+            self.slot_index, self.generation, self.pool_id
+        )
+    }
+}
+
+fn extract_secret_bytes(secret: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = secret.extract::<Vec<u8>>() {
+        return Ok(bytes);
+    }
+    if let Ok(text) = secret.extract::<String>() {
+        return Ok(text.into_bytes());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "secret must be bytes or str",
+    ))
+}
+
+fn lease_quarantined_error(py: Python<'_>, slot_index: u32, generation: u64, msg: String) -> PyErr {
+    if let Ok(errors_mod) = py.import("vertebra.extensions.broker.errors")
+        && let Ok(exc_cls) = errors_mod.getattr("LeaseQuarantinedError")
+        && let Ok(inst) = exc_cls.call1((slot_index, generation, msg.as_str()))
+    {
+        return PyErr::from_value(inst);
+    }
+    pyo3::exceptions::PyRuntimeError::new_err(msg)
+}
+
+fn attach_err_to_py(py: Python<'_>, err: vertebra_core::broker_attach::AttachError) -> PyErr {
+    use vertebra_core::broker_attach::AttachError;
+    let msg = err.to_string();
+    match err {
+        AttachError::AuthFailed(_) | AttachError::InsecurePermissions(_) => {
+            if let Ok(errors_mod) = py.import("vertebra.extensions.broker.errors")
+                && let Ok(exc_cls) = errors_mod.getattr("BrokerAuthenticationError")
+                && let Ok(inst) = exc_cls.call1((msg.as_str(),))
+            {
+                return PyErr::from_value(inst);
+            }
+            pyo3::exceptions::PyPermissionError::new_err(msg)
+        }
+        AttachError::Timeout(_) => pyo3::exceptions::PyTimeoutError::new_err(msg),
+        AttachError::Protocol(_) | AttachError::Io(_) | AttachError::UnsupportedPlatform => {
+            pyo3::exceptions::PyRuntimeError::new_err(msg)
+        }
+    }
+}
+
+#[pyclass(immutable_type)]
+pub struct BrokerAttachServer {
+    server: std::sync::Mutex<Option<vertebra_core::broker_attach::BrokerAttachServer>>,
+    handle: std::sync::Mutex<Option<vertebra_core::broker_attach::AttachServerHandle>>,
+    socket_path: String,
+}
+
+#[pymethods]
+impl BrokerAttachServer {
+    #[new]
+    #[pyo3(signature = (socket_path, secret, shm_fd, shm_size = 0))]
+    pub fn new(
+        py: Python<'_>,
+        socket_path: &str,
+        secret: &Bound<'_, PyAny>,
+        shm_fd: i32,
+        shm_size: usize,
+    ) -> PyResult<Self> {
+        let secret_bytes = extract_secret_bytes(secret)?;
+        let path_owned = socket_path.to_string();
+        let bound = py
+            .detach(|| {
+                vertebra_core::broker_attach::BrokerAttachServer::bind(
+                    &path_owned,
+                    &secret_bytes,
+                    shm_fd,
+                    shm_size,
+                )
+            })
+            .map_err(|err| attach_err_to_py(py, err))?;
+        Ok(Self {
+            socket_path: bound.socket_path().to_string_lossy().into_owned(),
+            server: std::sync::Mutex::new(Some(bound)),
+            handle: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[pyo3(signature = (timeout_ms = 5000))]
+    pub fn serve_one(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<()> {
+        let dur = Duration::from_millis(timeout_ms);
+        let result = py.detach(|| {
+            let guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(srv) = guard.as_ref() else {
+                return Err(vertebra_core::broker_attach::AttachError::Protocol(
+                    "attach server already started in background".to_string(),
+                ));
+            };
+            srv.serve_one(dur)
+        });
+        result.map_err(|err| attach_err_to_py(py, err))
+    }
+
+    pub fn start(&self, py: Python<'_>) -> PyResult<()> {
+        let srv = {
+            let mut guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        let Some(srv) = srv else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "attach server already started",
+            ));
+        };
+        let handle = py
+            .detach(|| srv.start_background())
+            .map_err(|err| attach_err_to_py(py, err))?;
+        let mut h_guard = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *h_guard = Some(handle);
+        Ok(())
+    }
+
+    pub fn stop(&self, py: Python<'_>) {
+        let handle = {
+            let mut h_guard = self
+                .handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            h_guard.take()
+        };
+        let srv = {
+            let mut s_guard = self
+                .server
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s_guard.take()
+        };
+        let socket_path = self.socket_path.clone();
+        py.detach(move || {
+            if let Some(h) = handle {
+                h.stop();
+            }
+            drop(srv);
+            let _ = std::fs::remove_file(socket_path);
+        });
+    }
+
+    #[getter]
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "BrokerAttachServer(socket_path={:?}, secret='[REDACTED]')",
+            self.socket_path
+        )
+    }
+}
+
+#[pyclass(frozen, immutable_type)]
+pub struct BrokerAttachClient;
+
+#[pymethods]
+impl BrokerAttachClient {
+    #[staticmethod]
+    #[pyo3(signature = (socket_path, secret, timeout_ms = 5000))]
+    pub fn attach(
+        py: Python<'_>,
+        socket_path: &str,
+        secret: &Bound<'_, PyAny>,
+        timeout_ms: u64,
+    ) -> PyResult<(i32, usize)> {
+        let secret_bytes = extract_secret_bytes(secret)?;
+        let path_owned = socket_path.to_string();
+        let dur = Duration::from_millis(timeout_ms);
+        let result = py.detach(|| {
+            vertebra_core::broker_attach::BrokerAttachClient::attach(
+                &path_owned,
+                &secret_bytes,
+                dur,
+            )
+        });
+        match result {
+            Ok((owned_fd, shm_size)) => {
+                #[cfg(unix)]
+                let raw_fd =
+                    vertebra_core::broker_attach::BrokerAttachClient::into_raw_fd(owned_fd);
+                #[cfg(not(unix))]
+                let raw_fd = owned_fd;
+                Ok((raw_fd, shm_size))
+            }
+            Err(err) => Err(attach_err_to_py(py, err)),
         }
     }
 }
@@ -549,12 +786,34 @@ impl LeaseBroker {
             .map_err(broker_err_to_py)
     }
 
-    pub fn release(&self, slot_index: u32, generation: u64) -> PyResult<bool> {
+    pub fn release(&self, py: Python<'_>, slot_index: u32, generation: u64) -> PyResult<bool> {
         match self.table.release(slot_index, generation) {
             Ok(()) => Ok(true),
             Err(BrokerError::LeaseNotFound) | Err(BrokerError::GenerationMismatch) => Ok(false),
+            Err(BrokerError::InvalidState) => Err(lease_quarantined_error(
+                py,
+                slot_index,
+                generation,
+                BrokerError::InvalidState.to_string(),
+            )),
             Err(err) => Err(broker_err_to_py(err)),
         }
+    }
+
+    pub fn quarantine(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .quarantine(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn dispose_quarantined(&self, slot_index: u32, generation: u64) -> PyResult<()> {
+        self.table
+            .dispose_quarantined(slot_index, generation)
+            .map_err(broker_err_to_py)
+    }
+
+    pub fn quarantined_count(&self) -> u32 {
+        self.table.quarantined_count()
     }
 
     pub fn reap_expired(&self) -> u32 {
@@ -564,6 +823,16 @@ impl LeaseBroker {
 
     pub fn reclaim_worker(&self, worker_pid: u32) -> u32 {
         self.table.reclaim_worker(worker_pid)
+    }
+
+    pub fn reclaim_worker_leases(&self, py: Python<'_>, worker_pid: u32) -> Vec<ReclaimedLease> {
+        py.detach(|| {
+            self.table
+                .reclaim_worker_leases(worker_pid)
+                .into_iter()
+                .map(ReclaimedLease::from)
+                .collect()
+        })
     }
 
     pub fn stats(&self) -> BrokerStats {

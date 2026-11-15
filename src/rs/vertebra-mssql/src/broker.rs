@@ -134,11 +134,14 @@ impl MssqlBrokerBackend {
                 primary_in_use: 0,
                 overflow_in_use: 0,
                 waiting_threads: 0,
+                quarantined: 0,
                 total_acquired: 0,
                 total_released: 0,
                 total_expired: 0,
                 total_timeouts: 0,
                 total_reclaimed: 0,
+                total_quarantined: 0,
+                total_disposed: 0,
             },
         }
     }

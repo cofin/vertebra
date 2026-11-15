@@ -5,7 +5,10 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import struct
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import types
 from pathlib import Path
@@ -13,13 +16,16 @@ from typing import Any
 
 import pytest
 
-from vertebra._vertebra import ArrowCursor, BrokerEngineRegistry
+from vertebra._vertebra import ArrowCursor, BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry
 from vertebra.extensions.broker import (
     DBRPC_VERSION,
+    BrokerAuthenticationError,
     BrokerConfig,
     BrokerEngineDiscovery,
+    BrokerHost,
     DbRpcOp,
     DbRpcRequest,
+    ShutdownReport,
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.broker.dbrpc import (
@@ -387,3 +393,142 @@ def test_duckdb_broker_capsule_execute_vtbarrow_and_error_handling() -> None:
     finally:
         BrokerEngineRegistry.close_pool(6, pool_id)
         BrokerEngineRegistry.close_pool(6, pool_id)
+
+
+def test_uds_broker_attach_wrong_secret_perms_and_worker_transport(tmp_path: Path) -> None:
+    """Verify UDS attach enforces 0700 dir permissions, rejects bad secrets, and shares owner leases."""
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="vtb-uds-") as raw_dir:
+        sock_dir = Path(raw_dir)
+        os.chmod(sock_dir, 0o700)
+        sock_path = str(sock_dir / "broker.sock")
+        secret = b"correct-broker-attach-secret-key"
+
+        owner_cfg = BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50, socket_path=sock_path)
+        host = BrokerHost(owner_cfg, socket_path=sock_path, secret=secret)
+        host.start()
+        try:
+            assert "correct-broker-attach-secret-key" not in repr(host)
+            assert "[REDACTED]" in repr(host)
+
+            with pytest.raises(BrokerAuthenticationError) as wrong_exc:
+                BrokerAttachClient.attach(sock_path, b"wrong-broker-attach-secret-key", timeout_ms=1000)
+            assert "correct-broker-attach-secret-key" not in str(wrong_exc.value)
+
+            os.chmod(sock_dir, 0o755)
+            try:
+                with pytest.raises(BrokerAuthenticationError):
+                    BrokerAttachClient.attach(sock_path, secret, timeout_ms=1000)
+            finally:
+                os.chmod(sock_dir, 0o700)
+
+            worker = SyncSHMBrokerTransport(
+                BrokerConfig(
+                    pool_size=2,
+                    max_overflow=0,
+                    acquire_timeout_ms=50,
+                    role="worker",
+                    socket_path=sock_path,
+                    attach_secret=secret,
+                )
+            )
+            assert "correct-broker-attach-secret-key" not in repr(
+                worker.config if hasattr(worker, "config") else owner_cfg
+            )
+            with host.transport.acquire(worker_id=1), worker.acquire(worker_id=2), pytest.raises(TimeoutError):
+                worker.acquire(worker_id=3, timeout_ms=20)
+            assert host.transport.metrics().active_leases == 0
+        finally:
+            host.stop(timeout=2.0)
+
+        with pytest.raises(BrokerAuthenticationError):
+            os.chmod(tmp_path, 0o755)
+            try:
+                BrokerAttachServer(str(tmp_path / "bad.sock"), secret, 0, 0)
+            finally:
+                os.chmod(tmp_path, 0o700)
+
+
+def test_broker_host_worker_exit_rollback_success_failure_disposal_and_bounded_stop() -> None:
+    """Verify owning-thread recovery handles ROLLBACK success, failure disposal, and bounded stop timeout."""
+    host = BrokerHost(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
+    host.start()
+    seen_threads: list[int] = []
+    disposed_slots: list[int] = []
+    try:
+        host_tid = host.owning_thread_id
+        assert host_tid is not None
+
+        def _rollback_ok(lease: Any) -> None:
+            seen_threads.append(threading.get_ident())
+
+        host.register_session_hooks(
+            on_rollback=_rollback_ok, on_dispose=lambda lease: disposed_slots.append(lease.slot_index)
+        )
+        g_ok = host.transport.acquire(worker_id=81001)
+        reclaimed_ok = host.on_worker_exit(81001)
+        assert reclaimed_ok == 1
+        assert seen_threads == [host_tid]
+        assert disposed_slots == []
+        assert host.transport.quarantined_count() == 0
+
+        def _rollback_fail(lease: Any) -> None:
+            seen_threads.append(threading.get_ident())
+            raise RuntimeError("simulated dirty connection reset error")
+
+        host.register_session_hooks(
+            on_rollback=_rollback_fail, on_dispose=lambda lease: disposed_slots.append(lease.slot_index)
+        )
+        g_fail = host.transport.acquire(worker_id=81002)
+        reclaimed_fail = host.on_worker_exit(81002)
+        assert reclaimed_fail == 1
+        assert seen_threads == [host_tid, host_tid]
+        assert disposed_slots == [g_fail.slot_index]
+        assert host.transport.quarantined_count() == 0
+
+        reused = host.transport.acquire(worker_id=81003)
+        reused.release()
+        _ = g_ok
+
+        release_blocker = threading.Event()
+        blocker_started = threading.Event()
+
+        def _blocking_cleanup(_lease: Any = None) -> None:
+            blocker_started.set()
+            release_blocker.wait(timeout=1.0)
+
+        blocker_thread = threading.Thread(
+            target=lambda: host._executor.submit(_blocking_cleanup, timeout=2.0),
+            daemon=True,
+        )
+        blocker_thread.start()
+        assert blocker_started.wait(timeout=2.0)
+        report = host.stop(timeout=0.05)
+        release_blocker.set()
+        blocker_thread.join(timeout=2.0)
+        assert isinstance(report, ShutdownReport)
+        assert report.completed is False
+        assert report.pending_leases >= 1
+        assert report.rolled_back_leases == 1
+        assert report.rollback_errors == 1
+        assert report.disposed_leases == 2
+    finally:
+        if host.started:
+            host.stop(timeout=1.0)
+
+
+def test_vtb_broker_cli_help_loads_lazily_without_eager_engine_imports() -> None:
+    """Verify `vtb broker --help` prints help quickly without importing native engine drivers."""
+    script = (
+        "import sys\n"
+        "from click.testing import CliRunner\n"
+        "from vertebra.cli import _build_cli\n"
+        "cli = _build_cli()\n"
+        "res = CliRunner().invoke(cli, ['broker', '--help'])\n"
+        "assert res.exit_code == 0, res.output\n"
+        "assert 'serve' in res.output and 'status' in res.output, res.output\n"
+        "forbidden = ('vertebra_postgres', 'vertebra_mysql', 'vertebra_oracle', 'vertebra_mssql', 'vertebra_duckdb', 'vertebra.extensions.broker.engines')\n"
+        "loaded = [m for m in forbidden if m in sys.modules]\n"
+        "assert not loaded, f'eager imports loaded: {loaded}'\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr or proc.stdout

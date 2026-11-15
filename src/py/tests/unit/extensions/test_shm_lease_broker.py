@@ -15,6 +15,7 @@ from vertebra.extensions.broker import (
     BrokerAttachError,
     BrokerConfig,
     BrokerSegmentInUseError,
+    LeaseQuarantinedError,
     SyncSHMBrokerTransport,
 )
 
@@ -179,3 +180,49 @@ def test_owner_and_worker_roles_share_pool_capacity() -> None:
         assert owner.metrics().active_leases == 0
     finally:
         owner.unlink()
+
+
+def test_size_one_quarantine_blocks_until_disposal_and_release_raises() -> None:
+    """Verify quarantining a slot blocks reuse until disposed and rejecting direct release."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    part_id = broker.register_partition(0xABCDEF01, 1, 0)
+    grant = broker.acquire_in(part_id, worker_pid=51001, ttl_ns=0, timeout_ms=50, bind_key_hash=0)
+    assert grant is not None
+
+    broker.quarantine(grant.slot_index, grant.generation)
+    assert broker.quarantined_count() == 1
+    stats = broker.stats()
+    assert stats.quarantined == 1
+    assert stats.total_quarantined == 1
+    assert broker.try_acquire_in(part_id, worker_pid=51002, ttl_ns=0, bind_key_hash=0) is None
+
+    with pytest.raises(LeaseQuarantinedError):
+        broker.release(grant.slot_index, grant.generation)
+
+    broker.dispose_quarantined(grant.slot_index, grant.generation)
+    assert broker.quarantined_count() == 0
+    assert broker.stats().total_disposed == 1
+
+    reused = broker.try_acquire_in(part_id, worker_pid=51002, ttl_ns=0, bind_key_hash=0)
+    assert reused is not None
+    assert broker.release(reused.slot_index, reused.generation) is True
+
+
+def test_reclaim_worker_leases_isolates_dead_pid_without_disturbing_live_worker() -> None:
+    """Verify reclaim_worker_leases quarantines only dead_pid slots and bumps generations."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    dead_grant = broker.try_acquire(worker_pid=62001, ttl_ns=0, bind_key_hash=0)
+    live_grant = broker.try_acquire(worker_pid=62002, ttl_ns=0, bind_key_hash=0)
+    assert dead_grant is not None and live_grant is not None
+
+    reclaimed = broker.reclaim_worker_leases(62001)
+    assert len(reclaimed) == 1
+    assert reclaimed[0].slot_index == dead_grant.slot_index
+    assert reclaimed[0].generation == dead_grant.generation + 1
+    assert broker.quarantined_count() == 1
+    assert broker.try_acquire(worker_pid=62003, ttl_ns=0, bind_key_hash=0) is None
+
+    broker.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+    assert broker.quarantined_count() == 0
+    assert broker.release(live_grant.slot_index, live_grant.generation) is True
+    assert broker.stats().active_leases == 0

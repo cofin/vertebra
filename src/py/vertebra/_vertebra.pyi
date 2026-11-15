@@ -31,6 +31,8 @@ __all__ = [
     "AsyncGcpTokenCache",
     "BigQueryError",
     "BigQueryRowError",
+    "BrokerAttachClient",
+    "BrokerAttachServer",
     "BrokerEngineRegistry",
     "BrokerStats",
     "CloudSQLDialer",
@@ -48,6 +50,7 @@ __all__ = [
     "InternalError",
     "JWTGuard",
     "LeaseBroker",
+    "ReclaimedLease",
     "LeaseGrant",
     "LogSink",
     "NotFoundError",
@@ -820,6 +823,8 @@ class BrokerStats:
     """Number of overflow pool slots currently leased."""
     waiting_threads: int
     """Number of worker threads currently parked on the futex wait queue."""
+    quarantined: int
+    """Number of pool slots currently quarantined pending rollback/disposal."""
     total_acquired: int
     """Cumulative count of leases granted since broker initialization."""
     total_released: int
@@ -830,6 +835,49 @@ class BrokerStats:
     """Cumulative count of `acquire` calls that timed out waiting for a slot."""
     total_reclaimed: int
     """Cumulative count of leases reclaimed from crashed worker PIDs."""
+    total_quarantined: int
+    """Cumulative count of leases placed into quarantine."""
+    total_disposed: int
+    """Cumulative count of quarantined slots disposed back to free state."""
+
+@final
+class ReclaimedLease:
+    """Descriptor identifying a worker-reclaimed slot awaiting host disposal."""
+
+    slot_index: int
+    """Slot index within the shared-memory lease table."""
+    generation: int
+    """Monotonic generation of the reclaimed slot in `Quarantined` state."""
+    pool_id: int
+    """Partition identifier (`pool_id`) owning the reclaimed slot."""
+
+@final
+class BrokerAttachServer:
+    """Authenticated Unix domain socket server delivering the broker SHM FD via `SCM_RIGHTS`."""
+
+    def __new__(
+        cls,
+        socket_path: str,
+        secret: bytes | str,
+        shm_fd: int,
+        shm_size: int = 0,
+    ) -> Self: ...
+    def serve_one(self, timeout_ms: int = 5000) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    @property
+    def socket_path(self) -> str: ...
+
+@final
+class BrokerAttachClient:
+    """Client helper authenticating over UDS to receive the broker SHM FD."""
+
+    @staticmethod
+    def attach(
+        socket_path: str,
+        secret: bytes | str,
+        timeout_ms: int = 5000,
+    ) -> tuple[int, int]: ...
 
 @final
 class LeaseBroker:
@@ -871,6 +919,10 @@ class LeaseBroker:
     def from_env() -> LeaseBroker | None: ...
     def statement_cache(self) -> StatementCache | None: ...
     def active_leases_for_worker(self, worker_pid: int) -> list[tuple[int, int, int]]: ...
+    def quarantine(self, slot_index: int, generation: int) -> None: ...
+    def dispose_quarantined(self, slot_index: int, generation: int) -> None: ...
+    def quarantined_count(self) -> int: ...
+    def reclaim_worker_leases(self, worker_pid: int) -> list[ReclaimedLease]: ...
     def publish_channel(
         self,
         channel: Any,

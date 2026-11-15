@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use vertebra_core::broker::{BrokerError, ShmLeaseTable, ShmStatementCache};
+use vertebra_core::broker::{
+    BrokerError, PoolPartitionSpec, ShmLeaseTable, ShmStatementCache, stable_hash64,
+};
 use vertebra_core::shm::ShmRegion;
 
 #[test]
@@ -363,4 +365,69 @@ fn test_heartbeat_extends_lease_and_rejects_stale_generation() {
         table.heartbeat(g.slot_index, g.generation),
         Err(BrokerError::StaleGeneration)
     );
+}
+
+#[test]
+fn test_quarantine_blocks_slot_until_dispose_and_reclaim_worker_leases_isolates_pids() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
+
+    let h = stable_hash64(b"pool-quarantine-test");
+    let part = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: h,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    let dead_grant = table.try_acquire_in(part, 7001, 0, h).unwrap().unwrap();
+    let live_grant = table.try_acquire(7002, 0, 0).unwrap();
+
+    // Quarantining the dead_grant slot keeps partition capacity (1) reserved.
+    table
+        .quarantine(dead_grant.slot_index, dead_grant.generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 1);
+    assert_eq!(table.stats().quarantined, 1);
+    assert_eq!(table.stats().total_quarantined, 1);
+    assert!(table.try_acquire_in(part, 7003, 0, h).unwrap().is_none());
+
+    // Wrong generation fails with GenerationMismatch; disposing Free/Leased fails with InvalidState.
+    assert_eq!(
+        table.quarantine(live_grant.slot_index, live_grant.generation + 9),
+        Err(BrokerError::GenerationMismatch)
+    );
+    assert_eq!(
+        table.dispose_quarantined(live_grant.slot_index, live_grant.generation),
+        Err(BrokerError::InvalidState)
+    );
+
+    // Explicit dispose returns the slot to Free so a new acquisition succeeds.
+    table
+        .dispose_quarantined(dead_grant.slot_index, dead_grant.generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 0);
+    assert_eq!(table.stats().total_disposed, 1);
+    let reused = table.try_acquire_in(part, 7003, 0, h).unwrap().unwrap();
+
+    // Reclaiming pid 7003 isolates its leased slots into Quarantined without touching live pid 7002.
+    let reclaimed = table.reclaim_worker_leases(7003);
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].slot_index, reused.slot_index);
+    assert_eq!(reclaimed[0].generation, reused.generation + 1);
+    assert_eq!(reclaimed[0].pool_id, part);
+    assert_eq!(table.quarantined_count(), 1);
+    assert!(table.try_acquire_in(part, 7004, 0, h).unwrap().is_none());
+
+    // Reclaim completes cleanup via dispose_quarantined after rollback, while live_grant stays intact.
+    table
+        .dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+        .unwrap();
+    assert_eq!(table.quarantined_count(), 0);
+    table
+        .release(live_grant.slot_index, live_grant.generation)
+        .unwrap();
+    assert_eq!(table.stats().active_leases, 0);
 }

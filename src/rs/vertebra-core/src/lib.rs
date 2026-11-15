@@ -5,6 +5,7 @@
 
 pub mod bridge;
 pub mod broker;
+pub mod broker_attach;
 pub mod buffer;
 pub mod channel;
 pub mod cleanup;
@@ -39,10 +40,11 @@ pub use bridge::{
     WriteRequest,
 };
 pub use broker::{
-    BrokerError, LeaseGrant, LeaseSlot, LeaseTableStats, MAX_POOL_PARTITIONS, PoolPartitionSpec,
-    ShmLeaseTable, ShmStatementCache, StatementCacheStats, StatementPlanEntry, StatementSlot,
-    stable_hash64,
+    BrokerError, LeaseGrant, LeaseSlot, LeaseState, LeaseTableStats, MAX_POOL_PARTITIONS,
+    PoolPartitionSpec, ReclaimedLease, ShmLeaseTable, ShmStatementCache, StatementCacheStats,
+    StatementPlanEntry, StatementSlot, stable_hash64,
 };
+pub use broker_attach::{AttachError, AttachServerHandle, BrokerAttachClient, BrokerAttachServer};
 pub use channel::{MpmcSlotView, SlotView};
 pub use layout::CacheLine;
 pub use notify::{AsyncCompletionQueue, Notifier, SyncCompletionQueue};

@@ -11,10 +11,14 @@ import time
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
-from vertebra._vertebra import StatementCache, stable_hash64
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+from vertebra._vertebra import BrokerEngineRegistry, StatementCache, stable_hash64
 from vertebra.extensions.alchemy.broker import AsyncSHMSessionBroker, SyncSHMSessionBroker
 from vertebra.extensions.broker import (
     DBRPC_HEADER_SIZE,
@@ -22,11 +26,15 @@ from vertebra.extensions.broker import (
     AsyncSHMBrokerTransport,
     BrokerAttachError,
     BrokerConfig,
+    BrokerEngineDiscovery,
+    BrokerMetrics,
     BrokerPlugin,
     DbRpcHeader,
     DbRpcOp,
     DbRpcRequest,
     DbRpcResponse,
+    LeaseQuarantinedError,
+    PoolMetrics,
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.broker import transport as broker_transport_mod
@@ -137,6 +145,7 @@ def test_broker_plugin_zpages_integration() -> None:
     cfg = BrokerConfig(pool_size=5, max_overflow=2)
     plugin = BrokerPlugin(config=cfg, zpages=zpages, otel_recorder=otel_recorder)
     plugin.on_app_init(SimpleNamespace(state={}, dependencies={}))
+    assert isinstance(plugin.transport, SyncSHMBrokerTransport)
 
     lease = plugin.transport.acquire(worker_id=1, bind_key="test")
     sample = plugin.snapshot_metrics()
@@ -192,7 +201,7 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects(dialect: str) -> None:
     sql = "SELECT * FROM events WHERE tenant_id = :tenant_id"
     compiled_count = 0
 
-    def _compile_for(target_dialect: str):
+    def _compile_for(target_dialect: str) -> Callable[[str], tuple[str, tuple[str, ...]]]:
         def _inner(_raw: str) -> tuple[str, tuple[str, ...]]:
             nonlocal compiled_count
             compiled_count += 1
@@ -273,7 +282,7 @@ def test_stable_hash64_cross_process_pythonhashseed_and_statement_cache() -> Non
 
     script = (
         "import json\n"
-        "from vertebra._vertebra import StatementCache, stable_hash64\n"
+        "from vertebra._vertebra import BrokerEngineRegistry, StatementCache, stable_hash64\n"
         f"sc, created = StatementCache.open_or_create_named({cache_name!r}, capacity=16)\n"
         "plan = sc.lookup(1, b'SELECT 42')\n"
         "out = {\n"
@@ -400,3 +409,104 @@ async def test_deterministic_bind_keys_partitions_and_clean_break(bind_key: str 
 
     with pytest.raises(ImportError):
         exec("from vertebra.extensions.broker import SyncInMemoryBrokerTransport", {})
+
+
+@pytest.mark.parametrize("secret", [b"top-secret-bytes-999", "top-secret-str-999"])
+def test_broker_config_repr_redacts_secrets(secret: bytes | str) -> None:
+    """Verify BrokerConfig.__repr__ omits attach_secret plaintext while preserving socket_path."""
+    cfg = BrokerConfig(socket_path="/tmp/test-vtb/broker.sock", attach_secret=secret)
+    rendered = repr(cfg)
+    assert "/tmp/test-vtb/broker.sock" in rendered
+    assert "[REDACTED]" in rendered
+    secret_text = secret.decode("utf-8") if isinstance(secret, bytes) else secret
+    assert secret_text not in rendered
+
+
+def test_session_pinning_transaction_lifecycle_and_two_partition_pool_metrics() -> None:
+    """Verify session/tx affinity pinning and two-partition PoolMetrics summing to BrokerMetrics."""
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=4, max_overflow=0, acquire_timeout_ms=50))
+    part_a = transport.register_partition("pool_a", pool_size=2, max_overflow=0)
+    part_b = transport.register_partition("pool_b", pool_size=2, max_overflow=0)
+
+    lease1 = transport.pin_session("sess-1", bind_key="pool_a", partition=part_a)
+    lease2 = transport.pin_session("sess-1", bind_key="pool_a", partition=part_a)
+    assert lease2 is lease1
+    assert lease1.pinned_session_id == "sess-1"
+
+    tx_lease = transport.begin_transaction("sess-1")
+    assert tx_lease.slot_index == lease1.slot_index
+    assert tx_lease.in_transaction is True
+
+    transport.acquire(worker_id=77001, bind_key="pool_b", partition=part_b)
+    mid_metrics = transport.metrics()
+    assert isinstance(mid_metrics, BrokerMetrics)
+    assert set(mid_metrics.pools) == {"pool_a", "pool_b"}
+    assert all(isinstance(p, PoolMetrics) for p in mid_metrics.pools.values())
+    assert sum(p.active_leases for p in mid_metrics.pools.values()) == mid_metrics.active_leases == 2
+    assert sum(p.total_acquired for p in mid_metrics.pools.values()) == mid_metrics.total_acquired == 2
+
+    reclaimed = transport.reclaim_worker_leases(77001)
+    assert len(reclaimed) == 1
+    q_metrics = transport.metrics()
+    assert sum(p.quarantined for p in q_metrics.pools.values()) == q_metrics.quarantined == 1
+    assert sum(p.total_quarantined for p in q_metrics.pools.values()) == q_metrics.total_quarantined == 1
+
+    transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+    assert transport.commit_transaction("sess-1") is True
+
+    end_metrics = transport.metrics()
+    assert sum(p.active_leases for p in end_metrics.pools.values()) == end_metrics.active_leases == 0
+    assert sum(p.quarantined for p in end_metrics.pools.values()) == end_metrics.quarantined == 0
+    assert sum(p.total_released for p in end_metrics.pools.values()) == end_metrics.total_released == 1
+    assert sum(p.total_disposed for p in end_metrics.pools.values()) == end_metrics.total_disposed == 1
+
+
+def test_stream_dbrpc_vtbarrow_and_cancel_quarantine() -> None:
+    """Verify stream_dbrpc delivers DuckDB VTBARROW results and quarantines leases on cancel."""
+    BrokerEngineDiscovery.register_installed()
+
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    pool_id = BrokerEngineRegistry.open_pool(6, ":memory:", 2)
+    try:
+        lease_arrow = transport.acquire(worker_id=78001)
+        arrow_stream = transport.stream_dbrpc(
+            6,
+            pool_id,
+            "SELECT i, 'row-' || i AS label FROM range(0, 150) AS t(i)",
+            lease=lease_arrow,
+            chunk_size=128,
+        )
+        chunks = list(arrow_stream)
+        assert len(chunks) == 1
+        assert chunks[0].arrow_shm is not None and chunks[0].arrow_shm.startswith("/vtb-dd-")
+        assert chunks[0].rowcount == 150
+        lease_arrow.release()
+
+        lease_cancel = transport.acquire(worker_id=78002)
+        cancel_called = []
+        stream = transport.stream_dbrpc(
+            6,
+            pool_id,
+            chunk_source=[
+                DbRpcResponse(request_id=1, status=0, rows=((1,),)),
+                DbRpcResponse(request_id=1, status=0, rows=((2,),)),
+            ],
+            lease=lease_cancel,
+            on_cancel=lambda: cancel_called.append(True),
+        )
+        first = next(stream)
+        assert first.rows == ((1,),)
+        stream.cancel()
+        assert cancel_called == [True]
+        assert lease_cancel.quarantined is True
+        assert transport.quarantined_count() == 1
+
+        with pytest.raises(LeaseQuarantinedError):
+            next(stream)
+        with pytest.raises(LeaseQuarantinedError):
+            transport.release(lease_cancel.lease_id)
+
+        transport.dispose_quarantined(lease_cancel)
+        assert transport.quarantined_count() == 0
+    finally:
+        BrokerEngineRegistry.close_pool(6, pool_id)

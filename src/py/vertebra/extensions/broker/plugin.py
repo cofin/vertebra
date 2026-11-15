@@ -67,6 +67,7 @@ class BrokerPlugin:
             total_reclaimed=m.total_reclaimed,
             statement_cache_hits=m.statement_cache_hits,
             statement_cache_misses=m.statement_cache_misses,
+            quarantined=m.quarantined,
         )
         if self.otel_recorder is not None:
             self.otel_recorder.record_sample(sample)
@@ -120,6 +121,7 @@ class BrokerPlugin:
                 "active_leases": m.active_leases,
                 "primary_in_use": m.primary_in_use,
                 "overflow_in_use": m.overflow_in_use,
+                "quarantined": m.quarantined,
                 "utilization_ratio": utilization,
                 "waiting_threads": m.waiting_threads,
                 "total_acquired": m.total_acquired,
@@ -127,6 +129,8 @@ class BrokerPlugin:
                 "total_expired": m.total_expired,
                 "total_timeouts": m.total_timeouts,
                 "total_reclaimed": m.total_reclaimed,
+                "total_quarantined": m.total_quarantined,
+                "total_disposed": m.total_disposed,
                 "statement_cache_hits": m.statement_cache_hits,
                 "statement_cache_misses": m.statement_cache_misses,
                 "statement_cache_evictions": m.statement_cache_evictions,
