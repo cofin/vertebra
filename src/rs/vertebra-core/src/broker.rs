@@ -26,7 +26,7 @@ pub const SLOT_STATE_PRIMARY: u32 = 1;
 pub const SLOT_STATE_OVERFLOW: u32 = 2;
 const SLOT_STATE_CLAIMING: u32 = 3;
 pub const SLOT_STATE_QUARANTINED: u32 = 4;
-const REAPER_CLAIM_SENTINEL: u32 = u32::MAX;
+const SLOT_STATE_RECLAIMING: u32 = 5;
 
 /// Public lifecycle state of a broker lease slot.
 #[repr(u32)]
@@ -502,6 +502,18 @@ impl ShmLeaseTable {
             hdr.wake_seq.0.store(0);
             hdr.rr_cursor.0.store(0, Ordering::Release);
             hdr.partition_count.0.store(0, Ordering::Release);
+        }
+
+        let slots_ptr = unsafe {
+            (header_ptr as *mut u8).add(std::mem::size_of::<ShmLeaseHeader>()) as *mut LeaseSlot
+        };
+        for idx in 0..((pool_size + max_overflow) as usize) {
+            // SAFETY: `slots_ptr` covers `pool_size + max_overflow` `LeaseSlot` entries within `req_size`.
+            unsafe {
+                (&*slots_ptr.add(idx))
+                    .partition_id
+                    .store(NO_PARTITION, Ordering::Relaxed);
+            }
         }
 
         Ok(())
@@ -1069,12 +1081,12 @@ impl ShmLeaseTable {
                 let (state, _) = unpack_state_pid(state_pid);
 
                 if state == SLOT_STATE_FREE {
-                    let claim_state_pid = pack_state_pid(SLOT_STATE_CLAIMING, worker_pid);
+                    let reclaiming_raw = pack_state_pid(SLOT_STATE_RECLAIMING, 0);
                     if slot
                         .state_and_pid
                         .compare_exchange(
                             state_pid,
-                            claim_state_pid,
+                            reclaiming_raw,
                             Ordering::AcqRel,
                             Ordering::Relaxed,
                         )
@@ -1106,18 +1118,14 @@ impl ShmLeaseTable {
                         slot.ttl_ns.store(ttl_ns, Ordering::Relaxed);
                         slot.last_heartbeat_ns.store(now, Ordering::Relaxed);
                         slot.bind_key_hash.store(bind_key_hash, Ordering::Relaxed);
-                        if slot
-                            .state_and_pid
+                        slot.state_and_pid
                             .compare_exchange(
-                                claim_state_pid,
+                                reclaiming_raw,
                                 pack_state_pid(target_state, worker_pid),
                                 Ordering::AcqRel,
                                 Ordering::Acquire,
                             )
-                            .is_err()
-                        {
-                            return Err(BrokerError::InvalidState);
-                        }
+                            .expect("exclusive SLOT_STATE_RECLAIMING ownership during acquire");
 
                         hdr.total_acquired.fetch_add(1, Ordering::Relaxed);
                         if let Some(entry) = part_entry {
@@ -1135,7 +1143,7 @@ impl ShmLeaseTable {
                         });
                     }
                     saw_claiming = true;
-                } else if state == SLOT_STATE_CLAIMING {
+                } else if state == SLOT_STATE_CLAIMING || state == SLOT_STATE_RECLAIMING {
                     saw_claiming = true;
                 }
             }
@@ -1270,7 +1278,7 @@ impl ShmLeaseTable {
             }
             let raw = slot.state_and_pid.load(Ordering::Acquire);
             let (state, pid) = unpack_state_pid(raw);
-            if state == SLOT_STATE_CLAIMING {
+            if state == SLOT_STATE_CLAIMING || state == SLOT_STATE_RECLAIMING {
                 std::hint::spin_loop();
                 continue;
             }
@@ -1331,43 +1339,73 @@ impl ShmLeaseTable {
         kind: ReleaseKind,
     ) -> Result<bool, BrokerError> {
         let (_, pid) = unpack_state_pid(raw);
-        let claim_pid = match kind {
-            ReleaseKind::Expire | ReleaseKind::Reclaim => REAPER_CLAIM_SENTINEL,
-            ReleaseKind::Release | ReleaseKind::DisposeQuarantined => pid,
+        let reclaiming_raw = pack_state_pid(SLOT_STATE_RECLAIMING, pid);
+        let active_claim_raw = match kind {
+            ReleaseKind::Release => {
+                let claim_raw = pack_state_pid(SLOT_STATE_CLAIMING, pid);
+                if slot
+                    .state_and_pid
+                    .compare_exchange(raw, claim_raw, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Ok(false);
+                }
+                if let Some(exp_gen) = expected_gen
+                    && slot.generation.load(Ordering::Acquire) != exp_gen
+                {
+                    let _ = slot.state_and_pid.compare_exchange(
+                        claim_raw,
+                        raw,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                    return Err(BrokerError::GenerationMismatch);
+                }
+                if slot
+                    .state_and_pid
+                    .compare_exchange(
+                        claim_raw,
+                        reclaiming_raw,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return Err(BrokerError::GenerationMismatch);
+                }
+                reclaiming_raw
+            }
+            ReleaseKind::Expire | ReleaseKind::Reclaim | ReleaseKind::DisposeQuarantined => {
+                if slot
+                    .state_and_pid
+                    .compare_exchange(raw, reclaiming_raw, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Ok(false);
+                }
+                if let Some(exp_gen) = expected_gen
+                    && slot.generation.load(Ordering::Acquire) != exp_gen
+                {
+                    let _ = slot.state_and_pid.compare_exchange(
+                        reclaiming_raw,
+                        raw,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                    return Err(BrokerError::GenerationMismatch);
+                }
+                reclaiming_raw
+            }
         };
-        let claim_state_pid = pack_state_pid(SLOT_STATE_CLAIMING, claim_pid);
-        if slot
-            .state_and_pid
-            .compare_exchange(raw, claim_state_pid, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(false);
-        }
-
-        if let Some(exp_gen) = expected_gen
-            && slot.generation.load(Ordering::Acquire) != exp_gen
-        {
-            let _ = slot.state_and_pid.compare_exchange(
-                claim_state_pid,
-                raw,
-                Ordering::Release,
-                Ordering::Relaxed,
-            );
-            return Err(BrokerError::GenerationMismatch);
-        }
 
         let part_id = slot.partition_id.load(Ordering::Acquire);
         if bump_generation {
             slot.generation.fetch_add(1, Ordering::AcqRel);
         }
         slot.partition_id.store(NO_PARTITION, Ordering::Relaxed);
-        if slot
-            .state_and_pid
-            .compare_exchange(claim_state_pid, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(BrokerError::GenerationMismatch);
-        }
+        slot.state_and_pid
+            .compare_exchange(active_claim_raw, 0, Ordering::AcqRel, Ordering::Acquire)
+            .expect("exclusive SLOT_STATE_RECLAIMING ownership during release");
 
         let hdr = self.header();
         hdr.active_leases.0.fetch_sub(1, Ordering::SeqCst);
@@ -1409,7 +1447,7 @@ impl ShmLeaseTable {
 
             let raw = slot.state_and_pid.load(Ordering::Acquire);
             let (state, _) = unpack_state_pid(raw);
-            if state == SLOT_STATE_CLAIMING {
+            if state == SLOT_STATE_CLAIMING || state == SLOT_STATE_RECLAIMING {
                 std::hint::spin_loop();
                 continue;
             }
@@ -1506,7 +1544,7 @@ impl ShmLeaseTable {
             }
             let raw = slot.state_and_pid.load(Ordering::Acquire);
             let (state, pid) = unpack_state_pid(raw);
-            if state == SLOT_STATE_CLAIMING {
+            if state == SLOT_STATE_CLAIMING || state == SLOT_STATE_RECLAIMING {
                 std::hint::spin_loop();
                 continue;
             }
@@ -1526,7 +1564,7 @@ impl ShmLeaseTable {
                     return Err(BrokerError::GenerationMismatch);
                 }
                 let (cur_state, _) = unpack_state_pid(slot.state_and_pid.load(Ordering::Acquire));
-                if cur_state == SLOT_STATE_CLAIMING {
+                if cur_state == SLOT_STATE_CLAIMING || cur_state == SLOT_STATE_RECLAIMING {
                     std::hint::spin_loop();
                     continue;
                 }
@@ -1541,6 +1579,19 @@ impl ShmLeaseTable {
                 );
                 return Err(BrokerError::GenerationMismatch);
             }
+            let reclaiming_raw = pack_state_pid(SLOT_STATE_RECLAIMING, pid);
+            if slot
+                .state_and_pid
+                .compare_exchange(
+                    claim_state_pid,
+                    reclaiming_raw,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return Err(BrokerError::GenerationMismatch);
+            }
             let hdr = self.header();
             hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
             let part_id = slot.partition_id.load(Ordering::Acquire);
@@ -1549,24 +1600,14 @@ impl ShmLeaseTable {
                 entry.quarantined.fetch_add(1, Ordering::AcqRel);
                 entry.total_quarantined.fetch_add(1, Ordering::Relaxed);
             }
-            if slot
-                .state_and_pid
+            slot.state_and_pid
                 .compare_exchange(
-                    claim_state_pid,
+                    reclaiming_raw,
                     pack_state_pid(SLOT_STATE_QUARANTINED, pid),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
-                .is_err()
-            {
-                if part_id < MAX_POOL_PARTITIONS as u32 {
-                    let entry = &hdr.partitions[part_id as usize];
-                    entry.quarantined.fetch_sub(1, Ordering::AcqRel);
-                    entry.total_quarantined.fetch_sub(1, Ordering::Relaxed);
-                }
-                hdr.total_quarantined.fetch_sub(1, Ordering::Relaxed);
-                return Err(BrokerError::GenerationMismatch);
-            }
+                .expect("exclusive SLOT_STATE_RECLAIMING ownership during quarantine");
             return Ok(());
         }
         if slot.generation.load(Ordering::Acquire) != generation {
@@ -1590,7 +1631,7 @@ impl ShmLeaseTable {
             }
             let raw = slot.state_and_pid.load(Ordering::Acquire);
             let (state, _) = unpack_state_pid(raw);
-            if state == SLOT_STATE_CLAIMING {
+            if state == SLOT_STATE_CLAIMING || state == SLOT_STATE_RECLAIMING {
                 std::hint::spin_loop();
                 continue;
             }
@@ -1654,7 +1695,7 @@ impl ShmLeaseTable {
         let total = self.total_capacity();
         let hdr = self.header();
         let mut reclaimed = Vec::new();
-        let reaper_raw = pack_state_pid(SLOT_STATE_CLAIMING, REAPER_CLAIM_SENTINEL);
+        let reaper_raw = pack_state_pid(SLOT_STATE_RECLAIMING, worker_pid);
 
         for idx in 0..total {
             let slot = self.slot(idx);
@@ -1692,12 +1733,16 @@ impl ShmLeaseTable {
                     };
                     hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
                     hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                    let _ = slot.state_and_pid.compare_exchange(
-                        reaper_raw,
-                        pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
+                    slot.state_and_pid
+                        .compare_exchange(
+                            reaper_raw,
+                            pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .expect(
+                            "exclusive SLOT_STATE_RECLAIMING ownership in reclaim_worker_leases",
+                        );
                     reclaimed.push(ReclaimedLease {
                         slot_index: idx,
                         generation: next_gen,
@@ -1726,12 +1771,16 @@ impl ShmLeaseTable {
                     };
                     hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
                     hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                    let _ = slot.state_and_pid.compare_exchange(
-                        reaper_raw,
-                        pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
+                    slot.state_and_pid
+                        .compare_exchange(
+                            reaper_raw,
+                            pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .expect(
+                            "exclusive SLOT_STATE_RECLAIMING ownership in reclaim_worker_leases",
+                        );
                     reclaimed.push(ReclaimedLease {
                         slot_index: idx,
                         generation: next_gen,
@@ -1749,7 +1798,7 @@ impl ShmLeaseTable {
         let total = self.total_capacity();
         let hdr = self.header();
         let mut reclaimed = 0u32;
-        let reaper_raw = pack_state_pid(SLOT_STATE_CLAIMING, REAPER_CLAIM_SENTINEL);
+        let reaper_raw = pack_state_pid(SLOT_STATE_RECLAIMING, worker_pid);
 
         for idx in 0..total {
             let slot = self.slot(idx);
@@ -1777,20 +1826,17 @@ impl ShmLeaseTable {
                     let part_id = slot.partition_id.load(Ordering::Acquire);
                     slot.generation.fetch_add(1, Ordering::AcqRel);
                     slot.partition_id.store(NO_PARTITION, Ordering::Relaxed);
-                    if slot
-                        .state_and_pid
+                    slot.state_and_pid
                         .compare_exchange(reaper_raw, 0, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        hdr.active_leases.0.fetch_sub(1, Ordering::SeqCst);
-                        if part_id < MAX_POOL_PARTITIONS as u32 {
-                            let entry = &hdr.partitions[part_id as usize];
-                            entry.active_leases.fetch_sub(1, Ordering::SeqCst);
-                            entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                        }
-                        hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                        reclaimed += 1;
+                        .expect("exclusive SLOT_STATE_RECLAIMING ownership in reclaim_worker");
+                    hdr.active_leases.0.fetch_sub(1, Ordering::SeqCst);
+                    if part_id < MAX_POOL_PARTITIONS as u32 {
+                        let entry = &hdr.partitions[part_id as usize];
+                        entry.active_leases.fetch_sub(1, Ordering::SeqCst);
+                        entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
                     }
+                    hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                    reclaimed += 1;
                     break;
                 }
                 if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
@@ -2992,22 +3038,35 @@ mod tests {
 
     #[test]
     fn test_reclaim_worker_steals_stalled_claiming_slot_without_underflow() {
-        let req_size = ShmLeaseTable::required_size(1, 0);
+        let req_size = ShmLeaseTable::required_size(2, 0);
         let region = ShmRegion::create(req_size).unwrap();
-        let table = Arc::new(ShmLeaseTable::init_in_region(region, 1, 0).unwrap());
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 2, 0).unwrap());
+
+        assert_eq!(
+            table.slot(0).partition_id.load(Ordering::Acquire),
+            NO_PARTITION
+        );
+        assert_eq!(
+            table.slot(1).partition_id.load(Ordering::Acquire),
+            NO_PARTITION
+        );
 
         let key = stable_hash64(b"stalled-claim");
         let part = table
             .register_partition(PoolPartitionSpec {
                 pool_key_hash: key,
-                pool_size: 1,
+                pool_size: 2,
                 max_overflow: 0,
             })
             .unwrap();
-        let grant = table.try_acquire_in(part, 6161, 0, key).unwrap().unwrap();
+
+        let grant = table
+            .try_acquire_in(part, u32::MAX, 0, key)
+            .unwrap()
+            .unwrap();
         let slot = table.slot(grant.slot_index);
-        let worker_raw = pack_state_pid(SLOT_STATE_PRIMARY, 6161);
-        let claiming_raw = pack_state_pid(SLOT_STATE_CLAIMING, 6161);
+        let worker_raw = pack_state_pid(SLOT_STATE_PRIMARY, u32::MAX);
+        let claiming_raw = pack_state_pid(SLOT_STATE_CLAIMING, u32::MAX);
         assert!(
             slot.state_and_pid
                 .compare_exchange(
@@ -3019,25 +3078,128 @@ mod tests {
                 .is_ok()
         );
 
-        let reclaimed = table.reclaim_worker_leases(6161);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let t_reclaim = Arc::clone(&table);
+        let b_reclaim = Arc::clone(&barrier);
+        let handle = std::thread::spawn(move || {
+            b_reclaim.wait();
+            t_reclaim.reclaim_worker_leases(u32::MAX)
+        });
+
+        barrier.wait();
+        while slot.state_and_pid.load(Ordering::Acquire) == claiming_raw {
+            std::thread::yield_now();
+        }
+        assert!(
+            slot.state_and_pid
+                .compare_exchange(
+                    claiming_raw,
+                    pack_state_pid(SLOT_STATE_RECLAIMING, u32::MAX),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        );
+
+        let reclaimed = handle.join().unwrap();
         assert_eq!(reclaimed.len(), 1);
         assert_eq!(reclaimed[0].slot_index, grant.slot_index);
         assert_eq!(reclaimed[0].generation, grant.generation + 1);
-        assert_eq!(
-            table.release_claimed_slot(
-                slot,
-                worker_raw,
-                Some(grant.generation),
-                false,
-                &table.header().total_released,
-                ReleaseKind::Release,
-            ),
-            Ok(false)
+        assert_eq!(reclaimed[0].pool_id, Some(part));
+        assert_eq!(table.partition_stats(key).unwrap().quarantined, 1);
+
+        let g2 = table.try_acquire_in(part, 6262, 0, key).unwrap().unwrap();
+        let slot2 = table.slot(g2.slot_index);
+        let worker2_raw = pack_state_pid(SLOT_STATE_PRIMARY, 6262);
+        let claiming2_raw = pack_state_pid(SLOT_STATE_CLAIMING, 6262);
+        assert!(
+            slot2
+                .state_and_pid
+                .compare_exchange(
+                    worker2_raw,
+                    claiming2_raw,
+                    Ordering::AcqRel,
+                    Ordering::Acquire
+                )
+                .is_ok()
         );
+        assert_eq!(table.reclaim_worker(6262), 1);
+
         table
             .dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
             .unwrap();
         assert_eq!(table.stats().active_leases, 0);
-        assert_eq!(table.partition_stats(key).unwrap().active_leases, 0);
+        assert_eq!(table.stats().quarantined, 0);
+        let end_stats = table.partition_stats(key).unwrap();
+        assert_eq!(end_stats.active_leases, 0);
+        assert_eq!(end_stats.quarantined, 0);
+        assert_eq!(end_stats.total_disposed, 1);
+        assert_eq!(end_stats.total_reclaimed, 2);
+    }
+
+    #[test]
+    fn test_concurrent_reclaim_vs_heartbeat_release_and_quarantine_preserves_invariants() {
+        let req_size = ShmLeaseTable::required_size(4, 2);
+        let region = ShmRegion::create(req_size).unwrap();
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 4, 2).unwrap());
+
+        let key = stable_hash64(b"concurrent-reclaim-stress");
+        let part = table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: key,
+                pool_size: 4,
+                max_overflow: 2,
+            })
+            .unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|s| {
+            let t1 = Arc::clone(&table);
+            let b1 = Arc::clone(&barrier);
+            let s1 = Arc::clone(&stop);
+            let worker = s.spawn(move || {
+                b1.wait();
+                for iter in 0..400u64 {
+                    if let Ok(Some(g)) = t1.try_acquire_in(part, 8888, 0, key) {
+                        let _ = t1.heartbeat(g.slot_index, g.generation);
+                        if iter % 3 == 0 {
+                            if t1.quarantine(g.slot_index, g.generation).is_ok() {
+                                let _ = t1.dispose_quarantined(g.slot_index, g.generation);
+                            }
+                        } else {
+                            let _ = t1.release(g.slot_index, g.generation);
+                        }
+                    }
+                }
+                s1.store(true, Ordering::Release);
+            });
+
+            let t2 = Arc::clone(&table);
+            let b2 = Arc::clone(&barrier);
+            let s2 = Arc::clone(&stop);
+            let reaper = s.spawn(move || {
+                b2.wait();
+                while !s2.load(Ordering::Acquire) {
+                    for r in t2.reclaim_worker_leases(8888) {
+                        let _ = t2.dispose_quarantined(r.slot_index, r.generation);
+                    }
+                    std::thread::yield_now();
+                }
+            });
+
+            barrier.wait();
+            worker.join().unwrap();
+            reaper.join().unwrap();
+        });
+
+        for r in table.reclaim_worker_leases(8888) {
+            let _ = table.dispose_quarantined(r.slot_index, r.generation);
+        }
+        assert_eq!(table.stats().active_leases, 0);
+        assert_eq!(table.stats().quarantined, 0);
+        let pstats = table.partition_stats(key).unwrap();
+        assert_eq!(pstats.active_leases, 0);
+        assert_eq!(pstats.quarantined, 0);
     }
 }

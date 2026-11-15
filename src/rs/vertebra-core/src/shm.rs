@@ -1810,6 +1810,82 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn open_named_waits_for_magic_publication_and_times_out_when_uninitialized() {
+        let page = os_page_size().unwrap();
+        let ready_name = format!("/vtb-wait-magic-{}", std::process::id());
+        let cname_ready = CString::new(ready_name.as_str()).unwrap();
+        let total_len = page * 2;
+        // SAFETY: `cname_ready` is a valid POSIX SHM name under `/vtb-*`.
+        let fd = unsafe {
+            let _ = libc::shm_unlink(cname_ready.as_ptr());
+            let fd = libc::shm_open(
+                cname_ready.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            );
+            assert!(fd >= 0);
+            assert_eq!(libc::ftruncate(fd, total_len as libc::off_t), 0);
+            fd
+        };
+        // SAFETY: `fd` holds `total_len` zeroed bytes.
+        let writer_region = unsafe { map_fd_region(fd, total_len) }.unwrap();
+        let publisher = std::thread::spawn(move || {
+            let mut reg = writer_region;
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            // SAFETY: exclusive test writer before `SHM_OWNER_MAGIC` publication.
+            unsafe {
+                reg.as_mut_slice()[0..4].copy_from_slice(b"OKAY");
+                let owner_page = &mut *(reg.as_ptr().add(page) as *mut ShmOwnerPage);
+                owner_page
+                    .header
+                    .init_state
+                    .store(SHM_INIT_READY, Ordering::Relaxed);
+                owner_page
+                    .header
+                    .owner_pid
+                    .store(std::process::id(), Ordering::Relaxed);
+                owner_page
+                    .header
+                    .owner_generation
+                    .store(1, Ordering::Relaxed);
+                owner_page.user_len = page as u64;
+                owner_page.magic.store(SHM_OWNER_MAGIC, Ordering::Release);
+            }
+            reg
+        });
+
+        let wait_start = std::time::Instant::now();
+        let opened = ShmRegion::open_named(&ready_name, page).unwrap();
+        assert!(wait_start.elapsed() >= std::time::Duration::from_millis(20));
+        // SAFETY: writer published `b"OKAY"` before releasing `SHM_OWNER_MAGIC`.
+        unsafe {
+            assert_eq!(&opened.as_slice()[0..4], b"OKAY");
+        }
+        drop(opened);
+        let _ = shm_unlink_named(&ready_name);
+        drop(publisher.join().unwrap());
+
+        let timeout_name = format!("/vtb-magic-to-{}", std::process::id());
+        let cname_to = CString::new(timeout_name.as_str()).unwrap();
+        // SAFETY: creating raw zeroed SHM segment without `SHM_OWNER_MAGIC`.
+        unsafe {
+            let _ = libc::shm_unlink(cname_to.as_ptr());
+            let fd_to = libc::shm_open(
+                cname_to.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            );
+            assert!(fd_to >= 0);
+            assert_eq!(libc::ftruncate(fd_to, total_len as libc::off_t), 0);
+            libc::close(fd_to);
+        }
+        let err = ShmRegion::open_named(&timeout_name, page).unwrap_err();
+        let _ = shm_unlink_named(&timeout_name);
+        assert!(matches!(err, ShmError::InitTimeout));
+    }
+
+    #[cfg(unix)]
     proptest! {
         #[test]
         fn long_names_are_rejected(len in 256usize..512) {

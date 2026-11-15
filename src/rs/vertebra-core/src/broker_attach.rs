@@ -10,8 +10,10 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, test))]
+use std::sync::atomic::AtomicUsize;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::thread::JoinHandle;
@@ -776,8 +778,10 @@ impl BrokerAttachServer {
     #[cfg(unix)]
     pub fn start_background(self) -> Result<AttachServerHandle, AttachError> {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
         let accepted_count = Arc::new(AtomicUsize::new(0));
         let stop_worker = Arc::clone(&stop_flag);
+        #[cfg(test)]
         let accepted_worker = Arc::clone(&accepted_count);
         let socket_path = self.socket_path.clone();
         self.listener.set_nonblocking(true)?;
@@ -796,6 +800,7 @@ impl BrokerAttachServer {
                         continue;
                     }
                     if let Ok((stream, _)) = self.listener.accept() {
+                        #[cfg(test)]
                         accepted_worker.fetch_add(1, Ordering::Release);
                         let _ = handle_client_connection(
                             stream,
@@ -811,6 +816,7 @@ impl BrokerAttachServer {
         Ok(AttachServerHandle {
             socket_path,
             stop_flag,
+            #[cfg(test)]
             accepted_count,
             thread: Mutex::new(Some(handle)),
         })
@@ -828,8 +834,7 @@ pub struct AttachServerHandle {
     socket_path: PathBuf,
     #[cfg(unix)]
     stop_flag: Arc<AtomicBool>,
-    #[cfg(unix)]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(unix, test))]
     accepted_count: Arc<AtomicUsize>,
     #[cfg(unix)]
     thread: Mutex<Option<JoinHandle<()>>>,
