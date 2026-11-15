@@ -514,10 +514,6 @@ def test_stream_dbrpc_vtbarrow_and_cancel_quarantine() -> None:
 
 def test_execute_dbrpc_and_rollback_raise_and_quarantine_on_nonzero_status(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify non-zero DBRPC statuses raise BrokerAttachError before altering transaction state."""
-    from types import SimpleNamespace
-
-    from vertebra.extensions.broker.dbrpc import encode_dbrpc_response
-
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     lease = transport.acquire(worker_id=79001)
     transport.begin_transaction(lease)

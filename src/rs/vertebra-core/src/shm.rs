@@ -325,15 +325,18 @@ impl ShmRegion {
                     region.len = req_user_len;
                     region.owner_header_offset = Some(trailer_off);
                 } else {
-                    region.len = req_user_len;
+                    drop(region);
+                    if start.elapsed() >= deadline {
+                        return Err(ShmError::InitTimeout);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
                 }
             }
             return Ok(region);
         }
     }
 
-    /// Create a named shared memory region (Unix only) without pre-unlinking a live segment.
-    #[cfg(unix)]
     /// Create a named shared-memory region on Unix, running `init` before publishing readiness.
     #[cfg(unix)]
     pub(crate) fn create_named_with(

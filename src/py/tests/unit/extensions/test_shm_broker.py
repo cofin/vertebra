@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 from vertebra._vertebra import (
     ArrowCursor,
@@ -25,6 +26,7 @@ from vertebra._vertebra import (
     LeaseBroker,
     PartitionStats,
 )
+from vertebra.cli import _build_cli
 from vertebra.extensions.broker import (
     DBRPC_VERSION,
     BrokerAuthenticationError,
@@ -563,12 +565,6 @@ def test_vtb_broker_cli_help_loads_lazily_without_eager_engine_imports() -> None
 
 def test_vtb_broker_status_reads_non_default_capacity_segment() -> None:
     """Verify `vtb broker status --shm-name ... --json` works for custom SHM broker capacities."""
-    from click.testing import CliRunner
-
-    from vertebra._vertebra import LeaseBroker
-    from vertebra.cli import _build_cli
-    from vertebra.utils.serializers import decode_json
-
     shm_name = f"/vtb-cli-st-{os.getpid()}"
     broker = LeaseBroker.create_named(shm_name, pool_size=3, max_overflow=1, stmt_capacity=32)
     try:

@@ -11,7 +11,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::thread::JoinHandle;
@@ -409,7 +409,8 @@ fn recv_ack_and_fd(stream: &UnixStream) -> Result<(OwnedFd, usize), AttachError>
     // SAFETY: Reading control header fields populated by `recvmsg`.
     let ctrl_base = unsafe { cmsg_space.buf.as_ptr() } as usize;
     // SAFETY: `buf` is 128 bytes long; `msg_controllen` is clamped to buffer capacity.
-    let ctrl_len = unsafe { msg_controllen.min(cmsg_space.buf.len()) };
+    #[allow(clippy::unnecessary_cast)]
+    let ctrl_len = unsafe { (msg_controllen as usize).min(cmsg_space.buf.len()) };
     let ctrl_end = ctrl_base + ctrl_len;
     // SAFETY: `CMSG_LEN(0)` evaluates the aligned header size with zero data bytes.
     let hdr_data_offset = unsafe { libc::CMSG_LEN(0) } as usize;
@@ -775,7 +776,9 @@ impl BrokerAttachServer {
     #[cfg(unix)]
     pub fn start_background(self) -> Result<AttachServerHandle, AttachError> {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let accepted_count = Arc::new(AtomicUsize::new(0));
         let stop_worker = Arc::clone(&stop_flag);
+        let accepted_worker = Arc::clone(&accepted_count);
         let socket_path = self.socket_path.clone();
         self.listener.set_nonblocking(true)?;
         let handle = std::thread::Builder::new()
@@ -793,6 +796,7 @@ impl BrokerAttachServer {
                         continue;
                     }
                     if let Ok((stream, _)) = self.listener.accept() {
+                        accepted_worker.fetch_add(1, Ordering::Release);
                         let _ = handle_client_connection(
                             stream,
                             &self.secret,
@@ -807,6 +811,7 @@ impl BrokerAttachServer {
         Ok(AttachServerHandle {
             socket_path,
             stop_flag,
+            accepted_count,
             thread: Mutex::new(Some(handle)),
         })
     }
@@ -823,6 +828,9 @@ pub struct AttachServerHandle {
     socket_path: PathBuf,
     #[cfg(unix)]
     stop_flag: Arc<AtomicBool>,
+    #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    accepted_count: Arc<AtomicUsize>,
     #[cfg(unix)]
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -1066,7 +1074,14 @@ mod tests {
 
         let handle = server.start_background().expect("start background");
         let stalled_client = UnixStream::connect(&sock).expect("connect stalled client");
-        std::thread::sleep(Duration::from_millis(20));
+        let accept_wait = Instant::now();
+        while handle.accepted_count.load(Ordering::Acquire) == 0 {
+            assert!(
+                accept_wait.elapsed() < Duration::from_secs(1),
+                "background server did not accept stalled client within 1s"
+            );
+            std::thread::yield_now();
+        }
 
         let start = Instant::now();
         handle.stop();
