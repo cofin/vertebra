@@ -121,11 +121,13 @@ class BrokerPlugin:
                 or pool_m.total_quarantined > 0
                 or pool_m.total_disposed > 0
             )
+            if has_pool_activity:
+                return pool_m
             has_other_pool_activity = any(
                 name != self.name and (counts.active_leases > 0 or counts.quarantined > 0 or counts.total_acquired > 0)
                 for name, counts in m.pools.items()
             )
-            if has_pool_activity or has_other_pool_activity:
+            if has_other_pool_activity:
                 return pool_m
         return m
 

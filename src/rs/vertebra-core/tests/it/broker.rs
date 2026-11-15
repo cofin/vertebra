@@ -533,3 +533,80 @@ fn test_shm_lease_table_direct_quarantine_partition_stats() {
     assert_eq!(after.quarantined, 0);
     assert_eq!(after.total_disposed, 1);
 }
+
+#[test]
+fn test_shm_lease_table_aba_cross_partition_release_and_partition_wakeup() {
+    let req_size = ShmLeaseTable::required_size(2, 0);
+    let region = ShmRegion::create(req_size).unwrap();
+    let table = Arc::new(ShmLeaseTable::init_in_region(region, 2, 0).unwrap());
+
+    let key_a = 0x1111_2222_3333_4444;
+    let key_b = 0x5555_6666_7777_8888;
+    let part_a = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_a,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+    let part_b = table
+        .register_partition(PoolPartitionSpec {
+            pool_key_hash: key_b,
+            pool_size: 1,
+            max_overflow: 0,
+        })
+        .unwrap();
+
+    // Acquire and release slot in partition A, then same worker PID acquires slot in partition B.
+    let g_a1 = table
+        .try_acquire_in(part_a, 7777, 0, key_a)
+        .unwrap()
+        .unwrap();
+    table.release(g_a1.slot_index, g_a1.generation).unwrap();
+
+    let g_b = table
+        .try_acquire_in(part_b, 7777, 0, key_b)
+        .unwrap()
+        .unwrap();
+    if g_b.slot_index == g_a1.slot_index {
+        // Stale release with old generation must fail without touching partition B's active count.
+        assert_eq!(
+            table.release(g_a1.slot_index, g_a1.generation),
+            Err(BrokerError::GenerationMismatch)
+        );
+        assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 1);
+    }
+    table.release(g_b.slot_index, g_b.generation).unwrap();
+    assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 0);
+
+    // Partition A waiter wakes promptly while Partition B also holds/releases leases.
+    let held_a = table
+        .acquire_in(part_a, 8001, 0, Duration::from_millis(50), key_a)
+        .unwrap();
+    let held_b = table
+        .acquire_in(part_b, 8002, 0, Duration::from_millis(50), key_b)
+        .unwrap();
+
+    let t_wait = Arc::clone(&table);
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let ready_worker = Arc::clone(&ready);
+    let waiter = std::thread::spawn(move || {
+        ready_worker.wait();
+        t_wait.acquire_in(part_a, 8003, 0, Duration::from_secs(2), key_a)
+    });
+
+    ready.wait();
+    let spin_start = Instant::now();
+    while table.stats().waiting_threads == 0 {
+        assert!(spin_start.elapsed() < Duration::from_secs(1));
+        std::thread::yield_now();
+    }
+    table.release(held_b.slot_index, held_b.generation).unwrap();
+    table.release(held_a.slot_index, held_a.generation).unwrap();
+
+    let acquired = waiter.join().unwrap().unwrap();
+    assert_eq!(acquired.worker_pid, 8003);
+    table
+        .release(acquired.slot_index, acquired.generation)
+        .unwrap();
+}

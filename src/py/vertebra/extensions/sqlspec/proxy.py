@@ -44,7 +44,6 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
-from vertebra.utils.type_guards import is_coroutine_callable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -540,8 +539,8 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                 return dict_rows
 
             if schema_type is not None and schema_type is not dict:
-                return self._convert_rows(self._rows_to_dicts(resp.rows, resp.columns), schema_type)
-            return self._rows_to_dicts(resp.rows, resp.columns)
+                return self._convert_rows(self._select_inline_dicts(resp.rows, resp.columns), schema_type)
+            return self._select_inline_dicts(resp.rows, resp.columns)
 
     @overload
     def select_one(
@@ -848,6 +847,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         with self._operation_lease():
             caller_in_tx = self._in_tx
             started_tx = False
+            started_op_tx = False
             try:
                 if single_transaction and not caller_in_tx:
                     self._send_tx_rpc("begin", next_in_tx=True)
@@ -862,6 +862,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                         op_res = self._execute_stack_operation_sync(operation)
                     except Exception as exc:
                         if started_op_tx:
+                            started_op_tx = False
                             self._send_tx_rpc("rollback", next_in_tx=False)
                         stack_error = StackExecutionError(
                             index,
@@ -878,6 +879,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                             continue
                         raise stack_error from exc
                     if started_op_tx:
+                        started_op_tx = False
                         self._send_tx_rpc("commit", next_in_tx=False)
                     results.append(StackResult(result=op_res))
 
@@ -885,26 +887,12 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     started_tx = False
                     self._send_tx_rpc("commit", next_in_tx=False)
             except BaseException:
+                if started_op_tx:
+                    self._send_tx_rpc("rollback", next_in_tx=False)
                 if started_tx:
                     self._send_tx_rpc("rollback", next_in_tx=False)
                 raise
         return tuple(results)
-
-    def _send_tx_rpc(self, op: str, *, next_in_tx: bool) -> None:
-        resp = self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op=op,
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
-        self._raise_for_error(resp)
-        self._in_tx = next_in_tx
-        self._transaction_depth = 1 if next_in_tx else 0
 
     def select_to_arrow(
         self,
@@ -921,7 +909,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         """Execute a SELECT statement and return a zero-copy ArrowResult from SharedArrowBuffer."""
         if native_only and import_optional("pyarrow") is None:
             msg = f"Adapter '{type(self).__name__}' requires pyarrow for native Arrow results when native_only=True."
-            raise ImproperConfigurationError(msg)
+            raise SQLSpecImproperConfigurationError(msg)
         effective_cfg = statement_config or self.statement_config
         with self._operation_lease():
             compiled_sql, compiled_params, prepared = self._compile_statement(
@@ -946,7 +934,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             self._raise_for_error(resp)
             if native_only and not resp.is_arrow_shm:
                 msg = f"Adapter '{type(self).__name__}' did not return native SHM Arrow results when native_only=True."
-                raise ImproperConfigurationError(msg)
+                raise SQLSpecImproperConfigurationError(msg)
             if resp.is_arrow_shm:
                 try:
                     table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
@@ -1063,22 +1051,27 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         return [compiled_params]
 
     @staticmethod
+    def _select_inline_dicts(rows: list[Any], columns: Sequence[str]) -> list[dict[str, Any]]:
+        """Return inline dict rows directly when already normalized, converting list rows only when needed."""
+        if rows and isinstance(rows[0], dict):
+            return cast("list[dict[str, Any]]", rows)
+        return ProxySyncDriver._rows_to_dicts(rows, columns)
+
+    @staticmethod
     def _hydrate_arrow_table(table: Any, rpc_columns: Sequence[str], schema_type: type[Any]) -> list[Any]:
-        """Hydrate schema_type from Arrow tables via C-level msgspec validation without intermediate struct skipping."""
-        list_type = cast("Any", list)[schema_type]
-        if hasattr(table, "to_pylist"):
-            dict_rows = table.to_pylist()
-            return cast("list[Any]", msgspec.convert(dict_rows, type=list_type)) if dict_rows else []
+        """Convert Arrow or SharedArrowTable rows and validate them into `schema_type` via msgspec."""
         raw_rows = getattr(table, "_rows", None)
         if raw_rows is not None:
             return ProxySyncDriver._convert_rows(
-                ProxySyncDriver._rows_to_dicts(raw_rows, rpc_columns),
+                ProxySyncDriver._select_inline_dicts(raw_rows, rpc_columns),
                 schema_type,
             )
+        if hasattr(table, "to_pylist"):
+            return ProxySyncDriver._convert_rows(table.to_pylist(), schema_type)
         return ProxySyncDriver._convert_rows(list(table), schema_type)
 
     def _unpack_select_typed(self, resp: BrokerRpcResponse, schema_type: type[Any]) -> list[Any]:
-        """Read spilled Arrow SHM and hydrate directly into schema_type without dict churn."""
+        """Read spilled Arrow SHM and hydrate into `schema_type`."""
         try:
             table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
             return self._hydrate_arrow_table(table, resp.columns, schema_type)
@@ -1172,7 +1165,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         if return_format != "table":
             if not hasattr(table, "to_batches"):
                 msg = f"Arrow return_format={return_format!r} requires pyarrow"
-                raise ImproperConfigurationError(msg)
+                raise SQLSpecImproperConfigurationError(msg)
             batches = table.to_batches(max_chunksize=batch_size)
             if return_format == "batch":
                 if batches:
@@ -1217,6 +1210,22 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             self.last_response = resp
         return resp
 
+    def _send_tx_rpc(self, op: str, *, next_in_tx: bool) -> None:
+        resp = self._send_rpc(
+            BrokerRpcRequest(
+                request_id=self._next_request_id(),
+                op=op,
+                pool_name=self.pool_name,
+                worker_pid=self.worker_pid,
+                slot_idx=self.slot_idx,
+                generation=self.generation,
+                in_tx=self._in_tx,
+            )
+        )
+        self._raise_for_error(resp)
+        self._in_tx = next_in_tx
+        self._transaction_depth = 1 if next_in_tx else 0
+
     def _release_arrow_shm(self, shm_name: str) -> None:
         """Send arrow_release RPC and unlink the shared-memory Arrow segment."""
         if not shm_name:
@@ -1251,7 +1260,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         if callable(acquire_lease_fn):
             return acquire_lease_fn(pool_name=self.pool_name, worker_pid=self.worker_pid)
         if isinstance(target, SyncBrokerLeaseSource):
-            return target.acquire(pool_name=self.pool_name, worker_pid=self.worker_pid)
+            return target.acquire(bind_key=self.pool_name, worker_id=self.worker_pid)
         return None
 
     def _quarantine_broker_lease(self, lease: Any) -> None:
@@ -1824,10 +1833,10 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
 
             if schema_type is not None and schema_type is not dict:
                 return ProxySyncDriver._convert_rows(
-                    ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns),
+                    ProxySyncDriver._select_inline_dicts(resp.rows, resp.columns),
                     schema_type,
                 )
-            return ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
+            return ProxySyncDriver._select_inline_dicts(resp.rows, resp.columns)
 
     @overload
     async def select_one(
@@ -2138,6 +2147,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         async with self._operation_lease():
             caller_in_tx = self._in_tx
             started_tx = False
+            started_op_tx = False
             try:
                 if single_transaction and not caller_in_tx:
                     await self._send_tx_rpc_async("begin", next_in_tx=True)
@@ -2152,6 +2162,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                         op_res = await self._execute_stack_operation_async(operation)
                     except Exception as exc:
                         if started_op_tx:
+                            started_op_tx = False
                             await self._send_tx_rpc_async("rollback", next_in_tx=False)
                         stack_error = StackExecutionError(
                             index,
@@ -2168,6 +2179,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                             continue
                         raise stack_error from exc
                     if started_op_tx:
+                        started_op_tx = False
                         await self._send_tx_rpc_async("commit", next_in_tx=False)
                     results.append(StackResult(result=op_res))
 
@@ -2175,26 +2187,12 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     started_tx = False
                     await self._send_tx_rpc_async("commit", next_in_tx=False)
             except BaseException:
+                if started_op_tx:
+                    await self._send_tx_rpc_async("rollback", next_in_tx=False)
                 if started_tx:
                     await self._send_tx_rpc_async("rollback", next_in_tx=False)
                 raise
         return tuple(results)
-
-    async def _send_tx_rpc_async(self, op: str, *, next_in_tx: bool) -> None:
-        resp = await self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op=op,
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=self.slot_idx,
-                generation=self.generation,
-                in_tx=self._in_tx,
-            )
-        )
-        ProxySyncDriver._raise_for_error(resp)
-        self._in_tx = next_in_tx
-        self._transaction_depth = 1 if next_in_tx else 0
 
     async def select_to_arrow(
         self,
@@ -2211,7 +2209,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         """Execute a SELECT statement asynchronously and return a zero-copy ArrowResult."""
         if native_only and import_optional("pyarrow") is None:
             msg = f"Adapter '{type(self).__name__}' requires pyarrow for native Arrow results when native_only=True."
-            raise ImproperConfigurationError(msg)
+            raise SQLSpecImproperConfigurationError(msg)
         effective_cfg = statement_config or self.statement_config
         async with self._operation_lease():
             compiled_sql, compiled_params, prepared = self._compile_statement(
@@ -2236,7 +2234,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             ProxySyncDriver._raise_for_error(resp)
             if native_only and not resp.is_arrow_shm:
                 msg = f"Adapter '{type(self).__name__}' did not return native SHM Arrow results when native_only=True."
-                raise ImproperConfigurationError(msg)
+                raise SQLSpecImproperConfigurationError(msg)
             if resp.is_arrow_shm:
                 try:
                     table = await SyncPool.default().submit_async(
@@ -2446,6 +2444,22 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             self.last_response = resp
         return resp
 
+    async def _send_tx_rpc_async(self, op: str, *, next_in_tx: bool) -> None:
+        resp = await self._send_rpc(
+            BrokerRpcRequest(
+                request_id=self._next_request_id(),
+                op=op,
+                pool_name=self.pool_name,
+                worker_pid=self.worker_pid,
+                slot_idx=self.slot_idx,
+                generation=self.generation,
+                in_tx=self._in_tx,
+            )
+        )
+        ProxySyncDriver._raise_for_error(resp)
+        self._in_tx = next_in_tx
+        self._transaction_depth = 1 if next_in_tx else 0
+
     async def _release_arrow_shm(self, shm_name: str) -> None:
         """Send arrow_release RPC asynchronously and unlink the shared-memory Arrow segment."""
         if not shm_name:
@@ -2480,22 +2494,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                 bind_key=self.pool_name,
                 worker_id=self.worker_pid,
             )
-        acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
-        if callable(acquire_lease_fn):
-            if is_coroutine_callable(acquire_lease_fn):
-                return await acquire_lease_fn(pool_name=self.pool_name, worker_pid=self.worker_pid)
-            res = await SyncPool.default().submit_async(
-                acquire_lease_fn, pool_name=self.pool_name, worker_pid=self.worker_pid
-            )
-            return await res if isinstance(res, Awaitable) else res
-        acquire_fn = getattr(target, "acquire", None)
-        if callable(acquire_fn):
-            if is_coroutine_callable(acquire_fn):
-                return await acquire_fn(pool_name=self.pool_name, worker_pid=self.worker_pid)
-            res = await SyncPool.default().submit_async(
-                acquire_fn, pool_name=self.pool_name, worker_pid=self.worker_pid
-            )
-            return await res if isinstance(res, Awaitable) else res
+        acquire_kwargs = (
+            (getattr(self.broker, "acquire_lease", None), {"pool_name": self.pool_name, "worker_pid": self.worker_pid}),
+            (getattr(target, "acquire", None), {"bind_key": self.pool_name, "worker_id": self.worker_pid}),
+        )
+        for fn, call_kwargs in acquire_kwargs:
+            if callable(fn):
+                return await _BaseSQLSpecProvider._invoke_async_or_offload(fn, **call_kwargs)
         return None
 
     async def _quarantine_broker_lease_async(self, lease: Any) -> None:
@@ -2508,9 +2513,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
             try:
-                res = quarantine_fn(lease)
-                if isinstance(res, Awaitable):
-                    await res
+                await _BaseSQLSpecProvider._invoke_async_or_offload(quarantine_fn, lease)
             except RuntimeError as exc:
                 if "invalid lease state for operation" not in str(exc):
                     raise
@@ -2526,24 +2529,20 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         if lease is None or getattr(lease, "quarantined", False):
             return
         if hasattr(lease, "release") and callable(lease.release):
-            res = lease.release()
-            if isinstance(res, Awaitable):
-                await res
+            await _BaseSQLSpecProvider._invoke_async_or_offload(lease.release)
             return
         resolved_slot = self.slot_idx if slot_idx is None else slot_idx
         resolved_gen = self.generation if generation is None else generation
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            res = release_lease_fn(resolved_slot, resolved_gen, in_tx=False)
-            if isinstance(res, Awaitable):
-                await res
+            await _BaseSQLSpecProvider._invoke_async_or_offload(
+                release_lease_fn, resolved_slot, resolved_gen, in_tx=False
+            )
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            res = release_fn(f"{resolved_slot}:{resolved_gen}")
-            if isinstance(res, Awaitable):
-                await res
+            await _BaseSQLSpecProvider._invoke_async_or_offload(release_fn, f"{resolved_slot}:{resolved_gen}")
 
 
 class ProxySyncSessionContext:

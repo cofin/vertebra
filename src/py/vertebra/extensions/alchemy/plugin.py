@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from vertebra.extensions.alchemy.cache import (
     AsyncCacheManager,
@@ -185,7 +186,8 @@ def _prepare_engine_config(
     is_async: bool = False,
 ) -> None:
     """Configure EngineConfig defaults, broker leasing connection args, and BrokerPool/AsyncBrokerPool."""
-    is_memory = ":memory:" in connection_string or "memory://" in connection_string
+    decoded_conn = unquote(connection_string)
+    is_memory = ":memory:" in decoded_conn or "mode=memory" in decoded_conn or "memory://" in decoded_conn
     existing = kwargs.get("engine_config")
     if isinstance(existing, engine_config_cls):
         cfg = existing

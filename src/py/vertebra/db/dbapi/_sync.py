@@ -6,6 +6,7 @@ import contextlib
 import sqlite3
 from typing import TYPE_CHECKING, Any, Final
 
+from vertebra._vertebra import classify_sql_statement
 from vertebra.db.registry import DatabaseRegistry
 
 if TYPE_CHECKING:
@@ -81,66 +82,18 @@ class NotSupportedError(DatabaseError):
 Binary = bytes
 
 
-_NON_ROW_RETURNING_WITHOUT_RETURNING: Final[frozenset[str]] = frozenset({"INSERT", "UPDATE", "DELETE", "MERGE"})
-_READ_ONLY_LEADING_KEYWORDS: Final[frozenset[str]] = frozenset(
-    {"SELECT", "WITH", "VALUES", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE"}
-)
-
-
-def _first_sql_keyword(operation: str) -> str | None:
-    """Return the first top-level SQL keyword after whitespace, comments, and punctuation."""
-    length = len(operation)
-    idx = 0
-    while idx < length:
-        ch = operation[idx]
-        if ch.isspace():
-            idx += 1
-            continue
-        if ch == "-" and idx + 1 < length and operation[idx + 1] == "-":
-            newline = operation.find("\n", idx + 2)
-            idx = length if newline < 0 else newline + 1
-            continue
-        if ch == "/" and idx + 1 < length and operation[idx + 1] == "*":
-            depth = 1
-            idx += 2
-            while idx < length and depth > 0:
-                if operation[idx] == "/" and idx + 1 < length and operation[idx + 1] == "*":
-                    depth += 1
-                    idx += 2
-                elif operation[idx] == "*" and idx + 1 < length and operation[idx + 1] == "/":
-                    depth -= 1
-                    idx += 2
-                else:
-                    idx += 1
-            continue
-        if ch.isalpha() or ch == "_":
-            start = idx
-            idx += 1
-            while idx < length and (operation[idx].isalnum() or operation[idx] == "_"):
-                idx += 1
-            if start > 0 and operation[start - 1] in {":", "@", "$"}:
-                continue
-            return operation[start:idx].upper()
-        if ch in {"(", ";"}:
-            idx += 1
-            continue
-        return None
-    return None
-
-
 def is_insert_sql(operation: str) -> bool:
     """Return True when the leading SQL verb in ``operation`` is INSERT."""
-    return _first_sql_keyword(operation) == "INSERT"
+    return classify_sql_statement(operation)[1]
 
 
 def is_read_only_sql(operation: str) -> bool:
     """Return True when the leading SQL verb is read-only query/introspection."""
-    return _first_sql_keyword(operation) in _READ_ONLY_LEADING_KEYWORDS
+    return classify_sql_statement(operation)[2]
 
 
 def coerce_dbapi_rows_and_desc(
     raw_res: Any,
-    fallback_cols: Sequence[str] = (),
 ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
     """Normalize driver query results into PEP 249 tuple rows and column descriptions."""
     if isinstance(raw_res, tuple) and len(raw_res) >= 2:
@@ -155,89 +108,12 @@ def coerce_dbapi_rows_and_desc(
             else None
         )
         return [tuple(r) if not isinstance(r, tuple) else r for r in raw_rows], desc
-    _ = fallback_cols
     return [], None
 
 
 def is_row_returning_sql(operation: str) -> bool:
     """Return True when ``operation`` starts with a query keyword or has a standalone ``RETURNING`` clause."""
-    first = _first_sql_keyword(operation)
-    if first in _ROW_RETURNING_LEADING_KEYWORDS:
-        return True
-    if first in _NON_ROW_RETURNING_WITHOUT_RETURNING and "returning" not in operation.lower():
-        return False
-    length = len(operation)
-    idx = 0
-    first_keyword: str | None = None
-    while idx < length:
-        ch = operation[idx]
-        if ch.isspace():
-            idx += 1
-            continue
-        if ch == "-" and idx + 1 < length and operation[idx + 1] == "-":
-            newline = operation.find("\n", idx + 2)
-            idx = length if newline < 0 else newline + 1
-            continue
-        if ch == "/" and idx + 1 < length and operation[idx + 1] == "*":
-            depth = 1
-            idx += 2
-            while idx < length and depth > 0:
-                if operation[idx] == "/" and idx + 1 < length and operation[idx + 1] == "*":
-                    depth += 1
-                    idx += 2
-                elif operation[idx] == "*" and idx + 1 < length and operation[idx + 1] == "/":
-                    depth -= 1
-                    idx += 2
-                else:
-                    idx += 1
-            continue
-        if ch == "$":
-            tag = _parse_dollar_tag(operation, idx)
-            if tag is not None:
-                end_block = operation.find(tag, idx + len(tag))
-                idx = length if end_block < 0 else end_block + len(tag)
-                continue
-        if ch in {"'", '"', "`"}:
-            quote = ch
-            idx += 1
-            while idx < length:
-                cur = operation[idx]
-                if cur == quote:
-                    if idx + 1 < length and operation[idx + 1] == quote:
-                        idx += 2
-                        continue
-                    idx += 1
-                    break
-                if cur == "\\" and quote == "'":
-                    idx += 2
-                    continue
-                idx += 1
-            continue
-        if ch.isalpha() or ch == "_":
-            start = idx
-            idx += 1
-            while idx < length and (operation[idx].isalnum() or operation[idx] == "_"):
-                idx += 1
-            if start > 0 and operation[start - 1] in {":", "@", "$"}:
-                continue
-            token = operation[start:idx].upper()
-            prev_sig_idx = start - 1
-            while prev_sig_idx >= 0 and operation[prev_sig_idx].isspace():
-                prev_sig_idx -= 1
-            is_qualified = prev_sig_idx >= 0 and operation[prev_sig_idx] == "."
-            next_sig_idx = idx
-            while next_sig_idx < length and operation[next_sig_idx].isspace():
-                next_sig_idx += 1
-            is_assignment_target = next_sig_idx < length and operation[next_sig_idx] == "="
-            if first_keyword is None:
-                first_keyword = token
-                if first_keyword in _ROW_RETURNING_LEADING_KEYWORDS:
-                    return True
-            elif token == "RETURNING" and not is_qualified and not is_assignment_target:
-                return True
-            continue
-        idx += 1
-    return False
+    return classify_sql_statement(operation)[0]
 
 
 class SyncDBAPICursor:
@@ -477,7 +353,7 @@ class SyncDBAPIConnection:
 
         if self._driver is None:
             has_shared_key = self._config is not None and self._config.pool_key() is not None
-            has_custom_broker = broker is not None and broker is not DatabaseRegistry.default_broker()
+            has_custom_broker = broker is not None and broker is not DatabaseRegistry._DEFAULT_BROKER
             if (
                 dialect_name == "sqlite"
                 and not lease_managed
@@ -487,7 +363,12 @@ class SyncDBAPIConnection:
                 db_target = str(getattr(self._config, "database", None) or ":memory:")
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
-                self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False, autocommit=False)
+                self._sqlite_conn = sqlite3.connect(
+                    db_target,
+                    check_same_thread=False,
+                    autocommit=False,
+                    uri=db_target.startswith("file:"),
+                )
                 self._owns_driver = True
             elif self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
@@ -556,38 +437,30 @@ class SyncDBAPIConnection:
             return rows, desc
 
         self.begin()
+        rows = []
+        desc = None
         if self._driver is not None:
             should_autocommit = self._autocommit and (self._in_transaction or not is_read_only_sql(sql))
             if hasattr(self._driver, "execute_with_description"):
                 raw_res = self._driver.execute_with_description(sql, parameters)
                 rows, desc = coerce_dbapi_rows_and_desc(raw_res)
-                if rows or desc is not None:
-                    if should_autocommit:
-                        self.commit()
-                    return rows, desc
-                return [], None
-            if hasattr(self._driver, "execute_tuples"):
+            elif hasattr(self._driver, "execute_tuples"):
                 rows = self._driver.execute_tuples(sql, parameters)
                 desc = (
                     tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(rows[0])))
                     if rows
                     else None
                 )
-                if should_autocommit:
-                    self.commit()
-                return rows, desc
-            if hasattr(self._driver, "select"):
+            elif hasattr(self._driver, "select"):
                 select_params = parameters if parameters else None
                 dict_rows = self._driver.select(sql, select_params)
-                if not dict_rows:
-                    return [], None
-                keys = tuple(dict_rows[0].keys())
-                desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
-                rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
-                if should_autocommit:
-                    self.commit()
-                return rows, desc
-        return [], None
+                if dict_rows:
+                    keys = tuple(dict_rows[0].keys())
+                    desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
+                    rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
+            if should_autocommit:
+                self.commit()
+        return rows, desc
 
     def execute_dml(
         self,
@@ -757,40 +630,9 @@ def connect(url: str = "sqlite+vtb:///:memory:", **kwargs: Any) -> SyncDBAPIConn
 
 _AUTOCOMMIT_ONLY_DIALECTS: frozenset[str] = frozenset({"bigquery", "googlesql", "spangres", "spanner"})
 
-_ROW_RETURNING_LEADING_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "SELECT",
-        "WITH",
-        "PRAGMA",
-        "SHOW",
-        "DESCRIBE",
-        "DESC",
-        "EXPLAIN",
-        "VALUES",
-    }
-)
-
 
 def _config_dialect(config: Any) -> str:
     """Resolve the lowercase dialect identifier exposed by a database configuration object."""
     cls_dialect = getattr(type(config), "dialect", "")
     raw = getattr(config, "dialect", cls_dialect)
     return str(raw).lower()
-
-
-def _parse_dollar_tag(sql: str, start: int) -> str | None:
-    """Parse a PostgreSQL dollar-quote delimiter starting at ``$`` or return None."""
-    length = len(sql)
-    idx = start + 1
-    if idx < length and sql[idx] == "$":
-        return "$$"
-    while idx < length:
-        ch = sql[idx]
-        if ch == "$":
-            return sql[start : idx + 1] if idx > start + 1 else None
-        if not (ch.isalnum() or ch == "_"):
-            return None
-        if idx == start + 1 and ch.isdigit():
-            return None
-        idx += 1
-    return None

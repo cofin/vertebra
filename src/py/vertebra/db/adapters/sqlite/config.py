@@ -68,7 +68,7 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
     def is_in_memory(self) -> bool:
         """Return True if the target database is in-memory."""
         raw = str(self.path)
-        return raw == ":memory:" or "mode=memory" in raw
+        return raw == ":memory:" or raw.startswith("file::memory:") or "mode=memory" in raw
 
     def initialization_pragmas(self) -> list[str]:
         """Return the list of PRAGMA statements executed upon connection initialization."""
@@ -115,5 +115,5 @@ class SQLiteConfig(BaseDatabaseConfig, frozen=True, gc=False):
         raw_path = str(self.path or self.database or ":memory:")
         if self.is_in_memory and "cache=shared" not in raw_path:
             return None
-        norm_path = raw_path if (raw_path == ":memory:" or "mode=memory" in raw_path) else os.path.abspath(raw_path)
+        norm_path = raw_path if self.is_in_memory else os.path.abspath(raw_path)
         return ("sqlite", norm_path, bool(self.wal_mode))

@@ -62,6 +62,18 @@ class _StubTerminalReporter:
         ("src/py/tests/integration/db/test_postgres_replication_live.py::test_live_pgoutput_toast_and_bytea", True),
         ("src/py/tests/integration/db/test_postgres_native_features_live.py::test_live_pgvector_roundtrip", True),
         ("src/py/tests/integration/db/test_postgres_command_deadlines.py::test_live_client_deadline[sync]", True),
+        (
+            "src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py::test_docker_multiprocess_pool_sharing[postgres]",
+            True,
+        ),
+        (
+            "src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py::test_docker_multiprocess_pool_sharing[mysql]",
+            False,
+        ),
+        (
+            "src/py/tests/integration/extensions/test_multiprocess_pool_sharing.py::test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction",
+            False,
+        ),
         ("src/py/tests/unit/db/test_postgres_driver.py::test_example", False),
         ("src/py/tests/integration/db/test_oracle_native.py::test_oracle_26ai_oson", False),
     ],

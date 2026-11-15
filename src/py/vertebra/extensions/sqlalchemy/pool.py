@@ -9,6 +9,7 @@ import threading
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, ClassVar, cast
+from urllib.parse import unquote
 
 from sqlalchemy import event as sa_event
 from sqlalchemy.pool import ConnectionPoolEntry, Pool
@@ -123,7 +124,10 @@ class BrokerPool(Pool):
                 if formatted:
                     partition_key = formatted
         if not partition_key and resolved_url:
-            is_memory = ":memory:" in resolved_url or resolved_url.rstrip("/").endswith("memory:")
+            decoded_url = unquote(resolved_url)
+            is_memory = (
+                ":memory:" in decoded_url or "mode=memory" in decoded_url or decoded_url.rstrip("/").endswith("memory:")
+            )
             partition_key = f"{resolved_url}#pool-{id(self)}" if is_memory else resolved_url
         if not partition_key:
             raise ImproperConfigurationError("BrokerPool requires a config, url, or explicit pool_key")
@@ -357,27 +361,23 @@ class BrokerPool(Pool):
             raise ImproperConfigurationError(
                 f"Configured broker {type(self._broker).__name__!r} does not implement acquire()"
             )
+        kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
+        if self._acquire_timeout_ms is not None:
+            kwargs["timeout_ms"] = self._acquire_timeout_ms
         if isinstance(target, AsyncSHMBrokerTransport):
-            kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
-            if self._acquire_timeout_ms is not None:
-                kwargs["timeout_ms"] = self._acquire_timeout_ms
             if self._is_asyncio or in_greenlet():
                 return self._await_if_needed(target.acquire(**kwargs))
             return target.acquire_sync(**kwargs)
         if isinstance(target, SyncSHMBrokerTransport):
-            kwargs = {"bind_key": self._partition_key, "worker_id": worker}
-            if self._acquire_timeout_ms is not None:
-                kwargs["timeout_ms"] = self._acquire_timeout_ms
             if self._is_asyncio and in_greenlet():
                 return await_only(SyncPool.default().submit_async(target.acquire, **kwargs))
             return target.acquire(**kwargs)
+        lease_kwargs = {"bind_key": self._partition_key, "worker_id": worker}
         if is_coroutine_callable(acquire_fn):
-            return self._await_if_needed(acquire_fn(pool_name=self._partition_key, worker_pid=worker))
+            return self._await_if_needed(acquire_fn(**lease_kwargs))
         if self._is_asyncio and in_greenlet():
-            return await_only(
-                SyncPool.default().submit_async(acquire_fn, pool_name=self._partition_key, worker_pid=worker)
-            )
-        return self._await_if_needed(acquire_fn(pool_name=self._partition_key, worker_pid=worker))
+            return await_only(SyncPool.default().submit_async(acquire_fn, **lease_kwargs))
+        return self._await_if_needed(acquire_fn(**lease_kwargs))
 
     def _release_lease(self, lease: Any) -> None:
         if not in_greenlet():
@@ -417,11 +417,12 @@ class BrokerPool(Pool):
         if not callable(quarantine_fn):
             return
 
+        is_async_quarantine = is_coroutine_callable(quarantine_fn)
         if not in_greenlet():
-            if allow_sync_fallback and is_coroutine_callable(quarantine_fn):
+            if allow_sync_fallback and is_async_quarantine:
                 self._run_coro_sync(quarantine_fn(lease))
                 return
-            if is_coroutine_callable(quarantine_fn):
+            if is_async_quarantine:
                 msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
                 raise ImproperConfigurationError(msg)
 

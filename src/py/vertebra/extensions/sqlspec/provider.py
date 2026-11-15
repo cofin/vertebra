@@ -409,10 +409,6 @@ class _BaseSQLSpecProvider:
         with self._lock:
             return self._tx_states.get((slot_idx, generation), False)
 
-    def _tx_state_for(self, key: tuple[int, int], default: bool) -> bool:
-        with self._lock:
-            return self._tx_states.get(key, default)
-
     def get_leased_session(self, slot_idx: int, generation: int) -> Any | None:
         """Return the pinned upstream session for (slot_idx, generation) if leased."""
         with self._lock:
@@ -431,6 +427,10 @@ class _BaseSQLSpecProvider:
                 return next(iter(self._upstreams.values()))
         return None
 
+    def _tx_state_for(self, key: tuple[int, int], default: bool) -> bool:
+        with self._lock:
+            return self._tx_states.get(key, default)
+
     @staticmethod
     def _format_error_message(exc: BaseException) -> str:
         msg = str(exc)
@@ -447,7 +447,8 @@ class _BaseSQLSpecProvider:
         key = (request.slot_idx, request.generation)
         try:
             if op == "arrow_release":
-                SharedArrowBuffer.unlink(request.arrow_shm_name)
+                if request.arrow_shm_name:
+                    SharedArrowBuffer.unlink(request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
@@ -627,7 +628,8 @@ class _BaseSQLSpecProvider:
         key = (request.slot_idx, request.generation)
         try:
             if op == "arrow_release":
-                SharedArrowBuffer.unlink(request.arrow_shm_name)
+                if request.arrow_shm_name:
+                    await SyncPool.default().submit_async(SharedArrowBuffer.unlink, request.arrow_shm_name)
                 with self._lock:
                     self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
@@ -888,17 +890,27 @@ class _BaseSQLSpecProvider:
             self._next_generation += 1
             return request.slot_idx, gen
 
+    @staticmethod
+    async def _invoke_async_or_offload(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a coroutine callable directly or offload a synchronous callable onto SyncPool."""
+        if is_coroutine_callable(fn):
+            return await fn(*args, **kwargs)
+        res = await SyncPool.default().submit_async(fn, *args, **kwargs)
+        return await res if isinstance(res, Awaitable) else res
+
     def _acquire_from_broker_sync(self, pool_name: str, worker_pid: int) -> Any:
         """Acquire a lease from self.broker synchronously via typed lease source contracts."""
         pid = worker_pid if worker_pid > 0 else os.getpid()
         target = getattr(self.broker, "transport", self.broker)
         if isinstance(target, SyncSHMBrokerTransport):
             return target.acquire(bind_key=pool_name, worker_id=pid)
+        if isinstance(target, AsyncSHMBrokerTransport):
+            return target.acquire_sync(bind_key=pool_name, worker_id=pid)
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
             return acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
         if isinstance(target, SyncBrokerLeaseSource):
-            return target.acquire(pool_name=pool_name, worker_pid=pid)
+            return target.acquire(bind_key=pool_name, worker_id=pid)
         raise ImproperConfigurationError("Configured broker does not support synchronous lease acquisition")
 
     async def _acquire_from_broker_async(self, pool_name: str, worker_pid: int) -> Any:
@@ -909,18 +921,13 @@ class _BaseSQLSpecProvider:
             return await target.acquire(bind_key=pool_name, worker_id=pid)
         if isinstance(target, SyncSHMBrokerTransport):
             return await SyncPool.default().submit_async(target.acquire, bind_key=pool_name, worker_id=pid)
-        acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
-        if callable(acquire_lease_fn):
-            if is_coroutine_callable(acquire_lease_fn):
-                return await acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
-            res = await SyncPool.default().submit_async(acquire_lease_fn, pool_name=pool_name, worker_pid=pid)
-            return await res if isinstance(res, Awaitable) else res
-        acquire_fn = getattr(target, "acquire", None)
-        if callable(acquire_fn):
-            if is_coroutine_callable(acquire_fn):
-                return await acquire_fn(pool_name=pool_name, worker_pid=pid)
-            res = await SyncPool.default().submit_async(acquire_fn, pool_name=pool_name, worker_pid=pid)
-            return await res if isinstance(res, Awaitable) else res
+        candidates: tuple[tuple[Any, dict[str, Any]], ...] = (
+            (getattr(self.broker, "acquire_lease", None), {"pool_name": pool_name, "worker_pid": pid}),
+            (getattr(target, "acquire", None), {"bind_key": pool_name, "worker_id": pid}),
+        )
+        for fn, call_kwargs in candidates:
+            if callable(fn):
+                return await self._invoke_async_or_offload(fn, **call_kwargs)
         raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
 
     def _extract_lease_coords(self, lease: Any) -> tuple[int, int]:
@@ -1003,6 +1010,10 @@ class _BaseSQLSpecProvider:
             return
         target = getattr(self.broker, "transport", self.broker)
         lease_arg = lease if lease is not None else key
+        quarantine_sync_fn = getattr(self.broker, "quarantine_sync", None) or getattr(target, "quarantine_sync", None)
+        if callable(quarantine_sync_fn):
+            quarantine_sync_fn(lease_arg)
+            return
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
             quarantine_fn(lease_arg)
@@ -1015,9 +1026,7 @@ class _BaseSQLSpecProvider:
         lease_arg = lease if lease is not None else key
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
-            res = quarantine_fn(lease_arg)
-            if isinstance(res, Awaitable):
-                await res
+            await self._invoke_async_or_offload(quarantine_fn, lease_arg)
 
     def _release_session_sync(self, key: tuple[int, int], in_tx: bool) -> None:
         """Release a pinned session synchronously, quarantining on rollback or context-exit error."""
@@ -1045,7 +1054,7 @@ class _BaseSQLSpecProvider:
             try:
                 self._quarantine_broker_lease(lease, key)
             except BaseException as quarantine_exc:
-                if isinstance(cleanup_exc, Exception):
+                if isinstance(cleanup_exc, Exception) and isinstance(quarantine_exc, Exception):
                     msg = (
                         f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
                         f"after cleanup error: {cleanup_exc}"
@@ -1079,7 +1088,7 @@ class _BaseSQLSpecProvider:
                     if hasattr(ctx_mgr, "__aexit__"):
                         await ctx_mgr.__aexit__(None, None, None)
                     elif hasattr(ctx_mgr, "__exit__"):
-                        ctx_mgr.__exit__(None, None, None)
+                        await SyncPool.default().submit_async(ctx_mgr.__exit__, None, None, None)
                 except BaseException as exit_exc:
                     if cleanup_exc is None:
                         cleanup_exc = exit_exc
@@ -1088,7 +1097,7 @@ class _BaseSQLSpecProvider:
             try:
                 await self._quarantine_broker_lease_async(lease, key)
             except BaseException as quarantine_exc:
-                if isinstance(cleanup_exc, Exception):
+                if isinstance(cleanup_exc, Exception) and isinstance(quarantine_exc, Exception):
                     msg = (
                         f"quarantine failed ({type(quarantine_exc).__name__}: {quarantine_exc}) "
                         f"after cleanup error: {cleanup_exc}"
@@ -1104,7 +1113,11 @@ class _BaseSQLSpecProvider:
 
     def _release_broker_lease(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker."""
-        if hasattr(lease, "release") and callable(lease.release):
+        lease_release_sync = getattr(lease, "release_sync", None)
+        if callable(lease_release_sync):
+            lease_release_sync()
+            return
+        if hasattr(lease, "release") and callable(lease.release) and not is_coroutine_callable(lease.release):
             lease.release()
             return
         if self.broker is None:
@@ -1114,6 +1127,10 @@ class _BaseSQLSpecProvider:
             release_lease_fn(key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
+        release_sync_fn = getattr(self.broker, "release_sync", None) or getattr(target, "release_sync", None)
+        if callable(release_sync_fn):
+            release_sync_fn(f"{key[0]}:{key[1]}")
+            return
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
             release_fn(f"{key[0]}:{key[1]}")
@@ -1121,24 +1138,18 @@ class _BaseSQLSpecProvider:
     async def _release_broker_lease_async(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker asynchronously."""
         if hasattr(lease, "release") and callable(lease.release):
-            res = lease.release()
-            if isinstance(res, Awaitable):
-                await res
+            await self._invoke_async_or_offload(lease.release)
             return
         if self.broker is None:
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            res = release_lease_fn(key[0], key[1], in_tx=in_tx)
-            if isinstance(res, Awaitable):
-                await res
+            await self._invoke_async_or_offload(release_lease_fn, key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            res = release_fn(f"{key[0]}:{key[1]}")
-            if isinstance(res, Awaitable):
-                await res
+            await self._invoke_async_or_offload(release_fn, f"{key[0]}:{key[1]}")
 
     def _exec_begin_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Begin a transaction on session synchronously and mark key as in-transaction."""
@@ -1478,6 +1489,41 @@ class _BaseSQLSpecProvider:
             self._active_arrow_buffers.add(shm_name)
         return shm_name, byte_len, list(table.column_names), int(table.num_rows)
 
+    def _should_spill_select(self, rows: list[dict[str, Any] | list[Any]]) -> bool:
+        """Return True when result rows exceed row-count or byte thresholds for SHM Arrow spill."""
+        row_count = len(rows)
+        if row_count >= self.arrow_threshold_rows:
+            return True
+        if row_count > 0 and self.arrow_threshold_bytes > 0:
+            encoded = encode_msgpack_bytes(rows)
+            return len(encoded) >= self.arrow_threshold_bytes
+        return False
+
+    def _build_spilled_select_response(
+        self,
+        request: BrokerRpcRequest,
+        in_tx: bool,
+        columns: list[str],
+        row_count: int,
+        shm_name: str,
+        byte_len: int,
+    ) -> BrokerRpcResponse:
+        """Record an active SHM segment and return its Arrow SHM BrokerRpcResponse."""
+        with self._lock:
+            self._active_arrow_buffers.add(shm_name)
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=True,
+            slot_idx=request.slot_idx,
+            generation=request.generation,
+            columns=columns,
+            rowcount=row_count,
+            in_tx=in_tx,
+            is_arrow_shm=True,
+            arrow_shm_name=shm_name,
+            arrow_byte_len=byte_len,
+        )
+
     def _build_select_response(
         self,
         request: BrokerRpcRequest,
@@ -1488,29 +1534,9 @@ class _BaseSQLSpecProvider:
         """Construct a BrokerRpcResponse for select, spilling to SharedArrowBuffer when thresholds are met."""
         in_tx = self._tx_state_for(key, request.in_tx)
         row_count = len(rows)
-        should_spill = row_count >= self.arrow_threshold_rows
-        if not should_spill and row_count > 0 and self.arrow_threshold_bytes > 0:
-            encoded = encode_msgpack_bytes(rows)
-            if len(encoded) >= self.arrow_threshold_bytes:
-                should_spill = True
-
-        if should_spill:
+        if rows and self._should_spill_select(rows):
             shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
-            with self._lock:
-                self._active_arrow_buffers.add(shm_name)
-            return BrokerRpcResponse(
-                request_id=request.request_id,
-                ok=True,
-                slot_idx=request.slot_idx,
-                generation=request.generation,
-                columns=columns,
-                rowcount=row_count,
-                in_tx=in_tx,
-                is_arrow_shm=True,
-                arrow_shm_name=shm_name,
-                arrow_byte_len=byte_len,
-            )
-
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
@@ -1529,8 +1555,24 @@ class _BaseSQLSpecProvider:
         rows: list[dict[str, Any] | list[Any]],
         columns: list[str],
     ) -> BrokerRpcResponse:
-        """Async wrapper offloading select response msgpack sizing and SharedArrowBuffer writes off the loop."""
-        return await SyncPool.default().submit_async(self._build_select_response, request, key, rows, columns)
+        """Construct a select BrokerRpcResponse inline when small, offloading only SHM Arrow spills."""
+        in_tx = self._tx_state_for(key, request.in_tx)
+        row_count = len(rows)
+        if rows and self._should_spill_select(rows):
+            shm_name, byte_len = await SyncPool.default().submit_async(
+                SharedArrowBuffer.write_table, rows, columns=columns
+            )
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
+        return BrokerRpcResponse(
+            request_id=request.request_id,
+            ok=True,
+            slot_idx=request.slot_idx,
+            generation=request.generation,
+            rows=rows,
+            columns=columns,
+            rowcount=row_count,
+            in_tx=in_tx,
+        )
 
     def _invoke_sync(self, session: Any, method_names: tuple[str, ...], sql: str, params: Any) -> Any:
         """Invoke the first available method in method_names on session synchronously."""

@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any, ClassVar, Self
 from uuid import UUID
 
-from vertebra._vertebra import LeaseBroker
+from vertebra._vertebra import LeaseBroker, classify_sql_statement
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.adapters.sqlite.core import VALID_SQLITE_SYNCHRONOUS
 from vertebra.db.arrow import (
@@ -61,9 +61,7 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         self._in_transaction: bool = False
         self._lastrowid: int | None = None
         try:
-            self._conn = sqlite3.connect(str(self.config.path), check_same_thread=False)
-            for pragma in self.config.initialization_pragmas():
-                self._conn.execute(pragma)
+            self._conn = self._open_connection(self.config)
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
 
@@ -77,14 +75,17 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         """Return the underlying sqlite3.Connection."""
         return self._conn
 
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the last captured SQLite INSERT rowid on this driver."""
+        return self._lastrowid
+
     def connect(self) -> Self:
         """Establish or reopen the underlying SQLite connection."""
         with self._lock:
             if self._closed:
                 try:
-                    self._conn = sqlite3.connect(str(self.config.path), check_same_thread=False)
-                    for pragma in self.config.initialization_pragmas():
-                        self._conn.execute(pragma)
+                    self._conn = self._open_connection(self.config)
                 except sqlite3.Error as exc:
                     raise _translate_sqlite_error(exc) from exc
                 self._in_transaction = False
@@ -163,7 +164,8 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
                             pass
                     rowcount = max(cur.rowcount, 0)
                     raw_rowid = cur.lastrowid
-                    rowid = int(raw_rowid) if raw_rowid is not None and _is_insert_statement(sql) else None
+                    _, is_insert, _ = classify_sql_statement(sql)
+                    rowid = int(raw_rowid) if raw_rowid is not None and is_insert else None
                     self._lastrowid = rowid
                 if not self._in_transaction:
                     self._conn.commit()
@@ -207,10 +209,14 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         bound = _normalize_sqlite_parameters(parameters)
         lease = self._acquire_sqlite_broker_lease(sql)
         try:
-            with self._lock:
-                cur = self._conn.execute(sql, bound)
+            with self._lock, closing(self._conn.execute(sql, bound)) as cur:
                 rows = [tuple(row) for row in cur.fetchall()]
                 cols = tuple(str(d[0]) for d in cur.description) if cur.description else ()
+                raw_rowid = cur.lastrowid
+                _, is_insert, is_read_only = classify_sql_statement(sql)
+                self._lastrowid = int(raw_rowid) if raw_rowid is not None and is_insert else None
+                if not self._in_transaction and not is_read_only:
+                    self._conn.commit()
                 return rows, cols
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc) from exc
@@ -266,17 +272,21 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         finally:
             self._release_sqlite_broker_lease(lease)
 
-    @property
-    def lastrowid(self) -> int | None:
-        """Return the last captured SQLite INSERT rowid on this driver."""
-        return self._lastrowid
-
     def last_insert_rowid(self) -> int | None:
         """Return the last inserted SQLite rowid under the driver lock."""
         with self._lock, closing(self._conn.cursor()) as cur:
             cur.execute("SELECT last_insert_rowid()")
             row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else None
+
+    @staticmethod
+    def _open_connection(config: SQLiteConfig) -> sqlite3.Connection:
+        """Open a sqlite3 connection with URI detection and configured pragmas."""
+        target = str(config.path)
+        conn = sqlite3.connect(target, check_same_thread=False, uri=target.startswith("file:"))
+        for pragma in config.initialization_pragmas():
+            conn.execute(pragma)
+        return conn
 
     def _acquire_sqlite_broker_lease(self, sql: str) -> Any:
         """Acquire a lease and statement cache plan from the attached broker if present."""
@@ -357,24 +367,6 @@ class AsyncSQLiteDriver(ThreadOffloadAsyncDatabaseDriver[SQLiteConfig, SyncSQLit
     async def last_insert_rowid(self) -> int | None:
         """Return the last inserted SQLite rowid asynchronously off the event loop."""
         return await asyncio.to_thread(self._sync.last_insert_rowid)
-
-
-def _is_insert_statement(sql: str) -> bool:
-    """Return True when the leading SQL verb (after comments) is INSERT."""
-    stripped = sql.lstrip()
-    while stripped.startswith(("--", "/*")):
-        if stripped.startswith("--"):
-            newline_idx = stripped.find("\n")
-            if newline_idx < 0:
-                return False
-            stripped = stripped[newline_idx + 1 :].lstrip()
-        else:
-            end_idx = stripped.find("*/")
-            if end_idx < 0:
-                return False
-            stripped = stripped[end_idx + 2 :].lstrip()
-    head = stripped[:7].upper()
-    return head.startswith("INSERT") and (len(head) == 6 or not (head[6].isalnum() or head[6] == "_"))
 
 
 def _translate_sqlite_error(exc: sqlite3.Error) -> DatabaseError:

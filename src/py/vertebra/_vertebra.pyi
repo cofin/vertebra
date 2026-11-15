@@ -37,6 +37,7 @@ __all__ = [
     "BrokerStats",
     "CloudSQLDialer",
     "ConnectionFailure",
+    "classify_sql_statement",
     "DataError",
     "DatabaseError",
     "GcpIdTokenSnapshot",
@@ -759,6 +760,7 @@ def drive_rsgi_batch(
 def parse_traceparent(header: str) -> tuple[str, str, int] | None: ...
 def format_traceparent(trace_id: str, span_id: str, trace_flags: int) -> str: ...
 def sanitize_sql(sql: str) -> str: ...
+def classify_sql_statement(operation: str) -> tuple[bool, bool, bool]: ...
 def instantiate_struct_vectorcall(
     cls: Any,
     args: tuple[Any, ...] | None = None,

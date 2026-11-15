@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import inspect
 import sqlite3
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 from vertebra.db.dbapi._sync import (
@@ -27,6 +27,7 @@ from vertebra.db.dbapi._sync import (
 )
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.sync_tools import SyncPool
+from vertebra.utils.type_guards import is_coroutine_callable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -132,11 +133,11 @@ class AsyncDBAPICursor:
             else:
                 last_rowid_fn = getattr(self._driver, "last_insert_rowid", None)
                 if callable(last_rowid_fn):
-                    if inspect.iscoroutinefunction(last_rowid_fn):
+                    if is_coroutine_callable(last_rowid_fn):
                         self.lastrowid = await last_rowid_fn()
                     else:
                         res = await SyncPool.default().submit_async(last_rowid_fn)
-                        self.lastrowid = await res if inspect.isawaitable(res) else res
+                        self.lastrowid = await res if isinstance(res, Awaitable) else res
         if self._conn.autocommit and (self._conn._in_transaction or not is_read_only_sql(operation)):
             await self._conn.commit()
         return self
@@ -286,14 +287,9 @@ class AsyncDBAPIConnection:
         self._owns_driver = driver is not None
         if self._driver is None:
             has_shared_key = self._config is not None and self._config.pool_key() is not None
-            has_custom_broker = broker is not None and broker is not DatabaseRegistry.default_broker()
-            if (
-                self._share_pool
-                and not lease_managed
-                and has_shared_key
-                and self._config is not None
-                and not has_custom_broker
-            ):
+            has_custom_broker = broker is not None and broker is not DatabaseRegistry._DEFAULT_BROKER
+            if self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
+                assert self._config is not None
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)

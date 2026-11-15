@@ -60,8 +60,13 @@ __all__ = (
 class SyncBrokerLeaseSource(Protocol):
     """Protocol for synchronous shared-memory broker lease acquisition and quarantine."""
 
-    def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a leased connection slot for ``pool_name`` and ``worker_pid``."""
+    def acquire(
+        self,
+        *,
+        bind_key: str | None = "default",
+        worker_id: int | None = None,
+    ) -> Any:
+        """Acquire a leased connection slot for ``bind_key`` and ``worker_id``."""
 
     def quarantine(self, lease: Any) -> None:
         """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
@@ -71,8 +76,13 @@ class SyncBrokerLeaseSource(Protocol):
 class AsyncBrokerLeaseSource(Protocol):
     """Protocol for asynchronous shared-memory broker lease acquisition and quarantine."""
 
-    async def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a leased connection slot asynchronously for ``pool_name`` and ``worker_pid``."""
+    async def acquire(
+        self,
+        *,
+        bind_key: str | None = "default",
+        worker_id: int | None = None,
+    ) -> Any:
+        """Acquire a leased connection slot asynchronously for ``bind_key`` and ``worker_id``."""
 
     async def quarantine(self, lease: Any) -> Any:
         """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
@@ -855,20 +865,6 @@ class _BaseSHMBrokerTransport:
             pools=pools,
         )
 
-    def _record_pool_acquire(self, slot_index: int, generation: int, pool_id: int | None, bind_key: str | None) -> str:
-        with self._lock:
-            pool_name = ""
-            if pool_id is not None:
-                pool_name = self._partition_names.get(pool_id, "")
-            if not pool_name and bind_key is not None and bind_key in self._partitions:
-                pool_name = bind_key
-            if pool_name:
-                self._lease_partitions[(slot_index, generation)] = pool_name
-                counters = self._pool_counters.setdefault(pool_name, self._empty_pool_counters())
-                counters["active_leases"] += 1
-                counters["total_acquired"] += 1
-            return pool_name
-
     def _record_pool_release(self, slot_index: int, generation: int) -> None:
         with self._lock:
             pool_name = self._lease_partitions.pop((slot_index, generation), None)
@@ -1432,25 +1428,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         else:
             grant = self._native.try_acquire(worker_pid=worker, ttl_ns=ttl_ns, bind_key_hash=bind_hash)
         if grant is not None:
-            resolved_pool_id = resolved_partition if resolved_partition is not None else 0
-            lease_id = f"{grant.slot_index}:{grant.generation}"
-            lease = AsyncConnectionLease(
-                lease_id=lease_id,
-                worker_id=worker,
-                acquired_at_ns=grant.acquired_ns,
-                ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
-                bind_key=resolved_bind_key,
-                is_overflow=grant.is_overflow,
-                slot_index=grant.slot_index,
-                generation=grant.generation,
-                transport=self,
-                pool_id=resolved_pool_id,
-                pool_name=resolved_bind_key,
-            )
-            self._register_acquired_lease(
-                lease, grant.slot_index, grant.generation, resolved_partition, resolved_bind_key
-            )
-            return lease
+            return self._build_async_lease(grant, worker, resolved_partition, resolved_bind_key)
 
         effective_timeout = (
             int(timeout * 1000)
@@ -1477,25 +1455,34 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         if blocking_grant is None:
             raise TimeoutError("Connection broker pool exhausted")
 
+        return self._build_async_lease(blocking_grant, worker, resolved_partition, resolved_bind_key)
+
+    def _build_async_lease(
+        self,
+        grant: Any,
+        worker: int,
+        resolved_partition: int | None,
+        resolved_bind_key: str,
+    ) -> AsyncConnectionLease:
+        """Construct and register an AsyncConnectionLease from a native SHM grant."""
         resolved_pool_id = resolved_partition if resolved_partition is not None else 0
-        lease_id = f"{blocking_grant.slot_index}:{blocking_grant.generation}"
         lease = AsyncConnectionLease(
-            lease_id=lease_id,
+            lease_id=f"{grant.slot_index}:{grant.generation}",
             worker_id=worker,
-            acquired_at_ns=blocking_grant.acquired_ns,
-            ttl_ns=blocking_grant.expiry_ns - blocking_grant.acquired_ns if blocking_grant.expiry_ns > 0 else 0,
+            acquired_at_ns=grant.acquired_ns,
+            ttl_ns=grant.expiry_ns - grant.acquired_ns if grant.expiry_ns > 0 else 0,
             bind_key=resolved_bind_key,
-            is_overflow=blocking_grant.is_overflow,
-            slot_index=blocking_grant.slot_index,
-            generation=blocking_grant.generation,
+            is_overflow=grant.is_overflow,
+            slot_index=grant.slot_index,
+            generation=grant.generation,
             transport=self,
             pool_id=resolved_pool_id,
             pool_name=resolved_bind_key,
         )
-        self._register_acquired_lease(
+        lease.pool_name = self._register_acquired_lease(
             lease,
-            blocking_grant.slot_index,
-            blocking_grant.generation,
+            grant.slot_index,
+            grant.generation,
             resolved_partition,
             resolved_bind_key,
         )
@@ -1752,4 +1739,8 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
     async def close(self) -> None:
         """Release broker resources asynchronously."""
+        self._close_impl()
+
+    def close_sync(self) -> None:
+        """Release broker resources synchronously."""
         self._close_impl()

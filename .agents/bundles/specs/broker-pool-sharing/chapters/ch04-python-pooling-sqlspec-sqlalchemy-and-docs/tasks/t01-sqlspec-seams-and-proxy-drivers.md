@@ -51,7 +51,7 @@ sources:
 
 ## Objective & Scope Boundary
 
-Replace signature reflection and suppressed release errors across sync and async paths in `provider.py` with `@runtime_checkable` `SyncBrokerLeaseSource`, `AsyncBrokerLeaseSource`, `SyncLeasedSession`, and `AsyncLeasedSession` Protocols, fix invalid `gc=False` container structs on `BrokerRpcRequest`/`BrokerRpcResponse`, subclass `SyncDriverAdapterBase` and `AsyncDriverAdapterBase` on `ProxySyncDriver` / `ProxyAsyncDriver` with clean rollback propagation, and remove stale `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport` type unions from `plugin.py` per [`../spec.md` §2](../spec.md) ([#98](https://github.com/cofin/vertebra/issues/98)) [^sqlspec-provider] [^sqlspec-proxy] [^sqlspec-plugin].
+Replace signature reflection and suppressed release errors across sync and async paths in `provider.py` with `@runtime_checkable` `SyncBrokerLeaseSource` and `AsyncBrokerLeaseSource` Protocols, fix invalid `gc=False` container structs on `BrokerRpcRequest`/`BrokerRpcResponse`, subclass `SyncDriverAdapterBase` and `AsyncDriverAdapterBase` on `ProxySyncDriver` / `ProxyAsyncDriver` with clean rollback propagation, and remove stale `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport` type unions from `plugin.py` per [`../spec.md` §2](../spec.md) ([#98](https://github.com/cofin/vertebra/issues/98)) [^sqlspec-provider] [^sqlspec-proxy] [^sqlspec-plugin].
 
 ## Bounded Read Manifest
 

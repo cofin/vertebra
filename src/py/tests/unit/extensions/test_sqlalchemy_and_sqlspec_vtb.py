@@ -1695,8 +1695,8 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
             self.leases: list[RecordingLease] = []
             self.quarantined_calls = 0
 
-        def acquire(self, *, pool_name: str, worker_pid: int) -> RecordingLease:
-            _ = (pool_name, worker_pid)
+        def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> RecordingLease:
+            _ = (bind_key, worker_id)
             lease = RecordingLease(2, len(self.leases) + 1)
             self.leases.append(lease)
             return lease
@@ -1754,8 +1754,8 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
             self.leases: list[RecordingLease] = []
             self.quarantined_calls = 0
 
-        async def acquire(self, *, pool_name: str, worker_pid: int) -> RecordingLease:
-            _ = (pool_name, worker_pid)
+        async def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> RecordingLease:
+            _ = (bind_key, worker_id)
             lease = RecordingLease(3, len(self.leases) + 1)
             self.leases.append(lease)
             return lease
@@ -1885,39 +1885,42 @@ def test_sync_broker_pool_checkout_rollback_quarantine_and_recreate(tmp_path: Pa
 
     engine = create_engine(url, pool=pool)
     try:
-        with engine.connect() as conn:
-            row = conn.exec_driver_sql("SELECT 7").fetchone()
-            assert row == (7,)
-            assert transport.metrics().active_leases == 1
-        assert transport.metrics().active_leases == 0
-        assert transport.metrics().total_released == 1
-        assert transport.quarantined_count() == 0
-
-        recreated = pool.recreate()
         try:
-            assert isinstance(recreated, BrokerPool)
-            assert recreated.partition_key == expected_partition
+            with engine.connect() as conn:
+                row = conn.exec_driver_sql("SELECT 7").fetchone()
+                assert row == (7,)
+                assert transport.metrics().active_leases == 1
+            assert transport.metrics().active_leases == 0
+            assert transport.metrics().total_released == 1
+            assert transport.quarantined_count() == 0
+
+            recreated = pool.recreate()
+            try:
+                assert isinstance(recreated, BrokerPool)
+                assert recreated.partition_key == expected_partition
+            finally:
+                recreated.dispose()
         finally:
-            recreated.dispose()
-    finally:
-        engine.dispose()
+            engine.dispose()
 
-    def _boom_rollback(_conn: Any) -> None:
-        raise RuntimeError("dirty connection reset error")
+        def _boom_rollback(_conn: Any) -> None:
+            raise RuntimeError("dirty connection reset error")
 
-    fail_pool = BrokerPool(broker=transport, url=url, on_rollback=_boom_rollback)
-    fail_engine = create_engine(url, pool=fail_pool)
-    try:
-        with pytest.raises(LeaseQuarantinedError) as exc_info, fail_engine.connect() as conn:
-            conn.exec_driver_sql("SELECT 1").fetchone()
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-        assert transport.quarantined_count() == 1
-        assert transport.metrics().total_quarantined == 1
-        assert transport.metrics().total_released == 1
-        transport.dispose_quarantined(exc_info.value.slot_index, exc_info.value.generation)
-        assert transport.quarantined_count() == 0
+        fail_pool = BrokerPool(broker=transport, url=url, on_rollback=_boom_rollback)
+        fail_engine = create_engine(url, pool=fail_pool)
+        try:
+            with pytest.raises(LeaseQuarantinedError) as exc_info, fail_engine.connect() as conn:
+                conn.exec_driver_sql("SELECT 1").fetchone()
+            assert isinstance(exc_info.value.__cause__, RuntimeError)
+            assert transport.quarantined_count() == 1
+            assert transport.metrics().total_quarantined == 1
+            assert transport.metrics().total_released == 1
+            transport.dispose_quarantined(exc_info.value.slot_index, exc_info.value.generation)
+            assert transport.quarantined_count() == 0
+        finally:
+            fail_engine.dispose()
     finally:
-        fail_engine.dispose()
+        transport.close()
 
 
 @pytest.mark.anyio
@@ -1928,31 +1931,34 @@ async def test_async_broker_pool_checkout_rollback_and_quarantine() -> None:
     pool = AsyncBrokerPool(broker=transport, url=url)
     async_engine = create_async_engine(url, pool=pool)
     try:
-        async with async_engine.connect() as conn:
-            res = await conn.exec_driver_sql("SELECT 9")
-            assert res.fetchone() == (9,)
-            assert transport.metrics().active_leases == 1
-        assert transport.metrics().active_leases == 0
-        assert transport.metrics().total_released == 1
-        assert transport.quarantined_count() == 0
-    finally:
-        await async_engine.dispose()
+        try:
+            async with async_engine.connect() as conn:
+                res = await conn.exec_driver_sql("SELECT 9")
+                assert res.fetchone() == (9,)
+                assert transport.metrics().active_leases == 1
+            assert transport.metrics().active_leases == 0
+            assert transport.metrics().total_released == 1
+            assert transport.quarantined_count() == 0
+        finally:
+            await async_engine.dispose()
 
-    def _boom_async_rollback(_conn: Any) -> None:
-        raise RuntimeError("async dirty rollback error")
+        def _boom_async_rollback(_conn: Any) -> None:
+            raise RuntimeError("async dirty rollback error")
 
-    fail_pool = AsyncBrokerPool(broker=transport, url=url, on_rollback=_boom_async_rollback)
-    fail_engine = create_async_engine(url, pool=fail_pool)
-    try:
-        with pytest.raises(LeaseQuarantinedError) as exc_info:
-            async with fail_engine.connect() as conn:
-                await conn.exec_driver_sql("SELECT 1")
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-        assert transport.quarantined_count() == 1
-        assert transport.metrics().total_quarantined == 1
-        await transport.dispose_quarantined(exc_info.value.slot_index, exc_info.value.generation)
+        fail_pool = AsyncBrokerPool(broker=transport, url=url, on_rollback=_boom_async_rollback)
+        fail_engine = create_async_engine(url, pool=fail_pool)
+        try:
+            with pytest.raises(LeaseQuarantinedError) as exc_info:
+                async with fail_engine.connect() as conn:
+                    await conn.exec_driver_sql("SELECT 1")
+            assert isinstance(exc_info.value.__cause__, RuntimeError)
+            assert transport.quarantined_count() == 1
+            assert transport.metrics().total_quarantined == 1
+            await transport.dispose_quarantined(exc_info.value.slot_index, exc_info.value.generation)
+        finally:
+            await fail_engine.dispose()
     finally:
-        await fail_engine.dispose()
+        await transport.close()
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -1963,12 +1969,18 @@ def test_alchemy_plugin_wires_broker_pool_classes(is_async: bool) -> None:
         if is_async
         else SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     )
-    if is_async:
-        cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", broker=broker)
-        assert issubclass(cfg.engine_config.poolclass, AsyncBrokerPool)
-    else:
-        cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=broker)
-        assert issubclass(cfg.engine_config.poolclass, BrokerPool)
+    try:
+        if is_async:
+            cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", broker=broker)
+            assert issubclass(cfg.engine_config.poolclass, AsyncBrokerPool)
+        else:
+            cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=broker)
+            assert issubclass(cfg.engine_config.poolclass, BrokerPool)
+    finally:
+        if isinstance(broker, AsyncSHMBrokerTransport):
+            broker.close_sync()
+        else:
+            broker.close()
 
 
 @pytest.mark.anyio
@@ -2143,36 +2155,46 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
     p2 = BrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db2}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
     mem_pool = BrokerPool(broker=sync_t, url="sqlite+vtb:///:memory:", pool_size=1, max_overflow=0)
     try:
-        assert p1.partition_key != p2.partition_key
-        assert mem_pool.partition_key is not None
-        assert "None" not in mem_pool.partition_key
-        assert mem_pool.partition_key.endswith(f"#pool-{id(mem_pool)}")
+        try:
+            assert p1.partition_key != p2.partition_key
+            assert mem_pool.partition_key is not None
+            assert "None" not in mem_pool.partition_key
+            assert mem_pool.partition_key.endswith(f"#pool-{id(mem_pool)}")
 
-        c1 = p1.connect()
-        c2 = p2.connect()
-        try:
-            with pytest.raises(TimeoutError):
-                p1.connect()
-        finally:
-            c2.close()
-        try:
-            with pytest.raises(TimeoutError):
-                p1.connect()
-        finally:
-            c1.close()
+            c1 = p1.connect()
+            c2 = p2.connect()
+            try:
+                with pytest.raises(TimeoutError):
+                    p1.connect()
+            finally:
+                c2.close()
+            try:
+                with pytest.raises(TimeoutError):
+                    p1.connect()
+            finally:
+                c1.close()
 
-        recreated = p1.recreate()
-        try:
-            assert isinstance(recreated, BrokerPool)
-            inv_conn = recreated.connect()
-            inv_conn.invalidate()
-            assert sync_t.metrics().active_leases == 0
+            recreated = p1.recreate()
+            try:
+                assert isinstance(recreated, BrokerPool)
+                inv_conn = recreated.connect()
+                inv_conn.invalidate()
+                assert sync_t.metrics().active_leases == 0
+            finally:
+                recreated.dispose()
         finally:
-            recreated.dispose()
+            mem_pool.dispose()
+            p2.dispose()
+            p1.dispose()
+
+        creator_sync = broker_creator("sqlite+vtb:///:memory:", broker=sync_t)
+        raw_sync = creator_sync()
+        try:
+            assert raw_sync.broker is sync_t
+        finally:
+            raw_sync.close()
     finally:
-        mem_pool.dispose()
-        p2.dispose()
-        p1.dispose()
+        sync_t.close()
 
     rollback_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
     rollback_db = tmp_path / "rollback.db"
@@ -2194,62 +2216,67 @@ async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alch
         reset_on_return="rollback",
     )
     try:
-        conn = rollback_pool.connect()
-        with pytest.raises(LeaseQuarantinedError) as q_exc:
-            conn.close()
-        assert isinstance(q_exc.value.__cause__, RuntimeError)
-        assert rollback_t.quarantined_count() == 1
-        with pytest.raises(TimeoutError):
-            rollback_pool.connect()
-        should_fail_rollback = False
-        rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
-        assert rollback_t.quarantined_count() == 0
-        recovered = rollback_pool.connect()
-        recovered.close()
+        try:
+            conn = rollback_pool.connect()
+            with pytest.raises(LeaseQuarantinedError) as q_exc:
+                conn.close()
+            assert isinstance(q_exc.value.__cause__, RuntimeError)
+            assert rollback_t.quarantined_count() == 1
+            with pytest.raises(TimeoutError):
+                rollback_pool.connect()
+            should_fail_rollback = False
+            rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
+            assert rollback_t.quarantined_count() == 0
+            recovered = rollback_pool.connect()
+            recovered.close()
+        finally:
+            rollback_pool.dispose()
     finally:
-        rollback_pool.dispose()
-
-    creator_sync = broker_creator("sqlite+vtb:///:memory:", broker=sync_t)
-    raw_sync = creator_sync()
-    try:
-        assert raw_sync.broker is sync_t
-    finally:
-        raw_sync.close()
+        rollback_t.close()
 
     async_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    creator_async = broker_creator("sqlite+vtb_async:///:memory:", broker=async_t, is_async=True)
-    raw_async = await greenlet_spawn(creator_async)
     try:
-        assert raw_async._connection.broker is async_t
+        creator_async = broker_creator("sqlite+vtb_async:///:memory:", broker=async_t, is_async=True)
+        raw_async = await greenlet_spawn(creator_async)
+        try:
+            assert raw_async._connection.broker is async_t
+        finally:
+            await greenlet_spawn(raw_async.close)
     finally:
-        await greenlet_spawn(raw_async.close)
+        await async_t.close()
 
     alchemy_sync_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=alchemy_sync_t)
-    sync_engine = sync_cfg.get_engine()
     try:
-        with sync_engine.connect() as sa_conn:
-            assert sa_conn.exec_driver_sql("SELECT 1").fetchone() == (1,)
-            raw_sync_fairy = sa_conn.connection
-            assert raw_sync_fairy.driver_connection.broker is alchemy_sync_t
-        assert alchemy_sync_t.metrics().active_leases == 0
-        assert alchemy_sync_t.metrics().total_released == 1
+        sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=alchemy_sync_t)
+        sync_engine = sync_cfg.get_engine()
+        try:
+            with sync_engine.connect() as sa_conn:
+                assert sa_conn.exec_driver_sql("SELECT 1").fetchone() == (1,)
+                raw_sync_fairy = sa_conn.connection
+                assert raw_sync_fairy.driver_connection.broker is alchemy_sync_t
+            assert alchemy_sync_t.metrics().active_leases == 0
+            assert alchemy_sync_t.metrics().total_released == 1
+        finally:
+            sync_engine.dispose()
     finally:
-        sync_engine.dispose()
+        alchemy_sync_t.close()
 
     alchemy_async_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
-    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", broker=alchemy_async_t)
-    async_engine = async_cfg.get_engine()
     try:
-        async with async_engine.connect() as asa_conn:
-            res = await asa_conn.exec_driver_sql("SELECT 1")
-            assert res.fetchone() == (1,)
-            raw_async_fairy = await asa_conn.get_raw_connection()
-            assert raw_async_fairy.driver_connection._connection.broker is alchemy_async_t
-        assert alchemy_async_t.metrics().active_leases == 0
-        assert alchemy_async_t.metrics().total_released == 1
+        async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", broker=alchemy_async_t)
+        async_engine = async_cfg.get_engine()
+        try:
+            async with async_engine.connect() as asa_conn:
+                res = await asa_conn.exec_driver_sql("SELECT 1")
+                assert res.fetchone() == (1,)
+                raw_async_fairy = await asa_conn.get_raw_connection()
+                assert raw_async_fairy.driver_connection._connection.broker is alchemy_async_t
+            assert alchemy_async_t.metrics().active_leases == 0
+            assert alchemy_async_t.metrics().total_released == 1
+        finally:
+            await async_engine.dispose()
     finally:
-        await async_engine.dispose()
+        await alchemy_async_t.close()
 
 
 def _assert_no_inspect_signature(source_path: Path) -> None:
@@ -2293,23 +2320,26 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         pool=BrokerPool(broker=transport, url=shared_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
     )
     try:
-        with e1.connect() as c1:
-            c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
-            with pytest.raises(TimeoutError):
-                e2.connect()
-        with e2.connect() as c2:
-            assert c2.exec_driver_sql("SELECT 1").fetchone() == (1,)
+        try:
+            with e1.connect() as c1:
+                c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
+                with pytest.raises(TimeoutError):
+                    e2.connect()
+            with e2.connect() as c2:
+                assert c2.exec_driver_sql("SELECT 1").fetchone() == (1,)
 
-        with e1.connect() as inv_conn:
-            inv_lease = inv_conn.info["vtb_broker_lease"]
-            inv_conn.invalidate(RuntimeError("boom"))
-        assert transport.quarantined_count() == 1
-        transport.dispose_quarantined(inv_lease.slot_index, inv_lease.generation)
-        assert transport.quarantined_count() == 0
-        e1.dispose()
+            with e1.connect() as inv_conn:
+                inv_lease = inv_conn.info["vtb_broker_lease"]
+                inv_conn.invalidate(RuntimeError("boom"))
+            assert transport.quarantined_count() == 1
+            transport.dispose_quarantined(inv_lease.slot_index, inv_lease.generation)
+            assert transport.quarantined_count() == 0
+            e1.dispose()
+        finally:
+            e1.dispose()
+            e2.dispose()
     finally:
-        e1.dispose()
-        e2.dispose()
+        transport.close()
 
     dispose_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
     dispose_pool = BrokerPool(
@@ -2320,12 +2350,15 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         acquire_timeout_ms=50,
     )
     try:
-        active_conn = dispose_pool.connect()
-        _ = active_conn
+        try:
+            active_conn = dispose_pool.connect()
+            _ = active_conn
+        finally:
+            dispose_pool.dispose()
+        assert dispose_t.quarantined_count() == 1
+        assert dispose_t.metrics().active_leases == 0
     finally:
-        dispose_pool.dispose()
-    assert dispose_t.quarantined_count() == 1
-    assert dispose_t.metrics().active_leases == 0
+        dispose_t.close()
 
     def _failing_creator() -> Any:
         raise RuntimeError("creator boom")
@@ -2340,11 +2373,28 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         acquire_timeout_ms=50,
     )
     try:
-        with pytest.raises(RuntimeError, match="creator boom"):
-            fail_pool.connect()
-        assert fail_t.quarantined_count() == 1
+        try:
+            with pytest.raises(RuntimeError, match="creator boom"):
+                fail_pool.connect()
+            assert fail_t.quarantined_count() == 1
+        finally:
+            fail_pool.dispose()
+
+        pg_cfg = create_sync_alchemy_config(
+            "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true",
+            broker=fail_t,
+        )
+        pg_engine = pg_cfg.get_engine()
+        try:
+            assert pg_cfg.connection_string == "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true"
+            assert SyncPostgreSQLDialect().create_connect_args(pg_engine.url) == (
+                [],
+                {"url": "postgresql+vtb://user:secret@db.internal:5432/orders"},
+            )
+        finally:
+            pg_engine.dispose()
     finally:
-        fail_pool.dispose()
+        fail_t.close()
 
     with pytest.raises(ImproperConfigurationError):
         BrokerPool.bind_class(broker=None)
@@ -2358,20 +2408,6 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         with pytest.raises(ImproperConfigurationError):
             BrokerPool._await_if_needed(coro)
     assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
-
-    pg_cfg = create_sync_alchemy_config(
-        "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true",
-        broker=fail_t,
-    )
-    pg_engine = pg_cfg.get_engine()
-    try:
-        assert pg_cfg.connection_string == "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true"
-        assert SyncPostgreSQLDialect().create_connect_args(pg_engine.url) == (
-            [],
-            {"url": "postgresql+vtb://user:secret@db.internal:5432/orders"},
-        )
-    finally:
-        pg_engine.dispose()
 
 
 @pytest.mark.anyio
@@ -2391,16 +2427,19 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
         pool=AsyncBrokerPool(broker=async_t, url=async_url, pool_size=1, max_overflow=0, acquire_timeout_ms=50),
     )
     try:
-        async with e1.connect() as c1:
-            await c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
-            with pytest.raises(TimeoutError):
-                await e2.connect()
-        async with e2.connect() as c2:
-            res = await c2.exec_driver_sql("SELECT 2")
-            assert res.fetchone() == (2,)
+        try:
+            async with e1.connect() as c1:
+                await c1.exec_driver_sql("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY)")
+                with pytest.raises(TimeoutError):
+                    await e2.connect()
+            async with e2.connect() as c2:
+                res = await c2.exec_driver_sql("SELECT 2")
+                assert res.fetchone() == (2,)
+        finally:
+            await e1.dispose()
+            await e2.dispose()
     finally:
-        await e1.dispose()
-        await e2.dispose()
+        await async_t.close()
 
     class MinimalAsyncLease:
         def __init__(self, slot: int, gen: int) -> None:
@@ -2415,8 +2454,8 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
             self.next_slot = 0
             self.quarantined: list[int] = []
 
-        async def acquire(self, *, pool_name: str, worker_pid: int) -> MinimalAsyncLease:
-            _ = (pool_name, worker_pid)
+        async def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> MinimalAsyncLease:
+            _ = (bind_key, worker_id)
             self.next_slot += 1
             return MinimalAsyncLease(self.next_slot, 1)
 
@@ -2443,49 +2482,52 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
         await greenlet_spawn(fake_pool.dispose)
 
     rollback_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
-    should_fail = True
-
-    class FailingAsyncRollbackConnection(AsyncDBAPIConnection):
-        async def rollback(self) -> None:
-            if should_fail:
-                raise RuntimeError("real async rollback failed")
-            await super().rollback()
-
-    async_dbapi = SQLAlchemyAsyncDBAPI()
-
-    def _create_failing_async() -> Any:
-        return AsyncAdapt_dbapi_connection(
-            async_dbapi,
-            FailingAsyncRollbackConnection(
-                driver=AsyncSQLiteDriver(),
-                broker=rollback_t,
-                lease_managed=True,
-            ),
-        )
-
-    rollback_pool = AsyncBrokerPool(
-        creator=_create_failing_async,
-        broker=rollback_t,
-        pool_key="async-real-rollback",
-        pool_size=1,
-        max_overflow=0,
-        acquire_timeout_ms=50,
-        reset_on_return="rollback",
-    )
     try:
-        bad_conn = await greenlet_spawn(rollback_pool.connect)
-        with pytest.raises(LeaseQuarantinedError) as q_exc:
-            await greenlet_spawn(bad_conn.close)
-        assert isinstance(q_exc.value.__cause__, RuntimeError)
-        assert rollback_t.quarantined_count() == 1
-        with pytest.raises(TimeoutError):
-            await greenlet_spawn(rollback_pool.connect)
-        should_fail = False
-        await rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
-        ok_conn = await greenlet_spawn(rollback_pool.connect)
-        await greenlet_spawn(ok_conn.close)
+        should_fail = True
+
+        class FailingAsyncRollbackConnection(AsyncDBAPIConnection):
+            async def rollback(self) -> None:
+                if should_fail:
+                    raise RuntimeError("real async rollback failed")
+                await super().rollback()
+
+        async_dbapi = SQLAlchemyAsyncDBAPI()
+
+        def _create_failing_async() -> Any:
+            return AsyncAdapt_dbapi_connection(
+                async_dbapi,
+                FailingAsyncRollbackConnection(
+                    driver=AsyncSQLiteDriver(),
+                    broker=rollback_t,
+                    lease_managed=True,
+                ),
+            )
+
+        rollback_pool = AsyncBrokerPool(
+            creator=_create_failing_async,
+            broker=rollback_t,
+            pool_key="async-real-rollback",
+            pool_size=1,
+            max_overflow=0,
+            acquire_timeout_ms=50,
+            reset_on_return="rollback",
+        )
+        try:
+            bad_conn = await greenlet_spawn(rollback_pool.connect)
+            with pytest.raises(LeaseQuarantinedError) as q_exc:
+                await greenlet_spawn(bad_conn.close)
+            assert isinstance(q_exc.value.__cause__, RuntimeError)
+            assert rollback_t.quarantined_count() == 1
+            with pytest.raises(TimeoutError):
+                await greenlet_spawn(rollback_pool.connect)
+            should_fail = False
+            await rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
+            ok_conn = await greenlet_spawn(rollback_pool.connect)
+            await greenlet_spawn(ok_conn.close)
+        finally:
+            await greenlet_spawn(rollback_pool.dispose)
     finally:
-        await greenlet_spawn(rollback_pool.dispose)
+        await rollback_t.close()
 
 
 @pytest.mark.anyio
@@ -2591,7 +2633,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         statement_config=sqlite_cfg,
     )
     try:
-        with pytest.raises(ImproperConfigurationError, match="native SHM Arrow"):
+        with pytest.raises(SQLSpecImproperConfigurationError, match="native SHM Arrow"):
             non_shm_proxy.select_to_arrow("SELECT id FROM items ORDER BY id", native_only=True)
     finally:
         non_shm_proxy.close()
@@ -2615,8 +2657,8 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         def __init__(self) -> None:
             self.quarantined = 0
 
-        def acquire(self, *, pool_name: str, worker_pid: int) -> tuple[int, int]:
-            _ = (pool_name, worker_pid)
+        def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> tuple[int, int]:
+            _ = (bind_key, worker_id)
             return (1, 1)
 
         def quarantine(self, lease: Any) -> None:
@@ -2695,41 +2737,72 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
 
 @pytest.mark.anyio
 async def test_proxy_async_driver_contended_sync_shm_broker_does_not_block_event_loop() -> None:
-    """Verify ProxyAsyncDriver offloads contended SyncSHMBrokerTransport acquisition without blocking the loop."""
+    """Verify ProxyAsyncDriver offloads contended SyncSHMBrokerTransport and SyncBrokerLeaseSource without blocking."""
     transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=2000))
-    transport.register_partition("shared", pool_size=1, max_overflow=0)
     async_upstream = AsyncSQLiteDriver()
     async_provider = SQLSpecAsyncProvider(async_upstream)
     proxy_async = ProxyAsyncDriver(async_provider, broker=transport, pool_name="shared")
-    held_lease = transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=500)
-    release_timer = threading.Timer(0.08, held_lease.release)
-    stop_event = asyncio.Event()
-    ticks = 0
-
-    async def _heartbeat() -> None:
-        nonlocal ticks
-        while not stop_event.is_set():
-            ticks += 1
-            await asyncio.sleep(0.005)
-
-    heartbeat_task = asyncio.create_task(_heartbeat())
+    held_lease: Any = None
     try:
-        release_timer.start()
-        value = await proxy_async.select_value("SELECT 42")
-        assert value == 42
+        transport.register_partition("shared", pool_size=1, max_overflow=0)
+        held_lease = transport.acquire(worker_id=os.getpid(), bind_key="shared", timeout_ms=500)
+        select_task = asyncio.create_task(proxy_async.select_value("SELECT 42"))
+        ticks = 0
+        while not select_task.done() and (transport.metrics().waiting_threads < 1 or ticks < 3):
+            ticks += 1
+            await asyncio.sleep(0)
         assert ticks >= 3
+        assert transport.metrics().waiting_threads == 1
+        held_lease.release()
+        held_lease = None
+        assert await select_task == 42
         assert transport.metrics().active_leases == 0
         assert async_provider.active_leases == 0
     finally:
-        release_timer.cancel()
-        if release_timer.is_alive():
-            release_timer.join(timeout=1.0)
-        stop_event.set()
-        await heartbeat_task
+        if held_lease is not None:
+            held_lease.release()
         await proxy_async.close()
         await async_provider.close()
         await async_upstream.close()
         transport.close()
+
+    started = threading.Event()
+    release_gate = threading.Event()
+
+    class _BlockingSyncLeaseSource:
+        def __init__(self) -> None:
+            self.quarantined = 0
+
+        def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> tuple[int, int]:
+            _ = (bind_key, worker_id)
+            started.set()
+            assert release_gate.wait(timeout=5.0)
+            return (0, 1)
+
+        def quarantine(self, lease: Any) -> None:
+            _ = lease
+            self.quarantined += 1
+
+    blocking_double = _BlockingSyncLeaseSource()
+    assert isinstance(blocking_double, SyncBrokerLeaseSource)
+    double_upstream = AsyncSQLiteDriver()
+    double_provider = SQLSpecAsyncProvider(double_upstream)
+    double_proxy = ProxyAsyncDriver(double_provider, broker=blocking_double, pool_name="shared")
+    try:
+        double_task = asyncio.create_task(double_proxy.select_value("SELECT 7"))
+        loop_ticks = 0
+        while not double_task.done() and (not started.is_set() or loop_ticks < 3):
+            loop_ticks += 1
+            await asyncio.sleep(0)
+        assert started.is_set()
+        assert loop_ticks >= 3
+        release_gate.set()
+        assert await double_task == 7
+    finally:
+        release_gate.set()
+        await double_proxy.close()
+        await double_provider.close()
+        await double_upstream.close()
 
 
 @pytest.mark.anyio
@@ -2810,8 +2883,8 @@ async def test_cancelled_error_propagates_unwrapped_from_release_lease_and_provi
         def __init__(self) -> None:
             self.quarantined = 0
 
-        def acquire(self, *, pool_name: str, worker_pid: int) -> tuple[int, int]:
-            _ = (pool_name, worker_pid)
+        def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> tuple[int, int]:
+            _ = (bind_key, worker_id)
             return (0, 1)
 
         def quarantine(self, lease: Any) -> None:
@@ -2915,11 +2988,28 @@ def test_alchemy_config_injects_broker_connect_args_only_for_vtb_urls(
 
 @pytest.mark.parametrize(
     "module_name",
-    ["vertebra.extensions.sqlalchemy.pool", "vertebra.extensions.alchemy"],
+    [
+        "vertebra.extensions.sqlalchemy",
+        "vertebra.extensions.sqlalchemy.pool",
+        "vertebra.extensions.sqlalchemy.dialects",
+        "vertebra.extensions.alchemy",
+    ],
 )
 def test_sqlalchemy_and_alchemy_extensions_import_without_sqlspec(module_name: str) -> None:
-    """Verify SQLAlchemy and Advanced Alchemy extensions do not eagerly import optional sqlspec."""
-    script = f"import sys, {module_name}; assert 'sqlspec' not in sys.modules, list(sys.modules)"
+    """Verify SQLAlchemy and Advanced Alchemy extensions operate cleanly with sqlspec blocked."""
+    script = (
+        "import importlib, sys; "
+        "sys.modules['sqlspec'] = None; "
+        f"importlib.import_module({module_name!r}); "
+        "from vertebra.extensions.alchemy import create_sync_alchemy_config; "
+        "from vertebra.extensions.sqlalchemy.pool import BrokerPool; "
+        "from vertebra.extensions.broker import BrokerConfig, SyncSHMBrokerTransport; "
+        "t = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0)); "
+        "cfg = create_sync_alchemy_config('sqlite+vtb:///:memory:', broker=t); "
+        "p = BrokerPool(broker=t, url='sqlite+vtb:///%3Amemory%3A'); "
+        "p.dispose(); t.close(); "
+        "assert 'sqlspec' not in sys.modules or sys.modules['sqlspec'] is None"
+    )
     proc = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -2927,3 +3017,164 @@ def test_sqlalchemy_and_alchemy_extensions_import_without_sqlspec(module_name: s
         check=False,
     )
     assert proc.returncode == 0, f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
+
+
+def test_async_shm_broker_acquire_sync_across_pool_proxy_and_sqlite_driver() -> None:
+    """Verify AsyncSHMBrokerTransport.acquire_sync works across BrokerPool, SQLSpec sync proxy, and SyncSQLiteDriver."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100))
+    pool: BrokerPool | None = None
+    sqlite_driver = SyncSQLiteDriver(broker=transport)
+    sync_provider: SQLSpecSyncProvider | None = None
+    proxy_sync: ProxySyncDriver | None = None
+    try:
+        lease = transport.acquire_sync(bind_key="direct", worker_id=os.getpid())
+        try:
+            assert lease.lease_id
+            assert transport.metrics().active_leases == 1
+        finally:
+            lease.release()
+        assert transport.metrics().active_leases == 0
+
+        pool = BrokerPool(broker=transport, url="sqlite+vtb:///%3Amemory%3A", pool_size=1, max_overflow=0)
+        assert pool.partition_key is not None
+        assert pool.partition_key.endswith(f"#pool-{id(pool)}")
+        conn = pool.connect()
+        try:
+            assert transport.metrics().active_leases == 1
+        finally:
+            conn.close()
+        assert transport.metrics().active_leases == 0
+
+        rows, _cols = sqlite_driver.execute_with_description("SELECT 99")
+        assert rows == [(99,)]
+        assert transport.metrics().active_leases == 0
+
+        sync_provider = SQLSpecSyncProvider(sqlite_driver, broker=transport)
+        proxy_sync = ProxySyncDriver(sync_provider, broker=transport, pool_name="sync_via_async")
+        assert proxy_sync.select_value("SELECT 55") == 55
+        assert transport.metrics().active_leases == 0
+
+        transport.quarantine_sync(transport.acquire_sync(bind_key="qsync"))
+        assert transport.quarantined_count() == 1
+    finally:
+        if proxy_sync is not None:
+            proxy_sync.close()
+        if sync_provider is not None:
+            sync_provider.close()
+        sqlite_driver.close()
+        if pool is not None:
+            pool.dispose()
+        transport.close_sync()
+
+
+@pytest.mark.anyio
+async def test_sqlspec_provider_idle_commit_cancelled_quarantine_and_stack_cancel() -> None:
+    """Verify idle commit fails clearly, quarantine cancellation unwraps, and execute_stack rolls back on BaseException."""
+    sync_provider = SQLSpecSyncProvider(SyncSQLiteDriver())
+    try:
+        sync_commit = sync_provider.handle_request(
+            BrokerRpcRequest(request_id=1, op="commit", pool_name="default", worker_pid=os.getpid())
+        )
+        assert sync_commit.ok is False
+        assert "Cannot commit without an active leased session" in sync_commit.error_message
+    finally:
+        sync_provider.close()
+
+    class _CancelQuarantineBroker:
+        def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> tuple[int, int]:
+            _ = (bind_key, worker_id)
+            return (0, 1)
+
+        def quarantine(self, lease: Any) -> None:
+            _ = lease
+            raise asyncio.CancelledError("quarantine cancelled")
+
+    class _BoomRollbackUpstream:
+        async def begin(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            raise ValueError("rollback exploded")
+
+        async def close(self) -> None:
+            return None
+
+    async_provider = SQLSpecAsyncProvider(_BoomRollbackUpstream(), broker=_CancelQuarantineBroker())
+    try:
+        idle_resp = await async_provider.handle_request(
+            BrokerRpcRequest(request_id=2, op="commit", pool_name="default", worker_pid=os.getpid())
+        )
+        assert idle_resp.ok is False
+        assert "Cannot commit without an active leased session" in idle_resp.error_message
+
+        acq = await async_provider.handle_request(
+            BrokerRpcRequest(request_id=3, op="acquire", pool_name="default", worker_pid=os.getpid())
+        )
+        assert acq.ok is True
+        beg = await async_provider.handle_request(
+            BrokerRpcRequest(
+                request_id=4,
+                op="begin",
+                pool_name="default",
+                worker_pid=os.getpid(),
+                slot_idx=acq.slot_idx,
+                generation=acq.generation,
+            )
+        )
+        assert beg.ok is True
+        with pytest.raises(asyncio.CancelledError):
+            await async_provider.handle_request(
+                BrokerRpcRequest(
+                    request_id=5,
+                    op="release",
+                    pool_name="default",
+                    worker_pid=os.getpid(),
+                    slot_idx=acq.slot_idx,
+                    generation=acq.generation,
+                    in_tx=True,
+                )
+            )
+    finally:
+        await async_provider.close()
+
+    sync_ops: list[str] = []
+
+    def _sync_cancel_transport(req: BrokerRpcRequest) -> BrokerRpcResponse:
+        sync_ops.append(req.op)
+        if req.op == "select":
+            raise KeyboardInterrupt("interrupted mid-stack")
+        return BrokerRpcResponse(request_id=req.request_id, ok=True, slot_idx=0, generation=1)
+
+    stack_proxy = ProxySyncDriver(_sync_cancel_transport)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            stack_proxy.execute_stack(
+                StatementStack().push_execute("SELECT 1"),
+                continue_on_error=True,
+            )
+        assert sync_ops == ["acquire", "begin", "select", "rollback", "release"]
+        assert stack_proxy.is_leased is False
+        assert stack_proxy._in_tx is False
+    finally:
+        stack_proxy.close()
+
+    async_ops: list[str] = []
+
+    async def _async_cancel_transport(req: BrokerRpcRequest) -> BrokerRpcResponse:
+        async_ops.append(req.op)
+        if req.op == "select":
+            raise asyncio.CancelledError("cancelled mid-stack")
+        return BrokerRpcResponse(request_id=req.request_id, ok=True, slot_idx=0, generation=1)
+
+    async_stack_proxy = ProxyAsyncDriver(_async_cancel_transport)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await async_stack_proxy.execute_stack(
+                StatementStack().push_execute("SELECT 1"),
+                continue_on_error=True,
+            )
+        assert async_ops == ["acquire", "begin", "select", "rollback", "release"]
+        assert async_stack_proxy.is_leased is False
+        assert async_stack_proxy._in_tx is False
+    finally:
+        await async_stack_proxy.close()

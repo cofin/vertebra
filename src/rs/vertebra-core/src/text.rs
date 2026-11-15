@@ -1008,6 +1008,178 @@ fn fold_latin_char(ch: char) -> &'static str {
     }
 }
 
+fn parse_dollar_tag(bytes: &[u8], start: usize) -> Option<usize> {
+    let len = bytes.len();
+    let mut idx = start + 1;
+    if idx < len && bytes[idx] == b'$' {
+        return Some(2);
+    }
+    while idx < len {
+        let b = bytes[idx];
+        if b == b'$' {
+            return (idx > start + 1).then_some(idx - start + 1);
+        }
+        if !(b.is_ascii_alphanumeric() || b == b'_') {
+            return None;
+        }
+        if idx == start + 1 && b.is_ascii_digit() {
+            return None;
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_keyword_in(token: &str, list: &[&str]) -> bool {
+    list.iter().any(|kw| token.eq_ignore_ascii_case(kw))
+}
+
+/// Classify a SQL statement returning `(is_row_returning, is_insert, is_read_only)` without heap allocation.
+#[must_use]
+pub fn classify_sql_statement(operation: &str) -> (bool, bool, bool) {
+    const READ_ONLY: &[&str] = &[
+        "SELECT", "WITH", "VALUES", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE",
+    ];
+    const ROW_RETURNING: &[&str] = &[
+        "SELECT", "WITH", "PRAGMA", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "VALUES",
+    ];
+    const NON_ROW_PREFIXES: &[&str] = &["INSERT", "UPDATE", "DELETE", "MERGE"];
+
+    let bytes = operation.as_bytes();
+    let len = bytes.len();
+    let mut idx = 0usize;
+    let mut first_keyword: Option<&str> = None;
+    let mut is_insert = false;
+    let mut is_read_only = false;
+
+    while idx < len {
+        let b = bytes[idx];
+        if b.is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+        if b >= 0x80
+            && let Some(ch) = operation[idx..].chars().next()
+            && ch.is_whitespace()
+        {
+            idx += ch.len_utf8();
+            continue;
+        }
+        if b == b'-' && idx + 1 < len && bytes[idx + 1] == b'-' {
+            idx += 2;
+            while idx < len && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            if idx < len {
+                idx += 1;
+            }
+            continue;
+        }
+        if b == b'/' && idx + 1 < len && bytes[idx + 1] == b'*' {
+            let mut depth = 1usize;
+            idx += 2;
+            while idx < len && depth > 0 {
+                if bytes[idx] == b'/' && idx + 1 < len && bytes[idx + 1] == b'*' {
+                    depth += 1;
+                    idx += 2;
+                } else if bytes[idx] == b'*' && idx + 1 < len && bytes[idx + 1] == b'/' {
+                    depth -= 1;
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            continue;
+        }
+        if b == b'$'
+            && let Some(tag_len) = parse_dollar_tag(bytes, idx)
+        {
+            let tag = &bytes[idx..idx + tag_len];
+            idx += tag_len;
+            if let Some(pos) = bytes[idx..].windows(tag_len).position(|w| w == tag) {
+                idx += pos + tag_len;
+            } else {
+                idx = len;
+            }
+            continue;
+        }
+        if matches!(b, b'\'' | b'"' | b'`') {
+            let quote = b;
+            idx += 1;
+            while idx < len {
+                let cur = bytes[idx];
+                if cur == quote {
+                    if idx + 1 < len && bytes[idx + 1] == quote {
+                        idx += 2;
+                        continue;
+                    }
+                    idx += 1;
+                    break;
+                }
+                if cur == b'\\' && quote == b'\'' {
+                    idx = (idx + 2).min(len);
+                    continue;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        if first_keyword.is_none() && (b == b'(' || b == b';') {
+            idx += 1;
+            continue;
+        }
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = idx;
+            idx += 1;
+            while idx < len && (bytes[idx].is_ascii_alphanumeric() || bytes[idx] == b'_') {
+                idx += 1;
+            }
+            if start > 0 && matches!(bytes[start - 1], b':' | b'@' | b'$') {
+                continue;
+            }
+            let token = &operation[start..idx];
+            let mut prev_sig_idx = start;
+            while prev_sig_idx > 0 && bytes[prev_sig_idx - 1].is_ascii_whitespace() {
+                prev_sig_idx -= 1;
+            }
+            let is_qualified = prev_sig_idx > 0 && bytes[prev_sig_idx - 1] == b'.';
+            let mut next_sig_idx = idx;
+            while next_sig_idx < len && bytes[next_sig_idx].is_ascii_whitespace() {
+                next_sig_idx += 1;
+            }
+            let is_assignment_target = next_sig_idx < len && bytes[next_sig_idx] == b'=';
+            if first_keyword.is_none() {
+                first_keyword = Some(token);
+                is_insert = token.eq_ignore_ascii_case("INSERT");
+                is_read_only = is_keyword_in(token, READ_ONLY);
+                if is_keyword_in(token, ROW_RETURNING) {
+                    return (true, is_insert, is_read_only);
+                }
+                if is_keyword_in(token, NON_ROW_PREFIXES)
+                    && !bytes
+                        .windows(9)
+                        .any(|w| w.eq_ignore_ascii_case(b"returning"))
+                {
+                    return (false, is_insert, is_read_only);
+                }
+            } else if token.eq_ignore_ascii_case("RETURNING")
+                && !is_qualified
+                && !is_assignment_target
+            {
+                return (true, is_insert, is_read_only);
+            }
+            continue;
+        }
+        idx += if b < 0x80 {
+            1
+        } else {
+            operation[idx..].chars().next().map_or(1, char::len_utf8)
+        };
+    }
+
+    (false, is_insert, is_read_only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,5 +1289,34 @@ mod tests {
 
         assert_eq!(humanize_number(123_790.0, 1), "123.8K");
         assert_eq!(humanize_rate(123_790.0, 1.0, "req", 1), "123.8K req/s");
+    }
+
+    #[test]
+    fn sql_statement_classification_handles_comments_quotes_and_returning() {
+        assert_eq!(classify_sql_statement("SELECT 1"), (true, false, true));
+        assert_eq!(
+            classify_sql_statement("/* lead /* nested */ */ (INSERT INTO t VALUES (1))"),
+            (false, true, false)
+        );
+        assert_eq!(
+            classify_sql_statement("-- comment\nINSERT INTO t (a) VALUES (?) RETURNING id"),
+            (true, true, false)
+        );
+        assert_eq!(
+            classify_sql_statement("UPDATE t SET returning = 'RETURNING' WHERE t.returning = 1"),
+            (false, false, false)
+        );
+        assert_eq!(
+            classify_sql_statement("UPDATE t SET v = $tag$RETURNING$tag$ WHERE id = 1"),
+            (false, false, false)
+        );
+        assert_eq!(
+            classify_sql_statement("DELETE FROM t WHERE id = :returning RETURNING id"),
+            (true, false, false)
+        );
+        assert_eq!(
+            classify_sql_statement("PRAGMA journal_mode"),
+            (true, false, true)
+        );
     }
 }

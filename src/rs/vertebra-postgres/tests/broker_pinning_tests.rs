@@ -622,21 +622,27 @@ fn postgres_broker_begin_fencing_idle_errors_and_concurrent_slots() {
     assert_eq!(decode_response_status(&c5), (0, None));
 
     // Higher-gen Commit, Savepoint, and Rollback-to-savepoint evict stale transaction and return specific error.
-    for (base_req, op, sp, expected) in [
+    for (base_req, stale_gen, newer_gen, op, sp, expected) in [
         (
             110,
+            6u64,
+            7u64,
             DbRpcOp::Commit,
             None,
             "cannot COMMIT: no transaction is in progress for lease generation",
         ),
         (
             120,
+            8u64,
+            9u64,
             DbRpcOp::Savepoint,
             Some("sp_newer"),
             "cannot SAVEPOINT: no transaction is in progress for lease generation",
         ),
         (
             130,
+            10u64,
+            11u64,
             DbRpcOp::Rollback,
             Some("sp_newer"),
             "cannot ROLLBACK TO SAVEPOINT: no transaction is in progress for lease generation",
@@ -645,22 +651,58 @@ fn postgres_broker_begin_fencing_idle_errors_and_concurrent_slots() {
         let b = backend
             .execute(
                 pool_id,
-                &encode_request_frame(DbRpcOp::Begin, base_req, 0, 6, None, None),
+                &encode_request_frame(DbRpcOp::Begin, base_req, 0, stale_gen, None, None),
             )
             .unwrap();
         assert_eq!(decode_response_status(&b), (0, None));
+        let ev_before = srv.events.lock().unwrap().len();
         let newer = backend
             .execute(
                 pool_id,
-                &encode_request_frame(op, base_req + 1, 0, 7, None, sp),
+                &encode_request_frame(op, base_req + 1, 0, newer_gen, None, sp),
             )
             .unwrap();
         let (st, m) = decode_response_status(&newer);
         assert_ne!(st, 0);
         assert!(m.unwrap_or_default().contains(expected));
+        {
+            let ev = srv.events.lock().unwrap();
+            assert!(
+                ev[ev_before..].iter().any(|(_, s)| s == "Q:ROLLBACK"),
+                "expected server-side ROLLBACK during eviction of gen={stale_gen} by {op:?}(gen={newer_gen})"
+            );
+        }
+        let stale_commit = backend
+            .execute(
+                pool_id,
+                &encode_request_frame(DbRpcOp::Commit, base_req + 2, 0, stale_gen, None, None),
+            )
+            .unwrap();
+        let (sc_st, sc_msg) = decode_response_status(&stale_commit);
+        assert_ne!(sc_st, 0);
+        assert!(
+            sc_msg
+                .unwrap_or_default()
+                .contains("stale lease generation"),
+            "evicted stale gen must remain rejected after newer gen"
+        );
+        let newer_idle_commit = backend
+            .execute(
+                pool_id,
+                &encode_request_frame(DbRpcOp::Commit, base_req + 3, 0, newer_gen, None, None),
+            )
+            .unwrap();
+        let (nc_st, nc_msg) = decode_response_status(&newer_idle_commit);
+        assert_ne!(nc_st, 0);
+        assert!(
+            nc_msg
+                .unwrap_or_default()
+                .contains("cannot COMMIT: no transaction")
+        );
     }
 
-    // Barrier-synchronized concurrent transactions on distinct lease slots do not clobber each other.
+    // Barrier-synchronized concurrent transactions on distinct lease slots use distinct backend connections.
+    let conc_ev_start = srv.events.lock().unwrap().len();
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         for slot in [1u32, 2u32] {
@@ -701,6 +743,63 @@ fn postgres_broker_begin_fencing_idle_errors_and_concurrent_slots() {
             });
         }
     });
+    {
+        let ev = srv.events.lock().unwrap();
+        let distinct_cids: BTreeMap<usize, usize> = ev[conc_ev_start..]
+            .iter()
+            .filter(|(_, s)| s == "Q:BEGIN")
+            .fold(BTreeMap::new(), |mut acc, (cid, _)| {
+                *acc.entry(*cid).or_insert(0) += 1;
+                acc
+            });
+        assert_eq!(
+            distinct_cids.len(),
+            2,
+            "concurrent slots must pin distinct backend connections"
+        );
+    }
+
+    // Barrier-synchronized same-slot Begin race between gen=10 and gen=11 always settles high-water gen=11.
+    let race_barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let b1 = &race_barrier;
+        let backend1 = &backend;
+        scope.spawn(move || {
+            b1.wait();
+            let _ = backend1
+                .execute(
+                    pool_id,
+                    &encode_request_frame(DbRpcOp::Begin, 300, 3, 10, None, None),
+                )
+                .unwrap();
+        });
+        let b2 = &race_barrier;
+        let backend2 = &backend;
+        scope.spawn(move || {
+            b2.wait();
+            let resp = backend2
+                .execute(
+                    pool_id,
+                    &encode_request_frame(DbRpcOp::Begin, 301, 3, 11, None, None),
+                )
+                .unwrap();
+            assert_eq!(decode_response_status(&resp), (0, None));
+        });
+    });
+    let commit_gen10 = backend
+        .execute(
+            pool_id,
+            &encode_request_frame(DbRpcOp::Commit, 302, 3, 10, None, None),
+        )
+        .unwrap();
+    assert_ne!(decode_response_status(&commit_gen10).0, 0);
+    let commit_gen11 = backend
+        .execute(
+            pool_id,
+            &encode_request_frame(DbRpcOp::Commit, 303, 3, 11, None, None),
+        )
+        .unwrap();
+    assert_eq!(decode_response_status(&commit_gen11), (0, None));
 
     backend.close_pool(pool_id);
 }

@@ -299,7 +299,8 @@ def _recv_worker_coords(parent_conn: Any, *, timeout: float = 15.0) -> tuple[int
     """Wait with bounded timeout for worker (pid, slot, gen) readiness tuple and close pipe."""
     try:
         assert parent_conn.poll(timeout), f"Worker readiness pipe timed out after {timeout}s"
-        return tuple(parent_conn.recv())  # type: ignore[return-value]
+        pid, slot_idx, generation = parent_conn.recv()
+        return (int(pid), int(slot_idx), int(generation))
     finally:
         parent_conn.close()
 
@@ -340,7 +341,11 @@ def _start_host_with_plugin(
     plugin.transport.register_partition("shared", pool_size=pool_size, max_overflow=max_overflow)
     host = BrokerHost(cfg, socket_path=attach_sock, secret=secret, transport=plugin.transport)
     host.start()
-    engine_pool_id = host.open_engine_pool(0, dialect_tag, dsn, pool_size + max_overflow)
+    try:
+        engine_pool_id = host.open_engine_pool(0, dialect_tag, dsn, pool_size + max_overflow)
+    except BaseException:
+        host.stop()
+        raise
     return host, plugin, zpages, recorder, engine_pool_id, attach_sock, secret
 
 
@@ -435,7 +440,12 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                 ),
             )
             tracked_procs.append(killer_proc)
-            killer_proc.start()
+            try:
+                killer_proc.start()
+            except BaseException:
+                parent_conn.close()
+                child_conn.close()
+                raise
             child_conn.close()
             dead_pid, _slot_idx, _gen = _recv_worker_coords(parent_conn)
             assert host.transport.metrics().active_leases == 1
@@ -490,7 +500,12 @@ def test_multiprocess_duckdb_pool_sharing_sigkill_rollback_and_eviction(tmp_path
                 args=(attach_sock, secret, child_err_conn),
             )
             tracked_procs.append(fail_proc)
-            fail_proc.start()
+            try:
+                fail_proc.start()
+            except BaseException:
+                parent_err_conn.close()
+                child_err_conn.close()
+                raise
             child_err_conn.close()
             fail_pid, fail_slot, _fail_gen = _recv_worker_coords(parent_err_conn)
 
@@ -635,7 +650,12 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
                 ),
             )
             tracked_procs.append(killer_proc)
-            killer_proc.start()
+            try:
+                killer_proc.start()
+            except BaseException:
+                parent_conn.close()
+                child_conn.close()
+                raise
             child_conn.close()
             dead_pid, _slot_idx, _gen = _recv_worker_coords(parent_conn)
 

@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import types
 import uuid
 from pathlib import Path
@@ -76,7 +75,7 @@ def _child_publish_and_compile(shm_name: str, pool_size: int, max_overflow: int,
 
 def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
     """Verify SyncSHMBrokerTransport co-locates statement cache in a single ShmRegion and shares across FD attachment."""
-    name = f"/vtb-colocated-{os.getpid()}-{int(time.time() * 1000)}"
+    name = f"/vtb-colocated-{uuid.uuid4().hex[:8]}"
     cfg = BrokerConfig(
         pool_size=4,
         max_overflow=2,
@@ -84,49 +83,56 @@ def test_shm_broker_colocated_statement_cache_single_region_and_fd() -> None:
         shm_name=name,
     )
     primary = SyncSHMBrokerTransport(cfg)
-    assert primary.stmt_capacity == 32
-    assert primary.stmt_offset > 0
-    assert primary.shm_size > primary.stmt_offset
+    fd_attached: SyncSHMBrokerTransport | None = None
+    try:
+        assert primary.stmt_capacity == 32
+        assert primary.stmt_offset > 0
+        assert primary.shm_size > primary.stmt_offset
 
-    separate_stmt_path = Path(f"/dev/shm/{name.lstrip('/')}-stmt")
-    assert not separate_stmt_path.exists()
+        separate_stmt_path = Path(f"/dev/shm/{name.lstrip('/')}-stmt")
+        assert not separate_stmt_path.exists()
 
-    compile_count = 0
+        compile_count = 0
 
-    def compile_sql(sql: str) -> tuple[str, tuple[str, ...]]:
-        nonlocal compile_count
-        compile_count += 1
-        return (sql.replace(":id", "$1"), ("id",))
+        def compile_sql(sql: str) -> tuple[str, tuple[str, ...]]:
+            nonlocal compile_count
+            compile_count += 1
+            return (sql.replace(":id", "$1"), ("id",))
 
-    plan1 = primary.get_or_compile_statement(
-        "postgresql",
-        "SELECT id, email FROM users WHERE id = :id",
-        compile_sql,
-    )
-    assert plan1.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
-    assert plan1.param_names == ("id",)
-    assert compile_count == 1
+        plan1 = primary.get_or_compile_statement(
+            "postgresql",
+            "SELECT id, email FROM users WHERE id = :id",
+            compile_sql,
+        )
+        assert plan1.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
+        assert plan1.param_names == ("id",)
+        assert compile_count == 1
 
-    assert primary.shm_fd is not None
-    fd_attached = SyncSHMBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
-    plan2 = fd_attached.get_or_compile_statement(
-        "postgresql",
-        "SELECT id, email FROM users WHERE id = :id",
-        compile_sql,
-    )
-    assert plan2.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
-    assert plan2.param_names == ("id",)
-    assert compile_count == 1
-    assert fd_attached.metrics().statement_cache_hits >= 1
+        assert primary.shm_fd is not None
+        fd_attached = SyncSHMBrokerTransport.from_fd(primary.shm_fd, primary.shm_size, cfg)
+        plan2 = fd_attached.get_or_compile_statement(
+            "postgresql",
+            "SELECT id, email FROM users WHERE id = :id",
+            compile_sql,
+        )
+        assert plan2.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
+        assert plan2.param_names == ("id",)
+        assert compile_count == 1
+        assert fd_attached.metrics().statement_cache_hits >= 1
 
-    fd_attached.invalidate_statements()
-    plan3 = primary.get_or_compile_statement(
-        "postgresql",
-        "SELECT id, email FROM users WHERE id = :id",
-        compile_sql,
-    )
-    assert plan3.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
-    assert compile_count == 2
+        fd_attached.invalidate_statements()
+        plan3 = primary.get_or_compile_statement(
+            "postgresql",
+            "SELECT id, email FROM users WHERE id = :id",
+            compile_sql,
+        )
+        assert plan3.compiled_sql == "SELECT id, email FROM users WHERE id = $1"
+        assert compile_count == 2
+    finally:
+        if fd_attached is not None:
+            fd_attached.close()
+        primary.unlink()
+        primary.close()
 
 
 def test_shm_broker_active_leases_for_worker_and_reclaim() -> None:
@@ -159,7 +165,7 @@ def test_shm_broker_active_leases_for_worker_and_reclaim() -> None:
 
 def test_shm_broker_cross_process_publish_and_drain_channel() -> None:
     """Verify publish and drain_channel communicate across processes via the shared-memory channel ring."""
-    name = f"/vtb-chan-{os.getpid()}-{int(time.time() * 1000)}"
+    name = f"/vtb-chan-{uuid.uuid4().hex[:8]}"
     cfg = BrokerConfig(
         pool_size=4,
         max_overflow=2,
@@ -167,28 +173,36 @@ def test_shm_broker_cross_process_publish_and_drain_channel() -> None:
         shm_name=name,
     )
     parent = SyncSHMBrokerTransport(cfg)
-    parent.get_or_compile_statement(
-        "postgresql",
-        "SELECT id, email FROM users WHERE id = :id",
-        lambda sql: (sql.replace(":id", "$1"), ("id",)),
-    )
+    proc: Any = None
+    try:
+        parent.get_or_compile_statement(
+            "postgresql",
+            "SELECT id, email FROM users WHERE id = :id",
+            lambda sql: (sql.replace(":id", "$1"), ("id",)),
+        )
 
-    ctx = mp.get_context("spawn")
-    proc = ctx.Process(
-        target=_child_publish_and_compile,
-        args=(name, cfg.pool_size, cfg.max_overflow, cfg.statement_cache_capacity),
-    )
-    proc.start()
-    proc.join(timeout=15)
-    assert proc.exitcode == 0
+        ctx = mp.get_context("spawn")
+        proc = ctx.Process(
+            target=_child_publish_and_compile,
+            args=(name, cfg.pool_size, cfg.max_overflow, cfg.statement_cache_capacity),
+        )
+        proc.start()
+        proc.join(timeout=15)
+        assert proc.exitcode == 0
 
-    messages = parent.drain_channel("invalidation")
-    assert len(messages) == 1
-    assert messages[0].channel == "invalidation"
-    assert messages[0].payload == b"evict:users:42"
-    assert messages[0].lease_id == "0:1"
-    assert messages[0].timestamp_ns > 0
-    assert parent.drain_channel("invalidation") == []
+        messages = parent.drain_channel("invalidation")
+        assert len(messages) == 1
+        assert messages[0].channel == "invalidation"
+        assert messages[0].payload == b"evict:users:42"
+        assert messages[0].lease_id == "0:1"
+        assert messages[0].timestamp_ns > 0
+        assert parent.drain_channel("invalidation") == []
+    finally:
+        if proc is not None and proc.is_alive():
+            proc.kill()
+            proc.join(timeout=5)
+        parent.unlink()
+        parent.close()
 
 
 def test_shm_broker_channel_isolation_and_ring_wraparound() -> None:
@@ -631,12 +645,14 @@ def test_lease_broker_partition_lookup_stats_and_unpartitioned_reclaim() -> None
     assert unpart_reclaimed[0].slot_index == unpart_grant.slot_index
     assert unpart_reclaimed[0].generation == unpart_grant.generation + 1
     assert unpart_reclaimed[0].pool_id is None
+    assert "pool_id=None" in repr(unpart_reclaimed[0])
     broker.dispose_quarantined(unpart_reclaimed[0].slot_index, unpart_reclaimed[0].generation)
 
     part_reclaimed = broker.reclaim_worker_leases(71001)
     assert len(part_reclaimed) == 1
     assert part_reclaimed[0].generation == part_grant.generation + 1
     assert part_reclaimed[0].pool_id == pool_id
+    assert f"pool_id={pool_id}" in repr(part_reclaimed[0])
     quar_stats = broker.partition_stats(key_hash)
     assert quar_stats is not None
     assert quar_stats.active_leases == 0

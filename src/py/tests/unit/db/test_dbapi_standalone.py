@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 import vertebra.db.dbapi as dbapi_pkg
-from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.dbapi import (
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
@@ -26,6 +26,7 @@ from vertebra.db.dbapi import (
     paramstyle,
     threadsafety,
 )
+from vertebra.db.driver import OperationalError as DriverOperationalError
 from vertebra.db.registry import DatabaseRegistry
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
@@ -258,19 +259,41 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
     with pytest.raises(InterfaceError):
         await open_async_cur.execute("SELECT 1")
 
-    default_mem_sync = SyncDBAPIConnection("sqlite+vtb:///:memory:")
+    default_mem_sync_a = SyncDBAPIConnection("sqlite+vtb:///:memory:")
+    default_mem_sync_b = SyncDBAPIConnection("sqlite+vtb:///:memory:")
+    default_mem_sync_driver = default_mem_sync_a.driver
     try:
-        assert default_mem_sync._owns_driver is True
+        assert default_mem_sync_driver is not None
+        assert default_mem_sync_driver is not default_mem_sync_b.driver
+        cur_a = default_mem_sync_a.cursor()
+        cur_a.execute("CREATE TABLE iso_sync (v INTEGER)")
+        cur_a.execute("INSERT INTO iso_sync VALUES (1)")
+        cur_b = default_mem_sync_b.cursor()
+        with pytest.raises(DriverOperationalError):
+            cur_b.execute("SELECT v FROM iso_sync")
     finally:
-        default_mem_sync.close()
-    assert default_mem_sync.closed is True
+        default_mem_sync_b.close()
+        default_mem_sync_a.close()
+    assert default_mem_sync_a.closed is True
+    assert default_mem_sync_driver.closed is True
 
-    default_mem_async = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:")
+    default_mem_async_a = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:")
+    default_mem_async_b = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:")
+    default_mem_async_driver = default_mem_async_a.driver
     try:
-        assert default_mem_async._owns_driver is True
+        assert default_mem_async_driver is not None
+        assert default_mem_async_driver is not default_mem_async_b.driver
+        cur_aa = default_mem_async_a.cursor()
+        await cur_aa.execute("CREATE TABLE iso_async (v INTEGER)")
+        await cur_aa.execute("INSERT INTO iso_async VALUES (1)")
+        cur_ab = default_mem_async_b.cursor()
+        with pytest.raises(DriverOperationalError):
+            await cur_ab.execute("SELECT v FROM iso_async")
     finally:
-        await default_mem_async.close()
-    assert default_mem_async.closed is True
+        await default_mem_async_b.close()
+        await default_mem_async_a.close()
+    assert default_mem_async_a.closed is True
+    assert default_mem_async_driver.closed is True
 
 
 def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
@@ -460,3 +483,158 @@ async def test_async_dbapi_non_sqlite_and_async_sqlite_driver_dml_lastrowid() ->
         assert fake_driver.commit_calls == 1
     finally:
         await conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("url", "expected_path", "expect_none_pool_key"),
+    [
+        ("sqlite:///%3Amemory%3A", ":memory:", True),
+        ("sqlite+vtb:///%3Amemory%3A", ":memory:", True),
+        ("sqlite:///file::memory:?cache=shared", "file::memory:?cache=shared", False),
+        ("sqlite:///file:mem_x?mode=memory&cache=shared", "file:mem_x?mode=memory&cache=shared", False),
+        ("sqlite:///file:mem_iso?mode=memory", "file:mem_iso?mode=memory", True),
+    ],
+)
+async def test_sqlite_memory_url_variants_never_create_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    expected_path: str,
+    expect_none_pool_key: bool,
+) -> None:
+    """Verify encoded and file: memory SQLite URLs classify cleanly and never leak disk files."""
+    monkeypatch.chdir(tmp_path)
+    cfg = SQLiteConfig.from_url(url)
+    assert cfg.path == expected_path
+    assert cfg.is_in_memory is True
+    assert (cfg.pool_key() is None) is expect_none_pool_key
+    assert SQLiteConfig(path="%3Amemory%3A").path == ":memory:"
+
+    driver = SyncSQLiteDriver(cfg)
+    try:
+        rows, _cols = driver.execute_with_description("SELECT 1")
+        assert rows == [(1,)]
+    finally:
+        driver.close()
+
+    sync_conn = SyncDBAPIConnection(url, share_pool=False)
+    try:
+        cur = sync_conn.cursor()
+        cur.execute("SELECT 2")
+        assert cur.fetchall() == [(2,)]
+    finally:
+        sync_conn.close()
+
+    async_url = (
+        url.replace("sqlite://", "sqlite+vtb_async://", 1)
+        if url.startswith("sqlite:///")
+        else "sqlite+vtb_async:///%3Amemory%3A"
+    )
+    async_conn = AsyncDBAPIConnection(async_url, share_pool=False)
+    try:
+        acur = async_conn.cursor()
+        await acur.execute("SELECT 3")
+        assert await acur.fetchall() == [(3,)]
+    finally:
+        await async_conn.close()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_dbapi_sqlite_insert_returning_and_empty_autocommit_commit() -> None:
+    """Verify INSERT ... RETURNING refreshes lastrowid and empty select/description autocommit commits cleanly."""
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        cur = sync_conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        cur.execute("INSERT INTO items (name) VALUES (?)", ("first",))
+        assert cur.lastrowid == 1
+        cur.execute("INSERT INTO items (name) VALUES (?) RETURNING id", ("second",))
+        assert cur.fetchall() == [(2,)]
+        assert cur.lastrowid == 2
+        cur.execute("SELECT id FROM items ORDER BY id")
+        assert cur.fetchall() == [(1,), (2,)]
+        assert cur.lastrowid is None
+    finally:
+        sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    try:
+        acur = async_conn.cursor()
+        await acur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        await acur.execute("/* lead */ INSERT INTO items (name) VALUES (?)", ("first",))
+        assert acur.lastrowid == 1
+        await acur.execute("INSERT INTO items (name) VALUES (?) RETURNING id", ("second",))
+        assert await acur.fetchall() == [(2,)]
+        assert acur.lastrowid == 2
+        await acur.execute("SELECT id FROM items ORDER BY id")
+        assert await acur.fetchall() == [(1,), (2,)]
+        assert acur.lastrowid is None
+    finally:
+        await async_conn.close()
+
+    class _EmptyResultDriver:
+        dialect = "postgres"
+
+        def __init__(self) -> None:
+            self.commit_calls = 0
+
+        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+            _ = (sql, parameters)
+            return ([], None)
+
+        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, params)
+            return []
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    desc_driver = _EmptyResultDriver()
+    empty_desc_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=desc_driver, share_pool=False)
+    try:
+        empty_desc_conn.autocommit = True
+        dcur = empty_desc_conn.cursor()
+        dcur.execute("UPDATE items SET name = 'x' RETURNING id")
+        assert dcur.fetchall() == []
+        assert desc_driver.commit_calls == 1
+    finally:
+        empty_desc_conn.close()
+
+    class _SelectOnlyEmptyDriver:
+        dialect = "postgres"
+
+        def __init__(self) -> None:
+            self.commit_calls = 0
+
+        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, params)
+            return []
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    sel_driver = _SelectOnlyEmptyDriver()
+    empty_sel_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=sel_driver, share_pool=False)
+    try:
+        empty_sel_conn.autocommit = True
+        scur = empty_sel_conn.cursor()
+        scur.execute("DELETE FROM items RETURNING id")
+        assert scur.fetchall() == []
+        assert sel_driver.commit_calls == 1
+    finally:
+        empty_sel_conn.close()
