@@ -17,6 +17,10 @@ from vertebra.extensions.sqlalchemy.alembic import (
     SpannerAlembicImpl,
     SQLiteAlembicImpl,
 )
+from vertebra.extensions.sqlalchemy.async_adapter import (
+    AsyncAdapt_dbapi_connection,
+    SQLAlchemyAsyncDBAPI,
+)
 from vertebra.extensions.sqlalchemy.cache import (
     CacheEntry,
     CacheStats,
@@ -65,6 +69,11 @@ from vertebra.extensions.sqlalchemy.dialects import (
     attach_serverless_disconnect_guard,
     is_free_threaded,
 )
+from vertebra.extensions.sqlalchemy.pool import (
+    AsyncBrokerPool,
+    BrokerPool,
+    broker_creator,
+)
 from vertebra.extensions.sqlalchemy.types import (
     BinaryJSON,
     DeleteUsingClause,
@@ -82,13 +91,16 @@ __all__ = (
     "DIALECT_DESCRIPTORS",
     "DIALECT_SCHEMES",
     "AlembicImpl",
+    "AsyncAdapt_dbapi_connection",
+    "AsyncBigQueryDialect",
+    "SyncBigQueryDialect",
+    "AsyncBrokerPool",
     "AsyncDBAPIConnection",
     "AsyncDBAPICursor",
     "AsyncDBAPIModule",
     "BigQueryAlembicImpl",
-    "AsyncBigQueryDialect",
-    "SyncBigQueryDialect",
     "BinaryJSON",
+    "BrokerPool",
     "CacheEntry",
     "CacheStats",
     "CreateVectorIndexOp",
@@ -126,6 +138,7 @@ __all__ = (
     "AsyncPostgreSQLDialect",
     "SyncPostgreSQLDialect",
     "ProgrammingError",
+    "SQLAlchemyAsyncDBAPI",
     "SQLiteAlembicImpl",
     "AsyncSQLiteDialect",
     "SyncSQLiteDialect",
@@ -143,5 +156,6 @@ __all__ = (
     "VectorStorageFormat",
     "Warning",
     "attach_serverless_disconnect_guard",
+    "broker_creator",
     "is_free_threaded",
 )

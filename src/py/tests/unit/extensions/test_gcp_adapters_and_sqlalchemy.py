@@ -46,6 +46,7 @@ from vertebra.extensions.alchemy import (
     create_sync_alchemy_config,
     normalize_alchemy_url,
 )
+from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
 from vertebra.extensions.django.db.backends.bigquery.base import (
     DatabaseWrapper as BigQueryDjangoDatabaseWrapper,
 )
@@ -97,6 +98,8 @@ from vertebra.extensions.sqlalchemy import (
     SyncSpannerDialect,
     Vector,
 )
+from vertebra.extensions.sqlalchemy import dialects as sqlalchemy_dialects_mod
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
 from vertebra.extensions.starlette import (
     provide_driver as starlette_provide_driver,
 )
@@ -1265,3 +1268,19 @@ async def test_native_provider_preserves_driver_exception_identity(
         assert exc.value.__cause__ is failure
     else:
         assert exc.value is failure
+
+
+def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
+    """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects.py has no embedded DBAPI."""
+    assert sqlalchemy_dialects_mod.__file__ is not None
+    dialects_src = Path(sqlalchemy_dialects_mod.__file__).read_text(encoding="utf-8")
+    assert "class SyncDBAPIConnection" not in dialects_src
+    assert "class AsyncDBAPIConnection" not in dialects_src
+    assert "vertebra.db.adapters" not in dialects_src
+
+    sync_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    bq_cfg = create_sync_alchemy_config("bigquery://analytics-proj/ds", broker=sync_broker)
+    sp_cfg = create_async_alchemy_config("spanner://core-proj/prod-inst/orders", broker=async_broker)
+    assert issubclass(bq_cfg.engine_config.poolclass, BrokerPool)
+    assert issubclass(sp_cfg.engine_config.poolclass, AsyncBrokerPool)

@@ -176,6 +176,9 @@ def test_span_ring_genai_metrics_cgroup_and_zpages(tmp_path: Path) -> None:
         total_reclaimed=0,
         statement_cache_hits=10,
         statement_cache_misses=1,
+        quarantined=1,
+        total_quarantined=3,
+        total_disposed=2,
     )
     span_sample = SpanData(
         name="GET /orders",

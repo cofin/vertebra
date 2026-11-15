@@ -275,10 +275,10 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert not SharedArrowBuffer.exists(spilled_shm_name)
         assert len(provider.active_arrow_buffers) == 0
 
-        arrow_table = sync_driver.select_to_arrow("SELECT id, name FROM items WHERE id <= 5 ORDER BY id")
-        assert arrow_table.num_rows == 5
-        assert arrow_table.column_names == ["id", "name"]
-        assert arrow_table.to_pylist() == [
+        arrow_result = sync_driver.select_to_arrow("SELECT id, name FROM items WHERE id <= 5 ORDER BY id")
+        assert arrow_result.num_rows == 5
+        assert arrow_result.column_names == ["id", "name"]
+        assert arrow_result.to_dict() == [
             {"id": 1, "name": "item-1"},
             {"id": 2, "name": "item-2"},
             {"id": 3, "name": "item-3"},
@@ -305,8 +305,9 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
     async_upstream = _SQLiteAsyncUpstreamDriver(upstream)
     async_provider = SQLSpecAsyncProvider(async_upstream, broker=broker, arrow_threshold_rows=256)
     async with ProxyAsyncDriver(async_provider, broker=broker) as async_driver:
-        async_table = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
-        assert async_table.num_rows == 300
+        async_result = await async_driver.select_to_arrow("SELECT id, name FROM items ORDER BY id")
+        assert async_result.num_rows == 300
+        assert async_result.get_data() is not None
         assert async_driver.last_response is not None
         assert async_driver.last_response.is_arrow_shm is True
         assert not SharedArrowBuffer.exists(async_driver.last_response.arrow_shm_name)

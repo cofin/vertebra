@@ -250,6 +250,7 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "TenantPredicate",
         "TenantScopeConfig",
         "ThreadOffloadAsyncDatabaseDriver",
+        "dbapi",
         "provide_driver",
     }
 )
@@ -291,6 +292,7 @@ def test_vertebra_db_lazy_exports_and_curated_engine_agnostic_all() -> None:
         assert loaded_adapters == []
         assert fresh_db.BaseDatabaseConfig is not None
         assert fresh_db.ArrowCursor is not None
+        assert fresh_db.dbapi is not None
         loaded_after_agnostic = [
             name for name in sys.modules if name == "vertebra.db.adapters" or name.startswith("vertebra.db.adapters.")
         ]

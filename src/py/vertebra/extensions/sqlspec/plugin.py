@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import logging
+from collections.abc import Awaitable
 from typing import Any, ClassVar, cast
 
 from vertebra.extensions.broker import (
@@ -14,8 +14,10 @@ from vertebra.extensions.broker import (
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.sqlspec.provider import (
+    AsyncBrokerLeaseSource,
     SQLSpecAsyncProvider,
     SQLSpecSyncProvider,
+    SyncBrokerLeaseSource,
     _BaseSQLSpecProvider,
 )
 from vertebra.extensions.sqlspec.proxy import (
@@ -34,8 +36,8 @@ try:
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
-type SyncBrokerTransport = SyncSHMBrokerTransport | Any
-type AsyncBrokerTransport = AsyncSHMBrokerTransport | Any
+type SyncBrokerTransport = SyncSHMBrokerTransport | SyncBrokerLeaseSource
+type AsyncBrokerTransport = AsyncSHMBrokerTransport | AsyncBrokerLeaseSource
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +192,7 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
         self.config: SyncConfigT = config
         self.provider: SQLSpecSyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or cast(SQLSpecSyncProvider, broker)
+            self.provider = provider or broker
             self.broker: Any = broker.broker
         else:
             self.provider = provider
@@ -221,6 +223,8 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
             broker=self.broker,
             pool_name=resolved_bind_key,
             worker_pid=worker_pid,
+            statement_config=self.statement_config,
+            dialect=getattr(self.config, "dialect", None),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
@@ -232,6 +236,8 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
                 self.provider,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
+                statement_config=self.statement_config,
+                dialect=getattr(self.config, "dialect", None),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
@@ -288,7 +294,7 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         self.config: AsyncConfigT = config
         self.provider: SQLSpecAsyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
-            self.provider = provider or cast(SQLSpecAsyncProvider, broker)
+            self.provider = provider or broker
             self.broker: Any = broker.broker
         else:
             self.provider = provider
@@ -319,6 +325,8 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
             broker=self.broker,
             pool_name=resolved_bind_key,
             worker_pid=worker_pid,
+            statement_config=self.statement_config,
+            dialect=getattr(self.config, "dialect", None),
         )
 
     def provide_session(self, *args: Any, **kwargs: Any) -> Any:
@@ -330,6 +338,8 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
                 self.provider,
                 broker=self.broker,
                 pool_name=resolved_bind_key,
+                statement_config=self.statement_config,
+                dialect=getattr(self.config, "dialect", None),
             )
         fn = getattr(self.config, "provide_session", None)
         return fn() if callable(fn) else None
@@ -361,7 +371,7 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         fn = getattr(self.config, "_close_pool", None) or getattr(self.config, "close_pool", None)
         if callable(fn):
             res = fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
 
 

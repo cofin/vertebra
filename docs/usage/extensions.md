@@ -92,7 +92,7 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 
 `vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) with automatic `NullPool` wiring and Cloud SQL / AlloyDB dialers. Engine wheels install via `vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, and `[spanner]` (raising `MissingDependencyError` if the corresponding extra wheel is absent, and DB-API `InterfaceError` when `DatabaseRegistry.parse_url` rejects a malformed URL).
+- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `SQLAlchemyAsyncDBAPI`) with automatic `NullPool` wiring for direct URLs and `BrokerPool` / `AsyncBrokerPool` + `broker_creator` wiring via `create_sync_alchemy_config` / `create_async_alchemy_config` when a shared-memory broker is attached. Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
@@ -167,4 +167,36 @@ Modernize Oracle APEX applications incrementally without a full rewrite using `v
 
 ## Shared-Memory Session Broker (`vertebra.extensions.broker`)
 
-`BrokerPlugin` (`BrokerConfig`, `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`, `SyncInMemoryBrokerTransport` / `AsyncInMemoryBrokerTransport`, `SyncConnectionLease` / `AsyncConnectionLease`, `StatementPlan`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes never multiply database connection counts.
+`BrokerPlugin` (`BrokerConfig`, `BrokerHost`, `BrokerEngineDiscovery`, `SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`, `SyncConnectionLease` / `AsyncConnectionLease`, `StatementPlan`, `LeaseQuarantinedError`) manages cross-worker database connection leases and prepared statement plans over shared memory so N Python worker processes share a bounded pool without multiplying database connections.
+
+```mermaid
+flowchart LR
+    W["Worker Processes (SQLSpec Proxy / BrokerPool)"] --> T["SyncSHMBrokerTransport / AsyncSHMBrokerTransport"]
+    T --> SHM["UDS SCM_RIGHTS Attach & ShmLeaseTable"]
+    SHM --> H["BrokerHost (vtb broker serve)"]
+    H --> C["BrokerEngineCapsule / Server Pools"]
+```
+
+- **Named SHM & Authenticated UDS Attach**: Owner segments write `ShmOwnerHeader` generation and PID ownership metadata; cross-process workers attach either by name or through `BrokerAttachClient` / `BrokerAttachServer` over a `0600` Unix domain socket inside a `0700` directory authenticated with `VERTEBRA_BROKER_SECRET` (`SCM_RIGHTS` FD passing).
+- **Supervision, Crash Recovery & Quarantine**: `vtb broker serve` runs `BrokerHost` and drains or rolls back active slots on shutdown (`ShutdownReport`), while `reclaim_worker_leases` transitions crashed worker slots into `Quarantined`, runs server `ROLLBACK` cleanup, and disposes dirty slots (`vtb broker status` and `DbPoolMetricSample` report `quarantined`, `total_quarantined`, and `total_disposed`). Session release or pool check-in failures quarantine the lease and raise `LeaseQuarantinedError`.
+- **SQLAlchemy & Advanced Alchemy Pool Sharing**: Pass `BrokerPool` / `AsyncBrokerPool` (and `broker_creator`) with `create_engine` / `create_async_engine`, or pass a transport to `create_sync_alchemy_config` / `create_async_alchemy_config` to partition broker leases by config `pool_key()`.
+
+```python
+from sqlalchemy import create_engine, text
+from vertebra.extensions.broker import BrokerConfig, BrokerHost, SyncSHMBrokerTransport
+from vertebra.extensions.sqlalchemy import BrokerPool, broker_creator
+
+config = BrokerConfig(pool_size=4, shm_name="/vtb-app-broker", role="owner")
+with BrokerHost(config) as host:
+    transport = SyncSHMBrokerTransport(BrokerConfig(shm_name="/vtb-app-broker", role="worker"))
+    pool_cls = BrokerPool.bind_class(broker=transport, url="sqlite:///app.db")
+    engine = create_engine(
+        "sqlite+vtb:///app.db",
+        poolclass=pool_cls,
+        creator=broker_creator("sqlite:///app.db", broker=transport),
+    )
+    with engine.connect() as conn:
+        value = conn.execute(text("SELECT 1")).scalar_one()
+    engine.dispose()
+    transport.close()
+```

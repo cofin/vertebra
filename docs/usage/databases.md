@@ -93,6 +93,13 @@ supports_pipelining = isinstance(db, SyncPipelineCapable)
 db.close()
 ```
 
+### Standalone DB-API 2.0 (`vertebra.db.dbapi`) & Broker Capabilities
+
+`vertebra.db.dbapi` provides standalone PEP 249 synchronous and asynchronous connections (`SyncDBAPIConnection`, `SyncDBAPICursor`, `SyncDBAPIModule`, `AsyncDBAPIConnection`, `AsyncDBAPICursor`, `AsyncDBAPIModule`, `connect`, `is_row_returning_sql`, and standard PEP 249 exception types) backed by `vertebra.db` drivers without importing `sqlalchemy`, `vertebra.extensions`, or adapter subpackages eagerly:
+
+- **Statement Autocommit Databases**: Setting `autocommit=False` on `bigquery`, `spanner`, or `spangres` DB-API connections raises PEP 249 `NotSupportedError` because those backends manage transactions at statement or RPC boundaries.
+- **Native Broker Engine Capsules**: `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb` export C-ABI `BrokerEngineCapsule` (`broker_engine_capsule()`) hooks discovered by `BrokerEngineDiscovery`; `vertebra._bigquery` and `vertebra._spanner` use multiplexed HTTP/2 REST/gRPC channels and are excluded from in-process SHM broker capsule hosting.
+
 ## SQLSpec & Litestar Integration
 
 Use `create_sqlspec_plugin` with an adapter configuration (such as `PostgreSQLAsyncConfig`, `MySQLAsyncConfig`, or `SQLiteAsyncConfig`) to manage connection leasing, shared-memory statement caches, and dependency injection:

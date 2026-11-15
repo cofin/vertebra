@@ -383,6 +383,8 @@ class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     statement_cache_hits: int
     statement_cache_misses: int
     quarantined: int = 0
+    total_quarantined: int = 0
+    total_disposed: int = 0
     wait_duration_ms: float = 0.0
     timestamp: float = msgspec.field(default_factory=time.time)
 

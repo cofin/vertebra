@@ -331,3 +331,34 @@ vtb workers run [OPTIONS] [APP]
 | `--drain-timeout` | `float` | `30.0` | Graceful drain timeout in seconds |
 | `--oneshot` | `text` | - | Execute a single registered background job and exit |
 | `--payload` | `text` | - | Optional JSON payload passed to --oneshot job |
+
+#### `vtb broker serve`
+
+Run the shared-memory connection broker host until SIGINT or SIGTERM.
+
+```bash
+vtb broker serve [OPTIONS]
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--shm-name` | `text` | - | Named POSIX SHM broker segment. |
+| `--socket-path` | `text` | - | Unix domain socket path for authenticated FD attach. |
+| `--secret` | `text` | - | Attach secret (reads VERTEBRA_BROKER_SECRET when omitted). |
+| `--pool-size` | `integer` | `20` | Primary pool slot capacity. |
+| `--max-overflow` | `integer` | `10` | Burst overflow slot capacity. |
+| `--stmt-capacity` | `integer` | `512` | Statement cache slot capacity. |
+| `--shutdown-timeout` | `float` | `10.0` | Bounded shutdown drain timeout in seconds. |
+
+#### `vtb broker status`
+
+Inspect live shared-memory lease and quarantine statistics.
+
+```bash
+vtb broker status [OPTIONS]
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--shm-name` | `text` | - | **Required.** Named POSIX SHM broker segment to inspect. |
+| `--json` | `flag` | `False` | Emit broker stats as JSON. |

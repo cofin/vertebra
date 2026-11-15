@@ -12,11 +12,14 @@ All notable changes to Vertebra are documented on this page.
 - Google Cloud `IapIdentitySource` ES256 signed JWT header verification (`vertebra-core[iap]`), `OidcTokenSource` (`AsyncGcpIdTokenCache` + `401` single retry) for `vtb ai mcp bridge --audience`, incremental cancellable `run_stdio_server`, and `resolve_app_mcp_core` / `is_litestar_mcp_app` discovery in `vtb ai mcp serve --app` ([#114](https://github.com/cofin/vertebra/issues/114)).
 - `Tool.authorize` single-pass guard splitting (`-32004` / `-32005`), `Mcp-Param-*` header validation (`-32020`), and single-use expiring confirmation consumption (`ConfirmationGate.consume_call_approval`).
 - `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrapping `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config`, `token_cache`, `generation`, `needs_refresh`, `invalidate`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` OAuth2 bearer-token rotation.
+- Shared-memory connection broker lifecycle hardening across Rust and Python: `ShmOwnerHeader` stale-owner reclamation, `LeaseState::Quarantined` / `LeaseQuarantinedError`, authenticated Unix domain socket `SCM_RIGHTS` attachment (`BrokerAttachServer`, `BrokerAttachClient`, `0700`/`0600` permission checks, `VERTEBRA_BROKER_SECRET`), `BrokerHost` (`vtb broker serve`, `vtb broker status`, `ShutdownReport`) crash `ROLLBACK` cleanup, and `BrokerEngineCapsule` ABI v1 (`BrokerEngineDiscovery`, `BrokerEngineRegistry`) across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb`.
+- Standalone PEP 249 `vertebra.db.dbapi` (`SyncDBAPIConnection`, `AsyncDBAPIConnection`, `SyncDBAPIModule`, `AsyncDBAPIModule`, `is_row_returning_sql`), isolated `SQLAlchemyAsyncDBAPI` (`vertebra.extensions.sqlalchemy.async_adapter`), partitioned SQLAlchemy pooling (`BrokerPool`, `AsyncBrokerPool`, `broker_creator`), and `DbPoolMetricSample` quarantine counters (`quarantined`, `total_quarantined`, `total_disposed`).
 
 ### Changed
 
 - Consolidated `MCPCore` well-known discovery and `SkillCatalog` / UI validation wiring across `AgentPlugin`, Starlette, FastAPI, Flask, Django, and `litestar-mcp>=0.20.0` (`create_mcp_plugin`) ([#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111)).
 - `DuckDBSecretConfig` rejects `persistent=True` with dynamic `value_provider` callables and validates `refresh_interval_seconds` as a positive finite number; `SyncDuckDBDriver` and `AsyncDuckDBDriver` invalidate dynamic secret providers on `(HTTP 401)` / `(HTTP 403)` `httpfs` errors and close the underlying `_client` if startup initialization fails.
+- `ProxySyncDriver` and `ProxyAsyncDriver` (`vertebra.extensions.sqlspec`) inherit `SyncDriverAdapterBase` and `AsyncDriverAdapterBase` with aligned upstream method signatures and `ArrowResult` returns, and `_BaseSQLSpecProvider` replaces `inspect.signature` / suppressed exits with `@runtime_checkable` broker Protocols and fail-loud lease quarantine ([#98](https://github.com/cofin/vertebra/issues/98)); `create_sync_alchemy_config` and `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a broker is provided.
 
 ### Fixed
 
@@ -25,6 +28,7 @@ All notable changes to Vertebra are documented on this page.
 ### Removed
 
 - Deleted empty compatibility alias `MCPService(MCPCore)` and `--name` flag on `vtb ai mcp serve` ([#114](https://github.com/cofin/vertebra/issues/114)).
+- Removed in-memory fallback broker transports (`SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `use_shm=False`) and duplicate embedded PEP 249 classes inside `vertebra.extensions.sqlalchemy.dialects`.
 
 ## 0.3.0
 

@@ -68,6 +68,8 @@ class BrokerPlugin:
             statement_cache_hits=m.statement_cache_hits,
             statement_cache_misses=m.statement_cache_misses,
             quarantined=m.quarantined,
+            total_quarantined=m.total_quarantined,
+            total_disposed=m.total_disposed,
         )
         if self.otel_recorder is not None:
             self.otel_recorder.record_sample(sample)

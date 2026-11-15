@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy.pool import NullPool
-
 from vertebra.extensions.alchemy.cache import (
     AsyncCacheManager,
     CacheConfig,
@@ -14,6 +12,7 @@ from vertebra.extensions.alchemy.cache import (
     setup_cache_listeners,
 )
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend, register_storage_backend
+from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
@@ -74,8 +73,10 @@ def _prepare_engine_config(
     broker: (SyncSHMSessionBroker | AsyncSHMSessionBroker | SyncBrokerTransport | AsyncBrokerTransport | None),
     kwargs: dict[str, Any],
     engine_config_cls: type[Any] = EngineConfig,
+    *,
+    is_async: bool = False,
 ) -> None:
-    """Configure EngineConfig defaults, broker leasing connection args, and NullPool."""
+    """Configure EngineConfig defaults, broker leasing connection args, and BrokerPool/AsyncBrokerPool."""
     is_memory = ":memory:" in connection_string or "memory://" in connection_string
     existing = kwargs.get("engine_config")
     if isinstance(existing, engine_config_cls):
@@ -96,10 +97,8 @@ def _prepare_engine_config(
             cfg.pool_recycle = 1800
 
     if broker is not None:
-        cfg.poolclass = NullPool
-        conn_args = dict(cfg.connect_args) if isinstance(cfg.connect_args, dict) else {}
-        conn_args["broker"] = broker
-        cfg.connect_args = conn_args
+        pool_cls = AsyncBrokerPool if is_async else BrokerPool
+        cfg.poolclass = pool_cls.bind_class(broker=broker, url=connection_string)
 
     kwargs["engine_config"] = cfg
 
@@ -152,7 +151,7 @@ def create_async_alchemy_config(
     """Create an Advanced Alchemy SQLAlchemyAsyncConfig with optional broker, storage, and cache."""
     resolved_url = normalize_alchemy_url(connection_string, is_async=True)
     _register_storage_if_provided(storage_backend, storage_key)
-    _prepare_engine_config(resolved_url, broker, kwargs)
+    _prepare_engine_config(resolved_url, broker, kwargs, is_async=True)
     _prepare_cache_config(cache_config, kwargs)
     return config_cls(connection_string=resolved_url, **kwargs)
 
@@ -170,7 +169,7 @@ def create_sync_alchemy_config(
     """Create an Advanced Alchemy SQLAlchemySyncConfig with optional broker, storage, and cache."""
     resolved_url = normalize_alchemy_url(connection_string, is_async=False)
     _register_storage_if_provided(storage_backend, storage_key)
-    _prepare_engine_config(resolved_url, broker, kwargs)
+    _prepare_engine_config(resolved_url, broker, kwargs, is_async=False)
     _prepare_cache_config(cache_config, kwargs)
     return config_cls(connection_string=resolved_url, **kwargs)
 

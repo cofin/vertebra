@@ -1060,9 +1060,7 @@ class BrokerEngineRegistry:
     @staticmethod
     def close_pool(dialect_tag: int, pool_id: int) -> None: ...
 
-
 def stable_hash64(data: bytes | str) -> int: ...
-
 def classify_jsonrpc_frame(
     payload: bytes,
 ) -> tuple[int, str | None, str | None]: ...

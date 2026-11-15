@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import contextlib
-import inspect
 import mmap
 import os
+import sqlite3
 import tempfile
 import threading
 import uuid
+from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import msgspec
+from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
+from vertebra.extensions.broker.errors import LeaseQuarantinedError
+from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, SyncSHMBrokerTransport
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import (
@@ -24,20 +27,65 @@ from vertebra.utils.serializers import (
 )
 from vertebra.utils.type_guards import is_msgspec_struct
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
 __all__ = (
+    "AsyncBrokerLeaseSource",
+    "AsyncLeasedSession",
     "BrokerRpcRequest",
     "BrokerRpcResponse",
     "SharedArrowBuffer",
     "SharedArrowTable",
     "SQLSpecAsyncProvider",
     "SQLSpecSyncProvider",
+    "SyncBrokerLeaseSource",
+    "SyncLeasedSession",
 )
 
 
-class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
+@runtime_checkable
+class SyncBrokerLeaseSource(Protocol):
+    """Protocol for synchronous shared-memory broker lease acquisition and quarantine."""
+
+    def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
+        """Acquire a leased connection slot for ``pool_name`` and ``worker_pid``."""
+
+    def quarantine(self, lease: Any) -> None:
+        """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
+
+
+@runtime_checkable
+class AsyncBrokerLeaseSource(Protocol):
+    """Protocol for asynchronous shared-memory broker lease acquisition and quarantine."""
+
+    async def acquire(self, *, pool_name: str, worker_pid: int) -> Any:
+        """Acquire a leased connection slot asynchronously for ``pool_name`` and ``worker_pid``."""
+
+    async def quarantine(self, lease: Any) -> Any:
+        """Quarantine ``lease`` so its slot stays reserved until explicit disposal."""
+
+
+@runtime_checkable
+class SyncLeasedSession(Protocol):
+    """Protocol for synchronous database sessions executed under a broker lease."""
+
+    def execute(self, sql: str, *parameters: Any) -> Any:
+        """Execute ``sql`` synchronously with ``parameters``."""
+
+    def rollback(self) -> None:
+        """Roll back the active session transaction."""
+
+
+@runtime_checkable
+class AsyncLeasedSession(Protocol):
+    """Protocol for asynchronous database sessions executed under a broker lease."""
+
+    def execute(self, sql: str, *parameters: Any) -> Any:
+        """Execute ``sql`` asynchronously with ``parameters``."""
+
+    def rollback(self) -> Any:
+        """Roll back the active async session transaction."""
+
+
+class BrokerRpcRequest(msgspec.Struct, frozen=True):
     """RPC request frame dispatched from a worker proxy driver to SQLSpecSyncProvider or SQLSpecAsyncProvider."""
 
     request_id: int = 0
@@ -53,7 +101,7 @@ class BrokerRpcRequest(msgspec.Struct, frozen=True, gc=False):
     arrow_shm_name: str = ""
 
 
-class BrokerRpcResponse(msgspec.Struct, frozen=True, gc=False):
+class BrokerRpcResponse(msgspec.Struct, frozen=True):
     """RPC response frame returned from SQLSpecSyncProvider or SQLSpecAsyncProvider to a worker proxy driver."""
 
     request_id: int = 0
@@ -759,8 +807,8 @@ class _BaseSQLSpecProvider:
         for name in arrow_names:
             SharedArrowBuffer.unlink(name)
 
-    def _resolve_upstream(self, pool_name: str) -> Any:
-        """Resolve the upstream config, driver, or factory for pool_name."""
+    def _resolve_upstream_optional(self, pool_name: str) -> Any:
+        """Return registered upstream config or driver for pool_name when present."""
         with self._lock:
             if pool_name in self._upstreams:
                 return self._upstreams[pool_name]
@@ -770,6 +818,13 @@ class _BaseSQLSpecProvider:
                 return self._upstreams["default"]
             if self._upstreams:
                 return next(iter(self._upstreams.values()))
+        return None
+
+    def _resolve_upstream(self, pool_name: str) -> Any:
+        """Resolve the upstream config, driver, or factory for pool_name."""
+        upstream = self._resolve_upstream_optional(pool_name)
+        if upstream is not None:
+            return upstream
         raise ImproperConfigurationError(f"No upstream SQLSpec config or driver registered for pool {pool_name!r}")
 
     def _acquire_slot_sync(self, request: BrokerRpcRequest) -> tuple[int, int]:
@@ -803,49 +858,35 @@ class _BaseSQLSpecProvider:
             return request.slot_idx, gen
 
     def _acquire_from_broker_sync(self, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a lease from self.broker synchronously."""
+        """Acquire a lease from self.broker synchronously via typed lease source contracts."""
+        pid = worker_pid if worker_pid > 0 else os.getpid()
         target = getattr(self.broker, "transport", self.broker)
+        if isinstance(target, SyncSHMBrokerTransport):
+            return target.acquire(bind_key=pool_name, worker_id=pid)
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
-            return self._call_broker_acquire(acquire_lease_fn, pool_name, worker_pid)
-        acquire_fn = getattr(target, "acquire", None)
-        if callable(acquire_fn):
-            return self._call_broker_acquire(acquire_fn, pool_name, worker_pid)
+            return acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
+        if isinstance(target, SyncBrokerLeaseSource):
+            return target.acquire(pool_name=pool_name, worker_pid=pid)
         raise ImproperConfigurationError("Configured broker does not support synchronous lease acquisition")
 
     async def _acquire_from_broker_async(self, pool_name: str, worker_pid: int) -> Any:
-        """Acquire a lease from self.broker asynchronously."""
-        target = getattr(self.broker, "transport", self.broker)
-        for attr in ("acquire_lease", "acquire"):
-            fn = getattr(self.broker, attr, None) or getattr(target, attr, None)
-            if callable(fn):
-                res = self._call_broker_acquire(fn, pool_name, worker_pid)
-                if inspect.isawaitable(res):
-                    return await res
-                return res
-        raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
-
-    @staticmethod
-    def _call_broker_acquire(fn: Any, pool_name: str, worker_pid: int) -> Any:
-        """Invoke a broker acquire function matching its accepted keyword or positional parameters."""
+        """Acquire a lease from self.broker asynchronously via typed lease source contracts."""
         pid = worker_pid if worker_pid > 0 else os.getpid()
-        try:
-            sig = inspect.signature(fn)
-            params = sig.parameters
-            kwargs: dict[str, Any] = {}
-            if "pool_name" in params:
-                kwargs["pool_name"] = pool_name
-            elif "bind_key" in params:
-                kwargs["bind_key"] = pool_name
-            if "worker_pid" in params:
-                kwargs["worker_pid"] = pid
-            elif "worker_id" in params:
-                kwargs["worker_id"] = pid
-            if kwargs or not params:
-                return fn(**kwargs)
-        except (ValueError, TypeError):
-            pass
-        return fn()
+        target = getattr(self.broker, "transport", self.broker)
+        if isinstance(target, AsyncSHMBrokerTransport):
+            res = target.acquire(bind_key=pool_name, worker_id=pid)
+            return await res if isinstance(res, Awaitable) else res
+        if isinstance(target, SyncSHMBrokerTransport):
+            return target.acquire(bind_key=pool_name, worker_id=pid)
+        acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
+        if callable(acquire_lease_fn):
+            res = acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
+            return await res if isinstance(res, Awaitable) else res
+        if isinstance(target, (AsyncBrokerLeaseSource, SyncBrokerLeaseSource)):
+            res = target.acquire(pool_name=pool_name, worker_pid=pid)
+            return await res if isinstance(res, Awaitable) else res
+        raise ImproperConfigurationError("Configured broker does not support asynchronous lease acquisition")
 
     def _extract_lease_coords(self, lease: Any) -> tuple[int, int]:
         """Extract (slot_idx, generation) from a broker lease object or tuple."""
@@ -873,7 +914,7 @@ class _BaseSQLSpecProvider:
             else (upstream() if callable(upstream) else upstream)
         )
         ctx_mgr = None
-        if hasattr(candidate, "__enter__") and not hasattr(candidate, "execute"):
+        if hasattr(candidate, "__enter__") and candidate is not upstream:
             ctx_mgr = candidate
             session = ctx_mgr.__enter__()
         else:
@@ -901,14 +942,14 @@ class _BaseSQLSpecProvider:
         else:
             candidate = upstream
 
-        if inspect.isawaitable(candidate):
+        if isinstance(candidate, Awaitable):
             candidate = await candidate
 
         ctx_mgr = None
-        if hasattr(candidate, "__aenter__") and not hasattr(candidate, "execute"):
+        if hasattr(candidate, "__aenter__") and candidate is not upstream:
             ctx_mgr = candidate
             session = await ctx_mgr.__aenter__()
-        elif hasattr(candidate, "__enter__") and not hasattr(candidate, "execute"):
+        elif hasattr(candidate, "__enter__") and candidate is not upstream:
             ctx_mgr = candidate
             session = ctx_mgr.__enter__()
         else:
@@ -921,44 +962,67 @@ class _BaseSQLSpecProvider:
             self._tx_states.setdefault(key, False)
         return session
 
+    def _quarantine_broker_lease(self, lease: Any, key: tuple[int, int]) -> None:
+        """Quarantine a lease or coordinate pair on self.broker without releasing it."""
+        if self.broker is None:
+            return
+        target = getattr(self.broker, "transport", self.broker)
+        lease_arg = lease if lease is not None else key
+        quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
+        if callable(quarantine_fn):
+            quarantine_fn(lease_arg)
+
+    async def _quarantine_broker_lease_async(self, lease: Any, key: tuple[int, int]) -> None:
+        """Quarantine a lease or coordinate pair asynchronously without releasing it."""
+        if self.broker is None:
+            return
+        target = getattr(self.broker, "transport", self.broker)
+        lease_arg = lease if lease is not None else key
+        quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
+        if callable(quarantine_fn):
+            res = quarantine_fn(lease_arg)
+            if isinstance(res, Awaitable):
+                await res
+
     def _release_session_sync(self, key: tuple[int, int], in_tx: bool) -> None:
-        """Release a pinned session synchronously, rolling back any uncommitted transaction."""
+        """Release a pinned session synchronously, quarantining on rollback or context-exit error."""
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
             was_in_tx = self._tx_states.pop(key, False) or in_tx
             lease = self._broker_leases.pop(key, None)
 
-        if session is not None and was_in_tx:
-            with contextlib.suppress(Exception):
+        try:
+            if session is not None and was_in_tx:
                 self._exec_rollback_sync(session, key)
-
-        if ctx_mgr is not None and hasattr(ctx_mgr, "__exit__"):
-            with contextlib.suppress(Exception):
+            if ctx_mgr is not None and hasattr(ctx_mgr, "__exit__"):
                 ctx_mgr.__exit__(None, None, None)
+        except BaseException as exc:
+            self._quarantine_broker_lease(lease, key)
+            raise LeaseQuarantinedError(key[0], key[1], str(exc)) from exc
 
         if lease is not None:
             self._release_broker_lease(lease, key, in_tx=False)
 
     async def _release_session_async(self, key: tuple[int, int], in_tx: bool) -> None:
-        """Release a pinned session asynchronously, rolling back any uncommitted transaction."""
+        """Release a pinned session asynchronously, quarantining on rollback or context-exit error."""
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
             was_in_tx = self._tx_states.pop(key, False) or in_tx
             lease = self._broker_leases.pop(key, None)
 
-        if session is not None and was_in_tx:
-            with contextlib.suppress(Exception):
+        try:
+            if session is not None and was_in_tx:
                 await self._exec_rollback_async(session, key)
-
-        if ctx_mgr is not None:
-            if hasattr(ctx_mgr, "__aexit__"):
-                with contextlib.suppress(Exception):
+            if ctx_mgr is not None:
+                if hasattr(ctx_mgr, "__aexit__"):
                     await ctx_mgr.__aexit__(None, None, None)
-            elif hasattr(ctx_mgr, "__exit__"):
-                with contextlib.suppress(Exception):
+                elif hasattr(ctx_mgr, "__exit__"):
                     ctx_mgr.__exit__(None, None, None)
+        except BaseException as exc:
+            await self._quarantine_broker_lease_async(lease, key)
+            raise LeaseQuarantinedError(key[0], key[1], str(exc)) from exc
 
         if lease is not None:
             await self._release_broker_lease_async(lease, key, in_tx=False)
@@ -966,46 +1030,40 @@ class _BaseSQLSpecProvider:
     def _release_broker_lease(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker."""
         if hasattr(lease, "release") and callable(lease.release):
-            with contextlib.suppress(Exception):
-                lease.release()
+            lease.release()
             return
         if self.broker is None:
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            with contextlib.suppress(Exception):
-                release_lease_fn(key[0], key[1], in_tx=in_tx)
+            release_lease_fn(key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            with contextlib.suppress(Exception):
-                release_fn(f"{key[0]}:{key[1]}")
+            release_fn(f"{key[0]}:{key[1]}")
 
     async def _release_broker_lease_async(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
         """Release a broker lease back to self.broker asynchronously."""
         if hasattr(lease, "release") and callable(lease.release):
-            with contextlib.suppress(Exception):
-                res = lease.release()
-                if inspect.isawaitable(res):
-                    await res
+            res = lease.release()
+            if isinstance(res, Awaitable):
+                await res
             return
         if self.broker is None:
             return
         release_lease_fn = getattr(self.broker, "release_lease", None)
         if callable(release_lease_fn):
-            with contextlib.suppress(Exception):
-                res = release_lease_fn(key[0], key[1], in_tx=in_tx)
-                if inspect.isawaitable(res):
-                    await res
+            res = release_lease_fn(key[0], key[1], in_tx=in_tx)
+            if isinstance(res, Awaitable):
+                await res
             return
         target = getattr(self.broker, "transport", self.broker)
         release_fn = getattr(target, "release", None)
         if callable(release_fn):
-            with contextlib.suppress(Exception):
-                res = release_fn(f"{key[0]}:{key[1]}")
-                if inspect.isawaitable(res):
-                    await res
+            res = release_fn(f"{key[0]}:{key[1]}")
+            if isinstance(res, Awaitable):
+                await res
 
     def _exec_begin_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Begin a transaction on session synchronously and mark key as in-transaction."""
@@ -1022,11 +1080,11 @@ class _BaseSQLSpecProvider:
         begin_fn = getattr(session, "begin", None)
         if callable(begin_fn):
             res = begin_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute") and not getattr(session, "in_transaction", False):
             res = session.execute("BEGIN")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
             self._tx_states[key] = True
@@ -1046,11 +1104,11 @@ class _BaseSQLSpecProvider:
         commit_fn = getattr(session, "commit", None)
         if callable(commit_fn):
             res = commit_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute"):
             res = session.execute("COMMIT")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
             self._tx_states[key] = False
@@ -1070,11 +1128,11 @@ class _BaseSQLSpecProvider:
         rollback_fn = getattr(session, "rollback", None)
         if callable(rollback_fn):
             res = rollback_fn()
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         elif hasattr(session, "execute"):
             res = session.execute("ROLLBACK")
-            if inspect.isawaitable(res):
+            if isinstance(res, Awaitable):
                 await res
         with self._lock:
             self._tx_states[key] = False
@@ -1114,7 +1172,7 @@ class _BaseSQLSpecProvider:
             fn = getattr(session, attr, None)
             if callable(fn):
                 res = fn(sql, list(many_params))
-                if inspect.isawaitable(res):
+                if isinstance(res, Awaitable):
                     res = await res
                 if isinstance(res, int):
                     return res
@@ -1141,7 +1199,7 @@ class _BaseSQLSpecProvider:
         method_name = "select_one_or_none" if allow_none else "select_one"
         direct_fn = getattr(session, method_name, None)
         if callable(direct_fn):
-            res = self._call_with_params(direct_fn, sql, params)
+            res = self._dispatch_sql(session, direct_fn, sql, params)
             if res is None:
                 if not allow_none:
                     msg = "No row found for select_one"
@@ -1175,8 +1233,8 @@ class _BaseSQLSpecProvider:
         method_name = "select_one_or_none" if allow_none else "select_one"
         direct_fn = getattr(session, method_name, None)
         if callable(direct_fn):
-            res = self._call_with_params(direct_fn, sql, params)
-            if inspect.isawaitable(res):
+            res = self._dispatch_sql(session, direct_fn, sql, params)
+            if isinstance(res, Awaitable):
                 res = await res
             if res is None:
                 if not allow_none:
@@ -1204,7 +1262,7 @@ class _BaseSQLSpecProvider:
         for attr in ("select_value", "fetch_val"):
             fn = getattr(session, attr, None)
             if callable(fn):
-                return self._call_with_params(fn, sql, params)
+                return self._dispatch_sql(session, fn, sql, params)
         raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), sql, params)
         rows, _, _ = self._extract_result_sync(raw_res)
         return self._extract_scalar(rows)
@@ -1214,8 +1272,8 @@ class _BaseSQLSpecProvider:
         for attr in ("select_value", "fetch_val"):
             fn = getattr(session, attr, None)
             if callable(fn):
-                res = self._call_with_params(fn, sql, params)
-                if inspect.isawaitable(res):
+                res = self._dispatch_sql(session, fn, sql, params)
+                if isinstance(res, Awaitable):
                     return await res
                 return res
         raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), sql, params)
@@ -1231,7 +1289,7 @@ class _BaseSQLSpecProvider:
         """Execute select_to_arrow synchronously and spill the result table into SharedArrowBuffer."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
-            raw_arrow = self._call_with_params(arrow_fn, request.sql, request.params)
+            raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
             shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
         else:
             raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), request.sql, request.params)
@@ -1262,8 +1320,8 @@ class _BaseSQLSpecProvider:
         """Execute select_to_arrow asynchronously and spill the result table into SharedArrowBuffer."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
-            raw_arrow = self._call_with_params(arrow_fn, request.sql, request.params)
-            if inspect.isawaitable(raw_arrow):
+            raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
+            if isinstance(raw_arrow, Awaitable):
                 raw_arrow = await raw_arrow
             shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
         else:
@@ -1344,7 +1402,7 @@ class _BaseSQLSpecProvider:
         for name in method_names:
             fn = getattr(session, name, None)
             if callable(fn):
-                return self._call_with_params(fn, sql, params)
+                return self._dispatch_sql(session, fn, sql, params)
         msg = f"Upstream session {type(session).__name__!r} does not implement any of {method_names}"
         raise AttributeError(msg)
 
@@ -1353,31 +1411,31 @@ class _BaseSQLSpecProvider:
         for name in method_names:
             fn = getattr(session, name, None)
             if callable(fn):
-                res = self._call_with_params(fn, sql, params)
-                if inspect.isawaitable(res):
+                res = self._dispatch_sql(session, fn, sql, params)
+                if isinstance(res, Awaitable):
                     return await res
                 return res
         msg = f"Upstream session {type(session).__name__!r} does not implement any of {method_names}"
         raise AttributeError(msg)
 
     @staticmethod
-    def _call_with_params(fn: Any, sql: str, params: Any) -> Any:
-        """Call a driver method with sql and either unpacked varargs or a parameter collection."""
+    def _dispatch_sql(session: Any, fn: Any, sql: str, params: Any) -> Any:
+        """Dispatch SQL execution across None, empty sequence, Mapping, and Sequence parameter forms."""
         if params is None or params == () or params == []:
             return fn(sql)
-        if isinstance(params, dict):
+        if isinstance(params, Mapping):
             return fn(sql, params)
-        if isinstance(params, (tuple, list)):
-            has_varargs = False
-            with contextlib.suppress(ValueError, TypeError):
-                sig = inspect.signature(fn)
-                has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
-            if has_varargs:
+        if isinstance(params, Sequence) and not isinstance(params, str | bytes | bytearray):
+            if isinstance(session, (SyncDriverAdapterBase, AsyncDriverAdapterBase)):
                 return fn(sql, *params)
-            try:
+            if isinstance(session, (sqlite3.Connection, sqlite3.Cursor)) or hasattr(session, "cursor"):
                 return fn(sql, params)
-            except TypeError:
+            if getattr(type(session), "dialect", None) is not None and not hasattr(session, "execute_many"):
+                return fn(sql, params)
+            try:
                 return fn(sql, *params)
+            except TypeError:
+                return fn(sql, params)
         return fn(sql, params)
 
     def _extract_result_sync(
@@ -1414,7 +1472,7 @@ class _BaseSQLSpecProvider:
             if desc is not None:
                 columns = [str(col[0]) for col in desc]
                 fetched = raw_res.fetchall()
-                if inspect.isawaitable(fetched):
+                if isinstance(fetched, Awaitable):
                     fetched = await fetched
                 rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, columns) for row in fetched]
                 return rows, columns, len(rows)

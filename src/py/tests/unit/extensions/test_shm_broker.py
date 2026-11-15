@@ -23,6 +23,7 @@ from vertebra.extensions.broker import (
     BrokerConfig,
     BrokerEngineDiscovery,
     BrokerHost,
+    BrokerPlugin,
     DbRpcOp,
     DbRpcRequest,
     ShutdownReport,
@@ -32,6 +33,9 @@ from vertebra.extensions.broker.dbrpc import (
     decode_dbrpc_response,
     encode_dbrpc_request,
 )
+from vertebra.server.platform import ZPagesRegistry
+from vertebra.telemetry.otel import DbPoolMetricSample, DbPoolRecorder
+from vertebra.utils.serializers import decode_json
 
 
 def _child_publish_and_compile(shm_name: str, pool_size: int, max_overflow: int, stmt_cap: int) -> None:
@@ -532,3 +536,39 @@ def test_vtb_broker_cli_help_loads_lazily_without_eager_engine_imports() -> None
     )
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
+def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None:
+    """Verify BrokerPlugin.snapshot_metrics and /brokerz report total_quarantined and total_disposed."""
+    zpages = ZPagesRegistry("broker-telemetry-test")
+    recorder = DbPoolRecorder()
+    plugin = BrokerPlugin(
+        BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50),
+        zpages=zpages,
+        otel_recorder=recorder,
+        name="telemetry_pool",
+    )
+    lease = plugin.transport.acquire(worker_id=91001, bind_key="telemetry_pool")
+    reclaimed = plugin.transport.reclaim_worker_leases(91001)
+    assert len(reclaimed) == 1
+    assert reclaimed[0].slot_index == lease.slot_index
+
+    mid_sample = plugin.snapshot_metrics()
+    assert isinstance(mid_sample, DbPoolMetricSample)
+    assert mid_sample.quarantined == 1
+    assert mid_sample.total_quarantined == 1
+    assert mid_sample.total_disposed == 0
+
+    plugin.transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+    end_sample = plugin.snapshot_metrics()
+    assert end_sample.quarantined == 0
+    assert end_sample.total_quarantined == 1
+    assert end_sample.total_disposed == 1
+    assert len(recorder.samples) == 2
+
+    status_code, payload = zpages.handle_zpage("/brokerz")
+    assert status_code == 200
+    body = decode_json(payload)
+    assert body["brokers"]["telemetry_pool"]["total_quarantined"] == 1
+    assert body["brokers"]["telemetry_pool"]["total_disposed"] == 1
+    assert body["brokers"]["telemetry_pool"]["quarantined"] == 0
