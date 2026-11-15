@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import os
 import sqlite3
 import threading
@@ -268,6 +269,11 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         if hasattr(self._broker, "lease_table") and self._broker.lease_table is not None:
             return self._broker.lease_table.acquire(os.getpid())
         if hasattr(self._broker, "acquire"):
+            if inspect.iscoroutinefunction(self._broker.acquire):
+                sync_acquire = getattr(self._broker, "_acquire_sync", None)
+                if callable(sync_acquire):
+                    return sync_acquire(bind_key="sqlite")
+                return None
             try:
                 return self._broker.acquire(bind_key="sqlite")
             except TypeError:
@@ -279,6 +285,12 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         if lease is None:
             return
         if hasattr(lease, "release"):
+            if inspect.iscoroutinefunction(lease.release):
+                release_impl = getattr(self._broker, "_release_impl", None)
+                lease_id = getattr(lease, "lease_id", None)
+                if callable(release_impl) and lease_id is not None:
+                    release_impl(lease_id)
+                return
             lease.release()
         elif self._broker is not None and hasattr(self._broker, "release") and hasattr(lease, "slot_index"):
             self._broker.release(lease.slot_index, lease.generation)

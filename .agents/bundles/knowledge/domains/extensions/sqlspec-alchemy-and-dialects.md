@@ -73,6 +73,12 @@ sources:
 - id: src-extensions-sqlalchemy-dialects-py
   resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
   title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)
+- id: src-extensions-sqlalchemy-pool-py
+  resource: src/py/vertebra/extensions/sqlalchemy/pool.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/pool.py)
+- id: src-db-dbapi-init-py
+  resource: src/py/vertebra/db/dbapi/__init__.py
+  title: Python implementation module (src/py/vertebra/db/dbapi/__init__.py)
 - id: src-extensions-sqlalchemy-types-py
   resource: src/py/vertebra/extensions/sqlalchemy/types.py
   title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/types.py)
@@ -118,7 +124,7 @@ BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` befo
 
 Pool defaults: `create_sync_alchemy_config` and `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` (`pool_key()`-partitioned SHM leasing with rollback-or-quarantine on check-in) when a broker is supplied, while direct `+vtb` dialects default to `NullPool` under explicit `shm_broker` URL parameters so per-process `QueuePool` does not multiply connections.
 
-## 2. Connection Broker (`alchemy/broker.py` & `broker/transport.py`)
+## 2. Connection Broker (`extensions/broker/`, `alchemy/broker.py`, & `sqlalchemy/pool.py`)
 
 | Symbol | Responsibility |
 |---|---|

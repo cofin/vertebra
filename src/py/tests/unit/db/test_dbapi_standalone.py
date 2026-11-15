@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import vertebra.db.dbapi as dbapi_pkg
 from vertebra.db.dbapi import (
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
@@ -16,7 +17,11 @@ from vertebra.db.dbapi import (
     NotSupportedError,
     SyncDBAPIConnection,
     SyncDBAPIModule,
+    apilevel,
+    connect,
     is_row_returning_sql,
+    paramstyle,
+    threadsafety,
 )
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
@@ -67,6 +72,8 @@ def test_dbapi_source_has_no_forbidden_imports(filename: str) -> None:
         ("SELECT 1", True),
         ("  -- leading comment\nSELECT id FROM items", True),
         ("/* block /* inner */ */ WITH cte AS (SELECT 1) SELECT * FROM cte", True),
+        ("/* /* inner */ */ SELECT 1", True),
+        ("/* outer /* nested SELECT */ inner */ INSERT INTO t VALUES (?)", False),
         ("PRAGMA table_info('users')", True),
         ("SHOW TABLES", True),
         ("DESCRIBE users", True),
@@ -129,7 +136,20 @@ async def test_async_dbapi_rejects_autocommit_false_for_autocommit_only_backends
 
 
 def test_dbapi_module_connect_and_invalid_url_errors() -> None:
-    """Verify SyncDBAPIModule and AsyncDBAPIModule open connections and raise InterfaceError on invalid URLs."""
+    """Verify SyncDBAPIModule, module-level PEP 249 attributes, connect(), and InterfaceError handling."""
+    assert apilevel == "2.0"
+    assert threadsafety == 2
+    assert paramstyle == "qmark"
+    assert dbapi_pkg.connect is connect
+
+    direct_conn = connect("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        direct_cur = direct_conn.cursor()
+        direct_cur.execute("SELECT 7")
+        assert direct_cur.fetchone() == (7,)
+    finally:
+        direct_conn.close()
+
     sync_mod = SyncDBAPIModule(paramstyle="qmark")
     sync_conn = sync_mod.connect("sqlite+vtb:///:memory:", share_pool=False)
     try:
@@ -144,6 +164,29 @@ def test_dbapi_module_connect_and_invalid_url_errors() -> None:
     with pytest.raises(InterfaceError):
         sync_mod.connect("unknown+vtb://host/db", share_pool=False)
 
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
+    """Verify AsyncDBAPIModule and AsyncDBAPICursor execute queries, fetch batches, close cleanly, and guard URLs."""
     async_mod = AsyncDBAPIModule(paramstyle="qmark")
+    with pytest.raises(InterfaceError):
+        async_mod.connect("unknown+vtb_async://host/db", share_pool=False)
+
     async_conn = async_mod.connect("sqlite+vtb_async:///:memory:", share_pool=False)
     assert isinstance(async_conn, AsyncDBAPIConnection)
+    cur = async_conn.cursor()
+    try:
+        await cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        await cur.executemany(
+            "INSERT INTO items (id, name) VALUES (?, ?)",
+            [(1, "alpha"), (2, "beta"), (3, "gamma")],
+        )
+        await cur.execute("SELECT id, name FROM items ORDER BY id")
+        assert await cur.fetchone() == (1, "alpha")
+        assert await cur.fetchmany(1) == [(2, "beta")]
+        assert await cur.fetchall() == [(3, "gamma")]
+        assert await cur.fetchone() is None
+    finally:
+        await cur.close()
+        await async_conn.close()
+    assert async_conn.closed is True

@@ -76,6 +76,7 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
+from vertebra.db.dbapi import AsyncDBAPIConnection, NotSupportedError, SyncDBAPIConnection
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
@@ -93,6 +94,7 @@ from vertebra.db.driver.capabilities import (
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
 from vertebra.extensions.sqlalchemy import dialects
+from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
 from vertebra.framework.channels import ChannelBus
 from vertebra.server._channels import ChannelBus as ServerChannelBus
 from vertebra.storage import GcpTokenSnapshot
@@ -1573,11 +1575,11 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
         )
         url = f"{engine}://projects/test-proj/instances/test-inst/databases/test-db"
         dialect_name = "Spangres" if engine == "spangres" else "Spanner"
-    sync_conn = dialects.SyncDBAPIConnection(url, driver=sync_driver, broker=object(), share_pool=False)
-    async_conn = dialects.AsyncDBAPIConnection(url, driver=async_driver, broker=object(), share_pool=False)
+    sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=object(), share_pool=False)
+    async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=object(), share_pool=False)
     try:
         getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(sync_conn)
-        adapted = AsyncAdapt_dbapi_connection(dialects.AsyncDBAPIModule(), async_conn)
+        adapted = AsyncAdapt_dbapi_connection(SQLAlchemyAsyncDBAPI(), async_conn)
         await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
         sync_cursor = sync_conn.cursor()
         async_cursor = async_conn.cursor()
@@ -1597,9 +1599,9 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
         assert sync_driver.select_value("SELECT COUNT(*) FROM cloud_items") == 3
         assert await async_driver.select_value("SELECT COUNT(*) FROM cloud_items") == 3
         assert sync_conn.autocommit is async_conn.autocommit is True
-        with pytest.raises(dialects.NotSupportedError, match="autocommit"):
+        with pytest.raises(NotSupportedError, match="autocommit"):
             sync_conn.autocommit = False
-        with pytest.raises(dialects.NotSupportedError, match="autocommit"):
+        with pytest.raises(NotSupportedError, match="autocommit"):
             async_conn.autocommit = False
         assert sync_conn.autocommit is async_conn.autocommit is True
     finally:

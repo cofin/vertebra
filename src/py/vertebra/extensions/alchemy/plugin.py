@@ -99,6 +99,9 @@ def _prepare_engine_config(
     if broker is not None:
         pool_cls = AsyncBrokerPool if is_async else BrokerPool
         cfg.poolclass = pool_cls.bind_class(broker=broker, url=connection_string)
+        existing_args = cfg.connect_args if isinstance(cfg.connect_args, dict) else {}
+        if "broker" not in existing_args:
+            cfg.connect_args = {**existing_args, "broker": broker, "lease_managed": True}
 
     kwargs["engine_config"] = cfg
 

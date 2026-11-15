@@ -16,24 +16,8 @@ from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool, Pool, QueuePool, StaticPool
 
-from vertebra.db.dbapi import (
-    AsyncDBAPIConnection,
-    AsyncDBAPICursor,
-    DatabaseError,
-    DataError,
-    Error,
-    IntegrityError,
-    InterfaceError,
-    InternalError,
-    NotSupportedError,
-    OperationalError,
-    ProgrammingError,
-    SyncDBAPIConnection,
-    SyncDBAPICursor,
-    SyncDBAPIModule,
-    Warning,
-)
-from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI as AsyncDBAPIModule
+from vertebra.db.dbapi import SyncDBAPIModule
+from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.sync_tools import SyncPool
 
@@ -47,34 +31,19 @@ __all__ = (
     "ALL_DIALECT_SCHEMES",
     "DIALECT_DESCRIPTORS",
     "DIALECT_SCHEMES",
-    "AsyncDBAPIConnection",
-    "AsyncDBAPICursor",
-    "AsyncDBAPIModule",
     "AsyncBigQueryDialect",
     "SyncBigQueryDialect",
-    "SyncDBAPIConnection",
-    "SyncDBAPICursor",
-    "SyncDBAPIModule",
-    "DataError",
-    "DatabaseError",
     "AsyncDuckDBDialect",
     "SyncDuckDBDialect",
-    "Error",
-    "IntegrityError",
-    "InterfaceError",
-    "InternalError",
     "AsyncMSSQLDialect",
     "SyncMSSQLDialect",
     "AsyncMySQLDialect",
     "SyncMySQLDialect",
-    "NotSupportedError",
     "NullPool",
-    "OperationalError",
     "AsyncOracleDialect",
     "SyncOracleDialect",
     "AsyncPostgreSQLDialect",
     "SyncPostgreSQLDialect",
-    "ProgrammingError",
     "AsyncSQLiteDialect",
     "SyncSQLiteDialect",
     "AsyncSpangresDialect",
@@ -82,7 +51,6 @@ __all__ = (
     "AsyncSpannerDialect",
     "SyncSpannerDialect",
     "SyncEngineAdapter",
-    "Warning",
     "attach_serverless_disconnect_guard",
     "is_free_threaded",
 )
@@ -212,7 +180,7 @@ class AsyncPostgreSQLDialect(_NativeTransactionDialect, PGDialect):
     default_paramstyle = "numeric_dollar"
     paramstyle = "numeric_dollar"
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="numeric_dollar"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="numeric_dollar"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -259,7 +227,7 @@ class AsyncSQLiteDialect(_NativeTransactionDialect, BaseSQLiteDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -317,7 +285,7 @@ class AsyncMySQLDialect(_NativeTransactionDialect, BaseMySQLDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="format"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="format"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -387,7 +355,7 @@ class AsyncOracleDialect(_NativeTransactionDialect, BaseOracleDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="named"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -432,7 +400,7 @@ class AsyncMSSQLDialect(_NativeTransactionDialect, MSDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -479,7 +447,7 @@ class AsyncDuckDBDialect(_NativeTransactionDialect, DefaultDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="qmark"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="qmark"))
 
     @classmethod
     def import_dbapi(cls) -> Any:
@@ -553,7 +521,7 @@ class AsyncBigQueryDialect(SyncBigQueryDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="named"))
 
 
 class SyncSpannerDialect(_NativeTransactionDialect, DefaultDialect):
@@ -626,7 +594,7 @@ class AsyncSpannerDialect(SyncSpannerDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="named"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="named"))
 
 
 class SyncSpangresDialect(_NativeTransactionDialect, PGDialect):
@@ -659,7 +627,7 @@ class AsyncSpangresDialect(SyncSpangresDialect):
     is_async = True
     supports_statement_cache = True
 
-    dbapi: Any = classmethod(lambda cls: AsyncDBAPIModule(paramstyle="pyformat"))
+    dbapi: Any = classmethod(lambda cls: SQLAlchemyAsyncDBAPI(paramstyle="pyformat"))
 
 
 class SyncEngineAdapter:

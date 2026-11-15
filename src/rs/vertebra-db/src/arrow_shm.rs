@@ -336,7 +336,7 @@ impl ShmArrowStreamWriter {
         let next_capacity = page_align(doubled.max(self.capacity.saturating_mul(2)))?;
 
         #[cfg(unix)]
-        self.region.disarm_unlink();
+        let _ = self.region.unlink_now();
 
         let mut next_region = allocate_shm_region(&self.shm_name, next_capacity)?;
         // SAFETY: Both `self.region` and `next_region` are exclusively owned by `self` and have

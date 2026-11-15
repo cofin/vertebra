@@ -954,6 +954,7 @@ class LeaseBroker:
         pool_size: int,
         max_overflow: int = 0,
     ) -> int: ...
+    def lookup_partition(self, pool_key_hash: int) -> int | None: ...
     def try_acquire_in(
         self,
         partition: int,

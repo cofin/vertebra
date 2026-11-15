@@ -739,6 +739,10 @@ impl LeaseBroker {
             .map_err(broker_err_to_py)
     }
 
+    pub fn lookup_partition(&self, pool_key_hash: u64) -> Option<u16> {
+        self.table.lookup_partition(pool_key_hash)
+    }
+
     #[pyo3(signature = (partition, worker_pid, ttl_ns=0, bind_key_hash=0))]
     pub fn try_acquire_in(
         &self,

@@ -83,7 +83,7 @@ sources:
 <!-- truth: start -->
 - **Baseline (`18baadcd`)**: `ShmRegion::create_named` unlinks before `O_EXCL` ([#95](https://github.com/cofin/vertebra/issues/95)), `cleanup_all()` is a no-op ([#96](https://github.com/cofin/vertebra/issues/96)), worker attach is unauthenticated ([#97](https://github.com/cofin/vertebra/issues/97)), `_BaseSQLSpecProvider` suppresses rollback/release errors ([#98](https://github.com/cofin/vertebra/issues/98)), and `BROKER_ENGINE_BACKENDS` is isolated per `cdylib` [^core-shm] [^core-cleanup] [^db-registry] [^sqlspec-provider].
 - **Target Architecture**: Atomic `ShmOwnerHeader` create-or-attach + PID-aware signal/startup cleanup, `0600` UDS `SCM_RIGHTS` attach, XXH3-64 `stable_hash64` + 64 `pool_key` partitions, C-ABI `BrokerEngineCapsule` (`MySQL`, `DuckDB`, `Oracle`, `MSSQL`, `PostgreSQL`) in `vertebra._vertebra.BrokerEngineRegistry`, `LeaseState::Quarantined` + server-side crash `ROLLBACK`, `SyncDriverAdapterBase`/`AsyncDriverAdapterBase` SQLSpec proxies, standalone `vertebra.db.dbapi`, and SQLAlchemy/Advanced Alchemy `BrokerPool` [^gcp-capsule] [^py-broker] [^postgres-rs].
-- **Scope & Boundaries**: `8` chapters and `27` compact tasks; BigQuery and Spanner stay on per-worker clients (recorded in `shm-broker-limitations.md`), and SQLite broker registration lands in `native-sqlite-driver` [^broker-okf].
+- **Scope & Boundaries**: `4` chapters and `16` compact tasks; BigQuery and Spanner stay on per-worker clients (recorded in `shm-broker-limitations.md`), and SQLite broker registration lands in `native-sqlite-driver` [^broker-okf].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance

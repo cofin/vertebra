@@ -48,9 +48,9 @@ from vertebra.db.adapters.mysql import (
     compile_mysql_statement,
     map_mysql_exception,
 )
+from vertebra.db.dbapi import SyncDBAPIConnection
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, CloudSQLConfig, SyncCloudSQLDialer
 from vertebra.extensions.sqlalchemy import (
-    SyncDBAPIConnection,
     SyncMySQLDialect,
     Vector,
 )

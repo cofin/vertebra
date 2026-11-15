@@ -71,6 +71,32 @@ Native database configurations, synchronous and asynchronous drivers (`SyncDatab
       members: false
       summary: false
 
+## Standalone PEP 249 DB-API (`vertebra.db.dbapi`)
+
+::: vertebra.db.dbapi.SyncDBAPIConnection
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.AsyncDBAPIConnection
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.SyncDBAPIModule
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.dbapi.AsyncDBAPIModule
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
 ## Relational, Cloud & Analytical Drivers (`vertebra.db.adapters`)
 
 ::: vertebra.db.adapters.postgres.PostgreSQLConfig

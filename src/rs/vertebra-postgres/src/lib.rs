@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use pyo3::prelude::*;
@@ -230,9 +230,12 @@ fn encode_postgres_err(request_id: u64, err: &PostgresError) -> Vec<u8> {
     ))
 }
 
+type PinnedPgConn = Arc<tokio::sync::Mutex<Option<PooledConnection>>>;
+
 /// Shared-memory broker backend managing broker-hosted `PostgresPool` instances (`DIALECT_TAG_POSTGRES = 1`).
 pub struct PostgresBrokerBackend {
     pools: RwLock<HashMap<u64, Arc<PostgresPool>>>,
+    pinned: Mutex<HashMap<(u64, u32), PinnedPgConn>>,
     next_pool_id: AtomicU64,
 }
 
@@ -248,8 +251,52 @@ impl PostgresBrokerBackend {
     pub fn new() -> Self {
         Self {
             pools: RwLock::new(HashMap::new()),
+            pinned: Mutex::new(HashMap::new()),
             next_pool_id: AtomicU64::new(1),
         }
+    }
+
+    fn get_pinned(&self, pool_id: u64, lease_slot: u32) -> Option<PinnedPgConn> {
+        self.pinned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(pool_id, lease_slot))
+            .cloned()
+    }
+
+    fn take_pinned(&self, pool_id: u64, lease_slot: u32) -> Option<PinnedPgConn> {
+        self.pinned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(pool_id, lease_slot))
+    }
+
+    fn set_pinned(
+        &self,
+        pool_id: u64,
+        lease_slot: u32,
+        conn: PooledConnection,
+    ) -> Option<PinnedPgConn> {
+        self.pinned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                (pool_id, lease_slot),
+                Arc::new(tokio::sync::Mutex::new(Some(conn))),
+            )
+    }
+
+    fn drain_pool_pinned(&self, pool_id: u64) -> Vec<PinnedPgConn> {
+        let mut guard = self
+            .pinned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keys: Vec<(u64, u32)> = guard
+            .keys()
+            .copied()
+            .filter(|(pid, _)| *pid == pool_id)
+            .collect();
+        keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
     }
 }
 
@@ -315,7 +362,14 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                     .ok_or_else(|| "DBRPC Execute frame missing SQL".to_string())?;
                 let (norm_sql, _) = self.normalize_statement(raw_sql);
                 let params: Vec<Parameter> = req.params.iter().map(scalar_to_pg_param).collect();
+                let pinned = self.get_pinned(pool_id, req.lease_slot);
                 let outcome: Result<QueryResult, PostgresError> = block_on_db(async move {
+                    if let Some(pinned_conn) = pinned {
+                        let mut guard = pinned_conn.lock().await;
+                        if let Some(conn) = guard.as_mut() {
+                            return conn.query(&norm_sql, &params, None).await;
+                        }
+                    }
                     let mut conn = pool.acquire().await?;
                     let res = conn.query(&norm_sql, &params, None).await;
                     let _ = conn.release().await;
@@ -349,21 +403,51 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                 }
             }
             DbRpcOp::Begin => {
-                let outcome = block_on_db(async move {
+                let previous = self.take_pinned(pool_id, req.lease_slot);
+                let outcome: Result<PooledConnection, PostgresError> = block_on_db(async move {
+                    if let Some(prev_conn) = previous {
+                        let mut guard = prev_conn.lock().await;
+                        if let Some(mut c) = guard.take() {
+                            let _ = c.rollback().await;
+                            let _ = c.release().await;
+                        }
+                    }
                     let mut conn = pool.acquire().await?;
-                    let res = conn.begin().await;
-                    let _ = conn.release().await;
-                    res
+                    if let Err(err) = conn.begin().await {
+                        let _ = conn.release().await;
+                        return Err(err);
+                    }
+                    Ok(conn)
                 });
                 match outcome {
-                    Ok(_) => Ok(encode_dbrpc_response_frame(
-                        &DbRpcEncodedResponse::ok_count(req_id, 0, None),
-                    )),
+                    Ok(conn) => {
+                        if let Some(stale) = self.set_pinned(pool_id, req.lease_slot, conn) {
+                            block_on_db(async move {
+                                let mut guard = stale.lock().await;
+                                if let Some(mut c) = guard.take() {
+                                    let _ = c.rollback().await;
+                                    let _ = c.release().await;
+                                }
+                            });
+                        }
+                        Ok(encode_dbrpc_response_frame(
+                            &DbRpcEncodedResponse::ok_count(req_id, 0, None),
+                        ))
+                    }
                     Err(err) => Ok(encode_postgres_err(req_id, &err)),
                 }
             }
             DbRpcOp::Commit => {
+                let pinned = self.take_pinned(pool_id, req.lease_slot);
                 let outcome = block_on_db(async move {
+                    if let Some(pinned_conn) = pinned {
+                        let mut guard = pinned_conn.lock().await;
+                        if let Some(mut conn) = guard.take() {
+                            let res = conn.commit().await;
+                            let _ = conn.release().await;
+                            return res;
+                        }
+                    }
                     let mut conn = pool.acquire().await?;
                     let res = conn.commit().await;
                     let _ = conn.release().await;
@@ -382,14 +466,30 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                         return Err(format!("invalid savepoint identifier `{sp}`"));
                     }
                     let stmt = format!("ROLLBACK TO SAVEPOINT {sp}");
+                    let pinned = self.get_pinned(pool_id, req.lease_slot);
                     block_on_db(async move {
+                        if let Some(pinned_conn) = pinned {
+                            let mut guard = pinned_conn.lock().await;
+                            if let Some(conn) = guard.as_mut() {
+                                return conn.simple_query(&stmt).await.map(|_| ());
+                            }
+                        }
                         let mut conn = pool.acquire().await?;
                         let res = conn.simple_query(&stmt).await.map(|_| ());
                         let _ = conn.release().await;
                         res
                     })
                 } else {
+                    let pinned = self.take_pinned(pool_id, req.lease_slot);
                     block_on_db(async move {
+                        if let Some(pinned_conn) = pinned {
+                            let mut guard = pinned_conn.lock().await;
+                            if let Some(mut conn) = guard.take() {
+                                let res = conn.rollback().await.map(|_| ());
+                                let _ = conn.release().await;
+                                return res;
+                            }
+                        }
                         let mut conn = pool.acquire().await?;
                         let res = conn.rollback().await.map(|_| ());
                         let _ = conn.release().await;
@@ -411,7 +511,14 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                     return Err(format!("invalid savepoint identifier `{sp}`"));
                 }
                 let stmt = format!("SAVEPOINT {sp}");
+                let pinned = self.get_pinned(pool_id, req.lease_slot);
                 let outcome = block_on_db(async move {
+                    if let Some(pinned_conn) = pinned {
+                        let mut guard = pinned_conn.lock().await;
+                        if let Some(conn) = guard.as_mut() {
+                            return conn.simple_query(&stmt).await.map(|_| ());
+                        }
+                    }
                     let mut conn = pool.acquire().await?;
                     let res = conn.simple_query(&stmt).await.map(|_| ());
                     let _ = conn.release().await;
@@ -431,6 +538,18 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
     }
 
     fn close_pool(&self, pool_id: u64) {
+        let drained = self.drain_pool_pinned(pool_id);
+        if !drained.is_empty() {
+            block_on_db(async move {
+                for pinned in drained {
+                    let mut guard = pinned.lock().await;
+                    if let Some(mut conn) = guard.take() {
+                        let _ = conn.rollback().await;
+                        let _ = conn.release().await;
+                    }
+                }
+            });
+        }
         let removed = {
             let mut guard = self
                 .pools

@@ -2,6 +2,30 @@
 
 `vertebra.extensions` connects Vertebra's native HTTP server, shared-memory worker pools, and multicloud object storage to Litestar, SQLSpec, SQLAlchemy / Advanced Alchemy, gRPC, and Oracle APEX.
 
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[sqlspec,alchemy]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[sqlspec,alchemy]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[sqlspec,alchemy]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[sqlspec,alchemy]"
+    ```
+
 ## Litestar Integration & Middleware Offload (`vertebra.extensions.litestar`)
 
 Vertebra provides first-class support for Litestar applications. Use `VertebraPlugin` and `VertebraConfig` to run a Litestar application on Vertebra's native HTTP ingress while offloading CORS, response compression, and static asset serving directly to the native server:
@@ -92,7 +116,7 @@ sqlspec_plugin = create_sqlspec_plugin(config)
 
 `vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers and connection leasing:
 
-- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `SQLAlchemyAsyncDBAPI`) with automatic `NullPool` wiring for direct URLs and `BrokerPool` / `AsyncBrokerPool` + `broker_creator` wiring via `create_sync_alchemy_config` / `create_async_alchemy_config` when a shared-memory broker is attached. Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
+- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `SQLAlchemyAsyncDBAPI`), using `NullPool` when `?shm_broker=true` is passed on dialect URLs (`StaticPool` for `:memory:` SQLite, `QueuePool` / `AsyncAdaptedQueuePool` otherwise) and wiring `BrokerPool` / `AsyncBrokerPool` + `broker_creator` through `create_sync_alchemy_config` / `create_async_alchemy_config` when a shared-memory broker is attached. Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
 - **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
 - **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
@@ -183,17 +207,29 @@ flowchart LR
 
 ```python
 from sqlalchemy import create_engine, text
-from vertebra.extensions.broker import BrokerConfig, BrokerHost, SyncSHMBrokerTransport
+from vertebra.extensions.broker import (
+    BrokerConfig,
+    BrokerHost,
+    SyncSHMBrokerTransport,
+)
 from vertebra.extensions.sqlalchemy import BrokerPool, broker_creator
 
 config = BrokerConfig(pool_size=4, shm_name="/vtb-app-broker", role="owner")
 with BrokerHost(config) as host:
-    transport = SyncSHMBrokerTransport(BrokerConfig(shm_name="/vtb-app-broker", role="worker"))
-    pool_cls = BrokerPool.bind_class(broker=transport, url="sqlite:///app.db")
+    worker_cfg = BrokerConfig(
+        pool_size=4,
+        shm_name="/vtb-app-broker",
+        role="worker",
+    )
+    transport = SyncSHMBrokerTransport(worker_cfg)
+    pool_cls = BrokerPool.bind_class(
+        broker=transport,
+        url="sqlite+vtb:///app.db",
+    )
     engine = create_engine(
         "sqlite+vtb:///app.db",
         poolclass=pool_cls,
-        creator=broker_creator("sqlite:///app.db", broker=transport),
+        creator=broker_creator("sqlite+vtb:///app.db", broker=transport),
     )
     with engine.connect() as conn:
         value = conn.execute(text("SELECT 1")).scalar_one()

@@ -101,6 +101,7 @@ class PoolMetrics(msgspec.Struct, frozen=True, gc=False):
     quarantined: int = 0
     total_acquired: int = 0
     total_released: int = 0
+    total_reclaimed: int = 0
     total_quarantined: int = 0
     total_disposed: int = 0
 
@@ -606,18 +607,36 @@ class _BaseSHMBrokerTransport:
         with self._lock:
             self._partitions[pool_key] = part_id
             self._partition_names[part_id] = pool_key
-            self._pool_counters.setdefault(
-                pool_key,
-                {
-                    "active_leases": 0,
-                    "quarantined": 0,
-                    "total_acquired": 0,
-                    "total_released": 0,
-                    "total_quarantined": 0,
-                    "total_disposed": 0,
-                },
-            )
+            self._pool_counters.setdefault(pool_key, self._empty_pool_counters())
         return part_id
+
+    @staticmethod
+    def _empty_pool_counters() -> dict[str, int]:
+        return {
+            "active_leases": 0,
+            "quarantined": 0,
+            "total_acquired": 0,
+            "total_released": 0,
+            "total_reclaimed": 0,
+            "total_quarantined": 0,
+            "total_disposed": 0,
+        }
+
+    def _resolve_partition(self, partition: int | None, bind_key: str | None, bind_hash: int) -> int | None:
+        if partition is not None or bind_key is None:
+            return partition
+        with self._lock:
+            resolved = self._partitions.get(bind_key)
+        if resolved is not None:
+            return resolved
+        looked_up = self._native.lookup_partition(bind_hash)
+        if looked_up is not None:
+            with self._lock:
+                self._partitions.setdefault(bind_key, looked_up)
+                self._partition_names.setdefault(looked_up, bind_key)
+                self._pool_counters.setdefault(bind_key, self._empty_pool_counters())
+            return looked_up
+        return None
 
     @staticmethod
     def _bind_key_hash(bind_key: str | None) -> int:
@@ -725,6 +744,7 @@ class _BaseSHMBrokerTransport:
                     quarantined=counts["quarantined"],
                     total_acquired=counts["total_acquired"],
                     total_released=counts["total_released"],
+                    total_reclaimed=counts["total_reclaimed"],
                     total_quarantined=counts["total_quarantined"],
                     total_disposed=counts["total_disposed"],
                 )
@@ -759,17 +779,7 @@ class _BaseSHMBrokerTransport:
                 pool_name = bind_key
             if pool_name:
                 self._lease_partitions[(slot_index, generation)] = pool_name
-                counters = self._pool_counters.setdefault(
-                    pool_name,
-                    {
-                        "active_leases": 0,
-                        "quarantined": 0,
-                        "total_acquired": 0,
-                        "total_released": 0,
-                        "total_quarantined": 0,
-                        "total_disposed": 0,
-                    },
-                )
+                counters = self._pool_counters.setdefault(pool_name, self._empty_pool_counters())
                 counters["active_leases"] += 1
                 counters["total_acquired"] += 1
             return pool_name
@@ -789,6 +799,8 @@ class _BaseSHMBrokerTransport:
         old_generation: int,
         new_generation: int,
         pool_id: int | None = None,
+        *,
+        reclaimed: bool = False,
     ) -> None:
         with self._lock:
             pool_name = self._lease_partitions.pop((slot_index, old_generation), None)
@@ -800,6 +812,8 @@ class _BaseSHMBrokerTransport:
                     counters["active_leases"] -= 1
                 counters["quarantined"] += 1
                 counters["total_quarantined"] += 1
+                if reclaimed:
+                    counters["total_reclaimed"] += 1
                 self._quarantined_partitions[(slot_index, new_generation)] = pool_name
 
     def _record_pool_dispose(self, slot_index: int, generation: int) -> None:
@@ -834,10 +848,7 @@ class _BaseSHMBrokerTransport:
         ttl_ns = self._config.lease_ttl_ms * 1_000_000
         bind_hash = self._bind_key_hash(resolved_bind_key)
 
-        resolved_partition = partition
-        if resolved_partition is None and resolved_bind_key is not None:
-            with self._lock:
-                resolved_partition = self._partitions.get(resolved_bind_key)
+        resolved_partition = self._resolve_partition(partition, resolved_bind_key, bind_hash)
 
         if resolved_partition is not None:
             grant = self._native.acquire_in(
@@ -985,7 +996,8 @@ class _BaseSHMBrokerTransport:
                 item.slot_index,
                 item.generation - 1 if item.generation > 0 else 0,
                 item.generation,
-                pool_id=item.pool_id if item.pool_id != 0 else None,
+                pool_id=item.pool_id,
+                reclaimed=True,
             )
         return reclaimed
 
@@ -1074,12 +1086,18 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         bind_key: str | None = "default",
         timeout: float | None = None,
         partition: int | None = None,
+        *,
+        pool_name: str | None = None,
+        worker_pid: int | None = None,
     ) -> SyncConnectionLease:
         """Acquire a connection lease synchronously, detaching GIL during wait."""
+        effective_bind_key = pool_name if pool_name is not None and bind_key == "default" else bind_key
         return self._acquire_sync(
+            pool_name=pool_name,
+            worker_pid=worker_pid,
             worker_id=worker_id,
             timeout_ms=timeout_ms,
-            bind_key=bind_key,
+            bind_key=effective_bind_key,
             timeout=timeout,
             partition=partition,
         )
@@ -1321,17 +1339,19 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         bind_key: str | None = "default",
         timeout: float | None = None,
         partition: int | None = None,
+        *,
+        pool_name: str | None = None,
+        worker_pid: int | None = None,
     ) -> AsyncConnectionLease:
         """Acquire a connection lease asynchronously without event loop blocking."""
-        worker = worker_id if worker_id is not None else os.getpid()
+        resolved_worker = worker_pid if worker_pid is not None else worker_id
+        worker = resolved_worker if resolved_worker is not None else os.getpid()
         ttl_ns = self._config.lease_ttl_ms * 1_000_000
-        bind_hash = self._bind_key_hash(bind_key)
-        resolved_bind_key = bind_key if bind_key is not None else ""
+        effective_bind_key = pool_name if pool_name is not None and bind_key == "default" else bind_key
+        bind_hash = self._bind_key_hash(effective_bind_key)
+        resolved_bind_key = effective_bind_key if effective_bind_key is not None else ""
 
-        resolved_partition = partition
-        if resolved_partition is None and bind_key is not None:
-            with self._lock:
-                resolved_partition = self._partitions.get(bind_key)
+        resolved_partition = self._resolve_partition(partition, effective_bind_key, bind_hash)
 
         if resolved_partition is not None:
             grant = self._native.try_acquire_in(

@@ -17,7 +17,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | **[Server & Workers](server.md)** | Worker execution loop (`Worker`, `run_worker`), worker lanes (`LaneConfig`, `WorkerRunner`), `EventLoopPool`, ASGI/RSGI/WSGI adapters, free-threaded GIL audit (`GilAuditReport`), and cgroup platform utilities (`CgroupQuota`, `SHMAllocationPolicy`). |
 | **[Telemetry & Logging](telemetry.md)** | OpenTelemetry spans (`TraceContext`, `SpanExporter`), GenAI token/cost metrics (`GenAiRecorder`), DB pool metrics (`DbPoolRecorder`), SQL trace propagation (`SqlTracePropagator`), and structured logging (`LoggingConfig`). |
 | **[Build, Wasm & Supervisor](build-and-wasm.md)** | Build orchestration (`BuildConfig`, `BuildOrchestrator`), TypeScript/Zod/Valibot/OpenAPI/Protobuf codegen, standalone/onefile packaging, Wasm sandboxes (`WASMPluginHost`), and process supervision. |
-| **[CLI Reference](cli.md)** | Generated reference for all `vtb` CLI commands (`run`, `dev`, `init`, `build`, `js`, `ai`, `workers`), arguments, and options. |
+| **[CLI Reference](cli.md)** | Generated reference for all `vtb` CLI commands (`run`, `dev`, `init`, `build`, `js`, `ai`, `workers`, `broker`), arguments, and options. |
 
 ## Databases
 
@@ -25,7 +25,7 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | --- | --- |
 | **[Database Drivers & Pools](db.md)** | Native `SyncPipelineCapable` / `AsyncPipelineCapable` batching, database drivers, and connection configs across PostgreSQL, MySQL, SQLite, Oracle 26ai, SQL Server, DuckDB, BigQuery, Spanner, DataFusion, Redis, Valkey, and Cloud SQL / AlloyDB dialers. |
 | **[Database Capabilities](database-capabilities.md)** | Adapter-owned BigQuery and Spanner agent tools plus PostgreSQL (`PostgresChangeSource`, `PostgresEmbeddingPushdown`), Oracle, and Spanner change/notification sources. |
-| **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`VertebraPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerPlugin`). |
+| **[SQLSpec, Alchemy & Extensions](extensions.md)** | Integrations for Litestar (`VertebraPlugin`), SQLSpec (`create_sqlspec_plugin`), SQLAlchemy / Advanced Alchemy (`create_alchemy_plugin`, `BrokerPool`), Oracle APEX (`ApexGateway`), gRPC (`GrpcServiceRegistry`), and SHM session brokers (`BrokerHost`, `SyncSHMBrokerTransport`, `BrokerPlugin`) paired with [`vertebra.db.dbapi`](db.md). |
 
 ## Object Storage
 

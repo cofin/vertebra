@@ -27,7 +27,11 @@ if TYPE_CHECKING:
         SyncDBAPICursor,
         SyncDBAPIModule,
         Warning,
+        apilevel,
+        connect,
         is_row_returning_sql,
+        paramstyle,
+        threadsafety,
     )
 
 __all__ = (
@@ -48,7 +52,11 @@ __all__ = (
     "SyncDBAPICursor",
     "SyncDBAPIModule",
     "Warning",
+    "apilevel",
+    "connect",
     "is_row_returning_sql",
+    "paramstyle",
+    "threadsafety",
 )
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
@@ -69,7 +77,11 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SyncDBAPICursor": ("vertebra.db.dbapi._sync", "SyncDBAPICursor"),
     "SyncDBAPIModule": ("vertebra.db.dbapi._sync", "SyncDBAPIModule"),
     "Warning": ("vertebra.db.dbapi._sync", "Warning"),
+    "apilevel": ("vertebra.db.dbapi._sync", "apilevel"),
+    "connect": ("vertebra.db.dbapi._sync", "connect"),
     "is_row_returning_sql": ("vertebra.db.dbapi._sync", "is_row_returning_sql"),
+    "paramstyle": ("vertebra.db.dbapi._sync", "paramstyle"),
+    "threadsafety": ("vertebra.db.dbapi._sync", "threadsafety"),
 }
 
 __getattr__, __dir__ = lazy_exports(__name__, __all__, _EXPORT_MAP)

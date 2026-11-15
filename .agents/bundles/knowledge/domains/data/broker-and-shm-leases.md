@@ -30,9 +30,21 @@ sources:
   - id: src-extensions-broker-transport-py
     resource: src/py/vertebra/extensions/broker/transport.py
     title: "Python implementation module (src/py/vertebra/extensions/broker/transport.py)"
+  - id: src-extensions-broker-host-py
+    resource: src/py/vertebra/extensions/broker/host.py
+    title: "Python implementation module (src/py/vertebra/extensions/broker/host.py)"
+  - id: src-extensions-broker-engines-py
+    resource: src/py/vertebra/extensions/broker/engines.py
+    title: "Python implementation module (src/py/vertebra/extensions/broker/engines.py)"
   - id: src-extensions-broker-plugin-py
     resource: src/py/vertebra/extensions/broker/plugin.py
     title: "Python implementation module (src/py/vertebra/extensions/broker/plugin.py)"
+  - id: src-extensions-sqlalchemy-pool-py
+    resource: src/py/vertebra/extensions/sqlalchemy/pool.py
+    title: "Python implementation module (src/py/vertebra/extensions/sqlalchemy/pool.py)"
+  - id: src-db-dbapi-sync-py
+    resource: src/py/vertebra/db/dbapi/_sync.py
+    title: "Python implementation module (src/py/vertebra/db/dbapi/_sync.py)"
   - id: src-extensions-alchemy-broker-py
     resource: src/py/vertebra/extensions/alchemy/broker.py
     title: "Python implementation module (src/py/vertebra/extensions/alchemy/broker.py)"
@@ -53,8 +65,8 @@ sources:
 # Shared-Memory Connection Broker & Statement Cache
 
 <!-- truth: start -->
-- `ShmLeaseTable` co-locates lock-free CAS connection lease slots, a seqlock `ShmStatementCache`, and a cross-worker `ShmChannelSlot` pub/sub ring inside a single shared-memory region.
-- Expired or crashed worker leases are reclaimed via monotonic `expiry_ns` deadlines and PID-tagged `reclaim_worker` sweeps without global locks.
+- `ShmLeaseTable` co-locates lock-free CAS connection lease slots (`LeaseState::{Free,Leased,Quarantined}`), a seqlock `ShmStatementCache` (256 B `StatementSlot`), and a cross-worker `ShmChannelSlot` pub/sub ring (`DEFAULT_CHANNEL_CAPACITY = 64` × 384 B) inside a single shared-memory region.
+- Expired or crashed worker leases are reclaimed via monotonic `expiry_ns` deadlines and PID-tagged `reclaim_worker_leases` sweeps into `SLOT_STATE_QUARANTINED` (`LeaseState::Quarantined`) until explicit server rollback and `dispose_quarantined`.
 <!-- truth: end -->
 
 Vertebra provides cross-process shared-memory database connection management and statement caching via [`src/rs/vertebra-core/src/broker.rs`](../../../../../src/rs/vertebra-core/src/broker.rs)[^src-vertebra-core-src-broker-rs] and [`src/py/vertebra/extensions/broker/transport.py`](../../../../../src/py/vertebra/extensions/broker/transport.py)[^src-extensions-broker-transport-py].
@@ -63,28 +75,28 @@ Vertebra provides cross-process shared-memory database connection management and
 
 [`ShmLeaseTable`](../../../../../src/rs/vertebra-core/src/broker.rs) manages pooled connection slots, a co-located statement cache, and a cross-process pub/sub ring in a single fixed-size POSIX shared memory region:
 
-- **Single-Region Co-location**: `ShmLeaseTable::init_in_region_with_statements(region, pool_size, max_overflow, stmt_capacity)` places the 64-byte `LeaseTableHeader` (including `stmt_offset`, `stmt_capacity`, `channel_write_seq`, and `channel_capacity`), the `LeaseSlot` array, the `ShmChannelSlot` ring (`DEFAULT_CHANNEL_CAPACITY = 256` × 256 B), and the `ShmStatementCache` inside one `ShmRegion` (`VERTEBRA_BROKER_SHM_FD` / `VERTEBRA_BROKER_SHM_SIZE`). `LeaseBroker.statement_cache()` returns a `StatementCache` handle bound to the co-located statement cache in the same region.
-- **Slot State Machine**: Each slot contains an atomic `state_and_pid` (`SLOT_STATE_FREE`, `SLOT_STATE_PRIMARY`, `SLOT_STATE_OVERFLOW`), `generation`, `acquired_ns`, `expiry_ns`, and `bind_key_hash`.
+- **Single-Region Co-location**: `ShmLeaseTable::init_in_region_with_statements(region, pool_size, max_overflow, stmt_capacity)` places the cache-line-aligned `ShmLeaseHeader` (including `stmt_offset`, `stmt_capacity`, `channel_write_seq`, and `channel_capacity`), the `LeaseSlot` array (`64` B each), up to `MAX_POOL_PARTITIONS = 64` `ShmPartitionEntry` slots (`64` B each, resolved via `lookup_partition`), the `ShmChannelSlot` ring (`DEFAULT_CHANNEL_CAPACITY = 64` × `384` B), and the `ShmStatementCache` inside one `ShmRegion` (`VERTEBRA_BROKER_SHM_FD` / `VERTEBRA_BROKER_SHM_SIZE`). `LeaseBroker.statement_cache()` returns a `StatementCache` handle bound to the co-located statement cache in the same region.
+- **Slot State Machine**: Each slot stores an atomic `state_and_pid` (`SLOT_STATE_FREE`, `SLOT_STATE_PRIMARY`, `SLOT_STATE_OVERFLOW`, `SLOT_STATE_QUARANTINED` mapped publicly to `LeaseState::{Free, Leased, Quarantined}`), `generation`, `acquired_ns`, `expiry_ns`, and `bind_key_hash`.
 - **Atomic Acquisition**: Workers acquire slots using compare-and-swap (`CAS`) without global locks, blocking on `wake_seq` (`WaitWord`) when exhausted.
-- **Heartbeats & Crash Reclamation**: If a worker process exits or fails to release its slot before `expiry_ns` elapses, `reap_expired` and `reclaim_worker(pid)` (invoked automatically by `WorkerLifecycle::reclaim_worker_leases` and `RingFactory::shutdown_workers` in [`workers/factory.rs`](../../../../../src/rs/vertebra-http/src/workers/factory.rs)) transition all slots owned by `pid` back to `SLOT_STATE_FREE` and wake waiting workers.
+- **Heartbeats & Crash Reclamation**: If a worker process exits or fails to release its slot before `expiry_ns` elapses, `reclaim_worker_leases(pid)` (returning `ReclaimedLease` with `slot_index`, `generation`, and `pool_id`) and `reclaim_worker(pid)` transition active slots owned by `pid` into `SLOT_STATE_QUARANTINED` (`LeaseState::Quarantined`); `WorkerLifecycle::reclaim_worker_leases` and `RingFactory::shutdown_workers` in [`workers/factory.rs`](../../../../../src/rs/vertebra-http/src/workers/factory.rs) invoke quarantine cleanup before `dispose_quarantined` returns the slot to `SLOT_STATE_FREE`.
 - **Cross-Process Channel Ring (`ShmChannelSlot`)**: `publish_channel(channel, payload, sender_pid, timestamp_ns)` and `drain_channel(channel, cursor)` provide lock-free seqlock-guarded cross-process pub/sub messaging across forked workers.
-- **Slot Alignment**: Lease slots (64 B) and channel/statement slots (256 B) are cache-line aligned to eliminate false sharing across concurrent worker cores.
+- **Slot Alignment**: Lease slots (`64` B), `ShmPartitionEntry` (`64` B), `StatementSlot` (`256` B), and `ShmChannelSlot` (`384` B) are cache-line aligned to prevent false sharing across concurrent worker cores.
 
 ## 2. Shared Statement Cache (`ShmStatementCache`)
 
 [`ShmStatementCache`](../../../../../src/rs/vertebra-core/src/broker.rs) provides cross-worker statement compilation caching:
 
-- **Key Hashing**: SQL statements are hashed with FNV-1a and a dialect tag into 64-bit fingerprint keys.
-- **Prepared Statement Metadata**: Stores compiled SQL bytes, parameter counts, and MsgPack-encoded parameter plans inside optimistic seqlock-guarded four-way set-associative slots (`StatementSlot`, 256 B).
+- **Key Hashing**: SQL statements and partition keys are hashed across processes with deterministic unseeded XXH3-64 (`stable_hash64` via `twox_hash::XxHash3_64::oneshot`) and a `u16` dialect tag (`DIALECT_TAG_*`).
+- **Prepared Statement Metadata**: Stores compiled SQL bytes (`STMT_SLOT_PAYLOAD_BYTES = 224` payload within `256` B `StatementSlot`), parameter counts, and MsgPack-encoded parameter plans inside optimistic seqlock-guarded four-way set-associative slots.
 - **Eviction**: Clock eviction policy bounded by power-of-two `capacity` (`CLOCK_REF_BIT`).
 
 ## 3. Python Broker Layer (`vertebra.extensions.broker`)
 
-[`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py) and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py)[^src-extensions-broker-plugin-py] integrate the native SHM tables into Python runtimes:
+[`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py), [`vertebra.extensions.broker.host`](../../../../../src/py/vertebra/extensions/broker/host.py)[^src-extensions-broker-host-py], [`vertebra.extensions.broker.engines`](../../../../../src/py/vertebra/extensions/broker/engines.py)[^src-extensions-broker-engines-py], and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py)[^src-extensions-broker-plugin-py] integrate the native SHM tables into Python runtimes:
 
-- **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`**: Coordinate lease requests and statement plan caching across workers via `LeaseBroker`, `StatementCache`, named POSIX SHM (`ShmOwnerHeader` generation/PID reclamation), or authenticated Unix domain socket `SCM_RIGHTS` attachment (`BrokerAttachClient` / `BrokerAttachServer`, failing closed on insecure directory/socket modes).
-- **`BrokerHost`, `BrokerEngineDiscovery` & Quarantine Supervision**: `BrokerHost` (`vtb broker serve`, `ShutdownReport`) hosts server pools and `BrokerEngineCapsule` (`BROKER_ENGINE_ABI_VERSION = 1`) vtables across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb`; worker exit/`SIGKILL` transitions slots into `LeaseState::Quarantined` via `reclaim_worker_leases`, executes server `ROLLBACK` cleanup, and clears capacity via `dispose_quarantined`.
-- **`vertebra.db.dbapi` & SQLAlchemy `BrokerPool`**: Standalone PEP 249 `SyncDBAPIConnection` / `AsyncDBAPIConnection` (`SyncDBAPIModule`, `AsyncDBAPIModule`, `is_row_returning_sql`) run without SQLAlchemy or adapter-package imports, while `SQLAlchemyAsyncDBAPI`, `BrokerPool`, `AsyncBrokerPool`, and `broker_creator` share SHM partitions across SQLAlchemy and Advanced Alchemy engines; session release or pool return failures quarantine the lease and raise `LeaseQuarantinedError`.
+- **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`**: Coordinate lease requests (resolving worker partitions via `lookup_partition` when unregistered locally) and statement plan caching across workers via `LeaseBroker`, `StatementCache`, named POSIX SHM (`ShmOwnerHeader` generation/PID reclamation), or authenticated Unix domain socket `SCM_RIGHTS` attachment (`BrokerAttachClient` / `BrokerAttachServer`, failing closed on insecure directory/socket modes).
+- **`BrokerHost`, `BrokerEngineDiscovery` & Quarantine Supervision**: `BrokerHost` (`vtb broker serve`, `ShutdownReport`) hosts server pools and `BrokerEngineCapsule` (`BROKER_ENGINE_ABI_VERSION = 1`) vtables across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb` (with per-`(pool_id, lease_slot)` pinned connection transactions in `PostgresBrokerBackend`); worker exit/`SIGKILL` transitions slots into `LeaseState::Quarantined` via `reclaim_worker_leases`, executes server `ROLLBACK` cleanup, and clears capacity via `dispose_quarantined`.
+- **`vertebra.db.dbapi` & SQLAlchemy `BrokerPool`**: Standalone PEP 249 `SyncDBAPIConnection` / `AsyncDBAPIConnection` (`SyncDBAPIModule`, `AsyncDBAPIModule`, `is_row_returning_sql` in [`_sync.py`](../../../../../src/py/vertebra/db/dbapi/_sync.py)[^src-db-dbapi-sync-py]) run without SQLAlchemy or adapter-package imports, while `SQLAlchemyAsyncDBAPI`, `BrokerPool`, `AsyncBrokerPool`, and `broker_creator` ([`pool.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/pool.py)[^src-extensions-sqlalchemy-pool-py]) share SHM partitions across SQLAlchemy and Advanced Alchemy engines; session release or pool return failures quarantine the lease and raise `LeaseQuarantinedError`.
 - **`BrokerPlugin` & `DbPoolMetricSample`**: Install broker state, DI providers, ZPages (`/brokerz`) diagnostics, and OpenTelemetry `DbPoolMetricSample` counters (`quarantined`, `total_quarantined`, `total_disposed`); see [Shared-Memory Broker & Cross-Process Limitations](shm-broker-limitations.md).
 - **`DatabaseRegistry.default()`, `BaseDatabaseConfig.pool_key()`, & `provide_driver`** ([`vertebra.db.registry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py], [`vertebra.db.driver._common`](../../../../../src/py/vertebra/db/driver/_common.py)[^src-db-driver-common-py]): Every adapter config overrides `BaseDatabaseConfig.pool_key()` (returning `None` for `:memory:` SQLite and DuckDB instances so ephemeral in-memory databases never cross-pollinate), and `DatabaseRegistry.pool_fingerprint(config_or_url)` delegates directly to `config.pool_key()`. `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `provide_driver(name_or_config, *, sync=False, registry=None)` allow native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `SyncDBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps to reuse the exact same underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
 - **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)[^src-utils-sync-tools-py]): `SyncPool` sizes its `ThreadPoolExecutor` to `max(1, max_workers if max_workers is not None else cpu_count * 2)` workers, propagates `contextvars`, recreates the executor across `fork`, and coalesces `submit_async` completion wakeups per event loop via `_AsyncCompletionQueue` (`socketpair` + `loop.add_reader` draining all queued completions per readiness wakeup, falling back to `call_soon_threadsafe` when `add_reader` is unsupported). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
@@ -94,7 +106,11 @@ Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-extensions-alchemy-brok
 [^src-vertebra-core-src-broker-rs]: `src/rs/vertebra-core/src/broker.rs` — Rust implementation module (src/rs/vertebra-core/src/broker.rs).
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module (src/rs/vertebra-py/src/lib.rs).
 [^src-extensions-broker-transport-py]: `src/py/vertebra/extensions/broker/transport.py` — Python implementation module (src/py/vertebra/extensions/broker/transport.py).
+[^src-extensions-broker-host-py]: `src/py/vertebra/extensions/broker/host.py` — Python implementation module (src/py/vertebra/extensions/broker/host.py).
+[^src-extensions-broker-engines-py]: `src/py/vertebra/extensions/broker/engines.py` — Python implementation module (src/py/vertebra/extensions/broker/engines.py).
 [^src-extensions-broker-plugin-py]: `src/py/vertebra/extensions/broker/plugin.py` — Python implementation module (src/py/vertebra/extensions/broker/plugin.py).
+[^src-extensions-sqlalchemy-pool-py]: `src/py/vertebra/extensions/sqlalchemy/pool.py` — Python implementation module (src/py/vertebra/extensions/sqlalchemy/pool.py).
+[^src-db-dbapi-sync-py]: `src/py/vertebra/db/dbapi/_sync.py` — Python implementation module (src/py/vertebra/db/dbapi/_sync.py).
 [^src-extensions-alchemy-broker-py]: `src/py/vertebra/extensions/alchemy/broker.py` — Python implementation module (src/py/vertebra/extensions/alchemy/broker.py).
 [^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Python implementation module (src/py/vertebra/db/registry.py).
 [^src-db-driver-common-py]: `src/py/vertebra/db/driver/_common.py` — Python implementation module (src/py/vertebra/db/driver/_common.py).

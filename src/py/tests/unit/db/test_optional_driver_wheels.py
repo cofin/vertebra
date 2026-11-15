@@ -39,7 +39,9 @@ from vertebra.utils.module_loader import reset_dependency_cache
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 _ROOT_PYPROJECT_DATA = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 _NON_DUCKDB_DEPENDENCY_GROUPS = tuple(
-    group_name for group_name in _ROOT_PYPROJECT_DATA.get("dependency-groups", {}) if group_name != "duckdb"
+    group_name
+    for group_name in _ROOT_PYPROJECT_DATA.get("dependency-groups", {})
+    if group_name not in {"duckdb", "bench"}
 )
 
 SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (

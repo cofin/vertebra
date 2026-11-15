@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
+import inspect
+import logging
 import os
 import threading
 from collections.abc import Awaitable, Callable
@@ -29,22 +30,7 @@ __all__ = (
     "broker_creator",
 )
 
-
-def _format_pool_key(raw_key: Any) -> str:
-    """Format a config ``pool_key()`` tuple or string into a canonical broker partition identifier."""
-    if isinstance(raw_key, tuple):
-        return "|".join(str(part) for part in raw_key)
-    return str(raw_key)
-
-
-def _await_if_needed(value: Any) -> Any:
-    """Resolve an awaitable inside SQLAlchemy's active greenlet, or return synchronous values directly."""
-    if isinstance(value, Awaitable):
-        if not in_greenlet():
-            msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
-            raise ImproperConfigurationError(msg)
-        return await_only(value)
-    return value
+logger = logging.getLogger(__name__)
 
 
 def broker_creator(
@@ -65,11 +51,13 @@ def broker_creator(
     if connect_fn is not None:
         return connect_fn
 
+    conn_kwargs = dict(connect_kwargs)
+    conn_kwargs.setdefault("lease_managed", True)
     if is_async:
         module = SQLAlchemyAsyncDBAPI()
-        return lambda: module.connect(url, broker=None, share_pool=share_pool, **connect_kwargs)
+        return lambda: module.connect(url, broker=broker, share_pool=share_pool, **conn_kwargs)
 
-    return lambda: SyncDBAPIConnection(url, broker=None, share_pool=share_pool, **connect_kwargs)
+    return lambda: SyncDBAPIConnection(url, broker=broker, share_pool=share_pool, **conn_kwargs)
 
 
 class BrokerPool(Pool):
@@ -123,9 +111,12 @@ class BrokerPool(Pool):
         if not partition_key and resolved_config is not None:
             pool_key_fn = getattr(resolved_config, "pool_key", None)
             if callable(pool_key_fn):
-                partition_key = _format_pool_key(pool_key_fn())
+                formatted = self._format_pool_key(pool_key_fn())
+                if formatted:
+                    partition_key = formatted
         if not partition_key and resolved_url:
-            partition_key = resolved_url
+            is_memory = ":memory:" in resolved_url or resolved_url.rstrip("/").endswith("memory:")
+            partition_key = f"{resolved_url}#pool-{id(self)}" if is_memory else resolved_url
         if not partition_key:
             raise ImproperConfigurationError("BrokerPool requires a config, url, or explicit pool_key")
 
@@ -148,12 +139,16 @@ class BrokerPool(Pool):
         self._acquire_timeout_ms = resolved_timeout
         self._on_rollback = resolved_on_rollback
         self._on_dispose = resolved_on_dispose
+        self._pool_size: int | None = pool_kw.pop("pool_size", None)
+        self._max_overflow: int | None = pool_kw.pop("max_overflow", None)
+        self._reset_mode: Any = reset_on_return
         self._lease_lock = threading.Lock()
         self._partition_registered = False
-        self._entry_leases: dict[int, Any] = {}
+        self._entry_leases: dict[int, tuple[ConnectionPoolEntry, Any]] = {}
 
-        super().__init__(resolved_creator, reset_on_return=reset_on_return, **pool_kw)
-        sa_event.listen(self, "invalidate", self._handle_invalidate)
+        super().__init__(resolved_creator, reset_on_return=False, **pool_kw)
+        if "_dispatch" not in pool_kw:
+            sa_event.listen(self, "invalidate", BrokerPool._on_connection_invalidate)
 
     @property
     def partition_key(self) -> str:
@@ -200,17 +195,103 @@ class BrokerPool(Pool):
             leased = len(self._entry_leases)
         return f"{type(self).__name__}(partition={self._partition_key!r}, active_leases={leased})"
 
+    def recreate(self) -> BrokerPool:
+        """Return a freshly initialized copy of this pool preserving broker configuration."""
+        return self.__class__(
+            self._creator,
+            broker=self._broker,
+            config=self._config,
+            url=self._url,
+            pool_key=self._pool_key_override or self._partition_key,
+            worker_id=self._worker_id,
+            acquire_timeout_ms=self._acquire_timeout_ms,
+            on_rollback=self._on_rollback,
+            on_dispose=self._on_dispose,
+            pool_size=self._pool_size,
+            max_overflow=self._max_overflow,
+            recycle=self._recycle,
+            echo=self.echo,
+            logging_name=self._orig_logging_name,
+            reset_on_return=self._reset_mode,
+            pre_ping=self._pre_ping,
+            _dispatch=self.dispatch,
+            dialect=self._dialect,
+        )
+
+    def dispose(self) -> None:
+        """Quarantine active checked-out leases safely during pool disposal."""
+        with self._lease_lock:
+            remaining = list(self._entry_leases.values())
+            self._entry_leases.clear()
+        for entry, lease in remaining:
+            entry.info.pop("vtb_broker_pool", None)
+            self._close_entry_safely(entry)
+            self._quarantine_lease(lease)
+            if self._on_dispose is not None:
+                self._on_dispose(lease)
+
+    @staticmethod
+    def _format_pool_key(raw_key: Any) -> str | None:
+        if raw_key is None:
+            return None
+        if isinstance(raw_key, tuple):
+            return "|".join(str(part) for part in raw_key)
+        rendered = str(raw_key)
+        return rendered if rendered else None
+
+    @staticmethod
+    def _await_if_needed(value: Any) -> Any:
+        if isinstance(value, Awaitable):
+            if not in_greenlet():
+                msg = "Async broker operations in SQLAlchemy pools must execute within an async greenlet context"
+                raise ImproperConfigurationError(msg)
+            return await_only(value)
+        return value
+
+    @staticmethod
+    def _on_connection_invalidate(
+        dbapi_connection: Any,
+        connection_record: Any,
+        exception: BaseException | None,
+    ) -> None:
+        if connection_record is None:
+            return
+        pool_ref = connection_record.info.pop("vtb_broker_pool", None)
+        if pool_ref is not None:
+            pool_ref._handle_invalidate(dbapi_connection, connection_record, exception)
+
     def _transport_target(self) -> Any:
         return getattr(self._broker, "transport", self._broker)
+
+    def _register_partition(self, target: Any) -> None:
+        register_fn = getattr(target, "register_partition", None)
+        if not callable(register_fn):
+            return
+        reg_kwargs: dict[str, Any] = {}
+        pool_size = self._pool_size
+        if pool_size is None and self._config is not None:
+            pool_size = getattr(self._config, "pool_size", None)
+        max_overflow = self._max_overflow
+        if max_overflow is None and self._config is not None:
+            max_overflow = getattr(self._config, "max_overflow", None)
+        if isinstance(pool_size, int) and not isinstance(pool_size, bool):
+            reg_kwargs["pool_size"] = pool_size
+        if isinstance(max_overflow, int) and not isinstance(max_overflow, bool):
+            reg_kwargs["max_overflow"] = max_overflow
+        if reg_kwargs:
+            try:
+                self._await_if_needed(register_fn(self._partition_key, **reg_kwargs))
+                return
+            except TypeError:
+                pass
+        self._await_if_needed(register_fn(self._partition_key))
 
     def _acquire_partition_lease(self) -> Any:
         target = self._transport_target()
         with self._lease_lock:
             registered = self._partition_registered
         if not registered:
-            register_fn = getattr(target, "register_partition", None)
-            if callable(register_fn):
-                _await_if_needed(register_fn(self._partition_key))
+            self._register_partition(target)
             with self._lease_lock:
                 self._partition_registered = True
 
@@ -223,28 +304,45 @@ class BrokerPool(Pool):
         kwargs: dict[str, Any] = {"bind_key": self._partition_key, "worker_id": worker}
         if self._acquire_timeout_ms is not None:
             kwargs["timeout_ms"] = self._acquire_timeout_ms
-        return _await_if_needed(acquire_fn(**kwargs))
+        return self._await_if_needed(acquire_fn(**kwargs))
 
     def _release_lease(self, lease: Any) -> None:
         release_fn = getattr(lease, "release", None)
         if callable(release_fn):
-            _await_if_needed(release_fn())
+            if inspect.iscoroutinefunction(release_fn) and not in_greenlet():
+                lease_transport = getattr(lease, "_transport", None)
+                release_impl = getattr(lease_transport, "_release_impl", None)
+                lease_id = getattr(lease, "lease_id", None)
+                if callable(release_impl) and lease_id is not None:
+                    release_impl(lease_id)
+                    return
+            self._await_if_needed(release_fn())
             return
         target = self._transport_target()
         lease_id = getattr(lease, "lease_id", None)
         transport_release = getattr(target, "release", None)
         if lease_id is not None and callable(transport_release):
-            _await_if_needed(transport_release(lease_id))
+            if inspect.iscoroutinefunction(transport_release) and not in_greenlet():
+                release_impl = getattr(target, "_release_impl", None)
+                if callable(release_impl):
+                    release_impl(lease_id)
+                    return
+            self._await_if_needed(transport_release(lease_id))
 
     def _quarantine_lease(self, lease: Any) -> None:
         target = self._transport_target()
         quarantine_fn = getattr(self._broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
+            if inspect.iscoroutinefunction(quarantine_fn) and not in_greenlet():
+                quarantine_impl = getattr(target, "_quarantine_impl", None)
+                if callable(quarantine_impl):
+                    quarantine_impl(lease)
+                    return
             try:
-                _await_if_needed(quarantine_fn(lease))
+                self._await_if_needed(quarantine_fn(lease))
             except TypeError:
                 coords = (int(lease.slot_index), int(lease.generation))
-                _await_if_needed(quarantine_fn(coords))
+                self._await_if_needed(quarantine_fn(coords))
 
     def _extract_lease_coords(self, lease: Any) -> tuple[int, int]:
         slot_idx = int(getattr(lease, "slot_index", 0))
@@ -256,15 +354,22 @@ class BrokerPool(Pool):
             self._on_rollback(entry.dbapi_connection)
             return
         conn: Any = entry.dbapi_connection
-        if conn is not None and hasattr(conn, "rollback"):
-            rb_result = conn.rollback()
-            if isinstance(rb_result, Awaitable):
-                _await_if_needed(rb_result)
+        if conn is not None:
+            if self._reset_mode == "commit" and hasattr(conn, "commit"):
+                res = conn.commit()
+            elif hasattr(conn, "rollback"):
+                res = conn.rollback()
+            else:
+                return
+            if isinstance(res, Awaitable):
+                self._await_if_needed(res)
 
     @staticmethod
     def _close_entry_safely(entry: ConnectionPoolEntry) -> None:
-        with contextlib.suppress(Exception):
+        try:
             entry.close()
+        except Exception as exc:
+            logger.debug("Ignored entry close failure while quarantining broker lease: %s", exc)
 
     def _handle_invalidate(
         self,
@@ -273,13 +378,14 @@ class BrokerPool(Pool):
         exception: BaseException | None,
     ) -> None:
         """Quarantine active leases if SQLAlchemy invalidates a checked-out connection record."""
-        _ = (dbapi_connection, exception)
+        _ = dbapi_connection
         if connection_record is None:
             return
         with self._lease_lock:
-            lease = self._entry_leases.pop(id(connection_record), None)
-        if lease is None:
+            entry_pair = self._entry_leases.pop(id(connection_record), None)
+        if entry_pair is None:
             return
+        _, lease = entry_pair
         if exception is not None:
             self._quarantine_lease(lease)
             if self._on_dispose is not None:
@@ -296,22 +402,25 @@ class BrokerPool(Pool):
             self._quarantine_lease(lease)
             raise
         with self._lease_lock:
-            self._entry_leases[id(entry)] = lease
+            self._entry_leases[id(entry)] = (entry, lease)
         entry.info["vtb_broker_lease"] = lease
+        entry.info["vtb_broker_pool"] = self
         return entry
 
     def _do_return_conn(self, record: ConnectionPoolEntry) -> None:
         """Roll back on return, releasing healthy leases and quarantining dirty sessions."""
+        record.info.pop("vtb_broker_pool", None)
         with self._lease_lock:
-            lease = self._entry_leases.pop(id(record), None)
-        if lease is None:
+            entry_pair = self._entry_leases.pop(id(record), None)
+        if entry_pair is None:
             record.close()
             return
+        _, lease = entry_pair
 
-        rollback_exc: Exception | None = None
+        rollback_exc: BaseException | None = None
         try:
             self._run_rollback(record)
-        except Exception as exc:
+        except BaseException as exc:
             rollback_exc = exc
 
         if rollback_exc is not None:
@@ -319,39 +428,14 @@ class BrokerPool(Pool):
             self._quarantine_lease(lease)
             if self._on_dispose is not None:
                 self._on_dispose(lease)
-            slot_idx, generation = self._extract_lease_coords(lease)
-            raise LeaseQuarantinedError(slot_idx, generation, str(rollback_exc)) from rollback_exc
+            if isinstance(rollback_exc, Exception):
+                slot_idx, generation = self._extract_lease_coords(lease)
+                raise LeaseQuarantinedError(slot_idx, generation, str(rollback_exc)) from rollback_exc
+            raise rollback_exc
 
-        record.close()
-        self._release_lease(lease)
-
-    def recreate(self) -> BrokerPool:
-        """Return a freshly initialized copy of this pool preserving broker configuration."""
-        return self.__class__(
-            self._creator,
-            broker=self._broker,
-            config=self._config,
-            url=self._url,
-            pool_key=self._pool_key_override,
-            worker_id=self._worker_id,
-            acquire_timeout_ms=self._acquire_timeout_ms,
-            on_rollback=self._on_rollback,
-            on_dispose=self._on_dispose,
-            recycle=self._recycle,
-            echo=self.echo,
-            logging_name=self._orig_logging_name,
-            reset_on_return=self._reset_on_return,
-            pre_ping=self._pre_ping,
-            _dispatch=self.dispatch,
-            dialect=self._dialect,
-        )
-
-    def dispose(self) -> None:
-        """Release or quarantine any tracked entry leases during pool disposal."""
-        with self._lease_lock:
-            remaining = list(self._entry_leases.values())
-            self._entry_leases.clear()
-        for lease in remaining:
+        try:
+            record.close()
+        finally:
             self._release_lease(lease)
 
 

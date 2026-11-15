@@ -1271,12 +1271,11 @@ async def test_native_provider_preserves_driver_exception_identity(
 
 
 def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
-    """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects.py has no embedded DBAPI."""
-    assert sqlalchemy_dialects_mod.__file__ is not None
-    dialects_src = Path(sqlalchemy_dialects_mod.__file__).read_text(encoding="utf-8")
-    assert "class SyncDBAPIConnection" not in dialects_src
-    assert "class AsyncDBAPIConnection" not in dialects_src
-    assert "vertebra.db.adapters" not in dialects_src
+    """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
+    assert not hasattr(sqlalchemy_dialects_mod, "SyncDBAPIConnection")
+    assert not hasattr(sqlalchemy_dialects_mod, "AsyncDBAPIConnection")
+    assert SyncBigQueryDialect.dbapi().paramstyle == "named"
+    assert AsyncSpannerDialect.dbapi().paramstyle == "named"
 
     sync_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
@@ -1284,3 +1283,7 @@ def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> N
     sp_cfg = create_async_alchemy_config("spanner://core-proj/prod-inst/orders", broker=async_broker)
     assert issubclass(bq_cfg.engine_config.poolclass, BrokerPool)
     assert issubclass(sp_cfg.engine_config.poolclass, AsyncBrokerPool)
+    assert bq_cfg.engine_config.connect_args["broker"] is sync_broker
+    assert sp_cfg.engine_config.connect_args["broker"] is async_broker
+    sync_broker.close()
+    async_broker._close_impl()

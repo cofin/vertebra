@@ -53,23 +53,60 @@ class BrokerPlugin:
         state_mapping[self.config.metrics_state_key] = self._transport.metrics()
         return self._transport
 
+    def _pool_metrics_fields(self, m: Any) -> dict[str, int]:
+        pool_m = m.pools.get(self.name)
+        if pool_m is not None:
+            has_pool_activity = (
+                pool_m.active_leases > 0
+                or pool_m.quarantined > 0
+                or pool_m.total_acquired > 0
+                or pool_m.total_released > 0
+                or pool_m.total_reclaimed > 0
+                or pool_m.total_quarantined > 0
+                or pool_m.total_disposed > 0
+            )
+            has_other_pool_activity = any(
+                name != self.name and (counts.active_leases > 0 or counts.quarantined > 0 or counts.total_acquired > 0)
+                for name, counts in m.pools.items()
+            )
+            if has_pool_activity or has_other_pool_activity:
+                return {
+                    "active_leases": pool_m.active_leases,
+                    "quarantined": pool_m.quarantined,
+                    "total_acquired": pool_m.total_acquired,
+                    "total_released": pool_m.total_released,
+                    "total_reclaimed": pool_m.total_reclaimed,
+                    "total_quarantined": pool_m.total_quarantined,
+                    "total_disposed": pool_m.total_disposed,
+                }
+        return {
+            "active_leases": m.active_leases,
+            "quarantined": m.quarantined,
+            "total_acquired": m.total_acquired,
+            "total_released": m.total_released,
+            "total_reclaimed": m.total_reclaimed,
+            "total_quarantined": m.total_quarantined,
+            "total_disposed": m.total_disposed,
+        }
+
     def snapshot_metrics(self) -> DbPoolMetricSample:
         """Create a point-in-time OpenTelemetry metric sample and record it."""
         m = self._transport.metrics()
+        pf = self._pool_metrics_fields(m)
         sample = DbPoolMetricSample(
             pool_name=self.name,
-            active_leases=m.active_leases,
+            active_leases=pf["active_leases"],
             primary_in_use=m.primary_in_use,
             overflow_in_use=m.overflow_in_use,
             max_capacity=self.config.pool_size + self.config.max_overflow,
             waiting_threads=m.waiting_threads,
             total_timeouts=m.total_timeouts,
-            total_reclaimed=m.total_reclaimed,
+            total_reclaimed=pf["total_reclaimed"],
             statement_cache_hits=m.statement_cache_hits,
             statement_cache_misses=m.statement_cache_misses,
-            quarantined=m.quarantined,
-            total_quarantined=m.total_quarantined,
-            total_disposed=m.total_disposed,
+            quarantined=pf["quarantined"],
+            total_quarantined=pf["total_quarantined"],
+            total_disposed=pf["total_disposed"],
         )
         if self.otel_recorder is not None:
             self.otel_recorder.record_sample(sample)
@@ -113,26 +150,27 @@ class BrokerPlugin:
 
         def provider() -> dict[str, object]:
             m = self._transport.metrics()
+            pf = self._pool_metrics_fields(m)
             total_cap = self.config.pool_size + self.config.max_overflow
-            utilization = m.active_leases / total_cap if total_cap > 0 else 0.0
+            utilization = pf["active_leases"] / total_cap if total_cap > 0 else 0.0
             total_lookups = m.statement_cache_hits + m.statement_cache_misses
             hit_ratio = m.statement_cache_hits / total_lookups if total_lookups > 0 else 0.0
             return {
                 "pool_size": self.config.pool_size,
                 "max_overflow": self.config.max_overflow,
-                "active_leases": m.active_leases,
+                "active_leases": pf["active_leases"],
                 "primary_in_use": m.primary_in_use,
                 "overflow_in_use": m.overflow_in_use,
-                "quarantined": m.quarantined,
+                "quarantined": pf["quarantined"],
                 "utilization_ratio": utilization,
                 "waiting_threads": m.waiting_threads,
-                "total_acquired": m.total_acquired,
-                "total_released": m.total_released,
+                "total_acquired": pf["total_acquired"],
+                "total_released": pf["total_released"],
                 "total_expired": m.total_expired,
                 "total_timeouts": m.total_timeouts,
-                "total_reclaimed": m.total_reclaimed,
-                "total_quarantined": m.total_quarantined,
-                "total_disposed": m.total_disposed,
+                "total_reclaimed": pf["total_reclaimed"],
+                "total_quarantined": pf["total_quarantined"],
+                "total_disposed": pf["total_disposed"],
                 "statement_cache_hits": m.statement_cache_hits,
                 "statement_cache_misses": m.statement_cache_misses,
                 "statement_cache_evictions": m.statement_cache_evictions,

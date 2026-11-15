@@ -787,6 +787,19 @@ impl ShmLeaseTable {
         }
     }
 
+    /// Look up the partition slot matching `pool_key_hash` in the shared header.
+    pub fn lookup_partition(&self, pool_key_hash: u64) -> Option<u16> {
+        let hdr = self.header();
+        for (idx, entry) in hdr.partitions.iter().enumerate() {
+            if entry.state.load(Ordering::Acquire) == PARTITION_READY
+                && entry.pool_key_hash.load(Ordering::Relaxed) == pool_key_hash
+            {
+                return Some(idx as u16);
+            }
+        }
+        None
+    }
+
     fn try_acquire_slot(
         &self,
         partition: Option<u16>,

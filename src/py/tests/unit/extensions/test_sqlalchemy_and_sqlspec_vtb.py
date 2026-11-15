@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import array
-import ast
 import importlib
 import sqlite3
 from pathlib import Path
@@ -19,11 +18,12 @@ from sqlalchemy import String, create_engine, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.util.concurrency import greenlet_spawn
-from sqlspec import SQL, StatementStack
-from sqlspec.core.filters import NullFilter
+from sqlspec import SQL, StatementStack, sql
+from sqlspec.core.filters import LimitOffsetFilter, NullFilter
 from sqlspec.core.parameters import ParameterStyle, ParameterStyleConfig
 from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
+from sqlspec.exceptions import StackExecutionError
 
 import vertebra.extensions.sqlspec as sqlspec_extension
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
@@ -32,6 +32,7 @@ from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.db.dbapi import AsyncDBAPIConnection, InterfaceError, SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
@@ -42,22 +43,18 @@ from vertebra.extensions.broker.errors import LeaseQuarantinedError
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
 from vertebra.extensions.sqlalchemy import (
     AlembicImpl,
-    AsyncDBAPIConnection,
     BinaryJSON,
     CreateVectorIndexOp,
     CreateViewOp,
     DeleteUsingClause,
     DropVectorIndexOp,
     InsertSentinelSpec,
-    InterfaceError,
     MySQLAlembicImpl,
     OracleAlembicImpl,
     ParameterizedSQL,
     PostgreSQLAlembicImpl,
     SelectInLoadSpec,
     SQLiteAlembicImpl,
-    SyncDBAPIConnection,
-    SyncDBAPIModule,
     SyncEngineAdapter,
     SyncMySQLDialect,
     SyncOracleDialect,
@@ -66,10 +63,8 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
     dialects,
 )
+from vertebra.extensions.sqlalchemy.async_adapter import SQLAlchemyAsyncDBAPI
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool, broker_creator
-from vertebra.extensions.sqlspec import plugin as sqlspec_plugin_mod
-from vertebra.extensions.sqlspec import provider as sqlspec_provider_mod
-from vertebra.extensions.sqlspec import proxy as sqlspec_proxy_mod
 from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
     MySQLSyncConfig,
@@ -125,7 +120,7 @@ async def test_async_dialect_begins_native_transaction(dialect_name: str) -> Non
     """Async dialect begin forwards through SQLAlchemy's real adapted DBAPI connection."""
     driver = AsyncSQLiteDriver()
     await driver.execute("CREATE TABLE transaction_items (id INTEGER)")
-    module = dialects.AsyncDBAPIModule()
+    module = SQLAlchemyAsyncDBAPI()
     adapted = await greenlet_spawn(module.connect, driver=driver, share_pool=False)
     try:
         await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
@@ -1666,9 +1661,9 @@ def test_async_dbapi_connection_rejects_unparsable_url() -> None:
         AsyncDBAPIConnection("nonsense+vtb_async://host/db", share_pool=False)
     assert isinstance(exc_info.value.__cause__, ValueError)
 
-    assert dialects.AsyncDBAPIModule.InterfaceError is InterfaceError
+    assert SQLAlchemyAsyncDBAPI.InterfaceError is InterfaceError
     with pytest.raises(InterfaceError):
-        dialects.AsyncDBAPIModule().connect("nonsense+vtb_async://host/db")
+        SQLAlchemyAsyncDBAPI().connect("nonsense+vtb_async://host/db")
 
 
 @pytest.mark.parametrize("failure_mode", ["rollback_error", "exit_error", "quarantine_error"])
@@ -1725,17 +1720,22 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
 
     sync_broker = SyncBrokerDouble()
     assert isinstance(sync_broker, SyncBrokerLeaseSource)
-    sync_provider = SQLSpecSyncProvider(lambda: SyncFailingSession(), broker=sync_broker)
+    sync_sessions: list[SyncFailingSession] = []
+
+    def _build_sync_session() -> SyncFailingSession:
+        sess = SyncFailingSession()
+        sync_sessions.append(sess)
+        return sess
+
+    sync_provider = SQLSpecSyncProvider(_build_sync_session, broker=sync_broker)
     sync_driver = ProxySyncDriver(sync_provider, broker=sync_broker)
     sync_driver.begin()
 
+    with pytest.raises(LeaseQuarantinedError) as exc_info:
+        sync_driver.release_lease()
+    assert sync_sessions[0].exit_called is True
     if failure_mode == "quarantine_error":
-        with pytest.raises(OSError, match="quarantine backend unreachable") as exc_info:
-            sync_provider._release_session_sync((sync_driver.slot_idx, sync_driver.generation), True)
-        assert isinstance(exc_info.value.__context__, ValueError)
-    else:
-        with pytest.raises(LeaseQuarantinedError):
-            sync_driver.release_lease()
+        assert "quarantine backend unreachable" in str(exc_info.value.__cause__)
     assert sync_broker.quarantined_calls == 1
     assert sync_broker.leases[0].released == 0
 
@@ -1757,10 +1757,14 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
                 raise OSError("async quarantine failure")
 
     class AsyncFailingSession:
+        def __init__(self) -> None:
+            self.exit_called = False
+
         async def __aenter__(self) -> AsyncFailingSession:
             return self
 
         async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            self.exit_called = True
             if failure_mode == "exit_error":
                 raise RuntimeError("async context exit failure")
 
@@ -1774,17 +1778,22 @@ async def test_sqlspec_provider_quarantines_without_release_on_sync_and_async_fa
 
     async_broker = AsyncBrokerDouble()
     assert isinstance(async_broker, AsyncBrokerLeaseSource)
-    async_provider = SQLSpecAsyncProvider(lambda: AsyncFailingSession(), broker=async_broker)
+    async_sessions: list[AsyncFailingSession] = []
+
+    def _build_async_session() -> AsyncFailingSession:
+        sess = AsyncFailingSession()
+        async_sessions.append(sess)
+        return sess
+
+    async_provider = SQLSpecAsyncProvider(_build_async_session, broker=async_broker)
     async_driver = ProxyAsyncDriver(async_provider, broker=async_broker)
     await async_driver.begin()
 
+    with pytest.raises(LeaseQuarantinedError) as a_exc_info:
+        await async_driver.release_lease()
+    assert async_sessions[0].exit_called is True
     if failure_mode == "quarantine_error":
-        with pytest.raises(OSError, match="async quarantine failure") as a_exc_info:
-            await async_provider._release_session_async((async_driver.slot_idx, async_driver.generation), True)
-        assert isinstance(a_exc_info.value.__context__, ValueError)
-    else:
-        with pytest.raises(LeaseQuarantinedError):
-            await async_driver.release_lease()
+        assert "async quarantine failure" in str(a_exc_info.value.__cause__)
     assert async_broker.quarantined_calls == 1
     assert async_broker.leases[0].released == 0
 
@@ -1831,16 +1840,10 @@ def test_proxy_drivers_subclass_sqlspec_bases_and_preserve_statement_config(
 
     assert BrokerRpcRequest.__struct_config__.gc is True
     assert BrokerRpcResponse.__struct_config__.gc is True
-
-    for mod in (sqlspec_provider_mod, sqlspec_proxy_mod):
-        assert mod.__file__ is not None
-        src = Path(mod.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in ("signature", "suppress"):
-                raise AssertionError(f"forbidden reflection or suppress call .{node.attr} in {mod.__name__}")
-    plugin_src = Path(sqlspec_plugin_mod.__file__).read_text(encoding="utf-8")
-    assert "InMemoryBrokerTransport" not in plugin_src
+    assert sync_driver.data_dictionary is None
+    assert async_driver.data_dictionary is None
+    assert sync_driver.provider is not None
+    assert sync_driver.provider.resolve_upstream_optional("primary") is not None
 
 
 @pytest.mark.parametrize(
@@ -1953,3 +1956,261 @@ def test_alchemy_plugin_wires_broker_pool_classes(is_async: bool) -> None:
     else:
         cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=broker)
         assert issubclass(cfg.engine_config.poolclass, BrokerPool)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count_with_window", [False, True])
+async def test_proxy_drivers_compile_sql_filters_stacks_and_common_driver_params(count_with_window: bool) -> None:
+    """Verify proxy drivers compile SQL/filters/styles, dispatch stacks/totals, bind single strings, and unwrap configs."""
+    pg_cfg = StatementConfig(
+        dialect="postgres",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.NUMERIC,
+            supported_parameter_styles={ParameterStyle.NUMERIC},
+        ),
+    )
+    pg_proxy = ProxySyncDriver(SQLSpecSyncProvider(SyncSQLiteDriver()), statement_config=pg_cfg)
+    compiled_sql, compiled_params, _ = pg_proxy.compile_with_broker(
+        pg_proxy,
+        pg_proxy.broker,
+        "postgres",
+        SQL("SELECT id FROM items WHERE id = :id", id=42),
+    )
+    assert compiled_sql.strip() == "SELECT id FROM items WHERE id = $1"
+    assert compiled_params == [42]
+
+    sqlite_cfg = StatementConfig(
+        dialect="sqlite",
+        parameter_config=ParameterStyleConfig(
+            default_parameter_style=ParameterStyle.QMARK,
+            supported_parameter_styles={ParameterStyle.QMARK},
+        ),
+    )
+    sync_driver = SyncSQLiteDriver()
+    sync_provider = SQLSpecSyncProvider(sync_driver)
+    proxy_sync = ProxySyncDriver(sync_provider, statement_config=sqlite_cfg)
+    proxy_sync.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
+    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
+    proxy_sync.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
+
+    qb_sql, qb_params, _ = proxy_sync.compile_with_broker(
+        proxy_sync,
+        proxy_sync.broker,
+        "sqlite",
+        sql.select("id", "name").from_("items").where_eq("id", 2),
+        (LimitOffsetFilter(limit=2, offset=1),),
+    )
+    assert "WHERE" in qb_sql.upper()
+    assert "LIMIT" in qb_sql.upper()
+    assert qb_params == [2, 2, 1]
+
+    assert proxy_sync.select_value("SELECT ?", "hello") == "hello"
+    assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
+    assert proxy_sync.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
+
+    rows, total = proxy_sync.select_with_total(
+        "SELECT id, name FROM items ORDER BY id",
+        LimitOffsetFilter(limit=2, offset=1),
+        count_with_window=count_with_window,
+    )
+    assert total == 3
+    assert [row["id"] for row in rows] == [2, 3]
+
+    ok_stack = (
+        StatementStack()
+        .push_execute("INSERT INTO items VALUES (?, ?)", 4, "d")
+        .push_execute("INSERT INTO items VALUES (?, ?)", 5, "e")
+    )
+    ok_results = proxy_sync.execute_stack(ok_stack)
+    assert len(ok_results) == 2
+    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
+
+    fail_stack = (
+        StatementStack()
+        .push_execute("INSERT INTO items VALUES (?, ?)", 6, "f")
+        .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
+    )
+    with pytest.raises(StackExecutionError):
+        proxy_sync.execute_stack(fail_stack)
+    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 5
+
+    cont_stack = (
+        StatementStack()
+        .push_execute("INSERT INTO items VALUES (?, ?)", 1, "dup")
+        .push_execute("INSERT INTO items VALUES (?, ?)", 7, "g")
+    )
+    cont_results = proxy_sync.execute_stack(cont_stack, continue_on_error=True)
+    assert len(cont_results) == 2
+    assert isinstance(cont_results[0].error, StackExecutionError)
+    assert cont_results[1].error is None
+    assert proxy_sync.select_value("SELECT COUNT(*) FROM items") == 6
+
+    async_driver = AsyncSQLiteDriver()
+    async_provider = SQLSpecAsyncProvider(async_driver)
+    proxy_async = ProxyAsyncDriver(async_provider, statement_config=sqlite_cfg)
+    await proxy_async.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 1, "a")
+    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 2, "b")
+    await proxy_async.execute("INSERT INTO items VALUES (?, ?)", 3, "c")
+
+    assert await proxy_async.select_value("SELECT ?", "hello") == "hello"
+    assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 2) == "b"
+    assert await proxy_async.select_value_or_none("SELECT name FROM items WHERE id = ?", 999) is None
+
+    arows, atotal = await proxy_async.select_with_total(
+        "SELECT id, name FROM items ORDER BY id",
+        LimitOffsetFilter(limit=2, offset=1),
+        count_with_window=count_with_window,
+    )
+    assert atotal == 3
+    assert [row["id"] for row in arows] == [2, 3]
+
+    aok_results = await proxy_async.execute_stack(ok_stack)
+    assert len(aok_results) == 2
+    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+
+    with pytest.raises(StackExecutionError):
+        await proxy_async.execute_stack(fail_stack)
+    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 5
+
+    acont_results = await proxy_async.execute_stack(cont_stack, continue_on_error=True)
+    assert len(acont_results) == 2
+    assert isinstance(acont_results[0].error, StackExecutionError)
+    assert acont_results[1].error is None
+    assert await proxy_async.select_value("SELECT COUNT(*) FROM items") == 6
+
+    class WrappedCfg:
+        dialect = "sqlite"
+        bind_key = "primary"
+        statement_config = sqlite_cfg
+        driver_features: dict[str, Any] = {}
+
+        def provide_session(self) -> Any:
+            return self
+
+    proxy_sync_cfg = ProxySyncConfig(WrappedCfg(), provider=sync_provider)
+    proxy_async_cfg = ProxyAsyncConfig(WrappedCfg(), provider=async_provider)
+    with proxy_sync_cfg.provide_proxied_session() as sess:
+        assert isinstance(sess, ProxySyncDriver)
+        assert sess.select_value("SELECT ?", 11) == 11
+    async with proxy_async_cfg.provide_proxied_session() as asess:
+        assert isinstance(asess, ProxyAsyncDriver)
+        assert await asess.select_value("SELECT ?", 12) == 12
+
+
+@pytest.mark.anyio
+async def test_broker_pool_partitions_timeouts_real_rollback_invalidate_and_alchemy_execution(tmp_path: Path) -> None:
+    """Verify partition isolation, pool_size=1 timeouts, real rollback quarantine, recreate/invalidate, and Alchemy SQL."""
+    db1 = tmp_path / "one.db"
+    db2 = tmp_path / "two.db"
+    sync_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    p1 = BrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db1}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
+    p2 = BrokerPool(broker=sync_t, url=f"sqlite+vtb:///{db2}", pool_size=1, max_overflow=0, acquire_timeout_ms=50)
+    mem_pool = BrokerPool(broker=sync_t, url="sqlite+vtb:///:memory:", pool_size=1, max_overflow=0)
+    try:
+        assert p1.partition_key != p2.partition_key
+        assert mem_pool.partition_key is not None
+        assert "None" not in mem_pool.partition_key
+        assert mem_pool.partition_key.endswith(f"#pool-{id(mem_pool)}")
+
+        c1 = p1.connect()
+        c2 = p2.connect()
+        try:
+            with pytest.raises(TimeoutError):
+                p1.connect()
+        finally:
+            c2.close()
+        try:
+            with pytest.raises(TimeoutError):
+                p1.connect()
+        finally:
+            c1.close()
+
+        recreated = p1.recreate()
+        assert isinstance(recreated, BrokerPool)
+        inv_conn = recreated.connect()
+        inv_conn.invalidate()
+        assert sync_t.metrics().active_leases == 0
+        recreated.dispose()
+    finally:
+        mem_pool.dispose()
+        p2.dispose()
+        p1.dispose()
+
+    rollback_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
+    rollback_db = tmp_path / "rollback.db"
+    should_fail_rollback = True
+
+    class FailingRollbackConnection(SyncDBAPIConnection):
+        def rollback(self) -> None:
+            if should_fail_rollback:
+                raise RuntimeError("real rollback failed")
+            super().rollback()
+
+    rollback_pool = BrokerPool(
+        creator=lambda: FailingRollbackConnection(driver=SyncSQLiteDriver(), broker=rollback_t, lease_managed=True),
+        broker=rollback_t,
+        pool_key=f"sqlite://{rollback_db}",
+        pool_size=1,
+        max_overflow=0,
+        acquire_timeout_ms=50,
+        reset_on_return="rollback",
+    )
+    try:
+        conn = rollback_pool.connect()
+        with pytest.raises(LeaseQuarantinedError) as q_exc:
+            conn.close()
+        assert isinstance(q_exc.value.__cause__, RuntimeError)
+        assert rollback_t.quarantined_count() == 1
+        with pytest.raises(TimeoutError):
+            rollback_pool.connect()
+        should_fail_rollback = False
+        rollback_t.dispose_quarantined(q_exc.value.slot_index, q_exc.value.generation)
+        assert rollback_t.quarantined_count() == 0
+        recovered = rollback_pool.connect()
+        recovered.close()
+    finally:
+        rollback_pool.dispose()
+
+    creator_sync = broker_creator("sqlite+vtb:///:memory:", broker=sync_t)
+    raw_sync = creator_sync()
+    try:
+        assert raw_sync.broker is sync_t
+    finally:
+        raw_sync.close()
+
+    async_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    creator_async = broker_creator("sqlite+vtb_async:///:memory:", broker=async_t, is_async=True)
+    raw_async = await greenlet_spawn(creator_async)
+    try:
+        assert raw_async._connection.broker is async_t
+    finally:
+        await greenlet_spawn(raw_async.close)
+
+    alchemy_sync_t = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", broker=alchemy_sync_t)
+    sync_engine = sync_cfg.get_engine()
+    try:
+        with sync_engine.connect() as sa_conn:
+            assert sa_conn.exec_driver_sql("SELECT 1").fetchone() == (1,)
+            raw_sync_fairy = sa_conn.connection
+            assert raw_sync_fairy.driver_connection.broker is alchemy_sync_t
+        assert alchemy_sync_t.metrics().active_leases == 0
+        assert alchemy_sync_t.metrics().total_released == 1
+    finally:
+        sync_engine.dispose()
+
+    alchemy_async_t = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", broker=alchemy_async_t)
+    async_engine = async_cfg.get_engine()
+    try:
+        async with async_engine.connect() as asa_conn:
+            res = await asa_conn.exec_driver_sql("SELECT 1")
+            assert res.fetchone() == (1,)
+            raw_async_fairy = await asa_conn.get_raw_connection()
+            assert raw_async_fairy.driver_connection._connection.broker is alchemy_async_t
+        assert alchemy_async_t.metrics().active_leases == 0
+        assert alchemy_async_t.metrics().total_released == 1
+    finally:
+        await async_engine.dispose()

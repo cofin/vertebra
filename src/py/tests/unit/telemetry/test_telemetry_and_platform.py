@@ -188,7 +188,17 @@ def test_span_ring_genai_metrics_cgroup_and_zpages(tmp_path: Path) -> None:
         start_ns=100,
         duration_ns=500,
     )
-    for item in (trace_sample, usage_sample, sample, pool_sample, span_sample):
+    decoded_pool = decode_json(encode_json_bytes(pool_sample))
+    assert decoded_pool["pool_name"] == "primary"
+    assert decoded_pool["active_leases"] == 2
+    assert decoded_pool["primary_in_use"] == 2
+    assert decoded_pool["overflow_in_use"] == 0
+    assert decoded_pool["max_capacity"] == 8
+    assert decoded_pool["total_reclaimed"] == 0
+    assert decoded_pool["quarantined"] == 1
+    assert decoded_pool["total_quarantined"] == 3
+    assert decoded_pool["total_disposed"] == 2
+    for item in (trace_sample, usage_sample, sample, span_sample):
         assert isinstance(decode_json(encode_json_bytes(item)), dict)
     assert isinstance(hash(trace_sample), int)
     assert isinstance(hash(usage_sample), int)

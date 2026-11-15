@@ -22,6 +22,7 @@ from vertebra.db.dbapi._sync import (
     _config_dialect,
     is_row_returning_sql,
 )
+from vertebra.db.registry import DatabaseRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -226,12 +227,12 @@ class AsyncDBAPIConnection:
         driver: Any = None,
         broker: Any = None,
         share_pool: bool = True,
+        lease_managed: bool = False,
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize asynchronous PEP 249 connection."""
         _ = kwargs
-        from vertebra.db.registry import DatabaseRegistry
 
         resolved_url = url
         if database is not None and (url == "sqlite+vtb_async:///:memory:" or not url):
@@ -245,10 +246,11 @@ class AsyncDBAPIConnection:
         self.closed: bool = False
 
         self._config: Any = None
+        driver_broker = None if lease_managed else self._broker
         try:
             self._config = (
-                DatabaseRegistry.parse_url(resolved_url, broker=self._broker)
-                if self._broker is not None
+                DatabaseRegistry.parse_url(resolved_url, broker=driver_broker)
+                if driver_broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
         except ValueError as exc:
@@ -263,7 +265,7 @@ class AsyncDBAPIConnection:
             if self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
             else:
-                target_registry = DatabaseRegistry(broker=self._broker)
+                target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
                 self._driver = self._config.build_async_driver(target_registry)
                 self._owns_driver = True
 

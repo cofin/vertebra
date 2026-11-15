@@ -557,12 +557,14 @@ def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None
     assert isinstance(mid_sample, DbPoolMetricSample)
     assert mid_sample.quarantined == 1
     assert mid_sample.total_quarantined == 1
+    assert mid_sample.total_reclaimed == 1
     assert mid_sample.total_disposed == 0
 
     plugin.transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
     end_sample = plugin.snapshot_metrics()
     assert end_sample.quarantined == 0
     assert end_sample.total_quarantined == 1
+    assert end_sample.total_reclaimed == 1
     assert end_sample.total_disposed == 1
     assert len(recorder.samples) == 2
 
@@ -570,5 +572,7 @@ def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None
     assert status_code == 200
     body = decode_json(payload)
     assert body["brokers"]["telemetry_pool"]["total_quarantined"] == 1
+    assert body["brokers"]["telemetry_pool"]["total_reclaimed"] == 1
     assert body["brokers"]["telemetry_pool"]["total_disposed"] == 1
     assert body["brokers"]["telemetry_pool"]["quarantined"] == 0
+    assert body["brokers"]["telemetry_pool"]["active_leases"] == 0

@@ -49,6 +49,9 @@ sources:
   - id: src-cli-workers-py
     resource: src/py/vertebra/cli/workers.py
     title: "Python implementation module (src/py/vertebra/cli/workers.py)"
+  - id: src-cli-broker-py
+    resource: src/py/vertebra/cli/broker.py
+    title: "Python implementation module (src/py/vertebra/cli/broker.py)"
   - id: src-cli-plugin-registry-py
     resource: src/py/vertebra/cli/plugin_registry.py
     title: "Python implementation module (src/py/vertebra/cli/plugin_registry.py)"
@@ -69,7 +72,7 @@ sources:
 # `vtb` Command-Line Interface
 
 <!-- truth: start -->
-- `vertebra.cli` exposes the `vtb` Click entrypoint (`run`, `dev`, `init`, `js`, `build`, `ai`, `workers`) via `VertebraExtensionGroup`, discovering `vertebra.cli_plugins` entry points and `CLIPluginProtocol.on_cli_init` hooks.
+- `vertebra.cli` exposes the `vtb` Click entrypoint (`run`, `dev`, `init`, `js`, `build`, `ai`, `workers`, `broker`) via `VertebraExtensionGroup`, discovering `vertebra.cli_plugins` entry points and `CLIPluginProtocol.on_cli_init` hooks.
 - `ServerLaunchEnv` resolves `[tool.vertebra]` (`[tool.vtb]` fallback) settings, auto-selects `shm` vs `embedded` topology, and propagates `VERTEBRA_*` variables cleanly to child processes.
 <!-- truth: end -->
 
@@ -87,6 +90,7 @@ sources:
 | `vtb ai models <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py)[^src-cli-ai-py] | Embedding model lifecycle subcommands: `list` (`--provider`, `--json`), `pull` (`--quant`, `--cache-dir`, `--source`), `stage` (`--to`, `--quant`), and `warm` (`--from`, `--shm`) with SHA-256 manifest verification and `/dev/shm` `1x` RAM warming. |
 | `vtb ai mcp <subcmd>` | [`cli/ai.py`](../../../../../src/py/vertebra/cli/ai.py) | Model Context Protocol subcommands: `bridge` (`--url`, `--token`, `--audience`, `--timeout` with `OidcTokenSource` `AsyncGcpIdTokenCache` auth and dual-mode `GET` SSE relay) and `serve` (`--app`, `--app-dir`, discovering app `MCPCore` via `resolve_app_mcp_core` or delegating `is_litestar_mcp_app` to `litestar_mcp.mcp.stdio`). |
 | `vtb workers run [APP]` | [`cli/workers.py`](../../../../../src/py/vertebra/cli/workers.py)[^src-cli-workers-py] | Launches admission-controlled [`WorkerRunner`](../server/worker-lanes.md) lanes (`--queues`, `--concurrency`, `--drain-timeout`) or executes a single background job via `--oneshot <job> [--payload <json>]`. |
+| `vtb broker <serve\|status>` | [`cli/broker.py`](../../../../../src/py/vertebra/cli/broker.py)[^src-cli-broker-py] | `serve` launches a supervised `BrokerHost` (`--shm-name`, `--socket-path`, `--secret` / `VERTEBRA_BROKER_SECRET`, `--pool-size`, `--max-overflow`, `--stmt-capacity`, `--shutdown-timeout`) with `SIGINT`/`SIGTERM` draining; `status` reports live or `--json` telemetry from a named broker segment without importing engine wheels. |
 
 ## 2. Pluggable CLI Extension System, TUI, Theme & Logging
 
@@ -103,6 +107,7 @@ sources:
 [^src-cli-js-py]: `src/py/vertebra/cli/js.py` — Python implementation module (src/py/vertebra/cli/js.py).
 [^src-cli-ai-py]: `src/py/vertebra/cli/ai.py` — Python implementation module (src/py/vertebra/cli/ai.py).
 [^src-cli-workers-py]: `src/py/vertebra/cli/workers.py` — Python implementation module (src/py/vertebra/cli/workers.py).
+[^src-cli-broker-py]: `src/py/vertebra/cli/broker.py` — Python implementation module (src/py/vertebra/cli/broker.py).
 [^src-cli-plugin-registry-py]: `src/py/vertebra/cli/plugin_registry.py` — Python implementation module (src/py/vertebra/cli/plugin_registry.py).
 [^src-cli-theme-py]: `src/py/vertebra/cli/theme.py` — Python implementation module (src/py/vertebra/cli/theme.py).
 [^src-cli-tui-py]: `src/py/vertebra/cli/tui.py` — Python implementation module (src/py/vertebra/cli/tui.py).

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
+
+from vertebra.db.registry import DatabaseRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,8 +25,16 @@ __all__ = (
     "SyncDBAPICursor",
     "SyncDBAPIModule",
     "Warning",
+    "apilevel",
+    "connect",
     "is_row_returning_sql",
+    "paramstyle",
+    "threadsafety",
 )
+
+apilevel: Final[str] = "2.0"
+threadsafety: Final[int] = 2
+paramstyle: Final[str] = "qmark"
 
 
 class Error(Exception):
@@ -129,8 +139,17 @@ def is_row_returning_sql(operation: str) -> bool:
             idx = length if newline < 0 else newline + 1
             continue
         if ch == "/" and idx + 1 < length and operation[idx + 1] == "*":
-            end_comment = operation.find("*/", idx + 2)
-            idx = length if end_comment < 0 else end_comment + 2
+            depth = 1
+            idx += 2
+            while idx < length and depth > 0:
+                if operation[idx] == "/" and idx + 1 < length and operation[idx + 1] == "*":
+                    depth += 1
+                    idx += 2
+                elif operation[idx] == "*" and idx + 1 < length and operation[idx + 1] == "/":
+                    depth -= 1
+                    idx += 2
+                else:
+                    idx += 1
             continue
         if ch == "$":
             tag = _parse_dollar_tag(operation, idx)
@@ -315,12 +334,12 @@ class SyncDBAPIConnection:
         driver: Any = None,
         broker: Any = None,
         share_pool: bool = True,
+        lease_managed: bool = False,
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize PEP 249 connection with URL or database parameters."""
         _ = kwargs
-        from vertebra.db.registry import DatabaseRegistry
 
         resolved_url = url
         if database is not None and (url == "sqlite+vtb:///:memory:" or not url):
@@ -334,10 +353,11 @@ class SyncDBAPIConnection:
         self.closed: bool = False
 
         self._config: Any = None
+        driver_broker = None if lease_managed else self._broker
         try:
             self._config = (
-                DatabaseRegistry.parse_url(resolved_url, broker=self._broker)
-                if self._broker is not None
+                DatabaseRegistry.parse_url(resolved_url, broker=driver_broker)
+                if driver_broker is not None
                 else DatabaseRegistry.parse_url(resolved_url)
             )
         except ValueError as exc:
@@ -356,10 +376,10 @@ class SyncDBAPIConnection:
                 if db_target.startswith("sqlite+"):
                     db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
                 self._sqlite_conn = sqlite3.connect(db_target, check_same_thread=False)
-            if self._share_pool and broker is None:
+            elif self._share_pool and broker is None:
                 self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
             else:
-                target_registry = DatabaseRegistry(broker=self._broker)
+                target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
                 self._driver = self._config.build_sync_driver(target_registry)
                 self._owns_driver = True
 
@@ -591,3 +611,8 @@ class SyncDBAPIModule:
         elif "url" in kwargs:
             url_arg = kwargs.pop("url")
         return SyncDBAPIConnection(url_arg, **kwargs)
+
+
+def connect(url: str = "sqlite+vtb:///:memory:", **kwargs: Any) -> SyncDBAPIConnection:
+    """Open a standalone synchronous PEP 249 DB-API connection."""
+    return SyncDBAPIConnection(url, **kwargs)

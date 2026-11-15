@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, cast, overload
 
 import msgspec
-from sqlspec.core import SQL, ArrowResult
+from sqlspec.core import SQL, ArrowResult, SQLResult, StackResult
+from sqlspec.core.stack import StatementStack
 from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
+from sqlspec.exceptions import StackExecutionError
+from sqlspec.utils.module_loader import import_optional
+from sqlspec.utils.schema import to_value_type
 
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, SyncSHMBrokerTransport
@@ -75,7 +79,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             self.provider: SQLSpecSyncProvider | None = provider
             self._transport_fn: Callable[[Any], Any] = provider.handle_request
             resolved_broker = broker if broker is not None else provider.broker
-            upstream_cfg = provider._resolve_upstream_optional(pool_name)
+            upstream_cfg = provider.resolve_upstream_optional(pool_name)
         elif callable(provider):
             self.provider = None
             self._transport_fn = provider
@@ -122,6 +126,11 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         """Return True when the driver holds an active broker lease."""
         return self._leased
 
+    @property
+    def data_dictionary(self) -> Any:
+        """Return optional metadata dictionary (not exposed over RPC proxy)."""
+        return None
+
     def acquire_lease(self) -> tuple[int, int]:
         """Acquire a connection lease and pin an upstream session in SQLSpecSyncProvider."""
         if self._leased:
@@ -134,18 +143,25 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             self._broker_lease = lease
             slot_idx, generation = self._extract_lease_coords(lease)
 
-        resp = self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op="acquire",
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=slot_idx,
-                generation=generation,
-            ),
-            record_last=False,
-        )
-        self._raise_for_error(resp)
+        try:
+            resp = self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="acquire",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=slot_idx,
+                    generation=generation,
+                ),
+                record_last=False,
+            )
+            self._raise_for_error(resp)
+        except BaseException:
+            failed_lease = self._broker_lease
+            self._broker_lease = None
+            if failed_lease is not None:
+                self._release_broker_lease(failed_lease)
+            raise
         self.slot_idx = resp.slot_idx
         self.generation = resp.generation
         self._leased = True
@@ -244,15 +260,48 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             if not self._context_entered and not self._in_tx:
                 self.release_lease()
 
-    @property
-    def data_dictionary(self) -> Any:
-        """Return optional metadata dictionary (not exposed over RPC proxy)."""
-        return None
-
     def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a single SQL statement on the proxy driver."""
-        rowcount = int(self.execute(statement))
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        with self._operation_lease():
+            compiled_sql, compiled_params, prepared = self._compile_statement(statement)
+            if prepared.returns_rows():
+                resp = self._send_rpc(
+                    BrokerRpcRequest(
+                        request_id=self._next_request_id(),
+                        op="select",
+                        pool_name=self.pool_name,
+                        worker_pid=self.worker_pid,
+                        slot_idx=self.slot_idx,
+                        generation=self.generation,
+                        sql=compiled_sql,
+                        params=compiled_params,
+                        in_tx=self._in_tx,
+                    )
+                )
+                self._raise_for_error(resp)
+                dict_rows, columns = self._unpack_select_rows(resp)
+                return self.create_execution_result(
+                    cursor,
+                    selected_data=dict_rows,
+                    column_names=columns,
+                    data_row_count=len(dict_rows),
+                    is_select_result=True,
+                )
+            resp = self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="execute",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            self._raise_for_error(resp)
+            return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount))
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a SQL statement with multiple parameter sets on the proxy driver."""
@@ -278,9 +327,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> Any:
         """Execute a SQL statement synchronously and return the affected row count."""
-        _ = (statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -290,7 +343,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
@@ -307,9 +360,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> Any:
         """Execute a batch SQL statement across parameters and return affected row count."""
-        _ = (filters, statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, _, _ = self._compile_statement(
+                statement,
+                filters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             normalized_many: list[list[Any] | dict[str, Any]] = [
                 list(item) if isinstance(item, tuple) else cast("dict[str, Any] | list[Any]", item)
                 for item in parameters
@@ -335,7 +392,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -362,9 +419,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> list[SchemaT] | list[dict[str, Any]]:
         """Execute a SELECT statement and return rows, transparently reading spilled Arrow SHM."""
-        _ = (statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -374,18 +435,14 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             self._raise_for_error(resp)
             if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows: list[dict[str, Any]] = table.to_pylist()
-                    return self._convert_rows(dict_rows, schema_type)
-                finally:
-                    self._release_arrow_shm(resp.arrow_shm_name)
+                dict_rows, _ = self._unpack_select_rows(resp)
+                return self._convert_rows(dict_rows, schema_type)
 
             if schema_type is not None and schema_type is not dict:
                 return self._hydrate_raw_rows(resp.rows, resp.columns, schema_type)
@@ -397,7 +454,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -424,9 +481,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> SchemaT | dict[str, Any]:
         """Execute a SELECT statement and return exactly one row."""
-        _ = (statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -436,22 +497,12 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             self._raise_for_error(resp)
-            if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows = table.to_pylist()
-                    if not dict_rows:
-                        raise VertebraError("ValueError: No row found for select_one")
-                    return cast("SchemaT | dict[str, Any]", self._convert_single(dict_rows[0], schema_type))
-                finally:
-                    self._release_arrow_shm(resp.arrow_shm_name)
-
-            dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
+            dict_rows, _ = self._unpack_select_rows(resp)
             if not dict_rows:
                 raise VertebraError("ValueError: No row found for select_one")
             return cast("SchemaT | dict[str, Any]", self._convert_single(dict_rows[0], schema_type))
@@ -461,7 +512,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -488,9 +539,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> SchemaT | dict[str, Any] | None:
         """Execute a SELECT statement and return at most one row or None."""
-        _ = (statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -500,22 +555,12 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             self._raise_for_error(resp)
-            if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows = table.to_pylist()
-                    if not dict_rows:
-                        return None
-                    return cast("SchemaT | dict[str, Any]", self._convert_single(dict_rows[0], schema_type))
-                finally:
-                    self._release_arrow_shm(resp.arrow_shm_name)
-
-            dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
+            dict_rows, _ = self._unpack_select_rows(resp)
             if not dict_rows:
                 return None
             return cast("SchemaT | dict[str, Any]", self._convert_single(dict_rows[0], schema_type))
@@ -525,7 +570,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         value_type: type[ValueT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -552,9 +597,13 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ValueT | Any:
         """Execute a SELECT statement and return the first column of the first row."""
-        _ = (value_type, statement_config, kwargs)
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -564,12 +613,186 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             self._raise_for_error(resp)
+            if value_type is not None and resp.scalar is not None:
+                return to_value_type(resp.scalar, value_type)
             return resp.scalar
+
+    @overload
+    def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: type[ValueT],
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> ValueT | None: ...
+
+    @overload
+    def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> Any: ...
+
+    def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: type[ValueT] | None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> ValueT | Any | None:
+        """Execute a SELECT statement and return a single scalar value or None."""
+        with self._operation_lease():
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
+            resp = self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="select_value_or_none",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            self._raise_for_error(resp)
+            if resp.scalar is None:
+                return None
+            if value_type is not None:
+                return to_value_type(resp.scalar, value_type)
+            return resp.scalar
+
+    @overload
+    def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: type[SchemaT],
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[SchemaT], int]: ...
+
+    @overload
+    def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: None = None,
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: type[SchemaT] | None = None,
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[SchemaT] | list[dict[str, Any]], int]:
+        """Execute a SELECT statement and return both page rows and total matching row count."""
+        effective_cfg = statement_config or self.statement_config
+        sql_statement = self.prepare_statement(statement, parameters, statement_config=effective_cfg, kwargs=kwargs)
+        with self._operation_lease():
+            if count_with_window:
+                rows = self.select(self._with_total_count(sql_statement), statement_config=effective_cfg)
+                data, total = self._extract_total_from_rows(rows)
+                if schema_type is not None:
+                    return cast("list[SchemaT]", self._convert_rows(data, schema_type)), int(total)
+                return data, int(total)
+
+            total = int(self.select_value(self._count_query(sql_statement), statement_config=effective_cfg) or 0)
+            if schema_type is not None:
+                typed_data = cast(
+                    "list[SchemaT]",
+                    self.select(sql_statement, schema_type=cast("Any", schema_type), statement_config=effective_cfg),
+                )
+                return typed_data, total
+            return self.select(sql_statement, statement_config=effective_cfg), total
+
+    def execute_stack(
+        self,
+        stack: StatementStack,
+        *,
+        continue_on_error: bool = False,
+    ) -> tuple[StackResult, ...]:
+        """Execute a StatementStack sequentially over the active proxy session lease."""
+        if not isinstance(stack, StatementStack):
+            msg = "execute_stack expects a StatementStack instance"
+            raise TypeError(msg)
+        if not stack:
+            msg = "Cannot execute an empty StatementStack"
+            raise ValueError(msg)
+
+        results: list[StackResult] = []
+        single_transaction = not continue_on_error
+        with self._operation_lease():
+            caller_in_tx = self._in_tx
+            started_tx = False
+            try:
+                if single_transaction and not caller_in_tx:
+                    self.begin()
+                    started_tx = True
+
+                for index, operation in enumerate(stack.operations):
+                    try:
+                        op_res = self._execute_stack_operation_sync(operation)
+                    except Exception as exc:
+                        stack_error = StackExecutionError(
+                            index,
+                            str(operation.statement),
+                            exc,
+                            adapter=type(self).__name__,
+                            mode="continue-on-error" if continue_on_error else "fail-fast",
+                        )
+                        if started_tx and not continue_on_error:
+                            try:
+                                self.rollback()
+                            except Exception:
+                                self._in_tx = False
+                            started_tx = False
+                        if continue_on_error:
+                            results.append(StackResult.from_error(stack_error))
+                            continue
+                        raise stack_error from exc
+                    results.append(StackResult(result=op_res))
+
+                if started_tx:
+                    self.commit()
+                    started_tx = False
+            except BaseException:
+                if started_tx:
+                    try:
+                        self.rollback()
+                    except Exception:
+                        self._in_tx = False
+                raise
+        return tuple(results)
 
     def select_to_arrow(
         self,
@@ -584,9 +807,15 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ArrowResult:
         """Execute a SELECT statement and return a zero-copy ArrowResult from SharedArrowBuffer."""
-        _ = (return_format, native_only, batch_size, arrow_schema, kwargs)
+        _ = native_only
+        effective_cfg = statement_config or self.statement_config
         with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, prepared = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=effective_cfg,
+                kwargs=kwargs,
+            )
             resp = self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -596,7 +825,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=self._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
@@ -606,20 +835,17 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                     table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
                 finally:
                     self._release_arrow_shm(resp.arrow_shm_name)
-                return self._wrap_arrow_result(
-                    statement,
-                    compiled_sql,
-                    table,
-                    statement_config=statement_config or self.statement_config,
-                )
-
-            dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
-            table = SharedArrowBuffer.coerce_table(dict_rows, columns=resp.columns)
+            else:
+                dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
+                table = SharedArrowBuffer.coerce_table(dict_rows, columns=resp.columns)
             return self._wrap_arrow_result(
-                statement,
+                prepared,
                 compiled_sql,
                 table,
-                statement_config=statement_config or self.statement_config,
+                statement_config=effective_cfg,
+                return_format=return_format,
+                batch_size=batch_size,
+                arrow_schema=arrow_schema,
             )
 
     def __enter__(self) -> ProxySyncDriver:
@@ -656,20 +882,121 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             if auto_acquired and not self._context_entered and not self._in_tx:
                 self.release_lease()
 
-    def _compile_statement(self, statement: Any) -> str:
-        """Consult the broker statement cache when available and return compiled SQL."""
-        sql = statement.sql if hasattr(statement, "sql") else str(statement)
-        if self.broker is None:
-            return str(sql)
-        target = getattr(self.broker, "transport", self.broker)
-        compile_fn = getattr(target, "get_or_compile_statement", None)
-        if callable(compile_fn):
-            dialect_name = self.dialect or "sqlspec"
-            plan = compile_fn(dialect_name, sql, lambda raw: (raw, ()))
-            compiled = getattr(plan, "compiled_sql", None)
-            if isinstance(compiled, str):
-                return compiled
-        return str(sql)
+    def _compile_statement(
+        self,
+        statement: Any,
+        parameters: tuple[Any, ...] = (),
+        *,
+        statement_config: StatementConfig | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[str, list[Any] | dict[str, Any], SQL]:
+        """Compile statement, parameters, filters, and kwargs using SQLSpec and optional broker cache."""
+        return self.compile_with_broker(
+            self,
+            self.broker,
+            self.dialect,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs,
+        )
+
+    @staticmethod
+    def compile_with_broker(
+        driver: SyncDriverAdapterBase | AsyncDriverAdapterBase,
+        broker: Any,
+        dialect: str,
+        statement: Any,
+        parameters: tuple[Any, ...] = (),
+        *,
+        statement_config: StatementConfig | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[str, list[Any] | dict[str, Any], SQL]:
+        """Compile a SQL statement, QueryBuilder, filters, and kwargs via SQLSpec and broker cache."""
+        effective_cfg = statement_config or driver.statement_config
+        prepared = driver.prepare_statement(
+            statement,
+            parameters,
+            statement_config=effective_cfg,
+            kwargs=kwargs or {},
+        )
+        compiled_sql, compiled_params = prepared.compile()
+        rpc_params = ProxySyncDriver._coerce_rpc_params(compiled_params)
+        if broker is not None:
+            target = getattr(broker, "transport", broker)
+            compile_fn = getattr(target, "get_or_compile_statement", None)
+            if callable(compile_fn):
+                plan = compile_fn(dialect or "sqlspec", compiled_sql, lambda raw: (raw, ()))
+                cached_sql = getattr(plan, "compiled_sql", None)
+                if isinstance(cached_sql, str):
+                    compiled_sql = cached_sql
+        return compiled_sql, rpc_params, prepared
+
+    @staticmethod
+    def _coerce_rpc_params(compiled_params: Any) -> list[Any] | dict[str, Any]:
+        if compiled_params is None:
+            return []
+        if isinstance(compiled_params, Mapping):
+            return dict(compiled_params)
+        if isinstance(compiled_params, Sequence) and not isinstance(compiled_params, str | bytes | bytearray):
+            return list(compiled_params)
+        return [compiled_params]
+
+    def _unpack_select_rows(self, resp: BrokerRpcResponse) -> tuple[list[dict[str, Any]], list[str]]:
+        if resp.is_arrow_shm:
+            try:
+                table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
+                dict_rows: list[dict[str, Any]] = table.to_pylist()
+                columns = list(resp.columns) if resp.columns else list(table.column_names)
+                return dict_rows, columns
+            finally:
+                self._release_arrow_shm(resp.arrow_shm_name)
+        dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
+        columns = list(resp.columns) if resp.columns else (list(dict_rows[0].keys()) if dict_rows else [])
+        return dict_rows, columns
+
+    def _execute_stack_operation_sync(self, operation: Any) -> SQLResult | ArrowResult:
+        kwargs = dict(operation.keyword_arguments) if operation.keyword_arguments else {}
+        if operation.method == "execute":
+            compiled_sql, compiled_params, prepared = self._compile_statement(
+                operation.statement,
+                operation.arguments,
+                kwargs=kwargs,
+            )
+            is_query = prepared.returns_rows()
+            resp = self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="select" if is_query else "execute",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            self._raise_for_error(resp)
+            if is_query:
+                dict_rows, columns = self._unpack_select_rows(resp)
+                return SQLResult(
+                    statement=prepared,
+                    data=dict_rows,
+                    rows_affected=len(dict_rows),
+                    column_names=columns,
+                )
+            return SQLResult(statement=prepared, rows_affected=int(resp.rowcount))
+        if operation.method == "execute_many":
+            parameter_sets = operation.arguments[0]
+            filters = operation.arguments[1:]
+            rc = int(self.execute_many(operation.statement, parameter_sets, *filters, **kwargs))
+            prepared = self.prepare_statement(operation.statement, filters, statement_config=self.statement_config)
+            return SQLResult(statement=prepared, rows_affected=rc)
+        if operation.method == "execute_arrow":
+            return self.select_to_arrow(operation.statement, *operation.arguments, **kwargs)
+        msg = f"Unsupported stack operation method: {operation.method}"
+        raise ValueError(msg)
 
     @staticmethod
     def _wrap_arrow_result(
@@ -678,11 +1005,33 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         table: Any,
         *,
         statement_config: StatementConfig | None = None,
+        return_format: ArrowReturnFormat = "table",
+        batch_size: int | None = None,
+        arrow_schema: Any = None,
     ) -> ArrowResult:
-        """Wrap a PyArrow table in a sqlspec ``ArrowResult`` preserving row counts."""
+        """Wrap a PyArrow table in a sqlspec ``ArrowResult`` preserving schema, format, and row counts."""
         prepared = statement if isinstance(statement, SQL) else SQL(compiled_sql, statement_config=statement_config)
+        if arrow_schema is not None and hasattr(table, "cast"):
+            table = table.cast(arrow_schema)
         num_rows = getattr(table, "num_rows", len(table) if hasattr(table, "__len__") else 0)
-        return ArrowResult(statement=prepared, data=table, rows_affected=num_rows)
+        arrow_data: Any = table
+        if return_format != "table" and hasattr(table, "to_batches"):
+            batches = table.to_batches(max_chunksize=batch_size)
+            if return_format == "batch":
+                if batches:
+                    arrow_data = batches[0]
+                else:
+                    pa = import_optional("pyarrow")
+                    if pa is not None:
+                        arrow_data = pa.RecordBatch.from_arrays(
+                            [pa.array([], type=field.type) for field in table.schema],
+                            schema=table.schema,
+                        )
+            elif return_format == "batches":
+                arrow_data = iter(batches)
+            elif return_format == "reader":
+                arrow_data = table.to_reader(max_chunksize=batch_size)
+        return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
 
     def _send_rpc(self, request: BrokerRpcRequest, *, record_last: bool = True) -> BrokerRpcResponse:
         """Dispatch a BrokerRpcRequest over the configured provider or raw transport."""
@@ -746,7 +1095,11 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         target = getattr(self.broker, "transport", self.broker)
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
-            quarantine_fn(lease)
+            try:
+                quarantine_fn(lease)
+            except RuntimeError as exc:
+                if "invalid lease state for operation" not in str(exc):
+                    raise
 
     def _release_broker_lease(self, lease: Any) -> None:
         """Release a directly acquired broker lease."""
@@ -867,7 +1220,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             self.provider: SQLSpecAsyncProvider | None = provider
             self._transport_fn: Callable[[Any], Any] = provider.handle_request
             resolved_broker = broker if broker is not None else provider.broker
-            upstream_cfg = provider._resolve_upstream_optional(pool_name)
+            upstream_cfg = provider.resolve_upstream_optional(pool_name)
         elif callable(provider):
             self.provider = None
             self._transport_fn = provider
@@ -916,6 +1269,11 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         """Return True when the driver holds an active broker lease."""
         return self._leased
 
+    @property
+    def data_dictionary(self) -> Any:
+        """Return optional metadata dictionary (not exposed over RPC proxy)."""
+        return None
+
     async def acquire_lease(self) -> tuple[int, int]:
         """Acquire a connection lease asynchronously and pin an upstream session."""
         if self._leased:
@@ -928,18 +1286,25 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             self._broker_lease = lease
             slot_idx, generation = ProxySyncDriver._extract_lease_coords(lease)
 
-        resp = await self._send_rpc(
-            BrokerRpcRequest(
-                request_id=self._next_request_id(),
-                op="acquire",
-                pool_name=self.pool_name,
-                worker_pid=self.worker_pid,
-                slot_idx=slot_idx,
-                generation=generation,
-            ),
-            record_last=False,
-        )
-        ProxySyncDriver._raise_for_error(resp)
+        try:
+            resp = await self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="acquire",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=slot_idx,
+                    generation=generation,
+                ),
+                record_last=False,
+            )
+            ProxySyncDriver._raise_for_error(resp)
+        except BaseException:
+            failed_lease = self._broker_lease
+            self._broker_lease = None
+            if failed_lease is not None:
+                await self._release_broker_lease_async(failed_lease)
+            raise
         self.slot_idx = resp.slot_idx
         self.generation = resp.generation
         self._leased = True
@@ -1038,15 +1403,48 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             if not self._context_entered and not self._in_tx:
                 await self.release_lease()
 
-    @property
-    def data_dictionary(self) -> Any:
-        """Return optional metadata dictionary (not exposed over RPC proxy)."""
-        return None
-
     async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a single SQL statement asynchronously on the proxy driver."""
-        rowcount = int(await self.execute(statement))
-        return self.create_execution_result(cursor, rowcount_override=rowcount)
+        async with self._operation_lease():
+            compiled_sql, compiled_params, prepared = self._compile_statement(statement)
+            if prepared.returns_rows():
+                resp = await self._send_rpc(
+                    BrokerRpcRequest(
+                        request_id=self._next_request_id(),
+                        op="select",
+                        pool_name=self.pool_name,
+                        worker_pid=self.worker_pid,
+                        slot_idx=self.slot_idx,
+                        generation=self.generation,
+                        sql=compiled_sql,
+                        params=compiled_params,
+                        in_tx=self._in_tx,
+                    )
+                )
+                ProxySyncDriver._raise_for_error(resp)
+                dict_rows, columns = await self._unpack_select_rows(resp)
+                return self.create_execution_result(
+                    cursor,
+                    selected_data=dict_rows,
+                    column_names=columns,
+                    data_row_count=len(dict_rows),
+                    is_select_result=True,
+                )
+            resp = await self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="execute",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            ProxySyncDriver._raise_for_error(resp)
+            return self.create_execution_result(cursor, rowcount_override=int(resp.rowcount))
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a SQL statement with multiple parameter sets asynchronously on the proxy driver."""
@@ -1072,9 +1470,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> Any:
         """Execute a SQL statement asynchronously and return the affected row count."""
-        _ = (statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1084,7 +1486,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
@@ -1101,9 +1503,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> Any:
         """Execute a batch SQL statement asynchronously across parameters and return affected row count."""
-        _ = (filters, statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, _, _ = self._compile_statement(
+                statement,
+                filters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             normalized_many: list[list[Any] | dict[str, Any]] = [
                 list(item) if isinstance(item, tuple) else cast("dict[str, Any] | list[Any]", item)
                 for item in parameters
@@ -1129,7 +1535,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -1156,9 +1562,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> list[SchemaT] | list[dict[str, Any]]:
         """Execute a SELECT statement asynchronously and return rows, transparently reading spilled Arrow SHM."""
-        _ = (statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1168,18 +1578,14 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             ProxySyncDriver._raise_for_error(resp)
             if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows: list[dict[str, Any]] = table.to_pylist()
-                    return ProxySyncDriver._convert_rows(dict_rows, schema_type)
-                finally:
-                    await self._release_arrow_shm(resp.arrow_shm_name)
+                dict_rows, _ = await self._unpack_select_rows(resp)
+                return ProxySyncDriver._convert_rows(dict_rows, schema_type)
 
             if schema_type is not None and schema_type is not dict:
                 return ProxySyncDriver._hydrate_raw_rows(resp.rows, resp.columns, schema_type)
@@ -1191,7 +1597,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -1218,9 +1624,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> SchemaT | dict[str, Any]:
         """Execute a SELECT statement asynchronously and return exactly one row."""
-        _ = (statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1230,22 +1640,12 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             ProxySyncDriver._raise_for_error(resp)
-            if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows = table.to_pylist()
-                    if not dict_rows:
-                        raise VertebraError("ValueError: No row found for select_one")
-                    return cast("SchemaT | dict[str, Any]", ProxySyncDriver._convert_single(dict_rows[0], schema_type))
-                finally:
-                    await self._release_arrow_shm(resp.arrow_shm_name)
-
-            dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
+            dict_rows, _ = await self._unpack_select_rows(resp)
             if not dict_rows:
                 raise VertebraError("ValueError: No row found for select_one")
             return cast("SchemaT | dict[str, Any]", ProxySyncDriver._convert_single(dict_rows[0], schema_type))
@@ -1255,7 +1655,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         schema_type: type[SchemaT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -1282,9 +1682,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> SchemaT | dict[str, Any] | None:
         """Execute a SELECT statement asynchronously and return at most one row or None."""
-        _ = (statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1294,22 +1698,12 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             ProxySyncDriver._raise_for_error(resp)
-            if resp.is_arrow_shm:
-                try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                    dict_rows = table.to_pylist()
-                    if not dict_rows:
-                        return None
-                    return cast("SchemaT | dict[str, Any]", ProxySyncDriver._convert_single(dict_rows[0], schema_type))
-                finally:
-                    await self._release_arrow_shm(resp.arrow_shm_name)
-
-            dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
+            dict_rows, _ = await self._unpack_select_rows(resp)
             if not dict_rows:
                 return None
             return cast("SchemaT | dict[str, Any]", ProxySyncDriver._convert_single(dict_rows[0], schema_type))
@@ -1319,7 +1713,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         self,
         statement: Statement | QueryBuilder,
         /,
-        *parameters: object,
+        *parameters: StatementParameters | StatementFilter,
         value_type: type[ValueT],
         statement_config: StatementConfig | None = None,
         **kwargs: Any,
@@ -1346,9 +1740,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ValueT | Any:
         """Execute a SELECT statement asynchronously and return the first scalar column value."""
-        _ = (value_type, statement_config, kwargs)
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1358,12 +1756,190 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
             ProxySyncDriver._raise_for_error(resp)
+            if value_type is not None and resp.scalar is not None:
+                return to_value_type(resp.scalar, value_type)
             return resp.scalar
+
+    @overload
+    async def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: type[ValueT],
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> ValueT | None: ...
+
+    @overload
+    async def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> Any: ...
+
+    async def select_value_or_none(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        value_type: type[ValueT] | None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> ValueT | Any | None:
+        """Execute a SELECT statement asynchronously and return a single scalar value or None."""
+        async with self._operation_lease():
+            compiled_sql, compiled_params, _ = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=statement_config,
+                kwargs=kwargs,
+            )
+            resp = await self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="select_value_or_none",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            ProxySyncDriver._raise_for_error(resp)
+            if resp.scalar is None:
+                return None
+            if value_type is not None:
+                return to_value_type(resp.scalar, value_type)
+            return resp.scalar
+
+    @overload
+    async def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: type[SchemaT],
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[SchemaT], int]: ...
+
+    @overload
+    async def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: None = None,
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], int]: ...
+
+    async def select_with_total(
+        self,
+        statement: Statement | QueryBuilder,
+        /,
+        *parameters: StatementParameters | StatementFilter,
+        schema_type: type[SchemaT] | None = None,
+        statement_config: StatementConfig | None = None,
+        count_with_window: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[SchemaT] | list[dict[str, Any]], int]:
+        """Execute an async SELECT statement and return page rows alongside total matching count."""
+        effective_cfg = statement_config or self.statement_config
+        sql_statement = self.prepare_statement(statement, parameters, statement_config=effective_cfg, kwargs=kwargs)
+        async with self._operation_lease():
+            if count_with_window:
+                rows = await self.select(self._with_total_count(sql_statement), statement_config=effective_cfg)
+                data, total = self._extract_total_from_rows(rows)
+                if schema_type is not None:
+                    return cast("list[SchemaT]", ProxySyncDriver._convert_rows(data, schema_type)), int(total)
+                return data, int(total)
+
+            total = int(await self.select_value(self._count_query(sql_statement), statement_config=effective_cfg) or 0)
+            if schema_type is not None:
+                typed_data = cast(
+                    "list[SchemaT]",
+                    await self.select(
+                        sql_statement,
+                        schema_type=cast("Any", schema_type),
+                        statement_config=effective_cfg,
+                    ),
+                )
+                return typed_data, total
+            return await self.select(sql_statement, statement_config=effective_cfg), total
+
+    async def execute_stack(
+        self,
+        stack: StatementStack,
+        *,
+        continue_on_error: bool = False,
+    ) -> tuple[StackResult, ...]:
+        """Execute a StatementStack asynchronously over the active proxy session lease."""
+        if not isinstance(stack, StatementStack):
+            msg = "execute_stack expects a StatementStack instance"
+            raise TypeError(msg)
+        if not stack:
+            msg = "Cannot execute an empty StatementStack"
+            raise ValueError(msg)
+
+        results: list[StackResult] = []
+        single_transaction = not continue_on_error
+        async with self._operation_lease():
+            caller_in_tx = self._in_tx
+            started_tx = False
+            try:
+                if single_transaction and not caller_in_tx:
+                    await self.begin()
+                    started_tx = True
+
+                for index, operation in enumerate(stack.operations):
+                    try:
+                        op_res = await self._execute_stack_operation_async(operation)
+                    except Exception as exc:
+                        stack_error = StackExecutionError(
+                            index,
+                            str(operation.statement),
+                            exc,
+                            adapter=type(self).__name__,
+                            mode="continue-on-error" if continue_on_error else "fail-fast",
+                        )
+                        if started_tx and not continue_on_error:
+                            try:
+                                await self.rollback()
+                            except Exception:
+                                self._in_tx = False
+                            started_tx = False
+                        if continue_on_error:
+                            results.append(StackResult.from_error(stack_error))
+                            continue
+                        raise stack_error from exc
+                    results.append(StackResult(result=op_res))
+
+                if started_tx:
+                    await self.commit()
+                    started_tx = False
+            except BaseException:
+                if started_tx:
+                    try:
+                        await self.rollback()
+                    except Exception:
+                        self._in_tx = False
+                raise
+        return tuple(results)
 
     async def select_to_arrow(
         self,
@@ -1378,9 +1954,15 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         **kwargs: Any,
     ) -> ArrowResult:
         """Execute a SELECT statement asynchronously and return a zero-copy ArrowResult."""
-        _ = (return_format, native_only, batch_size, arrow_schema, kwargs)
+        _ = native_only
+        effective_cfg = statement_config or self.statement_config
         async with self._operation_lease():
-            compiled_sql = self._compile_statement(statement)
+            compiled_sql, compiled_params, prepared = self._compile_statement(
+                statement,
+                parameters,
+                statement_config=effective_cfg,
+                kwargs=kwargs,
+            )
             resp = await self._send_rpc(
                 BrokerRpcRequest(
                     request_id=self._next_request_id(),
@@ -1390,7 +1972,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     slot_idx=self.slot_idx,
                     generation=self.generation,
                     sql=compiled_sql,
-                    params=ProxySyncDriver._normalize_params(parameters),
+                    params=compiled_params,
                     in_tx=self._in_tx,
                 )
             )
@@ -1400,20 +1982,17 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
                 finally:
                     await self._release_arrow_shm(resp.arrow_shm_name)
-                return ProxySyncDriver._wrap_arrow_result(
-                    statement,
-                    compiled_sql,
-                    table,
-                    statement_config=statement_config or self.statement_config,
-                )
-
-            dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
-            table = SharedArrowBuffer.coerce_table(dict_rows, columns=resp.columns)
+            else:
+                dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
+                table = SharedArrowBuffer.coerce_table(dict_rows, columns=resp.columns)
             return ProxySyncDriver._wrap_arrow_result(
-                statement,
+                prepared,
                 compiled_sql,
                 table,
-                statement_config=statement_config or self.statement_config,
+                statement_config=effective_cfg,
+                return_format=return_format,
+                batch_size=batch_size,
+                arrow_schema=arrow_schema,
             )
 
     async def __aenter__(self) -> ProxyAsyncDriver:
@@ -1450,33 +2029,80 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             if auto_acquired and not self._context_entered and not self._in_tx:
                 await self.release_lease()
 
-    def _compile_statement(self, statement: Any) -> str:
-        """Consult the broker statement cache when available and return compiled SQL."""
-        sql = statement.sql if hasattr(statement, "sql") else str(statement)
-        if self.broker is None:
-            return str(sql)
-        target = getattr(self.broker, "transport", self.broker)
-        compile_fn = getattr(target, "get_or_compile_statement", None)
-        if callable(compile_fn):
-            dialect_name = self.dialect or "sqlspec"
-            plan = compile_fn(dialect_name, sql, lambda raw: (raw, ()))
-            compiled = getattr(plan, "compiled_sql", None)
-            if isinstance(compiled, str):
-                return compiled
-        return str(sql)
-
-    @staticmethod
-    def _wrap_arrow_result(
+    def _compile_statement(
+        self,
         statement: Any,
-        compiled_sql: str,
-        table: Any,
+        parameters: tuple[Any, ...] = (),
         *,
         statement_config: StatementConfig | None = None,
-    ) -> ArrowResult:
-        """Wrap a PyArrow table in a sqlspec ``ArrowResult`` preserving row counts."""
-        prepared = statement if isinstance(statement, SQL) else SQL(compiled_sql, statement_config=statement_config)
-        num_rows = getattr(table, "num_rows", len(table) if hasattr(table, "__len__") else 0)
-        return ArrowResult(statement=prepared, data=table, rows_affected=num_rows)
+        kwargs: dict[str, Any] | None = None,
+    ) -> tuple[str, list[Any] | dict[str, Any], SQL]:
+        """Delegate statement compilation to ProxySyncDriver.compile_with_broker."""
+        return ProxySyncDriver.compile_with_broker(
+            self,
+            self.broker,
+            self.dialect,
+            statement,
+            parameters,
+            statement_config=statement_config,
+            kwargs=kwargs,
+        )
+
+    async def _unpack_select_rows(self, resp: BrokerRpcResponse) -> tuple[list[dict[str, Any]], list[str]]:
+        if resp.is_arrow_shm:
+            try:
+                table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
+                dict_rows: list[dict[str, Any]] = table.to_pylist()
+                columns = list(resp.columns) if resp.columns else list(table.column_names)
+                return dict_rows, columns
+            finally:
+                await self._release_arrow_shm(resp.arrow_shm_name)
+        dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
+        columns = list(resp.columns) if resp.columns else (list(dict_rows[0].keys()) if dict_rows else [])
+        return dict_rows, columns
+
+    async def _execute_stack_operation_async(self, operation: Any) -> SQLResult | ArrowResult:
+        kwargs = dict(operation.keyword_arguments) if operation.keyword_arguments else {}
+        if operation.method == "execute":
+            compiled_sql, compiled_params, prepared = self._compile_statement(
+                operation.statement,
+                operation.arguments,
+                kwargs=kwargs,
+            )
+            is_query = prepared.returns_rows()
+            resp = await self._send_rpc(
+                BrokerRpcRequest(
+                    request_id=self._next_request_id(),
+                    op="select" if is_query else "execute",
+                    pool_name=self.pool_name,
+                    worker_pid=self.worker_pid,
+                    slot_idx=self.slot_idx,
+                    generation=self.generation,
+                    sql=compiled_sql,
+                    params=compiled_params,
+                    in_tx=self._in_tx,
+                )
+            )
+            ProxySyncDriver._raise_for_error(resp)
+            if is_query:
+                dict_rows, columns = await self._unpack_select_rows(resp)
+                return SQLResult(
+                    statement=prepared,
+                    data=dict_rows,
+                    rows_affected=len(dict_rows),
+                    column_names=columns,
+                )
+            return SQLResult(statement=prepared, rows_affected=int(resp.rowcount))
+        if operation.method == "execute_many":
+            parameter_sets = operation.arguments[0]
+            filters = operation.arguments[1:]
+            rc = int(await self.execute_many(operation.statement, parameter_sets, *filters, **kwargs))
+            prepared = self.prepare_statement(operation.statement, filters, statement_config=self.statement_config)
+            return SQLResult(statement=prepared, rows_affected=rc)
+        if operation.method == "execute_arrow":
+            return await self.select_to_arrow(operation.statement, *operation.arguments, **kwargs)
+        msg = f"Unsupported stack operation method: {operation.method}"
+        raise ValueError(msg)
 
     async def _send_rpc(self, request: BrokerRpcRequest, *, record_last: bool = True) -> BrokerRpcResponse:
         """Dispatch a BrokerRpcRequest asynchronously over the configured provider or raw transport."""
@@ -1550,9 +2176,13 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
         target = getattr(self.broker, "transport", self.broker)
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
         if callable(quarantine_fn):
-            res = quarantine_fn(lease)
-            if isinstance(res, Awaitable):
-                await res
+            try:
+                res = quarantine_fn(lease)
+                if isinstance(res, Awaitable):
+                    await res
+            except RuntimeError as exc:
+                if "invalid lease state for operation" not in str(exc):
+                    raise
 
     async def _release_broker_lease_async(self, lease: Any) -> None:
         """Release a directly acquired broker lease asynchronously."""
