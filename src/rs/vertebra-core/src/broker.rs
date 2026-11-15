@@ -14,6 +14,7 @@ use crate::shm::{NamedAttach, ShmError, ShmRegion};
 pub const BROKER_MAGIC: u64 = u64::from_le_bytes(*b"VTBBRKR1");
 pub const BROKER_ABI_VERSION: u32 = 2;
 pub const MAX_BROKER_SLOTS: u32 = 4096;
+pub const MAX_STATEMENT_CAPACITY: u32 = 1 << 20;
 pub const MAX_POOL_PARTITIONS: usize = 64;
 const NO_PARTITION: u32 = u32::MAX;
 const PARTITION_EMPTY: u32 = 0;
@@ -249,6 +250,9 @@ pub struct ShmLeaseHeader {
     pub partitions: [ShmPartitionEntry; MAX_POOL_PARTITIONS],
 }
 
+const _: () = assert!(std::mem::size_of::<ShmLeaseHeader>() == 4544);
+const _: () = assert!(std::mem::align_of::<ShmLeaseHeader>() == 64);
+
 #[repr(C, align(64))]
 pub struct LeaseSlot {
     pub state_and_pid: AtomicU64,
@@ -344,21 +348,47 @@ unsafe impl Send for ShmLeaseTable {}
 unsafe impl Sync for ShmLeaseTable {}
 
 impl ShmLeaseTable {
+    pub fn validate_capacities(
+        pool_size: u32,
+        max_overflow: u32,
+        stmt_capacity: u32,
+        require_stmts: bool,
+    ) -> Result<u32, BrokerError> {
+        if pool_size == 0
+            || pool_size
+                .checked_add(max_overflow)
+                .is_none_or(|total| total > MAX_BROKER_SLOTS)
+        {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        if stmt_capacity == 0 && !require_stmts {
+            return Ok(0);
+        }
+        let base = stmt_capacity.max(4);
+        if base > MAX_STATEMENT_CAPACITY {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        base.checked_next_power_of_two()
+            .ok_or(BrokerError::InvalidCapacity)
+    }
+
     pub const fn lease_section_size(pool_size: u32, max_overflow: u32) -> usize {
+        let total = (pool_size as usize).saturating_add(max_overflow as usize);
         let raw = std::mem::size_of::<ShmLeaseHeader>()
-            + ((pool_size + max_overflow) as usize) * std::mem::size_of::<LeaseSlot>();
-        (raw + 63) & !63
+            .saturating_add(total.saturating_mul(std::mem::size_of::<LeaseSlot>()));
+        raw.saturating_add(63) & !63
     }
 
     pub const fn channel_section_size(capacity: u32) -> usize {
-        let raw = std::mem::size_of::<ShmChannelHeader>()
-            + (capacity as usize) * std::mem::size_of::<ShmChannelSlot>();
-        (raw + 63) & !63
+        let raw = std::mem::size_of::<ShmChannelHeader>().saturating_add(
+            (capacity as usize).saturating_mul(std::mem::size_of::<ShmChannelSlot>()),
+        );
+        raw.saturating_add(63) & !63
     }
 
     pub const fn required_size(pool_size: u32, max_overflow: u32) -> usize {
         Self::lease_section_size(pool_size, max_overflow)
-            + Self::channel_section_size(DEFAULT_CHANNEL_CAPACITY)
+            .saturating_add(Self::channel_section_size(DEFAULT_CHANNEL_CAPACITY))
     }
 
     pub const fn required_size_with_statements(
@@ -370,7 +400,7 @@ impl ShmLeaseTable {
         if stmt_capacity == 0 {
             base
         } else {
-            base + ShmStatementCache::required_size(stmt_capacity)
+            base.saturating_add(ShmStatementCache::required_size(stmt_capacity))
         }
     }
 
@@ -403,10 +433,10 @@ impl ShmLeaseTable {
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> Result<(), BrokerError> {
-        if pool_size == 0 || pool_size + max_overflow > MAX_BROKER_SLOTS {
-            return Err(BrokerError::InvalidCapacity);
-        }
-        let req_size = Self::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
+        let eff_stmt_cap_checked =
+            Self::validate_capacities(pool_size, max_overflow, stmt_capacity, false)?;
+        let req_size =
+            Self::required_size_with_statements(pool_size, max_overflow, eff_stmt_cap_checked);
         if region.len() < req_size {
             return Err(BrokerError::RegionTooSmall {
                 expected: req_size,
@@ -425,8 +455,8 @@ impl ShmLeaseTable {
         let header_ptr = unsafe { region.as_mut_slice() }.as_mut_ptr() as *mut ShmLeaseHeader;
 
         let lease_bytes = Self::lease_section_size(pool_size, max_overflow);
-        let (eff_stmt_cap, stmt_offset, stmt_bytes) = if stmt_capacity > 0 {
-            let cap = stmt_capacity.max(4).next_power_of_two();
+        let (eff_stmt_cap, stmt_offset, stmt_bytes) = if eff_stmt_cap_checked > 0 {
+            let cap = eff_stmt_cap_checked;
             let offset = lease_bytes as u64;
             let bytes = ShmStatementCache::required_size(cap);
             let stmt_hdr_ptr =
@@ -502,6 +532,14 @@ impl ShmLeaseTable {
                 }
                 return Err(BrokerError::UnsupportedAbi(hdr.abi_version));
             }
+            if Self::validate_capacities(hdr.pool_size, hdr.max_overflow, hdr.stmt_capacity, false)
+                .is_err()
+            {
+                if let Some(owner_pid) = live_owner {
+                    return Err(BrokerError::SegmentInUse { owner_pid });
+                }
+                return Err(BrokerError::InvalidCapacity);
+            }
             (hdr.pool_size, hdr.max_overflow, hdr.stmt_capacity)
         };
 
@@ -534,13 +572,14 @@ impl ShmLeaseTable {
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> Result<(Self, ShmStatementCache), BrokerError> {
-        if pool_size == 0 || pool_size + max_overflow > MAX_BROKER_SLOTS {
-            return Err(BrokerError::InvalidCapacity);
-        }
-        let eff_cap = stmt_capacity.max(4);
+        let eff_cap = Self::validate_capacities(pool_size, max_overflow, stmt_capacity, true)?;
         let req_size = Self::required_size_with_statements(pool_size, max_overflow, eff_cap);
-        let region = ShmRegion::create_named(name, req_size).map_err(|e| map_shm_error(e, name))?;
-        let table = Self::init_in_region_with_statements(region, pool_size, max_overflow, eff_cap)?;
+        let region = ShmRegion::create_named_with(name, req_size, |region| {
+            Self::init_region_slice_with_statements(region, pool_size, max_overflow, eff_cap)
+                .map_err(|_| ShmError::InvalidSize)
+        })
+        .map_err(|e| map_shm_error(e, name))?;
+        let table = Self::attach_region(region)?;
         let cache = table
             .statement_cache()
             .ok_or(BrokerError::InvalidCapacity)?;
@@ -549,7 +588,7 @@ impl ShmLeaseTable {
 
     #[cfg(unix)]
     pub fn open_with_statements(name: &str) -> Result<(Self, ShmStatementCache), BrokerError> {
-        Self::open_with_statements_internal(name, None)
+        Self::open_with_statements_internal(name, (None, None, None))
     }
 
     #[cfg(unix)]
@@ -559,13 +598,26 @@ impl ShmLeaseTable {
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> Result<(Self, ShmStatementCache), BrokerError> {
-        Self::open_with_statements_internal(name, Some((pool_size, max_overflow, stmt_capacity)))
+        Self::open_with_statements_internal(
+            name,
+            (Some(pool_size), Some(max_overflow), Some(stmt_capacity)),
+        )
+    }
+
+    #[cfg(unix)]
+    pub fn open_with_statements_matching_opt(
+        name: &str,
+        pool_size: Option<u32>,
+        max_overflow: Option<u32>,
+        stmt_capacity: Option<u32>,
+    ) -> Result<(Self, ShmStatementCache), BrokerError> {
+        Self::open_with_statements_internal(name, (pool_size, max_overflow, stmt_capacity))
     }
 
     #[cfg(unix)]
     fn open_with_statements_internal(
         name: &str,
-        expected: Option<(u32, u32, u32)>,
+        expected: (Option<u32>, Option<u32>, Option<u32>),
     ) -> Result<(Self, ShmStatementCache), BrokerError> {
         let probe = ShmRegion::open_named(name, std::mem::size_of::<ShmLeaseHeader>())
             .map_err(|e| map_shm_error(e, name))?;
@@ -584,23 +636,64 @@ impl ShmLeaseTable {
                 }
                 return Err(BrokerError::UnsupportedAbi(hdr.abi_version));
             }
-            if let Some((exp_pool, exp_ovf, exp_stmt)) = expected {
-                let eff_stmt = if exp_stmt == 0 {
-                    0
-                } else {
-                    exp_stmt.max(4).next_power_of_two()
-                };
-                if hdr.pool_size != exp_pool
-                    || hdr.max_overflow != exp_ovf
-                    || (eff_stmt > 0 && hdr.stmt_capacity != eff_stmt)
-                {
+            if Self::validate_capacities(hdr.pool_size, hdr.max_overflow, hdr.stmt_capacity, false)
+                .is_err()
+            {
+                if let Some(owner_pid) = live_owner {
+                    return Err(BrokerError::SegmentInUse { owner_pid });
+                }
+                return Err(BrokerError::InvalidCapacity);
+            }
+            let (exp_pool_opt, exp_ovf_opt, exp_stmt_opt) = expected;
+            if let Some(exp_pool) = exp_pool_opt {
+                if exp_pool == 0 || exp_pool > MAX_BROKER_SLOTS {
+                    return Err(BrokerError::InvalidCapacity);
+                }
+                if hdr.pool_size != exp_pool {
                     if let Some(owner_pid) = live_owner {
                         return Err(BrokerError::SegmentInUse { owner_pid });
                     }
                     return Err(BrokerError::InvalidCapacity);
                 }
             }
-            hdr.total_size as usize
+            if let Some(exp_ovf) = exp_ovf_opt {
+                if exp_pool_opt
+                    .unwrap_or(hdr.pool_size)
+                    .checked_add(exp_ovf)
+                    .is_none_or(|t| t > MAX_BROKER_SLOTS)
+                {
+                    return Err(BrokerError::InvalidCapacity);
+                }
+                if hdr.max_overflow != exp_ovf {
+                    if let Some(owner_pid) = live_owner {
+                        return Err(BrokerError::SegmentInUse { owner_pid });
+                    }
+                    return Err(BrokerError::InvalidCapacity);
+                }
+            }
+            if let Some(exp_stmt) = exp_stmt_opt {
+                let eff_stmt = Self::validate_capacities(
+                    exp_pool_opt.unwrap_or(hdr.pool_size),
+                    exp_ovf_opt.unwrap_or(hdr.max_overflow),
+                    exp_stmt,
+                    false,
+                )?;
+                if eff_stmt > 0 && hdr.stmt_capacity != eff_stmt {
+                    if let Some(owner_pid) = live_owner {
+                        return Err(BrokerError::SegmentInUse { owner_pid });
+                    }
+                    return Err(BrokerError::InvalidCapacity);
+                }
+            }
+            let min_total = Self::required_size_with_statements(
+                hdr.pool_size,
+                hdr.max_overflow,
+                hdr.stmt_capacity,
+            );
+            usize::try_from(hdr.total_size)
+                .ok()
+                .filter(|&sz| sz >= min_total)
+                .ok_or(BrokerError::InvalidCapacity)?
         };
         drop(probe);
         let region = ShmRegion::open_named(name, total_size).map_err(|e| map_shm_error(e, name))?;
@@ -618,10 +711,7 @@ impl ShmLeaseTable {
         max_overflow: u32,
         stmt_capacity: u32,
     ) -> Result<(Self, ShmStatementCache, bool), BrokerError> {
-        if pool_size == 0 || pool_size + max_overflow > MAX_BROKER_SLOTS {
-            return Err(BrokerError::InvalidCapacity);
-        }
-        let eff_cap = stmt_capacity.max(4).next_power_of_two();
+        let eff_cap = Self::validate_capacities(pool_size, max_overflow, stmt_capacity, true)?;
         let req_size = Self::required_size_with_statements(pool_size, max_overflow, eff_cap);
         let attach = ShmRegion::open_or_create_named(name, req_size, |region| {
             Self::init_region_slice_with_statements(region, pool_size, max_overflow, eff_cap)
@@ -743,7 +833,9 @@ impl ShmLeaseTable {
             return Err(BrokerError::InvalidCapacity);
         }
         let hdr = self.header();
-        loop {
+        let deadline = Instant::now() + Duration::from_millis(200);
+        'outer: loop {
+            let mut saw_init = false;
             for (idx, entry) in hdr.partitions.iter().enumerate() {
                 match entry.state.load(Ordering::Acquire) {
                     PARTITION_READY => {
@@ -752,10 +844,17 @@ impl ShmLeaseTable {
                         }
                     }
                     PARTITION_INIT => {
-                        std::hint::spin_loop();
+                        saw_init = true;
                     }
                     _ => {}
                 }
+            }
+            if saw_init {
+                if Instant::now() >= deadline {
+                    return Err(BrokerError::InitTimeout);
+                }
+                std::thread::yield_now();
+                continue;
             }
 
             let mut claimed = None;
@@ -765,8 +864,8 @@ impl ShmLeaseTable {
                     .compare_exchange(
                         PARTITION_EMPTY,
                         PARTITION_INIT,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
                     )
                     .is_ok()
                 {
@@ -779,13 +878,38 @@ impl ShmLeaseTable {
                 let pending = hdr
                     .partitions
                     .iter()
-                    .any(|e| e.state.load(Ordering::Acquire) == PARTITION_INIT);
+                    .any(|e| e.state.load(Ordering::SeqCst) == PARTITION_INIT);
                 if pending {
-                    std::hint::spin_loop();
+                    if Instant::now() >= deadline {
+                        return Err(BrokerError::InitTimeout);
+                    }
+                    std::thread::yield_now();
                     continue;
                 }
                 return Err(BrokerError::PartitionsExhausted);
             };
+
+            if (0..idx)
+                .any(|other| hdr.partitions[other].state.load(Ordering::SeqCst) == PARTITION_INIT)
+            {
+                entry.state.store(PARTITION_EMPTY, Ordering::Release);
+                if Instant::now() >= deadline {
+                    return Err(BrokerError::InitTimeout);
+                }
+                std::thread::yield_now();
+                continue 'outer;
+            }
+
+            while ((idx + 1)..MAX_POOL_PARTITIONS)
+                .any(|other| hdr.partitions[other].state.load(Ordering::SeqCst) == PARTITION_INIT)
+            {
+                if Instant::now() >= deadline {
+                    entry.state.store(PARTITION_EMPTY, Ordering::Release);
+                    return Err(BrokerError::InitTimeout);
+                }
+                std::hint::spin_loop();
+                std::thread::yield_now();
+            }
 
             let duplicate = hdr
                 .partitions
@@ -934,69 +1058,87 @@ impl ShmLeaseTable {
         let pool_sz = self.pool_size();
         let start_idx = hdr.rr_cursor.0.fetch_add(1, Ordering::Relaxed) % total;
 
-        for offset in 0..total {
-            let idx = (start_idx + offset) % total;
-            let slot = self.slot(idx);
-            let state_pid = slot.state_and_pid.load(Ordering::Acquire);
-            let (state, _) = unpack_state_pid(state_pid);
+        let mut claim_retries = 0u32;
+        loop {
+            let mut saw_claiming = false;
+            for offset in 0..total {
+                let idx = (start_idx + offset) % total;
+                let slot = self.slot(idx);
+                let state_pid = slot.state_and_pid.load(Ordering::Acquire);
+                let (state, _) = unpack_state_pid(state_pid);
 
-            if state == SLOT_STATE_FREE {
-                let claim_state_pid = pack_state_pid(SLOT_STATE_CLAIMING, worker_pid);
-                if slot
-                    .state_and_pid
-                    .compare_exchange(
-                        state_pid,
-                        claim_state_pid,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    let target_state = if partition.is_some() {
-                        if part_overflow {
-                            SLOT_STATE_OVERFLOW
-                        } else {
+                if state == SLOT_STATE_FREE {
+                    let claim_state_pid = pack_state_pid(SLOT_STATE_CLAIMING, worker_pid);
+                    if slot
+                        .state_and_pid
+                        .compare_exchange(
+                            state_pid,
+                            claim_state_pid,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        slot.partition_id
+                            .store(partition.map_or(NO_PARTITION, u32::from), Ordering::Release);
+                        let target_state = if partition.is_some() {
+                            if part_overflow {
+                                SLOT_STATE_OVERFLOW
+                            } else {
+                                SLOT_STATE_PRIMARY
+                            }
+                        } else if idx < pool_sz {
                             SLOT_STATE_PRIMARY
+                        } else {
+                            SLOT_STATE_OVERFLOW
+                        };
+                        let grant_gen = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                        let now = monotonic_now_ns();
+                        let expiry = if ttl_ns > 0 {
+                            now.saturating_add(ttl_ns)
+                        } else {
+                            0
+                        };
+
+                        slot.acquired_ns.store(now, Ordering::Relaxed);
+                        slot.expiry_ns.store(expiry, Ordering::Relaxed);
+                        slot.ttl_ns.store(ttl_ns, Ordering::Relaxed);
+                        slot.last_heartbeat_ns.store(now, Ordering::Relaxed);
+                        slot.bind_key_hash.store(bind_key_hash, Ordering::Relaxed);
+                        slot.state_and_pid
+                            .store(pack_state_pid(target_state, worker_pid), Ordering::Release);
+
+                        hdr.total_acquired.fetch_add(1, Ordering::Relaxed);
+                        if let Some(entry) = part_entry {
+                            entry.total_acquired.fetch_add(1, Ordering::Relaxed);
                         }
-                    } else if idx < pool_sz {
-                        SLOT_STATE_PRIMARY
-                    } else {
-                        SLOT_STATE_OVERFLOW
-                    };
-                    let grant_gen = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
-                    let now = monotonic_now_ns();
-                    let expiry = if ttl_ns > 0 {
-                        now.saturating_add(ttl_ns)
-                    } else {
-                        0
-                    };
 
-                    slot.acquired_ns.store(now, Ordering::Relaxed);
-                    slot.expiry_ns.store(expiry, Ordering::Relaxed);
-                    slot.ttl_ns.store(ttl_ns, Ordering::Relaxed);
-                    slot.last_heartbeat_ns.store(now, Ordering::Relaxed);
-                    slot.bind_key_hash.store(bind_key_hash, Ordering::Relaxed);
-                    slot.partition_id
-                        .store(partition.map_or(NO_PARTITION, u32::from), Ordering::Release);
-                    slot.state_and_pid
-                        .store(pack_state_pid(target_state, worker_pid), Ordering::Release);
-
-                    hdr.total_acquired.fetch_add(1, Ordering::Relaxed);
-                    if let Some(entry) = part_entry {
-                        entry.total_acquired.fetch_add(1, Ordering::Relaxed);
+                        return Ok(LeaseGrant {
+                            slot_index: idx,
+                            generation: grant_gen,
+                            worker_pid,
+                            is_overflow: target_state == SLOT_STATE_OVERFLOW,
+                            acquired_ns: now,
+                            expiry_ns: expiry,
+                            bind_key_hash,
+                        });
                     }
-
-                    return Ok(LeaseGrant {
-                        slot_index: idx,
-                        generation: grant_gen,
-                        worker_pid,
-                        is_overflow: target_state == SLOT_STATE_OVERFLOW,
-                        acquired_ns: now,
-                        expiry_ns: expiry,
-                        bind_key_hash,
-                    });
+                    saw_claiming = true;
+                } else if state == SLOT_STATE_CLAIMING {
+                    saw_claiming = true;
                 }
             }
+
+            if saw_claiming && claim_retries < 256 {
+                claim_retries += 1;
+                if claim_retries > 8 {
+                    std::thread::yield_now();
+                } else {
+                    std::hint::spin_loop();
+                }
+                continue;
+            }
+            break;
         }
 
         hdr.active_leases.0.fetch_sub(1, Ordering::SeqCst);
@@ -1110,31 +1252,53 @@ impl ShmLeaseTable {
             return Err(BrokerError::LeaseNotFound);
         }
         let slot = self.slot(slot_index);
-        let cur_gen = slot.generation.load(Ordering::Acquire);
-        let (state, _) = unpack_state_pid(slot.state_and_pid.load(Ordering::Acquire));
-        if cur_gen != generation || (state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW) {
-            return Err(BrokerError::StaleGeneration);
+        for _ in 0..1024 {
+            let cur_gen = slot.generation.load(Ordering::Acquire);
+            if cur_gen != generation {
+                return Err(BrokerError::StaleGeneration);
+            }
+            let raw = slot.state_and_pid.load(Ordering::Acquire);
+            let (state, pid) = unpack_state_pid(raw);
+            if state == SLOT_STATE_CLAIMING {
+                std::hint::spin_loop();
+                continue;
+            }
+            if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
+                return Err(BrokerError::StaleGeneration);
+            }
+            if slot
+                .state_and_pid
+                .compare_exchange(
+                    raw,
+                    pack_state_pid(SLOT_STATE_CLAIMING, pid),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            if slot.generation.load(Ordering::Acquire) != generation {
+                slot.state_and_pid.store(raw, Ordering::Release);
+                return Err(BrokerError::StaleGeneration);
+            }
+            let now = monotonic_now_ns();
+            slot.last_heartbeat_ns.store(now, Ordering::Release);
+            let ttl = slot.ttl_ns.load(Ordering::Relaxed);
+            if ttl > 0 {
+                slot.expiry_ns
+                    .store(now.saturating_add(ttl), Ordering::Relaxed);
+            }
+            slot.state_and_pid.store(raw, Ordering::Release);
+            return Ok(());
         }
-        let now = monotonic_now_ns();
-        slot.last_heartbeat_ns.store(now, Ordering::Release);
-        let ttl = slot.ttl_ns.load(Ordering::Relaxed);
-        if ttl > 0 {
-            slot.expiry_ns
-                .store(now.saturating_add(ttl), Ordering::Relaxed);
-        }
-        let (state_after, _) = unpack_state_pid(slot.state_and_pid.load(Ordering::Acquire));
-        if slot.generation.load(Ordering::Acquire) != generation
-            || (state_after != SLOT_STATE_PRIMARY && state_after != SLOT_STATE_OVERFLOW)
-        {
-            return Err(BrokerError::StaleGeneration);
-        }
-        Ok(())
+        Err(BrokerError::StaleGeneration)
     }
 
     fn wake_waiters_seqcst(&self) {
         let hdr = self.header();
+        hdr.wake_seq.0.fetch_add_seqcst(1);
         if hdr.waiters.0.load(Ordering::SeqCst) > 0 {
-            hdr.wake_seq.0.fetch_add_seqcst(1);
             let _ = hdr.wake_seq.0.wake_all();
         }
     }
@@ -1173,6 +1337,7 @@ impl ShmLeaseTable {
         if bump_generation {
             slot.generation.fetch_add(1, Ordering::AcqRel);
         }
+        slot.partition_id.store(NO_PARTITION, Ordering::Relaxed);
         slot.state_and_pid.store(0, Ordering::Release);
 
         let hdr = self.header();
@@ -1265,19 +1430,21 @@ impl ShmLeaseTable {
 
         for idx in 0..total {
             let slot = self.slot(idx);
+            let cur_gen = slot.generation.load(Ordering::Acquire);
             let raw = slot.state_and_pid.load(Ordering::Acquire);
             let (state, _) = unpack_state_pid(raw);
 
             if state == SLOT_STATE_PRIMARY || state == SLOT_STATE_OVERFLOW {
                 let ttl = slot.ttl_ns.load(Ordering::Relaxed);
                 let last_hb = slot.last_heartbeat_ns.load(Ordering::Acquire);
-                if ttl > 0
+                if slot.generation.load(Ordering::Acquire) == cur_gen
+                    && ttl > 0
                     && now_ns.saturating_sub(last_hb) > ttl
                     && self
                         .release_claimed_slot(
                             slot,
                             raw,
-                            None,
+                            Some(cur_gen),
                             true,
                             &hdr.total_expired,
                             ReleaseKind::Expire,
@@ -1324,7 +1491,7 @@ impl ShmLeaseTable {
                 .state_and_pid
                 .compare_exchange(
                     raw,
-                    pack_state_pid(SLOT_STATE_QUARANTINED, pid),
+                    pack_state_pid(SLOT_STATE_CLAIMING, pid),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
@@ -1340,6 +1507,10 @@ impl ShmLeaseTable {
                 }
                 return Err(BrokerError::InvalidState);
             }
+            if slot.generation.load(Ordering::Acquire) != generation {
+                slot.state_and_pid.store(raw, Ordering::Release);
+                return Err(BrokerError::GenerationMismatch);
+            }
             let hdr = self.header();
             hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
             let part_id = slot.partition_id.load(Ordering::Acquire);
@@ -1348,6 +1519,10 @@ impl ShmLeaseTable {
                 entry.quarantined.fetch_add(1, Ordering::AcqRel);
                 entry.total_quarantined.fetch_add(1, Ordering::Relaxed);
             }
+            slot.state_and_pid.store(
+                pack_state_pid(SLOT_STATE_QUARANTINED, pid),
+                Ordering::Release,
+            );
             return Ok(());
         }
         if slot.generation.load(Ordering::Acquire) != generation {
@@ -1438,11 +1613,52 @@ impl ShmLeaseTable {
 
         for idx in 0..total {
             let slot = self.slot(idx);
-            let raw = slot.state_and_pid.load(Ordering::Acquire);
-            let (state, pid) = unpack_state_pid(raw);
-            if (state == SLOT_STATE_PRIMARY || state == SLOT_STATE_OVERFLOW)
-                && pid == worker_pid
-                && slot
+            for spin in 0..1024 {
+                let raw = slot.state_and_pid.load(Ordering::Acquire);
+                let (state, pid) = unpack_state_pid(raw);
+                if pid != worker_pid {
+                    break;
+                }
+                if state == SLOT_STATE_CLAIMING {
+                    if spin < 1023 {
+                        std::hint::spin_loop();
+                        continue;
+                    }
+                    let cur_gen = slot.generation.load(Ordering::Acquire);
+                    if slot
+                        .generation
+                        .compare_exchange(cur_gen, cur_gen + 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let part = slot.partition_id.load(Ordering::Acquire);
+                    let pool_id = if part < MAX_POOL_PARTITIONS as u32 {
+                        let entry = &hdr.partitions[part as usize];
+                        entry.quarantined.fetch_add(1, Ordering::AcqRel);
+                        entry.total_quarantined.fetch_add(1, Ordering::Relaxed);
+                        entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                        Some(part as u16)
+                    } else {
+                        None
+                    };
+                    hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
+                    hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                    slot.state_and_pid.store(
+                        pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
+                        Ordering::Release,
+                    );
+                    reclaimed.push(ReclaimedLease {
+                        slot_index: idx,
+                        generation: cur_gen + 1,
+                        pool_id,
+                    });
+                    break;
+                }
+                if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
+                    break;
+                }
+                if slot
                     .state_and_pid
                     .compare_exchange(
                         raw,
@@ -1451,29 +1667,31 @@ impl ShmLeaseTable {
                         Ordering::Acquire,
                     )
                     .is_ok()
-            {
-                let next_gen = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
-                let part = slot.partition_id.load(Ordering::Acquire);
-                let pool_id = if part < MAX_POOL_PARTITIONS as u32 {
-                    let entry = &hdr.partitions[part as usize];
-                    entry.quarantined.fetch_add(1, Ordering::AcqRel);
-                    entry.total_quarantined.fetch_add(1, Ordering::Relaxed);
-                    entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                    Some(part as u16)
-                } else {
-                    None
-                };
-                hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
-                hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
-                slot.state_and_pid.store(
-                    pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
-                    Ordering::Release,
-                );
-                reclaimed.push(ReclaimedLease {
-                    slot_index: idx,
-                    generation: next_gen,
-                    pool_id,
-                });
+                {
+                    let next_gen = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    let part = slot.partition_id.load(Ordering::Acquire);
+                    let pool_id = if part < MAX_POOL_PARTITIONS as u32 {
+                        let entry = &hdr.partitions[part as usize];
+                        entry.quarantined.fetch_add(1, Ordering::AcqRel);
+                        entry.total_quarantined.fetch_add(1, Ordering::Relaxed);
+                        entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                        Some(part as u16)
+                    } else {
+                        None
+                    };
+                    hdr.total_quarantined.fetch_add(1, Ordering::Relaxed);
+                    hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                    slot.state_and_pid.store(
+                        pack_state_pid(SLOT_STATE_QUARANTINED, worker_pid),
+                        Ordering::Release,
+                    );
+                    reclaimed.push(ReclaimedLease {
+                        slot_index: idx,
+                        generation: next_gen,
+                        pool_id,
+                    });
+                    break;
+                }
             }
         }
 
@@ -1487,12 +1705,41 @@ impl ShmLeaseTable {
 
         for idx in 0..total {
             let slot = self.slot(idx);
-            let raw = slot.state_and_pid.load(Ordering::Acquire);
-            let (state, pid) = unpack_state_pid(raw);
-
-            if (state == SLOT_STATE_PRIMARY || state == SLOT_STATE_OVERFLOW)
-                && pid == worker_pid
-                && self
+            for spin in 0..1024 {
+                let raw = slot.state_and_pid.load(Ordering::Acquire);
+                let (state, pid) = unpack_state_pid(raw);
+                if pid != worker_pid {
+                    break;
+                }
+                if state == SLOT_STATE_CLAIMING {
+                    if spin < 1023 {
+                        std::hint::spin_loop();
+                        continue;
+                    }
+                    let cur_gen = slot.generation.load(Ordering::Acquire);
+                    if slot
+                        .generation
+                        .compare_exchange(cur_gen, cur_gen + 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        let part_id = slot.partition_id.load(Ordering::Acquire);
+                        slot.partition_id.store(NO_PARTITION, Ordering::Relaxed);
+                        slot.state_and_pid.store(0, Ordering::Release);
+                        hdr.active_leases.0.fetch_sub(1, Ordering::SeqCst);
+                        if part_id < MAX_POOL_PARTITIONS as u32 {
+                            let entry = &hdr.partitions[part_id as usize];
+                            entry.active_leases.fetch_sub(1, Ordering::SeqCst);
+                            entry.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        hdr.total_reclaimed.fetch_add(1, Ordering::Relaxed);
+                        reclaimed += 1;
+                    }
+                    break;
+                }
+                if state != SLOT_STATE_PRIMARY && state != SLOT_STATE_OVERFLOW {
+                    break;
+                }
+                if self
                     .release_claimed_slot(
                         slot,
                         raw,
@@ -1502,8 +1749,10 @@ impl ShmLeaseTable {
                         ReleaseKind::Reclaim,
                     )
                     .unwrap_or(false)
-            {
-                reclaimed += 1;
+                {
+                    reclaimed += 1;
+                    break;
+                }
             }
         }
 
@@ -1984,10 +2233,14 @@ impl ShmStatementCache {
 
     pub const fn required_size(capacity: u32) -> usize {
         let base = if capacity < 4 { 4 } else { capacity };
-        let cap = base.next_power_of_two();
+        let cap = if base > MAX_STATEMENT_CAPACITY {
+            MAX_STATEMENT_CAPACITY
+        } else {
+            base.next_power_of_two()
+        };
         let raw = std::mem::size_of::<ShmStatementHeader>()
-            + (cap as usize) * std::mem::size_of::<StatementSlot>();
-        (raw + 63) & !63
+            .saturating_add((cap as usize).saturating_mul(std::mem::size_of::<StatementSlot>()));
+        raw.saturating_add(63) & !63
     }
 
     pub fn from_region_at_offset(
@@ -1996,9 +2249,17 @@ impl ShmStatementCache {
         max_entries: u32,
         create: bool,
     ) -> Result<Self, BrokerError> {
-        let cap = max_entries.max(4).next_power_of_two();
+        let base = max_entries.max(4);
+        if base > MAX_STATEMENT_CAPACITY {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        let cap = base
+            .checked_next_power_of_two()
+            .ok_or(BrokerError::InvalidCapacity)?;
         let req_size = Self::required_size(cap);
-        let expected_end = offset + req_size;
+        let expected_end = offset
+            .checked_add(req_size)
+            .ok_or(BrokerError::InvalidCapacity)?;
         if region.len() < expected_end {
             return Err(BrokerError::RegionTooSmall {
                 expected: expected_end,
@@ -2042,7 +2303,13 @@ impl ShmStatementCache {
 
     #[cfg(unix)]
     pub fn open_or_create_named(name: &str, capacity: u32) -> Result<(Self, bool), BrokerError> {
-        let cap = capacity.max(4).next_power_of_two();
+        let base = capacity.max(4);
+        if base > MAX_STATEMENT_CAPACITY {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        let cap = base
+            .checked_next_power_of_two()
+            .ok_or(BrokerError::InvalidCapacity)?;
         let req_size = Self::required_size(cap);
         let attach = ShmRegion::open_or_create_named(name, req_size, |region| {
             let len = region.len();
@@ -2555,5 +2822,114 @@ mod tests {
         assert_eq!(tx_frames.len(), 1);
         assert_eq!(tx_frames[0].payload, b"commit:99");
         assert_eq!(tx_frames[0].lease_id, None);
+    }
+
+    #[test]
+    fn test_invalid_huge_capacities_fail_loudly_without_overflow() {
+        let region = ShmRegion::create(ShmLeaseTable::required_size(2, 0)).unwrap();
+        assert_eq!(
+            ShmLeaseTable::init_in_region(region, u32::MAX, 1).err(),
+            Some(BrokerError::InvalidCapacity)
+        );
+        let region2 = ShmRegion::create(ShmLeaseTable::required_size(2, 0)).unwrap();
+        assert_eq!(
+            ShmLeaseTable::init_in_region_with_statements(region2, 2, 0, u32::MAX).err(),
+            Some(BrokerError::InvalidCapacity)
+        );
+        assert!(ShmLeaseTable::required_size_with_statements(4096, 0, u32::MAX) > 0);
+    }
+
+    #[test]
+    fn test_reap_expired_does_not_reap_reacquired_same_pid_lease_aba() {
+        let req_size = ShmLeaseTable::required_size(1, 0);
+        let region = ShmRegion::create(req_size).unwrap();
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 1, 0).unwrap());
+
+        let old = table.try_acquire(4242, 10_000_000, 1).unwrap();
+        table.release(old.slot_index, old.generation).unwrap();
+        let fresh = table.try_acquire(4242, 60_000_000_000, 1).unwrap();
+        assert_ne!(fresh.generation, old.generation);
+
+        let future = fresh.acquired_ns.saturating_add(50_000_000);
+        assert_eq!(table.reap_expired(future), 0);
+        assert_eq!(table.stats().active_leases, 1);
+
+        let slot = table.slot(old.slot_index);
+        let stale_raw = pack_state_pid(SLOT_STATE_PRIMARY, 4242);
+        assert_eq!(
+            table.release_claimed_slot(
+                slot,
+                stale_raw,
+                Some(old.generation),
+                true,
+                &table.header().total_expired,
+                ReleaseKind::Expire,
+            ),
+            Err(BrokerError::GenerationMismatch)
+        );
+        assert_eq!(table.stats().active_leases, 1);
+        table.release(fresh.slot_index, fresh.generation).unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_register_partition_deduplicates_identical_keys() {
+        let req_size = ShmLeaseTable::required_size(8, 2);
+        let region = ShmRegion::create(req_size).unwrap();
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 8, 2).unwrap());
+
+        let key = stable_hash64(b"shared-partition-race");
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let ids: Vec<u16> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(8);
+            for _ in 0..8 {
+                let t = Arc::clone(&table);
+                let b = Arc::clone(&barrier);
+                handles.push(s.spawn(move || {
+                    b.wait();
+                    t.register_partition(PoolPartitionSpec {
+                        pool_key_hash: key,
+                        pool_size: 2,
+                        max_overflow: 1,
+                    })
+                    .unwrap()
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let first = ids[0];
+        assert!(ids.iter().all(|&id| id == first));
+        assert_eq!(table.header().partition_count.0.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_quarantine_and_dispose_never_underflows_partition_counter() {
+        let req_size = ShmLeaseTable::required_size(2, 0);
+        let region = ShmRegion::create(req_size).unwrap();
+        let table = Arc::new(ShmLeaseTable::init_in_region(region, 2, 0).unwrap());
+
+        let key = stable_hash64(b"quarantine-dispose-race");
+        let part = table
+            .register_partition(PoolPartitionSpec {
+                pool_key_hash: key,
+                pool_size: 1,
+                max_overflow: 0,
+            })
+            .unwrap();
+        let grant = table.try_acquire_in(part, 5150, 0, key).unwrap().unwrap();
+        assert_eq!(
+            table.dispose_quarantined(grant.slot_index, grant.generation),
+            Err(BrokerError::InvalidState)
+        );
+        table
+            .quarantine(grant.slot_index, grant.generation)
+            .unwrap();
+        let stats = table.partition_stats(key).unwrap();
+        assert_eq!(stats.quarantined, 1);
+        table
+            .dispose_quarantined(grant.slot_index, grant.generation)
+            .unwrap();
+        let after = table.partition_stats(key).unwrap();
+        assert_eq!(after.quarantined, 0);
+        assert_eq!(after.total_disposed, 1);
     }
 }

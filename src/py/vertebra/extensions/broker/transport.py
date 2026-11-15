@@ -410,29 +410,29 @@ class BrokerStream:
             self._exhausted = True
             raise StopIteration
 
-        if not self._started:
-            self._started = True
-            resp = self._transport._execute_dbrpc_impl(
-                self._dialect_tag,
-                self._engine_pool_id,
-                DbRpcOp.EXECUTE,
-                sql=self._sql,
-                params=self._params,
-                lease=self._lease,
-                chunk_rows=self._chunk_size,
-            )
-        else:
-            resp = self._transport._execute_dbrpc_impl(
-                self._dialect_tag,
-                self._engine_pool_id,
-                DbRpcOp.FETCH_CHUNK,
-                lease=self._lease,
-                chunk_rows=self._chunk_size,
-            )
-
-        if resp.status != 0:
+        try:
+            if not self._started:
+                self._started = True
+                resp = self._transport._execute_dbrpc_impl(
+                    self._dialect_tag,
+                    self._engine_pool_id,
+                    DbRpcOp.EXECUTE,
+                    sql=self._sql,
+                    params=self._params,
+                    lease=self._lease,
+                    chunk_rows=self._chunk_size,
+                )
+            else:
+                resp = self._transport._execute_dbrpc_impl(
+                    self._dialect_tag,
+                    self._engine_pool_id,
+                    DbRpcOp.FETCH_CHUNK,
+                    lease=self._lease,
+                    chunk_rows=self._chunk_size,
+                )
+        except Exception:
             self._exhausted = True
-            raise BrokerAttachError(resp.error_message or f"dbrpc stream execute failed with status {resp.status}")
+            raise
 
         if (
             resp.arrow_shm is not None
@@ -1108,7 +1108,16 @@ class _BaseSHMBrokerTransport:
             chunk_rows=chunk_rows,
         )
         raw = BrokerEngineRegistry.execute(dialect_tag, engine_pool_id, encode_dbrpc_request(req))
-        return decode_dbrpc_response(raw)
+        resp = decode_dbrpc_response(raw)
+        if resp.status != 0:
+            op_name = getattr(op, "name", str(op))
+            detail = (
+                f"{resp.error_class}: {resp.error_message}"
+                if resp.error_message
+                else (resp.error_class or f"status={resp.status}")
+            )
+            raise BrokerAttachError(f"DBRPC {op_name} failed ({detail})")
+        return resp
 
     def _publish_impl(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
         """Publish a message to a named shared-memory channel."""

@@ -510,3 +510,39 @@ def test_stream_dbrpc_vtbarrow_and_cancel_quarantine() -> None:
         assert transport.quarantined_count() == 0
     finally:
         BrokerEngineRegistry.close_pool(6, pool_id)
+
+
+def test_execute_dbrpc_and_rollback_raise_and_quarantine_on_nonzero_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify non-zero DBRPC statuses raise BrokerAttachError before altering transaction state."""
+    from types import SimpleNamespace
+
+    from vertebra.extensions.broker.dbrpc import encode_dbrpc_response
+
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    lease = transport.acquire(worker_id=79001)
+    transport.begin_transaction(lease)
+
+    fail_raw = encode_dbrpc_response(
+        DbRpcResponse(
+            request_id=1,
+            status=1,
+            error_class="DatabaseError",
+            error_message="simulated rollback failure",
+        )
+    )
+    monkeypatch.setattr(broker_transport_mod, "BrokerEngineRegistry", SimpleNamespace(execute=lambda *_args: fail_raw))
+
+    with pytest.raises(BrokerAttachError, match="simulated rollback failure"):
+        transport.execute_dbrpc(6, 1, DbRpcOp.EXECUTE, sql="SELECT 1", lease=lease)
+
+    with pytest.raises(BrokerAttachError, match="simulated rollback failure"):
+        transport.commit_transaction(lease, dialect_tag=6, engine_pool_id=1)
+    assert lease.in_transaction is True
+    assert lease.is_released is False
+
+    with pytest.raises(BrokerAttachError, match="simulated rollback failure"):
+        transport.rollback_transaction(lease, dialect_tag=6, engine_pool_id=1)
+    assert lease.quarantined is True
+    assert transport.quarantined_count() == 1
+    transport.dispose_quarantined(lease)
+    assert transport.quarantined_count() == 0

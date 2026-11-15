@@ -561,6 +561,27 @@ def test_vtb_broker_cli_help_loads_lazily_without_eager_engine_imports() -> None
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
+def test_vtb_broker_status_reads_non_default_capacity_segment() -> None:
+    """Verify `vtb broker status --shm-name ... --json` works for custom SHM broker capacities."""
+    from click.testing import CliRunner
+
+    from vertebra._vertebra import LeaseBroker
+    from vertebra.cli import _build_cli
+    from vertebra.utils.serializers import decode_json
+
+    shm_name = f"/vtb-cli-st-{os.getpid()}"
+    broker = LeaseBroker.create_named(shm_name, pool_size=3, max_overflow=1, stmt_capacity=32)
+    try:
+        res = CliRunner().invoke(_build_cli(), ["broker", "status", "--shm-name", shm_name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = decode_json(res.output)
+        assert payload["pool_size"] == 3
+        assert payload["max_overflow"] == 1
+        assert payload["active_leases"] == 0
+    finally:
+        broker.unlink()
+
+
 def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None:
     """Verify BrokerPlugin.snapshot_metrics and /brokerz report total_quarantined and total_disposed."""
     zpages = ZPagesRegistry("broker-telemetry-test")

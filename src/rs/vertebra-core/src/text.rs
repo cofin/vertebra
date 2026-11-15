@@ -1034,9 +1034,30 @@ fn is_keyword_in(token: &str, list: &[&str]) -> bool {
     list.iter().any(|kw| token.eq_ignore_ascii_case(kw))
 }
 
+/// Return the first top-level SQL keyword token outside whitespace, comments, quotes, and bind parameters.
+#[must_use]
+pub fn first_sql_keyword(operation: &str) -> Option<&str> {
+    classify_sql_scan(operation, false).3
+}
+
 /// Classify a SQL statement returning `(is_row_returning, is_insert, is_read_only)` without heap allocation.
 #[must_use]
 pub fn classify_sql_statement(operation: &str) -> (bool, bool, bool) {
+    let (row_ret, is_ins, is_ro, _) = classify_sql_scan(operation, false);
+    (row_ret, is_ins, is_ro)
+}
+
+/// Classify a T-SQL / MSSQL statement including lexical `OUTPUT` clauses without heap allocation.
+#[must_use]
+pub fn classify_mssql_statement(operation: &str) -> (bool, bool, bool) {
+    let (row_ret, is_ins, is_ro, _) = classify_sql_scan(operation, true);
+    (row_ret, is_ins, is_ro)
+}
+
+fn classify_sql_scan(
+    operation: &str,
+    detect_tsql_output: bool,
+) -> (bool, bool, bool, Option<&str>) {
     const READ_ONLY: &[&str] = &[
         "SELECT", "WITH", "VALUES", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE",
     ];
@@ -1153,20 +1174,22 @@ pub fn classify_sql_statement(operation: &str) -> (bool, bool, bool) {
                 is_insert = token.eq_ignore_ascii_case("INSERT");
                 is_read_only = is_keyword_in(token, READ_ONLY);
                 if is_keyword_in(token, ROW_RETURNING) {
-                    return (true, is_insert, is_read_only);
+                    return (true, is_insert, is_read_only, first_keyword);
                 }
-                if is_keyword_in(token, NON_ROW_PREFIXES)
-                    && !bytes
-                        .windows(9)
-                        .any(|w| w.eq_ignore_ascii_case(b"returning"))
-                {
-                    return (false, is_insert, is_read_only);
+                let might_have_clause = bytes
+                    .windows(9)
+                    .any(|w| w.eq_ignore_ascii_case(b"returning"))
+                    || (detect_tsql_output
+                        && bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"output")));
+                if is_keyword_in(token, NON_ROW_PREFIXES) && !might_have_clause {
+                    return (false, is_insert, is_read_only, first_keyword);
                 }
-            } else if token.eq_ignore_ascii_case("RETURNING")
-                && !is_qualified
+            } else if !is_qualified
                 && !is_assignment_target
+                && (token.eq_ignore_ascii_case("RETURNING")
+                    || (detect_tsql_output && token.eq_ignore_ascii_case("OUTPUT")))
             {
-                return (true, is_insert, is_read_only);
+                return (true, is_insert, is_read_only, first_keyword);
             }
             continue;
         }
@@ -1177,7 +1200,7 @@ pub fn classify_sql_statement(operation: &str) -> (bool, bool, bool) {
         };
     }
 
-    (false, is_insert, is_read_only)
+    (false, is_insert, is_read_only, first_keyword)
 }
 
 #[cfg(test)]
@@ -1317,6 +1340,15 @@ mod tests {
         assert_eq!(
             classify_sql_statement("PRAGMA journal_mode"),
             (true, false, true)
+        );
+        assert_eq!(first_sql_keyword("/* hint */ SELECT 1"), Some("SELECT"));
+        assert_eq!(
+            classify_mssql_statement("INSERT INTO t OUTPUT INSERTED.id VALUES (1)"),
+            (true, true, false)
+        );
+        assert_eq!(
+            classify_mssql_statement("UPDATE t SET output = ' OUTPUT ' WHERE t.output = 1"),
+            (false, false, false)
         );
     }
 }

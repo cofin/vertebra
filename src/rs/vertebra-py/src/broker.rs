@@ -454,15 +454,18 @@ impl LeaseBroker {
     #[new]
     #[pyo3(signature = (pool_size=20, max_overflow=10, stmt_capacity=512))]
     pub fn new(pool_size: u32, max_overflow: u32, stmt_capacity: u32) -> PyResult<Self> {
+        let eff_stmt =
+            ShmLeaseTable::validate_capacities(pool_size, max_overflow, stmt_capacity, false)
+                .map_err(broker_err_to_py)?;
         let req_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, eff_stmt);
         let region = ShmRegion::create(req_size)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let table = ShmLeaseTable::init_in_region_with_statements(
             region,
             pool_size,
             max_overflow,
-            stmt_capacity,
+            eff_stmt,
         )
         .map_err(broker_err_to_py)?;
         Ok(Self {
@@ -506,19 +509,19 @@ impl LeaseBroker {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (name, pool_size=20, max_overflow=10, stmt_capacity=512))]
+    #[pyo3(signature = (name, pool_size=None, max_overflow=None, stmt_capacity=None))]
     pub fn open_named(
         py: Python<'_>,
         name: &str,
-        pool_size: u32,
-        max_overflow: u32,
-        stmt_capacity: u32,
+        pool_size: Option<u32>,
+        max_overflow: Option<u32>,
+        stmt_capacity: Option<u32>,
     ) -> PyResult<Self> {
         #[cfg(unix)]
         {
             let table = py
                 .detach(|| {
-                    ShmLeaseTable::open_with_statements_matching(
+                    ShmLeaseTable::open_with_statements_matching_opt(
                         name,
                         pool_size,
                         max_overflow,

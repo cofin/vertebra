@@ -29,6 +29,7 @@ pub type ShmHandle = RawHandle;
 pub const SHM_INIT_PENDING: u32 = 0;
 /// Shared-memory ownership header state indicating the region is ready for attachers.
 pub const SHM_INIT_READY: u32 = 1;
+const SHM_INIT_REAPING: u32 = 2;
 
 const SHM_OWNER_MAGIC: u64 = u64::from_le_bytes(*b"VTBOWNR1");
 const INIT_WAIT_TIMEOUT_MS: u64 = 2000;
@@ -291,9 +292,10 @@ impl ShmRegion {
                 let owner_page =
                     unsafe { &*(region.ptr.as_ptr().add(trailer_off) as *const ShmOwnerPage) };
                 if owner_page.magic.load(Ordering::Acquire) == SHM_OWNER_MAGIC {
-                    if owner_page.header.init_state.load(Ordering::Acquire) == SHM_INIT_PENDING {
+                    let state = owner_page.header.init_state.load(Ordering::Acquire);
+                    if state == SHM_INIT_PENDING || state == SHM_INIT_REAPING {
                         let pid = owner_page.header.owner_pid.load(Ordering::Acquire);
-                        if pid != 0 && !is_pid_alive(pid) {
+                        if state == SHM_INIT_PENDING && pid != 0 && !is_pid_alive(pid) {
                             drop(region);
                             return Err(io::Error::from_raw_os_error(libc::ENOENT).into());
                         }
@@ -304,7 +306,14 @@ impl ShmRegion {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         continue;
                     }
-                    let available_user_len = owner_page.user_len as usize;
+                    let Ok(available_user_len) = usize::try_from(owner_page.user_len) else {
+                        drop(region);
+                        return Err(ShmError::InvalidSize);
+                    };
+                    if available_user_len > trailer_off {
+                        drop(region);
+                        return Err(ShmError::InvalidSize);
+                    }
                     if available_user_len < req_user_len {
                         let pid = owner_page.header.owner_pid.load(Ordering::Acquire);
                         drop(region);
@@ -325,10 +334,17 @@ impl ShmRegion {
 
     /// Create a named shared memory region (Unix only) without pre-unlinking a live segment.
     #[cfg(unix)]
-    pub fn create_named(name: &str, size: usize) -> Result<Self, ShmError> {
+    /// Create a named shared-memory region on Unix, running `init` before publishing readiness.
+    #[cfg(unix)]
+    pub(crate) fn create_named_with(
+        name: &str,
+        size: usize,
+        init: impl FnOnce(&mut ShmRegion) -> Result<(), ShmError>,
+    ) -> Result<Self, ShmError> {
+        let mut init_opt = Some(init);
         let mut min_generation = 1u64;
         for _ in 0..8 {
-            match Self::try_create_named_with_gen(name, size, min_generation) {
+            match Self::try_create_named_with_gen(name, size, min_generation, &mut init_opt) {
                 Ok(region) => return Ok(region),
                 Err(CreateOrOpenConflict::Retry(next_gen)) => {
                     min_generation = next_gen;
@@ -337,6 +353,12 @@ impl ShmRegion {
             }
         }
         Err(ShmError::InitTimeout)
+    }
+
+    /// Create a named shared-memory region on Unix.
+    #[cfg(unix)]
+    pub fn create_named(name: &str, size: usize) -> Result<Self, ShmError> {
+        Self::create_named_with(name, size, |_| Ok(()))
     }
 
     /// Atomically open an existing initialized named segment or create and initialize it once.
@@ -384,6 +406,9 @@ impl ShmRegion {
                 }
                 Err(AttachOrRetry::RetryWithGeneration(owner_gen)) => {
                     next_generation = next_generation.max(owner_gen);
+                    if start.elapsed() >= deadline {
+                        return Err(ShmError::InitTimeout);
+                    }
                 }
                 Err(AttachOrRetry::Err(err)) => return Err(err),
             }
@@ -391,11 +416,15 @@ impl ShmRegion {
     }
 
     #[cfg(unix)]
-    fn try_create_named_with_gen(
+    fn try_create_named_with_gen<F>(
         name: &str,
         size: usize,
         generation: u64,
-    ) -> Result<Self, CreateOrOpenConflict> {
+        init_opt: &mut Option<F>,
+    ) -> Result<Self, CreateOrOpenConflict>
+    where
+        F: FnOnce(&mut ShmRegion) -> Result<(), ShmError>,
+    {
         if size == 0 {
             return Err(CreateOrOpenConflict::Err(ShmError::InvalidSize));
         }
@@ -405,7 +434,12 @@ impl ShmRegion {
         let cname = CString::new(name).map_err(|e| CreateOrOpenConflict::Err(e.into()))?;
 
         match Self::try_create_exclusive(&cname, name, user_len, page, generation) {
-            Ok(region) => {
+            Ok(mut region) => {
+                if let Some(init_fn) = init_opt.take()
+                    && let Err(err) = init_fn(&mut region)
+                {
+                    return Err(CreateOrOpenConflict::Err(err));
+                }
                 region.mark_owner_ready();
                 crate::cleanup::register_owned(name);
                 return Ok(region);
@@ -561,19 +595,25 @@ impl ShmRegion {
             unsafe {
                 libc::munmap(trailer_ptr, page);
             }
-            if magic != SHM_OWNER_MAGIC || state == SHM_INIT_PENDING {
-                if magic == SHM_OWNER_MAGIC && pid != 0 && !is_pid_alive(pid) {
-                    let _ = try_unlink_stale_locked(fd, cname, dev, ino);
+            if magic != SHM_OWNER_MAGIC || state == SHM_INIT_PENDING || state == SHM_INIT_REAPING {
+                if magic == SHM_OWNER_MAGIC
+                    && state == SHM_INIT_PENDING
+                    && pid != 0
+                    && !is_pid_alive(pid)
+                {
+                    let _ = try_unlink_stale_locked(fd, cname, dev, ino, trailer_off, page);
+                    // SAFETY: `fd` is owned by this function and closed on retry.
                     unsafe {
                         libc::close(fd);
                     }
                     return Ok(owner_gen.wrapping_add(1));
                 }
+                // SAFETY: `fd` is owned by this function and closed before waiting.
                 unsafe {
                     libc::close(fd);
                 }
                 if start.elapsed() >= deadline {
-                    if pid != 0 && is_pid_alive(pid) {
+                    if state == SHM_INIT_PENDING && pid != 0 && is_pid_alive(pid) {
                         return Err(CreateOrOpenConflict::Err(ShmError::InUse {
                             owner_pid: pid,
                         }));
@@ -584,6 +624,7 @@ impl ShmRegion {
                 continue;
             }
             if pid != 0 && is_pid_alive(pid) {
+                // SAFETY: `fd` is owned by this function and closed before returning `InUse`.
                 unsafe {
                     libc::close(fd);
                 }
@@ -591,7 +632,8 @@ impl ShmRegion {
                     owner_pid: pid,
                 }));
             }
-            let _ = try_unlink_stale_locked(fd, cname, dev, ino);
+            let _ = try_unlink_stale_locked(fd, cname, dev, ino, trailer_off, page);
+            // SAFETY: `fd` is owned by this function and closed on stale reap.
             unsafe {
                 libc::close(fd);
             }
@@ -656,11 +698,13 @@ impl ShmRegion {
         let state = owner_page.header.init_state.load(Ordering::Acquire);
         let pid = owner_page.header.owner_pid.load(Ordering::Acquire);
         let owner_gen = owner_page.header.owner_generation.load(Ordering::Acquire);
-        let user_len = owner_page.user_len as usize;
         if state == SHM_INIT_PENDING {
             if pid != 0 && !is_pid_alive(pid) {
-                let _ = try_unlink_stale_locked(fd, cname, dev, ino);
+                let _ = try_unlink_stale_locked(fd, cname, dev, ino, trailer_off, page);
                 drop(region);
+                if start.elapsed() >= deadline {
+                    return Err(AttachOrRetry::Err(ShmError::InitTimeout));
+                }
                 return Err(AttachOrRetry::RetryWithGeneration(
                     owner_gen.wrapping_add(1),
                 ));
@@ -668,18 +712,36 @@ impl ShmRegion {
             drop(region);
             return Ok(None);
         }
-        if !is_pid_alive(pid) {
-            let _ = try_unlink_stale_locked(fd, cname, dev, ino);
+        if state == SHM_INIT_REAPING {
             drop(region);
+            return Ok(None);
+        }
+        if state != SHM_INIT_READY {
+            drop(region);
+            return Err(AttachOrRetry::Err(ShmError::InvalidSize));
+        }
+        if !is_pid_alive(pid) {
+            let _ = try_unlink_stale_locked(fd, cname, dev, ino, trailer_off, page);
+            drop(region);
+            if start.elapsed() >= deadline {
+                return Err(AttachOrRetry::Err(ShmError::InitTimeout));
+            }
             return Err(AttachOrRetry::RetryWithGeneration(
                 owner_gen.wrapping_add(1),
             ));
+        }
+        let Ok(user_len) = usize::try_from(owner_page.user_len) else {
+            drop(region);
+            return Err(AttachOrRetry::Err(ShmError::InvalidSize));
+        };
+        if user_len == 0 || user_len > trailer_off {
+            drop(region);
+            return Err(AttachOrRetry::Err(ShmError::InvalidSize));
         }
         if user_len < req_user_len {
             drop(region);
             return Err(AttachOrRetry::Err(ShmError::InUse { owner_pid: pid }));
         }
-        let _ = (start, deadline);
         region.len = user_len;
         region.owner_header_offset = Some(trailer_off);
         Ok(Some(region))
@@ -815,6 +877,7 @@ impl ShmRegion {
         region.owns_handle = true;
         region.owns_mapping = true;
         *region.unlink_name.get_mut().expect("unlink_name mutex") = Some(cname);
+        crate::cleanup::register_owned(path);
         Ok(region)
     }
 
@@ -1182,6 +1245,11 @@ fn is_pid_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: u32) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn stat_fd(fd: RawFd) -> Result<(usize, libc::dev_t, libc::ino_t), ShmError> {
     // SAFETY: zeroed `libc::stat` is valid for `fstat` on an owned `fd`.
@@ -1203,14 +1271,69 @@ fn try_unlink_stale_locked(
     cname: &CString,
     expected_dev: libc::dev_t,
     expected_ino: libc::ino_t,
+    trailer_off: usize,
+    page: usize,
 ) -> bool {
     // SAFETY: `fd` is an open file descriptor to the candidate stale segment.
-    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return false;
-    }
+    let flocked = if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        true
+    } else {
+        let errno = io::Error::last_os_error().raw_os_error();
+        #[allow(unreachable_patterns)]
+        if !matches!(errno, Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)) {
+            return false;
+        }
+        // Fallback for kernels (such as macOS XNU) where `flock` is unsupported on `shm_open` FDs:
+        // claim exclusive reap ownership by atomically moving `init_state` to `SHM_INIT_REAPING`.
+        // SAFETY: `trailer_off` is page-aligned within `fd`.
+        let trailer_ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                trailer_off as libc::off_t,
+            )
+        };
+        if trailer_ptr == libc::MAP_FAILED {
+            return false;
+        }
+        // SAFETY: `trailer_ptr` maps one page holding `ShmOwnerPage`.
+        let claimed = unsafe {
+            let p = &*(trailer_ptr as *const ShmOwnerPage);
+            if p.magic.load(Ordering::Acquire) != SHM_OWNER_MAGIC
+                || is_pid_alive(p.header.owner_pid.load(Ordering::Acquire))
+            {
+                false
+            } else {
+                let state = p.header.init_state.load(Ordering::Acquire);
+                (state == SHM_INIT_PENDING || state == SHM_INIT_READY)
+                    && p.header
+                        .init_state
+                        .compare_exchange(
+                            state,
+                            SHM_INIT_REAPING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+            }
+        };
+        // SAFETY: `trailer_ptr` was mapped with length `page`.
+        unsafe {
+            libc::munmap(trailer_ptr, page);
+        }
+        if !claimed {
+            return false;
+        }
+        false
+    };
+    // SAFETY: `cname` is a validated NUL-terminated SHM name.
     let cur_fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0) };
     let matches_inode = if cur_fd >= 0 {
         let matched = stat_fd(cur_fd).is_ok_and(|(_, d, i)| d == expected_dev && i == expected_ino);
+        // SAFETY: `cur_fd` was opened above.
         unsafe {
             libc::close(cur_fd);
         }
@@ -1219,12 +1342,16 @@ fn try_unlink_stale_locked(
         false
     };
     let unlinked = if matches_inode {
+        // SAFETY: `cname` refers to the verified stale `(dev, ino)` segment.
         unsafe { libc::shm_unlink(cname.as_ptr()) == 0 }
     } else {
         false
     };
-    unsafe {
-        libc::flock(fd, libc::LOCK_UN);
+    if flocked {
+        // SAFETY: `fd` holds the exclusive flock acquired above.
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
     }
     unlinked
 }
@@ -1241,17 +1368,20 @@ pub(crate) fn try_unlink_if_dead_owner(name: &str) -> bool {
     let Ok(cname) = CString::new(name) else {
         return false;
     };
-    let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0) };
+    // SAFETY: `cname` is a validated NUL-terminated SHM name.
+    let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
     if fd < 0 {
         return false;
     }
     let Ok((file_len, dev, ino)) = stat_fd(fd) else {
+        // SAFETY: `fd` was opened above.
         unsafe {
             libc::close(fd);
         }
         return false;
     };
     if file_len < page * 2 || !file_len.is_multiple_of(page) {
+        // SAFETY: `fd` was opened above.
         unsafe {
             libc::close(fd);
         }
@@ -1270,25 +1400,29 @@ pub(crate) fn try_unlink_if_dead_owner(name: &str) -> bool {
         )
     };
     if trailer_ptr == libc::MAP_FAILED {
+        // SAFETY: `fd` was opened above.
         unsafe {
             libc::close(fd);
         }
         return false;
     }
+    // SAFETY: `trailer_ptr` maps one page holding `ShmOwnerPage`.
     let should_reap = unsafe {
         let p = &*(trailer_ptr as *const ShmOwnerPage);
         p.magic.load(Ordering::Acquire) == SHM_OWNER_MAGIC
             && p.header.owner_pid.load(Ordering::Acquire) != 0
             && !is_pid_alive(p.header.owner_pid.load(Ordering::Acquire))
     };
+    // SAFETY: `trailer_ptr` was mapped with length `page`.
     unsafe {
         libc::munmap(trailer_ptr, page);
     }
     let reaped = if should_reap {
-        try_unlink_stale_locked(fd, &cname, dev, ino)
+        try_unlink_stale_locked(fd, &cname, dev, ino, trailer_off, page)
     } else {
         false
     };
+    // SAFETY: `fd` was opened above.
     unsafe {
         libc::close(fd);
     }

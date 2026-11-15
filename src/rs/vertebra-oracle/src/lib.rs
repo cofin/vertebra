@@ -18,6 +18,7 @@ use pyo3::types::PyCapsule;
 use url::Url;
 use vertebra_core::broker::DIALECT_TAG_ORACLE;
 use vertebra_core::dbrpc::DbRpcOp;
+use vertebra_core::text::first_sql_keyword;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar, PlaceholderStyle,
     decode_dbrpc_request_frame, encode_dbrpc_response_frame, new_broker_engine_pycapsule,
@@ -184,8 +185,10 @@ fn oracle_cell_to_scalar(cell: &OracleCellValue) -> DbRpcScalar {
 }
 
 fn oracle_sql_returns_rows(sql: &str) -> bool {
-    let trimmed = sql.trim_start().to_ascii_uppercase();
-    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
+    matches!(
+        first_sql_keyword(sql),
+        Some(kw) if kw.eq_ignore_ascii_case("SELECT") || kw.eq_ignore_ascii_case("WITH")
+    )
 }
 
 fn encode_oracle_err(request_id: u64, err: &OracleError) -> Vec<u8> {

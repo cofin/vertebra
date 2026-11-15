@@ -8,7 +8,7 @@
 
 pub mod errors;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
@@ -29,7 +29,10 @@ use vertebra_core::broker::DIALECT_TAG_DUCKDB;
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_core::shm::ShmRegion;
-use vertebra_db::arrow_shm::{ShmArrowFrameHeader, ShmArrowStreamWriter};
+use vertebra_core::text::classify_sql_statement;
+use vertebra_db::arrow_shm::{
+    ACTIVE_ARROW_SHM_REGIONS, ShmArrowFrameHeader, ShmArrowStreamWriter, release_shm_arrow_frame,
+};
 use vertebra_db::duckdb::DuckdbConfig;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
@@ -3510,10 +3513,33 @@ impl AsyncDuckDBClient {
 }
 
 const DUCKDB_BROKER_ARROW_SPILL_ROWS: usize = 256;
+const DUCKDB_MAX_ACTIVE_SHM: usize = 64;
 
 struct DuckDBPoolEntry {
     inner: Arc<DuckDBInner>,
-    active_shm: Mutex<Vec<Arc<ShmRegion>>>,
+    active_shm: Mutex<VecDeque<String>>,
+}
+
+impl DuckDBPoolEntry {
+    fn register_active_shm(&self, shm_name: &str, region: Arc<ShmRegion>) {
+        let key = shm_name.to_string();
+        ACTIVE_ARROW_SHM_REGIONS.insert(key.clone(), region);
+        let evicted = {
+            let mut guard = self
+                .active_shm
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.retain(|existing| ACTIVE_ARROW_SHM_REGIONS.contains_key(existing));
+            let oldest = (guard.len() >= DUCKDB_MAX_ACTIVE_SHM)
+                .then(|| guard.pop_front())
+                .flatten();
+            guard.push_back(key);
+            oldest
+        };
+        if let Some(old_name) = evicted {
+            let _ = release_shm_arrow_frame(&old_name);
+        }
+    }
 }
 
 /// Shared-memory broker backend managing single-writer DuckDB pools (`DIALECT_TAG_DUCKDB = 6`).
@@ -3607,8 +3633,8 @@ fn duck_value_to_scalar(val: &DuckValue) -> DbRpcScalar {
 }
 
 fn sql_returns_rows(sql: &str) -> bool {
-    let upper = sql.to_ascii_uppercase();
-    is_read_only_sql(sql) || upper.contains(" RETURNING ")
+    classify_sql_statement(sql).0
+        || (!is_mutating_sql(sql) && leading_sql_keyword(sql) == "SUMMARIZE")
 }
 
 fn encode_duckdb_err(request_id: u64, err: &DuckDBClientError) -> Vec<u8> {
@@ -3656,7 +3682,7 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
         .map_err(|e| e.to_string())?;
         let entry = Arc::new(DuckDBPoolEntry {
             inner,
-            active_shm: Mutex::new(Vec::new()),
+            active_shm: Mutex::new(VecDeque::new()),
         });
         let pool_id = self.next_pool_id.fetch_add(1, Ordering::Relaxed);
         let mut guard = self
@@ -3708,11 +3734,7 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
                                 region,
                                 ..
                             }) => {
-                                entry
-                                    .active_shm
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .push(region);
+                                entry.register_active_shm(&shm_name, region);
                                 Ok(encode_dbrpc_response_frame(
                                     &DbRpcEncodedResponse::ok_arrow_shm(
                                         req_id,
@@ -3747,11 +3769,7 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
                                     region,
                                     ..
                                 }) => {
-                                    entry
-                                        .active_shm
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .push(region);
+                                    entry.register_active_shm(&shm_name, region);
                                     Ok(encode_dbrpc_response_frame(
                                         &DbRpcEncodedResponse::ok_arrow_shm(
                                             req_id,
@@ -3857,11 +3875,15 @@ impl BrokerPoolBackend for DuckDBBrokerBackend {
         };
         if let Some(entry) = removed {
             entry.inner.close_all();
-            entry
+            let pending: Vec<String> = entry
                 .active_shm
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
+                .drain(..)
+                .collect();
+            for shm_name in pending {
+                let _ = release_shm_arrow_frame(&shm_name);
+            }
         }
     }
 }

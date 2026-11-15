@@ -71,6 +71,7 @@ fn live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner() {
         if mode == "panic" {
             let name2 = std::env::var("VTB_SHM_OWNER_NAME_2").expect("child seg name 2");
             let region2 = ShmRegion::create_named(&name2, 4096).expect("child create_named 2");
+            println!("CREATED");
             let prev = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 vertebra_core::cleanup::cleanup_all();
@@ -97,6 +98,7 @@ fn live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner() {
         Err(ShmError::Sys(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(e) => panic!("{e:?}"),
     };
+    // SAFETY: `first` is exclusively owned in this test thread.
     unsafe {
         first.as_mut_slice()[0] = 0x5A;
     }
@@ -105,6 +107,7 @@ fn live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner() {
 
     let err = ShmRegion::create_named(&live_name, 4096).unwrap_err();
     assert!(matches!(err, ShmError::InUse { owner_pid } if owner_pid == std::process::id()));
+    // SAFETY: `first` mapping remains valid while held.
     unsafe {
         assert_eq!(first.as_slice()[0], 0x5A);
     }
@@ -130,8 +133,16 @@ fn live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner() {
 #[cfg(unix)]
 #[test]
 fn open_or_create_named_multi_thread_single_creator_and_cleanup_hooks() {
+    use std::os::unix::process::ExitStatusExt;
     use std::sync::Barrier;
     use vertebra_core::shm::{NamedAttach, SHM_INIT_READY};
+
+    struct BarrierDropGuard<'a>(&'a Barrier);
+    impl Drop for BarrierDropGuard<'_> {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
 
     let name = crate::unique_shm_name("/vtb-ooc");
     let threads = 8usize;
@@ -145,26 +156,28 @@ fn open_or_create_named_multi_thread_single_creator_and_cleanup_hooks() {
             let done_bar = std::sync::Arc::clone(&done_barrier);
             handles.push(s.spawn(move || {
                 bar.wait();
-                match ShmRegion::open_or_create_named(&seg, 4096, |reg| {
+                let attached = ShmRegion::open_or_create_named(&seg, 4096, |reg| {
+                    // SAFETY: creator holds `SHM_INIT_PENDING` exclusivity during initialization.
                     unsafe {
                         reg.as_mut_slice()[0] = 0x7E;
                     }
                     Ok(())
-                })
-                .expect("open_or_create_named")
-                {
+                });
+                let _done_guard = BarrierDropGuard(&done_bar);
+                match attached.expect("open_or_create_named") {
                     NamedAttach::Created(r) => {
                         let pid = r.owner_pid().unwrap_or(0);
-                        done_bar.wait();
+                        drop(_done_guard);
                         assert!(r.unlink_now());
                         (true, pid)
                     }
                     NamedAttach::Attached(r) => {
                         let pid = r.owner_pid().unwrap_or(0);
+                        // SAFETY: initializer finished with `SHM_INIT_READY` Release before attach.
                         unsafe {
                             assert_eq!(r.as_slice()[0], 0x7E);
                         }
-                        done_bar.wait();
+                        drop(_done_guard);
                         (false, pid)
                     }
                 }
@@ -175,24 +188,33 @@ fn open_or_create_named_multi_thread_single_creator_and_cleanup_hooks() {
     assert_eq!(SHM_INIT_READY, 1);
     assert_eq!(results.iter().filter(|(created, _)| *created).count(), 1);
     assert_eq!(results.iter().filter(|(created, _)| !*created).count(), 7);
+    assert!(results.iter().all(|(_, pid)| *pid == std::process::id()));
     let _ = vertebra_core::shm::shm_unlink_named(&name);
 
     let exe = std::env::current_exe().expect("current_exe");
     let p1 = crate::unique_shm_name("/vtb-panic1");
     let p2 = crate::unique_shm_name("/vtb-panic2");
-    let panic_status = std::process::Command::new(&exe)
+    let panic_out = std::process::Command::new(&exe)
         .env("VTB_SHM_OWNER_CHILD", "panic")
         .env("VTB_SHM_OWNER_NAME", &p1)
         .env("VTB_SHM_OWNER_NAME_2", &p2)
         .arg("--exact")
         .arg("shm::live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .arg("--nocapture")
+        .output()
         .expect("spawn panic child");
-    assert!(!panic_status.success());
-    assert!(!std::path::Path::new(&format!("/dev/shm{p1}")).exists());
-    assert!(!std::path::Path::new(&format!("/dev/shm{p2}")).exists());
+    assert!(!panic_out.status.success());
+    assert!(
+        String::from_utf8_lossy(&panic_out.stdout).contains("CREATED"),
+        "panic child exited before creating both segments"
+    );
+    assert!(ShmRegion::open_named(&p1, 4096).is_err());
+    assert!(ShmRegion::open_named(&p2, 4096).is_err());
+    #[cfg(target_os = "linux")]
+    {
+        assert!(!std::path::Path::new(&format!("/dev/shm{p1}")).exists());
+        assert!(!std::path::Path::new(&format!("/dev/shm{p2}")).exists());
+    }
 
     let reap_dead = crate::unique_shm_name("/vtb-reap-only");
     let child_dead = std::process::Command::new(&exe)
@@ -205,10 +227,16 @@ fn open_or_create_named_multi_thread_single_creator_and_cleanup_hooks() {
     assert!(child_dead.success());
     let reap_live = crate::unique_shm_name("/vtb-reap-only-live");
     let live_reg = ShmRegion::create_named(&reap_live, 4096).expect("live region");
-    let reaped = vertebra_core::cleanup::reap_dead_owner_segments(&["/vtb-reap-only"]);
-    assert!(reaped >= 1);
-    assert!(!std::path::Path::new(&format!("/dev/shm{reap_dead}")).exists());
-    assert!(std::path::Path::new(&format!("/dev/shm{reap_live}")).exists());
+    let reaped =
+        vertebra_core::cleanup::reap_dead_owner_segments(&[reap_dead.as_str(), reap_live.as_str()]);
+    assert_eq!(reaped, 1);
+    assert!(ShmRegion::open_named(&reap_dead, 4096).is_err());
+    assert!(ShmRegion::open_named(&reap_live, 4096).is_ok());
+    #[cfg(target_os = "linux")]
+    {
+        assert!(!std::path::Path::new(&format!("/dev/shm{reap_dead}")).exists());
+        assert!(std::path::Path::new(&format!("/dev/shm{reap_live}")).exists());
+    }
     drop(live_reg);
 
     use std::io::BufRead;
@@ -225,17 +253,22 @@ fn open_or_create_named_multi_thread_single_creator_and_cleanup_hooks() {
     let stdout = sig_child.stdout.take().expect("piped stdout");
     let mut reader = std::io::BufReader::new(stdout);
     let mut line = String::new();
+    let mut ready_seen = false;
     while reader.read_line(&mut line).expect("read child line") > 0 {
         if line.contains("READY") {
+            ready_seen = true;
             break;
         }
         line.clear();
     }
-    let child_pid = sig_child.id() as i32;
-    unsafe {
-        libc::kill(child_pid, libc::SIGTERM);
-    }
-    let _ = sig_child.wait().expect("wait sigterm child");
+    assert!(ready_seen, "sigterm child exited before READY");
+    let child_pid = sig_child.id() as libc::pid_t;
+    // SAFETY: `child_pid` is our live child process spawned above.
+    assert_eq!(unsafe { libc::kill(child_pid, libc::SIGTERM) }, 0);
+    let sig_status = sig_child.wait().expect("wait sigterm child");
+    assert_eq!(sig_status.signal(), Some(libc::SIGTERM));
+    assert!(ShmRegion::open_named(&sig_name, 4096).is_err());
+    #[cfg(target_os = "linux")]
     assert!(!std::path::Path::new(&format!("/dev/shm{sig_name}")).exists());
 }
 

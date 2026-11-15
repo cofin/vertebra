@@ -462,19 +462,23 @@ impl PostgresBrokerBackend {
             .collect()
     }
 
-    async fn rollback_and_release(mut conn: PooledConnection) {
-        let _ = conn.rollback().await;
-        let _ = conn.release().await;
+    async fn rollback_and_release(mut conn: PooledConnection) -> Result<(), PostgresError> {
+        let rb_res = conn.rollback().await;
+        let rel_res = conn.release().await;
+        rb_res.map(|_| ())?;
+        rel_res?;
+        Ok(())
     }
 
-    async fn release_pinned_entry(entry: Option<PinnedPgConn>) {
+    async fn release_pinned_entry(entry: Option<PinnedPgConn>) -> Result<(), PostgresError> {
         if let Some(pinned_conn) = entry {
             let mut guard = pinned_conn.lock().await;
             if let Some((_, conn)) = guard.take() {
                 drop(guard);
-                Self::rollback_and_release(conn).await;
+                return Self::rollback_and_release(conn).await;
             }
         }
+        Ok(())
     }
 
     fn lookup_pinned_action(
@@ -552,7 +556,7 @@ impl PostgresBrokerBackend {
                 newer_evicted: true,
                 ..
             } => {
-                Self::release_pinned_entry(Some(evicted)).await;
+                Self::release_pinned_entry(Some(evicted)).await?;
                 if allow_missing_or_unleased {
                     Ok(())
                 } else {
@@ -731,7 +735,7 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                                 req.lease_generation,
                                 &pinned_conn,
                             );
-                            Self::rollback_and_release(stale).await;
+                            let _ = Self::rollback_and_release(stale).await;
                         }
                     }
                     let mut conn = pool.acquire().await?;
@@ -776,7 +780,7 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                         Err(()) => return Ok(Self::encode_stale_generation_err(req_id)),
                     };
                 let outcome: Result<PooledConnection, PostgresError> = block_on_db(async move {
-                    Self::release_pinned_entry(previous).await;
+                    let _ = Self::release_pinned_entry(previous).await;
                     let mut conn = pool.acquire().await?;
                     if let Err(err) = conn.begin().await {
                         let _ = conn.release().await;
@@ -812,9 +816,9 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
                         let reject_entry = if !installed { Some(entry) } else { None };
                         if reject_entry.is_some() || raced.is_some() || stale_entry.is_some() {
                             block_on_db(async move {
-                                Self::release_pinned_entry(reject_entry).await;
-                                Self::release_pinned_entry(raced).await;
-                                Self::release_pinned_entry(stale_entry).await;
+                                let _ = Self::release_pinned_entry(reject_entry).await;
+                                let _ = Self::release_pinned_entry(raced).await;
+                                let _ = Self::release_pinned_entry(stale_entry).await;
                             });
                         }
                         if !pool_alive || (installed && !pool_still_alive) {
@@ -949,7 +953,7 @@ impl BrokerPoolBackend for PostgresBrokerBackend {
         if !drained.is_empty() {
             block_on_db(async move {
                 for pinned in drained {
-                    Self::release_pinned_entry(Some(pinned)).await;
+                    let _ = Self::release_pinned_entry(Some(pinned)).await;
                 }
             });
         }

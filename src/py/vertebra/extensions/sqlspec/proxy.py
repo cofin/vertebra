@@ -44,6 +44,7 @@ from vertebra.utils.serializers import (
     encode_msgpack_bytes,
 )
 from vertebra.utils.sync_tools import SyncPool
+from vertebra.utils.type_guards import is_coroutine_callable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -1270,8 +1271,11 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         if self.broker is None:
             return
         target = getattr(self.broker, "transport", self.broker)
-        quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
-        if callable(quarantine_fn):
+        quarantine_sync_fn = getattr(self.broker, "quarantine_sync", None) or getattr(target, "quarantine_sync", None)
+        quarantine_fn = (
+            quarantine_sync_fn or getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
+        )
+        if callable(quarantine_fn) and not is_coroutine_callable(quarantine_fn):
             try:
                 quarantine_fn(lease)
             except RuntimeError as exc:
@@ -1288,8 +1292,14 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         """Release a directly acquired broker lease."""
         if lease is None or getattr(lease, "quarantined", False):
             return
-        if hasattr(lease, "release") and callable(lease.release):
+        lease_release_sync = getattr(lease, "release_sync", None)
+        if callable(lease_release_sync):
+            lease_release_sync()
+            return
+        if hasattr(lease, "release") and callable(lease.release) and not is_coroutine_callable(lease.release):
             lease.release()
+            return
+        if self.broker is None:
             return
         resolved_slot = self.slot_idx if slot_idx is None else slot_idx
         resolved_gen = self.generation if generation is None else generation
@@ -1298,8 +1308,12 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             release_lease_fn(resolved_slot, resolved_gen, in_tx=False)
             return
         target = getattr(self.broker, "transport", self.broker)
+        release_sync_fn = getattr(self.broker, "release_sync", None) or getattr(target, "release_sync", None)
+        if callable(release_sync_fn):
+            release_sync_fn(f"{resolved_slot}:{resolved_gen}")
+            return
         release_fn = getattr(target, "release", None)
-        if callable(release_fn):
+        if callable(release_fn) and not is_coroutine_callable(release_fn):
             release_fn(f"{resolved_slot}:{resolved_gen}")
 
     @staticmethod

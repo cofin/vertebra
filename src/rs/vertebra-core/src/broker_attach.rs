@@ -15,10 +15,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+fn validate_timeout(timeout: Duration) -> Result<(), AttachError> {
+    if timeout.is_zero() {
+        return Err(AttachError::Timeout(
+            "attach timeout must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 const HANDSHAKE_MAGIC: [u8; 4] = *b"VTBA";
 const HANDSHAKE_VERSION: u16 = 1;
@@ -292,13 +302,34 @@ fn send_ack_and_fd(stream: &UnixStream, shm_fd: RawFd, shm_size: u64) -> Result<
         );
     }
 
-    // SAFETY: `stream` and `msg` remain valid for the duration of `sendmsg`.
-    let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
-    if sent < 0 {
-        let err = std::io::Error::last_os_error();
+    let sent = loop {
+        // SAFETY: `stream` and `msg` remain valid for the duration of `sendmsg`.
+        let rc = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                return Err(AttachError::Timeout(
+                    "timed out sending SHM descriptor".to_string(),
+                ));
+            }
+            return Err(AttachError::Io(err));
+        }
+        break rc as usize;
+    };
+    if sent == 0 {
+        return Err(AttachError::Protocol(
+            "zero-byte sendmsg while sending SHM descriptor".to_string(),
+        ));
+    }
+    if sent < payload.len()
+        && let Err(err) = (&*stream).write_all(&payload[sent..])
+    {
         if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
             return Err(AttachError::Timeout(
-                "timed out sending SHM descriptor".to_string(),
+                "timed out sending trailing attach ack bytes".to_string(),
             ));
         }
         return Err(AttachError::Io(err));
@@ -308,93 +339,220 @@ fn send_ack_and_fd(stream: &UnixStream, shm_fd: RawFd, shm_size: u64) -> Result<
 
 #[cfg(unix)]
 fn recv_ack_and_fd(stream: &UnixStream) -> Result<(OwnedFd, usize), AttachError> {
-    let mut payload = [0u8; 16];
-    let mut iov = libc::iovec {
-        iov_base: payload.as_mut_ptr().cast::<libc::c_void>(),
-        iov_len: payload.len(),
-    };
+    let mut payload = [0u8; 10];
 
     #[repr(C)]
     union CmsgSpace {
         hdr: libc::cmsghdr,
         buf: [u8; 128],
     }
-    let mut cmsg_space = CmsgSpace { buf: [0u8; 128] };
 
-    // SAFETY: Zero-initialized `msghdr` pointing to valid `iov` and `cmsg_space`.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    // SAFETY: Aligned control buffer matching `cmsghdr`.
-    msg.msg_control = unsafe { cmsg_space.buf.as_mut_ptr() }.cast::<libc::c_void>();
-    msg.msg_controllen = 128 as _;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let recv_flags = libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    let recv_flags = 0;
 
-    // SAFETY: Receiving handshake response + optional `SCM_RIGHTS` FD.
-    let nread = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) };
-    if nread < 0 {
-        let err = std::io::Error::last_os_error();
-        if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
-            return Err(AttachError::Timeout(
-                "timed out receiving SHM descriptor".to_string(),
+    let (nread_usize, mut cmsg_space, msg_flags, msg_controllen) = loop {
+        let mut iov = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: payload.len(),
+        };
+        let mut cmsg_space = CmsgSpace { buf: [0u8; 128] };
+        // SAFETY: Zero-initialized `msghdr` pointing to valid `iov` and `cmsg_space`.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        // SAFETY: Aligned control buffer matching `cmsghdr`.
+        msg.msg_control = unsafe { cmsg_space.buf.as_mut_ptr() }.cast::<libc::c_void>();
+        msg.msg_controllen = 128 as _;
+
+        // SAFETY: Receiving handshake response + optional `SCM_RIGHTS` FD.
+        let nread = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, recv_flags) };
+        if nread < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                return Err(AttachError::Timeout(
+                    "timed out receiving SHM descriptor".to_string(),
+                ));
+            }
+            return Err(AttachError::Io(err));
+        }
+        if nread == 0 {
+            return Err(AttachError::Protocol(
+                "server closed UDS connection during attach handshake".to_string(),
             ));
         }
-        return Err(AttachError::Io(err));
+        break (
+            nread as usize,
+            cmsg_space,
+            msg.msg_flags,
+            msg.msg_controllen,
+        );
+    };
+
+    let mut received_fds: Vec<OwnedFd> = Vec::new();
+    // SAFETY: Reading control header fields populated by `recvmsg`.
+    let ctrl_base = unsafe { cmsg_space.buf.as_ptr() } as usize;
+    // SAFETY: `buf` is 128 bytes long; `msg_controllen` is clamped to buffer capacity.
+    let ctrl_len = unsafe { msg_controllen.min(cmsg_space.buf.len()) };
+    let ctrl_end = ctrl_base + ctrl_len;
+    // SAFETY: `CMSG_LEN(0)` evaluates the aligned header size with zero data bytes.
+    let hdr_data_offset = unsafe { libc::CMSG_LEN(0) } as usize;
+
+    let mut probe_msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    // SAFETY: Pointing `probe_msg` only for `CMSG_FIRSTHDR`/`CMSG_NXTHDR` cursor traversal.
+    probe_msg.msg_control = unsafe { cmsg_space.buf.as_mut_ptr() }.cast::<libc::c_void>();
+    probe_msg.msg_controllen = ctrl_len as _;
+
+    // SAFETY: Walking validated `cmsg` headers inside `cmsg_space`.
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&probe_msg) };
+    while !cmsg.is_null() {
+        let cmsg_addr = cmsg as usize;
+        if cmsg_addr < ctrl_base || cmsg_addr + std::mem::size_of::<libc::cmsghdr>() > ctrl_end {
+            break;
+        }
+        // SAFETY: `cmsg` lies within `cmsg_space.buf[..ctrl_len]`.
+        let hdr = unsafe { &*cmsg };
+        let cmsg_len = hdr.cmsg_len as usize;
+        if hdr.cmsg_level == libc::SOL_SOCKET
+            && hdr.cmsg_type == libc::SCM_RIGHTS
+            && cmsg_len >= hdr_data_offset
+        {
+            // SAFETY: `cmsg` has valid length at least `CMSG_LEN(0)`.
+            let data_ptr = unsafe { libc::CMSG_DATA(cmsg) };
+            let max_avail = ctrl_end.saturating_sub(data_ptr as usize);
+            let payload_bytes = cmsg_len.saturating_sub(hdr_data_offset).min(max_avail);
+            let fd_count = payload_bytes / std::mem::size_of::<RawFd>();
+            for i in 0..fd_count {
+                let mut raw_fd: RawFd = -1;
+                // SAFETY: `i * size_of::<RawFd>() + size_of::<RawFd>() <= max_avail`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data_ptr.add(i * std::mem::size_of::<RawFd>()),
+                        (&mut raw_fd as *mut RawFd).cast::<u8>(),
+                        std::mem::size_of::<RawFd>(),
+                    );
+                }
+                if raw_fd >= 0 {
+                    // SAFETY: `raw_fd` is newly installed in this process via `SCM_RIGHTS`.
+                    unsafe {
+                        let _ = libc::fcntl(raw_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        received_fds.push(OwnedFd::from_raw_fd(raw_fd));
+                    }
+                }
+            }
+        }
+        // SAFETY: Advancing to subsequent control message header within `msg_control`.
+        cmsg = unsafe { libc::CMSG_NXTHDR(&probe_msg, cmsg) };
     }
-    if nread == 0 {
+
+    if (msg_flags & libc::MSG_CTRUNC) != 0 {
         return Err(AttachError::Protocol(
-            "server closed UDS connection during attach handshake".to_string(),
+            "SCM_RIGHTS control data truncated (MSG_CTRUNC)".to_string(),
         ));
     }
-    let nread_usize = nread as usize;
     if payload[0] != ACK_STATUS_OK {
         return Err(AttachError::AuthFailed("attach secret verification failed"));
     }
-    if nread_usize < 10 {
+    if nread_usize < payload.len()
+        && let Err(err) = (&*stream).read_exact(&mut payload[nread_usize..])
+    {
+        if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+            return Err(AttachError::Timeout(
+                "timed out receiving attach response frame".to_string(),
+            ));
+        }
         return Err(AttachError::Protocol(format!(
-            "truncated attach response frame: expected 10 bytes, got {nread_usize}"
+            "truncated attach response frame: {err}"
+        )));
+    }
+    if received_fds.len() > 1 {
+        return Err(AttachError::Protocol(format!(
+            "expected single SCM_RIGHTS SHM descriptor, got {}",
+            received_fds.len()
         )));
     }
     let shm_size_u64 = u64::from_le_bytes(payload[2..10].try_into().expect("8-byte slice"));
     let shm_size = usize::try_from(shm_size_u64)
         .map_err(|_| AttachError::Protocol("SHM size overflows usize".to_string()))?;
 
-    let mut received_fd: Option<OwnedFd> = None;
-    // SAFETY: Walking validated `cmsg` headers inside `cmsg_space`.
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-    while !cmsg.is_null() {
-        // SAFETY: `cmsg` points within `msg_control` bounds guaranteed by kernel.
-        let hdr = unsafe { &*cmsg };
-        if hdr.cmsg_level == libc::SOL_SOCKET && hdr.cmsg_type == libc::SCM_RIGHTS {
-            let mut raw_fd: RawFd = -1;
-            // SAFETY: Copying one `RawFd` from `CMSG_DATA(cmsg)`.
-            unsafe {
-                let data_ptr = libc::CMSG_DATA(cmsg);
-                std::ptr::copy_nonoverlapping(
-                    data_ptr,
-                    (&mut raw_fd as *mut RawFd).cast::<u8>(),
-                    std::mem::size_of::<RawFd>(),
-                );
-            }
-            if raw_fd >= 0 {
-                // SAFETY: `raw_fd` is newly installed in this process via `SCM_RIGHTS`.
-                unsafe {
-                    let _ = libc::fcntl(raw_fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                    if received_fd.is_none() {
-                        received_fd = Some(OwnedFd::from_raw_fd(raw_fd));
-                    } else {
-                        libc::close(raw_fd);
-                    }
-                }
-            }
-        }
-        // SAFETY: Advancing to subsequent control message header within `msg_control`.
-        cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
-    }
-
-    let owned = received_fd.ok_or_else(|| {
+    let owned = received_fds.pop().ok_or_else(|| {
         AttachError::Protocol("server response lacked SCM_RIGHTS SHM descriptor".to_string())
     })?;
     Ok((owned, shm_size))
+}
+
+#[cfg(unix)]
+fn read_exact_interruptible(
+    stream: &mut UnixStream,
+    buf: &mut [u8],
+    deadline: Instant,
+    stop_flag: Option<&AtomicBool>,
+    timeout_msg: &str,
+    eof_prefix: &str,
+) -> Result<(), AttachError> {
+    let mut offset = 0usize;
+    while offset < buf.len() {
+        if stop_flag.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(AttachError::Timeout("attach server stopping".to_string()));
+        }
+        match stream.read(&mut buf[offset..]) {
+            Ok(0) => {
+                return Err(AttachError::Protocol(format!(
+                    "{eof_prefix}: unexpected EOF after {offset} of {} bytes",
+                    buf.len()
+                )));
+            }
+            Ok(n) => {
+                offset += n;
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(AttachError::Timeout(timeout_msg.to_string()));
+                }
+                let rem = deadline.saturating_duration_since(now);
+                let slice_ms = rem
+                    .min(Duration::from_millis(50))
+                    .as_millis()
+                    .clamp(1, i32::MAX as u128) as i32;
+                let mut pfd = libc::pollfd {
+                    fd: stream.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: `pfd` covers the live socket descriptor for a bounded poll slice.
+                let rc = unsafe { libc::poll(&mut pfd, 1, slice_ms) };
+                if rc < 0 {
+                    let io_err = std::io::Error::last_os_error();
+                    if io_err.kind() == ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(AttachError::Io(io_err));
+                }
+            }
+            Err(err) => {
+                return Err(AttachError::Protocol(format!("{eof_prefix}: {err}")));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -404,22 +562,22 @@ fn handle_client_connection(
     shm_fd: RawFd,
     shm_size: u64,
     timeout: Duration,
+    stop_flag: Option<&AtomicBool>,
 ) -> Result<(), AttachError> {
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    validate_timeout(timeout)?;
+    let deadline = Instant::now() + timeout;
     verify_peer_uid(&stream)?;
+    stream.set_nonblocking(true)?;
 
     let mut header = [0u8; 8];
-    if let Err(err) = stream.read_exact(&mut header) {
-        if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
-            return Err(AttachError::Timeout(
-                "timed out reading attach handshake header".to_string(),
-            ));
-        }
-        return Err(AttachError::Protocol(format!(
-            "truncated attach handshake header: {err}"
-        )));
-    }
+    read_exact_interruptible(
+        &mut stream,
+        &mut header,
+        deadline,
+        stop_flag,
+        "timed out reading attach handshake header",
+        "truncated attach handshake header",
+    )?;
     if header[0..4] != HANDSHAKE_MAGIC {
         return Err(AttachError::Protocol(
             "invalid attach handshake magic".to_string(),
@@ -433,21 +591,34 @@ fn handle_client_connection(
     }
     let secret_len = usize::from(u16::from_le_bytes([header[6], header[7]]));
     if secret_len == 0 || secret_len > MAX_SECRET_BYTES {
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_write_timeout(Some(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)),
+        ));
         let _ = stream.write_all(&[ACK_STATUS_REJECTED]);
         return Err(AttachError::AuthFailed("invalid attach secret length"));
     }
 
     let mut candidate = vec![0u8; secret_len];
-    if let Err(err) = stream.read_exact(&mut candidate) {
-        if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
-            return Err(AttachError::Timeout(
-                "timed out reading attach secret payload".to_string(),
-            ));
-        }
-        return Err(AttachError::Protocol(format!(
-            "truncated attach secret payload: {err}"
-        )));
+    read_exact_interruptible(
+        &mut stream,
+        &mut candidate,
+        deadline,
+        stop_flag,
+        "timed out reading attach secret payload",
+        "truncated attach secret payload",
+    )?;
+
+    stream.set_nonblocking(false)?;
+    let write_rem = deadline.saturating_duration_since(Instant::now());
+    if write_rem.is_zero() {
+        return Err(AttachError::Timeout(
+            "timed out before writing attach handshake response".to_string(),
+        ));
     }
+    stream.set_write_timeout(Some(write_rem))?;
 
     if !secret.matches_constant_time(&candidate) {
         let _ = stream.write_all(&[ACK_STATUS_REJECTED]);
@@ -544,6 +715,7 @@ impl BrokerAttachServer {
     /// Accept and authenticate a single client connection within `timeout`, delivering `shm_fd`.
     #[cfg(unix)]
     pub fn serve_one(&self, timeout: Duration) -> Result<(), AttachError> {
+        validate_timeout(timeout)?;
         let stream = self.accept_with_timeout(timeout)?;
         handle_client_connection(
             stream,
@@ -551,6 +723,7 @@ impl BrokerAttachServer {
             self.shm_fd.as_raw_fd(),
             self.shm_size,
             timeout,
+            None,
         )
     }
 
@@ -620,13 +793,13 @@ impl BrokerAttachServer {
                         continue;
                     }
                     if let Ok((stream, _)) = self.listener.accept() {
-                        let _ = stream.set_nonblocking(false);
                         let _ = handle_client_connection(
                             stream,
                             &self.secret,
                             self.shm_fd.as_raw_fd(),
                             self.shm_size,
                             Duration::from_secs(5),
+                            Some(&stop_worker),
                         );
                     }
                 }
@@ -697,6 +870,7 @@ impl BrokerAttachClient {
         secret: &[u8],
         timeout: Duration,
     ) -> Result<(OwnedFd, usize), AttachError> {
+        validate_timeout(timeout)?;
         let redacted = RedactedSecret::new(secret.to_vec())?;
         let path = socket_path.as_ref();
         check_socket_security(path)?;
@@ -748,5 +922,160 @@ impl BrokerAttachClient {
     #[must_use]
     pub fn into_raw_fd(owned: OwnedFd) -> RawFd {
         owned.into_raw_fd()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn recv_ack_and_fd_rejects_multiple_fds_and_closes_all() {
+        let (server, client) = UnixStream::pair().expect("unix stream pair");
+        let mut pipe_fds: [RawFd; 2] = [-1; 2];
+        // SAFETY: `pipe_fds` points to 2 writable `RawFd` slots.
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        // SAFETY: Both pipe descriptors were created cleanly by `libc::pipe`.
+        let (read_fd, write_fd) = unsafe {
+            (
+                OwnedFd::from_raw_fd(pipe_fds[0]),
+                OwnedFd::from_raw_fd(pipe_fds[1]),
+            )
+        };
+
+        let mut payload = [0u8; 10];
+        payload[0] = ACK_STATUS_OK;
+        payload[2..10].copy_from_slice(&4096u64.to_le_bytes());
+
+        let mut iov = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: payload.len(),
+        };
+
+        #[repr(C)]
+        union CmsgSpace {
+            hdr: libc::cmsghdr,
+            buf: [u8; 128],
+        }
+        let mut cmsg_space = CmsgSpace { buf: [0u8; 128] };
+        let two_fds = [write_fd.as_raw_fd(), write_fd.as_raw_fd()];
+        let data_bytes = std::mem::size_of_val(&two_fds) as u32;
+        // SAFETY: Evaluating `CMSG_SPACE` for two `RawFd` entries.
+        let needed = unsafe { libc::CMSG_SPACE(data_bytes) } as usize;
+
+        // SAFETY: Initializing `msghdr` with `iov` and `cmsg_space`.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        // SAFETY: Control buffer matches `needed` bytes.
+        msg.msg_control = unsafe { cmsg_space.buf.as_mut_ptr() }.cast::<libc::c_void>();
+        msg.msg_controllen = needed as _;
+
+        // SAFETY: Populating one `SCM_RIGHTS` header carrying two FDs.
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            assert!(!cmsg.is_null());
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(data_bytes) as _;
+            std::ptr::copy_nonoverlapping(
+                two_fds.as_ptr().cast::<u8>(),
+                libc::CMSG_DATA(cmsg),
+                data_bytes as usize,
+            );
+        }
+
+        // SAFETY: `server` and `msg` are valid.
+        assert_eq!(unsafe { libc::sendmsg(server.as_raw_fd(), &msg, 0) }, 10);
+        drop(write_fd);
+
+        let err = recv_ack_and_fd(&client).expect_err("extra FDs must be rejected");
+        assert!(matches!(err, AttachError::Protocol(_)));
+
+        // SAFETY: `read_fd` is owned exclusively by this test.
+        let mut pipe_reader = std::fs::File::from(read_fd);
+        let mut probe = [0u8; 1];
+        let n = pipe_reader.read(&mut probe).expect("read pipe EOF");
+        assert_eq!(n, 0, "all received extra FDs must be closed on error");
+    }
+
+    #[test]
+    fn recv_ack_and_fd_reassembles_split_ack_payload() {
+        let (server, client) = UnixStream::pair().expect("unix stream pair");
+        let shm = crate::shm::ShmRegion::create(4096).expect("anon shm");
+        let raw_fd = shm.handle().expect("shm handle");
+
+        let mut head = [0u8; 4];
+        head[0] = ACK_STATUS_OK;
+        let full_size = 8192u64.to_le_bytes();
+        head[2..4].copy_from_slice(&full_size[0..2]);
+
+        let mut iov = libc::iovec {
+            iov_base: head.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: head.len(),
+        };
+        #[repr(C)]
+        union CmsgSpace {
+            hdr: libc::cmsghdr,
+            buf: [u8; 128],
+        }
+        let mut cmsg_space = CmsgSpace { buf: [0u8; 128] };
+        let data_bytes = std::mem::size_of::<RawFd>() as u32;
+        // SAFETY: Evaluating `CMSG_SPACE` for one `RawFd`.
+        let needed = unsafe { libc::CMSG_SPACE(data_bytes) } as usize;
+        // SAFETY: Zeroed `msghdr`.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        // SAFETY: Control buffer aligned to `cmsghdr`.
+        msg.msg_control = unsafe { cmsg_space.buf.as_mut_ptr() }.cast::<libc::c_void>();
+        msg.msg_controllen = needed as _;
+        // SAFETY: Writing single `SCM_RIGHTS` FD.
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(data_bytes) as _;
+            std::ptr::copy_nonoverlapping(
+                (&raw_fd as *const RawFd).cast::<u8>(),
+                libc::CMSG_DATA(cmsg),
+                std::mem::size_of::<RawFd>(),
+            );
+            assert_eq!(libc::sendmsg(server.as_raw_fd(), &msg, 0), 4);
+        }
+        (&server).write_all(&full_size[2..]).expect("tail write");
+
+        let (_fd, size) = recv_ack_and_fd(&client).expect("split ack reassembly");
+        assert_eq!(size, 8192);
+    }
+
+    #[test]
+    fn zero_timeout_returns_timeout_and_stop_interrupts_stalled_client() {
+        let dir = format!("/tmp/vtb-att-unit-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let sock = PathBuf::from(&dir).join("broker.sock");
+        let shm = crate::shm::ShmRegion::create(4096).expect("anon shm");
+        let server =
+            BrokerAttachServer::bind(&sock, b"unit-secret", shm.handle().unwrap(), 4096).unwrap();
+
+        let err = BrokerAttachClient::attach(&sock, b"unit-secret", Duration::ZERO).unwrap_err();
+        assert!(matches!(err, AttachError::Timeout(_)));
+
+        let handle = server.start_background().expect("start background");
+        let stalled_client = UnixStream::connect(&sock).expect("connect stalled client");
+        std::thread::sleep(Duration::from_millis(20));
+
+        let start = Instant::now();
+        handle.stop();
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "stop() stalled waiting on idle client: {:?}",
+            start.elapsed()
+        );
+        drop(stalled_client);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

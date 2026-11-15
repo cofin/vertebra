@@ -407,7 +407,7 @@ def test_broker_transport_leasing_and_channel_message() -> None:
     decoded = msgspec.msgpack.decode(encoded, type=ChannelMessage)
     assert decoded == msg
 
-    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=0.05))
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=1, acquire_timeout=0.05, lease_ttl=5.0))
     with transport.acquire() as lease1:
         assert lease1.is_overflow is False
         lease2 = transport.acquire()
@@ -531,7 +531,8 @@ async def test_shm_session_broker_concurrency_and_lock_safety() -> None:
     await async_broker.release()
     assert async_broker.in_use == 0
 
-    assert await async_broker.release() is None if False else async_broker.in_use == 0
+    await async_broker.release()
+    assert async_broker.in_use == 0
 
 
 @pytest.mark.anyio

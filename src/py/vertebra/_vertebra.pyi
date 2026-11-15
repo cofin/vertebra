@@ -925,9 +925,9 @@ class LeaseBroker:
     @staticmethod
     def open_named(
         name: str,
-        pool_size: int = 20,
-        max_overflow: int = 10,
-        stmt_capacity: int = 512,
+        pool_size: int | None = None,
+        max_overflow: int | None = None,
+        stmt_capacity: int | None = None,
     ) -> LeaseBroker: ...
     @staticmethod
     def open_or_create_named(

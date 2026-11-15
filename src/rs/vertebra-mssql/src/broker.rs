@@ -14,6 +14,7 @@ use vertebra_core::broker::{
 };
 use vertebra_core::dbrpc::DbRpcOp;
 use vertebra_core::shm::ShmRegion;
+use vertebra_core::text::classify_mssql_statement;
 use vertebra_db::py_async::block_on_db;
 use vertebra_db::{
     BrokerEngineBackend, BrokerPoolBackend, DbRpcEncodedResponse, DbRpcScalar,
@@ -195,8 +196,7 @@ fn mssql_cell_to_scalar(cell: &MssqlCellValue) -> DbRpcScalar {
 }
 
 fn mssql_sql_returns_rows(sql: &str) -> bool {
-    let trimmed = sql.trim_start().to_ascii_uppercase();
-    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.contains(" OUTPUT ")
+    classify_mssql_statement(sql).0
 }
 
 fn encode_mssql_err(request_id: u64, err: &MssqlError) -> Vec<u8> {
@@ -390,5 +390,20 @@ mod tests {
         assert_eq!(broker.lease_stats().active_leases, 1);
         broker.release_lease(grant).expect("release lease");
         assert_eq!(broker.lease_stats().active_leases, 0);
+    }
+
+    #[test]
+    fn mssql_sql_returns_rows_handles_comments_quotes_and_output() {
+        assert!(mssql_sql_returns_rows("/* lead */ SELECT 1"));
+        assert!(mssql_sql_returns_rows(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+        assert!(mssql_sql_returns_rows(
+            "INSERT INTO t OUTPUT INSERTED.id VALUES (1)"
+        ));
+        assert!(!mssql_sql_returns_rows("INSERT INTO t VALUES (' OUTPUT ')"));
+        assert!(!mssql_sql_returns_rows(
+            "UPDATE t SET t.output = 1 WHERE t.output = 2"
+        ));
     }
 }

@@ -348,19 +348,15 @@ fn test_heartbeat_extends_lease_and_rejects_stale_generation() {
     let table = ShmLeaseTable::init_in_region(region, 2, 0).unwrap();
 
     let g = table.try_acquire(2001, 30_000_000, 0).unwrap();
-    std::thread::sleep(Duration::from_millis(18));
+    let t0 = g.acquired_ns;
+    while vertebra_core::broker::monotonic_now_ns() <= t0 {
+        std::thread::yield_now();
+    }
     table.heartbeat(g.slot_index, g.generation).unwrap();
-    std::thread::sleep(Duration::from_millis(18));
-    assert_eq!(
-        table.reap_expired(vertebra_core::broker::monotonic_now_ns()),
-        0
-    );
+    let t_hb = vertebra_core::broker::monotonic_now_ns();
+    assert_eq!(table.reap_expired(t0.saturating_add(30_000_001)), 0);
 
-    std::thread::sleep(Duration::from_millis(38));
-    assert_eq!(
-        table.reap_expired(vertebra_core::broker::monotonic_now_ns()),
-        1
-    );
+    assert_eq!(table.reap_expired(t_hb.saturating_add(30_000_001)), 1);
     assert_eq!(
         table.heartbeat(g.slot_index, g.generation),
         Err(BrokerError::StaleGeneration)
@@ -557,7 +553,8 @@ fn test_shm_lease_table_aba_cross_partition_release_and_partition_wakeup() {
         })
         .unwrap();
 
-    // Acquire and release slot in partition A, then same worker PID acquires slot in partition B.
+    // Hold one slot so `part_a` and `part_b` deterministically contend for the sole remaining slot.
+    let hold = table.try_acquire(1000, 0, 0).unwrap();
     let g_a1 = table
         .try_acquire_in(part_a, 7777, 0, key_a)
         .unwrap()
@@ -568,18 +565,18 @@ fn test_shm_lease_table_aba_cross_partition_release_and_partition_wakeup() {
         .try_acquire_in(part_b, 7777, 0, key_b)
         .unwrap()
         .unwrap();
-    if g_b.slot_index == g_a1.slot_index {
-        // Stale release with old generation must fail without touching partition B's active count.
-        assert_eq!(
-            table.release(g_a1.slot_index, g_a1.generation),
-            Err(BrokerError::GenerationMismatch)
-        );
-        assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 1);
-    }
+    assert_eq!(g_b.slot_index, g_a1.slot_index);
+    assert_eq!(
+        table.release(g_a1.slot_index, g_a1.generation),
+        Err(BrokerError::GenerationMismatch)
+    );
+    assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 1);
     table.release(g_b.slot_index, g_b.generation).unwrap();
     assert_eq!(table.partition_stats(key_b).unwrap().active_leases, 0);
+    table.release(hold.slot_index, hold.generation).unwrap();
 
-    // Partition A waiter wakes promptly while Partition B also holds/releases leases.
+    // Competing waiters on `part_b` and `part_a`: releasing `held_a` must wake `part_a`
+    // immediately via `wake_all()` even while `part_b` remains full (well under 25ms fallback).
     let held_a = table
         .acquire_in(part_a, 8001, 0, Duration::from_millis(50), key_a)
         .unwrap();
@@ -587,26 +584,45 @@ fn test_shm_lease_table_aba_cross_partition_release_and_partition_wakeup() {
         .acquire_in(part_b, 8002, 0, Duration::from_millis(50), key_b)
         .unwrap();
 
-    let t_wait = Arc::clone(&table);
-    let ready = Arc::new(std::sync::Barrier::new(2));
-    let ready_worker = Arc::clone(&ready);
-    let waiter = std::thread::spawn(move || {
-        ready_worker.wait();
-        t_wait.acquire_in(part_a, 8003, 0, Duration::from_secs(2), key_a)
+    let ready = Arc::new(std::sync::Barrier::new(3));
+    let t_wait_b = Arc::clone(&table);
+    let ready_b = Arc::clone(&ready);
+    let waiter_b = std::thread::spawn(move || {
+        ready_b.wait();
+        t_wait_b.acquire_in(part_b, 8004, 0, Duration::from_secs(2), key_b)
+    });
+
+    let t_wait_a = Arc::clone(&table);
+    let ready_a = Arc::clone(&ready);
+    let waiter_a = std::thread::spawn(move || {
+        ready_a.wait();
+        t_wait_a.acquire_in(part_a, 8003, 0, Duration::from_secs(2), key_a)
     });
 
     ready.wait();
     let spin_start = Instant::now();
-    while table.stats().waiting_threads == 0 {
+    while table.stats().waiting_threads < 2 {
         assert!(spin_start.elapsed() < Duration::from_secs(1));
         std::thread::yield_now();
     }
-    table.release(held_b.slot_index, held_b.generation).unwrap();
+    let release_start = Instant::now();
     table.release(held_a.slot_index, held_a.generation).unwrap();
 
-    let acquired = waiter.join().unwrap().unwrap();
-    assert_eq!(acquired.worker_pid, 8003);
+    let acquired_a = waiter_a.join().unwrap().unwrap();
+    assert!(
+        release_start.elapsed() < Duration::from_millis(20),
+        "partition waiter stalled instead of waking via wake_all(): {:?}",
+        release_start.elapsed()
+    );
+    assert_eq!(acquired_a.worker_pid, 8003);
+
+    table.release(held_b.slot_index, held_b.generation).unwrap();
+    let acquired_b = waiter_b.join().unwrap().unwrap();
+    assert_eq!(acquired_b.worker_pid, 8004);
     table
-        .release(acquired.slot_index, acquired.generation)
+        .release(acquired_a.slot_index, acquired_a.generation)
+        .unwrap();
+    table
+        .release(acquired_b.slot_index, acquired_b.generation)
         .unwrap();
 }
