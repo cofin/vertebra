@@ -1138,7 +1138,7 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
     cargo_cmd = builder.cargo_command()
     assert "--bin" in cargo_cmd and "vertebra-server" in cargo_cmd
     assert "--release" in cargo_cmd
-    assert "vertebra-http/python,vertebra-http/tls,vertebra-http/compression" in cargo_cmd
+    assert "vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3" in cargo_cmd
 
     assert builder.repair_command(tmp_path / "vertebra.whl", tmp_path / "repaired") == [
         "auditwheel",

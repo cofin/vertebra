@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-14T22:49:00Z"
+    commit: f277a29b
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -67,7 +70,7 @@ sources:
 - Partition ingress batching and correlation across power-of-two shards (`RequestBatcher::spawn_pool`, 8 `InFlightRequests` shards) and release shard locks before waking responders.
 <!-- truth: end -->
 
-All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
+All crates use `edition = "2024"`, and `make lint-all` runs `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings`. The patterns below apply to [`vertebra-core`](../../../../../src/rs/vertebra-core/src/lib.rs) rings and the [`vertebra-http`](../../../../../src/rs/vertebra-http/src/lib.rs) dispatch path.
 
 ## Cache-Line Isolation (`ABI_VERSION = 3`) & Padded MPMC Sequence Slots
 

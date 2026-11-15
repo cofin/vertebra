@@ -48,6 +48,7 @@ zstd        = { workspace = true }
 
 # Platform
 libc = { workspace = true }
+socket2 = { version = "=0.6.5", features = ["all"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities

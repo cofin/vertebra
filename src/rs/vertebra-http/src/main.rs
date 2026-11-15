@@ -673,6 +673,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     vertebra_http::workers::install_panic_cleanup_hook();
 
     let config = ServerConfig::from_env();
+    config
+        .validate_http3()
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
 
     #[cfg(all(feature = "python", unix))]
     if config.topology == Topology::Embedded && config.workers.count > 1 && !is_embedded_child {

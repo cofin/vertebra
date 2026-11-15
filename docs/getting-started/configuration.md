@@ -26,6 +26,12 @@ Vertebra automatically selects the worker mode from `--workers` and your Python 
 | `VERTEBRA_LOG_LEVEL` | `"info"` | Log level (`debug`, `info`, `warning`, `error`). |
 | `PYTHON_JIT` | - | Set to `"1"` or `"0"` when `--jit` / `--no-jit` is passed to `vtb run`. |
 | `VERTEBRA_STRICT_FREE_THREADING` | `"0"` | Set to `"1"` to fail startup if an imported C extension re-enables the GIL on `3.14t`/`3.15t`. |
+| `VERTEBRA_TLS_CERT` | - | Path to the PEM TLS certificate chain for HTTPS and HTTP/3 termination. |
+| `VERTEBRA_TLS_KEY` | - | Path to the PEM private key matching `VERTEBRA_TLS_CERT`. |
+| `VERTEBRA_HTTP3` | `"false"` | Set to `"1"` or `"true"` to enable the HTTP/3 over QUIC UDP listener (requires TLS and `--features http3`). |
+| `VERTEBRA_HTTP3_ALT_SVC_MAX_AGE` | `"86400"` | `ma=` max-age in seconds advertised in `Alt-Svc` headers when QUIC is bound. |
+| `VERTEBRA_HTTP3_MAX_STREAMS` | `"256"` | Maximum concurrent bidirectional QUIC streams per HTTP/3 connection (`> 0`). |
+| `VERTEBRA_HTTP3_KEEP_ALIVE_MS` | `"15000"` | QUIC transport keep-alive interval in milliseconds (`0` disables keep-alive). |
 
 ## Backpressure & Load Shedding Variables
 

@@ -1,4 +1,4 @@
-//! HTTP/3 over QUIC endpoint (`quinn 0.11.9`, `h3 0.0.8`, `h3-quinn 0.0.10`) and
+//! HTTP/3 over QUIC endpoint (`quinn 0.11.12`, `h3 0.0.8`, `h3-quinn 0.0.10`) and
 //! `Alt-Svc` header advertisement.
 
 #[cfg(feature = "http3")]
@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "http3")]
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{HeaderMap, HeaderValue};
 #[cfg(feature = "http3")]
-use http::{Request, Response};
+use http::{HeaderName, Request, Response, StatusCode, header};
 #[cfg(feature = "http3")]
 use http_body_util::{BodyExt, Either, Full};
 #[cfg(feature = "http3")]
@@ -94,12 +94,36 @@ pub fn build_quic_server_config(
     Ok(server_config)
 }
 
-/// Run the HTTP/3 over QUIC accept loop on `endpoint` until `shutdown_rx` signals `true`.
+#[cfg(feature = "http3")]
+const H3_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(feature = "http3")]
+const H3_ENDPOINT_IDLE_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[cfg(feature = "http3")]
+const HOP_BY_HOP_HEADERS: [HeaderName; 5] = [
+    header::CONNECTION,
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("proxy-connection"),
+    header::TRANSFER_ENCODING,
+    header::UPGRADE,
+];
+
+/// Strip HTTP/1.x connection-specific hop-by-hop headers forbidden by RFC 9114 §4.2 on HTTP/3.
+#[cfg(feature = "http3")]
+pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    for name in &HOP_BY_HOP_HEADERS {
+        headers.remove(name);
+    }
+}
+
+/// Run the HTTP/3 over QUIC accept loop on `endpoint` until `shutdown_rx` signals `true`
+/// or closes, then cleanly drain active connections before closing the endpoint.
 #[cfg(feature = "http3")]
 pub async fn serve_http3_endpoint<F, Fut, B>(
     endpoint: quinn::Endpoint,
     alt_svc_port: u16,
     cfg: Http3Config,
+    max_body_size: usize,
     handler: Arc<F>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), Http3Error>
@@ -108,40 +132,69 @@ where
     Fut: Future<Output = Response<Either<Full<Bytes>, B>>> + Send + 'static,
     B: Body<Data = Bytes, Error = Infallible> + Send + Unpin + 'static,
 {
-    loop {
-        tokio::select! {
-            maybe_incoming = endpoint.accept() => {
-                let Some(incoming) = maybe_incoming else {
-                    break;
-                };
-                let handler = Arc::clone(&handler);
-                let alt_svc_max_age = cfg.alt_svc_max_age;
-                tokio::spawn(async move {
-                    match incoming.await {
-                        Ok(quic_conn) => {
-                            if let Err(e) = serve_h3_connection(
-                                quic_conn,
-                                alt_svc_port,
-                                alt_svc_max_age,
-                                handler,
-                            ).await {
-                                debug!(error = %e, "HTTP/3 connection closed");
+    let mut conn_tasks = tokio::task::JoinSet::new();
+    if !*shutdown_rx.borrow_and_update() {
+        loop {
+            tokio::select! {
+                maybe_incoming = endpoint.accept() => {
+                    let Some(incoming) = maybe_incoming else {
+                        break;
+                    };
+                    let handler = Arc::clone(&handler);
+                    let alt_svc_max_age = cfg.alt_svc_max_age;
+                    let conn_shutdown = shutdown_rx.clone();
+                    conn_tasks.spawn(async move {
+                        match incoming.await {
+                            Ok(quic_conn) => {
+                                if let Err(e) = serve_h3_connection(
+                                    quic_conn,
+                                    alt_svc_port,
+                                    alt_svc_max_age,
+                                    max_body_size,
+                                    handler,
+                                    conn_shutdown,
+                                ).await {
+                                    debug!(error = %e, "HTTP/3 connection closed");
+                                }
+                            }
+                            Err(e) => {
+                                debug!(error = %e, "QUIC handshake failed");
                             }
                         }
-                        Err(e) => {
-                            debug!(error = %e, "QUIC handshake failed");
-                        }
+                    });
+                }
+                Some(res) = conn_tasks.join_next(), if !conn_tasks.is_empty() => {
+                    if let Err(e) = res {
+                        warn!(error = %e, "HTTP/3 connection task panicked");
                     }
-                });
-            }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    endpoint.close(0u32.into(), b"server shutting down");
-                    break;
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow_and_update() {
+                        break;
+                    }
                 }
             }
         }
     }
+
+    let drain_deadline = tokio::time::sleep(H3_CONNECTION_DRAIN_TIMEOUT);
+    tokio::pin!(drain_deadline);
+    while !conn_tasks.is_empty() {
+        tokio::select! {
+            res = conn_tasks.join_next() => {
+                if let Some(Err(e)) = res {
+                    warn!(error = %e, "HTTP/3 connection task panicked during shutdown");
+                }
+            }
+            _ = &mut drain_deadline => {
+                conn_tasks.abort_all();
+                break;
+            }
+        }
+    }
+
+    endpoint.close(0u32.into(), b"server shutting down");
+    let _ = tokio::time::timeout(H3_ENDPOINT_IDLE_TIMEOUT, endpoint.wait_idle()).await;
     Ok(())
 }
 
@@ -150,7 +203,9 @@ async fn serve_h3_connection<F, Fut, B>(
     quic_conn: quinn::Connection,
     alt_svc_port: u16,
     alt_svc_max_age: u64,
+    max_body_size: usize,
     handler: Arc<F>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), Http3Error>
 where
     F: Fn(Request<Bytes>) -> Fut + Send + Sync + 'static,
@@ -162,50 +217,109 @@ where
             .await
             .map_err(|e| Http3Error::H3(e.to_string()))?;
 
-    loop {
-        match h3_conn.accept().await {
-            Ok(Some(resolver)) => {
-                let handler = Arc::clone(&handler);
-                tokio::spawn(async move {
-                    match resolver.resolve_request().await {
-                        Ok((req, stream)) => {
-                            if let Err(e) = handle_h3_request(
-                                req,
-                                stream,
-                                alt_svc_port,
-                                alt_svc_max_age,
-                                handler,
-                            )
-                            .await
-                            {
-                                warn!(error = %e, "failed handling HTTP/3 request stream");
-                            }
+    let mut stream_tasks = tokio::task::JoinSet::new();
+    if *shutdown_rx.borrow_and_update() {
+        let _ = h3_conn.shutdown(0).await;
+    } else {
+        loop {
+            tokio::select! {
+                accept_res = h3_conn.accept() => {
+                    match accept_res {
+                        Ok(Some(resolver)) => {
+                            let handler = Arc::clone(&handler);
+                            stream_tasks.spawn(async move {
+                                match resolver.resolve_request().await {
+                                    Ok((req, stream)) => {
+                                        if let Err(e) = handle_h3_request(
+                                            req,
+                                            stream,
+                                            alt_svc_port,
+                                            alt_svc_max_age,
+                                            max_body_size,
+                                            handler,
+                                        )
+                                        .await
+                                        {
+                                            warn!(error = %e, "failed handling HTTP/3 request stream");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!(error = %e, "failed resolving HTTP/3 request");
+                                    }
+                                }
+                            });
                         }
+                        Ok(None) => break,
                         Err(e) => {
-                            debug!(error = %e, "failed resolving HTTP/3 request");
+                            debug!(error = %e, "HTTP/3 accept loop terminated");
+                            break;
                         }
                     }
-                });
+                }
+                Some(res) = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
+                    if let Err(e) = res {
+                        warn!(error = %e, "HTTP/3 request task panicked");
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow_and_update() {
+                        let _ = h3_conn.shutdown(0).await;
+                        break;
+                    }
+                }
             }
-            Ok(None) => break,
-            Err(e) => {
-                debug!(error = %e, "HTTP/3 accept loop terminated");
-                break;
-            }
+        }
+    }
+
+    while let Some(res) = stream_tasks.join_next().await {
+        if let Err(e) = res {
+            warn!(error = %e, "HTTP/3 request task panicked during drain");
         }
     }
     Ok(())
 }
 
+#[cfg(feature = "http3")]
+async fn send_payload_too_large(
+    stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    alt_svc_port: u16,
+    alt_svc_max_age: u64,
+) -> Result<(), Http3Error> {
+    stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+    let mut head_resp = Response::builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(())
+        .map_err(|e| Http3Error::H3(e.to_string()))?;
+    inject_alt_svc_header(head_resp.headers_mut(), alt_svc_port, alt_svc_max_age);
+    stream
+        .send_response(head_resp)
+        .await
+        .map_err(|e| Http3Error::H3(e.to_string()))?;
+    stream
+        .send_data(Bytes::from_static(b"Payload Too Large"))
+        .await
+        .map_err(|e| Http3Error::H3(e.to_string()))?;
+    stream
+        .finish()
+        .await
+        .map_err(|e| Http3Error::H3(e.to_string()))?;
+    Ok(())
+}
+
 /// Convert an `h3` request and `RequestStream` into a `hyper::Request<Bytes>`, invoke
-/// `handler`, and write the resulting `Either<Full<Bytes>, B>` body and optional HTTP/3
-/// trailers back over the QUIC stream.
+/// `handler` after enforcing `max_body_size` before buffering, and write the resulting
+/// response body and optional HTTP/3 trailers back over the QUIC stream.
 #[cfg(feature = "http3")]
 pub async fn handle_h3_request<F, Fut, B>(
     req: Request<()>,
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     alt_svc_port: u16,
     alt_svc_max_age: u64,
+    max_body_size: usize,
     handler: Arc<F>,
 ) -> Result<(), Http3Error>
 where
@@ -214,18 +328,33 @@ where
     B: Body<Data = Bytes, Error = Infallible> + Send + Unpin + 'static,
 {
     let (parts, ()) = req.into_parts();
+    if let Some(len) = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        && len > max_body_size
+    {
+        return send_payload_too_large(&mut stream, alt_svc_port, alt_svc_max_age).await;
+    }
+
     let mut body_buf = BytesMut::new();
-    while let Some(mut chunk) = stream
+    while let Some(chunk) = stream
         .recv_data()
         .await
         .map_err(|e| Http3Error::H3(e.to_string()))?
     {
-        body_buf.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+        let chunk_len = chunk.remaining();
+        if chunk_len > max_body_size.saturating_sub(body_buf.len()) {
+            return send_payload_too_large(&mut stream, alt_svc_port, alt_svc_max_age).await;
+        }
+        body_buf.put(chunk);
     }
 
     let full_req = Request::from_parts(parts, body_buf.freeze());
     let resp = handler(full_req).await;
     let (mut resp_parts, resp_body) = resp.into_parts();
+    strip_hop_by_hop_headers(&mut resp_parts.headers);
     inject_alt_svc_header(&mut resp_parts.headers, alt_svc_port, alt_svc_max_age);
 
     let head_resp = Response::from_parts(resp_parts, ());

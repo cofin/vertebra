@@ -22,12 +22,14 @@ use crate::compression::CompressionOffloadConfig;
 use crate::cors::CompiledCorsOffload;
 use crate::grpc::{
     GRPC_HEADER_LEN, GrpcError, GrpcStatus, GrpcWireFormat, build_grpc_trailers_only_response,
-    is_grpc_request, parse_grpc_timeout,
+    parse_grpc_timeout,
 };
 use crate::health::HealthState;
 use crate::hmr;
 use crate::mcp_bridge::extract_mcp_observability_headers;
-use crate::payload::{PayloadError, collect_bounded_body};
+use crate::payload::{
+    PayloadError, collect_bounded_body, decode_buffered_body, is_active_content_encoding,
+};
 use crate::routing::RouterError;
 use crate::server::ServerState;
 
@@ -37,6 +39,11 @@ use crate::server::ServerState;
 const HEALTH_PATH: &str = "/__vertebra/health";
 
 pub use crate::body::{FrameReceiver, HttpResponse, ResponseBody, full_body, stream_body};
+
+enum RequestBodySource {
+    Incoming(Incoming),
+    Buffered(Bytes),
+}
 
 /// Top-level request handler; called for every accepted HTTP connection.
 pub async fn handle(
@@ -48,78 +55,110 @@ pub async fn handle(
         let (parts, body) = hmr_resp.into_parts();
         return Ok(Response::from_parts(parts, Either::Left(body)));
     }
+    let (parts, body) = req.into_parts();
+    dispatch_request(parts, RequestBodySource::Incoming(body), state).await
+}
 
+/// Shared ingress request handler for protocols supplying pre-buffered request bodies (HTTP/3 QUIC).
+pub async fn handle_buffered(
+    req: Request<Bytes>,
+    state: Arc<ServerState>,
+) -> Result<HttpResponse, Infallible> {
+    let (parts, body) = req.into_parts();
+    dispatch_request(parts, RequestBodySource::Buffered(body), state).await
+}
+
+async fn dispatch_request(
+    parts: http::request::Parts,
+    body: RequestBodySource,
+    state: Arc<ServerState>,
+) -> Result<HttpResponse, Infallible> {
+    let mut resp = dispatch_request_inner(parts, body, &state).await;
+    if let Some(port) = state.http3_port {
+        crate::http3::inject_alt_svc_header(
+            resp.headers_mut(),
+            port,
+            state.config.http3.alt_svc_max_age,
+        );
+    }
+    Ok(resp)
+}
+
+async fn dispatch_request_inner(
+    mut parts: http::request::Parts,
+    body: RequestBodySource,
+    state: &Arc<ServerState>,
+) -> HttpResponse {
     // Health endpoint sits above routing and backpressure so probes always
     // work, even when the controller is shedding load.
-    let req_path = req.uri().path();
+    let req_path = parts.uri.path();
     if req_path == HEALTH_PATH
         && state.health_endpoint.state() == HealthState::Healthy
         && let Some(bp) = state.dispatcher.backpressure()
     {
-        return Ok(health_response(Some(bp.snapshot())));
+        return health_response(Some(bp.snapshot()));
     }
     if let Some(health_resp) = state.health_endpoint.try_intercept(req_path) {
-        let (parts, body) = health_resp.into_parts();
-        return Ok(Response::from_parts(parts, Either::Left(body)));
+        let (resp_parts, body) = health_resp.into_parts();
+        return Response::from_parts(resp_parts, Either::Left(body));
     }
 
     // Token-guarded `/debug/pprof/*` diagnostic endpoint.
     if state.config.profile.enabled
-        && let Some(pprof_resp) = state.profile_endpoint.try_handle(req_path, req.headers())
+        && let Some(pprof_resp) = state.profile_endpoint.try_handle(req_path, &parts.headers)
     {
-        return Ok(pprof_resp.map(Either::Left));
+        return pprof_resp.map(Either::Left);
     }
 
     // Zero-GIL `/.well-known/*` discovery cache.
-    if req_path.starts_with("/.well-known/") && matches!(*req.method(), Method::GET | Method::HEAD)
-    {
-        let inm = req
-            .headers()
+    if req_path.starts_with("/.well-known/") && matches!(parts.method, Method::GET | Method::HEAD) {
+        let inm = parts
+            .headers
             .get(header::IF_NONE_MATCH)
             .and_then(|v| v.to_str().ok());
         if let Some(disc) = state.discovery_cache.serve(req_path, inm) {
-            let body = if *req.method() == Method::HEAD {
+            let resp_body = if parts.method == Method::HEAD {
                 Bytes::new()
             } else {
                 disc.body
             };
             let mut resp = Response::builder()
                 .status(disc.status)
-                .body(full_body(body))
+                .body(full_body(resp_body))
                 .unwrap();
             *resp.headers_mut() = disc.headers;
-            return Ok(resp);
+            return resp;
         }
     }
 
     // Native Rust SSE topic subscription fastpath (`/__vertebra/sse/{topic}`).
-    if *req.method() == Method::GET
+    if parts.method == Method::GET
         && let Some(topic) = req_path.strip_prefix("/__vertebra/sse/")
         && !topic.is_empty()
     {
-        let last_event_id = req
-            .headers()
+        let last_event_id = parts
+            .headers
             .get("last-event-id")
             .and_then(|v| v.to_str().ok());
         let sse_resp = state.sse_hub.subscribe_response(topic, last_event_id);
-        let (parts, body) = sse_resp.into_parts();
-        return Ok(Response::from_parts(parts, Either::Right(body)));
+        let (resp_parts, body) = sse_resp.into_parts();
+        return Response::from_parts(resp_parts, Either::Right(body));
     }
 
     // Zero-GIL CORS OPTIONS preflight offload.
-    if *req.method() == Method::OPTIONS
+    if parts.method == Method::OPTIONS
         && let Some(ref cors) = state.cors
-        && let Some(origin) = req
-            .headers()
+        && let Some(origin) = parts
+            .headers
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok())
-        && let Some(req_method) = req
-            .headers()
+        && let Some(req_method) = parts
+            .headers
             .get(header::ACCESS_CONTROL_REQUEST_METHOD)
             .and_then(|v| v.to_str().ok())
     {
-        let req_headers = req
-            .headers()
+        let req_headers = parts
+            .headers
             .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
             .and_then(|v| v.to_str().ok());
         let (status, preflight_headers) =
@@ -129,29 +168,29 @@ pub async fn handle(
             .body(full_body(Bytes::new()))
             .unwrap();
         *resp.headers_mut() = preflight_headers;
-        return Ok(resp);
+        return resp;
     }
 
     // Zero-GIL OpenAPI schema cache offload.
-    if matches!(*req.method(), Method::GET | Method::HEAD)
+    if matches!(parts.method, Method::GET | Method::HEAD)
         && let Some(ref openapi) = state.openapi_cache
         && req_path == openapi.schema_path
     {
-        let inm_matches = req
-            .headers()
+        let inm_matches = parts
+            .headers
             .get(header::IF_NONE_MATCH)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|inm| inm.trim() == openapi.etag_str);
-        let (status, body) = if inm_matches {
+        let (status, resp_body) = if inm_matches {
             (StatusCode::NOT_MODIFIED, Bytes::new())
-        } else if *req.method() == Method::HEAD {
+        } else if parts.method == Method::HEAD {
             (StatusCode::OK, Bytes::new())
         } else {
             (StatusCode::OK, openapi.body.clone())
         };
         let mut resp = Response::builder()
             .status(status)
-            .body(full_body(body))
+            .body(full_body(resp_body))
             .unwrap();
         let hdrs = resp.headers_mut();
         hdrs.insert(header::CONTENT_TYPE, openapi.content_type.clone());
@@ -161,48 +200,48 @@ pub async fn handle(
             HeaderValue::from_static("public, max-age=0, must-revalidate"),
         );
         if let Some(ref cors) = state.cors
-            && let Some(origin) = req
-                .headers()
+            && let Some(origin) = parts
+                .headers
                 .get(header::ORIGIN)
                 .and_then(|v| v.to_str().ok())
         {
             cors.apply_response_headers(origin, hdrs);
         }
-        return Ok(resp);
+        return resp;
     }
 
     // Zero-GIL static asset mount offload.
-    if !state.static_mounts.is_empty() && matches!(*req.method(), Method::GET | Method::HEAD) {
+    if !state.static_mounts.is_empty() && matches!(parts.method, Method::GET | Method::HEAD) {
         for mount in &state.static_mounts {
             if let Some(rel_path) = mount.match_relative_path(req_path) {
                 for manager in &mount.managers {
                     if let Some(static_resp) =
-                        manager.serve_static_request(rel_path, req.headers()).await
+                        manager.serve_static_request(rel_path, &parts.headers).await
                     {
-                        let (mut parts, full) = static_resp.into_parts();
+                        let (mut resp_parts, full) = static_resp.into_parts();
                         for (name, val) in &mount.headers {
-                            parts.headers.insert(name.clone(), val.clone());
+                            resp_parts.headers.insert(name.clone(), val.clone());
                         }
                         if mount.send_as_attachment {
-                            parts.headers.insert(
+                            resp_parts.headers.insert(
                                 header::CONTENT_DISPOSITION,
                                 HeaderValue::from_static("attachment"),
                             );
                         }
                         if let Some(ref cors) = state.cors
-                            && let Some(origin) = req
-                                .headers()
+                            && let Some(origin) = parts
+                                .headers
                                 .get(header::ORIGIN)
                                 .and_then(|v| v.to_str().ok())
                         {
-                            cors.apply_response_headers(origin, &mut parts.headers);
+                            cors.apply_response_headers(origin, &mut resp_parts.headers);
                         }
-                        let body = if *req.method() == Method::HEAD {
+                        let resp_body = if parts.method == Method::HEAD {
                             Either::Left(Full::new(Bytes::new()))
                         } else {
                             Either::Left(full)
                         };
-                        return Ok(Response::from_parts(parts, body));
+                        return Response::from_parts(resp_parts, resp_body);
                     }
                 }
             }
@@ -215,7 +254,7 @@ pub async fn handle(
     let _permit = if let Some(controller) = state.dispatcher.backpressure() {
         match controller.try_acquire_for_path(req_path).await {
             Ok(permit) => Some(permit),
-            Err(reason) => return Ok(rejection_response(reason)),
+            Err(reason) => return rejection_response(reason),
         }
     } else {
         None
@@ -225,22 +264,24 @@ pub async fn handle(
         .access_logger
         .as_ref()
         .map(|_| std::time::Instant::now());
-    let is_grpc = is_grpc_request(&req);
+    let is_grpc = parts.method == Method::POST
+        && parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("application/grpc"));
     if is_grpc
-        && let Some(raw_timeout) = req
-            .headers()
+        && let Some(raw_timeout) = parts
+            .headers
             .get("grpc-timeout")
             .and_then(|v| v.to_str().ok())
         && let Err(err) = parse_grpc_timeout(raw_timeout)
     {
-        let wf = GrpcWireFormat::from_headers(req.headers());
-        return Ok(
-            build_grpc_trailers_only_response(wf, err.status(), Some(&err.to_string()))
-                .map(Either::Left),
-        );
+        let wf = GrpcWireFormat::from_headers(&parts.headers);
+        return build_grpc_trailers_only_response(wf, err.status(), Some(&err.to_string()))
+            .map(Either::Left);
     }
 
-    let (mut parts, body) = req.into_parts();
     let method = &parts.method;
     let path = parts.uri.path();
 
@@ -248,17 +289,17 @@ pub async fn handle(
     let route_match = match state.router.lookup_method(method, path) {
         Ok(m) => m,
         Err(RouterError::NotFound { .. }) => {
-            return Ok(Response::builder()
+            return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(full_body(Bytes::from_static(b"Not Found")))
-                .unwrap());
+                .unwrap();
         }
         Err(RouterError::MethodNotAllowed { allowed, .. }) => {
-            return Ok(Response::builder()
+            return Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .header("allow", allowed.join(", "))
                 .body(full_body(Bytes::from_static(b"Method Not Allowed")))
-                .unwrap());
+                .unwrap();
         }
     };
 
@@ -266,55 +307,63 @@ pub async fn handle(
     debug!(handler_id, method = %method, path, "routed request");
 
     // 2. Collect bounded body and optionally decompress Content-Encoding.
-    let body_bytes = if body.size_hint().exact() == Some(0) {
-        Bytes::new()
-    } else {
-        let content_length = parts
-            .headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<usize>().ok());
-        let content_encoding_owned = parts
+    let content_length = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    let active_encoding = is_active_content_encoding(
+        parts
             .headers
             .get(header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
+            .and_then(|v| v.to_str().ok()),
+    )
+    .map(str::to_owned);
 
-        let collected = match collect_bounded_body(
-            body,
-            content_length,
-            content_encoding_owned.as_deref(),
-            &state.config.payload_limits,
-        )
-        .await
-        {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                warn!(error = %err, "request payload rejected");
-                let msg = match err {
-                    PayloadError::TooLarge { .. } | PayloadError::DecompressedTooLarge { .. } => {
-                        "Payload Too Large"
-                    }
-                    PayloadError::UnsupportedEncoding(_) => "Unsupported Media Type",
-                    PayloadError::DecompressionFailed(_) | PayloadError::StreamRead(_) => {
-                        "Bad Request"
-                    }
-                };
-                return Ok(error_response(err.status_code(), msg));
-            }
-        };
-
-        if let Some(ref enc) = content_encoding_owned
-            && !enc.trim().is_empty()
-            && !enc.trim().eq_ignore_ascii_case("identity")
-        {
-            parts.headers.remove(header::CONTENT_ENCODING);
-            if let Ok(cl_val) = HeaderValue::from_str(&collected.len().to_string()) {
-                parts.headers.insert(header::CONTENT_LENGTH, cl_val);
+    let collected_res: Result<(Bytes, bool), PayloadError> = match body {
+        RequestBodySource::Incoming(incoming) => {
+            if incoming.size_hint().exact() == Some(0) {
+                Ok((Bytes::new(), false))
+            } else {
+                collect_bounded_body(
+                    incoming,
+                    content_length,
+                    active_encoding.as_deref(),
+                    &state.config.payload_limits,
+                )
+                .await
+                .map(|bytes| (bytes, active_encoding.is_some()))
             }
         }
+        RequestBodySource::Buffered(raw_bytes) => decode_buffered_body(
+            raw_bytes,
+            content_length,
+            active_encoding.as_deref(),
+            &state.config.payload_limits,
+        ),
+    };
 
-        collected
+    let body_bytes = match collected_res {
+        Ok((bytes, was_decompressed)) => {
+            if was_decompressed {
+                parts.headers.remove(header::CONTENT_ENCODING);
+                if let Ok(cl_val) = HeaderValue::from_str(&bytes.len().to_string()) {
+                    parts.headers.insert(header::CONTENT_LENGTH, cl_val);
+                }
+            }
+            bytes
+        }
+        Err(err) => {
+            warn!(error = %err, "request payload rejected");
+            let msg = match err {
+                PayloadError::TooLarge { .. } | PayloadError::DecompressedTooLarge { .. } => {
+                    "Payload Too Large"
+                }
+                PayloadError::UnsupportedEncoding(_) => "Unsupported Media Type",
+                PayloadError::DecompressionFailed(_) | PayloadError::StreamRead(_) => "Bad Request",
+            };
+            return error_response(err.status_code(), msg);
+        }
     };
 
     if !body_bytes.is_empty() {
@@ -330,21 +379,21 @@ pub async fn handle(
                 if flag > 1 {
                     let wf = GrpcWireFormat::from_headers(&parts.headers);
                     let err = GrpcError::InvalidCompressionFlag(flag);
-                    return Ok(build_grpc_trailers_only_response(
+                    return build_grpc_trailers_only_response(
                         wf,
                         err.status(),
                         Some(&err.to_string()),
                     )
-                    .map(Either::Left));
+                    .map(Either::Left);
                 }
                 if msg_len > state.config.max_grpc_message_size {
                     let wf = GrpcWireFormat::from_headers(&parts.headers);
-                    return Ok(build_grpc_trailers_only_response(
+                    return build_grpc_trailers_only_response(
                         wf,
                         GrpcStatus::ResourceExhausted,
                         Some("gRPC message exceeds max_grpc_message_size"),
                     )
-                    .map(Either::Left));
+                    .map(Either::Left);
                 }
             }
         } else if parts
@@ -354,10 +403,7 @@ pub async fn handle(
             .is_some_and(|ct| ct.starts_with("multipart/form-data"))
         {
             if body_bytes.len() > state.config.multipart_limits.max_total_size {
-                return Ok(error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "Payload Too Large",
-                ));
+                return error_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large");
             }
         } else if parts.method == Method::POST
             && parts.uri.path().starts_with("/mcp")
@@ -446,14 +492,11 @@ pub async fn handle(
 
     // 5. Send to collector for batching.
     if state.get_collector().send(pending).await.is_err() {
-        return Ok(error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server shutting down",
-        ));
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
     }
 
     // 6. Await response and apply configured Rust CORS / compression offloads.
-    let mut hyper_resp = match reply_rx.await {
+    let hyper_resp = match reply_rx.await {
         Ok(resp) => build_response_with_offloads(
             resp,
             state.cors.as_ref(),
@@ -467,14 +510,6 @@ pub async fn handle(
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "worker error")
         }
     };
-
-    if state.config.http3.enabled {
-        crate::http3::inject_alt_svc_header(
-            hyper_resp.headers_mut(),
-            state.config.bind.port(),
-            state.config.http3.alt_svc_max_age,
-        );
-    }
 
     // Feed the circuit breaker. 5xx counts as failure; everything else is
     // treated as success from the infrastructure's perspective.
@@ -506,7 +541,7 @@ pub async fn handle(
         });
     }
 
-    Ok(hyper_resp)
+    hyper_resp
 }
 
 fn rejection_response(reason: RejectionReason) -> HttpResponse {

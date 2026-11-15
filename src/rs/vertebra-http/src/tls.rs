@@ -266,6 +266,7 @@ mod rustls_acceptor {
         pub fn from_config(
             cfg: &TlsConfig,
         ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+            let _ = rustls::crypto::ring::default_provider().install_default();
             let cert_file = std::fs::File::open(&cfg.cert_path)?;
             let key_file = std::fs::File::open(&cfg.key_path)?;
 

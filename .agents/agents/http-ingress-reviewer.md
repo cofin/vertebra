@@ -59,8 +59,8 @@ You are a read-only reviewer for `http-ingress`. You report findings; you never 
 ## Allowed Commands
 
 - `git diff`, `git log`, `git show`, `git ls-files`
-- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression,http3`
-- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,compression`
+- `cargo check --manifest-path src/rs/Cargo.toml -p vertebra-http --no-default-features --features tls,compression`
+- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-http --features tls,http3,compression`
 - `uv run --no-sync python -m tools.scripts.review_setup route`
 - `uv run --no-sync python -m tools.scripts.review_setup ledger`
 

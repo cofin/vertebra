@@ -13,6 +13,9 @@ generated:
   by: flow/0.29.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-archive
+    at: "2026-11-14T22:49:00Z"
+    commit: f277a29b
   - by: agent:flow-executor
     at: "2026-11-14T18:05:00Z"
     commit: 1b191388
@@ -130,11 +133,11 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | Target | Command | What It Verifies |
 |---|---|---|
 | `make dev` | `cargo build --workspace` (non-extension crates) + `maturin develop --uv` across all 10 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`) | Debug native build required after Rust edits before `pytest` (`make build` runs the `--release` counterpart). |
-| `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cargo test --workspace --features tls,compression,gcp` | Unit and integration tests across all 13 workspace crates. |
+| `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cargo test --workspace --features tls,http3,compression,gcp` + non-`http3` `config::tests` & `server` fail-loud check | Unit and integration tests across all 13 workspace crates plus `--no-default-features` / `--features tls,compression` gate coverage. |
 | `make py-test` | `make dev` + `mypy.stubtest` across all 10 extensions + `uv run pytest src/py/tests -v` | `.pyi` stub parity plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] (zero third-party `duckdb` dependency outside `--group bench`). |
 | `make {duckdb,mysql,mssql,oracle,postgres}-test` & `make db-conformance` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, engine unit + live conformance/native suites (`make db-conformance ENGINE=<duckdb\|mysql\|mariadb\|mssql\|oracle> [VERSION=<v>]` requires `ENGINE` under zero-skip `ConformanceGate`; `oracle-test` runs `test_oracle_adapter.py` + `test_oracle_native.py`), `postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel]), and `postgres-bench-check` ([`test_postgres_benchmarks.py`](../../../../src/py/tests/unit/tools/test_postgres_benchmarks.py)[^src-postgres-bench-tests]) | Scoped native database crate, stub, live conformance, benchmark comparator, and PEP 420 wheel isolation gates. |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=..." bun run test` | Vitest suites under [`package.json`](../../../../src/ts/vertebra-client/package.json)[^src-package-json]. |
-| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` (`src/py`, `tools`, `docs/examples`) + `mypy` (`tools/benchmarks` included) + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
+| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` (`src/py`, `tools`, `docs/examples`) + `mypy` (`tools/benchmarks` included) + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
 | `make docs` | `scan_public_docstrings` + `generate_cli_docs --check` + `zensical build --clean` + `postbuild` + `verify_docs_artifacts` | Docstring/CLI parity, Zensical build, `llms.txt`, and `<= 120 KB` / `<= 14` TOC HTML bounds. |
 | `make check` | `lint` + `test` (`rs-test` + `py-test` + `ts-test`) + `coverage` | Full release verification gate. |
 
@@ -147,8 +150,8 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `review-check` | `agents`, `python`, `ci`, or `workflow_dispatch` | `uv run --no-project --python 3.12 --with "msgspec>=0.18" python -m tools.scripts.review_setup validate` (`fetch-depth: 0`) | `ubuntu-latest` |
 | `lint` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make lint-all` | `ubuntu-latest` |
 | `test-python` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make py-test`; on `3.12` also `make coverage` (`coverage.xml`) | Python `3.12`, `3.13`, `3.14`, `3.14t`, `3.15`, `3.15t` |
-| `test-rust` | `rust`, `ci`, or `workflow_dispatch` | Windows `cargo check` (`x86_64-pc-windows-msvc`) + `make rs-test` (`tls,compression,gcp`) | `ubuntu-latest` |
-| `test-rust-macos` | `workflow_dispatch` | `cargo test --workspace --features tls,compression,gcp,macos-ulock` | `macos-latest` |
+| `test-rust` | `rust`, `ci`, or `workflow_dispatch` | Windows `cargo check` (`x86_64-pc-windows-msvc`) + `make rs-test` (`tls,http3,compression,gcp`) | `ubuntu-latest` |
+| `test-rust-macos` | `workflow_dispatch` | `cargo test --workspace --features tls,http3,compression,gcp,macos-ulock` | `macos-latest` |
 | `test-typescript` | `typescript`, `ci`, or `workflow_dispatch` | `make ts-install` + `make ts-build` + `make ts-test` | `ubuntu-latest` |
 | `build-docs` | `docs`, `ci`, or `workflow_dispatch` | `uv sync --frozen --no-install-project --only-group doc` + `make docs` | `ubuntu-latest` |
 | `core-wheel-smoke` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make core-wheel-check` | `ubuntu-latest` |

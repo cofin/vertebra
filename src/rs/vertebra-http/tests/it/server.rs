@@ -305,6 +305,14 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
         val
     }
 
+    fn kernel_nodename() -> String {
+        let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::uname(&raw mut uts) }, 0);
+        unsafe { std::ffi::CStr::from_ptr(uts.nodename.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     let single =
         server::bind_listener("127.0.0.1:0".parse().unwrap(), false).expect("non-reuseport bind");
     assert_eq!(
@@ -337,16 +345,44 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
             );
         }
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
-            assert_eq!(unsafe { libc::uname(&raw mut uts) }, 0);
-            let nodename =
-                unsafe { std::ffi::CStr::from_ptr(uts.nodename.as_ptr()) }.to_string_lossy();
+            let nodename = kernel_nodename();
             assert_eq!(
                 nodename, "sandbox",
                 "dual SO_REUSEPORT listen failed on native kernel ({nodename}): {err}"
             );
         }
         Err(err) => panic!("unexpected second SO_REUSEPORT bind error: {err}"),
+    }
+
+    let udp_single =
+        server::bind_udp_listener("127.0.0.1:0".parse().unwrap(), false).expect("udp bind");
+    assert_eq!(
+        get_int_sockopt(udp_single.as_raw_fd(), libc::SO_REUSEPORT),
+        0,
+        "udp reuse_port=false must leave SO_REUSEPORT disabled"
+    );
+    assert_ne!(
+        get_int_sockopt(udp_single.as_raw_fd(), libc::SO_REUSEADDR),
+        0,
+        "udp SO_REUSEADDR must be enabled"
+    );
+    drop(udp_single);
+
+    let udp1 =
+        server::bind_udp_listener("127.0.0.1:0".parse().unwrap(), true).expect("udp reuseport");
+    let udp_addr = udp1.local_addr().unwrap();
+    assert_ne!(
+        get_int_sockopt(udp1.as_raw_fd(), libc::SO_REUSEPORT),
+        0,
+        "udp reuse_port=true must set SO_REUSEPORT"
+    );
+    let _udp2 = server::bind_udp_listener(udp_addr, true).expect("dual udp SO_REUSEPORT bind");
+    if server::bind_udp_listener(udp_addr, false).is_ok() {
+        let nodename = kernel_nodename();
+        assert_eq!(
+            nodename, "sandbox",
+            "non-SO_REUSEPORT UDP bind must fail on native kernel ({nodename})"
+        );
     }
 }
 
@@ -780,4 +816,182 @@ async fn test_server_enforces_payload_limits_profile_discovery_and_access_log() 
     assert_eq!(worker_hits.load(Ordering::Acquire), 1);
 
     srv.shutdown().await;
+}
+
+#[cfg(not(feature = "http3"))]
+#[tokio::test]
+async fn test_run_with_listener_fails_loud_without_http3_feature() {
+    use vertebra_http::config::TlsConfig;
+    use vertebra_http::http3::Http3Config;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = Arc::new(ServerConfig {
+        bind: listener.local_addr().unwrap(),
+        tls: Some(TlsConfig::default()),
+        http3: Http3Config {
+            enabled: true,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        server::run_with_listener(
+            listener,
+            cfg,
+            router,
+            Arc::new(Dispatcher::new()),
+            vec![tx],
+            std::future::pending::<()>(),
+        ),
+    )
+    .await
+    .expect("validate_http3 must return without waiting for shutdown");
+    let err = res.expect_err("http3.enabled without http3 feature must fail");
+    assert!(
+        err.to_string().contains("http3"),
+        "expected error mentioning http3 feature, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_buffered_worker_dispatch_and_payload_limits() {
+    use bytes::Bytes;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use http::{Request, StatusCode};
+    use std::io::Write as _;
+    use vertebra_http::batcher::PendingRequest;
+    use vertebra_http::http3::Http3Config;
+    use vertebra_http::payload::PayloadLimits;
+    use vertebra_http::response::handle_buffered;
+    use vertebra_http::server::ServerState;
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (collector_tx, mut collector_rx) = tokio::sync::mpsc::channel::<PendingRequest>(16);
+    tokio::spawn(async move {
+        while let Some(pending) = collector_rx.recv().await {
+            let mut out = b"h3-worker:".to_vec();
+            out.extend_from_slice(&pending.body);
+            let _ = pending
+                .reply
+                .send(PendingResponse::unary(200, Bytes::new(), Bytes::from(out)));
+        }
+    });
+
+    let cfg = Arc::new(ServerConfig {
+        payload_limits: PayloadLimits {
+            max_body_size: 32,
+            max_decompressed_size: 16,
+        },
+        http3: Http3Config {
+            enabled: true,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+    let state = Arc::new(ServerState::new(
+        router,
+        Arc::new(Dispatcher::new()),
+        cfg,
+        vec![collector_tx],
+    ));
+
+    let valid_req = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .body(Bytes::from_static(b"ok"))
+        .unwrap();
+    let valid_resp = handle_buffered(valid_req, Arc::clone(&state))
+        .await
+        .unwrap();
+    assert_eq!(valid_resp.status(), StatusCode::OK);
+    assert!(
+        valid_resp.headers().get("alt-svc").is_none(),
+        "alt-svc must not be emitted on 200 worker responses without bound http3_port"
+    );
+    let body = http_body_util::BodyExt::collect(valid_resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(body.as_ref(), b"h3-worker:ok");
+
+    let cl_overflow = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .header("content-length", "999")
+        .body(Bytes::from_static(b"hi"))
+        .unwrap();
+    assert_eq!(
+        handle_buffered(cl_overflow, Arc::clone(&state))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+
+    let body_overflow = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .body(Bytes::from(vec![b'a'; 33]))
+        .unwrap();
+    let overflow_resp = handle_buffered(body_overflow, Arc::clone(&state))
+        .await
+        .unwrap();
+    assert_eq!(overflow_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(overflow_resp.headers().get("alt-svc").is_none());
+
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(b"zip").unwrap();
+    let gz_bytes = gz.finish().unwrap();
+    let gz_req = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .header("content-encoding", "gzip")
+        .body(Bytes::from(gz_bytes))
+        .unwrap();
+    let gz_resp = handle_buffered(gz_req, Arc::clone(&state)).await.unwrap();
+    assert_eq!(gz_resp.status(), StatusCode::OK);
+    let gz_out = http_body_util::BodyExt::collect(gz_resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(gz_out.as_ref(), b"h3-worker:zip");
+
+    let zstd_bytes = zstd::stream::encode_all(std::io::Cursor::new(b"zst"), 3).unwrap();
+    let zstd_req = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .header("content-encoding", "zstd")
+        .body(Bytes::from(zstd_bytes))
+        .unwrap();
+    let zstd_resp = handle_buffered(zstd_req, Arc::clone(&state)).await.unwrap();
+    assert_eq!(zstd_resp.status(), StatusCode::OK);
+    let zstd_out = http_body_util::BodyExt::collect(zstd_resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(zstd_out.as_ref(), b"h3-worker:zst");
+
+    let bomb_bytes = zstd::stream::encode_all(std::io::Cursor::new(&[b'x'; 64][..]), 3).unwrap();
+    assert!(bomb_bytes.len() <= 32);
+    let bomb_req = Request::builder()
+        .method("POST")
+        .uri("/echo")
+        .header("content-encoding", "zstd")
+        .body(Bytes::from(bomb_bytes))
+        .unwrap();
+    assert_eq!(
+        handle_buffered(bomb_req, Arc::clone(&state))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
 }

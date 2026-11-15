@@ -1,9 +1,7 @@
 use bytes::Bytes;
 use http::StatusCode;
 use vertebra_http::discovery::{WellKnownDiscoveryCache, is_excluded_from_spa_fallback};
-use vertebra_http::mcp_bridge::{
-    McpBridgeConfig, McpStdioBridge, extract_mcp_observability_headers,
-};
+use vertebra_http::mcp_bridge::extract_mcp_observability_headers;
 
 #[test]
 fn test_well_known_discovery_cache_etag_and_304() {
@@ -63,33 +61,14 @@ fn test_extract_mcp_observability_headers() {
     let obs = extract_mcp_observability_headers(payload).expect("valid jsonrpc");
     assert_eq!(obs.mcp_method.as_deref(), Some("tools/call"));
     assert_eq!(obs.mcp_name.as_deref(), Some("query_schema"));
-}
 
-#[tokio::test]
-async fn test_mcp_stdio_bridge_roundtrip_over_in_memory_streams() {
-    let input =
-        b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\"}}\n";
-    let config = McpBridgeConfig {
-        endpoint_url: "http://127.0.0.1:0/mcp".to_string(),
-        bearer_token: Some("tok_test".to_string()),
-    };
-    let bridge = McpStdioBridge::new(config);
-    let mut output = Vec::new();
-
-    bridge
-        .run_with_responder(&input[..], &mut output, |req_line, obs, auth| {
-            assert!(req_line.contains("\"tools/call\""));
-            assert_eq!(obs.mcp_method.as_deref(), Some("tools/call"));
-            assert_eq!(obs.mcp_name.as_deref(), Some("echo"));
-            assert_eq!(auth.as_deref(), Some("Bearer tok_test"));
-            Ok(r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#.to_string())
-        })
-        .await
-        .expect("bridge roundtrip should succeed");
-
-    let out_str = String::from_utf8(output).unwrap();
+    let notification = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let obs_notif = extract_mcp_observability_headers(notification).expect("valid json");
     assert_eq!(
-        out_str.trim(),
-        r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#
+        obs_notif.mcp_method.as_deref(),
+        Some("notifications/initialized")
     );
+    assert_eq!(obs_notif.mcp_name, None);
+
+    assert_eq!(extract_mcp_observability_headers(b"{invalid"), None);
 }

@@ -24,7 +24,7 @@ __all__ = (
     "main",
 )
 
-_SERVER_FEATURES = "vertebra-http/python,vertebra-http/tls,vertebra-http/compression"
+_SERVER_FEATURES = "vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3"
 
 
 def _normalize_platform(raw_platform: str) -> str:

@@ -195,7 +195,7 @@ jobs:
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
-        run: cargo test --workspace --features tls,compression,gcp,macos-ulock
+        run: cargo test --workspace --features tls,http3,compression,gcp,macos-ulock
 
   test-typescript:
     runs-on: ubuntu-latest

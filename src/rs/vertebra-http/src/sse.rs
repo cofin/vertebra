@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use http::header::{self, HeaderValue};
 use http::{Response, StatusCode};
 use hyper::body::Frame;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::body::FrameReceiver;
 
@@ -258,16 +258,24 @@ pub struct SseHub {
     topics: DashMap<String, Arc<SseTopicChannel>>,
     replay_capacity: usize,
     heartbeat_interval: Duration,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl SseHub {
     /// Create a new `SseHub` with per-topic `replay_capacity` and keepalive `heartbeat_interval`.
     pub fn new(replay_capacity: usize, heartbeat_interval: Duration) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             topics: DashMap::new(),
             replay_capacity: replay_capacity.max(1),
             heartbeat_interval: heartbeat_interval.max(Duration::from_millis(10)),
+            shutdown_tx,
         }
+    }
+
+    /// Close all active SSE subscription streams cleanly on server shutdown.
+    pub fn close_all(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 
     fn get_or_create_topic(&self, topic: &str) -> Arc<SseTopicChannel> {
@@ -329,8 +337,12 @@ impl SseHub {
 
         let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, Infallible>>(64);
         let heartbeat_interval = self.heartbeat_interval;
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
+            if *shutdown_rx.borrow_and_update() {
+                return;
+            }
             for frame_bytes in replayed {
                 if tx.send(Ok(Frame::data(frame_bytes))).await.is_err() {
                     return;
@@ -344,6 +356,11 @@ impl SseHub {
             loop {
                 tokio::select! {
                     biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow_and_update() {
+                            break;
+                        }
+                    }
                     msg = broadcast_rx.recv() => {
                         match msg {
                             Ok(bytes) => {

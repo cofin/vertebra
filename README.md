@@ -42,7 +42,7 @@ vtb build --standalone
 make dev         # Build Rust crates and install debug Python extensions
 make build       # Build TS client, release Rust binaries, and wheel
 make test        # Run all tests (Rust + Python + TypeScript)
-make rs-test     # Run Rust workspace tests (tls, compression, and gcp features)
+make rs-test     # Run Rust tests (tls, http3, compression, gcp)
 make py-test     # Run Python test suite
 make oracle-test # Run Oracle 26ai Rust tests, stubtest, and Python unit tests
 make oracle-wheel-check # Verify vertebra-oracle wheel isolation
