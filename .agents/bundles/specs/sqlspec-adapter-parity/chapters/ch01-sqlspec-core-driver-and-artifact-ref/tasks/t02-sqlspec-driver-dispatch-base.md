@@ -11,33 +11,36 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t01
+  - sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t01
 files:
-- src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/extensions/sqlspec/adapters/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/db/driver/_sync.py
-- src/py/vertebra/db/driver/_async.py
-- src/py/vertebra/db/driver/_common.py
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/registry.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/db/driver/_sync.py
+  - src/py/vertebra/db/driver/_async.py
+  - src/py/vertebra/db/driver/_common.py
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/registry.py
 estimated_loc: 245
 tags:
-- sqlspec
-- driver
-- pipeline
-- arrow
+  - sqlspec
+  - driver
+  - pipeline
+  - arrow
 sources:
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver
-- id: db-common
-  resource: src/py/vertebra/db/driver/_common.py
-  title: Canonical DatabaseError hierarchy
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver
+  - id: db-common
+    resource: src/py/vertebra/db/driver/__init__.py
+    title: DatabaseError hierarchy re-exported from vertebra._vertebra
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement _driver.py Template-Method Dispatch Bases and Pipeline Stack Execution
@@ -49,8 +52,8 @@ Create `src/py/vertebra/extensions/sqlspec/_driver.py` implementing the MyPyC-sa
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy overrides of `execute`/`select` and `DeferredSyncExceptionHandler`/`DeferredAsyncExceptionHandler` to eliminate/extract.
-- `src/py/vertebra/db/driver/_sync.py` & `_async.py` — `select_to_arrow`, `load_from_arrow`, `stream_arrow_batches`, `write_arrow_shm`, and `query_with_columns` hooks on `SyncDatabaseDriver`/`AsyncDatabaseDriver`.
-- `src/py/vertebra/db/driver/_common.py` & `capabilities.py` — `DatabaseError`, `SyncPipelineCapable`, `AsyncPipelineCapable`, `NotificationSource`, and `QueueStore`.
+- `src/py/vertebra/db/driver/_sync.py` & `_async.py` — `select_to_arrow`, `load_from_arrow`, `stream_arrow_batches`, and `query_with_columns` hooks on `SyncDatabaseDriver`/`AsyncDatabaseDriver` (`write_arrow_shm` is on `CommonDriverMixin` in `_common.py`). Move `src/py/vertebra/extensions/sqlspec/adapters.py` to `src/py/vertebra/extensions/sqlspec/adapters/__init__.py` unchanged so the per-engine `adapters/<engine>/` packages added in `ch02`–`ch03` import cleanly while the legacy classes remain importable until `ch04:t03` trims that file.
+- `src/py/vertebra/db/driver/_common.py`, `__init__.py` & `capabilities.py` — `BaseDatabaseConfig`, `CommonDriverMixin`, the `DatabaseError` hierarchy re-exported from `vertebra._vertebra`, `SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncNotificationSource`/`AsyncNotificationSource` (split by `native-redis-driver`), and `QueueStore`.
 - `src/py/vertebra/db/registry.py` — reference-counted shared pool lifecycle.
 
 ## Contracts & Edge Cases
@@ -76,4 +79,4 @@ uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions
 - [ ] Zero regressions in the fast verification gate.
 
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Current monolithic SQLSpec BaseSyncDriver and BaseAsyncDriver.
-[^db-common]: `src/py/vertebra/db/driver/_common.py` — Canonical DatabaseError hierarchy.
+[^db-common]: `src/py/vertebra/db/driver/__init__.py` — DatabaseError hierarchy re-exported from vertebra._vertebra.

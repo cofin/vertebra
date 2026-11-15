@@ -11,44 +11,44 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t02
+  - native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t02
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/tests/integration/conformance_gate.py
-- src/py/tests/unit/db/test_conformance_gate.py
-- src/py/tests/integration/db/test_driver_conformance.py
-- .github/workflows/ci.yml
+  - src/py/tests/integration/conformance_gate.py
+  - src/py/tests/unit/db/test_conformance_gate.py
+  - src/py/tests/integration/db/test_driver_conformance.py
+  - .github/workflows/ci.yml
 tests:
-- src/py/tests/unit/db/test_conformance_gate.py
-- src/py/tests/integration/db/test_driver_conformance.py
-- src/py/tests/unit/db/test_sqlite_driver.py
+  - src/py/tests/unit/db/test_conformance_gate.py
+  - src/py/tests/integration/db/test_driver_conformance.py
+  - src/py/tests/unit/db/test_sqlite_driver.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/tests/integration/conformance_gate.py
-- src/py/tests/unit/db/test_conformance_gate.py
-- src/py/tests/integration/db/test_driver_conformance.py
-- .github/workflows/ci.yml
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/tests/integration/conformance_gate.py
+  - src/py/tests/unit/db/test_conformance_gate.py
+  - src/py/tests/integration/db/test_driver_conformance.py
+  - .github/workflows/ci.yml
 estimated_loc: 110
 tags:
-- sqlite
-- sqlalchemy
-- conformance
-- ci
+  - sqlite
+  - sqlalchemy
+  - conformance
+  - ci
 sources:
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncSQLiteDialect
-  title: SQLAlchemy sqlite+vertebra and sqlite+vertebra_async dialects
-- id: conformance-suite
-  resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
-  title: Database driver conformance suite and ENGINE_SPECS
-- id: conformance-gate
-  resource: src/py/tests/integration/conformance_gate.py::ConformanceGate
-  title: ConformanceGate SUPPORTED_ENGINES lane filter
-- id: ci-wf
-  resource: .github/workflows/ci.yml
-  title: Continuous integration test and wheel isolation workflow
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncSQLiteDialect
+    title: SQLAlchemy sqlite+vertebra and sqlite+vertebra_async dialects
+  - id: conformance-suite
+    resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
+    title: Database driver conformance suite and ENGINE_SPECS
+  - id: conformance-gate
+    resource: src/py/tests/integration/conformance_gate.py::ConformanceGate
+    title: ConformanceGate SUPPORTED_ENGINES lane filter
+  - id: ci-wf
+    resource: .github/workflows/ci.yml
+    title: Continuous integration test and wheel isolation workflow
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: SQLAlchemy Native SQLite Dialect Alignment, Conformance Suite, and CI Gate
@@ -63,12 +63,12 @@ Route `sqlite+vertebra` / `sqlite+vertebra_async` cleanly through native SQLite 
 - `src/py/tests/integration/conformance_gate.py` — `ConformanceGate.SUPPORTED_ENGINES`.
 - `src/py/tests/unit/db/test_conformance_gate.py` — `ConformanceGate` supported-engine unit assertions.
 - `src/py/tests/integration/db/test_driver_conformance.py` — `EngineConformanceSpec` and `ENGINE_SPECS` `"sqlite"` entry.
-- `.github/workflows/ci.yml` — `duckdb-test` / `duckdb-wheel-check` CI steps.
+- `.github/workflows/ci.yml` — `postgres-wheel-check` job and `test-db-conformance` matrix (`make db-conformance ENGINE=… VERSION=…`).
 
 ## Contracts & Edge Cases
 
-- Remove any direct `sqlite3` fallback in `dialects.py` (`sqlite+vertebra`, `+vtb`, `+vertebra_async`, `+vtb_async` remain intact).
-- Update `ENGINE_SPECS` in `test_driver_conformance.py` for `"sqlite"` with `native_extension_module="vertebra._sqlite"`, `supports_pipeline=True`, and `pending_flow_id=None`, and add `"sqlite"` to `ConformanceGate.SUPPORTED_ENGINES` (`conformance_gate.py` + `test_conformance_gate.py`).
+- Confirm `extensions/sqlalchemy/dialects.py` keeps `sqlite+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` intact with no `sqlite3` use; the `sqlite3.connect` fallback in `src/py/vertebra/db/dbapi/_sync.py` is removed by `sqlalchemy-and-django-integration:ch01:t01`.
+- Update `ENGINE_SPECS` in `test_driver_conformance.py` for `"sqlite"` with `native_extension_module="vertebra._sqlite"`, and `supports_pipeline=True` (`pending_flow_id` already defaults to `None`), and add `"sqlite"` to `ConformanceGate.SUPPORTED_ENGINES` (`conformance_gate.py` + `test_conformance_gate.py`).
 - Add CI steps running `make sqlite-test` and `make sqlite-wheel-check` in `.github/workflows/ci.yml`.
 - **Edge Case**: Scalar conformance cases (`bool`, `JSONB` `dict`/`list`, `Decimal`, `UUID`, `datetime`, `bytes`) round-trip losslessly across `:memory:` and WAL files.
 

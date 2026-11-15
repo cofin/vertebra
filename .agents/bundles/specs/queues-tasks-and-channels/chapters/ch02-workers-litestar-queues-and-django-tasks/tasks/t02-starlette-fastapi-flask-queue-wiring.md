@@ -4,46 +4,48 @@ id: queues-tasks-and-channels:ch02-workers-litestar-queues-and-django-tasks:t02
 flow_id: queues-tasks-and-channels
 chapter_id: ch02-workers-litestar-queues-and-django-tasks
 title: Wire Starlette, FastAPI & Flask Queue Extensions onto QueueService & Container DI
-description: Replace standalone deque stubs in Starlette/FastAPI/Flask queue modules with unified QueueService, QueueBackendSettings, and Container DI.
+description: Replace the Flask deque stub and the Starlette/FastAPI litestar-queues re-exports with unified QueueService, QueueBackendSettings, and Container DI.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch02-workers-litestar-queues-and-django-tasks:t01
+  - queues-tasks-and-channels:ch02-workers-litestar-queues-and-django-tasks:t01
 files:
-- src/py/vertebra/extensions/starlette/queues.py
-- src/py/vertebra/extensions/flask/queues.py
-- src/py/vertebra/extensions/fastapi/plugin.py
+  - src/py/vertebra/extensions/starlette/queues.py
+  - src/py/vertebra/extensions/fastapi/queues.py
+  - src/py/vertebra/extensions/flask/queues.py
+  - src/py/vertebra/extensions/fastapi/plugin.py
 tests:
-- src/py/tests/unit/extensions/test_starlette_plugin.py
-- src/py/tests/unit/extensions/test_fastapi_plugin.py
-- src/py/tests/unit/extensions/test_flask_plugin.py
+  - src/py/tests/unit/extensions/test_starlette_plugin.py
+  - src/py/tests/unit/extensions/test_fastapi_plugin.py
+  - src/py/tests/unit/extensions/test_flask_plugin.py
 read_set:
-- src/py/vertebra/extensions/starlette/queues.py
-- src/py/vertebra/extensions/flask/queues.py
-- src/py/vertebra/extensions/fastapi/plugin.py
-- src/py/vertebra/framework/queues/worker.py
-- src/py/vertebra/server/lanes.py
+  - src/py/vertebra/extensions/starlette/queues.py
+  - src/py/vertebra/extensions/flask/queues.py
+  - src/py/vertebra/extensions/fastapi/plugin.py
+  - src/py/vertebra/server/lanes.py
+  - src/py/vertebra/server/lanes.py
 estimated_loc: 195
 tags:
-- queues
-- starlette
-- fastapi
-- flask
+  - queues
+  - starlette
+  - fastapi
+  - flask
 sources:
-- id: starlette-q
-  resource: src/py/vertebra/extensions/starlette/queues.py
-  title: Starlette queue integration
-- id: flask-q
-  resource: src/py/vertebra/extensions/flask/queues.py
-  title: Flask synchronous queue integration
-- id: fastapi-plug
-  resource: src/py/vertebra/extensions/fastapi/plugin.py
-  title: FastAPI VertebraPlugin
+  - id: starlette-q
+    resource: src/py/vertebra/extensions/starlette/queues.py
+    title: Starlette queue integration
+  - id: flask-q
+    resource: src/py/vertebra/extensions/flask/queues.py
+    title: Flask synchronous queue integration
+  - id: fastapi-plug
+    resource: src/py/vertebra/extensions/fastapi/plugin.py
+    title: FastAPI VertebraPlugin
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Wire Starlette, FastAPI & Flask Queue Extensions onto QueueService & Container DI
@@ -54,11 +56,10 @@ Wire Starlette, FastAPI, and Flask queue integrations onto unified `QueueService
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/starlette/queues.py` — ASGI queue lifespan and DI wiring.
-- `src/py/vertebra/extensions/flask/queues.py` — WSGI synchronous `SyncQueueStore` enqueue and worker dispatch.
-- `src/py/vertebra/extensions/fastapi/plugin.py` — FastAPI `VertebraPlugin` queue registration and lifespan.
-- `src/py/vertebra/framework/queues/worker.py` — `WorkerRunner` execution and drain contracts.
-- `src/py/vertebra/server/lanes.py` — `MultiLaneWorkerRunner` lane supervision.
+- `src/py/vertebra/extensions/starlette/queues.py` — litestar-queues SHM name re-exports (re-exported again by `src/py/vertebra/extensions/fastapi/queues.py`) to replace with ASGI queue lifespan and DI wiring.
+- `src/py/vertebra/extensions/flask/queues.py` — in-memory deque backend to replace with WSGI synchronous `SyncQueueStore` enqueue and worker dispatch.
+- `src/py/vertebra/extensions/fastapi/plugin.py` — FastAPI `VertebraPlugin` (queue registration and lifespan to be added).
+- `src/py/vertebra/server/lanes.py` — `WorkerRunner` execution, lane supervision, and drain contracts.
 
 ## Contracts & Edge Cases
 

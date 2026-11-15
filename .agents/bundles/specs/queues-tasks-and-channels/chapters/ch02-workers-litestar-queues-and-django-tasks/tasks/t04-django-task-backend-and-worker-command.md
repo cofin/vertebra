@@ -11,44 +11,46 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch02-workers-litestar-queues-and-django-tasks:t03
+  - queues-tasks-and-channels:ch02-workers-litestar-queues-and-django-tasks:t03
 files:
-- src/py/vertebra/extensions/django/tasks.py
-- src/py/vertebra/extensions/django/__init__.py
-- src/py/vertebra/extensions/django/management/__init__.py
-- src/py/vertebra/extensions/django/management/commands/__init__.py
-- src/py/vertebra/extensions/django/management/commands/vertebra_worker.py
+  - src/py/vertebra/extensions/django/tasks.py
+  - src/py/vertebra/extensions/django/queues.py
+  - src/py/vertebra/extensions/django/__init__.py
+  - src/py/vertebra/extensions/django/management/__init__.py
+  - src/py/vertebra/extensions/django/management/commands/__init__.py
+  - src/py/vertebra/extensions/django/management/commands/vertebra_worker.py
 tests:
-- src/py/tests/unit/extensions/test_django_plugin.py
+  - src/py/tests/unit/extensions/test_django_plugin.py
 read_set:
-- src/py/vertebra/extensions/django/queues.py
-- src/py/vertebra/extensions/django/__init__.py
-- src/py/vertebra/extensions/django/apps.py
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/framework/queues/worker.py
-- src/py/vertebra/framework/di.py
+  - src/py/vertebra/extensions/django/queues.py
+  - src/py/vertebra/extensions/django/__init__.py
+  - src/py/vertebra/extensions/django/apps.py
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/server/lanes.py
+  - src/py/vertebra/framework/di.py
 estimated_loc: 235
 tags:
-- django
-- tasks
-- queues
-- worker
-- di
+  - django
+  - tasks
+  - queues
+  - worker
+  - di
 sources:
-- id: dj-queues
-  resource: src/py/vertebra/extensions/django/queues.py
-  title: Fake deque-based Django queue module slated for deletion
-- id: dj-init
-  resource: src/py/vertebra/extensions/django/__init__.py
-  title: Public Django extension exports
-- id: dj-apps
-  resource: src/py/vertebra/extensions/django/apps.py
-  title: VertebraAppConfig Django app registration
-- id: fw-di
-  resource: src/py/vertebra/framework/di.py
-  title: Container per-task dependency scope
+  - id: dj-queues
+    resource: src/py/vertebra/extensions/django/queues.py
+    title: Fake deque-based Django queue module slated for deletion
+  - id: dj-init
+    resource: src/py/vertebra/extensions/django/__init__.py
+    title: Public Django extension exports
+  - id: dj-apps
+    resource: src/py/vertebra/extensions/django/apps.py
+    title: VertebraAppConfig Django app registration
+  - id: fw-di
+    resource: src/py/vertebra/framework/di.py
+    title: Container per-task dependency scope
+verification_strategy: regression_tdd
 ---
 
 # Task `t04`: Implement Django 6.0+ TaskBackend (Sync/Async) and vertebra_worker Management Command
@@ -84,7 +86,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/django && uv run --no-syn
 
 ## Acceptance Criteria
 
-- [ ] `extensions/django/queues.py` is deleted and `extensions/django/tasks.py::TaskBackend` implements sync `enqueue` via `SyncQueueStore` and async `aenqueue` via `AsyncQueueStore`.
+- [ ] `extensions/django/queues.py` is deleted and `src/py/vertebra/extensions/django/tasks.py::TaskBackend` implements sync `enqueue` via `SyncQueueStore` and async `aenqueue` via `AsyncQueueStore`.
 - [ ] `python manage.py vertebra_worker` executes enqueued Django `6.0+` tasks with scoped `Container` DI.
 - [ ] Zero regressions in the fast verification gate.
 

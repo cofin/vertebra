@@ -11,34 +11,36 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t04
+  - sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t04
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects/duckdb.py
-- src/py/vertebra/extensions/sqlalchemy/dialects/bigquery.py
-- src/py/vertebra/db/adapters/bigquery/config.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/duckdb.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/bigquery.py
+  - src/py/vertebra/db/adapters/bigquery/config.py
 tests:
-- src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+  - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/vertebra/db/adapters/duckdb/driver.py
-- src/py/vertebra/db/adapters/bigquery/config.py
-- src/py/vertebra/utils/module_loader.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/vertebra/db/adapters/duckdb/_sync.py
+  - src/py/vertebra/db/adapters/duckdb/_async.py
+  - src/py/vertebra/db/adapters/bigquery/config.py
+  - src/py/vertebra/utils/module_loader.py
 estimated_loc: 225
 tags:
-- sqlalchemy
-- duckdb
-- bigquery
-- dialects
+  - sqlalchemy
+  - duckdb
+  - bigquery
+  - dialects
 sources:
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Current DuckDB and BigQuery SQLAlchemy dialect implementations
-- id: bq-config
-  resource: src/py/vertebra/db/adapters/bigquery/config.py
-  title: BigQueryConfig connection configuration
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Current DuckDB and BigQuery SQLAlchemy dialect implementations
+  - id: bq-config
+    resource: src/py/vertebra/db/adapters/bigquery/config.py
+    title: BigQueryConfig connection configuration
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Implement Native DuckDB and BigQuery Sync/Async SQLAlchemy Dialects

@@ -9,53 +9,57 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T23:10:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:10:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T23:10:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T23:10:00Z'
+    commit: 1b191388
 tags:
-- sqlite
-- rust
-- wheel
-- packaging
-- pyo3
-- review
+  - sqlite
+  - rust
+  - wheel
+  - packaging
+  - pyo3
+  - review
 sources:
-- id: cargo-ws
-  resource: src/rs/Cargo.toml
-  title: Rust workspace member manifest
-- id: duckdb-cargo
-  resource: src/rs/vertebra-duckdb/Cargo.toml
-  title: Standalone embedded PyO3 wheel Cargo precedent
-- id: duckdb-pyproj
-  resource: src/rs/vertebra-duckdb/pyproject.toml
-  title: Maturin standalone wheel isolation manifest precedent
-- id: root-pyproject
-  resource: pyproject.toml
-  title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
-- id: makefile
-  resource: Makefile
-  title: Polyglot build, lint, stubtest, and wheel-check targets
-- id: release-wf
-  resource: .github/workflows/release.yaml
-  title: Release wheel and sdist build matrix
-- id: review-areas
-  resource: .agents/skills/review-core/references/areas.toml
-  title: Review router area path ownership manifest
-- id: review-checklist
-  resource: .agents/skills/review-core/references/checklist.md
-  title: Review checklist including FFI-09 stub list
-- id: pyo3-skill
-  resource: .agents/skills/pyo3-bridge/SKILL.md
-  title: PyO3 native extension engineering skill
-- id: wheel-tests
-  resource: src/py/tests/unit/db/test_optional_driver_wheels.py
-  title: Sibling PyO3 wheel isolation test gate
+  - id: cargo-ws
+    resource: src/rs/Cargo.toml
+    title: Rust workspace member manifest
+  - id: duckdb-cargo
+    resource: src/rs/vertebra-duckdb/Cargo.toml
+    title: Standalone embedded PyO3 wheel Cargo precedent
+  - id: duckdb-pyproj
+    resource: src/rs/vertebra-duckdb/pyproject.toml
+    title: Maturin standalone wheel isolation manifest precedent
+  - id: root-pyproject
+    resource: pyproject.toml
+    title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
+  - id: makefile
+    resource: Makefile
+    title: Polyglot build, lint, stubtest, and wheel-check targets
+  - id: release-wf
+    resource: .github/workflows/release.yaml
+    title: Release wheel and sdist build matrix
+  - id: review-areas
+    resource: .agents/skills/review-core/references/areas.toml
+    title: Review router area path ownership manifest
+  - id: review-checklist
+    resource: .agents/skills/review-core/references/checklist.md
+    title: Review checklist including FFI-09 stub list
+  - id: pyo3-skill
+    resource: .agents/skills/pyo3-bridge/SKILL.md
+    title: PyO3 native extension engineering skill
+  - id: wheel-tests
+    resource: src/py/tests/unit/db/test_optional_driver_wheels.py
+    title: Sibling PyO3 wheel isolation test gate
+current_task: "native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t01"
 ---
 
 # Chapter 01: Standalone vertebra-sqlite Crate, Companion Wheel Isolation, and Review Manifests
@@ -106,7 +110,7 @@ arrow-array = { version = "=60.1.0", default-features = false }
 arrow-buffer = { version = "=60.1.0", default-features = false }
 arrow-ipc = { version = "=60.1.0", default-features = false }
 arrow-schema = { version = "=60.1.0", default-features = false }
-parking_lot = { workspace = true }
+parking_lot = "0.12"
 pyo3 = { workspace = true }
 rusqlite = { version = "=0.41.1", features = ["bundled", "modern_sqlite", "hooks", "serialize", "blob", "column_decltype", "backup"] }
 serde_json = { workspace = true }
@@ -150,7 +154,7 @@ User documentation, `AGENTS.md`, and OKF chapters execute in `ch03:t04`; review 
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Baseline (`473e1f2e`)**: `state: planned`; `0/4` tasks completed.
 - **Active Invariants**: Zero sibling wheels ship `_sqlite.pyi`; `_sqlite` compiles against bundled SQLite 3.45+ without OS libraries.
 - **Fast Chapter Gate (`< 60s`)**: `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-sqlite && make sqlite-wheel-check && uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py -q && make review-check`
 

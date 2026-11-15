@@ -11,45 +11,45 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch02-rust-clients-topologies-and-streams:t03
+  - native-redis-driver:ch02-rust-clients-topologies-and-streams:t03
 files:
-- src/rs/vertebra-redis/src/py_client.rs
-- src/rs/vertebra-redis/src/lib.rs
-- src/py/vertebra/_redis.pyi
-- src/rs/vertebra-redis/src/pubsub.rs
-- src/rs/vertebra-redis/src/streams.rs
-- src/py/tests/unit/test_freethreaded_gil.py
+  - src/rs/vertebra-redis/src/py_client.rs
+  - src/rs/vertebra-redis/src/lib.rs
+  - src/py/vertebra/_redis.pyi
+  - src/rs/vertebra-redis/src/pubsub.rs
+  - src/rs/vertebra-redis/src/streams.rs
+  - src/py/tests/unit/test_freethreaded_gil.py
 tests:
-- src/rs/vertebra-redis/tests/redis_client.rs
-- src/py/tests/unit/test_freethreaded_gil.py
+  - src/rs/vertebra-redis/tests/redis_client.rs
+  - src/py/tests/unit/test_freethreaded_gil.py
 read_set:
-- src/rs/vertebra-db/src/py_async.rs
-- src/rs/vertebra-redis/src/client_core.rs
-- src/py/vertebra/_redis.pyi
-- src/rs/vertebra-redis/src/lib.rs
-- src/py/tests/unit/test_freethreaded_gil.py
+  - src/rs/vertebra-db/src/py_async.rs
+  - src/rs/vertebra-redis/src/client_core.rs
+  - src/py/vertebra/_redis.pyi
+  - src/rs/vertebra-redis/src/lib.rs
+  - src/py/tests/unit/test_freethreaded_gil.py
 estimated_loc: 245
 tags:
-- redis
-- pyo3
-- async
-- pipeline
-- valkey
-- pubsub
-- streams
-- freethreaded
+  - redis
+  - pyo3
+  - async
+  - pipeline
+  - pubsub
+  - streams
+  - freethreaded
 sources:
-- id: py-async
-  resource: src/rs/vertebra-db/src/py_async.rs
-  title: AsyncCompletionQueue and Notifier PyO3 bridge
-- id: mysql-pyi
-  resource: src/py/vertebra/_mysql.pyi
-  title: Standalone extension stub precedent
-- id: ft-gil-test
-  resource: src/py/tests/unit/test_freethreaded_gil.py
-  title: Free-threaded Python 3.14t/3.15t GIL_USED test
+  - id: py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: AsyncCompletionQueue and Notifier PyO3 bridge
+  - id: mysql-pyi
+    resource: src/py/vertebra/_mysql.pyi
+    title: Standalone extension stub precedent
+  - id: ft-gil-test
+    resource: src/py/tests/unit/test_freethreaded_gil.py
+    title: Free-threaded Python 3.14t/3.15t GIL_USED test
+verification_strategy: regression_tdd
 ---
 
 # Task `t04`: Expose PyO3 Sync/AsyncRedisClient, Pipelines, Pub/Sub Listeners, and Streams

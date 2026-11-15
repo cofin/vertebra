@@ -9,43 +9,47 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 depends_on_chapters:
-- ch02-sqlspec-relational-adapters
-- ch03-sqlspec-enterprise-and-cloud-adapters
+  - ch02-sqlspec-relational-adapters
+  - ch03-sqlspec-enterprise-and-cloud-adapters
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T18:50:00Z'
+    commit: 1b191388
 tags:
-- sqlspec
-- storage
-- events
-- documentation
-- okf
+  - sqlspec
+  - storage
+  - events
+  - documentation
+  - okf
 sources:
-- id: sqlspec-storage
-  resource: src/py/vertebra/extensions/sqlspec/storage.py
-  title: SQLSpec ObjectStoreBackend
-- id: sqlspec-events
-  resource: src/py/vertebra/extensions/sqlspec/events.py
-  title: SQLSpec ChangeFeed event backends
-- id: sqlspec-plugin
-  resource: src/py/vertebra/extensions/sqlspec/plugin.py
-  title: SQLSpecPlugin lifecycle
-- id: okf-dialects
-  resource: .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-  title: SQLSpec OKF chapter
+  - id: sqlspec-storage
+    resource: src/py/vertebra/extensions/sqlspec/storage.py
+    title: SQLSpec ObjectStoreBackend
+  - id: sqlspec-events
+    resource: src/py/vertebra/extensions/sqlspec/events.py
+    title: SQLSpec ChangeFeed event backends
+  - id: sqlspec-plugin
+    resource: src/py/vertebra/extensions/sqlspec/plugin.py
+    title: SQLSpecPlugin lifecycle
+  - id: okf-dialects
+    resource: .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+    title: SQLSpec OKF chapter
+current_task: "sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t01"
 ---
 
 # Chapter 04: ObjectStoreBase Parity, ChangeFeed Event Backends, Legacy Cutover & Docs/OKF
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `extensions/sqlspec/{adapters,bigquery,spanner}.py` coexist with incomplete `ObjectStoreBackend` and uncheckpointed `ChangeFeed*EventBackend` classes [^sqlspec-storage] [^sqlspec-events] [^sqlspec-plugin].
+- **Baseline (`473e1f2e`)**: `extensions/sqlspec/{adapters,bigquery,spanner}.py` coexist with a base-less `ObjectStoreBackend` (method surface complete, no `ObjectStoreBase` parent) and uncheckpointed `ChangeFeed*EventBackend` classes [^sqlspec-storage] [^sqlspec-events] [^sqlspec-plugin].
 - **Target Architecture**: `ObjectStoreBackend` subclasses `ObjectStoreBase`, `ChangeFeed*EventBackend` persists checkpoints and spills `> 8000`B notify payloads, monolithic `{adapters,bigquery,spanner}.py` are deleted (with zero `_compat.py`), and docs/OKF chapters are synchronized [^okf-dialects].
 <!-- truth: end -->
 
@@ -60,18 +64,26 @@ This final chapter completes `ObjectStoreBackend(ObjectStoreBase)` parity, harde
 
 ```python
 class ObjectStoreBackend(ObjectStoreBase):
-    def stream_arrow_sync(self, path: str, *, batch_size: int = 65536) -> Iterator[pa.RecordBatch]: ...
-    def stream_arrow_async(self, path: str, *, batch_size: int = 65536) -> AsyncIterator[pa.RecordBatch]: ...
-    def sign_sync(self, paths: str | list[str], *, expires_in: int = 3600) -> str | list[str]: ...
-    async def sign_async(self, paths: str | list[str], *, expires_in: int = 3600) -> str | list[str]: ...
+    def stream_arrow_sync(self, pattern: str, *, file_format: str = "parquet", batch_size: int = 65_536, **kwargs: Any) -> Iterator[pa.RecordBatch]: ...
+    def stream_arrow_async(self, pattern: str, *, file_format: str = "parquet", batch_size: int = 65_536, **kwargs: Any) -> AsyncIterator[pa.RecordBatch]: ...
+    def sign_sync(self, paths: str | list[str], expires_in: int = 3600, for_upload: bool = False) -> str | list[str]: ...
+    async def sign_async(self, paths: str | list[str], expires_in: int = 3600, for_upload: bool = False) -> str | list[str]: ...
 
 class ChangeFeedSyncEventBackend:
-    def publish(self, channel: str, payload: Mapping[str, Any]) -> str: ...
-    def iter_events(self, channel: str, *, resume_token: str | None = None) -> Iterator[ dict[str, Any]]: ...
+    def publish(self, channel: str, payload: Mapping[str, Any], metadata: Mapping[str, Any] | None = None) -> str: ...
+    def publish_many(self, channel: str, payloads: Sequence[Mapping[str, Any]]) -> list[str]: ...
+    def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None: ...
+    def ack(self, event_id: str) -> None: ...
+    def nack(self, event_id: str) -> None: ...
+    def shutdown(self) -> None: ...
 
 class ChangeFeedAsyncEventBackend:
-    async def publish(self, channel: str, payload: Mapping[str, Any]) -> str: ...
-    def iter_events(self, channel: str, *, resume_token: str | None = None) -> AsyncIterator[dict[str, Any]]: ...
+    async def publish(self, channel: str, payload: Mapping[str, Any], metadata: Mapping[str, Any] | None = None) -> str: ...
+    async def publish_many(self, channel: str, payloads: Sequence[Mapping[str, Any]]) -> list[str]: ...
+    async def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None: ...
+    async def ack(self, event_id: str) -> None: ...
+    async def nack(self, event_id: str) -> None: ...
+    async def shutdown(self) -> None: ...
 ```
 
 ## 3. Documentation & OKF Knowledge Plan
@@ -90,13 +102,13 @@ Updates `docs/usage/extensions.md`, `docs/reference/extensions.md`, [sqlspec-alc
 ## 5. Implementation Plan
 
 - [ ] [t01-objectstore-backend-parity.md](tasks/t01-objectstore-backend-parity.md) — Subclass sqlspec.storage.ObjectStoreBase in extensions/sqlspec/storage.py with async/sync streaming, copy/move, and signed URLs.
-- [ ] [t02-changefeed-event-backends.md](tasks/t02-changefeed-event-backends.md) — Add durable checkpoint persistence and ArtifactReference large-payload spill to extensions/sqlspec/events.py.
+- [ ] [t02-changefeed-event-backends.md](tasks/t02-changefeed-event-backends.md) — Add durable checkpoint persistence and `EventQueueStore` table spill for large payloads to extensions/sqlspec/events.py.
 - [ ] [t03-legacy-cutover-and-plugin-cleanup.md](tasks/t03-legacy-cutover-and-plugin-cleanup.md) — Delete extensions/sqlspec/{adapters,bigquery,spanner}.py and rewire plugin.py and __init__.py onto per-engine packages.
 - [ ] [t04-sqlspec-docs-and-okf-sync.md](tasks/t04-sqlspec-docs-and-okf-sync.md) — Update docs/usage/extensions.md, docs/reference/extensions.md, sqlspec-alchemy-and-dialects.md, and database-driver-limitations.md.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch04-sqlspec-cutover-storage-events-docs` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
+Chapter `ch04-sqlspec-cutover-storage-events-docs` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver`, `native-redis-driver`, and `sqlalchemy-and-django-integration`; `broker-pool-sharing` complete and archived at `246d7d0e`).
 
 Fast Chapter Gate (`< 60s` offline):
 

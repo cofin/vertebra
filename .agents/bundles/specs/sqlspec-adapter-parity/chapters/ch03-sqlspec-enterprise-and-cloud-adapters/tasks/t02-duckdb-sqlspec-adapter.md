@@ -11,49 +11,51 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch03-sqlspec-enterprise-and-cloud-adapters:t01
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/duckdb/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/duckdb/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/duckdb/driver.py
-- src/py/vertebra/db/adapters/duckdb/core.py
-- src/py/vertebra/db/adapters/duckdb/config.py
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/duckdb/_sync.py
+  - src/py/vertebra/db/adapters/duckdb/_async.py
+  - src/py/vertebra/db/adapters/duckdb/core.py
+  - src/py/vertebra/db/adapters/duckdb/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- duckdb
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - duckdb
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: duckdb-drv
-  resource: src/py/vertebra/db/adapters/duckdb/driver.py
-  title: Native DuckDB sync and async drivers
-- id: duckdb-core
-  resource: src/py/vertebra/db/adapters/duckdb/core.py
-  title: Native DuckDB core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Existing DuckDB SQLSpec adapter
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: duckdb-drv
+    resource: src/py/vertebra/db/adapters/duckdb/_sync.py
+    title: Native DuckDB sync and async drivers
+  - id: duckdb-core
+    resource: src/py/vertebra/db/adapters/duckdb/core.py
+    title: Native DuckDB core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Existing DuckDB SQLSpec adapter
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Deliver Feature-Complete DuckDB SQLSpec Adapter Package
@@ -65,7 +67,7 @@ Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/duckdb/{__in
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
-- `src/py/vertebra/db/adapters/duckdb/driver.py` — native DuckDB sync and async execution and Arrow drivers.
+- `src/py/vertebra/db/adapters/duckdb/_sync.py` and `src/py/vertebra/db/adapters/duckdb/_async.py` — native DuckDB sync and async execution and Arrow drivers.
 - `src/py/vertebra/db/adapters/duckdb/core.py` — native DuckDB parameter and wire helpers.
 - `src/py/vertebra/db/adapters/duckdb/config.py` — `DuckDBConfig` `:memory:<name>` connection options.
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy DuckDB SQLSpec logic to replace cleanly.
@@ -95,7 +97,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/duckdb &
 - [ ] `DuckDBSyncConfig` and `DuckDBAsyncConfig` resolve `adapter_name = 'vertebra_duckdb'` and all extension store classes natively on `sqlspec>=0.71.1`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^duckdb-drv]: `src/py/vertebra/db/adapters/duckdb/driver.py` — Native DuckDB sync and async drivers.
+[^duckdb-drv]: `src/py/vertebra/db/adapters/duckdb/_sync.py` and `src/py/vertebra/db/adapters/duckdb/_async.py` — Native DuckDB sync and async drivers.
 [^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py` — Native DuckDB core parameter and wire helpers.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Existing DuckDB SQLSpec adapter.
 [^storage-art]: `src/py/vertebra/storage/_store.py` — Storage-neutral ArtifactReference value struct.

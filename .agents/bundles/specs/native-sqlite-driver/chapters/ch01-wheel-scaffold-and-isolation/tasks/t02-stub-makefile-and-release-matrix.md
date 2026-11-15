@@ -11,34 +11,35 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: implementation_first
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t01
+  - native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t01
 files:
-- src/py/vertebra/_sqlite.pyi
-- Makefile
-- .github/workflows/release.yaml
+  - src/py/vertebra/_sqlite.pyi
+  - Makefile
+  - .github/workflows/release.yaml
 tests: []
 read_set:
-- src/py/vertebra/_duckdb.pyi
-- Makefile
-- .github/workflows/release.yaml
+  - src/py/vertebra/_duckdb.pyi
+  - Makefile
+  - .github/workflows/release.yaml
 estimated_loc: 135
 tags:
-- sqlite
-- stubs
-- ci
-- makefile
+  - sqlite
+  - stubs
+  - ci
+  - makefile
 sources:
-- id: duckdb-pyi
-  resource: src/py/vertebra/_duckdb.pyi
-  title: Standalone extension stub precedent
-- id: makefile
-  resource: Makefile
-  title: Polyglot build, lint, stubtest, and wheel-check targets
-- id: release-wf
-  resource: .github/workflows/release.yaml
-  title: Release wheel and sdist build matrix
+  - id: duckdb-pyi
+    resource: src/py/vertebra/_duckdb.pyi
+    title: Standalone extension stub precedent
+  - id: makefile
+    resource: Makefile
+    title: Polyglot build, lint, stubtest, and wheel-check targets
+  - id: release-wf
+    resource: .github/workflows/release.yaml
+    title: Release wheel and sdist build matrix
+verification_strategy: implementation_first
 ---
 
 # Task `t02`: Author _sqlite.pyi Stub, Makefile Targets, and Release Matrix

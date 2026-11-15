@@ -10,43 +10,44 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- spanner-queue-and-rw-transactions:t02
+  - spanner-queue-and-rw-transactions:t02
 files:
-- src/py/vertebra/db/adapters/spanner/queue.py
-- src/py/vertebra/db/adapters/spanner/__init__.py
-- src/py/vertebra/framework/queues/spanner.py
-- src/py/vertebra/framework/queues/base.py
+  - src/py/vertebra/db/adapters/spanner/queue.py
+  - src/py/vertebra/db/adapters/spanner/__init__.py
+  - src/py/vertebra/framework/queues/spanner.py
+  - src/py/vertebra/framework/queues/base.py
 tests:
-- src/py/tests/unit/db/test_spanner_queue_and_cdc.py
-- src/py/tests/unit/framework/test_distributed_queues.py
+  - src/py/tests/unit/db/test_spanner_queue_and_cdc.py
+  - src/py/tests/unit/framework/test_distributed_queues.py
 read_set:
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/spanner/_sync.py
-- src/py/vertebra/db/adapters/spanner/_async.py
-- src/py/vertebra/db/adapters/spanner/core.py
-- src/py/vertebra/framework/queues/spanner.py
-- src/py/vertebra/framework/queues/base.py
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/adapters/spanner/_sync.py
+  - src/py/vertebra/db/adapters/spanner/_async.py
+  - src/py/vertebra/db/adapters/spanner/core.py
+  - src/py/vertebra/framework/queues/spanner.py
+  - src/py/vertebra/framework/queues/base.py
 estimated_loc: 245
 tags:
-- spanner
-- spangres
-- queues
-- transactions
+  - spanner
+  - spangres
+  - queues
+  - transactions
 sources:
-- id: spn-driver
-  resource: src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver
-  title: SyncSpannerDriver and AsyncSpannerDriver run_in_transaction
-- id: queue-cap
-  resource: src/py/vertebra/db/driver/capabilities.py
-  title: SyncQueueStore and AsyncQueueStore protocols
-- id: queue-spanner
-  resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
-  title: SpannerQueueBackend passing 6 args to 3-param CLAIM_SPANNER_JOBS_SQL and skipping UPDATE_CLAIM_SPANNER_JOBS_SQL
-- id: queue-base
-  resource: src/py/vertebra/framework/queues/base.py::QueueService
-  title: QueueService backend registry
+  - id: spn-driver
+    resource: src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver
+    title: SyncSpannerDriver and AsyncSpannerDriver run_in_transaction
+  - id: queue-cap
+    resource: src/py/vertebra/db/driver/capabilities.py
+    title: SyncQueueStore and AsyncQueueStore protocols
+  - id: queue-spanner
+    resource: src/py/vertebra/framework/queues/spanner.py::SpannerQueueBackend
+    title: SpannerQueueBackend passing 6 args to 3-param CLAIM_SPANNER_JOBS_SQL and skipping UPDATE_CLAIM_SPANNER_JOBS_SQL
+  - id: queue-base
+    resource: src/py/vertebra/framework/queues/base.py::QueueService
+    title: QueueService backend registry
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Implement Sync/AsyncSpannerQueueStore and Remediate SpannerQueueBackend
@@ -59,7 +60,7 @@ Create `SyncSpannerQueueStore` and `AsyncSpannerQueueStore` in `src/py/vertebra/
 
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncQueueStore` and `AsyncQueueStore` protocols.
 - `src/py/vertebra/db/adapters/spanner/_sync.py` & `_async.py` — interactive `run_in_transaction` sync/async driver methods.
-- `src/py/vertebra/db/adapters/spanner/core.py` — GoogleSQL `@param` and Spangres `$1` parameter encoding.
+- `src/py/vertebra/db/adapters/spanner/core.py` — parameter JSON encoding (`dialect` is ignored today; positional parameters become `p1..pN`), to be made dialect-aware for GoogleSQL `@param` and Spangres `$1`.
 - `src/py/vertebra/framework/queues/spanner.py` — broken `dequeue()`, GoogleSQL-only SQL, unconditional `acquire_lease()`, and unbounded `_receipt_index`.
 - `src/py/vertebra/framework/queues/base.py` — `QueueService` backend registry (`QueueBackendSettings(kind="spanner")`).
 

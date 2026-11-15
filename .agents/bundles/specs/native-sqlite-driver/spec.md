@@ -9,84 +9,87 @@ planning_quality: standard
 planning_degraded_reason: null
 has_chapters: true
 chapters:
-- ch01-wheel-scaffold-and-isolation
-- ch02-rust-engine-arrow-and-pyo3-clients
-- ch03-python-cutover-pipelines-ci-and-docs
+  - ch01-wheel-scaffold-and-isolation
+  - ch02-rust-engine-arrow-and-pyo3-clients
+  - ch03-python-cutover-pipelines-ci-and-docs
 current_chapter: ch01-wheel-scaffold-and-isolation
 current_task: native-sqlite-driver:ch01:t01
 parent_prd: native-data-platform
 depends_on_flows: []
 plan_revision: 1
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 created_at: '2026-11-12T23:45:00Z'
-updated_at: '2026-11-15T17:48:00Z'
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:10:00Z'
 verified:
-- by: agent:flow-archive
-  at: '2026-11-15T17:48:00Z'
-  commit: 28415b3f
-- by: agent:plan-generator
-  at: '2026-11-14T23:10:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:flow-archive
+    at: '2026-11-15T17:48:00Z'
+    commit: 246d7d0e
+  - by: agent:plan-generator
+    at: '2026-11-14T23:10:00Z'
+    commit: 1b191388
 tags:
-- sqlite
-- rust
-- pyo3
-- wal
-- arrow
-- wheel
+  - sqlite
+  - rust
+  - pyo3
+  - wal
+  - arrow
+  - wheel
 sources:
-- id: cargo-ws
-  resource: src/rs/Cargo.toml
-  title: Rust workspace member manifest
-- id: duckdb-cargo
-  resource: src/rs/vertebra-duckdb/Cargo.toml
-  title: Standalone embedded PyO3 wheel Cargo precedent
-- id: root-pyproject
-  resource: pyproject.toml
-  title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
-- id: sqlite-rs
-  resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
-  title: Shared SQLite pragma helper in vertebra-db
-- id: py-async
-  resource: src/rs/vertebra-db/src/py_async.rs
-  title: AsyncCompletionQueue and Notifier PyO3 bridge
-- id: arrow-shm
-  resource: src/rs/vertebra-db/src/arrow_shm.rs
-  title: ShmArrowStreamWriter and VTBARROW ShmCapsule constructor
-- id: vertebra-py-db
-  resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
-  title: Legacy sqlite_initialization_pragmas binding in vertebra-py
-- id: sqlite-core
-  resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
-  title: SQLiteCore pragma helper with 5-arg call defect
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
-  title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
-- id: driver-caps
-  resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
-  title: SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols
-- id: conformance-suite
-  resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
-  title: Database driver conformance suite and ENGINE_SPECS
-- id: okf-drivers
-  resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-  title: Database drivers and dialers OKF chapter
+  - id: cargo-ws
+    resource: src/rs/Cargo.toml
+    title: Rust workspace member manifest
+  - id: duckdb-cargo
+    resource: src/rs/vertebra-duckdb/Cargo.toml
+    title: Standalone embedded PyO3 wheel Cargo precedent
+  - id: root-pyproject
+    resource: pyproject.toml
+    title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
+  - id: sqlite-rs
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: Shared SQLite pragma helper in vertebra-db
+  - id: py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: DbCompletionDrainer, spawn_rust_db_task_with_attr_and_cancel, and construct_py_arrow_cursor PyO3 async bridge
+  - id: arrow-shm
+    resource: src/rs/vertebra-db/src/arrow_shm.rs
+    title: ShmArrowStreamWriter VTBARROW stream writer
+  - id: vertebra-py-db
+    resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
+    title: Legacy sqlite_initialization_pragmas binding in vertebra-py
+  - id: sqlite-core
+    resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
+    title: SQLiteCore pragma helper with 5-arg call defect
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
+    title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
+  - id: driver-caps
+    resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
+    title: SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols
+  - id: conformance-suite
+    resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
+    title: Database driver conformance suite and ENGINE_SPECS
+  - id: okf-drivers
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Database drivers and dialers OKF chapter
 ---
 
 # Specification: Standalone Rust SQLite Wheel (vertebra-sqlite)
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `SyncSQLiteDriver` wraps stdlib `sqlite3` behind a Python `RLock`, `AsyncSQLiteDriver` hops through `ThreadOffloadAsyncDatabaseDriver` (`asyncio.to_thread`), and `SQLiteCore.initialization_pragmas` calls 6-arg `_vertebra.sqlite_initialization_pragmas` with 5 args (`TypeError` suppressed) [^sqlite-drv] [^sqlite-core] [^vertebra-py-db].
+- **Baseline (`473e1f2e`)**: `SyncSQLiteDriver` wraps stdlib `sqlite3` behind a Python `RLock`, `AsyncSQLiteDriver` hops through `ThreadOffloadAsyncDatabaseDriver` (`asyncio.to_thread`), and `SQLiteCore.initialization_pragmas` calls 7-parameter `_vertebra.sqlite_initialization_pragmas` with 5 positional args (omitting `path` and `max_readers`) under `contextlib.suppress(TypeError, ValueError, RuntimeError)` [^sqlite-drv] [^sqlite-core] [^vertebra-py-db].
 - **Target Architecture**: Standalone `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `vertebra-core[sqlite]`, `#[pymodule(gil_used = false)]`) over `rusqlite = "=0.41.1"` (`bundled` + `modern_sqlite`, zero system `libsqlite3`) with 1 writer + `max_readers` WAL OS threads, SQLite 3.45+ `JSONB`, `InterruptHandle` `cancel()`, online `backup_to`/`restore_from`, `VTBARROW` `ShmCapsule` `ArrowCursor` + `load_from_arrow`, `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`), and delayed-commit `SyncSQLitePipeline`/`AsyncSQLitePipeline` [^duckdb-cargo] [^py-async] [^arrow-shm] [^driver-caps].
 - **Scope & Boundaries**: `3` chapters and `12` compact tasks cutting `SyncSQLiteDriver` and `AsyncSQLiteDriver` over to `vertebra._sqlite` with zero `import sqlite3` in production drivers and full CI/release/OKF integration [^conformance-suite] [^okf-drivers].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-SQLite is the remaining relational adapter still executing on Python stdlib `sqlite3` and `ThreadOffloadAsyncDatabaseDriver` at `18baadcd` [^sqlite-drv]. In addition, `SQLiteCore.initialization_pragmas` (`src/py/vertebra/db/adapters/sqlite/core.py:33`) invokes `_vertebra.sqlite_initialization_pragmas` without `path: str` and suppresses `TypeError` on every call [^sqlite-core] [^vertebra-py-db]. This flow delivers a standalone `src/rs/vertebra-sqlite` wheel (`vertebra._sqlite`, `vertebra-core[sqlite]`) compiling bundled SQLite 3.45+ via `rusqlite 0.41.1` (`bundled`, `modern_sqlite`, `hooks`, `serialize`, `blob`, `column_decltype`, `backup`), running a GIL-free single-writer + multi-reader WAL worker pool safe for Python `3.14t`/`3.15t`, streaming `VTBARROW` `ShmCapsule` Arrow batches directly from `sqlite3_column_*` values, exposing delayed-commit `SyncSQLitePipeline`/`AsyncSQLitePipeline` with nested savepoints plus online `backup_to`/`restore_from` hooks, and registering `DIALECT_TAG_SQLITE = 3` with `BrokerEngineCapsule`.
+SQLite is the remaining relational adapter still executing on Python stdlib `sqlite3` and `ThreadOffloadAsyncDatabaseDriver` at `473e1f2e` [^sqlite-drv]. In addition, `SQLiteCore.initialization_pragmas` (`src/py/vertebra/db/adapters/sqlite/core.py:34-41`) invokes `_vertebra.sqlite_initialization_pragmas` without `path` or `max_readers` and suppresses `TypeError`, `ValueError`, and `RuntimeError` on every call [^sqlite-core] [^vertebra-py-db]. This flow delivers a standalone `src/rs/vertebra-sqlite` wheel (`vertebra._sqlite`, `vertebra-core[sqlite]`) compiling bundled SQLite 3.45+ via `rusqlite 0.41.1` (`bundled`, `modern_sqlite`, `hooks`, `serialize`, `blob`, `column_decltype`, `backup`), running a GIL-free single-writer + multi-reader WAL worker pool safe for Python `3.14t`/`3.15t`, streaming `VTBARROW` `ShmCapsule` Arrow batches directly from `sqlite3_column_*` values, exposing delayed-commit `SyncSQLitePipeline`/`AsyncSQLitePipeline` with nested savepoints plus online `backup_to`/`restore_from` hooks, and registering `DIALECT_TAG_SQLITE = 3` with `BrokerEngineCapsule`.
 
 **Non-Goals:**
 - System dynamic `libsqlite3` linking (bundled amalgamation is mandatory for wheel portability and SQLite 3.45+ `JSONB`).
@@ -130,7 +133,7 @@ Both `SyncSQLiteDriver` and `AsyncSQLiteDriver` implement `SyncPipelineCapable` 
 | Boundary | Trigger | Expected Contract | Invariant |
 | --- | --- | --- | --- |
 | Wheel absent | `vertebra-sqlite` not installed | `MissingDependencyError` naming `vertebra-core[sqlite]` | Fail-loud driver contract |
-| Constraint error | SQLite extended codes `2067`/`787`/`1299`/`275` | `UniqueViolationError` / `ForeignKeyViolationError` / `NotNullViolationError` / `CheckViolationError` | Typed exception parity |
+| Constraint error | SQLite extended codes `2067`/`1555`/`2579`/`787`/`1299`/`275` | `IntegrityError` with `sqlstate` `23505`/`23503`/`23502`/`23514` | Existing `vertebra._vertebra` hierarchy (no new subclasses) |
 | Query cancel | `driver.cancel()` or async `Task.cancel()` | `InterruptHandle::interrupt()` aborts execution within `< 50ms` | Responsive cancellation |
 | Nested pipeline fail | Statement raises inside nested `driver.pipeline()` | Rolls back nested `SAVEPOINT` while preserving outer tx | Savepoint isolation |
 
@@ -155,13 +158,13 @@ Both `SyncSQLiteDriver` and `AsyncSQLiteDriver` implement `SyncPipelineCapable` 
 
 - [ ] [ch01-wheel-scaffold-and-isolation](chapters/ch01-wheel-scaffold-and-isolation/spec.md) — Scaffold `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `gil_used = false`, bundled SQLite 3.45+), wire `[sqlite]` extra and `Makefile`/CI release matrix, enforce companion wheel isolation across sibling extensions, and register review manifests.
 - [ ] [ch02-rust-engine-arrow-and-pyo3-clients](chapters/ch02-rust-engine-arrow-and-pyo3-clients/spec.md) — Implement Rust `SqliteClientConfig`/pragmas/extended errors, 1-writer/`max_readers` WAL worker pool with `JSONB`/`backup_to`/`restore_from`/`InterruptHandle`, `VTBARROW` SHM streaming and `load_from_arrow`, and `SyncSQLiteClient`/`AsyncSQLiteClient` + `broker_engine_capsule`.
-- [ ] [ch03-python-cutover-pipelines-ci-and-docs](chapters/ch03-python-cutover-pipelines-ci-and-docs/spec.md) — Fix `SQLiteCore.initialization_pragmas`, delete legacy `_vertebra` sqlite binding, add `SyncSQLitePipeline`/`AsyncSQLitePipeline`, cut `SyncSQLiteDriver`/`AsyncSQLiteDriver` over to `vertebra._sqlite`, wire SQLAlchemy/conformance/CI, and synchronize docs and OKF knowledge.
+- [ ] [ch03-python-cutover-pipelines-ci-and-docs](chapters/ch03-python-cutover-pipelines-ci-and-docs/spec.md) — Fix `SQLiteCore.initialization_pragmas`, delete legacy `_vertebra` sqlite binding, add `SyncSQLitePipeline`/`AsyncSQLitePipeline`, cut `SyncSQLiteDriver`/`AsyncSQLiteDriver` over to `vertebra._sqlite`, wire conformance/CI, and synchronize docs and OKF knowledge.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `0/3` chapters and `0/12` tasks completed; frontier at `ch01-wheel-scaffold-and-isolation` (`native-sqlite-driver:ch01:t01`).
-- **Upstream Flow Dependencies**: None (`broker-pool-sharing` complete and archived at `28415b3f`).
-- **Active Invariants**: Zero system `libsqlite3` dependency; `GIL_USED == False`; zero `import sqlite3` in production SQLite driver/dialect modules; reciprocal `.pyi` wheel isolation holds across every extension.
+- **Baseline (`473e1f2e`)**: `0/3` chapters and `0/12` tasks completed; frontier at `ch01-wheel-scaffold-and-isolation` (`native-sqlite-driver:ch01:t01`).
+- **Upstream Flow Dependencies**: None (`broker-pool-sharing` complete and archived at `246d7d0e`).
+- **Active Invariants**: Zero system `libsqlite3` dependency; `GIL_USED == False`; zero `import sqlite3` under `src/py/vertebra/db/adapters/sqlite/` (the `sqlite3` uses in `src/py/vertebra/db/dbapi/` are removed by `sqlalchemy-and-django-integration:ch01:t01`; `extensions/sqlalchemy/dialects.py` has none); reciprocal `.pyi` wheel isolation holds across every extension.
 - **Full `/flow:finish` Gate**: `make sqlite-test && make sqlite-wheel-check && make lint-all && make py-test && make docs && make review-check`
 
 [^cargo-ws]: `src/rs/Cargo.toml` — Rust workspace member manifest.

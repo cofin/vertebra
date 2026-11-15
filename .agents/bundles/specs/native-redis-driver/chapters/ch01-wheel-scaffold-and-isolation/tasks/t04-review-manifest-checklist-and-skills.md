@@ -11,33 +11,34 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch01-wheel-scaffold-and-isolation:t03
+  - native-redis-driver:ch01-wheel-scaffold-and-isolation:t03
 files:
-- .agents/skills/review-core/references/areas.toml
-- .agents/skills/review-core/references/checklist.md
-- .agents/skills/pyo3-bridge/SKILL.md
+  - .agents/skills/review-core/references/areas.toml
+  - .agents/skills/review-core/references/checklist.md
+  - .agents/skills/pyo3-bridge/SKILL.md
 tests: []
 read_set:
-- .agents/skills/review-core/references/areas.toml
-- .agents/skills/review-core/references/checklist.md
-- .agents/skills/pyo3-bridge/SKILL.md
+  - .agents/skills/review-core/references/areas.toml
+  - .agents/skills/review-core/references/checklist.md
+  - .agents/skills/pyo3-bridge/SKILL.md
 estimated_loc: 50
 tags:
-- review
-- pyo3
-- skills
+  - review
+  - pyo3
+  - skills
 sources:
-- id: review-areas
-  resource: .agents/skills/review-core/references/areas.toml
-  title: Review router area ownership manifest
-- id: review-checklist
-  resource: .agents/skills/review-core/references/checklist.md
-  title: Review checklist including FFI-09 stub list
-- id: pyo3-skill
-  resource: .agents/skills/pyo3-bridge/SKILL.md
-  title: PyO3 native extension engineering skill
+  - id: review-areas
+    resource: .agents/skills/review-core/references/areas.toml
+    title: Review router area ownership manifest
+  - id: review-checklist
+    resource: .agents/skills/review-core/references/checklist.md
+    title: Review checklist including FFI-09 stub list
+  - id: pyo3-skill
+    resource: .agents/skills/pyo3-bridge/SKILL.md
+    title: PyO3 native extension engineering skill
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Register vertebra-redis in Review Manifests, Checklist, and Skills

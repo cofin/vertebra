@@ -11,67 +11,69 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch03-distributed-channels-stores-and-docs:t03
+  - queues-tasks-and-channels:ch03-distributed-channels-stores-and-docs:t03
 files:
-- docs/usage/queues-and-realtime.md
-- docs/reference/queues.md
-- docs/reference/database-capabilities.md
-- docs/usage/extensions.md
-- docs/usage/databases.md
-- docs/usage/analytics-and-cdc.md
-- .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-- .agents/bundles/knowledge/domains/extensions/litestar.md
-- .agents/bundles/knowledge/domains/server/server-runtime-limitations.md
+  - docs/usage/queues-and-realtime.md
+  - docs/reference/queues.md
+  - docs/reference/database-capabilities.md
+  - docs/reference/db.md
+  - docs/usage/extensions.md
+  - docs/usage/databases.md
+  - docs/usage/analytics-and-cdc.md
+  - .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  - .agents/bundles/knowledge/domains/extensions/litestar.md
+  - .agents/bundles/knowledge/domains/server/server-runtime-limitations.md
 tests:
-- src/py/tests/unit/extensions/test_vite_and_docs_portal.py
-- src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+  - src/py/tests/unit/extensions/test_vite_and_docs_portal.py
+  - src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 read_set:
-- docs/usage/queues-and-realtime.md
-- docs/reference/queues.md
-- docs/reference/database-capabilities.md
-- src/py/vertebra/db/driver/capabilities.py
-- docs/usage/extensions.md
-- docs/usage/databases.md
+  - docs/usage/queues-and-realtime.md
+  - docs/reference/queues.md
+  - docs/reference/database-capabilities.md
+  - src/py/vertebra/db/driver/capabilities.py
+  - docs/usage/extensions.md
+  - docs/usage/databases.md
 estimated_loc: 220
 tags:
-- documentation
-- queues
-- channels
-- litestar-queues
-- django
-- valkey
-- okf
-- knowledge
+  - documentation
+  - queues
+  - channels
+  - litestar-queues
+  - django
+  - valkey
+  - okf
+  - knowledge
 sources:
-- id: doc-qr
-  resource: docs/usage/queues-and-realtime.md
-  title: Queues and realtime channels usage guide
-- id: ref-q
-  resource: docs/reference/queues.md
-  title: Queues API reference
-- id: ref-cap
-  resource: docs/reference/database-capabilities.md
-  title: Database driver capabilities reference
-- id: doc-ext
-  resource: docs/usage/extensions.md
-  title: Litestar and Django extension usage guide
-- id: doc-db
-  resource: docs/usage/databases.md
-  title: Database usage guide
-- id: doc-cdc
-  resource: docs/usage/analytics-and-cdc.md
-  title: Analytics, CDC, and notification listener guide
-- id: okf-queues
-  resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-  title: Distributed queues and email OKF chapter
-- id: okf-litestar
-  resource: .agents/bundles/knowledge/domains/extensions/litestar.md
-  title: Litestar extension OKF chapter
-- id: okf-srv-lim
-  resource: .agents/bundles/knowledge/domains/server/server-runtime-limitations.md
-  title: Server and realtime runtime limitations OKF chapter
+  - id: doc-qr
+    resource: docs/usage/queues-and-realtime.md
+    title: Queues and realtime channels usage guide
+  - id: ref-q
+    resource: docs/reference/queues.md
+    title: Queues API reference
+  - id: ref-cap
+    resource: docs/reference/database-capabilities.md
+    title: Database driver capabilities reference
+  - id: doc-ext
+    resource: docs/usage/extensions.md
+    title: Litestar and Django extension usage guide
+  - id: doc-db
+    resource: docs/usage/databases.md
+    title: Database usage guide
+  - id: doc-cdc
+    resource: docs/usage/analytics-and-cdc.md
+    title: Analytics, CDC, and notification listener guide
+  - id: okf-queues
+    resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+    title: Distributed queues and email OKF chapter
+  - id: okf-litestar
+    resource: .agents/bundles/knowledge/domains/extensions/litestar.md
+    title: Litestar extension OKF chapter
+  - id: okf-srv-lim
+    resource: .agents/bundles/knowledge/domains/server/server-runtime-limitations.md
+    title: Server and realtime runtime limitations OKF chapter
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Synchronize Public Queues, Realtime, Extensions & Databases Docs and OKF Chapters
@@ -92,8 +94,8 @@ Update `docs/usage/{queues-and-realtime,extensions,databases,analytics-and-cdc}.
 ## Contracts & Edge Cases
 
 - Document `SyncQueueStore`/`AsyncQueueStore`, `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`, `SyncOracleQueueStore`/`AsyncOracleQueueStore`, `QueueBackendSettings`, and distributed `ChannelsBackend` across Memory, Redis, Valkey, PostgreSQL, and Oracle using `pymdownx.tabbed` install tabs and 4–6 node conceptual Mermaid diagrams.
-- Provide concise code examples (`msgspec.Struct` without internal boilerplate flags, inline config dicts) for `litestar-queues`, Django `TASKS` / `CACHES` / `CHANNEL_LAYERS`, `ValkeyStore` RESP3 client-side tracking, and synchronous `Sync*NotificationSource.listen()` CLI/worker usage.
-- Keep every OKF file (`distributed-queues-and-email.md`, `litestar.md`, `server-runtime-limitations.md`) `<= 200` lines with `<= 40`-line bounded truth blocks, recording explicit caveats: SHM queue/channels are single-host multi-worker; PostgreSQL `NOTIFY` frames cap at `8000` bytes (wakeup IDs only); Oracle TxEventQ vs polling fallback; Cloud Spanner `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` lands in follow-up flow `spanner-queue-and-rw-transactions`.
+- Provide concise code examples (`msgspec.Struct` without internal boilerplate flags, inline config dicts) for `litestar-queues`, Django `TASKS` / `CHANNEL_LAYERS`, `ValkeyStore` RESP3 client-side tracking, and synchronous `Sync*NotificationSource.listen()` CLI/worker usage.
+- Keep every OKF file (`distributed-queues-and-email.md`, `litestar.md`, `server-runtime-limitations.md`) `<= 200` lines with `<= 40`-line bounded truth blocks, recording explicit caveats: SHM queue/channels are single-host multi-worker; PostgreSQL `NOTIFY` frames cap at `8000` bytes (wakeup IDs only); Oracle TxEventQ vs polling fallback; Spanner `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` lands in follow-up flow `spanner-queue-and-rw-transactions`.
 
 ## Test Matrix
 

@@ -11,31 +11,34 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch01-queue-stores-and-first-party-backends:t02
+  - queues-tasks-and-channels:ch01-queue-stores-and-first-party-backends:t02
 files:
-- src/py/vertebra/framework/queues/postgres.py
-- src/py/vertebra/framework/queues/oracle.py
+  - src/py/vertebra/framework/queues/postgres.py
+  - src/py/vertebra/framework/queues/oracle.py
 tests:
-- src/py/tests/unit/framework/test_distributed_queues.py
+  - src/py/tests/unit/framework/test_distributed_queues.py
 read_set:
-- src/py/vertebra/framework/queues/postgres.py
-- src/py/vertebra/framework/queues/oracle.py
-- src/py/vertebra/db/adapters/postgres/queue.py
-- src/py/vertebra/db/adapters/oracle/queue.py
+  - src/py/vertebra/framework/queues/postgres.py
+  - src/py/vertebra/framework/queues/oracle.py
+  - src/py/vertebra/db/adapters/postgres/_sync.py
+  - src/py/vertebra/db/adapters/postgres/_async.py
+  - src/py/vertebra/db/adapters/oracle/_sync.py
+  - src/py/vertebra/db/adapters/oracle/_async.py
 estimated_loc: 225
 tags:
-- queues
-- postgres
-- oracle
+  - queues
+  - postgres
+  - oracle
 sources:
-- id: queue-pg
-  resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-  title: PostgreSQLQueueBackend requiring manual executor injection
-- id: queue-ora
-  resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
-  title: OracleQueueBackend probing oracledb
+  - id: queue-pg
+    resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
+    title: PostgreSQLQueueBackend requiring manual executor injection
+  - id: queue-ora
+    resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
+    title: OracleQueueBackend probing oracledb
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Auto-Wire PostgreSQLQueueBackend and OracleQueueBackend Over Native Queue Stores
@@ -47,7 +50,7 @@ Wire `PostgreSQLQueueBackend` and `OracleQueueBackend` to build `SyncPostgresQue
 ## Bounded Read Manifest
 
 - `src/py/vertebra/framework/queues/{postgres,oracle}.py` — current fail-loud backends.
-- `src/py/vertebra/db/adapters/{postgres,oracle}/queue.py` — native sync/async queue stores.
+- `src/py/vertebra/db/adapters/{postgres,oracle}/driver.py` — native drivers (plus `Sync*QueueStore`/`Async*QueueStore` from `t02`).
 
 ## Contracts & Edge Cases
 

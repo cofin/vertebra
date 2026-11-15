@@ -11,38 +11,39 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t02
+  - sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t02
 files:
-- src/py/vertebra/extensions/sqlspec/provider.py
-- src/py/vertebra/extensions/sqlspec/proxy.py
-- src/py/vertebra/extensions/sqlspec/__init__.py
-- src/py/vertebra/storage/_store.py
-- src/py/vertebra/storage/__init__.py
+  - src/py/vertebra/extensions/sqlspec/provider.py
+  - src/py/vertebra/extensions/sqlspec/proxy.py
+  - src/py/vertebra/extensions/sqlspec/__init__.py
+  - src/py/vertebra/storage/_store.py
+  - src/py/vertebra/storage/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlspec_shm_proxy.py
-- src/py/tests/unit/storage/test_storage_store.py
+  - src/py/tests/unit/extensions/test_sqlspec_shm_proxy.py
+  - src/py/tests/unit/storage/test_storage_store.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/provider.py
-- src/py/vertebra/extensions/sqlspec/proxy.py
-- src/py/vertebra/extensions/sqlspec/__init__.py
-- src/py/vertebra/storage/_store.py
-- src/py/vertebra/storage/__init__.py
-- src/py/vertebra/db/arrow.py
+  - src/py/vertebra/extensions/sqlspec/provider.py
+  - src/py/vertebra/extensions/sqlspec/proxy.py
+  - src/py/vertebra/extensions/sqlspec/__init__.py
+  - src/py/vertebra/storage/_store.py
+  - src/py/vertebra/storage/__init__.py
+  - src/py/vertebra/db/arrow.py
 estimated_loc: 210
 tags:
-- sqlspec
-- arrow
-- shm
-- storage
+  - sqlspec
+  - arrow
+  - shm
+  - storage
 sources:
-- id: sqlspec-provider
-  resource: src/py/vertebra/extensions/sqlspec/provider.py
-  title: SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface
-- id: storage-store
-  resource: src/py/vertebra/storage/_store.py
-  title: ObjectMeta and PutResult storage value structs
+  - id: sqlspec-provider
+    resource: src/py/vertebra/extensions/sqlspec/provider.py
+    title: SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface
+  - id: storage-store
+    resource: src/py/vertebra/storage/_store.py
+    title: ObjectMeta and PutResult storage value structs
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Cut SQLSpec Provider Over to VTBARROW ArrowCursor and Add vertebra.storage.ArtifactReference
@@ -60,7 +61,7 @@ Replace `SharedArrowBuffer`/`SharedArrowTable` with Rust `VTBARROW` `ArrowCursor
 
 ## Contracts & Edge Cases
 
-- Replace `SharedArrowBuffer` and `SharedArrowTable` across `provider.py`, `proxy.py`, and `extensions/sqlspec/__init__.py` with `ArrowCursor` (`VTBARROW` SHM frames whose unlink lifecycle is tied strictly to lease release), and remove `gc=False` from `BrokerRpcRequest` and `BrokerRpcResponse`.
+- Replace `SharedArrowBuffer` and `SharedArrowTable` across `provider.py`, `proxy.py`, and `extensions/sqlspec/__init__.py` with `ArrowCursor` (`VTBARROW` SHM frames whose unlink lifecycle is tied strictly to lease release), and remove `gc=False` from `ObjectMeta` and `PutResult` in `src/py/vertebra/storage/_store.py` (`BrokerRpcRequest` and `BrokerRpcResponse` already omit it).
 - Remove `gc=False` from `ObjectMeta` and `PutResult` in `storage/_store.py` (which hold container metadata dicts).
 - Define `class ArtifactReference(msgspec.Struct, frozen=True):` (`uri: str`, `version: int`, `content_type: str | None = None`, `size: int | None = None`, `updated: datetime | None = None`, `signed_url: str | None = None`) in `storage/_store.py` and export from `vertebra.storage` with zero SQL or SQLSpec imports.
 
@@ -77,7 +78,7 @@ uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions
 ## Acceptance Criteria
 
 - [ ] `SharedArrowBuffer` and `SharedArrowTable` are removed from `provider.py` in favor of `VTBARROW` `ArrowCursor`.
-- [ ] `vertebra.storage.ArtifactReference` is exported and `gc=False` is removed from container-bearing structs.
+- [ ] `vertebra.storage.ArtifactReference` is exported and `gc=False` is removed from `ObjectMeta` and `PutResult`.
 - [ ] Zero regressions in the fast verification gate.
 
 [^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py` — SQLSpecSyncProvider and SQLSpecAsyncProvider Arrow result surface.

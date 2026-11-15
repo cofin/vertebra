@@ -11,37 +11,39 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t01
+  - native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t01
 files:
-- src/py/vertebra/db/adapters/sqlite/driver.py
-- src/py/vertebra/db/adapters/sqlite/config.py
+  - src/py/vertebra/db/adapters/sqlite/driver.py
+  - src/py/vertebra/db/adapters/sqlite/config.py
 tests:
-- src/py/tests/unit/db/test_sqlite_driver.py
-- src/py/tests/unit/db/test_enterprise_olap_drivers.py
+  - src/py/tests/unit/db/test_sqlite_driver.py
+  - src/py/tests/unit/db/test_enterprise_olap_drivers.py
 read_set:
-- src/py/vertebra/db/adapters/sqlite/driver.py
-- src/py/vertebra/db/adapters/sqlite/config.py
-- src/py/vertebra/db/adapters/duckdb/driver.py
-- src/rs/vertebra-db/src/py_async.rs
-- src/py/vertebra/_sqlite.pyi
+  - src/py/vertebra/db/adapters/sqlite/driver.py
+  - src/py/vertebra/db/adapters/sqlite/config.py
+  - src/py/vertebra/db/adapters/duckdb/_sync.py
+  - src/py/vertebra/db/adapters/duckdb/_async.py
+  - src/rs/vertebra-db/src/py_async.rs
+  - src/py/vertebra/_sqlite.pyi
 estimated_loc: 245
 tags:
-- sqlite
-- driver
-- async
-- arrow
+  - sqlite
+  - driver
+  - async
+  - arrow
 sources:
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
-  title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
-- id: sqlite-cfg
-  resource: src/py/vertebra/db/adapters/sqlite/config.py::SQLiteConfig
-  title: Python SQLiteConfig struct
-- id: duckdb-lib
-  resource: src/rs/vertebra-duckdb/src/lib.rs
-  title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
+    title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
+  - id: sqlite-cfg
+    resource: src/py/vertebra/db/adapters/sqlite/config.py::SQLiteConfig
+    title: Python SQLiteConfig struct
+  - id: duckdb-lib
+    resource: src/rs/vertebra-duckdb/src/lib.rs
+    title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Cut SyncSQLiteDriver and AsyncSQLiteDriver Over to vertebra._sqlite
@@ -54,7 +56,7 @@ Rewrite `SyncSQLiteDriver` and `AsyncSQLiteDriver(AsyncDatabaseDriver[SQLiteConf
 
 - `src/py/vertebra/db/adapters/sqlite/driver.py` — Current stdlib `sqlite3` `SyncSQLiteDriver` and `ThreadOffloadAsyncDatabaseDriver` `AsyncSQLiteDriver`.
 - `src/py/vertebra/db/adapters/sqlite/config.py` — `SQLiteConfig` fields.
-- `src/py/vertebra/db/adapters/duckdb/driver.py` — Direct `AsyncDatabaseDriver` + `spawn_rust_db_task_with_attr_and_cancel` pattern.
+- `src/py/vertebra/db/adapters/duckdb/_sync.py` and `src/py/vertebra/db/adapters/duckdb/_async.py` — Direct `AsyncDatabaseDriver` + `spawn_rust_db_task_with_attr_and_cancel` pattern.
 - `src/rs/vertebra-db/src/py_async.rs` — Rust async completion drainer registration and `spawn_rust_db_task_with_attr_and_cancel` contract.
 - `src/py/vertebra/_sqlite.pyi` — `SyncSQLiteClient` and `AsyncSQLiteClient` stubs.
 

@@ -1,0 +1,27 @@
+{
+  "flowId": "native-data-platform",
+  "authorSlug": "codyfincher-google-com",
+  "authorEmail": "codyfincher@google.com",
+  "authorName": "Cody Fincher",
+  "updatedAt": "2026-11-15T20:55:00.000Z",
+  "comments": [
+    {
+      "id": "c-445b38cb-90aa-4f11-82d2-ca912a91e63e",
+      "parentCommentId": null,
+      "authorEmail": "codyfincher@google.com",
+      "authorName": "Cody Fincher",
+      "chapterId": null,
+      "taskId": "native-data-platform:t14",
+      "anchorHeading": "t14: [`native-redis-driver`](../native-redis-driver/spec.md) — Standalone `vertebra-redis` RESP3 wheel (Cluster, Sentinel, client tracking, GCP Memorystore IAM, Streams, Pub/Sub) plus hoisted `SyncNotificationSource`/`AsyncNotificationSource` split (`ch01`–`ch04`, `16` tasks)",
+      "quotedText": null,
+      "commentKind": "feedback",
+      "state": "addressed",
+      "body": "For the redis driver, it should be determined if we need to split valkey out to it's own here as well.",
+      "upvoterEmails": [],
+      "planRevision": 12,
+      "resolvedInRevision": 13,
+      "createdAt": "2026-11-15T20:41:02.187Z",
+      "updatedAt": "2026-11-15T20:55:00.000Z"
+    }
+  ]
+}

@@ -11,49 +11,51 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch02-sqlspec-relational-adapters:t03
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/oracle/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/oracle/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/oracle/driver.py
-- src/py/vertebra/db/adapters/oracle/core.py
-- src/py/vertebra/db/adapters/oracle/notify.py
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/oracle/_sync.py
+  - src/py/vertebra/db/adapters/oracle/_async.py
+  - src/py/vertebra/db/adapters/oracle/core.py
+  - src/py/vertebra/db/adapters/oracle/notify.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- oracle
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - oracle
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: oracle-drv
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: Native Oracle sync and async drivers
-- id: oracle-core
-  resource: src/py/vertebra/db/adapters/oracle/core.py
-  title: Native Oracle core parameter and wire helpers
-- id: ora-notify
-  resource: src/py/vertebra/db/adapters/oracle/notify.py
-  title: Oracle TxEventQ notification source
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: oracle-drv
+    resource: src/py/vertebra/db/adapters/oracle/_sync.py
+    title: Native Oracle sync and async drivers
+  - id: oracle-core
+    resource: src/py/vertebra/db/adapters/oracle/core.py
+    title: Native Oracle core parameter and wire helpers
+  - id: ora-notify
+    resource: src/py/vertebra/db/adapters/oracle/notify.py
+    title: Oracle TxEventQ notification source
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t04`: Deliver Feature-Complete Oracle SQLSpec Adapter Package
@@ -65,7 +67,7 @@ Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/oracle/{__in
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
-- `src/py/vertebra/db/adapters/oracle/driver.py` — native Oracle sync and async execution drivers.
+- `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — native Oracle sync and async execution drivers.
 - `src/py/vertebra/db/adapters/oracle/core.py` — native Oracle parameter, JSON, and `array('f')` `VECTOR` wire helpers.
 - `src/py/vertebra/db/adapters/oracle/notify.py` — `SyncOracleNotificationSource` and `AsyncOracleNotificationSource` TxEventQ channels.
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy Oracle SQLSpec logic to replace cleanly.
@@ -95,7 +97,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/oracle &
 - [ ] `OracleSyncConfig` and `OracleAsyncConfig` resolve `adapter_name = 'vertebra_oracle'` and all extension store classes natively on `sqlspec>=0.71.1`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^oracle-drv]: `src/py/vertebra/db/adapters/oracle/driver.py` — Native Oracle sync and async drivers.
+[^oracle-drv]: `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — Native Oracle sync and async drivers.
 [^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Native Oracle core parameter and wire helpers.
 [^ora-notify]: `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification source.
 [^storage-art]: `src/py/vertebra/storage/_store.py` — Storage-neutral ArtifactReference value struct.

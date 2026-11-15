@@ -11,49 +11,51 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch03-sqlspec-enterprise-and-cloud-adapters:t02
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/bigquery/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/bigquery/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlspec_bigquery.py
+  - src/py/tests/unit/extensions/test_sqlspec_bigquery.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/bigquery/driver.py
-- src/py/vertebra/db/adapters/bigquery/core.py
-- src/py/vertebra/db/adapters/bigquery/object_tables.py
-- src/py/vertebra/extensions/sqlspec/bigquery.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/bigquery/_sync.py
+  - src/py/vertebra/db/adapters/bigquery/_async.py
+  - src/py/vertebra/db/adapters/bigquery/core.py
+  - src/py/vertebra/db/adapters/bigquery/object_tables.py
+  - src/py/vertebra/extensions/sqlspec/bigquery.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- bigquery
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - bigquery
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: bigquery-drv
-  resource: src/py/vertebra/db/adapters/bigquery/driver.py
-  title: Native Google BigQuery sync and async drivers
-- id: bigquery-core
-  resource: src/py/vertebra/db/adapters/bigquery/core.py
-  title: Native Google BigQuery core parameter and wire helpers
-- id: sqlspec-bq
-  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-  title: Current top-level BigQuery SQLSpec module
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: bigquery-drv
+    resource: src/py/vertebra/db/adapters/bigquery/_sync.py
+    title: Native Google BigQuery sync and async drivers
+  - id: bigquery-core
+    resource: src/py/vertebra/db/adapters/bigquery/core.py
+    title: Native Google BigQuery core parameter and wire helpers
+  - id: sqlspec-bq
+    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+    title: Current top-level BigQuery SQLSpec module
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Deliver Feature-Complete BigQuery SQLSpec Adapter Package
@@ -65,7 +67,7 @@ Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/bigquery/{__
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
-- `src/py/vertebra/db/adapters/bigquery/driver.py` — native Google BigQuery sync/async execution, Storage Read/Write Arrow, and session IDs.
+- `src/py/vertebra/db/adapters/bigquery/_sync.py` and `src/py/vertebra/db/adapters/bigquery/_async.py` — native Google BigQuery sync/async execution, Storage Read/Write Arrow, and session IDs.
 - `src/py/vertebra/db/adapters/bigquery/core.py` — native BigQuery `@name` parameter and `STRUCT`/`ARRAY`/`NUMERIC`/`GEOGRAPHY`/`JSON` wire helpers.
 - `src/py/vertebra/db/adapters/bigquery/object_tables.py` — native `ObjectRef` struct retained for Object Tables.
 - `src/py/vertebra/extensions/sqlspec/bigquery.py` — current top-level BigQuery SQLSpec module to migrate cleanly.
@@ -95,7 +97,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/bigquery
 - [ ] `BigQuerySyncConfig` and `BigQueryAsyncConfig` resolve `adapter_name = 'vertebra_bigquery'` and all extension store classes natively on `sqlspec>=0.71.1`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^bigquery-drv]: `src/py/vertebra/db/adapters/bigquery/driver.py` — Native Google BigQuery sync and async drivers.
+[^bigquery-drv]: `src/py/vertebra/db/adapters/bigquery/_sync.py` and `src/py/vertebra/db/adapters/bigquery/_async.py` — Native Google BigQuery sync and async drivers.
 [^bigquery-core]: `src/py/vertebra/db/adapters/bigquery/core.py` — Native Google BigQuery core parameter and wire helpers.
 [^sqlspec-bq]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — Current top-level BigQuery SQLSpec module.
 [^storage-art]: `src/py/vertebra/storage/_store.py` — Storage-neutral ArtifactReference value struct.

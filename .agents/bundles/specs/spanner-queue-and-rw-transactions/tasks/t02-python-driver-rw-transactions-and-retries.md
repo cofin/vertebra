@@ -10,37 +10,38 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- spanner-queue-and-rw-transactions:t01
+  - spanner-queue-and-rw-transactions:t01
 files:
-- src/py/vertebra/db/adapters/spanner/transactions.py
-- src/py/vertebra/db/adapters/spanner/_sync.py
-- src/py/vertebra/db/adapters/spanner/_async.py
-- src/py/vertebra/db/adapters/spanner/__init__.py
+  - src/py/vertebra/db/adapters/spanner/transactions.py
+  - src/py/vertebra/db/adapters/spanner/_sync.py
+  - src/py/vertebra/db/adapters/spanner/_async.py
+  - src/py/vertebra/db/adapters/spanner/__init__.py
 tests:
-- src/py/tests/unit/db/test_spanner.py
+  - src/py/tests/unit/db/test_spanner.py
 read_set:
-- src/py/vertebra/db/adapters/spanner/transactions.py
-- src/py/vertebra/db/adapters/spanner/_sync.py
-- src/py/vertebra/db/adapters/spanner/_async.py
-- src/py/vertebra/db/adapters/spanner/__init__.py
-- src/py/vertebra/_spanner.pyi
+  - src/py/vertebra/db/adapters/spanner/transactions.py
+  - src/py/vertebra/db/adapters/spanner/_sync.py
+  - src/py/vertebra/db/adapters/spanner/_async.py
+  - src/py/vertebra/db/adapters/spanner/__init__.py
+  - src/py/vertebra/_spanner.pyi
 estimated_loc: 225
 tags:
-- spanner
-- driver
-- transactions
+  - spanner
+  - driver
+  - transactions
 sources:
-- id: spn-tx
-  resource: src/py/vertebra/db/adapters/spanner/transactions.py::SyncSpannerTransaction
-  title: Current SyncSpannerTransaction and AsyncSpannerTransaction delegating to non-atomic single-shot RPCs
-- id: spn-sync
-  resource: src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver
-  title: SyncSpannerDriver run_in_transaction and transaction context manager
-- id: spn-init
-  resource: src/py/vertebra/db/adapters/spanner/__init__.py
-  title: Public Spanner adapter barrel
+  - id: spn-tx
+    resource: src/py/vertebra/db/adapters/spanner/transactions.py::SyncSpannerTransaction
+    title: Current SyncSpannerTransaction and AsyncSpannerTransaction delegating to non-atomic single-shot RPCs
+  - id: spn-sync
+    resource: src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver
+    title: SyncSpannerDriver run_in_transaction and inherited buffered transaction() context manager
+  - id: spn-init
+    resource: src/py/vertebra/db/adapters/spanner/__init__.py
+    title: Public Spanner adapter barrel
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Wire SyncSpannerDriver / AsyncSpannerDriver Interactive Transactions & Aborted Closure Retries
@@ -52,7 +53,7 @@ Wire `SyncSpannerTransaction` and `AsyncSpannerTransaction` in `src/py/vertebra/
 ## Bounded Read Manifest
 
 - `src/py/vertebra/db/adapters/spanner/transactions.py` — `SyncSpannerTransaction` and `AsyncSpannerTransaction` statement/mutation APIs.
-- `src/py/vertebra/db/adapters/spanner/_sync.py` & `_async.py` — `run_in_transaction`, `begin`, `commit`, `rollback`, and `transaction()` context managers.
+- `src/py/vertebra/db/adapters/spanner/_sync.py` & `_async.py` — `run_in_transaction` (fixed `0.01 * attempt` sleep, no `retry_delay_ms`) and buffered `begin`/`commit`/`rollback`; `transaction()` is inherited from `src/py/vertebra/db/driver/_sync.py` / `_async.py` and is overridden here.
 - `src/py/vertebra/db/adapters/spanner/__init__.py` — Spanner package public exports.
 - `src/py/vertebra/_spanner.pyi` — `SyncSpannerReadWriteTransaction` and `AsyncSpannerReadWriteTransaction` bindings.
 
@@ -78,5 +79,5 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-spanner && uv run --no-
 - [ ] Zero regressions in the fast verification gate.
 
 [^spn-tx]: `src/py/vertebra/db/adapters/spanner/transactions.py::SyncSpannerTransaction` — Current SyncSpannerTransaction and AsyncSpannerTransaction delegating to non-atomic single-shot RPCs.
-[^spn-sync]: `src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver` — SyncSpannerDriver run_in_transaction and transaction context manager.
+[^spn-sync]: `src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver` — SyncSpannerDriver run_in_transaction and inherited buffered transaction() context manager.
 [^spn-init]: `src/py/vertebra/db/adapters/spanner/__init__.py` — Public Spanner adapter barrel.

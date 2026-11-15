@@ -10,95 +10,99 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
-- ch02-rust-engine-arrow-and-pyo3-clients
-plan_commit: 1b191388
-updated_at: '2026-11-14T23:10:00Z'
+  - ch02-rust-engine-arrow-and-pyo3-clients
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:10:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T23:10:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T23:10:00Z'
+    commit: 1b191388
 tags:
-- sqlite
-- driver
-- pipeline
-- conformance
-- ci
-- docs
-- okf
-- limitations
+  - sqlite
+  - driver
+  - pipeline
+  - conformance
+  - ci
+  - docs
+  - okf
+  - limitations
 sources:
-- id: sqlite-core
-  resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
-  title: SQLiteCore pragma helper with 5-arg call defect
-- id: vertebra-py-db
-  resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
-  title: Legacy sqlite_initialization_pragmas binding in vertebra-py
-- id: vertebra-pyi
-  resource: src/py/vertebra/_vertebra.pyi
-  title: Core vertebra._vertebra stub declarations
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
-  title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
-- id: sqlite-cfg
-  resource: src/py/vertebra/db/adapters/sqlite/config.py::SQLiteConfig
-  title: Python SQLiteConfig struct
-- id: driver-caps
-  resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
-  title: SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncSQLiteDialect
-  title: SQLAlchemy sqlite+vertebra and sqlite+vertebra_async dialects
-- id: conformance-suite
-  resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
-  title: Database driver conformance suite and ENGINE_SPECS
-- id: conformance-gate
-  resource: src/py/tests/integration/conformance_gate.py::ConformanceGate
-  title: ConformanceGate SUPPORTED_ENGINES lane filter
-- id: ci-wf
-  resource: .github/workflows/ci.yml
-  title: Continuous integration test and wheel isolation workflow
-- id: docs-db
-  resource: docs/usage/databases.md
-  title: Database drivers usage guide
-- id: docs-stubs
-  resource: docs/reference/native-stubs.md
-  title: Native extension stub API reference
-- id: docs-changelog
-  resource: docs/changelog/index.md
-  title: Release changelog
-- id: okf-drivers
-  resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-  title: Database drivers and dialers OKF chapter
-- id: domains-idx
-  resource: .agents/bundles/knowledge/domains/index.md
-  title: OKF domains catalog index
-- id: review-pyo3-skill
-  resource: .agents/skills/review-pyo3-bridge/SKILL.md
-  title: PyO3 bridge review skill
-- id: agents-md
-  resource: AGENTS.md
-  title: Repository agent instructions and quick verification commands
-- id: okf-workflow
-  resource: .agents/bundles/knowledge/workflow.md
-  title: Project Makefile and verification workflow chapter
+  - id: sqlite-core
+    resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
+    title: SQLiteCore pragma helper with 5-arg call defect
+  - id: vertebra-py-db
+    resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
+    title: Legacy sqlite_initialization_pragmas binding in vertebra-py
+  - id: vertebra-pyi
+    resource: src/py/vertebra/_vertebra.pyi
+    title: Core vertebra._vertebra stub declarations
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
+    title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
+  - id: sqlite-cfg
+    resource: src/py/vertebra/db/adapters/sqlite/config.py::SQLiteConfig
+    title: Python SQLiteConfig struct
+  - id: driver-caps
+    resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
+    title: SyncPipeline, AsyncPipeline, SyncPipelineCapable, and AsyncPipelineCapable protocols
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncSQLiteDialect
+    title: SQLAlchemy sqlite+vertebra and sqlite+vertebra_async dialects
+  - id: conformance-suite
+    resource: src/py/tests/integration/db/test_driver_conformance.py::EngineConformanceSpec
+    title: Database driver conformance suite and ENGINE_SPECS
+  - id: conformance-gate
+    resource: src/py/tests/integration/conformance_gate.py::ConformanceGate
+    title: ConformanceGate SUPPORTED_ENGINES lane filter
+  - id: ci-wf
+    resource: .github/workflows/ci.yml
+    title: Continuous integration test and wheel isolation workflow
+  - id: docs-db
+    resource: docs/usage/databases.md
+    title: Database drivers usage guide
+  - id: docs-stubs
+    resource: docs/reference/native-stubs.md
+    title: Native extension stub API reference
+  - id: docs-changelog
+    resource: docs/changelog/index.md
+    title: Release changelog
+  - id: okf-drivers
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Database drivers and dialers OKF chapter
+  - id: domains-idx
+    resource: .agents/bundles/knowledge/domains/index.md
+    title: OKF domains catalog index
+  - id: review-pyo3-skill
+    resource: .agents/skills/review-pyo3-bridge/SKILL.md
+    title: PyO3 bridge review skill
+  - id: agents-md
+    resource: AGENTS.md
+    title: Repository agent instructions and quick verification commands
+  - id: okf-workflow
+    resource: .agents/bundles/knowledge/workflow.md
+    title: Project Makefile and verification workflow chapter
+current_task: "native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t01"
 ---
 
 # Chapter 03: Python SQLite Adapter Cutover, Delayed-Commit Pipelines, Conformance CI, and Docs/OKF
 
 <!-- truth: start -->
-- `SQLiteCore.initialization_pragmas` fixes the 5-arg `TypeError` bug (`src/py/vertebra/db/adapters/sqlite/core.py:33`) and `sqlite_initialization_pragmas` is removed from `vertebra-py` and `_vertebra.pyi` [^sqlite-core] [^vertebra-py-db] [^vertebra-pyi].
+- `SQLiteCore.initialization_pragmas` fixes the 5-of-7-argument call suppressed at `src/py/vertebra/db/adapters/sqlite/core.py:34-41` and `sqlite_initialization_pragmas` is removed from `vertebra-py` and `_vertebra.pyi` [^sqlite-core] [^vertebra-py-db] [^vertebra-pyi].
 - `SyncSQLitePipeline` and `AsyncSQLitePipeline` implement `SyncPipeline` / `AsyncPipeline` using delayed-commit `BEGIN IMMEDIATE` (or nested `SAVEPOINT` inside an outer transaction) flushed in a single native worker batch [^driver-caps].
 - `SyncSQLiteDriver` and `AsyncSQLiteDriver(AsyncDatabaseDriver[SQLiteConfig])` execute exclusively through `vertebra._sqlite` + `spawn_rust_db_task_with_attr_and_cancel`, exposing `pipeline()`, `backup_to()`, `restore_from()`, `cancel()`, and zero-copy `VTBARROW` `ArrowCursor` with zero `import sqlite3` in `src/py/vertebra/db/adapters/sqlite/` [^sqlite-drv] [^sqlite-cfg].
-- `test_driver_conformance.py` updates `ENGINE_SPECS` for `"sqlite"` with `native_extension_module="vertebra._sqlite"`, `supports_pipeline=True`, and `pending_flow_id=None`; `ConformanceGate.SUPPORTED_ENGINES` adds `"sqlite"`; `dialects.py` removes stdlib `sqlite3` shortcuts; `.github/workflows/ci.yml` runs `make sqlite-test` and `make sqlite-wheel-check` [^sa-dialects] [^conformance-suite] [^conformance-gate] [^ci-wf].
+- `test_driver_conformance.py` updates `ENGINE_SPECS` for `"sqlite"` with `native_extension_module="vertebra._sqlite"`, and `supports_pipeline=True` (`pending_flow_id` already defaults to `None`); `ConformanceGate.SUPPORTED_ENGINES` adds `"sqlite"`; `.github/workflows/ci.yml` adds `sqlite` to the `test-db-conformance` matrix and runs `make sqlite-test` and `make sqlite-wheel-check` [^sa-dialects] [^conformance-suite] [^conformance-gate] [^ci-wf].
 - `docs/usage/databases.md`, `docs/reference/native-stubs.md` (`heading_level: 4`, `<= 14` TOC items, `< 120_000` bytes), `docs/changelog/index.md`, `sqlite-limitations.md` (`<= 200` lines), `database-drivers-and-dialers.md`, `domains/index.md`, `review-pyo3-bridge/SKILL.md`, `AGENTS.md`, and `.agents/bundles/knowledge/workflow.md` are synchronized [^docs-db] [^docs-stubs] [^docs-changelog] [^okf-drivers] [^domains-idx] [^review-pyo3-skill] [^agents-md] [^okf-workflow].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-At `18baadcd`, `SQLiteCore.initialization_pragmas` passes 5 arguments to 6-argument `_vertebra.sqlite_initialization_pragmas` while suppressing `TypeError` [^sqlite-core] [^vertebra-py-db], `SyncSQLiteDriver` wraps stdlib `sqlite3`, and `AsyncSQLiteDriver` subclasses `ThreadOffloadAsyncDatabaseDriver` (`asyncio.to_thread` per query) [^sqlite-drv]. This chapter cuts both drivers cleanly onto `vertebra._sqlite`, adds delayed-commit `SyncSQLitePipeline` / `AsyncSQLitePipeline` with savepoint nesting plus `backup_to` / `restore_from`, wires fail-loud conformance and CI, and updates public docs, `AGENTS.md`, review skills, and OKF chapters (`sqlite-limitations.md <= 200` lines) [^docs-stubs] [^okf-drivers] [^okf-workflow].
+At `473e1f2e`, `SQLiteCore.initialization_pragmas` passes 5 arguments to 7-parameter `_vertebra.sqlite_initialization_pragmas` while suppressing `TypeError`, `ValueError`, and `RuntimeError` [^sqlite-core] [^vertebra-py-db], `SyncSQLiteDriver` wraps stdlib `sqlite3`, and `AsyncSQLiteDriver` subclasses `ThreadOffloadAsyncDatabaseDriver` (`asyncio.to_thread` per query) [^sqlite-drv]. This chapter cuts both drivers cleanly onto `vertebra._sqlite`, adds delayed-commit `SyncSQLitePipeline` / `AsyncSQLitePipeline` with savepoint nesting plus `backup_to` / `restore_from`, wires fail-loud conformance and CI, and updates public docs, `AGENTS.md`, review skills, and OKF chapters (`sqlite-limitations.md <= 200` lines) [^docs-stubs] [^okf-drivers] [^okf-workflow].
 
 **Non-Goals:** Redis/Valkey documentation (owned by `native-redis-driver`); Django SQLite backend subclassing (owned by `sqlalchemy-and-django-integration`).
 
@@ -115,7 +119,7 @@ At `18baadcd`, `SQLiteCore.initialization_pragmas` passes 5 arguments to 6-argum
 
 - **R10 / R11**: Fix `SQLiteCore.initialization_pragmas` without swallowing errors, delete `sqlite_initialization_pragmas` from `vertebra-py/src/db.rs` and `_vertebra.pyi`, and implement delayed-commit `SyncSQLitePipeline` / `AsyncSQLitePipeline` with nested savepoints (`t01`).
 - **R12**: Cut `SyncSQLiteDriver` and `AsyncSQLiteDriver` over to `vertebra._sqlite` (`ensure_module`), removing `import sqlite3` and `ThreadOffloadAsyncDatabaseDriver`, and exposing `pipeline()`, `backup_to()`, `restore_from()`, `select_to_arrow()`, `stream_arrow_batches()`, `load_from_arrow()`, `execute_script()`, and `cancel()` (`t02`).
-- **R13**: Remove stdlib `sqlite3` shortcuts from `extensions/sqlalchemy/dialects.py`, set `native_extension_module="vertebra._sqlite"`, `supports_pipeline=True`, and `pending_flow_id=None` on `"sqlite"` in `ENGINE_SPECS` (`test_driver_conformance.py`), add `"sqlite"` to `ConformanceGate.SUPPORTED_ENGINES` (`conformance_gate.py` + `test_conformance_gate.py`), and run `make sqlite-test` + `make sqlite-wheel-check` in `.github/workflows/ci.yml` (`t03`).
+- **R13**: Set `native_extension_module="vertebra._sqlite"` and `supports_pipeline=True` on `"sqlite"` (the `sqlite3` fallback in `src/py/vertebra/db/dbapi/` is removed by `sqlalchemy-and-django-integration:ch01:t01`; `extensions/sqlalchemy/dialects.py` has no `sqlite3` use) in `ENGINE_SPECS` (`test_driver_conformance.py`), add `"sqlite"` to `ConformanceGate.SUPPORTED_ENGINES` (`conformance_gate.py` + `test_conformance_gate.py`), and run `make sqlite-test` + `make sqlite-wheel-check` in `.github/workflows/ci.yml` (`t03`).
 - **R14**: Update `docs/usage/databases.md` (`uv`/`pip`/`pdm`/`poetry` tabs), `docs/reference/native-stubs.md` (`heading_level: 4`, `<= 14` TOC items, `< 120_000` bytes), `docs/changelog/index.md`, `.agents/bundles/knowledge/domains/data/{sqlite-limitations,database-drivers-and-dialers}.md` (`<= 200` lines), `.agents/bundles/knowledge/domains/index.md`, `.agents/skills/review-pyo3-bridge/SKILL.md`, `AGENTS.md`, and `.agents/bundles/knowledge/workflow.md` (`t04`).
 
 ```python
@@ -152,7 +156,7 @@ sqlite-limitations.md required caveats (<= 200 lines):
 
 **Integration Flow:**
 - `ensure_module("vertebra._sqlite", package="vertebra-core[sqlite]", extra="sqlite")` fails loudly with `MissingDependencyError` when `vertebra-sqlite` is absent.
-- `AsyncSQLiteDriver` awaits `spawn_rust_db_task_with_attr_and_cancel(..., "_vertebra_sqlite_completion_drainer")` directly without `asyncio.to_thread`.
+- `AsyncSQLiteDriver` awaits `AsyncSQLiteClient` awaitables that the Rust side produces through `spawn_rust_db_task_with_attr_and_cancel` (`_vertebra_sqlite_completion_drainer`), without `asyncio.to_thread`.
 - `make docs` runs `scan_public_docstrings`, Zensical build, and `tools/docs/verify_docs_artifacts.py` (`<= 14` TOC items, `< 120_000` bytes); `make review-check` verifies `DOC-01`..`DOC-09`.
 
 | Boundary | Trigger | Expected Contract | Invariant |
@@ -185,7 +189,7 @@ Task `t04` completes `[9/9]` public documentation, skill, workflow, and OKF deli
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Baseline (`473e1f2e`)**: `state: planned`; `0/4` tasks completed.
 - **Active Invariants**: Zero `import sqlite3` in `src/py/vertebra/db/adapters/sqlite/`; all OKF and skill files stay `<= 200` lines; `make docs` and `make review-check` exit `0`.
 - **Fast Chapter Gate (`< 60s`)**: `make sqlite-test && uv run --no-sync ruff check src/py/vertebra/db/adapters/sqlite src/py/vertebra/extensions/sqlalchemy && uv run --no-sync mypy src/py/vertebra/db/adapters/sqlite src/py/vertebra/extensions/sqlalchemy && uv run --no-sync pytest src/py/tests/unit/db/test_conformance_gate.py -q && uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-check`
 

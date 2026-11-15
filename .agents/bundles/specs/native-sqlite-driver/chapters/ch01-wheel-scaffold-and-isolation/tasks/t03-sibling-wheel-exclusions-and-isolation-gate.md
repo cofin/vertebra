@@ -11,41 +11,42 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: implementation_first
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t02
+  - native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t02
 files:
-- src/rs/vertebra-bigquery/pyproject.toml
-- src/rs/vertebra-bundler/pyproject.toml
-- src/rs/vertebra-duckdb/pyproject.toml
-- src/rs/vertebra-mssql/pyproject.toml
-- src/rs/vertebra-mysql/pyproject.toml
-- src/rs/vertebra-oracle/pyproject.toml
-- src/rs/vertebra-postgres/pyproject.toml
-- src/rs/vertebra-spanner/pyproject.toml
-- src/rs/vertebra-storage/pyproject.toml
+  - src/rs/vertebra-bigquery/pyproject.toml
+  - src/rs/vertebra-bundler/pyproject.toml
+  - src/rs/vertebra-duckdb/pyproject.toml
+  - src/rs/vertebra-mssql/pyproject.toml
+  - src/rs/vertebra-mysql/pyproject.toml
+  - src/rs/vertebra-oracle/pyproject.toml
+  - src/rs/vertebra-postgres/pyproject.toml
+  - src/rs/vertebra-spanner/pyproject.toml
+  - src/rs/vertebra-storage/pyproject.toml
 tests:
-- src/py/tests/unit/db/test_optional_driver_wheels.py
+  - src/py/tests/unit/db/test_optional_driver_wheels.py
 read_set:
-- src/rs/vertebra-bigquery/pyproject.toml
-- src/rs/vertebra-bundler/pyproject.toml
-- src/rs/vertebra-duckdb/pyproject.toml
-- src/rs/vertebra-mssql/pyproject.toml
-- src/rs/vertebra-oracle/pyproject.toml
-- src/py/tests/unit/db/test_optional_driver_wheels.py
+  - src/rs/vertebra-bigquery/pyproject.toml
+  - src/rs/vertebra-bundler/pyproject.toml
+  - src/rs/vertebra-duckdb/pyproject.toml
+  - src/rs/vertebra-mssql/pyproject.toml
+  - src/rs/vertebra-oracle/pyproject.toml
+  - src/py/tests/unit/db/test_optional_driver_wheels.py
 estimated_loc: 220
 tags:
-- sqlite
-- wheel
-- packaging
-- tests
+  - sqlite
+  - wheel
+  - packaging
+  - tests
 sources:
-- id: duckdb-pyproj
-  resource: src/rs/vertebra-duckdb/pyproject.toml
-  title: Maturin standalone wheel isolation manifest precedent
-- id: wheel-tests
-  resource: src/py/tests/unit/db/test_optional_driver_wheels.py
-  title: Sibling PyO3 wheel isolation test gate
+  - id: duckdb-pyproj
+    resource: src/rs/vertebra-duckdb/pyproject.toml
+    title: Maturin standalone wheel isolation manifest precedent
+  - id: wheel-tests
+    resource: src/py/tests/unit/db/test_optional_driver_wheels.py
+    title: Sibling PyO3 wheel isolation test gate
+verification_strategy: implementation_first
 ---
 
 # Task `t03`: Enforce _sqlite Companion Wheel Exclusions Across All Sibling Extensions
@@ -66,7 +67,7 @@ Add `"**/py/vertebra/_sqlite.pyi"` to `[tool.maturin].exclude` across all 9 sibl
 ## Contracts & Edge Cases
 
 - Insert `"**/py/vertebra/_sqlite.pyi"` in sorted order inside `[tool.maturin].exclude` across all 9 sibling extension `pyproject.toml` files without altering each crate's own included stub.
-- Expand `SIBLING_WHEEL_MANIFESTS` in `test_optional_driver_wheels.py` to cover `vertebra-sqlite` (`_sqlite.pyi`), `vertebra-oracle` (`_oracle.pyi`), and `vertebra-postgres` (`_postgres.pyi`) reciprocally, plus assert `[project.optional-dependencies].sqlite == [f"vertebra-sqlite=={version}"]`.
+- Expand `SIBLING_WHEEL_MANIFESTS` in `test_optional_driver_wheels.py` with `vertebra-sqlite` (`_sqlite.pyi`) and the missing `vertebra-oracle` (`_oracle.pyi`) entry (`vertebra-postgres` is already listed) and add `_sqlite.pyi` to `sibling_stubs`, plus assert `[project.optional-dependencies].sqlite == [f"vertebra-sqlite=={version}"]`.
 - **Edge Case**: Every modified TOML manifest validates cleanly with `tomllib`, and zero sibling wheels leak `_sqlite.pyi`.
 
 ## Test Matrix

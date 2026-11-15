@@ -11,49 +11,51 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/mssql/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mssql/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/mssql/driver.py
-- src/py/vertebra/db/adapters/mssql/core.py
-- src/py/vertebra/db/adapters/mssql/config.py
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/mssql/_sync.py
+  - src/py/vertebra/db/adapters/mssql/_async.py
+  - src/py/vertebra/db/adapters/mssql/core.py
+  - src/py/vertebra/db/adapters/mssql/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- mssql
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - mssql
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: mssql-drv
-  resource: src/py/vertebra/db/adapters/mssql/driver.py
-  title: Native SQL Server (MSSQL) sync and async drivers
-- id: mssql-core
-  resource: src/py/vertebra/db/adapters/mssql/core.py
-  title: Native SQL Server (MSSQL) core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Existing MSSQL SQLSpec adapter
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: mssql-drv
+    resource: src/py/vertebra/db/adapters/mssql/_sync.py
+    title: Native SQL Server (MSSQL) sync and async drivers
+  - id: mssql-core
+    resource: src/py/vertebra/db/adapters/mssql/core.py
+    title: Native SQL Server (MSSQL) core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Existing MSSQL SQLSpec adapter
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Deliver Feature-Complete SQL Server SQLSpec Adapter Package
@@ -65,7 +67,7 @@ Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/mssql/{__ini
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
-- `src/py/vertebra/db/adapters/mssql/driver.py` — native SQL Server (MSSQL) sync and async execution drivers.
+- `src/py/vertebra/db/adapters/mssql/_sync.py` and `src/py/vertebra/db/adapters/mssql/_async.py` — native SQL Server (MSSQL) sync and async execution drivers.
 - `src/py/vertebra/db/adapters/mssql/core.py` — `MSSQLCore.rewrite_placeholders` and TDS wire helpers.
 - `src/py/vertebra/db/adapters/mssql/config.py` — `MSSQLConfig` connection options.
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy MSSQL SQLSpec logic to replace cleanly.
@@ -95,7 +97,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/mssql &&
 - [ ] `MSSQLSyncConfig` and `MSSQLAsyncConfig` resolve `adapter_name = 'vertebra_mssql'` and all extension store classes natively on `sqlspec>=0.71.1`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^mssql-drv]: `src/py/vertebra/db/adapters/mssql/driver.py` — Native SQL Server (MSSQL) sync and async drivers.
+[^mssql-drv]: `src/py/vertebra/db/adapters/mssql/_sync.py` and `src/py/vertebra/db/adapters/mssql/_async.py` — Native SQL Server (MSSQL) sync and async drivers.
 [^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py` — Native SQL Server (MSSQL) core parameter and wire helpers.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Existing MSSQL SQLSpec adapter.
 [^storage-art]: `src/py/vertebra/storage/_store.py` — Storage-neutral ArtifactReference value struct.

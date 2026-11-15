@@ -16,7 +16,7 @@ generated:
 verified:
   - by: agent:flow-completion
     at: "2026-11-14T21:38:00Z"
-    commit: 8a836024
+    commit: c526639f
 sources:
   - id: src-postgres-stream-rs
     resource: src/rs/vertebra-postgres/src/replication/stream.rs::ReplicationSession

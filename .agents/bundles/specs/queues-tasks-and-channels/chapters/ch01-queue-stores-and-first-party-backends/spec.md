@@ -9,60 +9,64 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
-  at: '2026-11-14T18:50:00Z'
+  at: '2026-11-15T20:55:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-15T20:55:00Z'
+    commit: 246d7d0e
 tags:
-- queues
-- postgres
-- oracle
-- capabilities
-- redis
-- valkey
+  - queues
+  - postgres
+  - oracle
+  - capabilities
+  - redis
+  - valkey
 sources:
-- id: queue-cap
-  resource: src/py/vertebra/db/driver/capabilities.py::QueueStore
-  title: Current async-only QueueStore protocol
-- id: pg-drv
-  resource: src/py/vertebra/db/adapters/postgres/driver.py
-  title: Native PostgreSQL driver
-- id: ora-drv
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: Native Oracle driver
-- id: queue-base
-  resource: src/py/vertebra/framework/queues/base.py::QueueService
-  title: First-party QueueService
-- id: queue-pg
-  resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
-  title: PostgreSQL queue backend
-- id: queue-ora
-  resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
-  title: Oracle queue backend
-- id: queue-redis
-  resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
-  title: Redis and Valkey queue backends
+  - id: queue-cap
+    resource: src/py/vertebra/db/driver/capabilities.py::QueueStore
+    title: Current async-only QueueStore protocol
+  - id: pg-drv
+    resource: src/py/vertebra/db/adapters/postgres/_sync.py
+    title: Native PostgreSQL driver
+  - id: ora-drv
+    resource: src/py/vertebra/db/adapters/oracle/_sync.py
+    title: Native Oracle driver
+  - id: queue-base
+    resource: src/py/vertebra/framework/queues/base.py::QueueService
+    title: First-party QueueService
+  - id: queue-pg
+    resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
+    title: PostgreSQL queue backend
+  - id: queue-ora
+    resource: src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend
+    title: Oracle queue backend
+  - id: queue-redis
+    resource: src/py/vertebra/framework/queues/redis.py::RedisQueueBackend
+    title: Redis and Valkey queue backends
+current_task: "queues-tasks-and-channels:ch01-queue-stores-and-first-party-backends:t01"
 ---
 
 # Chapter 01: Sync/AsyncQueueStore Protocols, Native PG/Oracle Stores, and Auto-Wired Queue Backends
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `QueueStore` in `db/driver/capabilities.py` is a single unprefixed async protocol with zero implementations; `PostgreSQLQueueBackend` and `OracleQueueBackend` fail without manual `executor=`, `OracleQueueBackend` probes `oracledb`, `base.py` duplicates cron parsing, and `TaskEnvelope` / `DeadLetterEntry` set `gc=False` on container fields [^queue-cap] [^queue-base] [^queue-pg] [^queue-ora].
-- **Target Architecture**: `@runtime_checkable SyncQueueStore` and `AsyncQueueStore` (zero aliases) are implemented natively by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`vertebra._postgres`) and `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`vertebra._oracle`) consuming `Sync*NotificationSource`/`Async*NotificationSource` from `native-redis-driver:ch03`; `QueueService` selects backends via `QueueBackendSettings`; `PostgreSQLQueueBackend`/`OracleQueueBackend` auto-construct native stores; `RedisQueueBackend`/`ValkeyQueueBackend` run on `vertebra._redis` streams/sorted-sets [^pg-drv] [^ora-drv] [^queue-redis].
+- **Baseline (`473e1f2e`)**: `QueueStore` in `db/driver/capabilities.py` is a single unprefixed async protocol with zero implementations; `PostgreSQLQueueBackend` and `OracleQueueBackend` fail without manual `executor=`, `OracleQueueBackend` probes `oracledb`, `base.py` duplicates cron parsing, and `TaskEnvelope` / `DeadLetterEntry` set `gc=False` on container fields [^queue-cap] [^queue-base] [^queue-pg] [^queue-ora].
+- **Target Architecture**: `@runtime_checkable SyncQueueStore` and `AsyncQueueStore` (zero aliases) are implemented natively by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`vertebra._postgres`) and `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`vertebra._oracle`) consuming `Sync*NotificationSource`/`Async*NotificationSource`; `QueueService` selects backends via `QueueBackendSettings`; `PostgreSQLQueueBackend`/`OracleQueueBackend` auto-construct native stores; `RedisQueueBackend` (`queues/redis.py` over `vertebra._redis`) and `ValkeyQueueBackend` (`queues/valkey.py` over `vertebra._valkey`) add notification wakeups, `enqueue_sync`, and `TaskResultRecord` storage [^pg-drv] [^ora-drv] [^queue-redis].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter splits `QueueStore` into `SyncQueueStore` and `AsyncQueueStore`, delivers native PostgreSQL and Oracle SQL queue stores inside `vertebra.db.adapters.{postgres,oracle}.queue`, and wires `QueueService` and first-party backends (`postgres`, `oracle`, `redis`, `valkey`, `shm`, `memory`) onto native drivers and queue stores with zero third-party client probes [^queue-cap] [^queue-base].
+This chapter splits `QueueStore` into `SyncQueueStore` and `AsyncQueueStore`, delivers native PostgreSQL and Oracle SQL queue stores inside `vertebra.db.adapters.postgres.queue` and `vertebra.db.adapters.oracle.queue`, and wires `QueueService` and first-party backends (`postgres`, `oracle`, `redis`, `valkey`, `memory`, and a new first-party `shm` backend) onto native drivers and queue stores with zero third-party client probes [^queue-cap] [^queue-base].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- **R1 (`SyncQueueStore` / `AsyncQueueStore`)**: `@runtime_checkable` protocols in `db/driver/capabilities.py` with zero aliases.
+- **R1 (`SyncQueueStore` / `AsyncQueueStore`)**: `@runtime_checkable` protocols in `db/driver/capabilities.py` with zero aliases; the existing `ClaimedJob` record is renamed `QueueEntry` and `complete`/`fail` become `ack`/`nack`. The blocks below are excerpts; `t01` lists the full method set shared by both protocols.
 - **R2 (`SyncPostgresQueueStore` / `AsyncPostgresQueueStore` & `SyncOracleQueueStore` / `AsyncOracleQueueStore`)**: `FOR UPDATE SKIP LOCKED` leases, `(job_id, attempt)` fencing, heartbeats, retries, DLQ, cron leases, and native notification wakeups.
 
 ```python
@@ -82,6 +86,7 @@ class SyncQueueStore(Protocol):
 class AsyncQueueStore(Protocol):
     async def ensure_schema(self) -> None: ...
     async def enqueue(self, entry: QueueEntry) -> str: ...
+    async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]: ...
     async def claim(self, queues: Sequence[str], *, limit: int = 1, worker_id: str, lease_seconds: float = 30.0) -> list[QueueEntry]: ...
     async def ack(self, job_id: str, *, attempt: int) -> bool: ...
     async def nack(self, job_id: str, *, attempt: int, error: str, retry_delay_s: float | None = None) -> bool: ...
@@ -91,7 +96,7 @@ class AsyncQueueStore(Protocol):
 ```
 
 - **R3 (`QueueBackendSettings` & Clean Models)**: Config-keyed `QueueService._build_backend`, `TaskResultRecord` persistence, `gc=False` removed from `TaskEnvelope`/`DeadLetterEntry`, and duplicate `base.py::_cron_matches*` deleted.
-- **R4 (Auto-Wired Native Backends)**: `PostgreSQLQueueBackend`, `OracleQueueBackend` (`vertebra-core[oracle]` hint), `RedisQueueBackend`, and `ValkeyQueueBackend` build native stores/clients automatically from configured drivers.
+- **R4 (Auto-Wired Native Backends)**: `PostgreSQLQueueBackend`, `OracleQueueBackend` (`vertebra-core[oracle]` hint), `RedisQueueBackend` (`queues/redis.py`), and `ValkeyQueueBackend` (`queues/valkey.py`) build native stores/clients automatically from configured drivers.
 
 ```python
 class QueueBackendSettings(msgspec.Struct, frozen=True):
@@ -101,13 +106,13 @@ class QueueBackendSettings(msgspec.Struct, frozen=True):
     poll_interval_seconds: float = 1.0
     consumer_name: str = "vertebra-worker"
 
-class TaskEnvelope(msgspec.Struct, frozen=True):
+class TaskEnvelope(msgspec.Struct, frozen=True, kw_only=True, array_like=True):
     task_id: str
     task_name: str
+    lane: TaskLane
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = msgspec.field(default_factory=dict)
-    lane: TaskLane = "io"
-    attempt: int = 0
+    attempt: int = 1
     max_retries: int = 3
 ```
 
@@ -122,28 +127,28 @@ Protocol, store capabilities, `QueueBackendSettings`, and backend configuration 
 | `t01` | Split Sync/AsyncQueueStore Protocols and Add QueueBackendSettings & SHM Fixes | `src/py/vertebra/db/driver/capabilities.py`, `src/py/vertebra/db/driver/__init__.py`, `src/py/vertebra/db/__init__.py` (+3 more) | `src/py/tests/unit/db/test_native_db_drivers.py`, `src/py/tests/unit/framework/test_distributed_queues.py` |
 | `t02` | Implement Sync/Async PostgresQueueStore and OracleQueueStore | `src/py/vertebra/db/adapters/postgres/queue.py`, `src/py/vertebra/db/adapters/postgres/__init__.py`, `src/py/vertebra/db/adapters/oracle/queue.py` (+1 more) | `src/py/tests/unit/db/test_postgres_native_queries.py`, `src/py/tests/unit/db/test_oracle_adapter.py` |
 | `t03` | Auto-Wire PostgreSQLQueueBackend and OracleQueueBackend Over Native Queue Stores | `src/py/vertebra/framework/queues/postgres.py`, `src/py/vertebra/framework/queues/oracle.py` | `src/py/tests/unit/framework/test_distributed_queues.py` |
-| `t04` | Wire RedisQueueBackend and ValkeyQueueBackend Over vertebra._redis Streams & ZSETs | `src/py/vertebra/framework/queues/redis.py`, `src/py/vertebra/framework/queues/__init__.py` | `src/py/tests/unit/framework/test_distributed_queues.py` |
+| `t04` | Wire RedisQueueBackend and ValkeyQueueBackend Notification Wakeups & Result Persistence | `src/py/vertebra/framework/queues/redis.py`, `src/py/vertebra/framework/queues/valkey.py`, `src/py/vertebra/framework/queues/__init__.py` | `src/py/tests/unit/framework/test_distributed_queues.py` |
 
 ## 5. Implementation Plan
 
 - [ ] [t01-queue-store-protocols-and-service-settings.md](tasks/t01-queue-store-protocols-and-service-settings.md) — Split QueueStore into SyncQueueStore and AsyncQueueStore in capabilities.py, add QueueBackendSettings/TaskResultRecord, drop gc=False on TaskEnvelope/DeadLetterEntry, and remove duplicate cron helpers.
 - [ ] [t02-postgres-and-oracle-queue-stores.md](tasks/t02-postgres-and-oracle-queue-stores.md) — Build Sync/AsyncPostgresQueueStore (FOR UPDATE OF q SKIP LOCKED, pg_notify, zero correlated subqueries) and Sync/AsyncOracleQueueStore (FOR UPDATE SKIP LOCKED, TxEventQ).
 - [ ] [t03-postgres-and-oracle-queue-backends.md](tasks/t03-postgres-and-oracle-queue-backends.md) — Auto-construct native queue stores in PostgreSQLQueueBackend and OracleQueueBackend (replacing oracledb probe with vertebra-core[oracle]).
-- [ ] [t04-redis-and-valkey-queue-backends.md](tasks/t04-redis-and-valkey-queue-backends.md) — Wire RedisQueueBackend and ValkeyQueueBackend onto vertebra._redis XREADGROUP/XAUTOCLAIM consumer groups and delayed ZSET schedules.
+- [ ] [t04-redis-and-valkey-queue-backends.md](tasks/t04-redis-and-valkey-queue-backends.md) — Wire RedisQueueBackend (`vertebra._redis`) and ValkeyQueueBackend (`vertebra._valkey`) notification wakeups, `enqueue_sync`, and `TaskResultRecord` persistence.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch01-queue-stores-and-first-party-backends` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-postgres-driver` and `native-redis-driver`).
+Chapter `ch01-queue-stores-and-first-party-backends` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-redis-driver`, `native-valkey-driver`, and `sqlalchemy-and-django-integration`).
 
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync mypy src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_native_queries.py src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/unit/framework/test_distributed_queues.py
+uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync mypy src/py/vertebra/db/driver src/py/vertebra/db/__init__.py src/py/vertebra/db/adapters/postgres/queue.py src/py/vertebra/db/adapters/oracle/queue.py src/py/vertebra/framework/queues src/py/vertebra/extensions/flask/queues.py && uv run --no-sync pytest src/py/tests/unit/db/test_native_db_drivers.py src/py/tests/unit/db/test_postgres_native_queries.py src/py/tests/unit/db/test_oracle_adapter.py src/py/tests/unit/framework/test_distributed_queues.py -q
 ```
 
 [^queue-cap]: `src/py/vertebra/db/driver/capabilities.py::QueueStore` — Current async-only QueueStore protocol.
-[^pg-drv]: `src/py/vertebra/db/adapters/postgres/driver.py` — Native PostgreSQL driver.
-[^ora-drv]: `src/py/vertebra/db/adapters/oracle/driver.py` — Native Oracle driver.
+[^pg-drv]: `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — Native PostgreSQL driver.
+[^ora-drv]: `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — Native Oracle driver.
 [^queue-base]: `src/py/vertebra/framework/queues/base.py::QueueService` — First-party QueueService.
 [^queue-pg]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend.
 [^queue-ora]: `src/py/vertebra/framework/queues/oracle.py::OracleQueueBackend` — Oracle queue backend.

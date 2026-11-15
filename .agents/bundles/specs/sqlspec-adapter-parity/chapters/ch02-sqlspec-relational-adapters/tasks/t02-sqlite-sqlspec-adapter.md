@@ -11,49 +11,50 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch02-sqlspec-relational-adapters:t01
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/sqlite/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/sqlite/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/sqlite/driver.py
-- src/py/vertebra/db/adapters/sqlite/core.py
-- src/py/vertebra/db/adapters/sqlite/config.py
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/sqlite/driver.py
+  - src/py/vertebra/db/adapters/sqlite/core.py
+  - src/py/vertebra/db/adapters/sqlite/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- sqlite
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - sqlite
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py
-  title: Native SQLite sync and async drivers
-- id: sqlite-core
-  resource: src/py/vertebra/db/adapters/sqlite/core.py
-  title: Native SQLite core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Existing SQLite SQLSpec adapter
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py
+    title: Native SQLite sync and async drivers
+  - id: sqlite-core
+    resource: src/py/vertebra/db/adapters/sqlite/core.py
+    title: Native SQLite core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Existing SQLite SQLSpec adapter
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Deliver Feature-Complete SQLite SQLSpec Adapter Package

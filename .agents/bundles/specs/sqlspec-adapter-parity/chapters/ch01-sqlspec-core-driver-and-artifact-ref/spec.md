@@ -9,39 +9,43 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T18:50:00Z'
+    commit: 1b191388
 tags:
-- sqlspec
-- driver
-- arrow
-- storage
+  - sqlspec
+  - driver
+  - arrow
+  - storage
 sources:
-- id: pyproject-sqlspec
-  resource: pyproject.toml
-  title: sqlspec floor and optional adk extra
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Current monolithic SQLSpec driver module
-- id: sqlspec-provider
-  resource: src/py/vertebra/extensions/sqlspec/provider.py
-  title: Broker SQLSpec provider
-- id: storage-store
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage value objects
+  - id: pyproject-sqlspec
+    resource: pyproject.toml
+    title: sqlspec floor and optional adk extra
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Current monolithic SQLSpec driver module
+  - id: sqlspec-provider
+    resource: src/py/vertebra/extensions/sqlspec/provider.py
+    title: Broker SQLSpec provider
+  - id: storage-store
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage value objects
+current_task: "sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t01"
 ---
 
 # Chapter 01: SQLSpec Dispatch Foundation, VTBARROW Provider & Storage ArtifactReference
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: `extensions/sqlspec/adapters.py` overrides `execute`/`select`, `provider.py` defines `SharedArrowBuffer`/`SharedArrowTable`, and `spanner.py` imports BigQuery `ObjectRef` [^sqlspec-adapters] [^sqlspec-provider].
+- **Baseline (`473e1f2e`)**: `extensions/sqlspec/adapters.py` overrides `execute`/`select`, `provider.py` defines `SharedArrowBuffer`/`SharedArrowTable`, and `spanner.py` imports BigQuery `ObjectRef` [^sqlspec-adapters] [^sqlspec-provider].
 - **Target Architecture**: `sqlspec>=0.71.1` natively resolves `adapter_name` and explicit `*_store_class` attributes with zero `_compat.py` monkeypatching; `_driver.py` implements `dispatch_execute*`; `provider.py` emits `VTBARROW` `ArrowCursor` frames; `vertebra.storage.ArtifactReference` provides engine-neutral artifact metadata [^pyproject-sqlspec] [^storage-store].
 <!-- truth: end -->
 
@@ -53,7 +57,7 @@ This chapter establishes the shared foundation for all 8 SQLSpec adapter package
 
 - **R1 (`sqlspec>=0.71.1` & Zero Monkeypatching)**: Declare `sqlspec>=0.71.1` and `adk = ["google-adk>=1.0.0"]`; `_compat.py` must not exist.
 - **R2 (`_driver.py` Dispatch Contract)**: Inherit `execute`/`select*` from `SyncDriverAdapterBase`/`AsyncDriverAdapterBase`, implement `dispatch_execute*`, `execute_stack` pipelining, non-mutating `StatementConfig` merge, `TypedParameter` unwrapping, `DatabaseError` mapping, and refcounted shared-pool `close()`.
-- **R3 (`VTBARROW` & `ArtifactReference`)**: Replace `SharedArrowBuffer`/`SharedArrowTable` with `ArrowCursor`, remove `gc=False` on container structs, and export `vertebra.storage.ArtifactReference`.
+- **R3 (`VTBARROW` & `ArtifactReference`)**: Replace `SharedArrowBuffer`/`SharedArrowTable` with `ArrowCursor`, remove `gc=False` from `ObjectMeta` and `PutResult`, and export `vertebra.storage.ArtifactReference`.
 
 ```python
 class ArtifactReference(msgspec.Struct, frozen=True):
@@ -93,12 +97,12 @@ Foundation APIs are documented in `ch04-sqlspec-cutover-storage-events-docs`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch01-sqlspec-core-driver-and-artifact-ref` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
+Chapter `ch01-sqlspec-core-driver-and-artifact-ref` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver`, `native-redis-driver`, and `sqlalchemy-and-django-integration`; `broker-pool-sharing` complete and archived at `246d7d0e`).
 
 Fast Chapter Gate (`< 60s` offline):
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions/sqlspec src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/db/driver src/py/vertebra/extensions/sqlspec src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_shm_proxy.py src/py/tests/unit/storage/test_storage_store.py
+uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/extensions/sqlspec src/py/vertebra/storage && uv run --no-sync mypy src/py/vertebra/db/driver src/py/vertebra/extensions/sqlspec src/py/vertebra/storage && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_shm_proxy.py src/py/tests/unit/storage/test_storage_store.py src/py/tests/unit/db/test_native_db_drivers.py
 ```
 
 [^pyproject-sqlspec]: `pyproject.toml` — sqlspec floor and optional adk extra.

@@ -10,35 +10,36 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- spanner-queue-and-rw-transactions:t03
+  - spanner-queue-and-rw-transactions:t03
 files:
-- .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
-- .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-- docs/usage/queues-and-realtime.md
+  - .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
+  - .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  - docs/usage/queues-and-realtime.md
 tests:
-- src/py/tests/unit/extensions/test_vite_and_docs_portal.py
+  - src/py/tests/unit/extensions/test_vite_and_docs_portal.py
 read_set:
-- .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
-- .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-- docs/usage/queues-and-realtime.md
+  - .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
+  - .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  - docs/usage/queues-and-realtime.md
 estimated_loc: 155
 tags:
-- documentation
-- okf
-- spanner
-- queues
+  - documentation
+  - okf
+  - spanner
+  - queues
 sources:
-- id: okf-gcp
-  resource: .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
-  title: BigQuery and Cloud Spanner drivers OKF chapter
-- id: okf-queues
-  resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-  title: Distributed queues OKF chapter
-- id: doc-qr
-  resource: docs/usage/queues-and-realtime.md
-  title: Queues and realtime usage guide
+  - id: okf-gcp
+    resource: .agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md
+    title: BigQuery and Spanner drivers OKF chapter
+  - id: okf-queues
+    resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+    title: Distributed queues OKF chapter
+  - id: doc-qr
+    resource: docs/usage/queues-and-realtime.md
+    title: Queues and realtime usage guide
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Synchronize Spanner ReadWrite Transactions & Queue Store Docs and OKF Chapters
@@ -73,6 +74,6 @@ uv run --no-sync ruff check src/py/vertebra/db/adapters/spanner src/py/vertebra/
 - [ ] `gcp-bigquery-and-spanner-drivers.md` and `distributed-queues-and-email.md` stay `<= 200` lines and pass `review_setup.py validate`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^okf-gcp]: `.agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md` — BigQuery and Cloud Spanner drivers OKF chapter.
+[^okf-gcp]: `.agents/bundles/knowledge/domains/data/gcp-bigquery-and-spanner-drivers.md` — BigQuery and Spanner drivers OKF chapter.
 [^okf-queues]: `.agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md` — Distributed queues OKF chapter.
 [^doc-qr]: `docs/usage/queues-and-realtime.md` — Queues and realtime usage guide.

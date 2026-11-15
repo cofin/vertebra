@@ -3,88 +3,78 @@ type: Task
 id: native-redis-driver:ch03-python-cutover-and-notifications:t03
 flow_id: native-redis-driver
 chapter_id: ch03-python-cutover-and-notifications
-title: Remove Legacy RESP3 Bindings from vertebra-py and Delete vertebra-db/src/resp3/mod.rs
-description: Delete encode_resp_command, encode_hello3_handshake, crc16_xmodem, redis_hash_slot, and parse_cluster_redirect from vertebra-py/_vertebra.pyi and remove src/rs/vertebra-db/src/resp3/mod.rs.
+title: Extract Self-Contained ValkeyQueueBackend into src/py/vertebra/framework/queues/valkey.py
+description: Move ValkeyQueueBackend out of framework/queues/redis.py into a self-contained framework/queues/valkey.py module with a new ValkeyStreamClient protocol and zero imports from queues/redis.py.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch03-python-cutover-and-notifications:t02
+  - native-redis-driver:ch03-python-cutover-and-notifications:t02
 files:
-- src/rs/vertebra-py/src/db.rs
-- src/py/vertebra/_vertebra.pyi
-- src/rs/vertebra-db/src/resp3/mod.rs
-- src/rs/vertebra-db/src/lib.rs
+  - src/py/vertebra/framework/queues/valkey.py
+  - src/py/vertebra/framework/queues/redis.py
+  - src/py/vertebra/framework/queues/__init__.py
+  - src/py/vertebra/framework/queues/backends.py
+  - src/py/vertebra/framework/queues/base.py
 tests:
-- src/py/tests/unit/db/test_redis_valkey_resp3.py
-- src/rs/vertebra-redis/tests/redis_client.rs
+  - src/py/tests/unit/framework/test_distributed_queues.py
 read_set:
-- src/rs/vertebra-py/src/db.rs
-- src/py/vertebra/_vertebra.pyi
-- src/rs/vertebra-db/src/resp3/mod.rs
-- src/rs/vertebra-db/src/lib.rs
+  - src/py/vertebra/framework/queues/redis.py
+  - src/py/vertebra/framework/queues/__init__.py
+  - src/py/tests/unit/framework/test_distributed_queues.py
 estimated_loc: 220
 tags:
-- pyo3
-- resp3
-- debloat
-- rust
+  - queues
+  - valkey
+  - redis
+  - isolation
 sources:
-- id: resp3-bindings
-  resource: src/rs/vertebra-py/src/db.rs::redis_hash_slot
-  title: Legacy RESP3 helper bindings on vertebra._vertebra
-- id: vertebra-pyi
-  resource: src/py/vertebra/_vertebra.pyi
-  title: Core vertebra._vertebra stub declarations
-- id: resp3-rs
-  resource: src/rs/vertebra-db/src/resp3/mod.rs
-  title: Legacy RESP3 codec module in vertebra-db
-- id: db-lib
-  resource: src/rs/vertebra-db/src/lib.rs
-  title: vertebra-db crate root re-exporting resp3
+  - id: queue-redis
+    resource: src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend
+    title: ValkeyQueueBackend currently defined in framework/queues/redis.py
+  - id: queue-init
+    resource: src/py/vertebra/framework/queues/__init__.py
+    title: Framework queues package exports
+verification_strategy: regression_tdd
 ---
 
-# Task `t03`: Remove Legacy RESP3 Bindings from vertebra-py and Delete vertebra-db/src/resp3/mod.rs
+# Task `t03`: Extract Self-Contained ValkeyQueueBackend into src/py/vertebra/framework/queues/valkey.py
 
 ## Objective & Scope Boundary
 
-Remove `encode_resp_command`, `encode_hello3_handshake`, `crc16_xmodem`, `redis_hash_slot`, and `parse_cluster_redirect` from `src/rs/vertebra-py/src/db.rs` and `src/py/vertebra/_vertebra.pyi`, and delete `src/rs/vertebra-db/src/resp3/mod.rs` + `pub mod resp3;` from `src/rs/vertebra-db/src/lib.rs` per [`../spec.md` §2](../spec.md) [^resp3-bindings] [^vertebra-pyi] [^resp3-rs] [^db-lib].
+Extract the thin `ValkeyQueueBackend(RedisQueueBackend)` subclass from `src/py/vertebra/framework/queues/redis.py` into a self-contained `src/py/vertebra/framework/queues/valkey.py` module, define a new `ValkeyStreamClient` protocol there (copy of `RedisStreamClient`; none exists today), repoint the `src/py/vertebra/framework/queues/backends.py` import and the `QueueService._build_backend` dotted path in `src/py/vertebra/framework/queues/base.py`, and re-export `ValkeyQueueBackend` from `src/py/vertebra/framework/queues/__init__.py` per [`../spec.md` §2](../spec.md) [^queue-redis] [^queue-init].
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-py/src/db.rs` — RESP3 imports, `#[pyfunction]` wrappers, and module registrations.
-- `src/py/vertebra/_vertebra.pyi` — RESP3 stub declarations.
-- `src/rs/vertebra-db/src/resp3/mod.rs` — 475-line legacy RESP3 parser/encoder to delete.
-- `src/rs/vertebra-db/src/lib.rs` — `pub mod resp3;` and `pub use resp3::{...};`.
+- `src/py/vertebra/framework/queues/redis.py` — `RedisQueueBackend`, `ValkeyQueueBackend`, and `RedisStreamClient`.
+- `src/py/vertebra/framework/queues/__init__.py` — Lazy queue backend exports (`PY-06`).
+- `src/py/tests/unit/framework/test_distributed_queues.py` — Queue backend unit tests.
 
 ## Contracts & Edge Cases
 
-- Keep `vertebra._redis` as the sole owner of `crc16_xmodem`, `redis_hash_slot`, and `parse_cluster_redirect`.
-- **Edge Case**: Rebuild `_vertebra` and verify `mypy.stubtest vertebra._vertebra` passes immediately.
-- **Edge Case**: Confirm no crate under `src/rs/` references `vertebra_db::resp3` and workspace compilation stays warning-free.
+- `src/py/vertebra/framework/queues/valkey.py` defines `ValkeyStreamClient` and `ValkeyQueueBackend`, keeping the current `redis.asyncio` client construction (`redis://`/`rediss://` or injected `client=`; scheme cutover to `valkey://`/`valkeys://`/`unix://` lands in `native-valkey-driver:ch03:t04`), with zero imports from `src/py/vertebra/framework/queues/redis.py`.
+- `src/py/vertebra/framework/queues/redis.py` defines `RedisStreamClient` and `RedisQueueBackend` accepting `redis://`, `rediss://`, and `unix://` with zero references to Valkey.
+- **Edge Case**: Legacy RESP3 bindings (`encode_resp_command`, `encode_hello3_handshake`, `crc16_xmodem`, `redis_hash_slot`, `parse_cluster_redirect`) on `vertebra._vertebra` remain intact in this flow and are removed in `native-valkey-driver:ch03:t03` once `ValkeyCore` cuts over to `vertebra._valkey`.
 
 ## Test Matrix
 
-- Assert `not hasattr(vertebra._vertebra, "encode_resp_command")` in `test_redis_valkey_resp3.py` and run `mypy.stubtest vertebra._vertebra`.
-- `cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-redis --features vertebra-db/gcp` passes.
+- Assert in `test_distributed_queues.py` that `ValkeyQueueBackend` is imported from `vertebra.framework.queues.valkey` (and re-exported by `vertebra.framework.queues`), `queues/valkey.py` has zero imports from `queues/redis.py`, and the `backends.py` re-export and `QueueService` `kind="valkey"` path resolve to `vertebra.framework.queues.valkey.ValkeyQueueBackend`.
 
 ## Verification
 
 ```bash
-cargo test --manifest-path src/rs/Cargo.toml -p vertebra-db -p vertebra-redis --features vertebra-db/gcp && make dev && uv run --no-sync python -m mypy.stubtest vertebra._vertebra --concise && uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q
+uv run --no-sync pytest src/py/tests/unit/framework/test_distributed_queues.py -q && uv run --no-sync ruff check src/py/vertebra/framework/queues && uv run --no-sync mypy src/py/vertebra/framework/queues
 ```
 
 ## Acceptance Criteria
 
-- [ ] `vertebra._vertebra` exports zero RESP3 functions and passes `stubtest`.
-- [ ] `src/rs/vertebra-db/src/resp3/mod.rs` is deleted and workspace Cargo tests pass.
+- [ ] `src/py/vertebra/framework/queues/valkey.py` and `src/py/vertebra/framework/queues/redis.py` have zero cross-imports.
+- [ ] `ValkeyQueueBackend` and `RedisQueueBackend` pass unit and type checks.
 - [ ] Zero regressions in the fast verification gate.
 
-[^resp3-bindings]: `src/rs/vertebra-py/src/db.rs::redis_hash_slot` — Legacy RESP3 helper bindings on vertebra._vertebra.
-[^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Core vertebra._vertebra stub declarations.
-[^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs` — Legacy RESP3 codec module in vertebra-db.
-[^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate root re-exporting resp3.
+[^queue-redis]: `src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend` — ValkeyQueueBackend currently defined in framework/queues/redis.py.
+[^queue-init]: `src/py/vertebra/framework/queues/__init__.py` — Framework queues package exports.

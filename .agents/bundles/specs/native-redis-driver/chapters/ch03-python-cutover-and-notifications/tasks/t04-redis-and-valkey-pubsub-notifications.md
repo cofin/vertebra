@@ -3,54 +3,47 @@ type: Task
 id: native-redis-driver:ch03-python-cutover-and-notifications:t04
 flow_id: native-redis-driver
 chapter_id: ch03-python-cutover-and-notifications
-title: Implement Sync/Async Redis and Valkey Pub/Sub Notification Sources
-description: Implement SyncRedisNotificationSource, AsyncRedisNotificationSource, SyncValkeyNotificationSource, and AsyncValkeyNotificationSource over vertebra._redis Pub/Sub.
+title: Implement Sync/Async Redis Pub/Sub Notification Sources
+description: Implement SyncRedisNotificationSource and AsyncRedisNotificationSource over vertebra._redis Pub/Sub.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch03-python-cutover-and-notifications:t03
+  - native-redis-driver:ch03-python-cutover-and-notifications:t03
 files:
-- src/py/vertebra/db/adapters/redis/notify.py
-- src/py/vertebra/db/adapters/redis/__init__.py
-- src/py/vertebra/db/adapters/valkey/notify.py
-- src/py/vertebra/db/adapters/valkey/__init__.py
+  - src/py/vertebra/db/adapters/redis/notify.py
+  - src/py/vertebra/db/adapters/redis/__init__.py
 tests:
-- src/py/tests/unit/db/test_redis_valkey_resp3.py
+  - src/py/tests/unit/db/test_redis_valkey_resp3.py
 read_set:
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/redis/driver.py
-- src/py/vertebra/db/adapters/redis/__init__.py
-- src/py/vertebra/_redis.pyi
-- src/py/vertebra/db/adapters/valkey/config.py
-- src/py/vertebra/db/adapters/valkey/__init__.py
-estimated_loc: 220
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/adapters/redis/driver.py
+  - src/py/vertebra/db/adapters/redis/__init__.py
+  - src/py/vertebra/_redis.pyi
+estimated_loc: 180
 tags:
-- redis
-- pubsub
-- notifications
-- valkey
+  - redis
+  - pubsub
+  - notifications
 sources:
-- id: driver-caps
-  resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
-  title: NotificationSource capability protocol in capabilities.py
-- id: redis-drv
-  resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
-  title: Python socket/asyncio SyncRedisDriver and AsyncRedisDriver
-- id: valkey-drv
-  resource: src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver
-  title: SyncValkeyDriver and AsyncValkeyDriver
+  - id: driver-caps
+    resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
+    title: NotificationSource capability protocol in capabilities.py
+  - id: redis-drv
+    resource: src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver
+    title: SyncRedisDriver and AsyncRedisDriver
+verification_strategy: regression_tdd
 ---
 
-# Task `t04`: Implement Sync/Async Redis and Valkey Pub/Sub Notification Sources
+# Task `t04`: Implement Sync/Async Redis Pub/Sub Notification Sources
 
 ## Objective & Scope Boundary
 
-Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` (`src/py/vertebra/db/adapters/redis/notify.py`) and `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` (`src/py/vertebra/db/adapters/valkey/notify.py`), lazy-exporting them from `redis/__init__.py` and `valkey/__init__.py` per [`../spec.md` §2](../spec.md) [^driver-caps] [^redis-drv] [^valkey-drv].
+Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` (`src/py/vertebra/db/adapters/redis/notify.py`) over `vertebra._redis.SyncRedisListener` and `AsyncRedisListener`, lazy-exporting them from `src/py/vertebra/db/adapters/redis/__init__.py` per [`../spec.md` §2](../spec.md) [^driver-caps] [^redis-drv].
 
 ## Bounded Read Manifest
 
@@ -58,15 +51,13 @@ Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` (`src
 - `src/py/vertebra/db/adapters/redis/driver.py` — `SyncRedisDriver` and `AsyncRedisDriver` (`vertebra._redis` client plumbing).
 - `src/py/vertebra/db/adapters/redis/__init__.py` — Lazy package exports (`PY-06`).
 - `src/py/vertebra/_redis.pyi` — `SyncRedisListener` and `AsyncRedisListener` signatures.
-- `src/py/vertebra/db/adapters/valkey/config.py` — `ValkeyConfig` defaults.
-- `src/py/vertebra/db/adapters/valkey/__init__.py` — Lazy package exports (`PY-06`).
 
 ## Contracts & Edge Cases
 
 - Support `publish`, `subscribe`, `psubscribe`, `ssubscribe` (Cluster sharded pub/sub), `unsubscribe`, `listen()`, `close()`/`aclose()`, and optional `ChangeFeed` envelope hydration while recording pattern/shard metadata on `NotificationEvent.metadata`.
-- Default Valkey sources to `ValkeyConfig()` and probe `ensure_module("vertebra._redis", package="vertebra-core[valkey]", extra="valkey")`.
+- Probe `ensure_module("vertebra._redis", package="vertebra-core[redis]", extra="redis")`.
 - **Edge Case**: Breaking out of `listen()` closes the dedicated `SyncRedisListener` / `AsyncRedisListener` handle deterministically.
-- **Edge Case**: Missing `vertebra._redis` raises `MissingDependencyError` naming `vertebra-core[redis]` or `vertebra-core[valkey]`.
+- **Edge Case**: Missing `vertebra._redis` raises `MissingDependencyError` naming `vertebra-core[redis]`.
 
 ## Test Matrix
 
@@ -75,15 +66,13 @@ Implement `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` (`src
 ## Verification
 
 ```bash
-uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/redis src/py/vertebra/db/adapters/valkey && uv run --no-sync mypy src/py/vertebra/db/adapters/redis src/py/vertebra/db/adapters/valkey
+uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q && uv run --no-sync ruff check src/py/vertebra/db/adapters/redis && uv run --no-sync mypy src/py/vertebra/db/adapters/redis
 ```
 
 ## Acceptance Criteria
 
 - [ ] `SyncRedisNotificationSource` and `AsyncRedisNotificationSource` pass unit and protocol checks.
-- [ ] `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` pass unit and type checks.
 - [ ] Zero regressions in the fast verification gate.
 
 [^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::NotificationSource` — NotificationSource capability protocol in capabilities.py.
-[^redis-drv]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — Python socket/asyncio SyncRedisDriver and AsyncRedisDriver.
-[^valkey-drv]: `src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver` — SyncValkeyDriver and AsyncValkeyDriver.
+[^redis-drv]: `src/py/vertebra/db/adapters/redis/driver.py::SyncRedisDriver` — SyncRedisDriver and AsyncRedisDriver.

@@ -9,66 +9,70 @@ state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 depends_on_chapters:
-- ch01-sqlspec-core-driver-and-artifact-ref
+  - ch01-sqlspec-core-driver-and-artifact-ref
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T18:50:00Z'
+    commit: 1b191388
 tags:
-- sqlspec
-- postgres
-- adk
-- events
-- litestar
-- sqlite
-- mysql
-- oracle
+  - sqlspec
+  - postgres
+  - adk
+  - events
+  - litestar
+  - sqlite
+  - mysql
+  - oracle
 sources:
-- id: postgres-drv
-  resource: src/py/vertebra/db/adapters/postgres/driver.py
-  title: Native PostgreSQL sync and async drivers
-- id: postgres-core
-  resource: src/py/vertebra/db/adapters/postgres/core.py
-  title: Native PostgreSQL core parameter and wire helpers
-- id: pg-notify
-  resource: src/py/vertebra/db/adapters/postgres/notify.py
-  title: PostgreSQL notification source
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py
-  title: Native SQLite sync and async drivers
-- id: sqlite-core
-  resource: src/py/vertebra/db/adapters/sqlite/core.py
-  title: Native SQLite core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Existing SQLite SQLSpec adapter
-- id: mysql-drv
-  resource: src/py/vertebra/db/adapters/mysql/driver.py
-  title: Native MySQL & MariaDB sync and async drivers
-- id: mysql-core
-  resource: src/py/vertebra/db/adapters/mysql/core.py
-  title: Native MySQL & MariaDB core parameter and wire helpers
-- id: oracle-drv
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: Native Oracle sync and async drivers
-- id: oracle-core
-  resource: src/py/vertebra/db/adapters/oracle/core.py
-  title: Native Oracle core parameter and wire helpers
-- id: ora-notify
-  resource: src/py/vertebra/db/adapters/oracle/notify.py
-  title: Oracle TxEventQ notification source
+  - id: postgres-drv
+    resource: src/py/vertebra/db/adapters/postgres/_sync.py
+    title: Native PostgreSQL sync and async drivers
+  - id: postgres-core
+    resource: src/py/vertebra/db/adapters/postgres/core.py
+    title: Native PostgreSQL core parameter and wire helpers
+  - id: pg-notify
+    resource: src/py/vertebra/db/adapters/postgres/notify.py
+    title: PostgreSQL notification source
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py
+    title: Native SQLite sync and async drivers
+  - id: sqlite-core
+    resource: src/py/vertebra/db/adapters/sqlite/core.py
+    title: Native SQLite core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Existing SQLite SQLSpec adapter
+  - id: mysql-drv
+    resource: src/py/vertebra/db/adapters/mysql/_sync.py
+    title: Native MySQL & MariaDB sync and async drivers
+  - id: mysql-core
+    resource: src/py/vertebra/db/adapters/mysql/core.py
+    title: Native MySQL & MariaDB core parameter and wire helpers
+  - id: oracle-drv
+    resource: src/py/vertebra/db/adapters/oracle/_sync.py
+    title: Native Oracle sync and async drivers
+  - id: oracle-core
+    resource: src/py/vertebra/db/adapters/oracle/core.py
+    title: Native Oracle core parameter and wire helpers
+  - id: ora-notify
+    resource: src/py/vertebra/db/adapters/oracle/notify.py
+    title: Oracle TxEventQ notification source
+current_task: "sqlspec-adapter-parity:ch02-sqlspec-relational-adapters:t01"
 ---
 
 # Chapter 02: Per-Engine SQLSpec Adapter Packages for PostgreSQL, SQLite, MySQL, and Oracle
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: Relational SQLSpec integration (`postgres`, `sqlite`, `mysql`, `oracle`) lacks modular `src/py/vertebra/extensions/sqlspec/adapters/<engine>/` parity, MySQL emits `%s` instead of `?`, and `adapters.py` omits full data dictionaries and zero-SDK ADK/Events/Litestar stores [^sqlspec-adapters] [^pg-notify] [^ora-notify].
+- **Baseline (`473e1f2e`)**: Relational SQLSpec integration (`postgres`, `sqlite`, `mysql`, `oracle`) lacks modular `src/py/vertebra/extensions/sqlspec/adapters/<engine>/` parity, MySQL emits `%s` instead of `?`, and `adapters.py` omits full data dictionaries and zero-SDK ADK/Events/Litestar stores [^sqlspec-adapters] [^pg-notify] [^ora-notify].
 - **Target Architecture**: Each `extensions/sqlspec/adapters/{postgres,sqlite,mysql,oracle}/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` package implements full `sqlspec>=0.71.1` parity over its native `db/adapters/<engine>/driver.py` (using MySQL `?` QMARK binds), declares `adapter_name = "vertebra_<engine>"` with explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (plus lazy `*ADKArtifactStore` exports), and keeps SQL/parameter helpers strictly local to its own `core.py` [^postgres-drv] [^postgres-core] [^sqlite-drv] [^sqlite-core] [^mysql-drv] [^mysql-core] [^oracle-drv] [^oracle-core].
 <!-- truth: end -->
 
@@ -78,7 +82,7 @@ This chapter delivers standalone `src/py/vertebra/extensions/sqlspec/adapters/{p
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- **Driver & DataDictionary**: Set `StatementConfig(dialect='postgres')` with default and execution `ParameterStyle.NUMERIC` (`$1, $2` positional sequences matching `vertebra._postgres` instead of legacy `%s`), native Arrow `COPY BINARY` `select_to_arrow`, server-side portal `dispatch_select_stream`, pipeline `execute_stack`, and savepoints. Duplicate all PostgreSQL SQL/parameter helpers locally inside `adapters/postgres/core.py` (zero cross-adapter helper modules).
+- **Driver & DataDictionary**: Set `StatementConfig(dialect='postgres')` with default and execution `ParameterStyle.NUMERIC` (`$1, $2` positional sequences matching `vertebra._postgres`, as today), native Arrow `COPY BINARY` `select_to_arrow`, server-side portal `dispatch_select_stream`, pipeline `execute_stack`, and savepoints. Duplicate all PostgreSQL SQL/parameter helpers locally inside `adapters/postgres/core.py` (zero cross-adapter helper modules).
 - **Sub-Extension Stores**: Subclass SDK-free upstream bases (`BaseSyncADKStore`/`BaseAsyncADKStore`, pgvector cosine/HNSW + `tsvector` `BaseSyncADKMemoryStore`/`BaseAsyncADKMemoryStore`, `BaseSyncADKArtifactStore`/`BaseAsyncADKArtifactStore` returning `ArtifactReference` on the shared surface, `BaseEventQueueStore` + `PostgresSyncEventsBackend`/`PostgresAsyncEventsBackend` over `SyncPostgresNotificationSource`/`AsyncPostgresNotificationSource`, and `BaseSQLSpecStore` `ON CONFLICT (key) DO UPDATE`) with zero `psycopg` imports.
 - **Config & Lazy Exports**: Define `PostgresSyncConfig` and `PostgresAsyncConfig` declaring `adapter_name = 'vertebra_postgres'`, `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (plus lazy `*ADKArtifactStore` exports via PEP 562 `__getattr__` in `__init__.py` so `google.adk` loads lazily and guards via `MissingDependencyError`).
 
@@ -220,7 +224,7 @@ Adapter exports and store capabilities are documented in `ch04-sqlspec-cutover-s
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch02-sqlspec-relational-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
+Chapter `ch02-sqlspec-relational-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver`, `native-redis-driver`, and `sqlalchemy-and-django-integration`; `broker-pool-sharing` complete and archived at `246d7d0e`).
 
 Fast Chapter Gate (`< 60s` offline):
 
@@ -228,14 +232,14 @@ Fast Chapter Gate (`< 60s` offline):
 uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/postgres src/py/vertebra/extensions/sqlspec/adapters/sqlite src/py/vertebra/extensions/sqlspec/adapters/mysql src/py/vertebra/extensions/sqlspec/adapters/oracle && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/adapters/postgres src/py/vertebra/extensions/sqlspec/adapters/sqlite src/py/vertebra/extensions/sqlspec/adapters/mysql src/py/vertebra/extensions/sqlspec/adapters/oracle && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 ```
 
-[^postgres-drv]: `src/py/vertebra/db/adapters/postgres/driver.py` — Native PostgreSQL sync and async drivers.
+[^postgres-drv]: `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — Native PostgreSQL sync and async drivers.
 [^postgres-core]: `src/py/vertebra/db/adapters/postgres/core.py` — Native PostgreSQL core parameter and wire helpers.
 [^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification source.
 [^sqlite-drv]: `src/py/vertebra/db/adapters/sqlite/driver.py` — Native SQLite sync and async drivers.
 [^sqlite-core]: `src/py/vertebra/db/adapters/sqlite/core.py` — Native SQLite core parameter and wire helpers.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Existing SQLite SQLSpec adapter.
-[^mysql-drv]: `src/py/vertebra/db/adapters/mysql/driver.py` — Native MySQL & MariaDB sync and async drivers.
+[^mysql-drv]: `src/py/vertebra/db/adapters/mysql/_sync.py` and `src/py/vertebra/db/adapters/mysql/_async.py` — Native MySQL & MariaDB sync and async drivers.
 [^mysql-core]: `src/py/vertebra/db/adapters/mysql/core.py` — Native MySQL & MariaDB core parameter and wire helpers.
-[^oracle-drv]: `src/py/vertebra/db/adapters/oracle/driver.py` — Native Oracle sync and async drivers.
+[^oracle-drv]: `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — Native Oracle sync and async drivers.
 [^oracle-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Native Oracle core parameter and wire helpers.
 [^ora-notify]: `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification source.

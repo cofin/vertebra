@@ -1,0 +1,27 @@
+{
+  "flowId": "integration-remediation",
+  "authorSlug": "codyfincher-google-com",
+  "authorEmail": "codyfincher@google.com",
+  "authorName": "Cody Fincher",
+  "updatedAt": "2026-11-15T20:55:00.000Z",
+  "comments": [
+    {
+      "id": "c-b13b3274-51db-4d93-8610-5d900b147966",
+      "parentCommentId": null,
+      "authorEmail": "codyfincher@google.com",
+      "authorName": "Cody Fincher",
+      "chapterId": null,
+      "taskId": "integration-remediation:t11",
+      "anchorHeading": "6. Current State & Remaining Plan Snapshot",
+      "quotedText": "[x] [364c7cbe] critical-correctness-fixes — Confirmation-gate binding, opt-in WebMCP, prefix-scoped SCAN+UNLIN",
+      "commentKind": "feedback",
+      "state": "addressed",
+      "body": "Can the dogpile caching be extended with our own native caching you can use?  this would be a revision of the plan.",
+      "upvoterEmails": [],
+      "planRevision": 11,
+      "resolvedInRevision": 12,
+      "createdAt": "2026-11-15T20:36:26.122Z",
+      "updatedAt": "2026-11-15T20:55:00.000Z"
+    }
+  ]
+}

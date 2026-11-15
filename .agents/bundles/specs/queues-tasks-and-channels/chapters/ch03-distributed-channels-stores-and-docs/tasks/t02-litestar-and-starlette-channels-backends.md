@@ -11,38 +11,43 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch03-distributed-channels-stores-and-docs:t01
+  - queues-tasks-and-channels:ch03-distributed-channels-stores-and-docs:t01
 files:
-- src/py/vertebra/extensions/litestar/channels.py
-- src/py/vertebra/extensions/starlette/channels.py
-- src/py/vertebra/extensions/flask/channels.py
+  - src/py/vertebra/extensions/litestar/channels.py
+  - src/py/vertebra/extensions/litestar/__init__.py
+  - src/py/vertebra/extensions/litestar/plugin.py
+  - src/py/vertebra/extensions/starlette/channels.py
+  - src/py/vertebra/extensions/flask/channels.py
 tests:
-- src/py/tests/unit/extensions/test_litestar_plugin.py
-- src/py/tests/unit/extensions/test_starlette_plugin.py
+  - src/py/tests/unit/extensions/test_litestar_plugin.py
+  - src/py/tests/unit/extensions/test_starlette_plugin.py
+  - src/py/tests/unit/extensions/test_flask_plugin.py
+  - src/py/tests/unit/server/test_litestar_direct_fastpath.py
 read_set:
-- src/py/vertebra/extensions/litestar/channels.py
-- src/py/vertebra/extensions/starlette/channels.py
-- src/py/vertebra/extensions/flask/channels.py
-- src/py/vertebra/server/_channels.py
-- src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/extensions/litestar/channels.py
+  - src/py/vertebra/extensions/starlette/channels.py
+  - src/py/vertebra/extensions/flask/channels.py
+  - src/py/vertebra/server/_channels.py
+  - src/py/vertebra/db/driver/capabilities.py
 estimated_loc: 210
 tags:
-- channels
-- litestar
-- starlette
-- flask
+  - channels
+  - litestar
+  - starlette
+  - flask
 sources:
-- id: ls-channels
-  resource: src/py/vertebra/extensions/litestar/channels.py::swap_channels_backend
-  title: Litestar channels backend monkeypatching slated for removal
-- id: st-channels
-  resource: src/py/vertebra/extensions/starlette/channels.py
-  title: Starlette channels backend
-- id: fl-channels
-  resource: src/py/vertebra/extensions/flask/channels.py
-  title: Flask synchronous channels integration
+  - id: ls-channels
+    resource: src/py/vertebra/extensions/litestar/channels.py::swap_channels_backend
+    title: Litestar channels backend monkeypatching slated for removal
+  - id: st-channels
+    resource: src/py/vertebra/extensions/starlette/channels.py
+    title: Starlette channels backend
+  - id: fl-channels
+    resource: src/py/vertebra/extensions/flask/channels.py
+    title: Flask synchronous channels integration
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Wire Litestar ChannelsPlugin, Starlette, and Flask Channels Backends Without Monkeypatching
@@ -53,9 +58,9 @@ Replace `swap_channels_backend` monkeypatching in `extensions/litestar/channels.
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/litestar/channels.py` — `ChannelsBackend(litestar.channels.backends.base.ChannelsBackend)` and `ChannelsPlugin` builder (`swap_channels_backend` slated for removal).
+- `src/py/vertebra/extensions/litestar/channels.py` — `ChannelsBackend(ChannelBus)` today (target subclasses `litestar.channels.backends.base.ChannelsBackend`) and `ChannelsPlugin` builder; `swap_channels_backend` is removed here and from its importers `src/py/vertebra/extensions/litestar/__init__.py` and `src/py/vertebra/extensions/litestar/plugin.py`.
 - `src/py/vertebra/extensions/starlette/channels.py` — ASGI Starlette channels adapter.
-- `src/py/vertebra/extensions/flask/channels.py` — WSGI synchronous Flask channels adapter.
+- `src/py/vertebra/extensions/flask/channels.py` — `ChannelMessage` struct only today; receives the WSGI synchronous Flask channels adapter.
 - `src/py/vertebra/server/_channels.py` — `ChannelBus` pub/sub fan-out.
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncNotificationSource` and `AsyncNotificationSource` protocols.
 

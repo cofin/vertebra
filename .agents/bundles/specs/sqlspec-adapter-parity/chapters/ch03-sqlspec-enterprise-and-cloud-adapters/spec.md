@@ -2,79 +2,83 @@
 type: Spec
 flow_id: sqlspec-adapter-parity
 chapter_id: ch03-sqlspec-enterprise-and-cloud-adapters
-title: 'Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner'
-description: Deliver feature-complete per-engine SQLSpec packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner (fixing sqlglot 'spanner'/'postgres' dialect names and removing cross-engine BigQuery ObjectRef imports).
+title: 'Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Spanner'
+description: Deliver feature-complete per-engine SQLSpec packages for SQL Server, DuckDB, BigQuery, and Spanner (fixing sqlglot 'spanner'/'postgres' dialect names and removing cross-engine BigQuery ObjectRef imports).
 status: stable
 state: planned
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
-plan_commit: 1b191388
-updated_at: '2026-11-14T18:50:00Z'
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 depends_on_chapters:
-- ch01-sqlspec-core-driver-and-artifact-ref
+  - ch01-sqlspec-core-driver-and-artifact-ref
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T18:50:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T18:50:00Z'
+    commit: 1b191388
 tags:
-- sqlspec
-- mssql
-- adk
-- events
-- litestar
-- duckdb
-- bigquery
-- spanner
+  - sqlspec
+  - mssql
+  - adk
+  - events
+  - litestar
+  - duckdb
+  - bigquery
+  - spanner
 sources:
-- id: mssql-drv
-  resource: src/py/vertebra/db/adapters/mssql/driver.py
-  title: Native SQL Server (MSSQL) sync and async drivers
-- id: mssql-core
-  resource: src/py/vertebra/db/adapters/mssql/core.py
-  title: Native SQL Server (MSSQL) core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Existing MSSQL SQLSpec adapter
-- id: duckdb-drv
-  resource: src/py/vertebra/db/adapters/duckdb/driver.py
-  title: Native DuckDB sync and async drivers
-- id: duckdb-core
-  resource: src/py/vertebra/db/adapters/duckdb/core.py
-  title: Native DuckDB core parameter and wire helpers
-- id: bigquery-drv
-  resource: src/py/vertebra/db/adapters/bigquery/driver.py
-  title: Native Google BigQuery sync and async drivers
-- id: bigquery-core
-  resource: src/py/vertebra/db/adapters/bigquery/core.py
-  title: Native Google BigQuery core parameter and wire helpers
-- id: sqlspec-bq
-  resource: src/py/vertebra/extensions/sqlspec/bigquery.py
-  title: Current top-level BigQuery SQLSpec module
-- id: spanner-drv
-  resource: src/py/vertebra/db/adapters/spanner/driver.py
-  title: Native Google Cloud Spanner & Spangres sync and async drivers
-- id: spanner-core
-  resource: src/py/vertebra/db/adapters/spanner/core.py
-  title: Native Google Cloud Spanner & Spangres core parameter and wire helpers
-- id: sqlspec-spn
-  resource: src/py/vertebra/extensions/sqlspec/spanner.py
-  title: Current top-level Spanner SQLSpec module with invalid sqlglot dialect names and BigQuery ObjectRef import
+  - id: mssql-drv
+    resource: src/py/vertebra/db/adapters/mssql/_sync.py
+    title: Native SQL Server (MSSQL) sync and async drivers
+  - id: mssql-core
+    resource: src/py/vertebra/db/adapters/mssql/core.py
+    title: Native SQL Server (MSSQL) core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Existing MSSQL SQLSpec adapter
+  - id: duckdb-drv
+    resource: src/py/vertebra/db/adapters/duckdb/_sync.py
+    title: Native DuckDB sync and async drivers
+  - id: duckdb-core
+    resource: src/py/vertebra/db/adapters/duckdb/core.py
+    title: Native DuckDB core parameter and wire helpers
+  - id: bigquery-drv
+    resource: src/py/vertebra/db/adapters/bigquery/_sync.py
+    title: Native Google BigQuery sync and async drivers
+  - id: bigquery-core
+    resource: src/py/vertebra/db/adapters/bigquery/core.py
+    title: Native Google BigQuery core parameter and wire helpers
+  - id: sqlspec-bq
+    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+    title: Current top-level BigQuery SQLSpec module
+  - id: spanner-drv
+    resource: src/py/vertebra/db/adapters/spanner/_sync.py
+    title: Native Spanner & Spangres sync and async drivers
+  - id: spanner-core
+    resource: src/py/vertebra/db/adapters/spanner/core.py
+    title: Native Spanner & Spangres core parameter and wire helpers
+  - id: sqlspec-spn
+    resource: src/py/vertebra/extensions/sqlspec/spanner.py
+    title: Current top-level Spanner SQLSpec module with invalid sqlglot dialect names and BigQuery ObjectRef import
+current_task: "sqlspec-adapter-parity:ch03-sqlspec-enterprise-and-cloud-adapters:t01"
 ---
 
-# Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Cloud Spanner
+# Chapter 03: Per-Engine SQLSpec Adapter Packages for SQL Server, DuckDB, BigQuery, and Spanner
 
 <!-- truth: start -->
-- **Baseline (`18baadcd`)**: Enterprise and cloud SQLSpec integration (`mssql`, `duckdb`, `bigquery`, `spanner`) lacks modular `src/py/vertebra/extensions/sqlspec/adapters/<engine>/` parity, DuckDB 2.0+ lexical `COPY` ordering and Arrow-divergent `fetchall()` fidelity, zero-SDK stores, and clean Spanner isolation (`spanner.py` sets invalid `sqlglot` dialect names `"googlesql"`/`"spangres"` and imports BigQuery `ObjectRef`) [^sqlspec-adapters] [^sqlspec-bq] [^sqlspec-spn].
-- **Target Architecture**: Each `extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` package implements full `sqlspec>=0.71.1` parity over its native `db/adapters/<engine>/driver.py`, declares `adapter_name = "vertebra_<engine>"` with explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (plus lazy `*ADKArtifactStore` exports), maps Spanner `googlesql` -> `"spanner"` and `spangres` -> `"postgres"`, uses `vertebra.storage.ArtifactReference` with zero BigQuery imports in Spanner, and keeps SQL/parameter helpers strictly local to its own `core.py` [^mssql-drv] [^duckdb-drv] [^bigquery-drv] [^spanner-drv].
+- **Baseline (`473e1f2e`)**: Enterprise and cloud SQLSpec integration (`mssql`, `duckdb`, `bigquery`, `spanner`) lacks modular `src/py/vertebra/extensions/sqlspec/adapters/<engine>/` parity, DuckDB 2.0+ lexical `COPY` ordering and Arrow-divergent `fetchall()` fidelity, zero-SDK stores, and clean Spanner isolation (`spanner.py` exposes `"googlesql"`, which is not a `sqlglot` dialect, as the driver/config `dialect` attribute and imports BigQuery `ObjectRef`) [^sqlspec-adapters] [^sqlspec-bq] [^sqlspec-spn].
+- **Target Architecture**: Each `extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/{__init__,config,core,driver,data_dictionary,adk,events,litestar}.py` package implements full `sqlspec>=0.71.1` parity over its native `db/adapters/<engine>/driver.py`, declares `adapter_name = "vertebra_<engine>"` with explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes (plus lazy `*ADKArtifactStore` exports), maps Spanner `googlesql` -> `"spanner"` and keeps sqlspec's registered `"spangres"` dialect, uses `vertebra.storage.ArtifactReference` with zero BigQuery imports in Spanner, and keeps SQL/parameter helpers strictly local to its own `core.py` [^mssql-drv] [^duckdb-drv] [^bigquery-drv] [^spanner-drv].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
 
-This chapter delivers standalone `src/py/vertebra/extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/` packages over Vertebra's native SQL Server, DuckDB, BigQuery, and Cloud Spanner/Spangres drivers, keeping all dialect SQL and parameter helpers strictly inside each engine's own `core.py` with zero cross-adapter SQL helper modules and zero third-party DB SDK imports [^mssql-core] [^duckdb-core] [^bigquery-core] [^spanner-core].
+This chapter delivers standalone `src/py/vertebra/extensions/sqlspec/adapters/{mssql,duckdb,bigquery,spanner}/` packages over Vertebra's native SQL Server, DuckDB, BigQuery, and Spanner/Spangres drivers, keeping all dialect SQL and parameter helpers strictly inside each engine's own `core.py` with zero cross-adapter SQL helper modules and zero third-party DB SDK imports [^mssql-core] [^duckdb-core] [^bigquery-core] [^spanner-core].
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
@@ -168,7 +172,7 @@ class BigQueryAsyncConfig(AsyncAdapterConfig):
     driver_type = BigQueryAsyncDriver
 ```
 
-- **Driver & DataDictionary**: Fix invalid `sqlglot` dialect names by setting `StatementConfig.dialect = 'spanner'` (`ParameterStyle.NAMED_AT` `@name`, `TypeCode.JSON` and `TypedParameter(semantic_name='ARRAY<FLOAT32>')`) when `spanner_dialect == 'googlesql'` and `StatementConfig.dialect = 'postgres'` (`ParameterStyle.NUMERIC` `$1 -> p1`) when `spanner_dialect == 'spangres'`. Support `execute_partitioned_dml`, `ExecuteBatchDml` `execute_stack`, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` routing `googlesql` vs `postgresql` catalog SQL. Keep helpers strictly inside `adapters/spanner/core.py`.
+- **Driver & DataDictionary**: Keep `StatementConfig.dialect = 'spanner'` (`ParameterStyle.NAMED_AT` `@name`, `TypeCode.JSON` and `TypedParameter(semantic_name='ARRAY<FLOAT32>')`) when `spanner_dialect == 'googlesql'` and `StatementConfig.dialect = 'spangres'` (sqlspec's registered `Spangres` dialect, `ParameterStyle.NUMERIC` `$1 -> p1`) when `spanner_dialect == 'spangres'`, and stop exposing `"googlesql"` as the driver/config `dialect` attribute. Support `execute_partitioned_dml`, `ExecuteBatchDml` `execute_stack`, and `SpannerSyncDataDictionary`/`SpannerAsyncDataDictionary` routing `googlesql` vs `postgresql` catalog SQL. Keep helpers strictly inside `adapters/spanner/core.py`.
 - **Sub-Extension Stores**: Implement zero-SDK `SpannerSyncADKStore`/`SpannerAsyncADKStore` (`provide_session(transaction=False)` lock-free snapshots on reads, `transaction=True` on writes), ScaNN/FTS/RRF/PropertyGraph `SpannerSyncADKMemoryStore`/`SpannerAsyncADKMemoryStore`, `SpannerSyncADKArtifactStore`/`SpannerAsyncADKArtifactStore` constructing `vertebra.storage.ArtifactReference` directly with ZERO `vertebra.db.adapters.bigquery` imports, hash-sharded `MOD(FARM_FINGERPRINT(...))` `BYTES` `SpannerEventQueueStore` (valid `ROW DELETION POLICY` / `TTL INTERVAL`, no invalid TTL on `updated_at`), and `SpannerLitestarStore`.
 - **Config & Lazy Exports**: Define `SpannerSyncConfig`/`SpannerAsyncConfig` and `SpangresSyncConfig`/`SpangresAsyncConfig` declaring `adapter_name = 'vertebra_spanner'`, isolated per-session transaction state on `provide_session`, and explicit `adk_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` (plus lazy `*ADKArtifactStore`) via PEP 562 lazy `__init__.py`.
 
@@ -209,7 +213,7 @@ Adapter exports and store capabilities are documented in `ch04-sqlspec-cutover-s
 | `t01` | Deliver Feature-Complete SQL Server SQLSpec Adapter Package | `src/py/vertebra/extensions/sqlspec/adapters/mssql/core.py`, `src/py/vertebra/extensions/sqlspec/adapters/mssql/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/mssql/data_dictionary.py` (+5 more) | `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
 | `t02` | Deliver Feature-Complete DuckDB SQLSpec Adapter Package | `src/py/vertebra/extensions/sqlspec/adapters/duckdb/core.py`, `src/py/vertebra/extensions/sqlspec/adapters/duckdb/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/duckdb/data_dictionary.py` (+5 more) | `src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py` |
 | `t03` | Deliver Feature-Complete BigQuery SQLSpec Adapter Package | `src/py/vertebra/extensions/sqlspec/adapters/bigquery/core.py`, `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/bigquery/data_dictionary.py` (+5 more) | `src/py/tests/unit/extensions/test_sqlspec_bigquery.py` |
-| `t04` | Deliver Feature-Complete Cloud Spanner & Spangres SQLSpec Adapter Package | `src/py/vertebra/extensions/sqlspec/adapters/spanner/core.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/data_dictionary.py` (+5 more) | `src/py/tests/unit/extensions/test_sqlspec_spanner.py` |
+| `t04` | Deliver Feature-Complete Spanner & Spangres SQLSpec Adapter Package | `src/py/vertebra/extensions/sqlspec/adapters/spanner/core.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`, `src/py/vertebra/extensions/sqlspec/adapters/spanner/data_dictionary.py` (+5 more) | `src/py/tests/unit/extensions/test_sqlspec_spanner.py` |
 
 ## 5. Implementation Plan
 
@@ -220,7 +224,7 @@ Adapter exports and store capabilities are documented in `ch04-sqlspec-cutover-s
 
 ## 6. Current State & Remaining Plan Snapshot
 
-Chapter `ch03-sqlspec-enterprise-and-cloud-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver` and `native-redis-driver`; `broker-pool-sharing` complete and archived at `28415b3f`).
+Chapter `ch03-sqlspec-enterprise-and-cloud-adapters` is `planned` behind [`../../spec.md`](../../spec.md) prerequisites (`native-sqlite-driver`, `native-redis-driver`, and `sqlalchemy-and-django-integration`; `broker-pool-sharing` complete and archived at `246d7d0e`).
 
 Fast Chapter Gate (`< 60s` offline):
 
@@ -228,14 +232,14 @@ Fast Chapter Gate (`< 60s` offline):
 uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/mssql src/py/vertebra/extensions/sqlspec/adapters/duckdb src/py/vertebra/extensions/sqlspec/adapters/bigquery src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync mypy src/py/vertebra/extensions/sqlspec/adapters/mssql src/py/vertebra/extensions/sqlspec/adapters/duckdb src/py/vertebra/extensions/sqlspec/adapters/bigquery src/py/vertebra/extensions/sqlspec/adapters/spanner && uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_sqlspec_bigquery.py src/py/tests/unit/extensions/test_sqlspec_spanner.py
 ```
 
-[^mssql-drv]: `src/py/vertebra/db/adapters/mssql/driver.py` — Native SQL Server (MSSQL) sync and async drivers.
+[^mssql-drv]: `src/py/vertebra/db/adapters/mssql/_sync.py` and `src/py/vertebra/db/adapters/mssql/_async.py` — Native SQL Server (MSSQL) sync and async drivers.
 [^mssql-core]: `src/py/vertebra/db/adapters/mssql/core.py` — Native SQL Server (MSSQL) core parameter and wire helpers.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Existing MSSQL SQLSpec adapter.
-[^duckdb-drv]: `src/py/vertebra/db/adapters/duckdb/driver.py` — Native DuckDB sync and async drivers.
+[^duckdb-drv]: `src/py/vertebra/db/adapters/duckdb/_sync.py` and `src/py/vertebra/db/adapters/duckdb/_async.py` — Native DuckDB sync and async drivers.
 [^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py` — Native DuckDB core parameter and wire helpers.
-[^bigquery-drv]: `src/py/vertebra/db/adapters/bigquery/driver.py` — Native Google BigQuery sync and async drivers.
+[^bigquery-drv]: `src/py/vertebra/db/adapters/bigquery/_sync.py` and `src/py/vertebra/db/adapters/bigquery/_async.py` — Native Google BigQuery sync and async drivers.
 [^bigquery-core]: `src/py/vertebra/db/adapters/bigquery/core.py` — Native Google BigQuery core parameter and wire helpers.
 [^sqlspec-bq]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — Current top-level BigQuery SQLSpec module.
-[^spanner-drv]: `src/py/vertebra/db/adapters/spanner/driver.py` — Native Google Cloud Spanner & Spangres sync and async drivers.
-[^spanner-core]: `src/py/vertebra/db/adapters/spanner/core.py` — Native Google Cloud Spanner & Spangres core parameter and wire helpers.
+[^spanner-drv]: `src/py/vertebra/db/adapters/spanner/_sync.py` and `src/py/vertebra/db/adapters/spanner/_async.py` — Native Spanner & Spangres sync and async drivers.
+[^spanner-core]: `src/py/vertebra/db/adapters/spanner/core.py` — Native Spanner & Spangres core parameter and wire helpers.
 [^sqlspec-spn]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Current top-level Spanner SQLSpec module with invalid sqlglot dialect names and BigQuery ObjectRef import.

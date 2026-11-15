@@ -11,39 +11,40 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t01
+  - native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t01
 files:
-- src/rs/vertebra-sqlite/src/value.rs
-- src/rs/vertebra-sqlite/src/worker.rs
-- src/rs/vertebra-sqlite/src/lib.rs
+  - src/rs/vertebra-sqlite/src/value.rs
+  - src/rs/vertebra-sqlite/src/worker.rs
+  - src/rs/vertebra-sqlite/src/lib.rs
 tests:
-- src/rs/vertebra-sqlite/tests/sqlite_client.rs
+  - src/rs/vertebra-sqlite/tests/sqlite_client.rs
 read_set:
-- src/rs/vertebra-sqlite/src/config.rs
-- src/rs/vertebra-sqlite/src/errors.rs
-- src/rs/vertebra-duckdb/src/lib.rs
+  - src/rs/vertebra-sqlite/src/config.rs
+  - src/rs/vertebra-sqlite/src/errors.rs
+  - src/rs/vertebra-duckdb/src/lib.rs
 estimated_loc: 245
 tags:
-- sqlite
-- wal
-- jsonb
-- backup
+  - sqlite
+  - wal
+  - jsonb
+  - backup
 sources:
-- id: duckdb-lib
-  resource: src/rs/vertebra-duckdb/src/lib.rs
-  title: Embedded worker-thread and VTBARROW PyO3 extension precedent
-- id: sqlite-rs
-  resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
-  title: Shared SQLite pragma helper in vertebra-db
+  - id: duckdb-lib
+    resource: src/rs/vertebra-duckdb/src/lib.rs
+    title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+  - id: sqlite-rs
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: Shared SQLite pragma helper in vertebra-db
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement 1-Writer/N-Reader WAL Pool, JSONB, Backup API, and Interrupt Registry
 
 ## Objective & Scope Boundary
 
-Implement `value.rs` and `worker.rs` in `vertebra-sqlite` covering the WAL writer + reader pool, SQLite 3.45+ `JSONB`, `SAVEPOINT` nesting, `InterruptHandle` cancellation, and `rusqlite::backup::Backup` snapshots per [`../spec.md` §2](../spec.md) [^duckdb-lib] [^sqlite-rs].
+Implement `value.rs` and `worker.rs` in `vertebra-sqlite` covering the WAL writer + reader pool, SQLite 3.45+ `JSONB`, `SAVEPOINT` nesting, `InterruptHandle` cancellation, and the `rusqlite` online `Backup` API snapshots per [`../spec.md` §2](../spec.md) [^duckdb-lib] [^sqlite-rs].
 
 ## Bounded Read Manifest
 
@@ -54,7 +55,7 @@ Implement `value.rs` and `worker.rs` in `vertebra-sqlite` covering the WAL write
 ## Contracts & Edge Cases
 
 - Open 1 writer + `max_readers` read-only WAL workers for file/shared-URI paths and 1 serialized worker for `:memory:`, caching prepared statements per worker.
-- Step `RETURNING` statements to completion, round-trip `JSONB` blobs and `BOOLEAN`/`TIMESTAMP` declared affinities, track per-op `InterruptHandle`, and expose `backup_to` / `restore_from` via `rusqlite::backup::Backup`.
+- Step `RETURNING` statements to completion, round-trip `JSONB` blobs and `BOOLEAN`/`TIMESTAMP` declared affinities, track per-op `InterruptHandle`, and expose `backup_to` / `restore_from` via the `rusqlite` online `Backup` API.
 - **Edge Case**: Idle `cancel()` is an idempotent no-op; active `cancel()` interrupts only the targeted in-flight operation.
 - **Edge Case**: `execute_pipeline` runs batched operations atomically inside `BEGIN IMMEDIATE` or a nested `SAVEPOINT`.
 

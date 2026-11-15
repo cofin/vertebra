@@ -1,20 +1,19 @@
 ---
 type: Task
-id: "strict-typing-hygiene:t01"
+id: strict-typing-hygiene:t01
 flow_id: strict-typing-hygiene
-title: "Prune Redundant Mypy Overrides, Fix Masked Imports, and Add Benchmark Lint Paths"
-description: "Remove 43+ PEP 561 typed packages from ignore_missing_imports in pyproject.toml, fix broken imports in extensions/litestar/queues/backend.py, and add tools/benchmarks to pyproject.toml and Makefile."
+title: Prune Redundant Mypy Overrides and Fix Masked Imports
+description: Remove 40 PEP 561 typed patterns from ignore_missing_imports in pyproject.toml and fix broken imports in extensions/litestar/queues/backend.py.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 18baadcd
+plan_commit: 473e1f2e
 depends_on: []
 files:
   - pyproject.toml
-  - Makefile
   - src/py/vertebra/extensions/litestar/queues/backend.py
 tests:
   - src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py
@@ -32,20 +31,21 @@ tags:
 sources:
   - id: pyproject-mypy
     resource: pyproject.toml
-    title: "[tool.mypy] files and [[tool.mypy.overrides]] ignore_missing_imports list"
+    title: '[tool.mypy] files and [[tool.mypy.overrides]] ignore_missing_imports list'
   - id: makefile-lint
     resource: Makefile
-    title: "lint and lint-all Ruff and Mypy target paths"
+    title: lint and lint-all Ruff and Mypy target paths
   - id: litestar-queues-backend
     resource: src/py/vertebra/extensions/litestar/queues/backend.py::SHMQueueBackend
-    title: "Broken litestar_queues.records TYPE_CHECKING import at line 23"
+    title: Broken litestar_queues.records TYPE_CHECKING import at line 23
+verification_strategy: regression_tdd
 ---
 
-# Task `t01`: Prune Redundant Mypy Overrides, Fix Masked Imports, and Add Benchmark Lint Paths
+# Task `t01`: Prune Redundant Mypy Overrides and Fix Masked Imports
 
 ## Objective & Scope Boundary
 
-Prune the `40+` redundant `ignore_missing_imports = true` entries from `pyproject.toml` (`52` patterns currently configured) and verify/fix any masked broken imports in `src/py/vertebra/extensions/litestar/queues/backend.py` (or its post-`queues-tasks-and-channels` `StoreQueueBackend` layout) per [`../spec.md` §2](../spec.md) [^pyproject-mypy] [^makefile-lint] [^litestar-queues-backend]. Out of scope: benchmark unit regression tests (`t02`) and enabling `src/py/tests` in `mypy` (`t03`).
+Prune the `40` redundant `ignore_missing_imports = true` entries from `pyproject.toml` (`52` patterns currently configured) and verify/fix any masked broken imports in `src/py/vertebra/extensions/litestar/queues/backend.py` (or its post-`queues-tasks-and-channels` `StoreQueueBackend` layout) per [`../spec.md` §2](../spec.md) [^pyproject-mypy] [^makefile-lint] [^litestar-queues-backend]. Out of scope: benchmark unit regression tests (`t02`) and enabling `src/py/tests` in `mypy` (`t03`).
 
 ## Bounded Read Manifest
 
@@ -62,12 +62,12 @@ Prune the `40+` redundant `ignore_missing_imports = true` entries from `pyprojec
 
 ## Test Matrix
 
-- Verify `uv run --no-sync mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples` exits `0` against real installed PEP 561 stubs; run `test_litestar_ecosystem_queues.py`.
+- Verify `uv run --no-sync mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks tools/docs docs/examples` exits `0` against real installed PEP 561 stubs; run `test_litestar_ecosystem_queues.py`.
 
 ## Verification
 
 ```bash
-uv run --no-sync ruff check src/py/vertebra/extensions/litestar/queues/backend.py && uv run --no-sync mypy src/py/vertebra tools/scripts tools/pgo tools/docs docs/examples && uv run --no-sync pytest src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py -q
+uv run --no-sync ruff check src/py/vertebra/extensions/litestar/queues/backend.py && uv run --no-sync mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks tools/docs docs/examples && uv run --no-sync pytest src/py/tests/unit/extensions/test_litestar_ecosystem_queues.py -q
 ```
 
 ## Acceptance Criteria

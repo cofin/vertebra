@@ -11,40 +11,41 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch02-cloud-dialects-alembic-and-advanced-alchemy:t04
+  - sqlalchemy-and-django-integration:ch02-cloud-dialects-alembic-and-advanced-alchemy:t04
 files:
-- src/py/vertebra/extensions/django/db/backends/postgresql/base.py
-- src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
+  - src/py/vertebra/extensions/django/db/backends/postgresql/base.py
+  - src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
 tests:
-- src/py/tests/unit/extensions/test_django_plugin.py
+  - src/py/tests/unit/extensions/test_django_plugin.py
 read_set:
-- src/py/vertebra/extensions/django/db/backends/__init__.py
-- src/py/vertebra/extensions/django/db/backends/postgresql/base.py
-- src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
-- src/py/vertebra/db/adapters/postgres/config.py
-- src/py/vertebra/db/adapters/sqlite/config.py
+  - src/py/vertebra/extensions/django/db/backends/__init__.py
+  - src/py/vertebra/extensions/django/db/backends/postgresql/base.py
+  - src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
+  - src/py/vertebra/db/adapters/postgres/config.py
+  - src/py/vertebra/db/adapters/sqlite/config.py
 estimated_loc: 225
 tags:
-- django
-- postgresql
-- sqlite
-- dbapi
+  - django
+  - postgresql
+  - sqlite
+  - dbapi
 sources:
-- id: dj-pg
-  resource: src/py/vertebra/extensions/django/db/backends/postgresql/base.py
-  title: Current Django PostgreSQL backend wrapper
-- id: dj-sqlite
-  resource: src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
-  title: Current Django SQLite3 backend wrapper
+  - id: dj-pg
+    resource: src/py/vertebra/extensions/django/db/backends/postgresql/base.py
+    title: Current Django PostgreSQL backend wrapper
+  - id: dj-sqlite
+    resource: src/py/vertebra/extensions/django/db/backends/sqlite3/base.py
+    title: Current Django SQLite3 backend wrapper
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Upgrade Django PostgreSQL and SQLite3 Backends Over Native Drivers
 
 ## Objective & Scope Boundary
 
-Rebase `extensions/django/db/backends/{postgresql,sqlite3}/base.py::DatabaseWrapper` onto Django `6.0+` built-in backends over `vertebra.db.dbapi` per [`../spec.md`](../spec.md) [^dj-pg] [^dj-sqlite].
+Rebase `DatabaseWrapper` in `src/py/vertebra/extensions/django/db/backends/postgresql/base.py` and `src/py/vertebra/extensions/django/db/backends/sqlite3/base.py` onto Django `6.0+` built-in backends over `vertebra.db.dbapi` per [`../spec.md`](../spec.md) [^dj-pg] [^dj-sqlite].
 
 ## Bounded Read Manifest
 
@@ -54,8 +55,8 @@ Rebase `extensions/django/db/backends/{postgresql,sqlite3}/base.py::DatabaseWrap
 
 ## Contracts & Edge Cases
 
-- `postgresql/base.py::DatabaseWrapper` subclasses `django.db.backends.postgresql.base.DatabaseWrapper`, sets `Database = SyncDBAPIModule`, builds `PostgreSQLConfig` locally in `get_connection_params()`, opens `SyncDBAPIConnection` (with optional broker lease pool), adapts `%s` binds cleanly, and implements `_set_autocommit` and `is_usable`.
-- `sqlite3/base.py::DatabaseWrapper` subclasses `django.db.backends.sqlite3.base.DatabaseWrapper`, builds `SQLiteConfig` locally, executes over native `SyncSQLiteDriver` via `SyncDBAPIConnection` (zero stdlib `sqlite3` fallback), and supports deterministic function/collation registration.
+- `src/py/vertebra/extensions/django/db/backends/postgresql/base.py::DatabaseWrapper` subclasses `django.db.backends.postgresql.base.DatabaseWrapper`, sets `Database = SyncDBAPIModule`, builds `PostgreSQLConfig` locally in `get_connection_params()`, opens `SyncDBAPIConnection` (with optional broker lease pool), adapts `%s` binds cleanly, and implements `_set_autocommit` and `is_usable`.
+- `src/py/vertebra/extensions/django/db/backends/sqlite3/base.py::DatabaseWrapper` subclasses `django.db.backends.sqlite3.base.DatabaseWrapper`, builds `SQLiteConfig` locally, executes over native `SyncSQLiteDriver` via `SyncDBAPIConnection` (zero stdlib `sqlite3` fallback), and supports deterministic function/collation registration.
 - Importing Django backends must never import `sqlalchemy` or `vertebra.extensions.sqlalchemy`.
 
 ## Test Matrix

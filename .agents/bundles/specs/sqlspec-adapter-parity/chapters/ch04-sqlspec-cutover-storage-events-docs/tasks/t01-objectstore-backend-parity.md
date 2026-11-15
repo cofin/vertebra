@@ -11,29 +11,31 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch03-sqlspec-enterprise-and-cloud-adapters:t04
+  - sqlspec-adapter-parity:ch02-sqlspec-relational-adapters:t04
+  - sqlspec-adapter-parity:ch03-sqlspec-enterprise-and-cloud-adapters:t04
 files:
-- src/py/vertebra/extensions/sqlspec/storage.py
+  - src/py/vertebra/extensions/sqlspec/storage.py
 tests:
-- src/py/tests/unit/extensions/test_data_storage_integrations.py
+  - src/py/tests/unit/extensions/test_data_storage_integrations.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/storage.py
-- src/py/vertebra/storage/_store.py
-- src/py/vertebra/storage/_arrow.py
+  - src/py/vertebra/extensions/sqlspec/storage.py
+  - src/py/vertebra/storage/_store.py
+  - src/py/vertebra/storage/_arrow.py
 estimated_loc: 215
 tags:
-- sqlspec
-- storage
-- arrow
+  - sqlspec
+  - storage
+  - arrow
 sources:
-- id: sqlspec-storage
-  resource: src/py/vertebra/extensions/sqlspec/storage.py
-  title: SQLSpec ObjectStoreBackend integration
-- id: vtb-storage
-  resource: src/py/vertebra/storage/_store.py
-  title: Native Rust SyncObjectStore and AsyncObjectStore
+  - id: sqlspec-storage
+    resource: src/py/vertebra/extensions/sqlspec/storage.py
+    title: SQLSpec ObjectStoreBackend integration
+  - id: vtb-storage
+    resource: src/py/vertebra/storage/_store.py
+    title: Native Rust SyncObjectStore and AsyncObjectStore
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Upgrade ObjectStoreBackend(ObjectStoreBase) to Full SQLSpec Storage Parity
@@ -50,7 +52,7 @@ Upgrade `src/py/vertebra/extensions/sqlspec/storage.py::ObjectStoreBackend` to s
 
 ## Contracts & Edge Cases
 
-- Subclass `ObjectStoreBase` implementing the full sync/async surface (`glob_sync`, `is_object_sync`, `is_path_sync`, `move_sync`, `move_async`, `copy_sync`, `copy_async`, `stream_arrow_sync`/`stream_arrow_async`, `supports_signing`, overloaded `sign_sync`/`sign_async` for `str | list[str]`, and `register_storage_alias` integration against `sqlspec.storage.registry.storage_registry` with `SyncStoragePipeline` / `AsyncStoragePipeline`).
+- Rebase `ObjectStoreBackend` (base-less today, with every listed method already present) onto `ObjectStoreBase` and close any abstract-method gaps, keeping upstream signatures (`sign_sync(paths, expires_in=3600, for_upload=False)`, `stream_arrow_sync(pattern, *, file_format="parquet", batch_size=65_536, **kwargs)`) across the full sync/async surface (`glob_sync`, `is_object_sync`, `is_path_sync`, `move_sync`, `move_async`, `copy_sync`, `copy_async`, `stream_arrow_sync`/`stream_arrow_async`, `supports_signing`, overloaded `sign_sync`/`sign_async` for `str | list[str]`, and `register_storage_alias` integration against `sqlspec.storage.registry.storage_registry` with `SyncStoragePipeline` / `AsyncStoragePipeline`).
 - Use native `AsyncObjectStore` Rust Tokio awaitables on all `*_async` methods (`PYO3-01`).
 
 ## Test Matrix

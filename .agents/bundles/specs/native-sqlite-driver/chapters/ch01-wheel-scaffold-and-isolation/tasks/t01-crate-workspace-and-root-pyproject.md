@@ -11,45 +11,46 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: implementation_first
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on: []
 files:
-- src/rs/vertebra-sqlite/Cargo.toml
-- src/rs/vertebra-sqlite/pyproject.toml
-- src/rs/vertebra-sqlite/src/lib.rs
-- src/rs/Cargo.toml
-- src/rs/Cargo.lock
-- pyproject.toml
+  - src/rs/vertebra-sqlite/Cargo.toml
+  - src/rs/vertebra-sqlite/pyproject.toml
+  - src/rs/vertebra-sqlite/src/lib.rs
+  - src/rs/Cargo.toml
+  - src/rs/Cargo.lock
+  - pyproject.toml
 tests: []
 read_set:
-- src/rs/vertebra-duckdb/Cargo.toml
-- src/rs/vertebra-duckdb/pyproject.toml
-- src/rs/vertebra-duckdb/src/lib.rs
-- src/rs/Cargo.toml
-- pyproject.toml
+  - src/rs/vertebra-duckdb/Cargo.toml
+  - src/rs/vertebra-duckdb/pyproject.toml
+  - src/rs/vertebra-duckdb/src/lib.rs
+  - src/rs/Cargo.toml
+  - pyproject.toml
 estimated_loc: 220
 tags:
-- sqlite
-- rust
-- pyo3
-- packaging
-- cargo
+  - sqlite
+  - rust
+  - pyo3
+  - packaging
+  - cargo
 sources:
-- id: duckdb-cargo
-  resource: src/rs/vertebra-duckdb/Cargo.toml
-  title: Standalone embedded PyO3 wheel Cargo precedent
-- id: duckdb-pyproj
-  resource: src/rs/vertebra-duckdb/pyproject.toml
-  title: Maturin standalone wheel isolation manifest precedent
-- id: duckdb-lib
-  resource: src/rs/vertebra-duckdb/src/lib.rs
-  title: Embedded worker-thread and VTBARROW PyO3 extension precedent
-- id: cargo-ws
-  resource: src/rs/Cargo.toml
-  title: Rust workspace member manifest
-- id: root-pyproject
-  resource: pyproject.toml
-  title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
+  - id: duckdb-cargo
+    resource: src/rs/vertebra-duckdb/Cargo.toml
+    title: Standalone embedded PyO3 wheel Cargo precedent
+  - id: duckdb-pyproj
+    resource: src/rs/vertebra-duckdb/pyproject.toml
+    title: Maturin standalone wheel isolation manifest precedent
+  - id: duckdb-lib
+    resource: src/rs/vertebra-duckdb/src/lib.rs
+    title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+  - id: cargo-ws
+    resource: src/rs/Cargo.toml
+    title: Rust workspace member manifest
+  - id: root-pyproject
+    resource: pyproject.toml
+    title: Root vertebra-core extras, uv sources, maturin excludes, and bumpversion
+verification_strategy: implementation_first
 ---
 
 # Task `t01`: Scaffold vertebra-sqlite Crate and Wire Cargo Workspace + [sqlite] Extra

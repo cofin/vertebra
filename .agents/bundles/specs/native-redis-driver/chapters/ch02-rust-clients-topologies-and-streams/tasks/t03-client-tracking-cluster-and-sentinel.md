@@ -11,29 +11,29 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch02-rust-clients-topologies-and-streams:t02
+  - native-redis-driver:ch02-rust-clients-topologies-and-streams:t02
 files:
-- src/rs/vertebra-redis/src/caching.rs
-- src/rs/vertebra-redis/src/topology.rs
-- src/rs/vertebra-redis/src/client_core.rs
+  - src/rs/vertebra-redis/src/caching.rs
+  - src/rs/vertebra-redis/src/topology.rs
+  - src/rs/vertebra-redis/src/client_core.rs
 tests:
-- src/rs/vertebra-redis/tests/redis_client.rs
+  - src/rs/vertebra-redis/tests/redis_client.rs
 read_set:
-- src/rs/vertebra-redis/src/client_core.rs
-- src/py/vertebra/db/adapters/redis/config.py
+  - src/rs/vertebra-redis/src/client_core.rs
+  - src/py/vertebra/db/adapters/redis/config.py
 estimated_loc: 245
 tags:
-- redis
-- valkey
-- cluster
-- sentinel
-- caching
+  - redis
+  - cluster
+  - sentinel
+  - caching
 sources:
-- id: redis-cfg
-  resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
-  title: RedisConfig topology, tracking, and Memorystore IAM fields
+  - id: redis-cfg
+    resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
+    title: RedisConfig topology, tracking, and Memorystore IAM fields
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Implement RESP3 CLIENT TRACKING L1 Cache, Cluster Routing, and Sentinel Discovery

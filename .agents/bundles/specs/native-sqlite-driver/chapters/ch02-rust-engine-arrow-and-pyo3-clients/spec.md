@@ -10,43 +10,47 @@ planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
-- ch01-wheel-scaffold-and-isolation
-plan_commit: 1b191388
-updated_at: '2026-11-14T23:10:00Z'
+  - ch01-wheel-scaffold-and-isolation
+plan_commit: 473e1f2e
+updated_at: '2026-11-15T23:30:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:10:00Z'
 verified:
-- by: agent:plan-generator
-  at: '2026-11-14T23:10:00Z'
-  commit: 1b191388
+  - by: agent:spec-sync
+    at: '2026-11-15T23:30:00Z'
+    commit: 473e1f2e
+  - by: agent:plan-generator
+    at: '2026-11-14T23:10:00Z'
+    commit: 1b191388
 tags:
-- sqlite
-- errors
-- pragmas
-- wal
-- arrow
-- pyo3
-- freethreaded
+  - sqlite
+  - errors
+  - pragmas
+  - wal
+  - arrow
+  - pyo3
+  - freethreaded
 sources:
-- id: sqlite-rs
-  resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
-  title: Shared SQLite pragma helper in vertebra-db
-- id: vertebra-py-db
-  resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
-  title: Legacy sqlite_initialization_pragmas binding in vertebra-py
-- id: py-async
-  resource: src/rs/vertebra-db/src/py_async.rs
-  title: AsyncCompletionQueue and Notifier PyO3 bridge
-- id: arrow-shm
-  resource: src/rs/vertebra-db/src/arrow_shm.rs
-  title: ShmArrowStreamWriter and VTBARROW ShmCapsule constructor
-- id: duckdb-lib
-  resource: src/rs/vertebra-duckdb/src/lib.rs
-  title: Embedded worker-thread and VTBARROW PyO3 extension precedent
-- id: ft-gil-test
-  resource: src/py/tests/unit/test_freethreaded_gil.py
-  title: Free-threaded Python 3.14t/3.15t GIL_USED verification test
+  - id: sqlite-rs
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: Shared SQLite pragma helper in vertebra-db
+  - id: vertebra-py-db
+    resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
+    title: Legacy sqlite_initialization_pragmas binding in vertebra-py
+  - id: py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: DbCompletionDrainer, spawn_rust_db_task_with_attr_and_cancel, and construct_py_arrow_cursor PyO3 async bridge
+  - id: arrow-shm
+    resource: src/rs/vertebra-db/src/arrow_shm.rs
+    title: ShmArrowStreamWriter and VTBARROW ShmCapsule constructor
+  - id: duckdb-lib
+    resource: src/rs/vertebra-duckdb/src/lib.rs
+    title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+  - id: ft-gil-test
+    resource: src/py/tests/unit/test_freethreaded_gil.py
+    title: Free-threaded Python 3.14t/3.15t GIL_USED verification test
+current_task: "native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t01"
 ---
 
 # Chapter 02: Rust SQLite Config, WAL Worker Pool, VTBARROW SHM, and PyO3 Clients
@@ -77,10 +81,10 @@ Python stdlib `sqlite3` serializes behind a Python `RLock`, allocates intermedia
 
 ## 2. Requirements, Concrete Contracts & Architecture
 
-- **R5b**: Implement `SqliteClientConfig` and extended `rusqlite::Error` -> `vertebra._vertebra` exception mapping (`UniqueViolationError`, `ForeignKeyViolationError`, `NotNullViolationError`, `CheckViolationError`, `OperationalError` with `is_transient`, `ProgrammingError`, `DataError`) (`t01`).
+- **R5b**: Implement `SqliteClientConfig` and extended `rusqlite::Error` -> `vertebra._vertebra` exception mapping onto the existing hierarchy (`IntegrityError` carrying `sqlstate` `23505`/`23503`/`23502`/`23514`, `OperationalError` with `is_transient`, `ProgrammingError`, `DataError`; no new exception classes) (`t01`).
 - **R6**: Implement `value.rs` and `worker.rs`: 1 writer + `max_readers` WAL pool, `:memory:` single-worker pinning, `BEGIN`/`SAVEPOINT` transaction pinning, full-step `RETURNING`, SQLite 3.45+ `JSONB`, prepared statement cache, `InterruptHandle` `cancel()`, and online `backup_to` / `restore_from` (`t02`).
 - **R7**: Implement `arrow_bridge.rs` encoding `rusqlite::ValueRef` directly into `VTBARROW` `ShmCapsule` `ArrowCursor` batches (`batch_size = 8192`) and transactional prepared `load_from_arrow` (`t03`).
-- **R8 / R9**: Implement `SyncSQLiteClient`, `AsyncSQLiteClient` (`submit_*`, `cancel_operation`, `drain_completions`, `notifier_fd`), batched `execute_pipeline`, and `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`), register `"vertebra._sqlite"` in `BrokerEngineDiscovery.ENGINE_MODULES`, update `_sqlite.pyi` and `test_freethreaded_gil.py`, and verify `< 50ms` recursive-CTE cancellation (`t04`).
+- **R8 / R9**: Implement `SyncSQLiteClient`, `AsyncSQLiteClient` (awaitables produced by `spawn_rust_db_task_with_attr_and_cancel` and drained through the `_vertebra_sqlite_completion_drainer` loop attribute, matching `vertebra-duckdb`; no polling `submit_*`/`drain_completions`/`notifier_fd` surface), batched `execute_pipeline`, and `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`), register `"vertebra._sqlite"` in `BrokerEngineDiscovery.ENGINE_MODULES`, update `_sqlite.pyi` and `test_freethreaded_gil.py`, and verify `< 50ms` recursive-CTE cancellation (`t04`).
 
 ```rust
 pub struct SqliteClientConfig {
@@ -94,10 +98,10 @@ pub struct SqliteClientConfig {
     pub enable_jsonb: bool,
 }
 // Extended SQLite error codes -> (Python exception class, sqlstate, is_transient):
-// 2067 | 1555 | 2579 -> UniqueViolationError ("23505", false)
-// 787                -> ForeignKeyViolationError ("23503", false)
-// 1299               -> NotNullViolationError ("23502", false)
-// 275                -> CheckViolationError ("23514", false)
+// 2067 | 1555 | 2579 -> IntegrityError ("23505", false)
+// 787                -> IntegrityError ("23503", false)
+// 1299               -> IntegrityError ("23502", false)
+// 275                -> IntegrityError ("23514", false)
 // 5 | 261 | 517 | 6  -> OperationalError ("55P03", true)
 // 9 (SQLITE_INTERRUPT)-> OperationalError ("57014", true)
 ```
@@ -184,7 +188,7 @@ Pragma defaults, `JSONB`, `backup_to`/`restore_from`, and `vertebra._sqlite` stu
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Baseline (`473e1f2e`)**: `state: planned`; `0/4` tasks completed.
 - **Active Invariants**: Extension loading (`load_extension`) stays disabled by default; every blocking SQLite FFI call executes off the Python GIL.
 - **Fast Chapter Gate (`< 60s`)**: `make dev && cargo test --manifest-path src/rs/Cargo.toml -p vertebra-sqlite --locked && uv run --no-sync python -m mypy.stubtest vertebra._sqlite --concise && uv run --no-sync pytest src/py/tests/unit/test_freethreaded_gil.py -q`
 

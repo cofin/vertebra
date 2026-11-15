@@ -11,35 +11,35 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch02-rust-clients-topologies-and-streams:t01
+  - native-redis-driver:ch02-rust-clients-topologies-and-streams:t01
 files:
-- src/rs/vertebra-redis/src/value.rs
-- src/rs/vertebra-redis/src/client_core.rs
-- src/rs/vertebra-redis/src/lib.rs
+  - src/rs/vertebra-redis/src/value.rs
+  - src/rs/vertebra-redis/src/client_core.rs
+  - src/rs/vertebra-redis/src/lib.rs
 tests:
-- src/rs/vertebra-redis/tests/redis_client.rs
+  - src/rs/vertebra-redis/tests/redis_client.rs
 read_set:
-- src/rs/vertebra-redis/src/config.rs
-- src/rs/vertebra-redis/src/errors.rs
+  - src/rs/vertebra-redis/src/config.rs
+  - src/rs/vertebra-redis/src/errors.rs
 estimated_loc: 245
 tags:
-- redis
-- valkey
-- resp3
-- pipeline
+  - redis
+  - resp3
+  - pipeline
 sources:
-- id: redis-cfg
-  resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
-  title: RedisConfig topology, tracking, and Memorystore IAM fields
+  - id: redis-cfg
+    resource: src/py/vertebra/db/adapters/redis/config.py::RedisConfig
+    title: RedisConfig topology, tracking, and Memorystore IAM fields
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement RESP2/RESP3 Value Codec, Atomic/Non-Atomic Pipelines, and Lua Script Cache
 
 ## Objective & Scope Boundary
 
-Implement `value.rs` and `client_core.rs` for `HELLO 3`, core KV commands, `redis::Pipeline` (`MULTI`/`EXEC` + non-atomic batching), and `EVALSHA`->`NOSCRIPT`->`EVAL` per [`../spec.md` §2](../spec.md) [^redis-cfg].
+Implement `value.rs` and `client_core.rs` for `HELLO 3`, core KV commands, `redis` crate `Pipeline` (`MULTI`/`EXEC` + non-atomic batching), and `EVALSHA`->`NOSCRIPT`->`EVAL` per [`../spec.md` §2](../spec.md) [^redis-cfg].
 
 ## Bounded Read Manifest
 

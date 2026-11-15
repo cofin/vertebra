@@ -11,46 +11,48 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch02-cloud-dialects-alembic-and-advanced-alchemy:t01
+  - sqlalchemy-and-django-integration:ch02-cloud-dialects-alembic-and-advanced-alchemy:t01
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py
-- src/py/vertebra/db/adapters/spanner/config.py
-- src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py
-- src/py/vertebra/extensions/sqlalchemy/__init__.py
-- pyproject.toml
+  - src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py
+  - src/py/vertebra/db/adapters/spanner/config.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py
+  - src/py/vertebra/extensions/sqlalchemy/__init__.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - pyproject.toml
 tests:
-- src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
-- src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
+  - src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_drop_in_names_and_generics.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/vertebra/extensions/sqlalchemy/__init__.py
-- src/py/vertebra/db/adapters/spanner/config.py
-- src/py/vertebra/utils/module_loader.py
-- pyproject.toml
+  - src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/vertebra/extensions/sqlalchemy/__init__.py
+  - src/py/vertebra/db/adapters/spanner/config.py
+  - src/py/vertebra/utils/module_loader.py
+  - pyproject.toml
 estimated_loc: 235
 tags:
-- sqlalchemy
-- spanner
-- spangres
-- dialects
-- entrypoints
+  - sqlalchemy
+  - spanner
+  - spangres
+  - dialects
+  - entrypoints
 sources:
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Current Spanner and Spangres SQLAlchemy dialect classes
-- id: spn-config
-  resource: src/py/vertebra/db/adapters/spanner/config.py
-  title: SpannerConfig connection configuration
-- id: entry-points
-  resource: pyproject.toml
-  title: 36 sqlalchemy.dialects entry points across 9 engines
-- id: sa-init
-  resource: src/py/vertebra/extensions/sqlalchemy/__init__.py
-  title: Public SQLAlchemy extension barrel
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Current Spanner and Spangres SQLAlchemy dialect classes
+  - id: spn-config
+    resource: src/py/vertebra/db/adapters/spanner/config.py
+    title: SpannerConfig connection configuration
+  - id: entry-points
+    resource: pyproject.toml
+    title: 36 sqlalchemy.dialects entry points across 9 engines
+  - id: sa-init
+    resource: src/py/vertebra/extensions/sqlalchemy/__init__.py
+    title: Public SQLAlchemy extension barrel
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement Spanner/Spangres Dialects, Dialect Barrel, and 36 Entrypoints

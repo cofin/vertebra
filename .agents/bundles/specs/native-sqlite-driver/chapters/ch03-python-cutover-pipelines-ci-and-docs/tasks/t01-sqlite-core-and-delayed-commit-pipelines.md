@@ -11,47 +11,48 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t04
+  - native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t04
 files:
-- src/py/vertebra/db/adapters/sqlite/core.py
-- src/rs/vertebra-py/src/db.rs
-- src/py/vertebra/_vertebra.pyi
-- src/py/vertebra/db/adapters/sqlite/pipeline.py
-- src/py/vertebra/db/adapters/sqlite/__init__.py
+  - src/py/vertebra/db/adapters/sqlite/core.py
+  - src/rs/vertebra-py/src/db.rs
+  - src/py/vertebra/_vertebra.pyi
+  - src/py/vertebra/db/adapters/sqlite/pipeline.py
+  - src/py/vertebra/db/adapters/sqlite/__init__.py
 tests:
-- src/py/tests/unit/db/test_sqlite_driver.py
+  - src/py/tests/unit/db/test_sqlite_driver.py
 read_set:
-- src/py/vertebra/db/adapters/sqlite/core.py
-- src/rs/vertebra-py/src/db.rs
-- src/py/vertebra/_vertebra.pyi
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/sqlite/__init__.py
-- src/py/vertebra/_sqlite.pyi
+  - src/py/vertebra/db/adapters/sqlite/core.py
+  - src/rs/vertebra-py/src/db.rs
+  - src/py/vertebra/_vertebra.pyi
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/adapters/sqlite/__init__.py
+  - src/py/vertebra/_sqlite.pyi
 estimated_loc: 220
 tags:
-- sqlite
-- core
-- debloat
-- pipeline
-- capabilities
+  - sqlite
+  - core
+  - debloat
+  - pipeline
+  - capabilities
 sources:
-- id: sqlite-core
-  resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
-  title: SQLiteCore pragma helper with 5-arg call defect
-- id: vertebra-py-db
-  resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
-  title: Legacy sqlite_initialization_pragmas binding in vertebra-py
-- id: vertebra-pyi
-  resource: src/py/vertebra/_vertebra.pyi
-  title: Core vertebra._vertebra stub declarations
-- id: driver-caps
-  resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
-  title: SyncPipeline and AsyncPipeline capability protocols
-- id: sqlite-drv
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
-  title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
+  - id: sqlite-core
+    resource: src/py/vertebra/db/adapters/sqlite/core.py::SQLiteCore
+    title: SQLiteCore pragma helper with 5-arg call defect
+  - id: vertebra-py-db
+    resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
+    title: Legacy sqlite_initialization_pragmas binding in vertebra-py
+  - id: vertebra-pyi
+    resource: src/py/vertebra/_vertebra.pyi
+    title: Core vertebra._vertebra stub declarations
+  - id: driver-caps
+    resource: src/py/vertebra/db/driver/capabilities.py::SyncPipeline
+    title: SyncPipeline and AsyncPipeline capability protocols
+  - id: sqlite-drv
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py::SyncSQLiteDriver
+    title: Python SyncSQLiteDriver and AsyncSQLiteDriver over stdlib sqlite3
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Fix SQLiteCore Pragma Bug, Clean Up _vertebra, and Implement Delayed-Commit Pipelines
@@ -62,7 +63,7 @@ Fix `SQLiteCore.initialization_pragmas` directly, delete `sqlite_initialization_
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/db/adapters/sqlite/core.py` — Broken 5-arg `native_fn` call and `contextlib.suppress(TypeError)`.
+- `src/py/vertebra/db/adapters/sqlite/core.py` — 5-of-7-argument `native_fn` call (`core.py:35-41`, omitting `path` and `max_readers`) under `contextlib.suppress(TypeError, ValueError, RuntimeError)` (`core.py:34`).
 - `src/rs/vertebra-py/src/db.rs` — `sqlite_initialization_pragmas` PyO3 function.
 - `src/py/vertebra/_vertebra.pyi` — `sqlite_initialization_pragmas` stub.
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncPipeline`, `AsyncPipeline`, `SyncPipelineCapable`, and `AsyncPipelineCapable`.
@@ -71,7 +72,7 @@ Fix `SQLiteCore.initialization_pragmas` directly, delete `sqlite_initialization_
 
 ## Contracts & Edge Cases
 
-- Remove `contextlib.suppress(TypeError)` and `_vertebra.sqlite_initialization_pragmas` lookup from `SQLiteCore.initialization_pragmas`, validating `synchronous` against `VALID_SQLITE_SYNCHRONOUS`.
+- Remove `contextlib.suppress(TypeError, ValueError, RuntimeError)` and `_vertebra.sqlite_initialization_pragmas` lookup from `SQLiteCore.initialization_pragmas`, validating `synchronous` against `VALID_SQLITE_SYNCHRONOUS`.
 - Delete `sqlite_initialization_pragmas` from `src/rs/vertebra-py/src/db.rs` and `src/py/vertebra/_vertebra.pyi`.
 - Conform `SyncSQLitePipeline` and `AsyncSQLitePipeline` to `@runtime_checkable` `SyncPipeline` and `AsyncPipeline` (`execute`, `select`, `results`, context managers), flushing queued operations in one `execute_pipeline` worker turn inside delayed-commit `BEGIN IMMEDIATE ... COMMIT` when idle or `SAVEPOINT ... RELEASE SAVEPOINT` (`ROLLBACK TO SAVEPOINT` on error) when nested inside an outer transaction.
 - **Edge Case**: Invalid `synchronous` values raise `ValueError` consistently.

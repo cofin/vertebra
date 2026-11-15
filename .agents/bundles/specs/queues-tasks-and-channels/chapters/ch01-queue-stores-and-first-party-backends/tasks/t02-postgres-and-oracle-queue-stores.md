@@ -11,43 +11,46 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- queues-tasks-and-channels:ch01-queue-stores-and-first-party-backends:t01
+  - queues-tasks-and-channels:ch01-queue-stores-and-first-party-backends:t01
 files:
-- src/py/vertebra/db/adapters/postgres/queue.py
-- src/py/vertebra/db/adapters/postgres/__init__.py
-- src/py/vertebra/db/adapters/oracle/queue.py
-- src/py/vertebra/db/adapters/oracle/__init__.py
+  - src/py/vertebra/db/adapters/postgres/queue.py
+  - src/py/vertebra/db/adapters/postgres/__init__.py
+  - src/py/vertebra/db/adapters/oracle/queue.py
+  - src/py/vertebra/db/adapters/oracle/__init__.py
 tests:
-- src/py/tests/unit/db/test_postgres_native_queries.py
-- src/py/tests/unit/db/test_oracle_adapter.py
+  - src/py/tests/unit/db/test_postgres_native_queries.py
+  - src/py/tests/unit/db/test_oracle_adapter.py
 read_set:
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/postgres/driver.py
-- src/py/vertebra/db/adapters/postgres/notify.py
-- src/py/vertebra/db/adapters/postgres/__init__.py
-- src/py/vertebra/db/adapters/oracle/driver.py
-- src/py/vertebra/db/adapters/oracle/notify.py
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/adapters/postgres/_sync.py
+  - src/py/vertebra/db/adapters/postgres/_async.py
+  - src/py/vertebra/db/adapters/postgres/notify.py
+  - src/py/vertebra/db/adapters/postgres/__init__.py
+  - src/py/vertebra/db/adapters/oracle/_sync.py
+  - src/py/vertebra/db/adapters/oracle/_async.py
+  - src/py/vertebra/db/adapters/oracle/notify.py
 estimated_loc: 245
 tags:
-- queues
-- postgres
-- skip-locked
-- oracle
+  - queues
+  - postgres
+  - skip-locked
+  - oracle
 sources:
-- id: pg-drv
-  resource: src/py/vertebra/db/adapters/postgres/driver.py
-  title: Native vertebra._postgres SyncPostgreSQLDriver and AsyncPostgreSQLDriver
-- id: pg-notify
-  resource: src/py/vertebra/db/adapters/postgres/notify.py
-  title: PostgreSQL notification sources
-- id: ora-drv
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver
-- id: ora-notify
-  resource: src/py/vertebra/db/adapters/oracle/notify.py
-  title: Oracle TxEventQ notification sources
+  - id: pg-drv
+    resource: src/py/vertebra/db/adapters/postgres/_sync.py
+    title: Native vertebra._postgres SyncPostgreSQLDriver and AsyncPostgreSQLDriver
+  - id: pg-notify
+    resource: src/py/vertebra/db/adapters/postgres/notify.py
+    title: PostgreSQL notification sources
+  - id: ora-drv
+    resource: src/py/vertebra/db/adapters/oracle/_sync.py
+    title: Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver
+  - id: ora-notify
+    resource: src/py/vertebra/db/adapters/oracle/notify.py
+    title: Oracle TxEventQ notification sources
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement Sync/Async PostgresQueueStore and OracleQueueStore
@@ -59,10 +62,10 @@ Implement `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` in `src/py/vertebra
 ## Bounded Read Manifest
 
 - `src/py/vertebra/db/driver/capabilities.py` — `SyncQueueStore` and `AsyncQueueStore` protocols.
-- `src/py/vertebra/db/adapters/postgres/driver.py` — `$1` extended query binds and transaction semantics.
+- `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — `$1` extended query binds and transaction semantics.
 - `src/py/vertebra/db/adapters/postgres/notify.py` — `pg_notify` wakeup channels.
 - `src/py/vertebra/db/adapters/postgres/__init__.py` — adapter public exports (mirrored in `oracle/__init__.py`).
-- `src/py/vertebra/db/adapters/oracle/driver.py` — `:name` binds, `MERGE INTO`, and transactions.
+- `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — `:name` binds, `MERGE INTO`, and transactions.
 - `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification sources.
 
 ## Contracts & Edge Cases
@@ -87,7 +90,7 @@ uv run --no-sync ruff check src/py/vertebra/db/driver src/py/vertebra/db/adapter
 - [ ] `SyncOracleQueueStore` and `AsyncOracleQueueStore` satisfy `SyncQueueStore` / `AsyncQueueStore` with zero `oracledb` imports.
 - [ ] Zero regressions in the fast verification gate.
 
-[^pg-drv]: `src/py/vertebra/db/adapters/postgres/driver.py` — Native vertebra._postgres SyncPostgreSQLDriver and AsyncPostgreSQLDriver.
+[^pg-drv]: `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — Native vertebra._postgres SyncPostgreSQLDriver and AsyncPostgreSQLDriver.
 [^pg-notify]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification sources.
-[^ora-drv]: `src/py/vertebra/db/adapters/oracle/driver.py` — Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver.
+[^ora-drv]: `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver.
 [^ora-notify]: `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification sources.

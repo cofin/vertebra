@@ -1,18 +1,18 @@
 ---
 type: Task
-id: "strict-typing-hygiene:t04"
+id: strict-typing-hygiene:t04
 flow_id: strict-typing-hygiene
-title: "Synchronize Tech Stack, Polyglot Test Matrix, and Workflow OKF Chapters"
-description: "Update product/tech-stack.md, knowledge/testing/polyglot-test-matrix.md (keeping <= 200L), and knowledge/workflow.md to reflect pruned mypy overrides and benchmark/test typing gates."
+title: Synchronize Tech Stack, Polyglot Test Matrix, and Workflow OKF Chapters
+description: Update product/tech-stack.md, knowledge/testing/polyglot-test-matrix.md (keeping <= 200L), and knowledge/workflow.md to reflect pruned mypy overrides and benchmark/test typing gates.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 18baadcd
+plan_commit: 473e1f2e
 depends_on:
-  - "strict-typing-hygiene:t03"
+  - strict-typing-hygiene:t03
 files:
   - .agents/bundles/product/tech-stack.md
   - .agents/bundles/knowledge/testing/polyglot-test-matrix.md
@@ -33,13 +33,14 @@ tags:
 sources:
   - id: okf-tech-stack
     resource: .agents/bundles/product/tech-stack.md
-    title: "Product technology stack Mypy Overrides and [tool.mypy].files bullets"
+    title: Product technology stack Mypy Overrides and [tool.mypy].files bullets
   - id: okf-test-matrix
     resource: .agents/bundles/knowledge/testing/polyglot-test-matrix.md
-    title: "Polyglot test matrix OKF chapter (198 lines on HEAD)"
+    title: Polyglot test matrix OKF chapter (198 lines on HEAD)
   - id: okf-workflow
     resource: .agents/bundles/knowledge/workflow.md
-    title: "Project workflow Makefile lint and lint-all commands"
+    title: Project workflow Makefile lint and lint-all commands
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Synchronize Tech Stack, Polyglot Test Matrix, and Workflow OKF Chapters
@@ -58,7 +59,7 @@ Update `.agents/bundles/product/tech-stack.md` (`<= 200L`), `.agents/bundles/kno
 
 ## Contracts & Edge Cases
 
-- `product/tech-stack.md` (`<= 200` lines, expanded YAML `tags:` list): update `[tool.mypy].files` (`src/py/vertebra`, `src/py/tests/unit`, `src/py/tests/integration`, `tools/benchmarks`, `tools/scripts`, `tools/pgo`, `tools/docs`, `docs/examples`) and replace the `40+`-module `Mypy Overrides` list with the minimal untyped/optional C-package list; re-anchor `verified` commits to ancestors of `HEAD`.
+- `product/tech-stack.md` (`<= 200` lines, expanded YAML `tags:` list): update `[tool.mypy].files` (`src/py/vertebra`, `src/py/tests/unit`, `src/py/tests/integration`, `tools/benchmarks`, `tools/scripts`, `tools/pgo`, `tools/docs`, `docs/examples`) and replace the `52`-pattern `Mypy Overrides` list with the minimal untyped/optional C-package list; re-anchor `verified` commits to ancestors of `HEAD`.
 - `knowledge/testing/polyglot-test-matrix.md` (`<= 200` lines, `<= 40`-line truth block): update `make lint` / `make lint-all` paths (`src/py/tests/{unit,integration}`) and 10-extension `stubtest` list while keeping `<= 200` lines, and re-anchor `verified` commits.
 - `knowledge/workflow.md` (`<= 200` lines): update `lint`/`lint-all` descriptions and companion `*-wheel-check` references.
 

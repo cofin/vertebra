@@ -11,42 +11,46 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t03
+  - sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t03
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects/mysql.py
-- src/py/vertebra/extensions/sqlalchemy/dialects/oracle.py
-- src/py/vertebra/extensions/sqlalchemy/dialects/mssql.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/mysql.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/oracle.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/mssql.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/types.py
-- src/py/vertebra/db/adapters/mysql/driver.py
-- src/py/vertebra/db/adapters/mysql/core.py
-- src/py/vertebra/db/adapters/oracle/driver.py
-- src/py/vertebra/db/adapters/mssql/driver.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/vertebra/extensions/sqlalchemy/types.py
+  - src/py/vertebra/db/adapters/mysql/_sync.py
+  - src/py/vertebra/db/adapters/mysql/_async.py
+  - src/py/vertebra/db/adapters/mysql/core.py
+  - src/py/vertebra/db/adapters/oracle/_sync.py
+  - src/py/vertebra/db/adapters/oracle/_async.py
+  - src/py/vertebra/db/adapters/mssql/_sync.py
+  - src/py/vertebra/db/adapters/mssql/_async.py
 estimated_loc: 230
 tags:
-- sqlalchemy
-- mysql
-- dialects
-- oracle
-- mssql
+  - sqlalchemy
+  - mysql
+  - dialects
+  - oracle
+  - mssql
 sources:
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Current MySQL dialect definitions
-- id: mysql-driver
-  resource: src/py/vertebra/db/adapters/mysql/driver.py
-  title: Native vertebra._mysql SyncMySQLDriver and AsyncMySQLDriver
-- id: oracle-driver
-  resource: src/py/vertebra/db/adapters/oracle/driver.py
-  title: Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver
-- id: mssql-driver
-  resource: src/py/vertebra/db/adapters/mssql/driver.py
-  title: Native vertebra._mssql SyncMSSQLDriver and AsyncMSSQLDriver
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Current MySQL dialect definitions
+  - id: mysql-driver
+    resource: src/py/vertebra/db/adapters/mysql/_sync.py
+    title: Native vertebra._mysql SyncMySQLDriver and AsyncMySQLDriver
+  - id: oracle-driver
+    resource: src/py/vertebra/db/adapters/oracle/_sync.py
+    title: Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver
+  - id: mssql-driver
+    resource: src/py/vertebra/db/adapters/mssql/_sync.py
+    title: Native vertebra._mssql SyncMSSQLDriver and AsyncMSSQLDriver
+verification_strategy: regression_tdd
 ---
 
 # Task `t04`: Implement Native MySQL, Oracle, and SQL Server Sync/Async SQLAlchemy Dialects
@@ -57,12 +61,12 @@ Implement `SyncMySQLDialect`/`AsyncMySQLDialect` (`MySQLDialect`), `SyncOracleDi
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlalchemy/dialects/_base.py` — shared dialect mixins.
+- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — MySQL dialect definitions (plus shared mixins from `t02`).
 - `src/py/vertebra/extensions/sqlalchemy/types.py` — `OracleVector` type registration.
-- `src/py/vertebra/db/adapters/mysql/driver.py` — `vertebra._mysql` binary `?` prepared statement execution and `lastrowid` metadata.
+- `src/py/vertebra/db/adapters/mysql/_sync.py` and `src/py/vertebra/db/adapters/mysql/_async.py` — `vertebra._mysql` binary `?` prepared statement execution and `lastrowid` metadata.
 - `src/py/vertebra/db/adapters/mysql/core.py` — MySQL / MariaDB version and charset helpers.
-- `src/py/vertebra/db/adapters/oracle/driver.py` — `:name` named binds and 23ai `VECTOR` / `BOOLEAN` / `OSON` capabilities.
-- `src/py/vertebra/db/adapters/mssql/driver.py` — `qmark` `?` -> `@P1` placeholder rewriting and `OUTPUT INSERTED` handling.
+- `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — `:name` named binds and 23ai `VECTOR` / `BOOLEAN` / `OSON` capabilities.
+- `src/py/vertebra/db/adapters/mssql/_sync.py` and `src/py/vertebra/db/adapters/mssql/_async.py` — `qmark` `?` -> `@P1` placeholder rewriting and `OUTPUT INSERTED` handling.
 
 ## Contracts & Edge Cases
 
@@ -86,6 +90,6 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlalchemy/dialects && uv
 - [ ] Zero regressions in the fast verification gate.
 
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Current MySQL dialect definitions.
-[^mysql-driver]: `src/py/vertebra/db/adapters/mysql/driver.py` — Native vertebra._mysql SyncMySQLDriver and AsyncMySQLDriver.
-[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/driver.py` — Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver.
-[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/driver.py` — Native vertebra._mssql SyncMSSQLDriver and AsyncMSSQLDriver.
+[^mysql-driver]: `src/py/vertebra/db/adapters/mysql/_sync.py` and `src/py/vertebra/db/adapters/mysql/_async.py` — Native vertebra._mysql SyncMySQLDriver and AsyncMySQLDriver.
+[^oracle-driver]: `src/py/vertebra/db/adapters/oracle/_sync.py` and `src/py/vertebra/db/adapters/oracle/_async.py` — Native vertebra._oracle SyncOracleDriver and AsyncOracleDriver.
+[^mssql-driver]: `src/py/vertebra/db/adapters/mssql/_sync.py` and `src/py/vertebra/db/adapters/mssql/_async.py` — Native vertebra._mssql SyncMSSQLDriver and AsyncMSSQLDriver.

@@ -11,35 +11,36 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t02
+  - sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t02
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects/postgresql.py
-- src/py/vertebra/extensions/sqlalchemy/dialects/sqlite.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/postgresql.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/sqlite.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/vertebra/db/adapters/postgres/driver.py
-- src/py/vertebra/db/adapters/sqlite/driver.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/vertebra/db/adapters/postgres/_sync.py
+  - src/py/vertebra/db/adapters/postgres/_async.py
+  - src/py/vertebra/db/adapters/sqlite/driver.py
 estimated_loc: 220
 tags:
-- sqlalchemy
-- postgresql
-- sqlite
-- dialects
+  - sqlalchemy
+  - postgresql
+  - sqlite
+  - dialects
 sources:
-- id: sa-dialects
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Existing PostgreSQL and SQLite dialect definitions
-- id: pg-driver
-  resource: src/py/vertebra/db/adapters/postgres/driver.py
-  title: Native PostgreSQL sync and async drivers
-- id: sqlite-driver
-  resource: src/py/vertebra/db/adapters/sqlite/driver.py
-  title: SQLite driver exposing engine version metadata
+  - id: sa-dialects
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Existing PostgreSQL and SQLite dialect definitions
+  - id: pg-driver
+    resource: src/py/vertebra/db/adapters/postgres/_sync.py
+    title: Native PostgreSQL sync and async drivers
+  - id: sqlite-driver
+    resource: src/py/vertebra/db/adapters/sqlite/driver.py
+    title: SQLite driver exposing engine version metadata
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Implement Native PostgreSQL and SQLite Sync/Async SQLAlchemy Dialects
@@ -50,9 +51,8 @@ Implement `SyncPostgreSQLDialect` / `AsyncPostgreSQLDialect` (`PGDialect`) and `
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlalchemy/dialects/_base.py` — `_SyncDialectMixin` and `_AsyncDialectMixin`.
-- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — PostgreSQL and SQLite dialect overrides to extract.
-- `src/py/vertebra/db/adapters/postgres/driver.py` — native `$1` parameter, `RETURNING`, and isolation level semantics.
+- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — PostgreSQL and SQLite dialect overrides to extract (plus `_SyncDialectMixin` / `_AsyncDialectMixin` from `t02`).
+- `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — native `$1` parameter, `RETURNING`, and isolation level semantics.
 - `src/py/vertebra/db/adapters/sqlite/driver.py` — native SQLite version metadata and WAL pragma hooks.
 
 ## Contracts & Edge Cases
@@ -77,5 +77,5 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlalchemy/dialects && uv
 - [ ] Zero regressions in the fast verification gate.
 
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Existing PostgreSQL and SQLite dialect definitions.
-[^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py` — Native PostgreSQL sync and async drivers.
+[^pg-driver]: `src/py/vertebra/db/adapters/postgres/_sync.py` and `src/py/vertebra/db/adapters/postgres/_async.py` — Native PostgreSQL sync and async drivers.
 [^sqlite-driver]: `src/py/vertebra/db/adapters/sqlite/driver.py` — SQLite driver exposing engine version metadata.

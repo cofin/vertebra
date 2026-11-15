@@ -1,18 +1,18 @@
 ---
 type: Task
-id: "strict-typing-hygiene:t03"
+id: strict-typing-hygiene:t03
 flow_id: strict-typing-hygiene
-title: "Enable Mypy Verification Across Unit and Integration Test Suites"
-description: "Add structural Spanner client Protocols, clean up test annotations across src/py/tests/unit/** and src/py/tests/integration/**, and enable test-suite mypy in pyproject.toml and Makefile."
+title: Enable Mypy Verification Across Unit and Integration Test Suites
+description: Add structural Spanner client Protocols, clean up test annotations across src/py/tests/unit/** and src/py/tests/integration/**, and enable test-suite mypy in pyproject.toml and Makefile.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: implementation_first
-plan_commit: 18baadcd
+plan_commit: 473e1f2e
 depends_on:
-  - "strict-typing-hygiene:t02"
+  - strict-typing-hygiene:t02
 files:
   - pyproject.toml
   - Makefile
@@ -39,16 +39,17 @@ tags:
 sources:
   - id: spanner-sync
     resource: src/py/vertebra/db/adapters/spanner/_sync.py::SyncSpannerDriver
-    title: "SyncSpannerDriver @final SyncSpannerClient parameter annotation"
+    title: SyncSpannerDriver @final SyncSpannerClient parameter annotation
   - id: spanner-async
     resource: src/py/vertebra/db/adapters/spanner/_async.py::AsyncSpannerDriver
-    title: "AsyncSpannerDriver @final AsyncSpannerClient parameter annotation"
+    title: AsyncSpannerDriver @final AsyncSpannerClient parameter annotation
   - id: makefile-lint
     resource: Makefile
-    title: "lint and lint-all mypy commands"
+    title: lint and lint-all mypy commands
   - id: tests-conftest
     resource: src/py/tests/conftest.py
-    title: "Root pytest fixtures and shared test typing surface"
+    title: Root pytest fixtures and shared test typing surface
+verification_strategy: implementation_first
 ---
 
 # Task `t03`: Enable Mypy Verification Across Unit and Integration Test Suites
@@ -68,7 +69,7 @@ Add structural `SyncSpannerClientProtocol` / `AsyncSpannerClientProtocol` (`typi
 
 ## Contracts & Edge Cases
 
-- Define `SyncSpannerClientProtocol` (`_sync.py`) and `AsyncSpannerClientProtocol` (`_async.py`) matching `vertebra._spanner.{SyncSpannerClient,AsyncSpannerClient}` methods so `@final` PyO3 client classes and deterministic test doubles in `test_spanner.py` / `test_sqlspec_spanner.py` both type-check without `cast` or `# type: ignore`.
+- Define `SyncSpannerClientProtocol` (`_sync.py`) and `AsyncSpannerClientProtocol` (`_async.py`) matching `vertebra._spanner.{SyncSpannerClient,AsyncSpannerClient}` methods (including `begin_read_write_transaction` from `spanner-queue-and-rw-transactions`) so `@final` PyO3 client classes and deterministic test doubles in `src/py/tests/unit/db/test_spanner.py` and `src/py/tests/unit/extensions/test_sqlspec_spanner.py` both type-check without `cast` or `# type: ignore`.
 - Across `src/py/tests/unit/**` and `src/py/tests/integration/**`: narrow `import_optional(...)` returns (`assert mod is not None` or `pytest.skip(...)`), replace `object()` dummy arguments passed to `LeaseBroker | None` with real `LeaseBroker(4)` or `None`, add missing fixture/helper PEP 585/604 annotations, and introduce zero `# type: ignore` or inline `#` comments.
 - Add `"src/py/tests/unit"` and `"src/py/tests/integration"` to `[tool.mypy].files` in `pyproject.toml` and to the `uv run mypy` lines in `Makefile` (`lint` and `lint-all`).
 

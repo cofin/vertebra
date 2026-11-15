@@ -11,36 +11,37 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t03
+  - sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t03
 files:
-- docs/usage/extensions.md
-- docs/reference/extensions.md
-- .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-- .agents/bundles/knowledge/domains/data/database-driver-limitations.md
+  - docs/usage/extensions.md
+  - docs/reference/extensions.md
+  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+  - .agents/bundles/knowledge/domains/data/database-driver-limitations.md
 tests:
-- src/py/tests/unit/extensions/test_vite_and_docs_portal.py
+  - src/py/tests/unit/extensions/test_vite_and_docs_portal.py
 read_set:
-- docs/usage/extensions.md
-- docs/reference/extensions.md
-- .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-- .agents/bundles/knowledge/domains/data/database-driver-limitations.md
+  - docs/usage/extensions.md
+  - docs/reference/extensions.md
+  - .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+  - .agents/bundles/knowledge/domains/data/database-driver-limitations.md
 estimated_loc: 170
 tags:
-- documentation
-- okf
-- sqlspec
+  - documentation
+  - okf
+  - sqlspec
 sources:
-- id: doc-ext
-  resource: docs/usage/extensions.md
-  title: SQLSpec extension usage documentation
-- id: okf-dialects
-  resource: .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
-  title: SQLSpec and dialects OKF chapter
-- id: okf-limits
-  resource: .agents/bundles/knowledge/domains/data/database-driver-limitations.md
-  title: Database driver and SQLSpec limitations ledger
+  - id: doc-ext
+    resource: docs/usage/extensions.md
+    title: SQLSpec extension usage documentation
+  - id: okf-dialects
+    resource: .agents/bundles/knowledge/domains/extensions/sqlspec-alchemy-and-dialects.md
+    title: SQLSpec and dialects OKF chapter
+  - id: okf-limits
+    resource: .agents/bundles/knowledge/domains/data/database-driver-limitations.md
+    title: Database driver and SQLSpec limitations ledger
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Synchronize SQLSpec Adapter Parity Documentation and OKF Knowledge Chapters

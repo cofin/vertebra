@@ -11,48 +11,48 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-redis-driver:ch04-queues-conformance-and-docs:t03
+  - native-redis-driver:ch04-queues-conformance-and-docs:t03
 files:
-- .agents/bundles/knowledge/domains/data/redis-limitations.md
-- .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-- .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-- .agents/skills/review-pyo3-bridge/SKILL.md
-- .agents/bundles/knowledge/domains/index.md
-- .agents/bundles/knowledge/workflow.md
+  - .agents/bundles/knowledge/domains/data/redis-limitations.md
+  - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+  - .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  - .agents/skills/review-pyo3-bridge/SKILL.md
+  - .agents/bundles/knowledge/domains/index.md
+  - .agents/bundles/knowledge/workflow.md
 tests: []
 read_set:
-- .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-- .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-- .agents/bundles/knowledge/domains/data/postgres-limitations.md
-- .agents/skills/review-pyo3-bridge/SKILL.md
-- .agents/bundles/knowledge/domains/index.md
-- .agents/bundles/knowledge/workflow.md
+  - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+  - .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+  - .agents/bundles/knowledge/domains/data/postgres-limitations.md
+  - .agents/skills/review-pyo3-bridge/SKILL.md
+  - .agents/bundles/knowledge/domains/index.md
+  - .agents/bundles/knowledge/workflow.md
 estimated_loc: 220
 tags:
-- okf
-- redis
-- valkey
-- limitations
-- skills
-- workflow
+  - okf
+  - redis
+  - limitations
+  - skills
+  - workflow
 sources:
-- id: okf-drivers
-  resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-  title: Database drivers and dialers OKF chapter
-- id: okf-queues
-  resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
-  title: Distributed queues and email OKF chapter
-- id: review-pyo3-skill
-  resource: .agents/skills/review-pyo3-bridge/SKILL.md
-  title: PyO3 bridge review skill
-- id: domains-idx
-  resource: .agents/bundles/knowledge/domains/index.md
-  title: OKF domains catalog index
-- id: okf-workflow
-  resource: .agents/bundles/knowledge/workflow.md
-  title: Project Makefile and verification workflow chapter
+  - id: okf-drivers
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Database drivers and dialers OKF chapter
+  - id: okf-queues
+    resource: .agents/bundles/knowledge/domains/framework/distributed-queues-and-email.md
+    title: Distributed queues and email OKF chapter
+  - id: review-pyo3-skill
+    resource: .agents/skills/review-pyo3-bridge/SKILL.md
+    title: PyO3 bridge review skill
+  - id: domains-idx
+    resource: .agents/bundles/knowledge/domains/index.md
+    title: OKF domains catalog index
+  - id: okf-workflow
+    resource: .agents/bundles/knowledge/workflow.md
+    title: Project Makefile and verification workflow chapter
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Author OKF redis-limitations.md and Synchronize Data/Framework Chapters and Review Skills

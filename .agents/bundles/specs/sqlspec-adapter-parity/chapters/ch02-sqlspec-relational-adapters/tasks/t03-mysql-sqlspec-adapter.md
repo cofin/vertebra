@@ -11,49 +11,51 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch01-sqlspec-core-driver-and-artifact-ref:t03
+  - sqlspec-adapter-parity:ch02-sqlspec-relational-adapters:t02
 files:
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/core.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/driver.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/adk.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/events.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/litestar.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py
-- src/py/vertebra/extensions/sqlspec/adapters/mysql/__init__.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/core.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/driver.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/adk.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/events.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/litestar.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters/mysql/__init__.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/_driver.py
-- src/py/vertebra/db/adapters/mysql/driver.py
-- src/py/vertebra/db/adapters/mysql/core.py
-- src/py/vertebra/db/adapters/mysql/config.py
-- src/py/vertebra/extensions/sqlspec/adapters.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/_driver.py
+  - src/py/vertebra/db/adapters/mysql/_sync.py
+  - src/py/vertebra/db/adapters/mysql/_async.py
+  - src/py/vertebra/db/adapters/mysql/core.py
+  - src/py/vertebra/db/adapters/mysql/config.py
+  - src/py/vertebra/extensions/sqlspec/adapters.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 245
 tags:
-- sqlspec
-- mysql
-- data-dictionary
-- adk
-- events
-- litestar
-- config
+  - sqlspec
+  - mysql
+  - data-dictionary
+  - adk
+  - events
+  - litestar
+  - config
 sources:
-- id: mysql-drv
-  resource: src/py/vertebra/db/adapters/mysql/driver.py
-  title: Native MySQL & MariaDB sync and async drivers
-- id: mysql-core
-  resource: src/py/vertebra/db/adapters/mysql/core.py
-  title: Native MySQL & MariaDB core parameter and wire helpers
-- id: sqlspec-adapters
-  resource: src/py/vertebra/extensions/sqlspec/adapters.py
-  title: Legacy MySQL SQLSpec adapter setting broken %s execution style
-- id: storage-art
-  resource: src/py/vertebra/storage/_store.py
-  title: Storage-neutral ArtifactReference value struct
+  - id: mysql-drv
+    resource: src/py/vertebra/db/adapters/mysql/_sync.py
+    title: Native MySQL & MariaDB sync and async drivers
+  - id: mysql-core
+    resource: src/py/vertebra/db/adapters/mysql/core.py
+    title: Native MySQL & MariaDB core parameter and wire helpers
+  - id: sqlspec-adapters
+    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    title: Legacy MySQL SQLSpec adapter setting broken %s execution style
+  - id: storage-art
+    resource: src/py/vertebra/storage/_store.py
+    title: Storage-neutral ArtifactReference value struct
+verification_strategy: regression_tdd
 ---
 
 # Task `t03`: Deliver Feature-Complete MySQL SQLSpec Adapter Package with QMARK ? Binds
@@ -65,7 +67,7 @@ Implement the complete `src/py/vertebra/extensions/sqlspec/adapters/mysql/{__ini
 ## Bounded Read Manifest
 
 - `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` dispatch template, config lifecycle, and refcounted pool close.
-- `src/py/vertebra/db/adapters/mysql/driver.py` — native MySQL & MariaDB sync and async execution drivers.
+- `src/py/vertebra/db/adapters/mysql/_sync.py` and `src/py/vertebra/db/adapters/mysql/_async.py` — native MySQL & MariaDB sync and async execution drivers.
 - `src/py/vertebra/db/adapters/mysql/core.py` — native MySQL & MariaDB binary `?` placeholder and parameter helpers.
 - `src/py/vertebra/db/adapters/mysql/config.py` — `MySQLConfig` connection options.
 - `src/py/vertebra/extensions/sqlspec/adapters.py` — legacy MySQL adapter setting `%s` execution style to fix and remove.
@@ -95,7 +97,7 @@ uv run --no-sync ruff check src/py/vertebra/extensions/sqlspec/adapters/mysql &&
 - [ ] `MySQLSyncConfig` and `MySQLAsyncConfig` resolve `adapter_name = 'vertebra_mysql'` and all extension store classes natively on `sqlspec>=0.71.1`.
 - [ ] Zero regressions in the fast verification gate.
 
-[^mysql-drv]: `src/py/vertebra/db/adapters/mysql/driver.py` — Native MySQL & MariaDB sync and async drivers.
+[^mysql-drv]: `src/py/vertebra/db/adapters/mysql/_sync.py` and `src/py/vertebra/db/adapters/mysql/_async.py` — Native MySQL & MariaDB sync and async drivers.
 [^mysql-core]: `src/py/vertebra/db/adapters/mysql/core.py` — Native MySQL & MariaDB core parameter and wire helpers.
 [^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Legacy MySQL SQLSpec adapter setting broken %s execution style.
 [^storage-art]: `src/py/vertebra/storage/_store.py` — Storage-neutral ArtifactReference value struct.

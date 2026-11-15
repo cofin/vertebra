@@ -11,42 +11,43 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t03
+  - native-sqlite-driver:ch02-rust-engine-arrow-and-pyo3-clients:t03
 files:
-- src/rs/vertebra-sqlite/src/py_client.rs
-- src/rs/vertebra-sqlite/src/lib.rs
-- src/py/vertebra/_sqlite.pyi
-- src/py/vertebra/extensions/broker/engines.py
+  - src/rs/vertebra-sqlite/src/py_client.rs
+  - src/rs/vertebra-sqlite/src/lib.rs
+  - src/py/vertebra/_sqlite.pyi
+  - src/py/vertebra/extensions/broker/engines.py
 tests:
-- src/rs/vertebra-sqlite/tests/sqlite_client.rs
-- src/py/tests/unit/test_freethreaded_gil.py
+  - src/rs/vertebra-sqlite/tests/sqlite_client.rs
+  - src/py/tests/unit/test_freethreaded_gil.py
 read_set:
-- src/rs/vertebra-db/src/py_async.rs
-- src/rs/vertebra-db/src/lib.rs
-- src/py/vertebra/_sqlite.pyi
-- src/py/vertebra/extensions/broker/engines.py
-- src/py/tests/unit/test_freethreaded_gil.py
+  - src/rs/vertebra-db/src/py_async.rs
+  - src/rs/vertebra-db/src/lib.rs
+  - src/py/vertebra/_sqlite.pyi
+  - src/py/vertebra/extensions/broker/engines.py
+  - src/py/tests/unit/test_freethreaded_gil.py
 estimated_loc: 245
 tags:
-- sqlite
-- pyo3
-- capsule
-- async
-- freethreaded
-- concurrency
-- tests
+  - sqlite
+  - pyo3
+  - capsule
+  - async
+  - freethreaded
+  - concurrency
+  - tests
 sources:
-- id: py-async
-  resource: src/rs/vertebra-db/src/py_async.rs
-  title: AsyncCompletionQueue and Notifier PyO3 bridge
-- id: duckdb-pyi
-  resource: src/py/vertebra/_duckdb.pyi
-  title: Standalone extension stub precedent
-- id: ft-gil-test
-  resource: src/py/tests/unit/test_freethreaded_gil.py
-  title: Free-threaded Python 3.14t/3.15t GIL_USED verification test
+  - id: py-async
+    resource: src/rs/vertebra-db/src/py_async.rs
+    title: AsyncCompletionQueue and Notifier PyO3 bridge
+  - id: duckdb-pyi
+    resource: src/py/vertebra/_duckdb.pyi
+    title: Standalone extension stub precedent
+  - id: ft-gil-test
+    resource: src/py/tests/unit/test_freethreaded_gil.py
+    title: Free-threaded Python 3.14t/3.15t GIL_USED verification test
+verification_strategy: regression_tdd
 ---
 
 # Task `t04`: Expose SyncSQLiteClient, AsyncSQLiteClient, Broker Capsule, and Free-Threaded Verification

@@ -1,19 +1,19 @@
 ---
 type: Research
 flow_id: integration-remediation
-title: "Official Google Cloud Rust crates versus the hand-written GCP wire code"
-description: "Primary-source evaluation of googleapis/google-cloud-rust crates for Spanner, BigQuery Storage, and auth, recording the adopt/keep decisions implemented in gcp-wire-protocol-correctness and gcp-driver-resilience."
+title: Official Google Cloud Rust crates versus the hand-written GCP wire code
+description: Primary-source evaluation of googleapis/google-cloud-rust crates for Spanner, BigQuery Storage, and auth, recording the adopt/keep decisions implemented in gcp-wire-protocol-correctness and gcp-driver-resilience.
 status: stable
 state: promoted
 promoted_to: integration-remediation
-created_at: "2026-11-03T00:00:00Z"
-updated_at: "2026-11-12T23:45:00Z"
+created_at: '2026-11-03T00:00:00Z'
+updated_at: '2026-11-12T23:45:00Z'
 generated:
   by: flow-setup
-  at: "2026-11-07T04:15:00Z"
+  at: '2026-11-07T04:15:00Z'
 verified:
   - by: agent:flow-setup
-    at: "2026-11-12T23:45:00Z"
+    at: '2026-11-12T23:45:00Z'
     commit: 18baadcd
 sources:
   - id: crate-spanner

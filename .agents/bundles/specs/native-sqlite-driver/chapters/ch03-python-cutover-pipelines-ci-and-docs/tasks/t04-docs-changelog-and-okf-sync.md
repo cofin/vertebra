@@ -11,61 +11,62 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: documentation_validation
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t03
+  - native-sqlite-driver:ch03-python-cutover-pipelines-ci-and-docs:t03
 files:
-- docs/usage/databases.md
-- docs/reference/native-stubs.md
-- docs/changelog/index.md
-- .agents/bundles/knowledge/domains/data/sqlite-limitations.md
-- .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-- .agents/bundles/knowledge/domains/index.md
-- .agents/skills/review-pyo3-bridge/SKILL.md
-- AGENTS.md
-- .agents/bundles/knowledge/workflow.md
+  - docs/usage/databases.md
+  - docs/reference/native-stubs.md
+  - docs/changelog/index.md
+  - .agents/bundles/knowledge/domains/data/sqlite-limitations.md
+  - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+  - .agents/bundles/knowledge/domains/index.md
+  - .agents/skills/review-pyo3-bridge/SKILL.md
+  - AGENTS.md
+  - .agents/bundles/knowledge/workflow.md
 tests: []
 read_set:
-- docs/usage/databases.md
-- docs/reference/native-stubs.md
-- docs/changelog/index.md
-- .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-- AGENTS.md
-- .agents/bundles/knowledge/workflow.md
+  - docs/usage/databases.md
+  - docs/reference/native-stubs.md
+  - docs/changelog/index.md
+  - .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+  - AGENTS.md
+  - .agents/bundles/knowledge/workflow.md
 estimated_loc: 220
 tags:
-- docs
-- sqlite
-- changelog
-- okf
-- limitations
-- skills
-- workflow
+  - docs
+  - sqlite
+  - changelog
+  - okf
+  - limitations
+  - skills
+  - workflow
 sources:
-- id: docs-db
-  resource: docs/usage/databases.md
-  title: Database drivers usage guide
-- id: docs-stubs
-  resource: docs/reference/native-stubs.md
-  title: Native extension stub API reference
-- id: docs-changelog
-  resource: docs/changelog/index.md
-  title: Release changelog
-- id: okf-drivers
-  resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
-  title: Database drivers and dialers OKF chapter
-- id: domains-idx
-  resource: .agents/bundles/knowledge/domains/index.md
-  title: OKF domains catalog index
-- id: review-pyo3-skill
-  resource: .agents/skills/review-pyo3-bridge/SKILL.md
-  title: PyO3 bridge review skill
-- id: agents-md
-  resource: AGENTS.md
-  title: Repository agent instructions and quick verification commands
-- id: okf-workflow
-  resource: .agents/bundles/knowledge/workflow.md
-  title: Project Makefile and verification workflow chapter
+  - id: docs-db
+    resource: docs/usage/databases.md
+    title: Database drivers usage guide
+  - id: docs-stubs
+    resource: docs/reference/native-stubs.md
+    title: Native extension stub API reference
+  - id: docs-changelog
+    resource: docs/changelog/index.md
+    title: Release changelog
+  - id: okf-drivers
+    resource: .agents/bundles/knowledge/domains/data/database-drivers-and-dialers.md
+    title: Database drivers and dialers OKF chapter
+  - id: domains-idx
+    resource: .agents/bundles/knowledge/domains/index.md
+    title: OKF domains catalog index
+  - id: review-pyo3-skill
+    resource: .agents/skills/review-pyo3-bridge/SKILL.md
+    title: PyO3 bridge review skill
+  - id: agents-md
+    resource: AGENTS.md
+    title: Repository agent instructions and quick verification commands
+  - id: okf-workflow
+    resource: .agents/bundles/knowledge/workflow.md
+    title: Project Makefile and verification workflow chapter
+verification_strategy: documentation_validation
 ---
 
 # Task `t04`: Synchronize Public Documentation, Changelog, OKF SQLite Chapters, and Review Skills

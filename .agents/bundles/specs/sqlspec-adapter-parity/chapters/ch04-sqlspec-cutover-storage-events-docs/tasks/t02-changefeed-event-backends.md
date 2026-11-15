@@ -4,42 +4,43 @@ id: sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t02
 flow_id: sqlspec-adapter-parity
 chapter_id: ch04-sqlspec-cutover-storage-events-docs
 title: Harden ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend with Checkpoints & Object Spill
-description: Add durable checkpoint persistence and ArtifactReference large-payload spill to extensions/sqlspec/events.py.
+description: Add durable checkpoint persistence and EventQueueStore table spill for large payloads to extensions/sqlspec/events.py.
 status: stable
 state: pending
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t01
+  - sqlspec-adapter-parity:ch04-sqlspec-cutover-storage-events-docs:t01
 files:
-- src/py/vertebra/extensions/sqlspec/events.py
+  - src/py/vertebra/extensions/sqlspec/events.py
 tests:
-- src/py/tests/unit/extensions/test_data_storage_integrations.py
+  - src/py/tests/unit/extensions/test_data_storage_integrations.py
 read_set:
-- src/py/vertebra/extensions/sqlspec/events.py
-- src/py/vertebra/db/cdc.py
-- src/py/vertebra/db/driver/capabilities.py
-- src/py/vertebra/db/adapters/postgres/notify.py
-- src/py/vertebra/db/adapters/oracle/notify.py
-- src/py/vertebra/storage/_store.py
+  - src/py/vertebra/extensions/sqlspec/events.py
+  - src/py/vertebra/db/cdc.py
+  - src/py/vertebra/db/driver/capabilities.py
+  - src/py/vertebra/db/adapters/postgres/notify.py
+  - src/py/vertebra/db/adapters/oracle/notify.py
+  - src/py/vertebra/storage/_store.py
 estimated_loc: 195
 tags:
-- sqlspec
-- events
-- cdc
+  - sqlspec
+  - events
+  - cdc
 sources:
-- id: sqlspec-events
-  resource: src/py/vertebra/extensions/sqlspec/events.py
-  title: ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend
-- id: db-cdc
-  resource: src/py/vertebra/db/cdc.py
-  title: CDCConfig, ChangeEvent, and ChangeFeed CDC primitives
-- id: db-capabilities
-  resource: src/py/vertebra/db/driver/capabilities.py
-  title: SyncChangeSource, AsyncChangeSource, and notification protocols
+  - id: sqlspec-events
+    resource: src/py/vertebra/extensions/sqlspec/events.py
+    title: ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend
+  - id: db-cdc
+    resource: src/py/vertebra/db/cdc.py
+    title: CDCConfig, ChangeEvent, and ChangeFeed CDC primitives
+  - id: db-capabilities
+    resource: src/py/vertebra/db/driver/capabilities.py
+    title: SyncChangeSource, AsyncChangeSource, and notification protocols
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Harden ChangeFeedSyncEventBackend and ChangeFeedAsyncEventBackend with Checkpoints & Object Spill
@@ -52,10 +53,10 @@ Harden `src/py/vertebra/extensions/sqlspec/events.py` (`ChangeFeedSyncEventBacke
 
 - `src/py/vertebra/extensions/sqlspec/events.py` — generic CDC event backend bridge (zero engine-specific SQL inside generic module).
 - `src/py/vertebra/db/cdc.py` — `CDCConfig`, `ChangeEvent`, and `ChangeFeed` resume-token contracts.
-- `src/py/vertebra/db/driver/capabilities.py` — `SyncChangeSource`, `AsyncChangeSource`, and `NotificationSource` protocols.
+- `src/py/vertebra/db/driver/capabilities.py` — `SyncChangeSource`, `AsyncChangeSource`, and `SyncNotificationSource`/`AsyncNotificationSource` protocols (split by `native-redis-driver`).
 - `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification source ceiling (`8000`B `NOTIFY` payload).
 - `src/py/vertebra/db/adapters/oracle/notify.py` — Oracle TxEventQ notification source contract.
-- `src/py/vertebra/storage/_store.py` — `ArtifactReference` metadata struct for large-payload spill references.
+- `src/py/vertebra/storage/_store.py` — `ObjectMeta` and `ArtifactReference` structs (reference only; large payloads spill into the `EventQueueStore` table, not object storage).
 
 ## Contracts & Edge Cases
 

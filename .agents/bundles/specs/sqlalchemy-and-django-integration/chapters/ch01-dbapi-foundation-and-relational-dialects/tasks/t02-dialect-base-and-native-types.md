@@ -11,31 +11,32 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t01
+  - sqlalchemy-and-django-integration:ch01-dbapi-foundation-and-relational-dialects:t01
 files:
-- src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
-- src/py/vertebra/extensions/sqlalchemy/types.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects/_base.py
+  - src/py/vertebra/extensions/sqlalchemy/types.py
 tests:
-- src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
+  - src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py
 read_set:
-- src/py/vertebra/extensions/sqlalchemy/dialects.py
-- src/py/vertebra/extensions/sqlalchemy/types.py
-- src/py/vertebra/utils/serializers/__init__.py
-- src/py/vertebra/extensions/alchemy/broker.py
+  - src/py/vertebra/extensions/sqlalchemy/dialects.py
+  - src/py/vertebra/extensions/sqlalchemy/types.py
+  - src/py/vertebra/utils/serializers/__init__.py
+  - src/py/vertebra/extensions/alchemy/broker.py
 estimated_loc: 220
 tags:
-- sqlalchemy
-- dialects
-- types
+  - sqlalchemy
+  - dialects
+  - types
 sources:
-- id: sa-types
-  resource: src/py/vertebra/extensions/sqlalchemy/types.py
-  title: SQLAlchemy custom vector and JSON type definitions
-- id: sa-dialects-base
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Dialect pool selection and create_connect_args hooks
+  - id: sa-types
+    resource: src/py/vertebra/extensions/sqlalchemy/types.py
+    title: SQLAlchemy custom vector and JSON type definitions
+  - id: sa-dialects-base
+    resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
+    title: Dialect pool selection and create_connect_args hooks
+verification_strategy: regression_tdd
 ---
 
 # Task `t02`: Implement Shared SQLAlchemy Dialect Mixins, ExecutionContext, and Native Types
@@ -46,7 +47,7 @@ Create shared `_SyncDialectMixin` / `_AsyncDialectMixin` in `dialects/_base.py` 
 
 ## Bounded Read Manifest
 
-- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — existing `import_dbapi`, `get_pool_class`, `create_connect_args`, and `is_disconnect` logic.
+- `src/py/vertebra/extensions/sqlalchemy/dialects.py` — existing `_NativeTransactionDialect.create_connect_args` and per-dialect `import_dbapi` / `get_pool_class` (no `is_disconnect` yet).
 - `src/py/vertebra/extensions/sqlalchemy/types.py` — custom SQLAlchemy `TypeDecorator` and `UserDefinedType` classes.
 - `src/py/vertebra/utils/serializers/__init__.py` — centralized `encode_json` / `decode_json` helpers.
 - `src/py/vertebra/extensions/alchemy/broker.py` — broker transport pool hooks.
@@ -54,7 +55,7 @@ Create shared `_SyncDialectMixin` / `_AsyncDialectMixin` in `dialects/_base.py` 
 ## Contracts & Edge Cases
 
 - `_SyncDialectMixin` (`import_dbapi -> SyncDBAPIModule`) and `_AsyncDialectMixin` (`is_async = True`, `import_dbapi` wrapping `AsyncDBAPIModule` via `async_adapter`) pass the full rendered Vertebra URL through `create_connect_args(url)` and select `BrokerPool` / `AsyncBrokerPool` when `broker` is present or native pool classes otherwise.
-- Implement `PgVector`, `HalfVector`, `SparseVector`, `OracleVector` (`VECTOR(dim, FLOAT32)` + `array('f')`), `SpannerVector` (`ARRAY<FLOAT32>`), `BigQueryGeography` (`GEOGRAPHY` WKT), and `MsgspecJSON` (routing strictly through `encode_json` / `decode_json`).
+- Replace the existing multi-dialect `Vector` and `BinaryJSON` types (updating the `alembic.py` comparators that use them) and keep the SQLAlchemy type import-distinct from the driver value type `vertebra.db.adapters.postgres.PgVector`; implement `PgVector`, `HalfVector`, `SparseVector`, `OracleVector` (`VECTOR(dim, FLOAT32)` + `array('f')`), `SpannerVector` (`ARRAY<FLOAT32>`), `BigQueryGeography` (`GEOGRAPHY` WKT), and `MsgspecJSON` (routing strictly through `encode_json` / `decode_json`).
 - Enforce leading `Sync*` / `Async*` naming and zero `Vertebra*` / `*Vtb*` / `Native*` class names (`PY-07`).
 
 ## Test Matrix

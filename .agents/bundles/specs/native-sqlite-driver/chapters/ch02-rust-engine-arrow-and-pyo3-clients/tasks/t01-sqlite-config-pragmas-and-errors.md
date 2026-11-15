@@ -11,34 +11,35 @@ planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
 strategy: regression_tdd
-plan_commit: 1b191388
+plan_commit: 473e1f2e
 depends_on:
-- native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t04
+  - native-sqlite-driver:ch01-wheel-scaffold-and-isolation:t04
 files:
-- src/rs/vertebra-sqlite/src/config.rs
-- src/rs/vertebra-sqlite/src/errors.rs
-- src/rs/vertebra-sqlite/src/lib.rs
+  - src/rs/vertebra-sqlite/src/config.rs
+  - src/rs/vertebra-sqlite/src/errors.rs
+  - src/rs/vertebra-sqlite/src/lib.rs
 tests:
-- src/rs/vertebra-sqlite/tests/sqlite_client.rs
+  - src/rs/vertebra-sqlite/tests/sqlite_client.rs
 read_set:
-- src/rs/vertebra-db/src/sqlite/mod.rs
-- src/rs/vertebra-py/src/db.rs
-- src/rs/vertebra-duckdb/src/lib.rs
+  - src/rs/vertebra-db/src/sqlite/mod.rs
+  - src/rs/vertebra-py/src/db.rs
+  - src/rs/vertebra-duckdb/src/lib.rs
 estimated_loc: 225
 tags:
-- sqlite
-- pragmas
-- errors
+  - sqlite
+  - pragmas
+  - errors
 sources:
-- id: sqlite-rs
-  resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
-  title: Shared SQLite pragma helper in vertebra-db
-- id: vertebra-py-db
-  resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
-  title: Legacy sqlite_initialization_pragmas binding in vertebra-py
-- id: duckdb-lib
-  resource: src/rs/vertebra-duckdb/src/lib.rs
-  title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+  - id: sqlite-rs
+    resource: src/rs/vertebra-db/src/sqlite/mod.rs::SqliteConfig
+    title: Shared SQLite pragma helper in vertebra-db
+  - id: vertebra-py-db
+    resource: src/rs/vertebra-py/src/db.rs::sqlite_initialization_pragmas
+    title: Legacy sqlite_initialization_pragmas binding in vertebra-py
+  - id: duckdb-lib
+    resource: src/rs/vertebra-duckdb/src/lib.rs
+    title: Embedded worker-thread and VTBARROW PyO3 extension precedent
+verification_strategy: regression_tdd
 ---
 
 # Task `t01`: Implement Rust SqliteClientConfig, Initialization Pragma Generator, and Extended Errors
@@ -49,7 +50,7 @@ Implement `SqliteClientConfig` (`config.rs`) and extended SQLite error mapping (
 
 ## Bounded Read Manifest
 
-- `src/rs/vertebra-db/src/sqlite/mod.rs` — `SqliteConfig::initialization_pragmas`.
+- `src/rs/vertebra-db/src/sqlite/mod.rs` — `SqliteConfig` and its `initialization_pragmas` method.
 - `src/rs/vertebra-py/src/db.rs` — Database exception construction helpers.
 - `src/rs/vertebra-duckdb/src/lib.rs` — Error translation precedent.
 
