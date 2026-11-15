@@ -13,15 +13,15 @@ chapters:
 - ch02-engine-capsules-and-discovery
 - ch03-lease-safety-and-uds-attach
 - ch04-python-pooling-sqlspec-sqlalchemy-and-docs
-current_chapter: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
-current_task: broker-pool-sharing:ch04:t01
+current_chapter: null
+current_task: null
 parent_prd: native-data-platform
 depends_on_flows:
 - native-postgres-driver
 plan_revision: 1
 plan_commit: 1b191388
 created_at: '2026-11-12T23:45:00Z'
-updated_at: '2026-11-15T00:06:00Z'
+updated_at: '2026-11-15T00:50:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T18:50:00Z'
@@ -150,12 +150,12 @@ class LeaseQuarantinedError(VertebraError): ...
 
 ## 3. Documentation & OKF Knowledge Plan
 
-- `[ ]` `docs/usage/extensions.md` — shared broker pools, UDS attach boundary, quarantine, `ProxySyncConfig`/`ProxyAsyncConfig`, and `BrokerPool` (`ch04:t04`).
-- `[ ]` `docs/usage/databases.md` — native engine `BrokerEngineCapsule` matrix and `vertebra.db.dbapi` (`ch04:t04`).
-- `[ ]` `docs/changelog/index.md` — `Unreleased` entries (`ch04:t04`).
-- `[ ]` `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — updated broker architecture (`<= 200` lines, `ch04:t04`).
-- `[ ]` `.agents/bundles/knowledge/domains/data/shm-broker-limitations.md` — operational caveats and engine exclusions (`<= 200` lines, `ch04:t04`).
-- `[ ]` `.agents/bundles/knowledge/domains/index.md` — index link to `shm-broker-limitations.md` (`ch04:t04`).
+- [x] `docs/usage/extensions.md` — shared broker pools, UDS attach boundary, quarantine, `ProxySyncConfig`/`ProxyAsyncConfig`, and `BrokerPool` (`ch04:t04`).
+- [x] `docs/usage/databases.md` — native engine `BrokerEngineCapsule` matrix and `vertebra.db.dbapi` (`ch04:t04`).
+- [x] `docs/changelog/index.md` — `Unreleased` entries (`ch04:t04`).
+- [x] `.agents/bundles/knowledge/domains/data/broker-and-shm-leases.md` — updated broker architecture (`<= 200` lines, `ch04:t04`).
+- [x] `.agents/bundles/knowledge/domains/data/shm-broker-limitations.md` — operational caveats and engine exclusions (`<= 200` lines, `ch04:t04`).
+- [x] `.agents/bundles/knowledge/domains/index.md` — index link to `shm-broker-limitations.md` (`ch04:t04`).
 
 ## 4. Requirement-to-Task Traceability Matrix
 
@@ -171,11 +171,11 @@ class LeaseQuarantinedError(VertebraError): ...
 - [x] [936110fc] [ch01-shm-ownership-and-broker-wire](chapters/ch01-shm-ownership-and-broker-wire/spec.md) — Enforce O_CREAT | O_EXCL SHM ownership, OwnedShmRegistry crash/shutdown unlink, explicit owner/worker broker roles, cross-process XXH3-64 pool identity, partitioned pools/heartbeats, and binary DBRPC frames.
 - [x] [673051f1] [ch02-engine-capsules-and-discovery](chapters/ch02-engine-capsules-and-discovery/spec.md) — Define BrokerEngineCapsule ABI v1 and BrokerEngineRegistry, implement Python BrokerEngineDiscovery, and export broker_engine_capsule() across MySQL, DuckDB, Oracle, SQL Server, and PostgreSQL.
 - [x] [ae86568f] [ch03-lease-safety-and-uds-attach](chapters/ch03-lease-safety-and-uds-attach/spec.md) — Implement crashed-worker lease quarantine and reclamation, SCM_RIGHTS/peercred UDS broker attach, BrokerHost reclamation loop, transaction session affinity, streaming Arrow cursors, and vtb broker CLI.
-- [ ] [ch04-python-pooling-sqlspec-sqlalchemy-and-docs](chapters/ch04-python-pooling-sqlspec-sqlalchemy-and-docs/spec.md) — Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
+- [x] [1b3820b7] [ch04-python-pooling-sqlspec-sqlalchemy-and-docs](chapters/ch04-python-pooling-sqlspec-sqlalchemy-and-docs/spec.md) — Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Progress (`ae86568f`)**: `3/4` chapters and `12/16` tasks completed; frontier at `ch04-python-pooling-sqlspec-sqlalchemy-and-docs` (`broker-pool-sharing:ch04:t01`).
+- **Progress (`1b3820b7`)**: `4/4` chapters and `16/16` tasks completed; pending zero-context `ch04` review, `/flow:finish`, and `/flow:archive`.
 - **Upstream Flow Dependencies**: `native-postgres-driver`.
 - **Active Invariants**: `vertebra-core` never links engine crates; live SHM segments are never unlinked; `extensions/sqlspec` contains zero `inspect.signature` or `contextlib.suppress(Exception)`; `vertebra.db.dbapi` has zero upward imports.
 - **Full `/flow:finish` Gate**: `make lint-all && make rs-test && make py-test && make docs && make review-check`

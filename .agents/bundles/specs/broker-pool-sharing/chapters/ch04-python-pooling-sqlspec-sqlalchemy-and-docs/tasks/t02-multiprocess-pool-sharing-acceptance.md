@@ -6,7 +6,9 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: Multi-Process Broker Pool Sharing and Worker Crash Reclamation Acceptance Suite
 description: Verify 4 OS worker processes share a single physical server pool and reclaim crashed worker leases cleanly.
 status: stable
-state: pending
+state: completed
+commit: 1b3820b7
+last_verified_commit: 1b3820b7
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -71,8 +73,8 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_shm_broker.py src/py/t
 
 ## Acceptance Criteria
 
-- [ ] Multi-process workers share one broker-owned pool and recover cleanly from `SIGKILL` and rollback failures.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Multi-process workers share one broker-owned pool and recover cleanly from `SIGKILL` and rollback failures.
+- [x] Zero regressions in the fast verification gate.
 
 [^otel-metrics]: `src/py/vertebra/telemetry/otel.py` — OpenTelemetry and ZPages database pool metric samples.
 [^int-conftest]: `src/py/tests/integration/conftest.py::vtb_postgres_config` — Containerized PostgreSQL and MySQL integration fixtures.

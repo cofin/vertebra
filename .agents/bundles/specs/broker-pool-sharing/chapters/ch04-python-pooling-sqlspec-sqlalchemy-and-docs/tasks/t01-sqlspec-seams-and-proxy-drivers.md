@@ -6,7 +6,9 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: Expose Typed SQLSpec Provider Seams and Refactor ProxySyncDriver / ProxyAsyncDriver
 description: Replace inspect.signature and suppressed release errors in SQLSpec providers with typed Protocols and quarantine, drop invalid gc=False on BrokerRpc structs, and rebase ProxySyncDriver/ProxyAsyncDriver onto SQLSpec driver base classes.
 status: stable
-state: pending
+state: completed
+commit: 1b3820b7
+last_verified_commit: 1b3820b7
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -85,10 +87,10 @@ uv run --no-sync pytest src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec
 
 ## Acceptance Criteria
 
-- [ ] Zero `inspect.signature` or `contextlib.suppress(Exception)` remain in `provider.py` or `proxy.py`.
-- [ ] Uncertain sync and async session releases always quarantine and raise `LeaseQuarantinedError`.
-- [ ] `BrokerRpcRequest`/`BrokerRpcResponse` drop `gc=False`; `ProxySyncDriver` and `ProxyAsyncDriver` inherit SQLSpec adapter bases; stale in-memory transport unions are removed from `plugin.py`.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Zero `inspect.signature` or `contextlib.suppress(Exception)` remain in `provider.py` or `proxy.py`.
+- [x] Uncertain sync and async session releases always quarantine and raise `LeaseQuarantinedError`.
+- [x] `BrokerRpcRequest`/`BrokerRpcResponse` drop `gc=False`; `ProxySyncDriver` and `ProxyAsyncDriver` inherit SQLSpec adapter bases; stale in-memory transport unions are removed from `plugin.py`.
+- [x] Zero regressions in the fast verification gate.
 
 [^sqlspec-provider]: `src/py/vertebra/extensions/sqlspec/provider.py::_BaseSQLSpecProvider` — Broker-side SQLSpec provider session and lease management.
 [^sqlspec-proxy]: `src/py/vertebra/extensions/sqlspec/proxy.py::ProxySyncDriver` — Worker-side SQLSpec proxy drivers.

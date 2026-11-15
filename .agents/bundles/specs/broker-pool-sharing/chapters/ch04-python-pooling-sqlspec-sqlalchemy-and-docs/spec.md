@@ -5,14 +5,14 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: 'Chapter 04: Proxy Drivers, Multi-Process SQLSpec & SQLAlchemy Pool Sharing, and Docs/OKF'
 description: Refactor SQLSpec provider seams and ProxySyncDriver/ProxyAsyncDriver, prove 4-worker single-pool sharing, extract standalone vertebra.db.dbapi and wire SQLAlchemy/Advanced Alchemy broker pooling, and sync docs/OKF.
 status: stable
-state: in_progress
+state: completed
 planning_status: complete
 planning_quality: standard
 planning_degraded_reason: null
 depends_on_chapters:
 - ch03-lease-safety-and-uds-attach
 plan_commit: 1b191388
-updated_at: '2026-11-14T23:08:00Z'
+updated_at: '2026-11-15T00:50:00Z'
 generated:
   by: flow/0.30.1
   at: '2026-11-14T23:08:00Z'
@@ -186,14 +186,14 @@ Task `t04` completes `[6/6]` documentation and OKF deliverables for `broker-pool
 
 ## 5. Implementation Plan
 
-- [ ] [t01-sqlspec-seams-and-proxy-drivers.md](tasks/t01-sqlspec-seams-and-proxy-drivers.md) — Replace `inspect.signature` and suppressed release blocks on SQLSpec providers with typed Protocols and quarantine, drop invalid `gc=False` on `BrokerRpc*`, rebase `ProxySyncDriver`/`ProxyAsyncDriver` onto adapter base classes, and remove stale in-memory transport unions in `plugin.py`.
-- [ ] [t02-multiprocess-pool-sharing-acceptance.md](tasks/t02-multiprocess-pool-sharing-acceptance.md) — Export quarantine counters on `DbPoolMetricSample` and verify 4 OS worker processes share one server pool, recover cleanly from `SIGKILL`, and enforce UDS rejection.
-- [ ] [t03-standalone-dbapi-and-sqlalchemy-pooling.md](tasks/t03-standalone-dbapi-and-sqlalchemy-pooling.md) — Extract standalone PEP 249 `vertebra.db.dbapi`, isolate `async_adapter.py`, remove embedded DB-API copies and adapter `isinstance` branching from `dialects.py`, clean stale `alchemy/__init__.py` exports, and wire `BrokerPool`/`AsyncBrokerPool`/`broker_creator`.
-- [ ] [t04-broker-docs-changelog-and-okf-sync.md](tasks/t04-broker-docs-changelog-and-okf-sync.md) — Update `docs/usage/{databases,extensions}.md`, `docs/changelog/index.md`, `broker-and-shm-leases.md`, `shm-broker-limitations.md`, and `domains/index.md`.
+- [x] [1b3820b7] [t01-sqlspec-seams-and-proxy-drivers.md](tasks/t01-sqlspec-seams-and-proxy-drivers.md) — Replace `inspect.signature` and suppressed release blocks on SQLSpec providers with typed Protocols and quarantine, drop invalid `gc=False` on `BrokerRpc*`, rebase `ProxySyncDriver`/`ProxyAsyncDriver` onto adapter base classes, and remove stale in-memory transport unions in `plugin.py`.
+- [x] [1b3820b7] [t02-multiprocess-pool-sharing-acceptance.md](tasks/t02-multiprocess-pool-sharing-acceptance.md) — Export quarantine counters on `DbPoolMetricSample` and verify 4 OS worker processes share one server pool, recover cleanly from `SIGKILL`, and enforce UDS rejection.
+- [x] [1b3820b7] [t03-standalone-dbapi-and-sqlalchemy-pooling.md](tasks/t03-standalone-dbapi-and-sqlalchemy-pooling.md) — Extract standalone PEP 249 `vertebra.db.dbapi`, isolate `async_adapter.py`, remove embedded DB-API copies and adapter `isinstance` branching from `dialects.py`, clean stale `alchemy/__init__.py` exports, and wire `BrokerPool`/`AsyncBrokerPool`/`broker_creator`.
+- [x] [1b3820b7] [t04-broker-docs-changelog-and-okf-sync.md](tasks/t04-broker-docs-changelog-and-okf-sync.md) — Update `docs/usage/{databases,extensions}.md`, `docs/changelog/index.md`, `broker-and-shm-leases.md`, `shm-broker-limitations.md`, and `domains/index.md`.
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Baseline (`18baadcd`)**: `state: planned`; `0/4` tasks completed.
+- **Completed (`1b3820b7`)**: `4/4` tasks completed (`t01`–`t04`); ready for zero-context chapter review (`last_reviewed_commit` stamped post-review).
 - **Active Invariants**: Zero `inspect.signature` or `contextlib.suppress(Exception)` in `extensions/sqlspec`; `vertebra.db.dbapi` loads zero upward packages; OKF chapters stay `<= 200` lines with zero private paths.
 - **Fast Chapter Gate (`< 60s`)**: `uv run --no-sync pytest src/py/tests/unit/db/test_dbapi_standalone.py src/py/tests/unit/extensions/test_sqlalchemy_and_sqlspec_vtb.py src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py src/py/tests/unit/extensions/test_shm_broker.py -q && uv run --no-sync ruff check src/py/vertebra/db/dbapi src/py/vertebra/extensions/sqlspec src/py/vertebra/extensions/sqlalchemy src/py/vertebra/extensions/alchemy src/py/vertebra/telemetry && uv run --no-sync mypy src/py/vertebra/db/dbapi src/py/vertebra/extensions/sqlspec src/py/vertebra/extensions/sqlalchemy src/py/vertebra/extensions/alchemy src/py/vertebra/telemetry && uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-check`
 

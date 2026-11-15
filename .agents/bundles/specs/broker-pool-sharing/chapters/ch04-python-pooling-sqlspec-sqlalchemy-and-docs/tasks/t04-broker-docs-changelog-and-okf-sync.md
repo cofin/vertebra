@@ -6,7 +6,9 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: Synchronize Broker Pool Sharing Documentation, Changelog, and OKF Chapters
 description: Update databases/extensions/dbapi docs, changelog, and OKF broker, driver, SQLSpec/SQLAlchemy, and broker-pool-limitations chapters.
 status: stable
-state: pending
+state: completed
+commit: 1b3820b7
+last_verified_commit: 1b3820b7
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -91,9 +93,9 @@ uv run --no-sync python -m tools.docs.scan_public_docstrings && make review-chec
 
 ## Acceptance Criteria
 
-- [ ] Public docs and changelog accurately describe shipped broker pool-sharing APIs and pass docstring scans.
-- [ ] Both OKF chapters are `<= 200` lines, present-tense, indexed without frontmatter drift, and pass `make review-check`.
-- [ ] Zero regressions in the fast verification gate.
+- [x] Public docs and changelog accurately describe shipped broker pool-sharing APIs and pass docstring scans.
+- [x] Both OKF chapters are `<= 200` lines, present-tense, indexed without frontmatter drift, and pass `make review-check`.
+- [x] Zero regressions in the fast verification gate.
 
 [^docs-ext]: `docs/usage/extensions.md` — Extensions usage documentation.
 [^docs-db]: `docs/usage/databases.md` — Databases usage documentation.

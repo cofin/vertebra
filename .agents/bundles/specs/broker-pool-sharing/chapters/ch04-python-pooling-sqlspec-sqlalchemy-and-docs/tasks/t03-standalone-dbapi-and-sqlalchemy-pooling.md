@@ -6,7 +6,9 @@ chapter_id: ch04-python-pooling-sqlspec-sqlalchemy-and-docs
 title: Extract Standalone vertebra.db.dbapi and Wire SQLAlchemy & Advanced Alchemy Broker Pooling
 description: Extract standalone PEP 249 vertebra.db.dbapi, isolate async_adapter.py, clean dialects.py/alembic.py and stale alchemy exports, and wire BrokerPool/AsyncBrokerPool across SQLAlchemy and Advanced Alchemy.
 status: stable
-state: pending
+state: completed
+commit: 1b3820b7
+last_verified_commit: 1b3820b7
 planning_quality: standard
 planning_degraded_reason: null
 worksheet_format: compact
@@ -104,10 +106,10 @@ uv run --no-sync pytest src/py/tests/unit/db/test_dbapi_standalone.py src/py/tes
 
 ## Acceptance Criteria
 
-- [ ] `vertebra.db.dbapi` satisfies PEP 249 and async DB-API contracts with zero upward imports.
-- [ ] `dialects.py` contains only SQLAlchemy dialect definitions with zero embedded DB-API classes or re-export shims, and stale `alchemy/__init__.py` exports are removed.
-- [ ] `BrokerPool` and `AsyncBrokerPool` share broker pools cleanly across SQLAlchemy and Advanced Alchemy.
-- [ ] Zero regressions in the fast verification gate.
+- [x] `vertebra.db.dbapi` satisfies PEP 249 and async DB-API contracts with zero upward imports.
+- [x] `dialects.py` contains only SQLAlchemy dialect definitions with zero embedded DB-API classes or re-export shims, and stale `alchemy/__init__.py` exports are removed.
+- [x] `BrokerPool` and `AsyncBrokerPool` share broker pools cleanly across SQLAlchemy and Advanced Alchemy.
+- [x] Zero regressions in the fast verification gate.
 
 [^sa-dialects]: `src/py/vertebra/extensions/sqlalchemy/dialects.py::SyncDBAPIModule` — SQLAlchemy-embedded PEP 249 module, connection, cursor, and dialect classes.
 [^db-config]: `src/py/vertebra/db/driver/_common.py::BaseDatabaseConfig` — BaseDatabaseConfig with dialect ClassVar and pool_key.
