@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Shared-Memory Broker & Cross-Process Limitations
-description: Platform, ABI, capacity, security, and cloud-driver boundaries governing Vertebra's shared-memory connection broker and standalone DB-API.
+description: "Platform, ABI, capacity, security, and cloud-driver boundaries governing Vertebra's shared-memory connection broker and standalone DB-API."
 status: stable
 tags:
 - data

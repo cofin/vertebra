@@ -1,9 +1,7 @@
 ---
 type: Pattern
 title: Serialization & Python Utility Conventions
-description: How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding,
-  Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration,
-  async/sync bridging, free-threaded worker pools, optional imports, and config lookup.
+description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
 status: stable
 tags:
 - patterns

@@ -1,8 +1,7 @@
 ---
 type: Decision
 title: 'ADR-004: Optional Driver Wheels and Shared-Memory Ownership'
-description: Database client dependency isolation and producer-owned Arrow mapping
-  transfer across independently linked PyO3 extensions.
+description: "Database client dependency isolation and producer-owned Arrow mapping transfer across independently linked PyO3 extensions."
 status: stable
 tags:
 - decisions

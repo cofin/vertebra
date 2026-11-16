@@ -1,10 +1,7 @@
 ---
 type: Guide
 title: SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions
-description: The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and
-  `vertebra.extensions.sqlalchemy` packages providing native SHM adapters (`SyncAdapterConfig`,
-  `AsyncAdapterConfig`), universal SHM broker proxies (`ProxySyncConfig`, `ProxyAsyncConfig`),
-  `+vtb` dialect implementations, column types, and CDC event backends.
+description: "The `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` packages providing native SHM adapters (`SyncAdapterConfig`, `AsyncAdapterConfig`), universal SHM broker proxies (`ProxySyncConfig`, `ProxyAsyncConfig`), `+vtb` dialect implementations, column types, and CDC event backends."
 status: stable
 tags:
 - domains

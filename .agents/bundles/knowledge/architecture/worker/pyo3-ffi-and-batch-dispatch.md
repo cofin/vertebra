@@ -1,8 +1,7 @@
 ---
 type: Guide
 title: PyO3 FFI & Vectorized Batch Dispatch
-description: The vertebra._vertebra module surface, anchored zero-copy Request/Headers/Response/RequestBatch
-  types, FastPathProvider dispatch plans, and Worker batch execution.
+description: "The vertebra._vertebra module surface, anchored zero-copy Request/Headers/Response/RequestBatch types, FastPathProvider dispatch plans, and Worker batch execution."
 status: stable
 tags:
 - architecture

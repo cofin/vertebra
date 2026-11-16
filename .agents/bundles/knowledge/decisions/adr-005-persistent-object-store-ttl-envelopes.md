@@ -1,8 +1,7 @@
 ---
 type: Decision
 title: 'ADR-005: Persistent Object-Store TTL Envelopes'
-description: Persist value bytes and wall-clock expiration together across object-storage
-  backends and process reconstruction.
+description: "Persist value bytes and wall-clock expiration together across object-storage backends and process reconstruction."
 status: stable
 tags:
 - decisions

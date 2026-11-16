@@ -1,9 +1,7 @@
 ---
 type: Concept
 title: 'Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django'
-description: First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware
-  offload specs, FastPathProvider dispatch, and ecosystem bridges across Litestar,
-  Starlette, FastAPI, Flask, and Django.
+description: "First-class framework plugins, matchit 0.9 RouteCompiler, Rust middleware offload specs, FastPathProvider dispatch, and ecosystem bridges across Litestar, Starlette, FastAPI, Flask, and Django."
 status: stable
 tags:
 - domains

@@ -171,7 +171,8 @@ async def test_a2a_http_handler_agent_card_etag_304_and_rust_discovery() -> None
     assert status_304 == 304
     assert body_304 == b""
 
-    weak_etag = f"W/{etag.strip('"')}"
+    cleaned_etag = etag.strip('"')
+    weak_etag = f"W/{cleaned_etag}"
     status_weak, _, _ = await handler.handle_request(
         "GET",
         "/.well-known/agent-card.json",
