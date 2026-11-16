@@ -8,6 +8,18 @@ from typing import TYPE_CHECKING, Any, cast
 from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from django.db.backends.oracle.base import (
+        DatabaseWrapper as DjangoOracleDatabaseWrapper,
+    )
+
+    from vertebra.db.dbapi import SyncDBAPICursor
+
+__all__ = ("DatabaseWrapper",)
 
 
 def _ensure_oracledb() -> None:
@@ -39,18 +51,16 @@ def _ensure_oracledb() -> None:
     sys.modules["oracledb"] = ora
 
 
-_ensure_oracledb()
+def _load_django_oracle_wrapper() -> type[Any]:
+    """Ensure oracledb shim is registered and return Django's Oracle DatabaseWrapper base."""
+    _ensure_oracledb()
+    mod = ensure_module("django.db.backends.oracle.base", extra="django")
+    wrapper_cls: type[Any] = mod.DatabaseWrapper
+    return wrapper_cls
 
-from django.db.backends.oracle.base import (  # noqa: E402
-    DatabaseWrapper as DjangoOracleDatabaseWrapper,
-)
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from vertebra.db.dbapi import SyncDBAPICursor
-
-__all__ = ("DatabaseWrapper",)
+if not TYPE_CHECKING:
+    DjangoOracleDatabaseWrapper = _load_django_oracle_wrapper()
 
 
 class DatabaseWrapper(DatabaseWrapperMixin, DjangoOracleDatabaseWrapper):

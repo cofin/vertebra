@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db.adapters.bigquery.core import BigQueryTableIdentifier
@@ -15,7 +15,16 @@ from vertebra.utils.text import validate_identifier
 if TYPE_CHECKING:
     from vertebra.db.adapters.bigquery.driver import AsyncBigQueryDriver, SyncBigQueryDriver
 
-__all__ = ("BigQueryEmbeddingPushdown",)
+__all__ = ("BigQueryEmbeddingPushdown", "BigQuerySelectPort")
+
+
+class BigQuerySelectPort(Protocol):
+    """Structural synchronous SQL selection port accepted by ``BigQueryEmbeddingPushdown``."""
+
+    def select(self, sql: str, parameters: Any = None, /) -> Sequence[Any]:
+        """Execute ``sql`` and return row records."""
+        ...
+
 
 _DISTANCE_TYPES: frozenset[str] = frozenset({"COSINE", "EUCLIDEAN", "DOT_PRODUCT"})
 
@@ -42,7 +51,7 @@ class BigQueryEmbeddingPushdown:
 
     def __init__(
         self,
-        driver: AsyncBigQueryDriver | SyncBigQueryDriver,
+        driver: AsyncBigQueryDriver | SyncBigQueryDriver | BigQuerySelectPort,
         model: str = "gemini-embedding-001",
         *,
         model_endpoint: str | None = None,
@@ -59,7 +68,7 @@ class BigQueryEmbeddingPushdown:
         self._normalize = normalize
 
     @property
-    def driver(self) -> AsyncBigQueryDriver | SyncBigQueryDriver:
+    def driver(self) -> AsyncBigQueryDriver | SyncBigQueryDriver | BigQuerySelectPort:
         """Return the database driver."""
         return self._driver
 

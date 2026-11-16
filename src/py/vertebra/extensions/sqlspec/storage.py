@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 from urllib.parse import urlparse
@@ -568,7 +568,7 @@ class ObjectStoreBackend(ObjectStoreBase):
                 batch_size=batch_size,
                 options=kwargs,
             )
-            async with contextlib.aclosing(cast("AsyncGenerator[ArrowRecordBatch, None]", batches)):
+            async with contextlib.aclosing(batches):
                 async for batch in batches:
                     yield batch
 

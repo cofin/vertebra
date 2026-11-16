@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -335,7 +335,7 @@ class SyncDuckDBDriver(SyncDatabaseDriver[DuckDBConfig]):
         *,
         batch_size: int = 65_536,
         **kwargs: Any,
-    ) -> Iterator[Any]:
+    ) -> Generator[Any, None, None]:
         """Stream Arrow record batches from `vertebra._duckdb` shared-memory cursors."""
         _ = kwargs
         chunk = max(1, int(batch_size))

@@ -269,25 +269,31 @@ class _SelectPort:
         self.rows = rows
         self.calls: list[tuple[str, Any, int]] = []
 
-    def select(self, sql: str, parameters: Any = None) -> Any:
+    def select(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
+        _ = kwargs
         self.calls.append((sql, parameters, threading.get_ident()))
         return self.rows
 
-    def execute(self, sql: str, parameters: Any = None) -> None:
+    def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
+        _ = kwargs
         self.calls.append((sql, parameters, threading.get_ident()))
 
 
-class _AsyncSelectPort(AsyncDatabaseDriver[Any], _SelectPort):
+class _AsyncSelectPort(AsyncDatabaseDriver[Any]):
     """Async database port implementing the real driver dispatch boundary."""
 
     def __init__(self, rows: Any) -> None:
-        _SelectPort.__init__(self, rows)
+        self.rows = rows
+        self.calls: list[tuple[str, Any, int]] = []
 
     async def select(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
-        return _SelectPort.select(self, sql, parameters)
+        _ = kwargs
+        self.calls.append((sql, parameters, threading.get_ident()))
+        return self.rows
 
     async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> Any:
-        return _SelectPort.execute(self, sql, parameters)
+        _ = kwargs
+        self.calls.append((sql, parameters, threading.get_ident()))
 
 
 _PROVIDERS = (BigQueryEmbeddingPushdown, SpannerEmbeddingPushdown, PostgresEmbeddingPushdown, OracleEmbeddingPushdown)
@@ -302,7 +308,8 @@ async def test_pushdown_capability_dispatch_and_order(provider: Any, port_type: 
     options = {"provider": "local"} if provider is OracleEmbeddingPushdown else {}
     pushdown = provider(port, dimensions=4, **options)
     assert isinstance(pushdown, EmbeddingPushdown)
-    assert pushdown.driver is port
+    pushdown_any: Any = pushdown
+    assert pushdown_any.driver is port
     vector = await pushdown.embed_query("query", normalize=False)
     assert vector.to_list() == [3.0, 4.0, 0.0, 0.0]
     port.rows = [{"embedding": [3.0, 4.0]}]
@@ -440,9 +447,17 @@ async def test_oracle_url_bytes_and_token_rotation(port_type: Any, async_cache: 
                 quota_project_id=None,
             )
 
-    class AsyncTokenPort(SyncTokenPort):
+    class AsyncTokenPort:
+        def __init__(self) -> None:
+            self.generation = 1
+
         async def get_token(self) -> GcpTokenSnapshot:
-            return super().get_token()
+            return GcpTokenSnapshot(
+                access_token=f"token-{self.generation}",
+                expires_at_unix_ms=4102444800000,
+                generation=self.generation,
+                quota_project_id=None,
+            )
 
     token_cache: Any = AsyncTokenPort() if async_cache else SyncTokenPort()
     port = port_type([{"embedding": encode_oracle_vector_f32([3, 4, 0, 0])}])
@@ -550,7 +565,7 @@ async def test_embed_document_and_embed_many_vector_cache_parity_and_partial_mis
             rows = [
                 [
                     float(len(txt)),
-                    float(len(titles[idx]) if titles and titles[idx] else 0),
+                    float(len(title_val) if titles and (title_val := titles[idx]) else 0),
                     1.0,
                     0.0,
                 ]

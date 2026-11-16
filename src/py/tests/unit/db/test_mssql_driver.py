@@ -9,6 +9,7 @@ import struct
 import sys
 import threading
 import time
+from typing import Any
 
 import msgspec
 import pyarrow as pa
@@ -696,7 +697,7 @@ async def test_async_mssql_pipeline_commit_rollback_and_savepoint_nesting() -> N
     ],
 )
 def test_mssql_config_in_memory_validation(
-    kwargs: dict[str, object],
+    kwargs: dict[str, Any],
     match_pattern: str,
 ) -> None:
     """Verify `MSSQLConfig` and native `SyncMSSQLClient` reject invalid port, NUL, encryption, and PEM inputs."""

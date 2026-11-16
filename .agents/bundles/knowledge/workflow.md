@@ -13,15 +13,15 @@ generated:
   by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-16T06:35:00Z"
+    commit: d4ffd666
+  - by: agent:flow-archive
+    at: "2026-11-16T04:10:00Z"
+    commit: a13ed018
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
-  - by: agent:flow-executor
-    at: "2026-11-14T22:27:00Z"
-    commit: ff9f78cb
-  - by: agent:flow-setup
-    at: "2026-11-14T18:43:00Z"
-    commit: 1b191388
 sources:
   - id: src-makefile
     resource: Makefile
@@ -65,8 +65,8 @@ make clean                                                            # Remove P
 make release bump=patch                                               # Synchronize versions across manifests via bump-my-version
 
 # 2. Fast Chapter Gate (< 60s — run once per chapter batch) & Focused Suites
-make lint-all                                                         # Read-only CI lint, Ruff, Mypy, stubtest, rustfmt --check, Clippy (--features tls,http3,compression,gcp), review-check
-make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy + stubtest + review-check
+make lint-all                                                         # Read-only CI lint, Ruff, Mypy (src/py/vertebra + src/py/tests/{unit,integration} + tools + docs/examples), stubtest, rustfmt --check, Clippy, review-check
+make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy (including tests & benchmarks) + stubtest + review-check
 make review-check                                                     # Validate review capability manifests, skills, agents, OKF bundles, and privacy constraints
 make review-route                                                     # Route changed files to owning review areas and shards (BASE=origin/main)
 uv run --no-sync pytest src/py/tests/unit/server/test_runner.py -q    # Targeted Python unit test file
@@ -100,7 +100,7 @@ make bench                                                            # make bui
 ## Polyglot Rebuild & Hygiene Rules
 
 1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed extras with `uv run --no-sync` when verifying an existing `.venv` or linked `git worktree`. After any `.rs` edit in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-sqlite`, `vertebra-redis`, or `vertebra-valkey`, rebuild the touched extension (or run `make dev`) before `pytest` or `mypy.stubtest`.
-2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files.
+2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` (`make core-wheel-check`) while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files (`make {sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey}-wheel-check`).
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
 5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.1.0; python_version < '3.14'` strictly inside `[dependency-groups].bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).

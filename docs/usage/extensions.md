@@ -208,7 +208,9 @@ CACHES = {
 TASKS = {
     "default": {
         "BACKEND": "vertebra.extensions.django.tasks.TaskBackend",
-        "OPTIONS": {"BACKEND_URL": "postgresql://app_user:secret@localhost:5432/app"},
+        "OPTIONS": {
+            "BACKEND_URL": "postgresql://app_user:secret@localhost:5432/app"
+        },
     }
 }
 

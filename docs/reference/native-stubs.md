@@ -136,24 +136,28 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._bigquery.AsyncBigQueryClient
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._spanner.SyncSpannerClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._spanner.AsyncSpannerClient
     options:
-      heading_level: 3
+      heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ## `vertebra._duckdb` — Embedded DuckDB 2.0 Analytical Client
@@ -162,12 +166,14 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._duckdb.AsyncDuckDBClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ## Native SQL Drivers (`_postgres`, `_oracle`, `_mysql`, `_mssql`, `_sqlite`)
@@ -178,72 +184,79 @@ Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED`
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._postgres.AsyncPostgresReplication
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._oracle.SyncOracleClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._mysql.SyncMySQLClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._mssql.SyncMSSQLClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._sqlite.SyncSQLiteClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._sqlite.AsyncSQLiteClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
-## `vertebra._redis` — Native RESP3 Client & Cache Invalidation
+## Native RESP3 Cache Drivers (`_redis`, `_valkey`)
 
-The standalone `vertebra._redis` native extension provides `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener`, `SyncRedisPipeline`, and `AsyncRedisPipeline` with RESP3 wire protocol support, client-side caching invalidations, Sentinel, and Cluster topology routing.
+Standalone `vertebra._redis` and `vertebra._valkey` extensions expose `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener`, `SyncRedisPipeline`, and `AsyncRedisPipeline` plus Valkey-native `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener`, `SyncValkeyPipeline`, and `AsyncValkeyPipeline` with RESP3 wire framing, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, client-side caching invalidations, Sentinel, and Cluster topology routing.
 
 ::: vertebra._redis.AsyncRedisClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._redis.SyncRedisClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
-
-## `vertebra._valkey` — Native Valkey RESP3 Client & Hash Expiration
-
-The standalone `vertebra._valkey` native extension provides `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener`, `SyncValkeyPipeline`, and `AsyncValkeyPipeline` with RESP3 wire protocol support, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, client-side caching invalidations, Sentinel, and Cluster topology routing.
 
 ::: vertebra._valkey.AsyncValkeyClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false
 
 ::: vertebra._valkey.SyncValkeyClient
     options:
       heading_level: 4
       members: false
+      summary: false
       show_signature: false

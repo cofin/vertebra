@@ -7,6 +7,7 @@ import enum
 import gc
 import uuid
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import pytest
@@ -67,51 +68,51 @@ class MyStruct(msgspec.Struct):
     data: str
 
 
-def test_encode_decode_basic():
+def test_encode_decode_basic() -> None:
     data = {"a": 1, "b": "test"}
     encoded = encode_json(data, as_bytes=True)
     assert decode_json(encoded) == data
 
 
-def test_encode_datetime():
+def test_encode_datetime() -> None:
     dt = datetime.datetime(2026, 3, 20, 10, 30, tzinfo=datetime.UTC)
     encoded = encode_json({"dt": dt}, as_bytes=True)
     assert b"2026-03-20T10:30:00Z" in encoded
 
 
-def test_encode_uuid():
+def test_encode_uuid() -> None:
     u = uuid.uuid4()
     encoded = encode_json({"u": u}, as_bytes=True)
     assert str(u).encode() in encoded
 
 
-def test_encode_decimal():
+def test_encode_decimal() -> None:
     d = decimal.Decimal("42.5")
     encoded = encode_json({"d": d}, as_bytes=True)
     assert b"42.5" in encoded
 
 
-def test_encode_enum():
+def test_encode_enum() -> None:
     e = MyEnum.A
     encoded = encode_json({"e": e}, as_bytes=True)
     assert b'"a"' in encoded
 
 
-def test_encode_dataclass():
+def test_encode_dataclass() -> None:
     d = MyData(name="test", age=25)
     encoded = encode_json(d, as_bytes=True)
     assert b'"name":"test"' in encoded
     assert b'"age":25' in encoded
 
 
-def test_encode_struct():
+def test_encode_struct() -> None:
     s = MyStruct(id=1, data="hello")
     encoded = encode_json(s, as_bytes=True)
     assert b'"id":1' in encoded
     assert b'"data":"hello"' in encoded
 
 
-def test_encode_complex_types():
+def test_encode_complex_types() -> None:
     data = {
         "set": {1, 2, 3},
         "frozenset": frozenset([4, 5]),
@@ -124,14 +125,14 @@ def test_encode_complex_types():
     assert decoded["decimal"] == "10.0"
 
 
-def test_encode_json_as_string():
+def test_encode_json_as_string() -> None:
     data = {"a": 1}
     encoded = encode_json(data, as_bytes=False)
     assert isinstance(encoded, str)
     assert encoded == '{"a":1}'
 
 
-def test_decode_json_string():
+def test_decode_json_string() -> None:
     data = '{"a":1}'
     decoded = decode_json(data)
     assert decoded == {"a": 1}
@@ -210,14 +211,14 @@ class SampleCamelItem(CamelizedBaseStruct):
     optional_tag: str | None = None
 
 
-class SampleFrozenItem(FrozenBaseStruct):
+class SampleFrozenItem(FrozenBaseStruct, frozen=True):
     """Immutable snake_case base struct with omitted defaults."""
 
     item_name: str
     optional_tag: str | None = None
 
 
-class SampleFrozenCamelItem(FrozenCamelizedStruct):
+class SampleFrozenCamelItem(FrozenCamelizedStruct, frozen=True):
     """Immutable camelCase base struct with omitted defaults."""
 
     item_name: str
@@ -250,11 +251,13 @@ def test_base_struct_hierarchy_configs_immutability_and_wire_encoding() -> None:
     mutable_base.optional_tag = "updated"
     assert mutable_base.to_dict() == {"item_name": "alpha", "optional_tag": "updated"}
 
+    untyped_frozen_base: Any = frozen_base
     with pytest.raises(AttributeError):
-        frozen_base.item_name = "mutated"
+        untyped_frozen_base.item_name = "mutated"
 
+    untyped_frozen_camel: Any = frozen_camel
     with pytest.raises(AttributeError):
-        frozen_camel.item_name = "mutated"
+        untyped_frozen_camel.item_name = "mutated"
 
     assert decode_json(encode_json_bytes(frozen_base)) == {"item_name": "gamma"}
     assert decode_json(encode_json_bytes(frozen_camel)) == {"itemName": "delta"}

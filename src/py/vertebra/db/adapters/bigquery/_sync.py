@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, Self
 
 import msgspec
 
+from vertebra._vertebra import (
+    ArrowCursor as _RustArrowCursor,
+)
 from vertebra._vertebra import (
     LeaseBroker,
     NotFoundError,
@@ -34,10 +37,66 @@ from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._bigquery import SyncBigQueryClient
     from vertebra.storage import AsyncObjectStore, SyncObjectStore
 
-__all__ = ("SyncBigQueryDriver",)
+__all__ = (
+    "SyncBigQueryClientProtocol",
+    "SyncBigQueryDriver",
+)
+
+
+class SyncBigQueryClientProtocol(Protocol):
+    """Structural protocol for synchronous BigQuery wire clients and test doubles."""
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a GoogleSQL query via ``jobs.query``."""
+        ...
+
+    def dry_run(
+        self,
+        sql: str,
+        params_json: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate ``sql`` via ``jobs.insert(dryRun=True)``."""
+        ...
+
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> _RustArrowCursor:
+        """Stream a BigQuery table into a zero-copy ``ArrowCursor``."""
+        ...
+
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]:
+        """Append an Arrow IPC stream via the Storage Write API."""
+        ...
+
+    def close(self) -> None:
+        """Close the client handle."""
+        ...
 
 
 class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
@@ -62,7 +121,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: SyncBigQueryClient | None = None,
+        client: SyncBigQueryClientProtocol | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -84,7 +143,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: SyncBigQueryClient | None = client
+        self._client: SyncBigQueryClientProtocol | None = client
         self._session_id: str | None = None
         self._in_transaction: bool = False
         self._last_query_metadata: dict[str, Any] = {}
@@ -504,9 +563,11 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             expires_in_secs=expires_in_secs,
         )
 
-    def _ensure_client(self) -> SyncBigQueryClient:
+    def _ensure_client(self) -> SyncBigQueryClientProtocol:
         if self._client is None:
-            self._client = BigQueryCore.create_sync_rust_client(self.config)
+            created: SyncBigQueryClientProtocol = BigQueryCore.create_sync_rust_client(self.config)
+            self._client = created
+            return created
         return self._client
 
     def _prepare_sql_and_params(

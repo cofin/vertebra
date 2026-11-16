@@ -13,15 +13,15 @@ generated:
   by: flow/0.29.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-16T06:35:00Z"
+    commit: d4ffd666
+  - by: agent:flow-archive
+    at: "2026-11-16T04:10:00Z"
+    commit: a13ed018
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
     commit: ff9f78cb
-  - by: agent:flow-executor
-    at: "2026-11-14T18:05:00Z"
-    commit: 1b191388
-  - by: agent:flow-learn
-    at: "2026-11-14T17:15:00Z"
-    commit: 1b191388
 sources:
   - id: src-makefile
     resource: Makefile
@@ -132,12 +132,12 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 
 | Target | Command | What It Verifies |
 |---|---|---|
-| `make dev` | `cargo build --workspace` (non-extension crates) + `maturin develop --uv` across all 10 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`) | Debug native build required after Rust edits before `pytest` (`make build` runs the `--release` counterpart). |
-| `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cargo test --workspace --features tls,http3,compression,gcp` + non-`http3` `config::tests` & `server` fail-loud check | Unit and integration tests across all 13 workspace crates plus `--no-default-features` / `--features tls,compression` gate coverage. |
-| `make py-test` | `make dev` + `mypy.stubtest` across all 10 extensions + `uv run pytest src/py/tests -v` | `.pyi` stub parity plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] (zero third-party `duckdb` dependency outside `--group bench`). |
-| `make {duckdb,mysql,mssql,oracle,postgres}-test` & `make db-conformance` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, engine unit + live conformance/native suites (`make db-conformance ENGINE=<duckdb\|mysql\|mariadb\|mssql\|oracle> [VERSION=<v>]` requires `ENGINE` under zero-skip `ConformanceGate`; `oracle-test` runs `test_oracle_adapter.py` + `test_oracle_native.py`), `postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel]), and `postgres-bench-check` ([`test_postgres_benchmarks.py`](../../../../src/py/tests/unit/tools/test_postgres_benchmarks.py)[^src-postgres-bench-tests]) | Scoped native database crate, stub, live conformance, benchmark comparator, and PEP 420 wheel isolation gates. |
+| `make dev` | `cargo build --workspace` (non-extension crates) + `maturin develop --uv` across all 13 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`, `_sqlite`, `_redis`, `_valkey`) | Debug native build required after Rust edits before `pytest` (`make build` runs the `--release` counterpart). |
+| `make rs-test` | `rm -rf /dev/shm/test-* /dev/shm/*vertebra*` + `cargo test --workspace --features tls,http3,compression,gcp` + non-`http3` `config::tests` & `server` fail-loud check | Unit and integration tests across all 16 workspace crates plus `--no-default-features` / `--features tls,compression` gate coverage. |
+| `make py-test` | `make dev` + `mypy.stubtest` across all 13 extensions + `uv run pytest src/py/tests -v` | `.pyi` stub parity plus Python suites under [`src/py/tests/`](../../../../src/py/tests/conftest.py)[^src-tests-conftest-py] (zero third-party `duckdb` dependency outside `--group bench`). |
+| `make {sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey}-test` & `make db-conformance` | Per-crate `cargo test`, `mypy.stubtest vertebra._<engine>`, engine unit + live conformance suites (`make db-conformance ENGINE=<duckdb\|mysql\|mariadb\|mssql\|oracle\|redis\|sqlite\|valkey> [VERSION=<v>]` under zero-skip `ConformanceGate`), `{sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey}-wheel-check` ([`verify_postgres_wheel.py`](../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel]), and `postgres-bench-check` ([`test_postgres_benchmarks.py`](../../../../src/py/tests/unit/tools/test_postgres_benchmarks.py)[^src-postgres-bench-tests]) | Scoped native database/cache crate, stub, live conformance, benchmark comparator, and PEP 420 wheel isolation gates. |
 | `make ts-test` | `cd src/ts/vertebra-client && NODE_OPTIONS="--localstorage-file=..." bun run test` | Vitest suites under [`package.json`](../../../../src/ts/vertebra-client/package.json)[^src-package-json]. |
-| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` (`src/py`, `tools`, `docs/examples`) + `mypy` (`tools/benchmarks` included) + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, type, stub, and review-manifest gate (`make lint` applies auto-fixes). |
+| `make lint-all` | `biome check .` + `ruff check` & `ruff format --check` (`src/py`, `tools`, `docs/examples`) + `mypy` (`src/py/vertebra`, `src/py/tests/{unit,integration}`, `tools/{scripts,pgo,benchmarks,docs}`, `docs/examples`) + `mypy.stubtest` + `cargo fmt --check` + `cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings` + `make review-check` | Read-only CI lint, strict test+source type-check, stub, and review-manifest gate (`make lint` applies auto-fixes). |
 | `make docs` | `scan_public_docstrings` + `generate_cli_docs --check` + `zensical build --clean` + `postbuild` + `verify_docs_artifacts` | Docstring/CLI parity, Zensical build, `llms.txt`, and `<= 120 KB` / `<= 14` TOC HTML bounds. |
 | `make check` | `lint` + `test` (`rs-test` + `py-test` + `ts-test`) + `coverage` | Full release verification gate. |
 
@@ -157,7 +157,7 @@ Vertebra runs verification gates across Rust (`cargo test`), Python (`pytest` + 
 | `core-wheel-smoke` | `python`, `rust`, `typescript`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make core-wheel-check` | `ubuntu-latest` |
 | `postgres-wheel-check` | `python`, `rust`, `ci`, or `workflow_dispatch` | `uv sync --frozen --group build && make ts-install && make ts-build && make postgres-wheel-check` | `ubuntu-latest` |
 | `postgres-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | `test_driver_conformance.py -v` filtered by `VERTEBRA_CONFORMANCE_ENGINES=postgres`, `VERTEBRA_CONFORMANCE_POSTGRES_VERSION=<pg_version>`, and `VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS=1`, plus live replication/feature/deadline suites on PG `18` | PG `14`–`18` (`pgvector/pgvector:pg<ver>`, `ubuntu-latest`) |
-| `test-db-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}` (`test_driver_conformance.py` + `test_{duckdb,mysql,mssql}_native.py`) gated by zero-skip `ConformanceGate` (`VERTEBRA_CONFORMANCE_ENGINES`) and `ServiceVersionMatrix` (`VERTEBRA_CONFORMANCE_{MYSQL,MARIADB,MSSQL}_VERSION`) | 10-row matrix: `duckdb` (`3.12`, `3.14t`), `mysql` (`8.0`/`8.4`/`9.7` on `3.12`; `8.4` on `3.14t`), `mariadb` (`11.4`, `11.8`), `mssql` (`2022`, `2025`) (`ubuntu-latest`) |
+| `test-db-conformance` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}` (`test_driver_conformance.py` + `test_{duckdb,mysql,mssql}_native.py`) gated by zero-skip `ConformanceGate` (`VERTEBRA_CONFORMANCE_ENGINES`) and `ServiceVersionMatrix` | 16-row matrix: `sqlite` (`3.12`, `3.14t`), `duckdb` (`3.12`, `3.14t`), `redis` (`3.12`, `3.14t`), `valkey` (`3.12`, `3.14t`), `mysql` (`8.0`/`8.4`/`9.7` on `3.12`; `8.4` on `3.14t`), `mariadb` (`11.4`, `11.8`), `mssql` (`2022`, `2025`) (`ubuntu-latest`) |
 | `conformance-oracle` | `python`, `rust`, `ci`, or `workflow_dispatch` | `make db-conformance ENGINE=oracle VERSION=23ai` (`test_driver_conformance.py` + `test_oracle_native.py` with `VERTEBRA_CONFORMANCE_ENGINES=oracle` and `VERTEBRA_CONFORMANCE_ORACLE_VERSION=23ai`) | `gvenzl/oracle-free:23-slim-faststart` (`continue-on-error: true`, `ubuntu-latest`) |
 
 ## 4. Suite Inventory, Shared-Memory Hygiene & Boundary Evidence

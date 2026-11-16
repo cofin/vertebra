@@ -283,8 +283,9 @@ def test_storage_integrity_error_hierarchy_and_separation_from_db() -> None:
     assert issubclass(IntegrityError, OSError)
     assert issubclass(PreconditionError, VertebraError)
     assert issubclass(PreconditionError, OSError)
-    assert IntegrityError is not PreconditionError
-    assert IntegrityError is not vertebra_db.IntegrityError
+    integrity_cls: type[BaseException] = IntegrityError
+    assert integrity_cls is not PreconditionError
+    assert integrity_cls is not vertebra_db.IntegrityError
     assert not issubclass(IntegrityError, vertebra_db.DatabaseError)
     assert issubclass(vertebra_db.IntegrityError, vertebra_db.DatabaseError)
     assert not issubclass(vertebra_db.IntegrityError, OSError)

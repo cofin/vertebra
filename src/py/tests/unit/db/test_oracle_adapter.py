@@ -2241,7 +2241,8 @@ async def test_pipeline_rolls_back_when_caller_raises_after_results() -> None:
 
         with pytest.raises(InterfaceError, match="unexecuted operations"), driver.pipeline() as pipe2:
             pipe2.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (2, "unflushed"))
-        assert driver.transaction_events == ("BEGIN", "ROLLBACK", "BEGIN", "ROLLBACK")
+        second_events: tuple[str, ...] = driver.transaction_events
+        assert second_events == ("BEGIN", "ROLLBACK", "BEGIN", "ROLLBACK")
 
     async_stub = _StubAsyncOracleClient()
     async_stub.queued_pipeline.append(outcomes)

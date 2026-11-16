@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import collections
-from collections.abc import AsyncIterator, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
@@ -493,10 +493,10 @@ class _AsyncValkeySubscriptionStream:
                 await self._driver._active_listener.ssubscribe(*self._channels)
         return self
 
-    def __aiter__(self) -> AsyncIterator[tuple[str, bytes]]:
+    def __aiter__(self) -> AsyncGenerator[tuple[str, bytes], None]:
         return self._stream()
 
-    async def _stream(self) -> AsyncIterator[tuple[str, bytes]]:
+    async def _stream(self) -> AsyncGenerator[tuple[str, bytes], None]:
         await self._execute_subscribe()
         listener = self._driver._active_listener
         if listener is None:

@@ -918,7 +918,6 @@ async def test_queue_backends_retry_backoff_and_dlq_replay(backend_url: str) -> 
     qsvc = QueueService(config, backend=backend)
     attempts_recorded: list[int] = []
 
-    @task(lane="io", retry_policy=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.01))
     async def failing_operation(x: int) -> int:
         attempts_recorded.append(len(attempts_recorded) + 1)
         if len(attempts_recorded) <= 2:
@@ -926,7 +925,9 @@ async def test_queue_backends_retry_backoff_and_dlq_replay(backend_url: str) -> 
             raise RuntimeError(msg)
         return x * 2
 
-    qsvc.register(failing_operation)
+    qsvc.register(
+        task(lane="io", retry_policy=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.01))(failing_operation)
+    )
     await qsvc.enqueue("failing_operation", 42)
 
     claimed1 = (await backend.dequeue(["io"], batch_size=1))[0]
@@ -996,11 +997,12 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     backend = MemoryQueueBackend()
     qsvc = QueueService(backend=backend)
 
-    @task(lane="io", cron=CronSchedule(expression="* * * * *", timezone="America/New_York"))
     def minutely_heartbeat() -> str:
         return "heartbeat"
 
-    qsvc.register(minutely_heartbeat)
+    qsvc.register(
+        task(lane="io", cron=CronSchedule(expression="* * * * *", timezone="America/New_York"))(minutely_heartbeat)
+    )
 
     sched1 = CronScheduler(qsvc, node_id="node-1", lease_ttl_seconds=0.1)
     sched2 = CronScheduler(qsvc, node_id="node-2", lease_ttl_seconds=0.1)
@@ -1045,13 +1047,12 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
 
     completed_jobs: list[str] = []
 
-    @task(lane="cpu")
     async def slow_cpu_job() -> str:
         await asyncio.sleep(0.04)
         completed_jobs.append("cpu_done")
         return "cpu_done"
 
-    qsvc.register(slow_cpu_job)
+    qsvc.register(task(lane="cpu")(slow_cpu_job))
 
     root_trace = TraceContext.generate(sampled=True)
     token = TraceContext.set_current(root_trace)
@@ -1116,11 +1117,10 @@ async def test_oracle_queue_backend_requires_oracledb_and_executor(
         backend = OracleQueueBackend(cfg, executor=fake)
         service = QueueService(cfg, backend=backend)
 
-        @task(name="oracle_ping", lane="io")
         def oracle_ping(val: int) -> int:
             return val + 1
 
-        service.register(oracle_ping)
+        service.register(task(name="oracle_ping", lane="io")(oracle_ping))
         await service.enqueue("oracle_ping", 41)
         assert await service.drain_once(("io",)) == [42]
         await service.close()
@@ -1161,11 +1161,10 @@ async def test_postgres_queue_backend_requires_native_postgres_and_executor(
         assert backend.direct_dsn == "postgresql://primary:5432/db"
         service = QueueService(qcfg, backend=backend)
 
-        @task(name="pg_ping", lane="io")
         def pg_ping(val: int) -> int:
             return val * 2
 
-        service.register(pg_ping)
+        service.register(task(name="pg_ping", lane="io")(pg_ping))
         await service.enqueue("pg_ping", 21)
         assert await service.drain_once(("io",)) == [42]
         await service.close()
@@ -1302,12 +1301,11 @@ async def test_worker_runner_scoped_di_and_cron_scheduler_register() -> None:
 
     invoked_with: list[dict[str, str]] = []
 
-    @task(lane="io")
     async def task_with_di(db_session: dict[str, str]) -> str:
         invoked_with.append(db_session)
         return "done"
 
-    qsvc.register(task_with_di)
+    qsvc.register(task(lane="io")(task_with_di))
     await qsvc.enqueue("task_with_di")
 
     runner = WorkerRunner(

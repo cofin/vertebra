@@ -163,6 +163,7 @@ async def test_s3_codec_writers_complete_valid_multipart(file_format: str, async
         result = await operation if async_write else operation
     assert isinstance(result, PutResult)
     assert result.path == "output"
+    assert result.etag is not None
     assert result.etag.strip('"') == "complete"
     assert len(completed) == 1
     assert result.size == len(completed[0])
@@ -1546,7 +1547,7 @@ async def test_storage_arrow_native_network_barrier(
         else store.iter_arrow_batches("data.parquet")
     )
     before = asyncio.all_tasks()
-    task = asyncio.create_task(anext(batches))
+    task: asyncio.Task[Any] = asyncio.create_task(batches.__anext__())
     try:
         async with asyncio.timeout(5):
             while not entered.is_set():
@@ -1719,11 +1720,6 @@ async def test_storage_arrow_writer_demand_and_abort(file_format: str, asynchron
     base = SyncObjectStore("memory://")
     paired = base.to_async() if asynchronous else base
     native = _ObservedArrowStore(paired._require_native(), events, asynchronous)
-    store = (
-        AsyncObjectStore("memory://", _native_instance=native)
-        if asynchronous
-        else SyncObjectStore("memory://", _native_instance=native)
-    )
 
     def batches() -> Iterator[Any]:
         try:
@@ -1737,15 +1733,17 @@ async def test_storage_arrow_writer_demand_and_abort(file_format: str, asynchron
 
     async def write() -> Any:
         if asynchronous:
+            async_store = AsyncObjectStore("memory://", _native_instance=native)
             return await (
-                store.write_parquet("output", batches())
+                async_store.write_parquet("output", batches())
                 if file_format == "parquet"
-                else store.write_arrow("output", batches())
+                else async_store.write_arrow("output", batches())
             )
+        sync_store = SyncObjectStore("memory://", _native_instance=native)
         return (
-            store.write_parquet("output", batches())
+            sync_store.write_parquet("output", batches())
             if file_format == "parquet"
-            else store.write_arrow("output", batches())
+            else sync_store.write_arrow("output", batches())
         )
 
     if fail:
@@ -2996,7 +2994,7 @@ async def test_write_default_checksum_false_returns_none_receipts(
     """Default checksum=False writes return None receipts and never promote user metadata to receipts."""
     store = _bulk_store(asynchronous)
     payload = b"default-checksum-disabled-payload"
-    extra_kwargs = (
+    extra_kwargs: dict[str, Any] = (
         {"attributes": {"sha256": "0" * 64, "crc32c": "00000000", "md5": "0" * 32}}
         if write_method in {"put", "put_stream", "open_writer"}
         else {}
@@ -3143,6 +3141,7 @@ async def test_write_expected_digest_mismatch_raises_integrity_error_and_preserv
         assert writer.closed
         assert writer.result is None
     else:
+        bad_kw: dict[str, Any] = {digest_field: wrong_hex}
         with pytest.raises(IntegrityError) as exc_info:
             await _write_with_method(
                 store,
@@ -3151,7 +3150,7 @@ async def test_write_expected_digest_mismatch_raises_integrity_error_and_preserv
                 b"corrupted-replacement",
                 tmp_path,
                 asynchronous=asynchronous,
-                **{digest_field: wrong_hex},
+                **bad_kw,
             )
 
     assert type(exc_info.value) is IntegrityError
@@ -3601,11 +3600,12 @@ async def test_write_batches_expected_digest_mismatch_preserves_prior_object(
     await _resolve(store.put(key, sentinel))
     table = pa.table({"id": [1, 2], "label": ["x", "y"]})
 
+    bad_digest_kw: dict[str, Any] = dict(bad_digest)
     with pytest.raises(IntegrityError):
         if asynchronous:
-            await write_batches_async(cast(AsyncObjectStore, store), key, table, file_format="parquet", **bad_digest)
+            await write_batches_async(cast(AsyncObjectStore, store), key, table, file_format="parquet", **bad_digest_kw)
         else:
-            write_batches_sync(cast(SyncObjectStore, store), key, table, file_format="parquet", **bad_digest)
+            write_batches_sync(cast(SyncObjectStore, store), key, table, file_format="parquet", **bad_digest_kw)
 
     assert bytes(await _resolve(store.get(key))) == sentinel
 
@@ -3654,14 +3654,15 @@ def test_artifact_reference_and_metadata_gc_collection() -> None:
     )
     assert ref.uri == "memory://bucket/artifacts/output.json"
     assert ref.version == 3
+    untyped_ref: Any = ref
     with pytest.raises(AttributeError):
-        ref.version = 4
+        untyped_ref.version = 4
 
     class _CycleTarget:
         def __init__(self) -> None:
             self.owner: Any = None
 
-    meta_target = _CycleTarget()
+    meta_target: Any = _CycleTarget()
     meta = ObjectMeta(path="a.bin", size=10, attributes={"target": meta_target})
     meta_target.owner = meta
     assert gc.is_tracked(meta) is True
@@ -3670,7 +3671,7 @@ def test_artifact_reference_and_metadata_gc_collection() -> None:
     gc.collect()
     assert meta_ref() is None
 
-    put_target = _CycleTarget()
+    put_target: Any = _CycleTarget()
     put = PutResult(path="b.bin", size=20, attributes={"target": put_target})
     put_target.owner = put
     assert gc.is_tracked(put) is True

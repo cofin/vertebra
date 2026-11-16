@@ -9,6 +9,7 @@ import json
 import math
 import re
 import threading
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -48,6 +49,24 @@ from vertebra.extensions.sqlspec.adapters.spanner import (
 from vertebra.typing import ImproperConfigurationError
 
 
+class _ClosableFakeSpannerClient(FakeSpannerClient):
+    """FakeSpannerClient implementing SyncSpannerClientProtocol.close."""
+
+    __slots__ = ()
+
+    def close(self) -> None:
+        return None
+
+
+class _ClosableFakeAsyncSpannerClient(FakeAsyncSpannerClient):
+    """FakeAsyncSpannerClient implementing AsyncSpannerClientProtocol.close."""
+
+    __slots__ = ()
+
+    async def close(self) -> None:
+        return None
+
+
 def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> None:
     """Verify SpannerSyncConfig ReadOnly vs ReadWrite sessions, SpannerConnectionShim, and SpannerDataDictionary."""
     core_driver = SyncSpannerDriver(
@@ -56,7 +75,7 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
             instance_id="test-inst",
             database_id="sqlspec-sync-db",
         ),
-        client=FakeSpannerClient(),
+        client=_ClosableFakeSpannerClient(),
     )
     config = SpannerSyncConfig(
         project_id="test-proj",
@@ -170,7 +189,7 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
     shim.close()
 
 
-class _StoreFakeSpannerClient(FakeSpannerClient):
+class _StoreFakeSpannerClient(_ClosableFakeSpannerClient):
     """FakeSpannerClient extended with Spanner JSON, ScaNN, FTS, and MERGE shims for SQLite."""
 
     def __init__(self) -> None:
@@ -470,7 +489,7 @@ async def test_spanner_async_config_and_async_stores() -> None:
     assert await eq.ack(evt["event_id"]) is True
 
 
-class _ArrowOptionsSpannerClient(FakeSpannerClient):
+class _ArrowOptionsSpannerClient(_ClosableFakeSpannerClient):
     """External Spanner client port recording partition and staleness options."""
 
     def __init__(self) -> None:
@@ -514,7 +533,8 @@ def test_spanner_native_driver_stack_results_and_batch_dml(
         else "SELECT id FROM stack_items WHERE id = @id"
     )
     args = (1,) if dialect == "spangres" else ()
-    kwargs = {} if dialect == "spangres" else {"id": 1}
+    kwargs: dict[str, Any] = {} if dialect == "spangres" else {"id": 1}
+    kwargs_two: dict[str, Any] = {} if dialect == "spangres" else {"id": 2}
     try:
         core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
         dml_res = driver.execute_stack(
@@ -531,9 +551,7 @@ def test_spanner_native_driver_stack_results_and_batch_dml(
         assert result[0].get_result().get_data() == [{"id": 1}]
         assert result[1].get_result().get_data() == [{"n": 2}]
         single = driver.execute_stack(
-            StatementStack().push_execute(
-                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
-            )
+            StatementStack().push_execute(select_sql, *((2,) if dialect == "spangres" else ()), **kwargs_two)
         )
         assert single[0].get_result().get_data() == [{"id": 2}]
         bound = StalenessBound.exact_staleness(750)
@@ -561,7 +579,7 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
     client = _ArrowOptionsSpannerClient()
     core = AsyncSpannerDriver(
         SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="stack-async-db", dialect=dialect),
-        client=FakeAsyncSpannerClient(client),
+        client=_ClosableFakeAsyncSpannerClient(client),
     )
     driver = (
         SpannerAsyncConfig(core.config, connection_instance=core).create_driver()
@@ -574,7 +592,8 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
         else "SELECT id FROM stack_items WHERE id = @id"
     )
     args = (1,) if dialect == "spangres" else ()
-    kwargs = {} if dialect == "spangres" else {"id": 1}
+    kwargs: dict[str, Any] = {} if dialect == "spangres" else {"id": 1}
+    kwargs_two: dict[str, Any] = {} if dialect == "spangres" else {"id": 2}
     try:
         await core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
         dml_res = await driver.execute_stack(
@@ -591,9 +610,7 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
         assert result[0].get_result().get_data() == [{"id": 1}]
         assert result[1].get_result().get_data() == [{"n": 2}]
         single = await driver.execute_stack(
-            StatementStack().push_execute(
-                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
-            )
+            StatementStack().push_execute(select_sql, *((2,) if dialect == "spangres" else ()), **kwargs_two)
         )
         assert single[0].get_result().get_data() == [{"id": 2}]
         bound = StalenessBound.exact_staleness(750)
@@ -631,7 +648,7 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
     monkeypatch.setattr(SyncAdapterConfig, "__init__", forbidden)
     monkeypatch.setattr(AsyncAdapterConfig, "__init__", forbidden)
     predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
-    constructors = {
+    constructors: dict[str, Callable[[], Any]] = {
         "sync-driver": lambda: SQLSpecSyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
         "async-driver": lambda: SQLSpecAsyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
         "sync-config": lambda: SpannerSyncConfig(tenant_predicate=predicate),
@@ -686,15 +703,22 @@ class _StalenessAndThreadTrackingSpannerClient(_StoreFakeSpannerClient):
             transaction_tag=transaction_tag,
         )
 
-    def commit_mutations(
+    def apply_mutations(
         self,
         mutations_json: str,
-        max_commit_delay_ms: int = 0,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> dict[str, Any]:
         self.call_threads.append(threading.get_ident())
-        return super().commit_mutations(mutations_json, max_commit_delay_ms=max_commit_delay_ms)
+        return super().apply_mutations(
+            mutations_json,
+            transaction_tag=transaction_tag,
+            exclude_txn_from_change_streams=exclude_txn_from_change_streams,
+            max_commit_delay_ms=max_commit_delay_ms,
+        )
 
-    def update_ddl(self, statements: list[str]) -> str:
+    def update_ddl(self, statements: Sequence[str]) -> str:
         self.call_threads.append(threading.get_ident())
         return super().update_ddl(statements)
 
@@ -723,7 +747,7 @@ async def test_spanner_sync_and_async_select_value_routes_through_active_snapsho
     async_raw = _StalenessAndThreadTrackingSpannerClient()
     async_core = AsyncSpannerDriver(
         SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="snap-val-async"),
-        client=FakeAsyncSpannerClient(async_raw),
+        client=_ClosableFakeAsyncSpannerClient(async_raw),
     )
     async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
     try:
@@ -781,9 +805,9 @@ async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -
 @pytest.mark.anyio
 async def test_sqlspec_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
     """SQLSpec sync and async Spanner drivers reject max_commit_delay_ms on batch_write."""
-    sync_backing = FakeSpannerClient()
+    sync_backing = _ClosableFakeSpannerClient()
     sync_core = SyncSpannerDriver(SpannerConfig(), client=sync_backing)
-    async_core = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(sync_backing))
+    async_core = AsyncSpannerDriver(SpannerConfig(), client=_ClosableFakeAsyncSpannerClient(sync_backing))
     sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core)
     async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
     try:

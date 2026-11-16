@@ -6,7 +6,8 @@ import asyncio
 import sys
 import time
 import types
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -516,7 +517,11 @@ async def test_spanner_change_stream_source_partitions_and_object_store_spill() 
         },
     ]
 
-    parsed = [rec for row in raw_rows for rec in source.parse_raw_row(row, partition_token="parent-token-1")]
+    parsed = [
+        rec
+        for row in raw_rows
+        for rec in source.parse_raw_row(cast("Mapping[str, Any] | str", row), partition_token="parent-token-1")
+    ]
     assert len(parsed) == 3
 
     emitted = source.ingest_records(parsed, partition_token="parent-token-1")
@@ -588,7 +593,10 @@ _EXPECTED_READ_PARAMS: dict[str, Any] = {
 @pytest.mark.anyio
 @pytest.mark.parametrize("dialect", ["spangres", "googlesql"])
 @pytest.mark.parametrize("mode", ["sync", "async"])
-async def test_spanner_change_stream_poll_binds_params_for_dialect(dialect: str, mode: str) -> None:
+async def test_spanner_change_stream_poll_binds_params_for_dialect(
+    dialect: Literal["spangres", "googlesql"],
+    mode: str,
+) -> None:
     """Spangres polls bind positional $1..$4 values; GoogleSQL polls bind named parameters."""
     driver: Any = _RecordingSpannerDriver() if mode == "sync" else _AsyncRecordingSpannerDriver()
     if mode == "sync":
@@ -1049,7 +1057,7 @@ class _InMemorySpannerQueueWire:
                 staleness_mode: str = "strong",
                 staleness_value: int | None = None,
             ) -> dict[str, Any]:
-                return sync_c.query(sql, params_json, staleness_mode, staleness_value)
+                return dict(sync_c.query(sql, params_json, staleness_mode, staleness_value))
 
             async def execute_dml(
                 self,
@@ -1058,7 +1066,7 @@ class _InMemorySpannerQueueWire:
                 request_tag: str | None = None,
                 transaction_tag: str | None = None,
             ) -> int:
-                return sync_c.execute_dml(sql, params_json, request_tag, transaction_tag)
+                return int(sync_c.execute_dml(sql, params_json, request_tag, transaction_tag))
 
             async def execute_batch_dml(
                 self,
@@ -1066,7 +1074,7 @@ class _InMemorySpannerQueueWire:
                 request_tag: str | None = None,
                 transaction_tag: str | None = None,
             ) -> list[int]:
-                return sync_c.execute_batch_dml(statements_json, request_tag, transaction_tag)
+                return list(sync_c.execute_batch_dml(statements_json, request_tag, transaction_tag))
 
             async def update_ddl(
                 self,
@@ -1074,7 +1082,7 @@ class _InMemorySpannerQueueWire:
                 operation_id: str | None = None,
                 timeout_seconds: float | None = None,
             ) -> str:
-                return sync_c.update_ddl(statements, operation_id, timeout_seconds)
+                return str(sync_c.update_ddl(statements, operation_id, timeout_seconds))
 
             async def close(self) -> None:
                 sync_c.close()
@@ -1185,22 +1193,22 @@ class _InMemorySpannerQueueWire:
             receipt_handle = str(_p("receipt_handle", 3))
             shard_id = int(_p("shard_id", 4))
             task_id = str(_p("task_id", 5))
-            job = jobs.get((shard_id, task_id))
-            if job is None:
+            claimed_job = jobs.get((shard_id, task_id))
+            if claimed_job is None:
                 return self._result_from_dicts([])
-            job["status"] = "running"
-            job["attempt"] = int(job["attempt"]) + 1
-            job["locked_until"] = locked_until
-            job["consumer_name"] = consumer_name
-            job["receipt_handle"] = receipt_handle
-            return self._result_from_dicts([dict(job)])
+            claimed_job["status"] = "running"
+            claimed_job["attempt"] = int(claimed_job["attempt"]) + 1
+            claimed_job["locked_until"] = locked_until
+            claimed_job["consumer_name"] = consumer_name
+            claimed_job["receipt_handle"] = receipt_handle
+            return self._result_from_dicts([dict(claimed_job)])
 
         if upper.startswith("DELETE FROM VERTEBRA_QUEUE_JOBS"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
             attempt = int(_p("attempt", 3))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and job["status"] == "running" and int(job["attempt"]) == attempt:
+            target_job = jobs.get((shard_id, task_id))
+            if target_job is not None and target_job["status"] == "running" and int(target_job["attempt"]) == attempt:
                 del jobs[(shard_id, task_id)]
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
@@ -1209,18 +1217,18 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
             attempt = int(_p("attempt", 3))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and job["status"] == "running" and int(job["attempt"]) == attempt:
-                job["status"] = "acked"
-                job["locked_until"] = None
+            acked_job = jobs.get((shard_id, task_id))
+            if acked_job is not None and acked_job["status"] == "running" and int(acked_job["attempt"]) == attempt:
+                acked_job["status"] = "acked"
+                acked_job["locked_until"] = None
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
         if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE SHARD_ID"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
-            job = jobs.get((shard_id, task_id))
-            return self._result_from_dicts([dict(job)] if job is not None else [])
+            found_job = jobs.get((shard_id, task_id))
+            return self._result_from_dicts([dict(found_job)] if found_job is not None else [])
 
         if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE LANE"):
             lane = str(_p("lane", 1))
@@ -1283,12 +1291,12 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 2))
             task_id = str(_p("task_id", 3))
             attempt = int(_p("attempt", 4))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and int(job["attempt"]) == attempt:
-                job["status"] = "dead_letter"
-                job["locked_until"] = None
-                job["receipt_handle"] = None
-                job["last_error"] = last_err
+            dlq_job = jobs.get((shard_id, task_id))
+            if dlq_job is not None and int(dlq_job["attempt"]) == attempt:
+                dlq_job["status"] = "dead_letter"
+                dlq_job["locked_until"] = None
+                dlq_job["receipt_handle"] = None
+                dlq_job["last_error"] = last_err
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1298,14 +1306,14 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 3))
             task_id = str(_p("task_id", 4))
             attempt = int(_p("attempt", 5))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and int(job["attempt"]) == attempt:
-                job["status"] = "pending"
-                job["scheduled_at"] = sched_at
-                job["locked_until"] = None
-                job["consumer_name"] = None
-                job["receipt_handle"] = None
-                job["last_error"] = last_err
+            retry_job = jobs.get((shard_id, task_id))
+            if retry_job is not None and int(retry_job["attempt"]) == attempt:
+                retry_job["status"] = "pending"
+                retry_job["scheduled_at"] = sched_at
+                retry_job["locked_until"] = None
+                retry_job["consumer_name"] = None
+                retry_job["receipt_handle"] = None
+                retry_job["last_error"] = last_err
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1314,9 +1322,9 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 2))
             task_id = str(_p("task_id", 3))
             worker_id = str(_p("worker_id", 4))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and job["status"] == "running" and job.get("consumer_name") == worker_id:
-                job["locked_until"] = locked_until
+            hb_job = jobs.get((shard_id, task_id))
+            if hb_job is not None and hb_job["status"] == "running" and hb_job.get("consumer_name") == worker_id:
+                hb_job["locked_until"] = locked_until
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1349,19 +1357,19 @@ class _InMemorySpannerQueueWire:
         if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET SCHEDULED_AT = NULL"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
-            job = jobs.get((shard_id, task_id))
-            if job is not None:
-                job["scheduled_at"] = None
+            prom_job = jobs.get((shard_id, task_id))
+            if prom_job is not None:
+                prom_job["scheduled_at"] = None
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
         if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'CANCELLED'"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
-            job = jobs.get((shard_id, task_id))
-            if job is not None and job["status"] in ("pending", "running"):
-                job["status"] = "cancelled"
-                job["locked_until"] = None
+            canc_job = jobs.get((shard_id, task_id))
+            if canc_job is not None and canc_job["status"] in ("pending", "running"):
+                canc_job["status"] = "cancelled"
+                canc_job["locked_until"] = None
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1389,13 +1397,14 @@ class _InMemorySpannerQueueWire:
             return self._result_from_dicts([dict(existing)] if existing is not None else [])
 
         if upper.startswith("INSERT INTO VERTEBRA_QUEUE_LEASES"):
-            rec = {
-                "lease_key": str(params["lease_key"]),
+            ins_lease_key = str(params["lease_key"])
+            ins_rec: dict[str, Any] = {
+                "lease_key": ins_lease_key,
                 "owner_id": str(params["owner_id"]),
                 "expires_at": float(params["expires_at"]),
                 "last_slot": params.get("last_slot"),
             }
-            leases[rec["lease_key"]] = rec
+            leases[ins_lease_key] = ins_rec
             return self._result_from_dicts([], row_count=1)
 
         if upper.startswith("UPDATE VERTEBRA_QUEUE_LEASES"):

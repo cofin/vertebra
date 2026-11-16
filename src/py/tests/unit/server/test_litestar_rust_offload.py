@@ -25,7 +25,9 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
 
-def _load_litestar_offload_primitives() -> tuple[Any, Any, Any, Any, Any]:
+def _load_litestar_offload_primitives() -> tuple[
+    Any, Callable[..., Callable[[Callable[..., Any]], Any]], Any, Any, Any
+]:
     """Load Litestar offload classes or fallback stubs when optional extra is absent."""
     litestar_mod = import_optional("litestar")
     comp_mod = import_optional("litestar.config.compression")

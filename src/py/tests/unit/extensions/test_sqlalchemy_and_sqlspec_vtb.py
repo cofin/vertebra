@@ -13,7 +13,7 @@ import sys
 import threading
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pytest
@@ -21,7 +21,7 @@ from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types.file_object import FileObject, StoredObject
-from sqlalchemy import String, create_engine, delete, select, update
+from sqlalchemy import String, create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.util.concurrency import greenlet_spawn
@@ -237,17 +237,17 @@ def test_sqlite_vtb_sync_engine_ddl_dml_and_rollback() -> None:
         BaseTestModel.metadata.create_all(conn)
 
     with engine.connect() as conn:
-        conn.execute(ItemRecord.__table__.insert().values(id=1, name="first"))
+        conn.execute(insert(ItemRecord).values(id=1, name="first"))
         conn.commit()
 
     with engine.connect() as conn:
         rows = conn.execute(select(ItemRecord).where(ItemRecord.id == 1)).fetchall()
         assert len(rows) == 1
-        assert rows[0][1] == "first"
+        assert rows[0]._mapping["name"] == "first"
 
     with engine.connect() as conn:
         trans = conn.begin()
-        conn.execute(ItemRecord.__table__.insert().values(id=2, name="rolled_back"))
+        conn.execute(insert(ItemRecord).values(id=2, name="rolled_back"))
         trans.rollback()
 
     with engine.connect() as conn:
@@ -801,7 +801,7 @@ def test_sqlspec_stack_ordered_results_and_binds(pipeline_capable: bool) -> None
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[1].get_result().get_data() == [{"id": 7}]
         assert result[2].get_result().get_data() == [{"n": 1}]
-        if pipeline_capable:
+        if isinstance(native, _SyncPipelinePort):
             assert native.pipeline_calls == 1
             assert [item[0] for item in native.queued] == ["execute", "select", "select"]
     finally:
@@ -825,7 +825,7 @@ async def test_sqlspec_async_stack_ordered_results_and_binds(pipeline_capable: b
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[1].get_result().get_data() == [{"id": 7}]
         assert result[2].get_result().get_data() == [{"n": 1}]
-        if pipeline_capable:
+        if isinstance(native, _AsyncPipelinePort):
             assert native.pipeline_calls == 1
             assert [item[0] for item in native.queued] == ["execute", "select", "select"]
     finally:
@@ -852,13 +852,13 @@ def test_sqlspec_stack_errors_roll_back_or_continue(continue_on_error: bool, pip
             assert result[1].is_error()
             assert result[0].rows_affected == result[2].rows_affected == 1
             assert native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
-            if pipeline_capable:
+            if isinstance(native, _SyncPipelinePort):
                 assert native.pipeline_calls == 0
         else:
             with pytest.raises(Exception, match="missing_table"):
                 driver.execute_stack(stack)
             assert native.select("SELECT id FROM stack_items") == []
-            if pipeline_capable:
+            if isinstance(native, _SyncPipelinePort):
                 assert native.pipeline_calls == 1
     finally:
         native.close()
@@ -887,13 +887,13 @@ async def test_sqlspec_async_stack_errors_roll_back_or_continue(
             assert result[1].is_error()
             assert result[0].rows_affected == result[2].rows_affected == 1
             assert await native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
-            if pipeline_capable:
+            if isinstance(native, _AsyncPipelinePort):
                 assert native.pipeline_calls == 0
         else:
             with pytest.raises(Exception, match="missing_table"):
                 await driver.execute_stack(stack)
             assert await native.select("SELECT id FROM stack_items") == []
-            if pipeline_capable:
+            if isinstance(native, _AsyncPipelinePort):
                 assert native.pipeline_calls == 1
     finally:
         await native.close()
@@ -927,7 +927,7 @@ def test_sqlspec_stack_uses_processed_row_metadata(pipeline_capable: bool) -> No
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
-        if pipeline_capable:
+        if isinstance(native, _SyncPipelinePort):
             assert [item[0] for item in native.queued] == ["select", "execute", "select"]
     finally:
         native.close()
@@ -954,7 +954,7 @@ async def test_sqlspec_async_stack_uses_processed_row_metadata(pipeline_capable:
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
-        if pipeline_capable:
+        if isinstance(native, _AsyncPipelinePort):
             assert [item[0] for item in native.queued] == ["select", "execute", "select"]
     finally:
         await native.close()
@@ -1155,14 +1155,26 @@ class _NativeBindConnection:
         return None
 
 
-class _AsyncNativeBindConnection(_NativeBindConnection):
+class _AsyncNativeBindConnection:
     """Async DBAPI port retaining actual SQL and bind observations."""
+
+    def __init__(self) -> None:
+        self._sync = _NativeBindConnection()
+        self.raw = self._sync.raw
+        self.calls = self._sync.calls
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._sync.in_transaction
+
+    def connection(self) -> Any:
+        return self
 
     def acquire(self) -> Any:
         return self
 
     def cursor(self) -> Any:
-        cursor = super().cursor()
+        cursor = self._sync.cursor()
 
         class Cursor:
             @property
@@ -1171,13 +1183,13 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
 
             @property
             def rowcount(self) -> int:
-                return cursor.rowcount
+                return int(cursor.rowcount)
 
             async def execute(self, sql: str, params: Any = None) -> None:
                 cursor.execute(sql, params)
 
             async def fetchall(self) -> list[Any]:
-                return cursor.fetchall()
+                return list(cursor.fetchall())
 
             async def close(self) -> None:
                 cursor.close()
@@ -1191,7 +1203,7 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
         return Cursor()
 
     async def execute(self, sql: str, params: Any = None) -> int:
-        return super().execute(sql, params)
+        return self._sync.execute(sql, params)
 
     async def execute_many(self, sql: str, param_sets: Any) -> int:
         total = 0
@@ -1200,31 +1212,31 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
         return total
 
     async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
-        return super().execute_with_description(sql, params)
+        return self._sync.execute_with_description(sql, params)
 
     async def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-        return super().fetch_all(sql, params)
+        return self._sync.fetch_all(sql, params)
 
     async def begin(self) -> None:
-        super().begin()
+        self._sync.begin()
 
     async def savepoint(self, name: str) -> None:
-        super().savepoint(name)
+        self._sync.savepoint(name)
 
     async def release_savepoint(self, name: str) -> None:
-        super().release_savepoint(name)
+        self._sync.release_savepoint(name)
 
     async def rollback_to_savepoint(self, name: str) -> None:
-        super().rollback_to_savepoint(name)
+        self._sync.rollback_to_savepoint(name)
 
     async def commit(self) -> None:
-        super().commit()
+        self._sync.commit()
 
     async def rollback(self) -> None:
-        super().rollback()
+        self._sync.rollback()
 
     async def close(self) -> None:
-        super().close()
+        self._sync.close()
 
     async def __aenter__(self) -> Any:
         return self
@@ -1574,12 +1586,14 @@ def test_sync_dbapi_connection_driver_ownership_and_broker_isolation() -> None:
     url = "postgresql+vtb://localhost:5432/ownership_sync_db"
     shared_conn = SyncDBAPIConnection(url, share_pool=True)
     shared_driver = shared_conn.driver
+    assert isinstance(shared_driver, SyncPostgreSQLDriver)
     assert shared_driver is DatabaseRegistry.default().get_shared_sync_driver(shared_conn.config)
     shared_conn.close()
     assert shared_driver._closed is False
 
     owned_conn = SyncDBAPIConnection(url, share_pool=False)
     owned_driver = owned_conn.driver
+    assert isinstance(owned_driver, SyncPostgreSQLDriver)
     assert owned_driver is not shared_driver
     owned_conn.close()
     assert owned_driver._closed is True
@@ -1588,6 +1602,7 @@ def test_sync_dbapi_connection_driver_ownership_and_broker_isolation() -> None:
     custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
     broker_conn = SyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
     broker_driver = broker_conn.driver
+    assert isinstance(broker_driver, SyncPostgreSQLDriver)
     assert broker_driver is not shared_driver
     assert broker_driver.config.broker is custom_broker
     broker_conn.close()
@@ -1603,12 +1618,14 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     url = "postgresql+vtb_async://localhost:5432/ownership_async_db"
     shared_conn = AsyncDBAPIConnection(url, share_pool=True)
     shared_driver = shared_conn.driver
+    assert isinstance(shared_driver, AsyncPostgreSQLDriver)
     assert shared_driver is DatabaseRegistry.default().get_shared_driver(shared_conn.config)
     await shared_conn.close()
     assert shared_driver._closed is False
 
     owned_conn = AsyncDBAPIConnection(url, share_pool=False)
     owned_driver = owned_conn.driver
+    assert isinstance(owned_driver, AsyncPostgreSQLDriver)
     assert owned_driver is not shared_driver
     await owned_conn.close()
     assert owned_driver._closed is True
@@ -1617,6 +1634,7 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
     broker_conn = AsyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
     broker_driver = broker_conn.driver
+    assert isinstance(broker_driver, AsyncPostgreSQLDriver)
     assert broker_driver is not shared_driver
     assert broker_driver.config.broker is custom_broker
     await broker_conn.close()
@@ -2391,7 +2409,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         pg_engine = pg_cfg.get_engine()
         try:
             assert pg_cfg.connection_string == "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true"
-            assert SyncPostgreSQLDialect().create_connect_args(pg_engine.url) == (
+            assert cast("Any", SyncPostgreSQLDialect)().create_connect_args(pg_engine.url) == (
                 [],
                 {"url": "postgresql+vtb://user:secret@db.internal:5432/orders"},
             )
@@ -2500,10 +2518,13 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
         def _create_failing_async() -> Any:
             return AsyncAdapt_dbapi_connection(
                 async_dbapi,
-                FailingAsyncRollbackConnection(
-                    driver=AsyncSQLiteDriver(),
-                    broker=rollback_t,
-                    lease_managed=True,
+                cast(
+                    "Any",
+                    FailingAsyncRollbackConnection(
+                        driver=AsyncSQLiteDriver(),
+                        broker=rollback_t,
+                        lease_managed=True,
+                    ),
                 ),
             )
 
@@ -2537,7 +2558,7 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
 @pytest.mark.anyio
 @pytest.mark.parametrize("return_format", ["table", "batch", "batches", "reader"])
 async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type_error(
-    return_format: str,
+    return_format: Literal["table", "batch", "batches", "reader"],
 ) -> None:
     """Verify streams, Arrow formats/native_only, named/mapping params, nested tx, worker quarantine, and _send_rpc."""
     sqlite_cfg = StatementConfig(
@@ -2576,7 +2597,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         assert stack_results[2].result.num_rows == 6
 
         with pytest.raises(TypeError):
-            proxy_sync.execute_stack("not-a-stack")
+            proxy_sync.execute_stack(cast("Any", "not-a-stack"))
         with pytest.raises(ValueError):
             proxy_sync.execute_stack(StatementStack())
 
@@ -2618,7 +2639,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
             assert arrow_payload.read_all().num_rows == 6
 
         with pytest.raises(ValueError, match="Unsupported Arrow return_format"):
-            proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format="invalid")
+            proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format=cast("Any", "invalid"))
     finally:
         proxy_sync.close()
         sync_provider.close()
@@ -2649,7 +2670,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         call_count += 1
         return 42
 
-    bad_proxy = ProxySyncDriver(_bad_rpc_transport)
+    bad_proxy = ProxySyncDriver(cast("Any", _bad_rpc_transport))
     try:
         with pytest.raises(TypeError, match="Unexpected RPC transport response type"):
             bad_proxy.acquire_lease()
@@ -2705,9 +2726,10 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
 
         assert proxy_async.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1) is None
         with pytest.raises(SQLSpecImproperConfigurationError):
-            await proxy_async.select_stream(
+            async with proxy_async.select_stream(
                 SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=True
-            )
+            ):
+                pass
         async with proxy_async.select_stream(
             SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=False
         ) as open_astream:

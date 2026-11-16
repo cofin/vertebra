@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlspec import StatementStack
@@ -14,6 +14,7 @@ from sqlspec.exceptions import NotFoundError as SQLSpecNotFoundError
 from sqlspec.exceptions import StackExecutionError
 
 from tests.unit.db.test_bigquery import _MockBigQueryRestServer
+from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra.db import ArrowCursor, NotFoundError, NotSupportedError
 from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver as CoreAsyncBigQueryDriver,
@@ -43,6 +44,7 @@ from vertebra.extensions.sqlspec.adapters.bigquery import (
     BigQuerySyncConfig,
     BigQuerySyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.bigquery import config as bq_config_mod
 from vertebra.storage import SigningConfig, SyncObjectStore
 
 
@@ -128,7 +130,7 @@ class _InMemoryBigQueryEngine:
                 self.artifacts.append(dict(params))
                 return 1
             if upper.startswith("DELETE "):
-                sid = params.get("session_id")
+                art_sid = params.get("session_id")
                 fname = str(params.get("filename", ""))
                 self.artifacts = [
                     a
@@ -137,7 +139,7 @@ class _InMemoryBigQueryEngine:
                         a.get("filename") == fname
                         and a.get("app_name") == params.get("app_name")
                         and a.get("user_id") == params.get("user_id")
-                        and (sid is None or a.get("session_id") == sid)
+                        and (art_sid is None or a.get("session_id") == art_sid)
                     )
                 ]
                 return 1
@@ -263,7 +265,7 @@ class _InMemoryBigQueryEngine:
                     and a.get("filename") == fname
                 ]
                 return [{"next_version": (max(matched_vers) + 1) if matched_vers else 1}]
-            sid = params.get("session_id")
+            art_sid = params.get("session_id")
             fname = params.get("filename")
             ver = params.get("version")
             matched = [
@@ -271,7 +273,7 @@ class _InMemoryBigQueryEngine:
                 for a in self.artifacts
                 if a.get("app_name") == params.get("app_name")
                 and a.get("user_id") == params.get("user_id")
-                and (sid is None or a.get("session_id") == sid)
+                and (art_sid is None or a.get("session_id") == art_sid)
                 and (fname is None or a.get("filename") == fname)
                 and (ver is None or a.get("version") == ver)
             ]
@@ -592,7 +594,7 @@ def test_bigquery_sync_config_driver_data_dictionary_and_connection_shim() -> No
     assert columns[0]["column_name"] == "id"
 
     partitions = driver.data_dictionary.get_partitions(driver, "metrics")
-    assert partitions[0]["partition_id"] == "20261102"
+    assert cast("dict[str, Any]", partitions[0])["partition_id"] == "20261102"
 
     arrow_cur = driver.select_to_arrow("SELECT id, name, score FROM metrics")
     assert arrow_cur.rows_affected == 2
@@ -992,23 +994,63 @@ class _ArrowOptionsBigQueryClient:
     def __init__(self) -> None:
         self.requests: list[tuple[Any, ...]] = []
 
-    def query(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        _ = (
+            sql,
+            params_json,
+            session_id,
+            create_session,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+        )
         return {"session_id": "arrow-options-session"}
+
+    def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
+        _ = (sql, params_json)
+        return {}
 
     def read_table_arrow(
         self,
         project_id: str,
         dataset_id: str,
         table_id: str,
-        selected_fields: list[str] | None,
-        row_restriction: str | None,
-        max_streams: int,
-        compression: str,
-    ) -> None:
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> RustArrowCursor:
         self.requests.append(
             (project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression)
         )
         raise RuntimeError("external Arrow read reached")
+
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]:
+        _ = (parent_table, arrow_ipc_bytes, mode)
+        raise NotImplementedError
+
+    def close(self) -> None:
+        return None
 
 
 class _AsyncArrowOptionsBigQueryClient:
@@ -1017,11 +1059,65 @@ class _AsyncArrowOptionsBigQueryClient:
     def __init__(self, sync: _ArrowOptionsBigQueryClient) -> None:
         self.sync = sync
 
-    async def query(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.sync.query(*args, **kwargs)
+    async def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self.sync.query(
+            sql,
+            params_json,
+            session_id,
+            create_session,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+        )
 
-    async def read_table_arrow(self, *args: Any, **kwargs: Any) -> None:
-        self.sync.read_table_arrow(*args, **kwargs)
+    async def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
+        return self.sync.dry_run(sql, params_json)
+
+    async def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> RustArrowCursor:
+        return self.sync.read_table_arrow(
+            project_id,
+            dataset_id,
+            table_id,
+            selected_fields,
+            row_restriction,
+            max_streams,
+            compression,
+        )
+
+    async def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]:
+        return self.sync.append_arrow(parent_table, arrow_ipc_bytes, mode)
+
+    def close(self) -> None:
+        self.sync.close()
 
 
 def test_bigquery_arrow_stack_preserves_native_storage_options() -> None:
@@ -1081,14 +1177,12 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
     for base in (BaseSyncDriver, BaseAsyncDriver, SyncAdapterConfig, AsyncAdapterConfig):
         monkeypatch.setattr(base, "__init__", forbidden)
     predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
-    constructors = {
+    constructors: dict[str, Callable[[], Any]] = {
         "sync-driver": lambda: BigQuerySyncDriver(ForbiddenCore(), tenant_predicate=predicate),
         "async-driver": lambda: BigQueryAsyncDriver(ForbiddenCore(), tenant_predicate=predicate),
         "sync-config": lambda: BigQuerySyncConfig(tenant_predicate=predicate),
         "async-config": lambda: BigQueryAsyncConfig(tenant_predicate=predicate),
     }
-    from vertebra.extensions.sqlspec.adapters.bigquery import config as bq_config_mod
-
     monkeypatch.setattr(bq_config_mod, "_merge_connection_config", forbidden)
     for constructor_type in (BigQuerySyncDriver, BigQueryAsyncDriver, BigQuerySyncConfig, BigQueryAsyncConfig):
         monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
@@ -1113,7 +1207,7 @@ def test_bigquery_sync_driver_rejects_per_call_tenant_id(method_name: str) -> No
     """Sync BigQuery query methods raise NotSupportedError when tenant_id is supplied."""
     engine = _InMemoryBigQueryEngine()
     driver = BigQuerySyncDriver(_SimulatedSyncCoreDriver(engine))
-    calls = {
+    calls: dict[str, Callable[[], Any]] = {
         "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
         "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
         "execute_stack": lambda: driver.execute_stack(StatementStack().push_execute("SELECT 1"), tenant_id="tenant-a"),
@@ -1146,7 +1240,7 @@ async def test_bigquery_async_driver_rejects_per_call_tenant_id(method_name: str
     """Async BigQuery query methods raise NotSupportedError when tenant_id is supplied."""
     engine = _InMemoryBigQueryEngine()
     driver = BigQueryAsyncDriver(_SimulatedAsyncCoreDriver(engine))
-    calls = {
+    calls: dict[str, Callable[[], Awaitable[Any]]] = {
         "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
         "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
         "execute_stack": lambda: driver.execute_stack(StatementStack().push_execute("SELECT 1"), tenant_id="tenant-a"),

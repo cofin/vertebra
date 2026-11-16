@@ -475,11 +475,11 @@ class FakeSpannerClient:
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
                 )
                 target_tables = [str(r[0]) for r in tbl_cur.fetchall()]
-            rows = []
+            col_rows: list[list[Any]] = []
             for tname in target_tables:
                 cur = self._conn.execute(f"PRAGMA table_info({tname})")
                 for idx, r in enumerate(cur.fetchall(), start=1):
-                    rows.append(
+                    col_rows.append(
                         [
                             tname,
                             str(r["name"]),
@@ -500,12 +500,12 @@ class FakeSpannerClient:
                     "is_generated",
                     "generation_expression",
                 ],
-                "rows": rows,
+                "rows": col_rows,
             }
 
         if "INFORMATION_SCHEMA.INDEXES" in upper:
             table_name = str(params_map.get("table_name") or params_map.get("p2") or params_map.get("p1") or "")
-            rows = []
+            rows_idx: list[list[Any]] = []
             for stmt in self.ddl_history:
                 m = re.search(
                     r"CREATE\s+(UNIQUE\s+)?(NULL_FILTERED\s+)?(VECTOR\s+|SEARCH\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)",
@@ -515,7 +515,7 @@ class FakeSpannerClient:
                 if m and m.group(5).lower() == table_name.lower():
                     idx_type_prefix = (m.group(3) or "").strip().upper()
                     idx_type = f"{idx_type_prefix} INDEX".strip() if idx_type_prefix else "INDEX"
-                    rows.append(
+                    rows_idx.append(
                         [table_name, m.group(4), idx_type, None, bool(m.group(1)), bool(m.group(2)), "READ_WRITE"]
                     )
             return {
@@ -528,7 +528,7 @@ class FakeSpannerClient:
                     "is_null_filtered",
                     "index_state",
                 ],
-                "rows": rows,
+                "rows": rows_idx,
             }
 
         if "INFORMATION_SCHEMA.TABLE_CONSTRAINTS" in upper:
@@ -603,6 +603,11 @@ class FakeSpannerClient:
         if isinstance(val, bool):
             return 1 if val else 0
         return val
+
+    def close(self) -> None:
+        """Close the backing in-memory SQLite connection."""
+        with self._lock:
+            self._conn.close()
 
     @staticmethod
     def _decode_cell(val: Any) -> Any:
@@ -824,6 +829,10 @@ class FakeAsyncSpannerClient:
             staleness_ms,
         )
 
+    async def close(self) -> None:
+        """Close the backing synchronous test double."""
+        self._sync_client.close()
+
 
 def _replace_named_pg(
     match: re.Match[str],
@@ -886,6 +895,7 @@ def test_spanner_config_from_dsn_variants() -> None:
     reg = DatabaseRegistry()
     reg.register("spanner_main", cfg_gsql)
     fp = reg.pool_fingerprint(cfg_gsql)
+    assert fp is not None
     assert fp[0] == "spanner"
     assert len(fp) == 5
 
@@ -1000,7 +1010,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
     )
     batch_results = driver.batch_write(
         [
-            MutationGroup([Mutation.insert_or_update("singers", ("singer_id", "name", "active"), [(5, "Eve", 1)])]),
+            MutationGroup((Mutation.insert_or_update("singers", ("singer_id", "name", "active"), [(5, "Eve", 1)]),)),
         ]
     )
     assert len(batch_results) == 1
@@ -1176,8 +1186,9 @@ def test_spanner_embedder_builders_reject_invalid_identifiers() -> None:
         embedder.build_vector_search_sql("docs; DROP TABLE docs")
     with pytest.raises(ValueError, match="embedding_column"):
         embedder.build_vector_search_sql("docs", embedding_column="embedding) --")
+    bad_dist: Any = "MANHATTAN"
     with pytest.raises(ValueError, match="distance_type"):
-        embedder.build_vector_search_sql("docs", distance_type="MANHATTAN")
+        embedder.build_vector_search_sql("docs", distance_type=bad_dist)
 
 
 @pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-predict", "ai-generate"])

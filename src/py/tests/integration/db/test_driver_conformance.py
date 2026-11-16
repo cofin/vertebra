@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
@@ -1560,11 +1560,11 @@ def _resolve_cache_config(
     for env_key in cache_spec.env_dsn_vars:
         value = os.environ.get(env_key, "").strip()
         if value:
-            return cache_spec.config_cls.from_url(value)
+            return cast("BaseDatabaseConfig", cache_spec.config_cls.from_url(value))
     if cache_spec.container_fixture is not None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
         fixture_cfg = request.getfixturevalue(cache_spec.container_fixture)
         assert isinstance(fixture_cfg, cache_spec.config_cls)
-        return fixture_cfg
+        return cast("BaseDatabaseConfig", fixture_cfg)
     pytest.skip(
         f"{cache_spec.engine} conformance requires {' or '.join(cache_spec.env_dsn_vars)} or {_CONFORMANCE_DOCKER_ENV}=1"
     )

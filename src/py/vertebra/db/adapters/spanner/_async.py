@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Literal, Protocol, Self
 
 import msgspec
 from anyio import CancelScope
@@ -44,10 +44,144 @@ from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.text import validate_identifier
 
-if TYPE_CHECKING:
-    from vertebra._spanner import AsyncSpannerClient
+__all__ = (
+    "AsyncSpannerClientProtocol",
+    "AsyncSpannerDriver",
+    "AsyncSpannerReadWriteTxProtocol",
+)
 
-__all__ = ("AsyncSpannerDriver",)
+
+class AsyncSpannerReadWriteTxProtocol(Protocol):
+    """Structural protocol for asynchronous interactive Spanner ``ReadWrite`` handles."""
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the transaction identifier bytes."""
+        ...
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Execute a SQL query inside this transaction asynchronously."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> Awaitable[int]:
+        """Execute a DML statement inside this transaction asynchronously."""
+        ...
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> Awaitable[list[int]]:
+        """Execute a batch of DML statements inside this transaction asynchronously."""
+        ...
+
+    def commit(self, mutations_json: str | None = None) -> Awaitable[dict[str, Any]]:
+        """Commit this transaction and optional buffered mutations asynchronously."""
+        ...
+
+    def rollback(self) -> Awaitable[None]:
+        """Roll back this transaction asynchronously."""
+        ...
+
+
+class AsyncSpannerClientProtocol(Protocol):
+    """Structural protocol for asynchronous Cloud Spanner wire clients and test doubles."""
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> Awaitable[dict[str, Any]]:
+        """Execute a streaming SQL read asynchronously."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> Awaitable[int]:
+        """Execute a single-statement transactional DML statement asynchronously."""
+        ...
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> Awaitable[list[int]]:
+        """Execute a batch of DML statements asynchronously."""
+        ...
+
+    def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> Awaitable[int]:
+        """Execute a Partitioned DML statement asynchronously."""
+        ...
+
+    def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Commit a JSON-encoded list of Spanner mutations asynchronously."""
+        ...
+
+    def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> Awaitable[list[dict[str, Any]]]:
+        """Commit independent mutation groups asynchronously via ``BatchWrite``."""
+        ...
+
+    def update_ddl(self, statements: Sequence[str]) -> Awaitable[str]:
+        """Execute schema DDL statements asynchronously."""
+        ...
+
+    def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> Awaitable[dict[str, Any]]:
+        """Execute a parallel ``PartitionQuery`` read asynchronously."""
+        ...
+
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> Awaitable[AsyncSpannerReadWriteTxProtocol]:
+        """Open a stateful asynchronous interactive ``ReadWrite`` transaction handle."""
+        ...
+
+    def close(self) -> Any:
+        """Close the client handle."""
+        ...
 
 
 class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
@@ -72,7 +206,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: AsyncSpannerClient | None = None,
+        client: AsyncSpannerClientProtocol | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -98,7 +232,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: AsyncSpannerClient | None = client
+        self._client: AsyncSpannerClientProtocol | None = client
         self._last_commit_stats: dict[str, Any] = {}
         self._active_transaction: AsyncSpannerTransaction | None = None
 
@@ -761,7 +895,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             total += await self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 
-    def _ensure_client(self) -> AsyncSpannerClient:
+    def _ensure_client(self) -> AsyncSpannerClientProtocol:
         if self._client is None:
             self._client = SpannerCore.create_async_rust_client(self.config)
         return self._client

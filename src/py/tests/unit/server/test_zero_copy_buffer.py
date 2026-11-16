@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from typing import Any, cast
 
 import pytest
 
@@ -260,7 +261,7 @@ async def test_async_storage_handler_submits_native_fastpath_frames(
     if expected_status == 200:
         assert isinstance(body, memoryview)
         assert isinstance(body.obj, StorageBuffer)
-    native = Response.from_buffer(status, body, headers=headers, request_id=303)
+    native = Response.from_buffer(status, body, headers=cast("Any", headers), request_id=303)
     assert native.status == expected_status
     assert native.body == expected_body
     assert dict(native.headers)[b"content-length"] == str(len(expected_body)).encode()

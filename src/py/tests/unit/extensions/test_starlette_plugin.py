@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Awaitable
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import pytest
@@ -85,9 +86,7 @@ def _make_mock_starlette_app() -> Any:
     async def create_item(request: Any) -> dict[str, Any]:
         raw = await request.body()
         vtb_req = request.scope.get("vertebra_request")
-        decoded = (
-            vtb_req.decode_msgspec(_ItemPayload) if vtb_req is not None else decode_json(raw, schema_type=_ItemPayload)
-        )
+        decoded = vtb_req.decode_msgspec(_ItemPayload) if vtb_req is not None else decode_json(raw, type=_ItemPayload)
         return {"created": decoded.name, "qty": decoded.qty, "body_len": len(raw)}
 
     def sync_ping(request: Any) -> dict[str, str]:
@@ -203,7 +202,7 @@ async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.
     assert res_get is not None
     status, _headers, body = res_get
     assert status == 200
-    assert decode_json(body) == {"item_id": 42, "method": "GET"}
+    assert decode_json(bytes(body)) == {"item_id": 42, "method": "GET"}
     assert scope_get["path_params"] == {"item_id": 42}
     assert scope_get["app"] is app
 
@@ -216,12 +215,12 @@ async def test_starlette_plugin_route_compiler_and_fastpath(monkeypatch: pytest.
     assert res_post is not None
     status_post, _headers_post, body_post = res_post
     assert status_post == 200
-    assert decode_json(body_post) == {"created": "bolt", "qty": 9, "body_len": 23}
+    assert decode_json(bytes(body_post)) == {"created": "bolt", "qty": 9, "body_len": 23}
 
     scope_sync = AsgiScope.from_parts(method="GET", path="/ping", query_string="echo=fast")
     res_sync = await fastpath.dispatch(scope_sync, noop_receive, noop_send)
     assert res_sync is not None
-    assert decode_json(res_sync[2]) == {"pong": "fast"}
+    assert decode_json(bytes(res_sync[2])) == {"pong": "fast"}
 
 
 @pytest.mark.anyio
@@ -305,7 +304,7 @@ async def test_starlette_fastpath_inline_sync_and_send_raw_response() -> None:
             body: bytes,
         ) -> None:
             raw_calls.append(status)
-            await proto.send_raw_response(status, headers, body)
+            await cast("Awaitable[None]", proto.send_raw_response(status, headers, body))
 
     scope = AsgiScope.from_parts(method="GET", path="/sub/ping", query_string="echo=inline")
     scope["root_path"] = "/sub"
@@ -505,14 +504,13 @@ async def test_starlette_queue_service_and_lifespan() -> None:
     qsvc = attach_starlette_queue_service(app, StarletteQueueService(backend=MemoryQueueBackend()))
     assert get_starlette_queue_service(app) is qsvc
 
-    executed = []
+    executed: list[int] = []
 
-    @task(lane="io")
     def job(val: int) -> int:
         executed.append(val)
         return val * 2
 
-    qsvc.register(job)
+    qsvc.register(task(lane="io")(job))
     await qsvc.enqueue("job", 21)
 
     async with starlette_queue_lifespan(app, run_worker=False) as svc:

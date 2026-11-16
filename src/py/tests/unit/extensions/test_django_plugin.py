@@ -91,8 +91,12 @@ from vertebra.utils.serializers import decode_json
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    _UploadedFileBase = UploadedFile[bytes]
+else:
+    _UploadedFileBase = UploadedFile
 
-class _ChunkRecordingUpload(UploadedFile):
+
+class _ChunkRecordingUpload(_UploadedFileBase):
     """Uploaded file with a tiny chunk size that records every chunk handed to storage."""
 
     DEFAULT_CHUNK_SIZE = 4
@@ -192,15 +196,17 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     assert re_route == "/items/{item_id}/"
     assert re_converters == (("item_id", "int"),)
 
-    @vertebra_view(methods=("POST",), status_code=201)
     @mcp_tool(name="create_django_order", description="Create an order in Django")
     def create_order_view(request: Request, order_id: int, body: OrderInput) -> dict[str, Any]:
         assert request.method == "POST"
         return {"id": order_id, "sku": body.sku, "qty": body.qty}
 
-    @vertebra_view(methods=("POST",))
+    vertebra_view(create_order_view, methods=("POST",), status_code=201)
+
     def create_pydantic_view(body: PydanticOrderInput) -> PydanticOrderInput:
         return PydanticOrderInput(sku=body.sku.upper(), qty=body.qty + 2)
+
+    vertebra_view(create_pydantic_view, methods=("POST",))
 
     class DetailView(MsgspecView):
         def get(self, request: Request, item_id: int) -> OrderRecord:
@@ -252,7 +258,7 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     )
 
     app_cfg = VertebraAppConfig()
-    assert app_cfg.ready() is None
+    app_cfg.ready()
 
     post_req = Request.from_parts(
         method="POST",
@@ -556,7 +562,6 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
 async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_send_raw_response() -> None:
     """Verify Django FastPath supports async def views, caches stateless MsgspecView, and uses send_raw_response."""
 
-    @vertebra_view(methods=("POST",), status_code=201)
     async def create_async_order_view(
         request: Request,
         order_id: int,
@@ -565,6 +570,8 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
         assert request.method == "POST"
         await asyncio.sleep(0)
         return OrderRecord(id=order_id, sku=body.sku, qty=body.qty)
+
+    vertebra_view(create_async_order_view, methods=("POST",), status_code=201)
 
     class CachedAsyncItemView(MsgspecView):
         init_count: ClassVar[int] = 0
@@ -598,7 +605,7 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
     compiler = RouteCompiler(urlpatterns=urlpatterns)
     fastpath = FastPath.from_app(SimpleNamespace(urlpatterns=urlpatterns))
     wrapped_wsgi = fastpath.wrap_wsgi()
-    assert wrapped_wsgi.__vertebra_fastpath__ is fastpath
+    assert getattr(wrapped_wsgi, "__vertebra_fastpath__", None) is fastpath
     assert not hasattr(wrapped_wsgi, "_vertebra_fastpath")
     assert len(compiler.entries) == len(fastpath.routes)
 
@@ -720,12 +727,13 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     observed_loops: list[tuple[int, int]] = []
 
-    @vertebra_view(methods=("POST",), status_code=200)
     @mcp_tool(name="django_probe_loop", description="Probe active event loop in Django")
     async def django_probe_loop(seq: int) -> dict[str, int]:
         loop = asyncio.get_running_loop()
         observed_loops.append((id(loop), threading.get_ident()))
         return {"seq": seq}
+
+    vertebra_view(django_probe_loop, methods=("POST",), status_code=200)
 
     urlpatterns: list[Any] = [
         _MockURLPattern(
@@ -805,7 +813,7 @@ def test_django_storage_deconstructs_and_requires_configuration(tmp_path: Path) 
         DjangoStorage()
     storage = DjangoStorage(LocalConfig(root=tmp_path), base_url="/media/")
     assert isinstance(storage, Storage)
-    path, args, kwargs = storage.deconstruct()
+    path, args, kwargs = cast("Any", storage).deconstruct()
     module, _, name = path.rpartition(".")
     restored = getattr(import_module(module), name)(*args, **kwargs)
     saved = restored.save("readme.txt", ContentFile(b"hello"))
@@ -835,7 +843,11 @@ async def test_django_storage_reopens_through_native_store(
     config = MemoryConfig(namespace="field-reopen") if backend == "memory" else LocalConfig(root=tmp_path / "objects")
     storage = DjangoStorage(config, location="uploads")
     storage.save(name, b"native payload")
-    handle = FieldFile(None, FileField(storage=storage), name) if consumer == "field" else await storage.aopen(name)
+    handle = (
+        FieldFile(cast("Any", None), FileField(storage=storage), name)
+        if consumer == "field"
+        else await storage.aopen(name)
+    )
     handle.open("rb")
     assert handle.read() == b"native payload"
     handle.close()
@@ -858,7 +870,8 @@ def test_django_storage_migration_writer_round_trips_configuration(tmp_path: Pat
     exec("\n".join(sorted(imports)), namespace)
     restored = eval(expression, namespace)
     assert isinstance(restored, Storage)
-    _, args, kwargs = restored.deconstruct()
+    assert isinstance(restored, DjangoStorage)
+    _, args, kwargs = cast("Any", restored).deconstruct()
     assert args == (config,)
     assert kwargs == {"location": "uploads", "base_url": "/media/", "file_overwrite": True, "expires_in": 71}
     assert restored.store.options == storage.store.options
@@ -1005,7 +1018,9 @@ def test_django_storage_naming_files_and_metadata(tmp_path: Path) -> None:
     assert storage.path("root.txt") == str(tmp_path / "uploads" / "root.txt")
     modified = storage.get_modified_time("root.txt")
     assert modified.tzinfo is not None
-    assert modified.utcoffset().total_seconds() == 0
+    offset = modified.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     with pytest.raises(NotImplementedError):
         storage.get_created_time("root.txt")
     with pytest.raises(NotImplementedError):

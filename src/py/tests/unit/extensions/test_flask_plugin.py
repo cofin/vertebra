@@ -134,10 +134,11 @@ def test_convert_werkzeug_rule_and_flask_fastpath(tmp_path: Any) -> None:
     static_dir.mkdir()
     app = _MockFlaskApp(static_folder=str(static_dir))
 
-    @vertebra_route(status_code=201)
     @mcp_tool(name="create_order", description="Create a new order")
     def create_order(order_id: int, body: CreateOrderPayload) -> dict[str, Any]:
         return {"order_id": order_id, "sku": body.sku, "qty": body.qty}
+
+    vertebra_route(create_order, status_code=201)
 
     @vertebra_route
     def create_pydantic_order(body: PydanticOrderPayload) -> PydanticOrderPayload:
@@ -241,11 +242,7 @@ async def test_flask_ecosystem_bridges() -> None:
     file_resp = send_storage_file(reg.get("default"), "reports/q1.txt", as_attachment=True, download_name="q1.txt")
     assert file_resp.status == 200
     assert bytes(file_resp.body) == b"quarter-1"
-    assert any(
-        (k == b"content-disposition" or k == "content-disposition")
-        and (b'filename="q1.txt"' in v if isinstance(v, bytes) else 'filename="q1.txt"' in v)
-        for k, v in file_resp.headers
-    )
+    assert any(k == b"content-disposition" and b'filename="q1.txt"' in v for k, v in file_resp.headers)
 
     async_store = AsyncObjectStore.from_config(MemoryConfig())
     await async_store.put("reports/q2.txt", b"quarter-2")
@@ -291,14 +288,16 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
     """Verify Flask FastPath executes async def views, wrap_asgi, and start_response.send_raw_response."""
     app = _MockFlaskApp()
 
-    @vertebra_route(status_code=201)
     async def create_async_order(order_id: int, body: CreateOrderPayload) -> dict[str, Any]:
         return {"order_id": order_id, "sku": body.sku, "qty": body.qty, "mode": "immediate"}
 
-    @vertebra_route(status_code=200)
+    vertebra_route(create_async_order, status_code=201)
+
     async def suspended_async_order(order_id: int, body: CreateOrderPayload) -> dict[str, Any]:
         await asyncio.sleep(0)
         return {"order_id": order_id, "sku": body.sku, "qty": body.qty, "mode": "suspended"}
+
+    vertebra_route(suspended_async_order, status_code=200)
 
     app.add_url_rule(
         "/async-orders/<int:order_id>",
@@ -316,7 +315,7 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
     compiler = RouteCompiler(app)
     fastpath = FastPath.from_app(app)
     wrapped_wsgi = fastpath.wrap_wsgi()
-    assert wrapped_wsgi.__vertebra_fastpath__ is fastpath
+    assert getattr(wrapped_wsgi, "__vertebra_fastpath__", None) is fastpath
     assert not hasattr(wrapped_wsgi, "_vertebra_fastpath")
     assert len(compiler.entries) == len(fastpath.routes)
 
@@ -390,12 +389,13 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
     observed_loops: list[tuple[int, int]] = []
     app = _MockFlaskApp()
 
-    @vertebra_route(status_code=200)
     @mcp_tool(name="probe_loop", description="Probe active event loop and thread")
     async def probe_loop(seq: int) -> dict[str, int]:
         loop = asyncio.get_running_loop()
         observed_loops.append((id(loop), threading.get_ident()))
         return {"seq": seq}
+
+    vertebra_route(probe_loop, status_code=200)
 
     app.add_url_rule("/probe/<int:seq>", endpoint="probe_loop", view_func=probe_loop, methods=["POST"])
     plugin = VertebraPlugin(app, config=VertebraConfig(mcp=MCPConfig(server_name="flask-mcp")))

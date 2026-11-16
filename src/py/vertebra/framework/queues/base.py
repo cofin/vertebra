@@ -9,7 +9,7 @@ import random
 import time
 import urllib.parse
 import uuid
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
 
 import msgspec
 
@@ -870,6 +870,33 @@ class QueueService:
         raise UnsupportedBackendError(msg)
 
 
+@overload
+def task(
+    fn: Callable[..., Any],
+    /,
+    *,
+    name: str | None = None,
+    lane: TaskLane = "io",
+    retry_policy: TaskRetryPolicy | None = None,
+    retry: TaskRetryPolicy | None = None,
+    cron: CronSchedule | None = None,
+    timeout_seconds: float = 300.0,
+) -> TaskDef: ...
+
+
+@overload
+def task(
+    fn: None = None,
+    *,
+    name: str | None = None,
+    lane: TaskLane = "io",
+    retry_policy: TaskRetryPolicy | None = None,
+    retry: TaskRetryPolicy | None = None,
+    cron: CronSchedule | None = None,
+    timeout_seconds: float = 300.0,
+) -> Callable[[Callable[..., Any]], TaskDef]: ...
+
+
 def task(
     fn: Callable[..., Any] | None = None,
     *,
@@ -879,7 +906,7 @@ def task(
     retry: TaskRetryPolicy | None = None,
     cron: CronSchedule | None = None,
     timeout_seconds: float = 300.0,
-) -> Any:
+) -> TaskDef | Callable[[Callable[..., Any]], TaskDef]:
     """Decorator registering a callable as a TaskDef."""
     effective_retry = retry_policy or retry or TaskRetryPolicy()
 

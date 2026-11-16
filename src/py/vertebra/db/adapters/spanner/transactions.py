@@ -14,12 +14,14 @@ from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 
 if TYPE_CHECKING:
-    from vertebra._spanner import (
-        AsyncSpannerReadWriteTransaction,
-        SyncSpannerReadWriteTransaction,
+    from vertebra.db.adapters.spanner._async import (
+        AsyncSpannerDriver,
+        AsyncSpannerReadWriteTxProtocol,
     )
-    from vertebra.db.adapters.spanner._async import AsyncSpannerDriver
-    from vertebra.db.adapters.spanner._sync import SyncSpannerDriver
+    from vertebra.db.adapters.spanner._sync import (
+        SyncSpannerDriver,
+        SyncSpannerReadWriteTxProtocol,
+    )
 
 __all__ = (
     "AsyncSpannerSnapshot",
@@ -334,7 +336,7 @@ class SyncSpannerTransaction:
     def __init__(
         self,
         driver: SyncSpannerDriver,
-        handle: SyncSpannerReadWriteTransaction,
+        handle: SyncSpannerReadWriteTxProtocol,
         *,
         transaction_tag: str | None = None,
     ) -> None:
@@ -574,7 +576,7 @@ class AsyncSpannerTransaction:
     def __init__(
         self,
         driver: AsyncSpannerDriver,
-        handle: AsyncSpannerReadWriteTransaction,
+        handle: AsyncSpannerReadWriteTxProtocol,
         *,
         transaction_tag: str | None = None,
     ) -> None:

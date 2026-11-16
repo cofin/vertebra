@@ -246,7 +246,8 @@ async def test_postgres_notify_listen_native_and_unsupported_stream(with_stream_
             async def _publish_notification(self, channel: str, payload: str) -> None:
                 _ = (channel, payload)
 
-        source = AsyncPostgresNotificationSource(_NoListenerDriver())
+        no_listener: Any = _NoListenerDriver()
+        source = AsyncPostgresNotificationSource(no_listener)
         with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
             await anext(source.listen())
         return
@@ -259,7 +260,11 @@ async def test_postgres_notify_listen_native_and_unsupported_stream(with_stream_
     source = AsyncPostgresNotificationSource(driver)
     await source.subscribe(["orders"])
     stream = source.listen()
-    next_task = asyncio.create_task(anext(stream))
+
+    async def _next_event() -> Any:
+        return await anext(stream)
+
+    next_task = asyncio.create_task(_next_event())
     while not cluster.listeners:
         await asyncio.sleep(0)
     cluster.publish_notification("orders", "hello-native", pid=42)
@@ -298,7 +303,7 @@ def test_postgres_sync_rls_predicate_propagates_session_setter_failure() -> None
         raise failure
 
     _ = orig_execute_sql
-    cluster.execute_sql = _failing_execute
+    cluster.__dict__["execute_sql"] = _failing_execute
     driver = SyncPostgreSQLDriver(pool=FakeSyncPostgresPool(cluster))
     try:
         adapter = PostgresSyncDriver(driver)

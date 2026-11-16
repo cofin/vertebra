@@ -4,7 +4,7 @@ import asyncio
 import base64
 import dataclasses
 import io
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from flask import Flask
 from litestar import Litestar
 from litestar.response import Stream as LitestarStream
+from litestar.routes import HTTPRoute
 from litestar.testing import TestClient as LitestarTestClient
 from litestar.testing import create_test_client
 from starlette.applications import Starlette
@@ -317,6 +318,7 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
     assert proto_status == 400
+    assert isinstance(proto_body, bytes)
     proto_decoded = decode_json(proto_body)
     assert proto_decoded["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION
 
@@ -345,6 +347,7 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         b'{"jsonrpc":"2.0","id":1,"method":"prompts/list"}',
     )
     assert method_status == 400
+    assert isinstance(method_body, bytes)
     method_decoded = decode_json(method_body)
     assert method_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -355,6 +358,7 @@ async def test_mcp_http_handler_conformance_and_negative_cases() -> None:
         b'{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"correct_name"}}',
     )
     assert name_status == 400
+    assert isinstance(name_body, bytes)
     name_decoded = decode_json(name_body)
     assert name_decoded["error"]["code"] == HEADER_MISMATCH
 
@@ -502,6 +506,7 @@ async def test_mcp_controllers_prompt_and_skill() -> None:
     prompts = reg.list_prompts()
     assert len(prompts) == 1
     assert prompts[0].name == "admin_diagnose"
+    assert prompts[0].getter is not None
     instantiated = await prompts[0].getter(target="db-node-1")
     assert len(instantiated) == 1
     assert "Act strictly as an administrator." in instantiated[0].content.text
@@ -767,6 +772,7 @@ async def test_mcp_http_handler_rejects_mcp_name_without_body_name(payload: obje
         encode_json_bytes(payload),
     )
     assert status == 400
+    assert isinstance(raw, bytes)
     decoded = decode_json(raw)
     assert decoded["error"]["code"] == HEADER_MISMATCH
     assert calls == []
@@ -777,6 +783,9 @@ async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_gua
     """SkillController guards wrap @mcp_tool methods while preserving webmcp, and AgentPlugin route opt['mcp_tool'] preserves schema and webmcp."""
 
     class RequireAuthGuard(GuardProtocol):
+        async def __call__(self, ctx: AgentContext) -> None:
+            await self.check(ctx)
+
         async def check(self, context: Any) -> None:
             if context is None or not getattr(getattr(context, "identity", None), "user_id", None):
                 raise PermissionDeniedError("Authentication required")
@@ -813,11 +822,13 @@ async def test_guarded_skill_controller_and_agent_plugin_preserve_webmcp_and_gua
     assert [t.name for t in manifest.tools] == ["guarded_web_ping", "opt_route_echo"]
 
     echo_tool = plugin.mcp_registry.get_tool("opt_route_echo")
+    assert echo_tool is not None
     assert echo_tool.webmcp is True
     assert echo_tool.requires_confirmation is True
     assert "text" in echo_tool.input_schema.get("properties", {})
 
     ping_tool = plugin.mcp_registry.get_tool("guarded_web_ping")
+    assert ping_tool is not None
     assert ping_tool.webmcp is True
     assert ping_tool.requires_confirmation is True
     assert ping_tool.annotations == {"readOnlyHint": True}
@@ -1004,6 +1015,7 @@ async def test_mcp_core_binds_agent_context(entrypoint: str, user_id: str | None
     outer = AgentContext(identity=CallerIdentity(user_id="outer"))
     token = bind_agent_context(outer)
     try:
+        payload: bytes | None
         if entrypoint == "handle":
             response = await core.handle(McpHttpRequest(method="POST", path="/mcp", body=body, context=context))
             payload = response.body
@@ -2320,7 +2332,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
     assert decode_json(ninth.body)["error"]["code"] == SESSION_CAPACITY_EXHAUSTED
     assert isinstance(StreamLimitExceededError("limit"), StreamLimitExceededError)
 
-    await extra_streams.pop().aclose()
+    await _aclose(extra_streams.pop())
     replacement = await core.handle(
         McpHttpRequest(
             method="GET",
@@ -2334,7 +2346,7 @@ async def test_mcp_get_sse_session_replay_keepalive_and_owner_limit() -> None:
     extra_streams.append(replacement.stream)
 
     for stream in extra_streams:
-        await stream.aclose()
+        await _aclose(stream)
     assert core.stream_broker.owner_stream_count("t1:alice") == 0
 
 
@@ -2360,7 +2372,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
             async def aclose(self) -> None:
                 closed_flag[0] = True
-                await inner.aclose()
+                await _aclose(inner)
 
         return _TrackingStream(), closed_flag
 
@@ -2438,7 +2450,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
     )
     star_resp = await asgi_app.handle_starlette_request(star_req)
     assert isinstance(star_resp, StreamingResponse)
-    star_iter = star_resp.body_iterator
+    star_iter = cast("AsyncGenerator[bytes, None]", star_resp.body_iterator)
     core.stream_broker.publish(sid, SseFrame(id="star-1", event="message", data="star-chunk"))
     assert b"star-chunk" in await anext(star_iter)
     await star_iter.aclose()
@@ -2528,7 +2540,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
         async def aclose(self) -> None:
             django_stream_closed[0] = True
-            await dj_inner.aclose()
+            await _aclose(dj_inner)
 
     orig_dj_handle = django_core.handle
 
@@ -2555,7 +2567,8 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
     )
     assert isinstance(dj_resp, StreamingHttpResponse)
     django_core.stream_broker.publish(dj_sid, SseFrame(id="dj-1", event="message", data="dj-chunk"))
-    dj_chunk = await anyio.to_thread.run_sync(next, dj_resp.streaming_content)
+    dj_iter = iter(cast("Iterable[bytes]", dj_resp.streaming_content))
+    dj_chunk = await anyio.to_thread.run_sync(lambda: next(dj_iter))
     assert b"dj-chunk" in dj_chunk
     dj_resp.close()
     assert django_stream_closed[0] is True
@@ -2578,7 +2591,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
         native_sid, SseFrame(id="nat-1", event="message", data="native-chunk")
     )
     assert b"native-chunk" in await anext(native_body)
-    await native_body.aclose()
+    await _aclose(native_body)
 
     opt_status, opt_hdrs, _ = await native_routes[("OPTIONS", "/mcp")](headers={})
     assert opt_status == 204
@@ -2601,7 +2614,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
         async def aclose(self) -> None:
             ls_stream_closed[0] = True
-            await ls_inner.aclose()
+            await _aclose(ls_inner)
 
     async def _ls_stream_handle(req: McpHttpRequest) -> McpHttpResponse:
         if req.method == "GET":
@@ -2615,6 +2628,7 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
 
     cast(Any, ls_service).handle = _ls_stream_handle
     mcp_route = next(h for h in litestar_app.routes if h.path == "/mcp")
+    assert isinstance(mcp_route, HTTPRoute)
     assert set(mcp_route.methods) >= {"POST", "GET", "DELETE", "OPTIONS"}
     ls_route_handler = mcp_route.route_handler_map["GET"][0]
     ls_result = await ls_route_handler.fn(
@@ -2626,9 +2640,10 @@ async def test_mcp_adapters_stream_incrementally_and_close_on_disconnect() -> No
         )
     )
     assert isinstance(ls_result, LitestarStream)
+    ls_iter = cast("AsyncGenerator[bytes, None]", ls_result.iterator)
     ls_service.stream_broker.publish(ls_sid, SseFrame(id="ls-1", event="message", data="ls-chunk"))
-    assert b"ls-chunk" in await anext(ls_result.iterator)
-    await ls_result.iterator.aclose()
+    assert b"ls-chunk" in await anext(ls_iter)
+    await ls_iter.aclose()
     assert ls_stream_closed[0] is True
 
 
@@ -2722,7 +2737,7 @@ async def test_mcp_list_changed_logging_and_progress_notifications() -> None:
     assert p1["method"] == "notifications/progress"
     assert p1["params"] == {"progressToken": "tok-sess", "progress": 1, "total": 2, "message": "halfway"}
     assert p2["params"]["progress"] == 2
-    await sse_resp.stream.aclose()
+    await _aclose(sse_resp.stream)
 
     post_sse_resp = await core.handle(
         McpHttpRequest(
@@ -2762,7 +2777,7 @@ async def test_mcp_list_changed_logging_and_progress_notifications() -> None:
     assert disabled_stream_resp.stream is not None
     disabled_tools_core.registry.register_tool(slow_tool)
     assert await disabled_tools_core.log("emergency", "ignored-when-logging-disabled") == 0
-    await disabled_stream_resp.stream.aclose()
+    await _aclose(disabled_stream_resp.stream)
 
 
 @pytest.mark.anyio
@@ -2901,7 +2916,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     assert listen_lc["method"] == "notifications/tools/list_changed"
     assert listen_lc["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"] == sub_id
 
-    await listen_resp.stream.aclose()
+    await _aclose(listen_resp.stream)
     assert not core._listen_registrations
 
     unsub_resp = await core.handle(
@@ -2934,7 +2949,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
         McpHttpRequest(method="DELETE", path="/mcp", context=alice, headers={"Mcp-Session-Id": sid})
     )
     assert del_resp.status == 204
-    await get_resp.stream.aclose()
+    await _aclose(get_resp.stream)
     assert await core.notify_resource_updated("doc://allowed") == 0
 
     sid_ttl = await _init_legacy_session(core, context=alice)
@@ -2960,7 +2975,7 @@ async def test_mcp_resource_subscriptions_fanout_cleanup_and_listen() -> None:
     )
     now_mono[0] = 120.0
     assert await core.notify_resource_updated("doc://allowed") == 0
-    await ttl_stream_resp.stream.aclose()
+    await _aclose(ttl_stream_resp.stream)
 
 
 @pytest.mark.anyio
@@ -3238,7 +3253,7 @@ async def test_mcp_skills_extension_pagination_blobs_prompts_and_notifications(t
             "notifications/resources/list_changed",
         }
     finally:
-        await sse_resp.stream.aclose()
+        await _aclose(sse_resp.stream)
 
     restricted_core = MCPCore(
         skill_catalog=MCPSkillsConfig(paths=(tmp_path,), directory_read=False),
@@ -3488,7 +3503,7 @@ def _build_demo_skills_config(tmp_path: Path) -> MCPSkillsConfig:
     skill_dir = tmp_path / "triage"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text("---\ntitle: Triage Skill\n---\n# Triage\nRun triage.\n", encoding="utf-8")
-    return MCPSkillsConfig(paths=[tmp_path])
+    return MCPSkillsConfig(paths=(tmp_path,))
 
 
 @pytest.mark.anyio
@@ -3648,3 +3663,8 @@ def test_flask_and_django_mount_skills_well_known_and_ui_validation(tmp_path: Pa
     bad_standalone_dj_reg.register_tool(broken_django)
     with pytest.raises(ImproperConfigurationError, match="ui://missing/django.html"):
         dispatch_django_mcp(bad_standalone_dj_reg, b"{}", skills=skills_cfg)
+
+
+async def _aclose(stream: Any) -> None:
+    """Close an async SSE stream iterator."""
+    await stream.aclose()

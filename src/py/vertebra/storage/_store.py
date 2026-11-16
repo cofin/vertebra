@@ -11,7 +11,17 @@ import shutil
 import tempfile
 import time
 import warnings
-from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Buffer,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Self
@@ -2078,7 +2088,7 @@ class SyncObjectStore(_BaseObjectStore):
 
     def iter_arrow_batches(
         self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
-    ) -> Iterator[Any]:
+    ) -> Generator[Any, None, None]:
         """Yield Arrow IPC RecordBatch objects through native streaming reads.
 
         ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
@@ -2092,7 +2102,7 @@ class SyncObjectStore(_BaseObjectStore):
         batch_size: int = 65536,
         columns: Sequence[str] | None = None,
         options: Mapping[str, Any] | None = None,
-    ) -> Iterator[Any]:
+    ) -> Generator[Any, None, None]:
         """Yield projected Parquet batches through bounded native range reads.
 
         ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``
@@ -2648,7 +2658,7 @@ class AsyncObjectStore(_BaseObjectStore):
 
     def iter_arrow_batches(
         self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads.
 
         ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
@@ -2662,7 +2672,7 @@ class AsyncObjectStore(_BaseObjectStore):
         batch_size: int = 65536,
         columns: Sequence[str] | None = None,
         options: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield projected Parquet batches through bounded native range reads.
 
         ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``

@@ -517,10 +517,10 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
     finally:
         conn.close()
 
-    assert SyncMySQLDialect.paramstyle == "format"
-    assert SyncMySQLDialect.use_insertmanyvalues is True
-    assert SyncMySQLDialect.insert_executemany_returning is False
-    assert SyncMySQLDialect.supports_native_jsonb is False
+    assert SyncMySQLDialect.paramstyle == "qmark"
+    assert SyncMySQLDialect.default_paramstyle == "qmark"
+    assert SyncMySQLDialect().insert_executemany_returning is False
+    assert SyncMySQLDialect.supports_statement_cache is True
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"

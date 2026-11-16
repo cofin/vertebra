@@ -6,7 +6,7 @@ import asyncio
 import warnings
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import click
 import msgspec
@@ -19,6 +19,7 @@ from litestar.config.app import AppConfig
 from litestar.di import NamedDependency
 from litestar.exceptions import LitestarDeprecationWarning
 from litestar.params import SkipValidation
+from litestar.plugins import InitPluginProtocol
 from litestar.testing import TestClient
 
 import vertebra
@@ -222,7 +223,7 @@ def test_sqlspec_generic_configs_and_pool_defaults() -> None:
     app_config = AppConfig()
     spec_plugin.on_app_init(app_config)
     for startup_fn in app_config.on_startup:
-        startup_fn()
+        cast("Callable[[], Any]", startup_fn)()
     assert "sqlspec" in app_config.state
     assert "db_session" in app_config.dependencies
     assert "db_connection" in app_config.dependencies
@@ -385,7 +386,8 @@ def test_alchemy_generic_configs_and_attachment_storage() -> None:
     app_config = AppConfig()
     plugin.on_app_init(app_config)
     for p in app_config.plugins:
-        p.on_app_init(app_config)
+        if isinstance(p, InitPluginProtocol):
+            p.on_app_init(app_config)
     assert "db_session" in app_config.dependencies
     assert "db_engine" in app_config.dependencies
 

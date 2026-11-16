@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import GuardProtocol
 from vertebra.agent.core.schema import Tool, tool
 from vertebra.agent.mcp import (
@@ -303,8 +304,8 @@ def test_webmcp_manifest_lists_only_tagged_tools() -> None:
     """build_webmcp_manifest lists @mcp_tool(webmcp=True), opt['mcp_tool'] with webmcp=True, and guarded controller tools, omitting untagged tools."""
 
     class _AllowGuard(GuardProtocol):
-        async def check(self, context: object) -> None:
-            _ = context
+        async def __call__(self, ctx: AgentContext) -> None:
+            _ = ctx
 
     class GuardedSkillController(SkillController):
         guards = (_AllowGuard(),)

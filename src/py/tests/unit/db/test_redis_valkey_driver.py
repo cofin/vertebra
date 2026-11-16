@@ -187,11 +187,11 @@ async def test_resp3_wire_loopback_server_execution_and_invalidation() -> None:
                         writer.write(b"+OK\r\n")
                     elif cmd == "GET":
                         k = frame[1].decode("utf-8") if isinstance(frame[1], bytes) else str(frame[1])
-                        v = stored_kv.get(k)
-                        if v is None:
+                        got_v = stored_kv.get(k)
+                        if got_v is None:
                             writer.write(b"_\r\n")
                         else:
-                            writer.write(f"${len(v)}\r\n".encode("ascii") + v + b"\r\n")
+                            writer.write(f"${len(got_v)}\r\n".encode("ascii") + got_v + b"\r\n")
                     elif cmd == "PTTL":
                         writer.write(b":5000\r\n")
                     elif cmd == "DEL":
@@ -334,11 +334,11 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
                         writer.write(b"+OK\r\n")
                     elif cmd == "GET":
                         k = frame[1].decode("utf-8") if isinstance(frame[1], bytes) else str(frame[1])
-                        v = stored_kv.get(k)
-                        if v is None:
+                        got_v = stored_kv.get(k)
+                        if got_v is None:
                             writer.write(b"_\r\n")
                         else:
-                            writer.write(f"${len(v)}\r\n".encode("ascii") + v + b"\r\n")
+                            writer.write(f"${len(got_v)}\r\n".encode("ascii") + got_v + b"\r\n")
                     elif cmd == "PTTL":
                         writer.write(b":5000\r\n")
                     elif cmd == "DEL":
@@ -409,7 +409,7 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
         await driver.execute_command("UNKNOWN")
 
     stream = driver.subscribe("events").__aiter__()
-    next_message = asyncio.create_task(anext(stream))
+    next_message: asyncio.Task[tuple[str, bytes]] = asyncio.create_task(stream.__anext__())
     await asyncio.wait_for(subscription_ready.wait(), timeout=2)
     assert len(subscriber_writers) == 1
     assert await driver.publish("events", b"remote_data\x00\xff") == 1

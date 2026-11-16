@@ -86,12 +86,10 @@ from vertebra.agent.tools import build_tools
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.telemetry.logger import LogSink
 from vertebra.telemetry.otel import SpanExporter
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
-try:
-    from vertebra import _vertebra
-except ImportError:
-    _vertebra = None
+_vertebra = import_optional("vertebra._vertebra")
 
 
 @pytest.mark.anyio
@@ -485,7 +483,9 @@ def test_rust_agent_ffi_classifier_schema_cache_and_async_logger() -> None:
         assert digest > 0
         assert etag.startswith('"') and etag.endswith('"')
         assert cache.get_etag("skill:search") == etag
-        assert bytes(cache.get_bytes("skill:search")) == b'{"properties":{"q":{"type":"string"}}}'
+        cached_bytes = cache.get_bytes("skill:search")
+        assert cached_bytes is not None
+        assert bytes(cached_bytes) == b'{"properties":{"q":{"type":"string"}}}'
         assert cache.combined_etag().startswith('"W/')
 
     py_cache = SchemaDigestCache()
@@ -632,7 +632,16 @@ def test_provider_registration_rejects_unsupported_parameter_kinds(parameter_kin
 async def test_provider_tools_preserve_keyword_only_defaults() -> None:
     """Named keyword-only operation fields keep their defaults and validation."""
 
-    class Provider(_TypedToolProvider):
+    class Provider:
+        def __init__(self) -> None:
+            self.policy_calls: list[dict[str, Any]] = []
+
+        def operations(self) -> dict[str, Any]:
+            return {"records": self.records}
+
+        def confirmation_reason(self, operation_name: str, arguments: Mapping[str, Any]) -> None:
+            self.policy_calls.append(dict(arguments))
+
         async def records(self, sql: str, *, limit: int = 10) -> dict[str, Any]:
             return {"sql": sql, "limit": limit}
 
@@ -946,18 +955,18 @@ async def test_sse_broker_open_stream_replay_keepalive_limits_and_cleanup() -> N
     assert broker.owner_stream_count("owner-b") == 1
     broker.publish("anon-other", SseFrame(id="e3", event="message", data="anon-msg"))
     assert await anext(other_owner_stream) == b"id: e3\ndata: anon-msg\n\n"
-    await other_owner_stream.aclose()
+    await cast("Any", other_owner_stream).aclose()
     assert broker.owner_stream_count("owner-b") == 0
     assert "anon-other" not in broker._buffers
 
-    await resumed.aclose()
+    await cast("Any", resumed).aclose()
     assert broker.owner_stream_count("owner-a") == 1
 
     broker.close_session("sess-1")
     assert "sess-1" not in broker._buffers
     with pytest.raises(StopAsyncIteration):
         await anext(second)
-    await second.aclose()
+    await cast("Any", second).aclose()
     assert broker.owner_stream_count("owner-a") == 0
 
 

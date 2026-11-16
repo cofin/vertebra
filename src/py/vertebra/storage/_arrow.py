@@ -8,7 +8,6 @@ import io
 import threading
 from collections.abc import (
     AsyncGenerator,
-    AsyncIterator,
     Awaitable,
     Buffer,
     Callable,
@@ -60,7 +59,7 @@ def iter_batches_sync(
     batch_size: int = 65536,
     columns: Sequence[str] | None = None,
     options: Mapping[str, Any] | None = None,
-) -> Iterator[Any]:
+) -> Generator[Any, None, None]:
     """Decode batches on demand using native synchronous streams or ranges.
 
     Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each
@@ -95,7 +94,7 @@ async def iter_batches_async(
     batch_size: int = 65536,
     columns: Sequence[str] | None = None,
     options: Mapping[str, Any] | None = None,
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any, None]:
     """Decode one batch per demand while native asynchronous I/O stays on-loop.
 
     Parquet sources open with ``read_ahead=0`` and ``pre_buffer=False`` so each

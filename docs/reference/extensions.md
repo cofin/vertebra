@@ -18,6 +18,7 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.litestar.plugin.VertebraPlugin
     options:
@@ -33,36 +34,43 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec._driver.AsyncAdapterConfig
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec.storage.ObjectStoreBackend
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec.plugin.ProxySyncConfig
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec.plugin.ProxyAsyncConfig
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec.provider.SQLSpecSyncProvider
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.extensions.sqlspec.provider.SQLSpecAsyncProvider
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ## SQLAlchemy & Advanced Alchemy (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import re
 import threading
+from collections.abc import Awaitable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -96,12 +97,12 @@ def _make_mock_fastapi_app() -> tuple[Any, Any]:
         call_counter["tenant"] += 1
         return str(request.query_params.get("tenant", "acme"))
 
-    tenant_dep = _MockDepends(get_tenant)
+    tenant_dep: Any = _MockDepends(get_tenant)
 
     async def get_auth_context(tenant: str = tenant_dep) -> dict[str, str]:
         return {"tenant": tenant, "role": "admin"}
 
-    auth_dep = _MockDepends(get_auth_context)
+    auth_dep: Any = _MockDepends(get_auth_context)
 
     @mcp_tool(name="create_order", description="Create an order")
     async def create_order(
@@ -188,7 +189,7 @@ async def test_fastapi_plugin_compiled_dependant_and_zero_copy_fastpath() -> Non
     assert res is not None
     status, _headers, body = res
     assert status == 201
-    decoded = decode_json(body, type=_OrderOutput)
+    decoded = decode_json(bytes(body), type=_OrderOutput)
     assert decoded == _OrderOutput(order_id=77, sku="GPU-H200", quantity=4, tenant="globex:admin")
     assert call_counter["tenant"] == 1
 
@@ -320,7 +321,7 @@ async def test_fastapi_fastpath_lazy_request_inline_sync_and_send_raw_response(
             body: bytes,
         ) -> None:
             raw_calls.append(status)
-            await proto.send_raw_response(status, headers, body)
+            await cast("Awaitable[None]", proto.send_raw_response(status, headers, body))
 
     scope_inline = AsgiScope.from_parts(method="GET", path="/api/inline/12")
     scope_inline["root_path"] = "/api"
@@ -403,9 +404,10 @@ async def test_multi_framework_stacked_app_mount_auto_attaches_fastpath() -> Non
     starlette_app = _StarletteApp()
     StarletteVertebraPlugin(starlette_app)
 
-    @vertebra_route(status_code=200)
     def fl_item(item_id: int) -> dict[str, Any]:
         return {"fw": "flask", "id": item_id}
+
+    vertebra_route(fl_item, status_code=200)
 
     class _FlaskRule:
         def __init__(self) -> None:
@@ -587,14 +589,13 @@ async def test_fastapi_queue_extension() -> None:
     qsvc = attach_fastapi_queue_service(app, FastAPIQueueService(backend=MemoryQueueBackend()))
     assert get_fastapi_queue_service(app) is qsvc
 
-    ran = []
+    ran: list[int] = []
 
-    @task(lane="io")
     def compute(x: int) -> int:
         ran.append(x)
         return x + 10
 
-    qsvc.register(compute)
+    qsvc.register(task(lane="io")(compute))
     await qsvc.enqueue("compute", 5)
 
     async with fastapi_queue_lifespan(app, run_worker=False) as svc:

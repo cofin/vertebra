@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
@@ -192,7 +192,7 @@ def test_rsgi_scope_properties() -> None:
 async def test_rsgi_http_protocol_response_methods(tmp_path: Path) -> None:
     """Verify RsgiHttpProtocol handles str, bytes, empty, file, file_range, and stream."""
     app = SampleRsgiApp()
-    adapter = RsgiAdapter(app)
+    adapter = RsgiAdapter(cast("Any", app))
 
     resp_empty = await adapter.handle_http(method="GET", path="/empty")
     assert resp_empty.status == 204

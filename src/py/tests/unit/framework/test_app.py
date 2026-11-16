@@ -3,7 +3,7 @@
 import importlib.resources
 import sys
 from types import ModuleType
-from typing import Annotated
+from typing import Annotated, Any
 
 import msgspec
 import pytest
@@ -79,11 +79,11 @@ def test_vertebra_app_route_registration_multiple_methods_on_same_path() -> None
     app = App()
 
     @app.get("/items")
-    def list_items() -> list:
+    def list_items() -> list[Any]:
         return []
 
     @app.post("/items")
-    def create_item() -> dict:
+    def create_item() -> dict[str, Any]:
         return {}
 
     assert len(app.routes) == 2
@@ -294,7 +294,7 @@ async def test_controller_router_procedure_registration_and_openapi_codegen_filt
 
 def test_autowire_loader_registers_discovered_services_and_controllers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify AutowireLoader.register_all registers discovered Service and Controller classes on App."""
-    fake_mod = ModuleType("fake_domain_pkg")
+    fake_mod: Any = ModuleType("fake_domain_pkg")
 
     class OrderService:
         def label(self) -> str:

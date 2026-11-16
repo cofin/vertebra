@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -339,7 +339,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         *,
         batch_size: int = 65_536,
         **kwargs: Any,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Stream Arrow record batches asynchronously via `vertebra._duckdb`."""
         _ = kwargs
         chunk = max(1, int(batch_size))

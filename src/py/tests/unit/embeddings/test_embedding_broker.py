@@ -271,11 +271,16 @@ async def test_subprocess_quarantine_shm_slab_exchange_and_fastembed_optional_gu
     monkeypatch.setattr("vertebra.embeddings._broker.is_free_threaded", lambda: True)
 
     seen_ft_prompts: list[str] = []
+
+    def _custom_gemma_backend(texts: list[str], dims: int) -> list[list[float]]:
+        seen_ft_prompts.extend(texts)
+        return [[1.0] * dims for _ in texts]
+
     ft_custom_gemma = GemmaEmbedder(
         "embeddinggemma-2-270m",
         dimensions=4,
         precision="int8",
-        backend_fn=lambda texts, dims: seen_ft_prompts.extend(texts) or [[1.0] * dims for _ in texts],
+        backend_fn=_custom_gemma_backend,
     )
     assert ft_custom_gemma.broker.should_quarantine_subprocess() is False
     ft_q = await ft_custom_gemma.embed_query("free threaded custom backend")

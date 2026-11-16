@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from django.db.backends.sqlite3._functions import register as register_functions
 from django.db.backends.sqlite3.base import (
     DatabaseWrapper as DjangoSQLiteDatabaseWrapper,
 )
@@ -12,6 +11,7 @@ from django.db.backends.sqlite3.base import (
 from vertebra.db.adapters.sqlite import SQLiteConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
+from vertebra.utils.module_loader import import_optional_attr
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -50,7 +50,9 @@ class DatabaseWrapper(DatabaseWrapperMixin, DjangoSQLiteDatabaseWrapper):
         cfg = conn_params["config"]
         conn = SyncDBAPIConnection(cfg)
         conn.autocommit = True
-        register_functions(conn)
+        register_functions = import_optional_attr("django.db.backends.sqlite3._functions", "register")
+        if callable(register_functions):
+            register_functions(conn)
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA legacy_alter_table = OFF")
         for init_command in self.init_commands:

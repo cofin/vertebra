@@ -1,5 +1,6 @@
 """Unit tests for SQLSpec BaseSyncDriver/BaseAsyncDriver template-method dispatch and error mapping."""
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -40,6 +41,7 @@ from vertebra._vertebra import (
 from vertebra._vertebra import DataError as NativeDataError
 from vertebra._vertebra import IntegrityError as NativeIntegrityError
 from vertebra._vertebra import OperationalError as NativeOperationalError
+from vertebra.db.adapters.sqlite.config import SQLiteConfig
 from vertebra.db.driver import AsyncDatabaseDriver, SyncDatabaseDriver
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.sqlspec._driver import (
@@ -57,7 +59,7 @@ from vertebra.extensions.sqlspec._driver import (
 )
 
 
-class _RecordingSyncNativeDriver(SyncDatabaseDriver):
+class _RecordingSyncNativeDriver(SyncDatabaseDriver[Any]):
     """Minimal native sync driver double recording calls for BaseSyncDriver verification."""
 
     def __init__(self, rows: list[dict[str, Any]] | None = None, columns: list[str] | None = None) -> None:
@@ -86,9 +88,14 @@ class _RecordingSyncNativeDriver(SyncDatabaseDriver):
         self.calls.append(("execute", sql, parameters))
         return 1
 
-    def execute_many(self, sql: str, param_sets: Any = None, **kwargs: Any) -> int:
+    def execute_many(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]] = (),
+        **kwargs: Any,
+    ) -> int:
         _ = kwargs
-        batch = list(param_sets or [])
+        batch = list(parameter_sets)
         self.calls.append(("execute_many", sql, batch))
         return len(batch)
 
@@ -97,11 +104,11 @@ class _RecordingSyncNativeDriver(SyncDatabaseDriver):
         sql: str,
         parameters: Any = None,
         **kwargs: Any,
-    ) -> tuple[list[Any], list[str]]:
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         _ = kwargs
         self.calls.append(("execute_with_description", sql, parameters))
         tuple_rows = [tuple(r.get(c) for c in self._columns) for r in self._rows]
-        return tuple_rows, list(self._columns)
+        return tuple_rows, tuple(self._columns)
 
     def begin(self) -> None:
         self._in_tx = True
@@ -113,7 +120,7 @@ class _RecordingSyncNativeDriver(SyncDatabaseDriver):
         self._in_tx = False
 
 
-class _RecordingAsyncNativeDriver(AsyncDatabaseDriver):
+class _RecordingAsyncNativeDriver(AsyncDatabaseDriver[Any]):
     """Minimal native async driver double recording calls for BaseAsyncDriver verification."""
 
     def __init__(self, rows: list[dict[str, Any]] | None = None, columns: list[str] | None = None) -> None:
@@ -142,9 +149,14 @@ class _RecordingAsyncNativeDriver(AsyncDatabaseDriver):
         self.calls.append(("execute", sql, parameters))
         return 1
 
-    async def execute_many(self, sql: str, param_sets: Any = None, **kwargs: Any) -> int:
+    async def execute_many(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]] = (),
+        **kwargs: Any,
+    ) -> int:
         _ = kwargs
-        batch = list(param_sets or [])
+        batch = list(parameter_sets)
         self.calls.append(("execute_many", sql, batch))
         return len(batch)
 
@@ -153,11 +165,11 @@ class _RecordingAsyncNativeDriver(AsyncDatabaseDriver):
         sql: str,
         parameters: Any = None,
         **kwargs: Any,
-    ) -> tuple[list[Any], list[str]]:
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         _ = kwargs
         self.calls.append(("execute_with_description", sql, parameters))
         tuple_rows = [tuple(r.get(c) for c in self._columns) for r in self._rows]
-        return tuple_rows, list(self._columns)
+        return tuple_rows, tuple(self._columns)
 
     async def begin(self) -> None:
         self._in_tx = True
@@ -174,7 +186,8 @@ class _SampleSyncAdapter(BaseSyncDriver):
 
     dialect = "sqlite"
 
-    def _default_statement_config(self) -> StatementConfig:
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
         return native_statement_config("sqlite", ParameterStyle.QMARK)
 
 
@@ -183,7 +196,8 @@ class _SampleAsyncAdapter(BaseAsyncDriver):
 
     dialect = "sqlite"
 
-    def _default_statement_config(self) -> StatementConfig:
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
         return native_statement_config("sqlite", ParameterStyle.QMARK)
 
 
@@ -290,8 +304,6 @@ async def test_shared_pool_refcounted_close_defers_until_final_release(tmp_path:
     adapter_two.close()
     assert sync_native.closed is True
     assert shared_native_refcount(sync_native) == 0
-
-    from vertebra.db.adapters.sqlite.config import SQLiteConfig
 
     cfg = SQLiteConfig(path=str(tmp_path / "shared_pool_test.db"))
     a1, owner1 = acquire_shared_native_driver(

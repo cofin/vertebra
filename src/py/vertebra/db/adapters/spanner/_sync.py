@@ -6,7 +6,7 @@ import contextlib
 import time as _time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Literal, Protocol, Self
 
 import msgspec
 
@@ -43,10 +43,144 @@ from vertebra.utils.schema import to_value_type
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.text import validate_identifier
 
-if TYPE_CHECKING:
-    from vertebra._spanner import SyncSpannerClient
+__all__ = (
+    "SyncSpannerClientProtocol",
+    "SyncSpannerDriver",
+    "SyncSpannerReadWriteTxProtocol",
+)
 
-__all__ = ("SyncSpannerDriver",)
+
+class SyncSpannerReadWriteTxProtocol(Protocol):
+    """Structural protocol for synchronous interactive Spanner ``ReadWrite`` handles."""
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the transaction identifier bytes."""
+        ...
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a SQL query inside this transaction."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        """Execute a DML statement inside this transaction."""
+        ...
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements inside this transaction."""
+        ...
+
+    def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+        """Commit this transaction and optional buffered mutations."""
+        ...
+
+    def rollback(self) -> None:
+        """Roll back this transaction."""
+        ...
+
+
+class SyncSpannerClientProtocol(Protocol):
+    """Structural protocol for synchronous Cloud Spanner wire clients and test doubles."""
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a streaming SQL read."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> int:
+        """Execute a single-statement transactional DML statement."""
+        ...
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements."""
+        ...
+
+    def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> int:
+        """Execute a Partitioned DML statement."""
+        ...
+
+    def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Commit a JSON-encoded list of Spanner mutations."""
+        ...
+
+    def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Commit independent mutation groups via ``BatchWrite``."""
+        ...
+
+    def update_ddl(self, statements: Sequence[str]) -> str:
+        """Execute schema DDL statements."""
+        ...
+
+    def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a parallel ``PartitionQuery`` read."""
+        ...
+
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> SyncSpannerReadWriteTxProtocol:
+        """Open a stateful synchronous interactive ``ReadWrite`` transaction handle."""
+        ...
+
+    def close(self) -> None:
+        """Close the client handle."""
+        ...
 
 
 class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
@@ -71,7 +205,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: SyncSpannerClient | None = None,
+        client: SyncSpannerClientProtocol | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -97,7 +231,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: SyncSpannerClient | None = client
+        self._client: SyncSpannerClientProtocol | None = client
         self._last_commit_stats: dict[str, Any] = {}
         self._active_transaction: SyncSpannerTransaction | None = None
 
@@ -761,7 +895,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
             total += self.load_from_arrow(table, cursor, upsert=upsert)
         return total
 
-    def _ensure_client(self) -> SyncSpannerClient:
+    def _ensure_client(self) -> SyncSpannerClientProtocol:
         if self._client is None:
             self._client = SpannerCore.create_sync_rust_client(self.config)
         return self._client

@@ -22,9 +22,9 @@ from vertebra.storage import (
 
 if TYPE_CHECKING:
     from pytest_databases.docker.azure_blob import AzureBlobService
-    from pytest_databases.docker.floci import FlociService
+    from pytest_databases.docker.floci import FlociAWSService
     from pytest_databases.docker.minio import MinioService
-    from pytest_databases.docker.rustfs import RustFSService
+    from pytest_databases.docker.rustfs import RustfsService
 
 
 def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
@@ -37,12 +37,12 @@ def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
 
 
 @pytest.fixture
-def rustfs_s3_config(rustfs_service: RustFSService, rustfs_default_bucket_name: str) -> S3Config:
+def rustfs_s3_config(rustfs_service: RustfsService, rustfs_default_bucket_name: str) -> S3Config:
     """Return S3Config targeting the pytest-databases RustFS container."""
     return S3Config(
         bucket=rustfs_default_bucket_name,
-        region=rustfs_service.region_name,
-        endpoint=rustfs_service.endpoint,
+        region="us-east-1",
+        endpoint=rustfs_service.endpoint_url,
         access_key_id=rustfs_service.access_key,
         secret_access_key=rustfs_service.secret_key,
         allow_http=True,
@@ -60,8 +60,8 @@ def minio_s3_config(minio_service: MinioService, minio_default_bucket_name: str)
     """Return S3Config targeting the pytest-databases MinIO container."""
     return S3Config(
         bucket=minio_default_bucket_name,
-        region=minio_service.region_name,
-        endpoint=minio_service.endpoint,
+        region="us-east-1",
+        endpoint=minio_service.endpoint_url,
         access_key_id=minio_service.access_key,
         secret_access_key=minio_service.secret_key,
         allow_http=True,
@@ -75,14 +75,14 @@ def minio_object_store(minio_s3_config: S3Config) -> SyncObjectStore:
 
 
 @pytest.fixture
-def floci_container_s3_config(floci_service: FlociService, floci_default_bucket_name: str) -> S3Config:
+def floci_container_s3_config(floci_aws_service: FlociAWSService) -> S3Config:
     """Return S3Config targeting the pytest-databases Floci container."""
     return S3Config(
-        bucket=floci_default_bucket_name,
-        region=floci_service.region_name,
-        endpoint=floci_service.endpoint,
-        access_key_id=floci_service.access_key,
-        secret_access_key=floci_service.secret_key,
+        bucket=f"{floci_aws_service.resource_prefix}vertebra-test",
+        region=floci_aws_service.region,
+        endpoint=floci_aws_service.endpoint_url,
+        access_key_id=floci_aws_service.access_key,
+        secret_access_key=floci_aws_service.secret_key,
         allow_http=True,
     )
 
@@ -100,7 +100,7 @@ def azurite_azure_config(azure_blob_service: AzureBlobService, azure_blob_defaul
         container=azure_blob_default_container_name,
         account=azure_blob_service.account_name,
         access_key=azure_blob_service.account_key,
-        endpoint=azure_blob_service.endpoint,
+        endpoint=azure_blob_service.account_url,
         use_emulator=True,
     )
 

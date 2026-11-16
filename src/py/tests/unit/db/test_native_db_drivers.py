@@ -769,7 +769,9 @@ async def test_channel_bus_spanner_source_delivers_once_per_output_channel(
         await bus.pump_change_source(channel=channel)
         assert len(client.calls) == 1
         assert "READ_orders_stream" in client.calls[0][0]
-        assert decode_json(client.calls[0][1])["start_ts"] == "2026-11-02T00:00:00Z"
+        raw_params = client.calls[0][1]
+        assert raw_params is not None
+        assert decode_json(raw_params)["start_ts"] == "2026-11-02T00:00:00Z"
         event = feed.replay_since(0)[0]
         output = encode_json_bytes(event)
         expected_original = shared_feed or channel in (None, "orders")
@@ -1321,14 +1323,84 @@ class _ContractBigQueryClient:
         return result
 
 
+class _ContractSpannerRwTx:
+    """In-memory SQLite-backed read-write transaction handle for `_ContractSpannerClient`."""
+
+    __slots__ = ("_async_mode", "_client", "_closed", "_tx_id")
+
+    def __init__(self, client: _ContractSpannerClient, tx_id: bytes, *, async_mode: bool = False) -> None:
+        self._client = client
+        self._tx_id = tx_id
+        self._async_mode = async_mode
+        self._closed = False
+        if not self._client._conn.in_transaction:
+            self._client._conn.execute("BEGIN")
+
+    @property
+    def transaction_id(self) -> bytes:
+        return self._tx_id
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def query(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        return self._client.query(sql, params_json)
+
+    def execute_dml(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        adapted, bound = self._client._adapt_sql(sql, params_json)
+        cur = self._client._conn.execute(adapted, bound)
+        return self._client._wrap(max(0, int(cur.rowcount or 0)))
+
+    def execute_batch_dml(self, statements_json: str, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        decoded = decode_json(statements_json) if statements_json else []
+        counts: list[int] = []
+        for entry in decoded:
+            stmt_sql = str(entry.get("sql", ""))
+            stmt_params = entry.get("params")
+            params_str = encode_json({"values": stmt_params}) if isinstance(stmt_params, dict) else None
+            adapted, bound = self._client._adapt_sql(stmt_sql, params_str)
+            cur = self._client._conn.execute(adapted, bound)
+            counts.append(max(0, int(cur.rowcount or 0)))
+        return self._client._wrap(counts)
+
+    def commit(self, mutations_json: str | None = None) -> Any:
+        count = self._client._apply_mutations_in_tx(mutations_json) if mutations_json else 0
+        self._client._conn.commit()
+        self._closed = True
+        return self._client._wrap({"commit_timestamp_micros": 1_700_000_000_000_000, "mutation_count": count})
+
+    def rollback(self) -> Any:
+        if not self._closed:
+            self._client._conn.rollback()
+            self._closed = True
+        return self._client._wrap(None)
+
+
 class _ContractSpannerClient:
     """In-memory SQLite-backed Spanner client double supporting sync and async wire calls."""
 
-    __slots__ = ("_async_mode", "_conn")
+    __slots__ = ("_async_mode", "_conn", "_tx_seq")
 
     def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
         self._conn = conn
         self._async_mode = async_mode
+        self._tx_seq = 0
+
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> Any:
+        _ = (transaction_tag, previous_transaction_id, exclude_txn_from_change_streams, max_commit_delay_ms)
+        self._tx_seq += 1
+        handle = _ContractSpannerRwTx(self, f"contract-tx-{self._tx_seq}".encode(), async_mode=self._async_mode)
+        return self._wrap(handle)
 
     @staticmethod
     def _adapt_sql(sql: str, params_json: str | None) -> tuple[str, Any]:
@@ -1379,7 +1451,7 @@ class _ContractSpannerClient:
         self._conn.commit()
         return self._wrap(counts)
 
-    def apply_mutations(self, mutations_json: str, *_extra: Any) -> Any:
+    def _apply_mutations_in_tx(self, mutations_json: str | None) -> int:
         decoded = decode_json(mutations_json) if mutations_json else []
         count = 0
         for item in decoded:
@@ -1391,8 +1463,15 @@ class _ContractSpannerClient:
             for row in vals:
                 self._conn.execute(f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})", list(row))
                 count += 1
+        return count
+
+    def apply_mutations(self, mutations_json: str, *_extra: Any) -> Any:
+        count = self._apply_mutations_in_tx(mutations_json)
         self._conn.commit()
         return self._wrap({"commit_timestamp_micros": 1_700_000_000_000_000, "mutation_count": count})
+
+    def close(self) -> Any:
+        return self._wrap(None)
 
     def update_ddl(self, statements: Sequence[str]) -> Any:
         for stmt in statements:
@@ -1557,10 +1636,10 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
     if engine == "bigquery":
         config = BigQueryConfig(project_id="test-proj", dataset_id="test_ds")
         sync_driver: Any = SyncBigQueryDriver(
-            config, client=cast("Any", _ContractBigQueryClient(raw_sync)), broker=object()
+            config, client=cast("Any", _ContractBigQueryClient(raw_sync)), broker=None
         )
         async_driver: Any = AsyncBigQueryDriver(
-            config, client=cast("Any", _ContractBigQueryClient(raw_async, async_mode=True)), broker=object()
+            config, client=cast("Any", _ContractBigQueryClient(raw_async, async_mode=True)), broker=None
         )
         url = "bigquery://test-proj/test_ds"
         dialect_name = "BigQuery"
@@ -1573,18 +1652,18 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
             use_shm_cache=False,
         )
         sync_driver = SyncSpannerDriver(
-            spanner_config, client=cast("Any", _ContractSpannerClient(raw_sync)), broker=object()
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_sync)), broker=None
         )
         async_driver = AsyncSpannerDriver(
-            spanner_config, client=cast("Any", _ContractSpannerClient(raw_async, async_mode=True)), broker=object()
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_async, async_mode=True)), broker=None
         )
         url = f"{engine}://projects/test-proj/instances/test-inst/databases/test-db"
         dialect_name = "Spangres" if engine == "spangres" else "Spanner"
-    sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=object(), share_pool=False)
-    async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=object(), share_pool=False)
+    sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=None, share_pool=False)
+    async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=None, share_pool=False)
     try:
         getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(sync_conn)
-        adapted = AsyncAdapt_dbapi_connection(SQLAlchemyAsyncDBAPI(), async_conn)
+        adapted = AsyncAdapt_dbapi_connection(SQLAlchemyAsyncDBAPI(), cast("Any", async_conn))
         await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
         sync_cursor = sync_conn.cursor()
         async_cursor = async_conn.cursor()
@@ -1643,6 +1722,7 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)
         sync_dd.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        assert async_dd._client is not None
         sync_for_async = async_dd._client.to_sync()
         sync_for_async.execute(ddl)
         sync_for_async.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
@@ -1927,19 +2007,25 @@ async def test_spanner_snapshots_and_transactions_not_found_and_buffered_mutatio
             with pytest.raises(NotFoundError):
                 await async_snap.query_one(by_id_sql, by_id_params(999))
 
-        sync_tx = SyncSpannerTransaction(sync_drv)
-        assert sync_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
-        with pytest.raises(NotFoundError):
-            sync_tx.select_one(by_id_sql, by_id_params(999))
-        with pytest.raises(NotFoundError):
-            sync_tx.query_one(by_id_sql, by_id_params(999))
+        def _check_sync_tx(sync_tx: SyncSpannerTransaction) -> None:
+            assert isinstance(sync_tx, SyncSpannerTransaction)
+            assert sync_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                sync_tx.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                sync_tx.query_one(by_id_sql, by_id_params(999))
 
-        async_tx = AsyncSpannerTransaction(async_drv)
-        assert await async_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
-        with pytest.raises(NotFoundError):
-            await async_tx.select_one(by_id_sql, by_id_params(999))
-        with pytest.raises(NotFoundError):
-            await async_tx.query_one(by_id_sql, by_id_params(999))
+        sync_drv.run_in_transaction(_check_sync_tx)
+
+        async def _check_async_tx(async_tx: AsyncSpannerTransaction) -> None:
+            assert isinstance(async_tx, AsyncSpannerTransaction)
+            assert await async_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                await async_tx.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                await async_tx.query_one(by_id_sql, by_id_params(999))
+
+        await async_drv.run_in_transaction(_check_async_tx)
 
         with sync_drv.transaction():
             sync_drv.apply_mutations(

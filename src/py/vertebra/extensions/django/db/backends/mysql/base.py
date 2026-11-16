@@ -9,6 +9,18 @@ from typing import TYPE_CHECKING, Any, Self
 from vertebra.db.adapters.mysql import MySQLConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from django.db.backends.mysql.base import (
+        DatabaseWrapper as DjangoMySQLDatabaseWrapper,
+    )
+
+    from vertebra.db.dbapi import SyncDBAPICursor
+
+__all__ = ("DatabaseWrapper",)
 
 
 def _ensure_mysqldb() -> None:
@@ -58,18 +70,16 @@ def _ensure_mysqldb() -> None:
     sys.modules["MySQLdb.converters"] = converters_mod
 
 
-_ensure_mysqldb()
+def _load_django_mysql_wrapper() -> type[Any]:
+    """Ensure MySQLdb shim is registered and return Django's MySQL DatabaseWrapper base."""
+    _ensure_mysqldb()
+    mod = ensure_module("django.db.backends.mysql.base", extra="django")
+    wrapper_cls: type[Any] = mod.DatabaseWrapper
+    return wrapper_cls
 
-from django.db.backends.mysql.base import (  # noqa: E402
-    DatabaseWrapper as DjangoMySQLDatabaseWrapper,
-)
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from vertebra.db.dbapi import SyncDBAPICursor
-
-__all__ = ("DatabaseWrapper",)
+if not TYPE_CHECKING:
+    DjangoMySQLDatabaseWrapper = _load_django_mysql_wrapper()
 
 
 def _format_to_qmark(sql: str) -> str:

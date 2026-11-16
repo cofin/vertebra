@@ -159,7 +159,7 @@ def test_enqueue_deep_snapshots_nested_mutable_containers_and_projects_pgjson_nu
     arr_inner_list: list[Any] = [bytearray(b"x")]
     comp_inner = bytearray(b"c")
 
-    params = [
+    params: list[Any] = [
         mutable_dict,
         mutable_buf,
         mem_view,
@@ -456,7 +456,7 @@ def test_async_live_pipeline_mid_batch_23505_attaches_outcomes_and_rolls_back() 
                     pipe.select("SELECT * FROM items")
                     await pipe.results()
 
-            err = exc_info.value
+            err: Any = exc_info.value
             assert err.sqlstate == "23505"
             assert err.failing_index == 1
             outcomes = err.outcomes

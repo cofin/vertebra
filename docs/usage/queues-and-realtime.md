@@ -136,7 +136,10 @@ from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
 from vertebra.framework.stores import KeyValueStore, ValkeyStore
 
 cache = KeyValueStore(key_prefix="app-cache")
-valkey_cache = ValkeyStore.from_url("valkey://localhost:6379/0", key_prefix="app-cache")
+valkey_cache = ValkeyStore.from_url(
+    "valkey://localhost:6379/0",
+    key_prefix="app-cache",
+)
 email_service = EmailService(
     EmailConfig(backend="memory", default_from="noreply@example.com")
 )

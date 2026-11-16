@@ -262,7 +262,7 @@ def test_worker_sigterm_enters_lame_duck_and_validates_shm_policy() -> None:
     """Verify Worker.handle_sigterm validates SHMAllocationPolicy, enters lame-duck mode, and updates zPages."""
     validated_calls: list[bool] = []
 
-    class TrackingShmPolicy(SHMAllocationPolicy):
+    class TrackingShmPolicy(SHMAllocationPolicy, frozen=True):
         def validate_environment(self) -> bool:
             res = super().validate_environment()
             validated_calls.append(res)

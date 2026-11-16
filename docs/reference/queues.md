@@ -15,41 +15,49 @@ Synchronous and asynchronous background task queues (`QueueService`, `QueueConfi
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.framework.queues.base.QueueBackendSettings
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.driver.capabilities.QueueEntry
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.driver.capabilities.SyncQueueStore
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.db.driver.capabilities.AsyncQueueStore
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.framework.queues.base.TaskRetryPolicy
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.framework.queues.base.TaskEnvelope
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.framework.queues.base.DeadLetterEntry
     options:
       heading_level: 4
       members: false
+      summary: false
 
 ::: vertebra.framework.queues.base.QueueService
     options:

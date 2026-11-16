@@ -334,8 +334,6 @@ def test_health_probe_server_endpoints_and_lame_duck(
     zpages = ZPagesRegistry("vertebra-worker", lame_duck=LameDuckController())
     if draining:
         zpages.lame_duck.enter_lame_duck()
-    else:
-        zpages.lame_duck._draining = False
 
     async def _run_probe_check() -> None:
         probe = HealthProbeServer(zpages, host="127.0.0.1", port=0)

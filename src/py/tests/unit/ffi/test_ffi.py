@@ -261,8 +261,9 @@ def test_non_blocking_dispatch() -> None:
     assert isinstance(hash(spec), int)
     batch = [Req(1), Req(2)]
     partitioned = BatchDispatchPlan(async_native=[(0, batch[0], spec), (1, batch[1], spec)])
+    untyped_plan: Any = partitioned
     with pytest.raises(AttributeError):
-        partitioned.async_native = []
+        untyped_plan.async_native = []
 
     start = time.monotonic()
     dispatch_batch(partitioned, {1: spec}, [], Response, scheduler, async_mode=True)

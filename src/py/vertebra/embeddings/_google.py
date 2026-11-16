@@ -8,12 +8,13 @@ import inspect
 import os
 import threading
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol
 
 import msgspec
 
 from vertebra._vertebra import (
     AsyncGcpTokenCache,
+    GcpTokenSnapshot,
     GoogleCloudAuthError,
     SyncGcpTokenCache,
     VectorBatchView,
@@ -30,11 +31,25 @@ from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
+    "GcpTokenCachePort",
     "GeminiEmbedder",
     "GrpcTransportCallable",
     "VertexEmbedder",
     "_GoogleEmbedder",
 )
+
+
+class GcpTokenCachePort(Protocol):
+    """Structural OAuth access-token cache port accepted by Google embedders."""
+
+    def get_token(self) -> GcpTokenSnapshot | Awaitable[GcpTokenSnapshot]:
+        """Return an OAuth access-token snapshot."""
+        ...
+
+    def invalidate(self, failed_generation: int, /) -> Any:
+        """Invalidate a rejected token generation."""
+        ...
+
 
 GrpcTransportCallable = Callable[
     [str, dict[str, str], bytes],
@@ -72,7 +87,7 @@ class _GoogleEmbedder(Embedder):
         *,
         dimensions: int = 768,
         endpoint: str,
-        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | GcpTokenCachePort | None = None,
         target_service_account: str | None = None,
         quota_project_id: str | None = None,
         cache: VectorCache | None = None,
@@ -349,7 +364,7 @@ class VertexEmbedder(_GoogleEmbedder):
         project: str | None = None,
         location: str = "us-central1",
         endpoint: str | None = None,
-        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | GcpTokenCachePort | None = None,
         target_service_account: str | None = None,
         quota_project_id: str | None = None,
         cache: VectorCache | None = None,
@@ -665,7 +680,7 @@ class GeminiEmbedder(_GoogleEmbedder):
         dimensions: int = 768,
         api_key: str | None = None,
         endpoint: str = "https://generativelanguage.googleapis.com",
-        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | GcpTokenCachePort | None = None,
         target_service_account: str | None = None,
         quota_project_id: str | None = None,
         cache: VectorCache | None = None,

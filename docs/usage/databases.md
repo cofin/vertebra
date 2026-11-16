@@ -398,7 +398,9 @@ config = ValkeyConfig.from_url("valkey://localhost:6379/0")
 async with AsyncValkeyDriver(config) as driver:
     await driver.set("vtb:user:1", b'{"name": "Alice"}', ex=300)
     user_bytes = await driver.get("vtb:user:1")
-    await driver.execute_command("HSET", "vtb:session:1", "token", "xyz", "ip", "127.0.0.1")
+    await driver.execute_command(
+        "HSET", "vtb:session:1", "token", "xyz", "ip", "127.0.0.1"
+    )
     await driver.hexpire("vtb:session:1", 3600, "token")
     notifications = driver.notification_source()
     await notifications.subscribe(["user_events"])

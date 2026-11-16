@@ -418,7 +418,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@(cd src/rs && cargo fmt --all)
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
@@ -433,7 +433,7 @@ lint-all:                                           ## Check formatting, linting
 	@echo "${INFO} Checking Python (Ruff & Mypy)..."
 	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
-	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
+	@uv run mypy src/py/vertebra src/py/tests/unit src/py/tests/integration tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \

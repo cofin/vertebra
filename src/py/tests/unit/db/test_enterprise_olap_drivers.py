@@ -821,7 +821,7 @@ def _arrow_ipc_stream_bytes(table: pa.Table) -> bytes:
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
-    return sink.getvalue().to_pybytes()
+    return bytes(sink.getvalue().to_pybytes())
 
 
 def _raise_on_row_materialization(*_args: Any, **_kwargs: Any) -> Any:
@@ -1329,7 +1329,7 @@ def test_duckdb_driver_executes_on_duckdb_engine() -> None:
         driver.commit()
         assert driver.execute_tuples("SELECT max(v) FROM tx_items") == [(9,)]
 
-        assert driver.commit() is None
-        assert driver.rollback() is None
+        driver.commit()
+        driver.rollback()
     finally:
         driver.close()
