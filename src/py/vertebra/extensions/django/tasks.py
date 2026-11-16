@@ -311,6 +311,12 @@ class TaskBackend(BaseTaskBackend):
                 getattr(task, "priority", 0),
                 getattr(task, "run_after", None),
             )
+        if callable(task):
+            for reg_name, reg_fn in self._registered_callables.items():
+                if reg_fn is task:
+                    return (reg_name, task, "default", 0, None)
+            fallback_name = getattr(task, "__name__", str(task))
+            return (fallback_name, task, "default", 0, None)
         task_name = str(task)
         func = self._registered_callables.get(task_name)
         return (task_name, func, "default", 0, None)

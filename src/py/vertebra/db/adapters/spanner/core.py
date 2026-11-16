@@ -197,14 +197,19 @@ class SpannerCore:
     ) -> dict[str, Any] | None:
         if parameters is None:
             return None
+        is_spangres = dialect.strip().lower() in {"spangres", "postgres", "postgresql", "pg"}
         if isinstance(parameters, Mapping):
             if not parameters:
                 return None
-            return {str(k).lstrip("@$"): cls._encode_param_entry(v) for k, v in parameters.items()}
+            encoded: dict[str, Any] = {}
+            for raw_key, val in parameters.items():
+                clean_key = str(raw_key).lstrip("@$")
+                param_key = f"p{clean_key}" if is_spangres and clean_key.isdigit() else clean_key
+                encoded[param_key] = cls._encode_param_entry(val)
+            return encoded
         if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):
             if not parameters:
                 return None
-            _ = dialect
             return {f"p{idx + 1}": cls._encode_param_entry(v) for idx, v in enumerate(parameters)}
         return None
 

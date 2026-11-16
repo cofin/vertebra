@@ -124,11 +124,44 @@ class TaskResultRecord(msgspec.Struct, frozen=True, kw_only=True):
 class QueueBackendSettings(msgspec.Struct, frozen=True):
     """Declarative configuration settings for QueueService backend initialization."""
 
-    kind: Literal["postgres", "oracle", "redis", "valkey", "spanner", "shm", "memory"] = "shm"
+    kind: Literal[
+        "postgres",
+        "postgresql",
+        "oracle",
+        "redis",
+        "valkey",
+        "spanner",
+        "spanner+googlesql",
+        "spangres",
+        "spanner+spangres",
+        "shm",
+        "memory",
+    ] = "shm"
+    """Queue backend identifier."""
+
     dsn: str | None = None
+    """Optional connection URI overriding the default scheme."""
+
     visibility_timeout_seconds: float = 30.0
+    """Visibility lease duration in seconds for claimed jobs."""
+
     poll_interval_seconds: float = 1.0
+    """Fallback polling interval in seconds when no wakeup push channel exists."""
+
     consumer_name: str = "vertebra-worker"
+    """Worker consumer identifier recorded on claimed jobs."""
+
+    driver: Any = None
+    """Optional pre-constructed asynchronous database driver."""
+
+    sync_driver: Any = None
+    """Optional pre-constructed synchronous database driver."""
+
+    store: Any = None
+    """Optional pre-constructed AsyncQueueStore."""
+
+    sync_store: Any = None
+    """Optional pre-constructed SyncQueueStore."""
 
     @property
     def backend_url(self) -> str:

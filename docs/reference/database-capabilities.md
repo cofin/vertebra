@@ -178,6 +178,18 @@ agent bridge. Creating providers and registering their tools opens no database c
       members: false
       summary: false
 
+::: vertebra.db.adapters.spanner.queue.SyncSpannerQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.spanner.queue.AsyncSpannerQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
 ::: vertebra.db.adapters.spanner.change_stream.SyncSpannerChangeStreamSource
     options:
       heading_level: 4

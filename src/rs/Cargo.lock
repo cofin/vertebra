@@ -6206,6 +6206,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6848,6 +6849,7 @@ dependencies = [
  "google-cloud-spanner",
  "google-cloud-spanner-admin-database-v1",
  "google-cloud-wkt",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -6858,6 +6860,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tonic",
  "url",
  "vertebra-core",
  "vertebra-db",

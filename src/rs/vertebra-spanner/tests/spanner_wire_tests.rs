@@ -667,12 +667,9 @@ async fn stub_client(stub: RecordingSpanner) -> SpannerClient {
         .build()
         .await
         .expect("build spanner");
-    SpannerClient::with_clients(
-        spanner,
-        None,
-        SpannerClientConfig::new("projects/p/instances/i/databases/d"),
-    )
-    .expect("client")
+    let mut cfg = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    cfg.endpoint = format!("http://{addr}");
+    SpannerClient::with_clients(spanner, None, cfg).expect("client")
 }
 
 #[test]
@@ -1270,4 +1267,774 @@ fn spanner_client_precomputes_routing_metadata_and_decodes_owned_nested_values()
             ),
         ])])
     );
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireRequestOptions {
+    #[prost(int32, tag = "1")]
+    priority: i32,
+    #[prost(string, tag = "2")]
+    request_tag: String,
+    #[prost(string, tag = "3")]
+    transaction_tag: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, prost::Message)]
+struct RwWirePrecommitToken {
+    #[prost(bytes = "vec", tag = "1")]
+    precommit_token: Vec<u8>,
+    #[prost(int32, tag = "2")]
+    seq_num: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireTransaction {
+    #[prost(bytes = "vec", tag = "1")]
+    id: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    precommit_token: Option<RwWirePrecommitToken>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireReadWrite {
+    #[prost(int32, tag = "1")]
+    read_lock_mode: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    multiplexed_session_previous_transaction_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireTransactionOptions {
+    #[prost(bool, tag = "5")]
+    exclude_txn_from_change_streams: bool,
+    #[prost(message, optional, tag = "1")]
+    read_write: Option<RwWireReadWrite>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireBeginTransactionRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(message, optional, tag = "2")]
+    options: Option<RwWireTransactionOptions>,
+    #[prost(message, optional, tag = "3")]
+    request_options: Option<RwWireRequestOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireTransactionSelector {
+    #[prost(bytes = "vec", tag = "2")]
+    id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireExecuteSqlRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(message, optional, tag = "2")]
+    transaction: Option<RwWireTransactionSelector>,
+    #[prost(string, tag = "3")]
+    sql: String,
+    #[prost(int64, tag = "9")]
+    seqno: i64,
+    #[prost(message, optional, tag = "11")]
+    request_options: Option<RwWireRequestOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireExecuteBatchDmlStatement {
+    #[prost(string, tag = "1")]
+    sql: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireExecuteBatchDmlRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(message, optional, tag = "2")]
+    transaction: Option<RwWireTransactionSelector>,
+    #[prost(message, repeated, tag = "3")]
+    statements: Vec<RwWireExecuteBatchDmlStatement>,
+    #[prost(int64, tag = "4")]
+    seqno: i64,
+    #[prost(message, optional, tag = "5")]
+    request_options: Option<RwWireRequestOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireResultSetMetadata {
+    #[prost(message, optional, tag = "1")]
+    row_type: Option<ProstStructType>,
+    #[prost(message, optional, tag = "2")]
+    transaction: Option<RwWireTransaction>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireResultSet {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<RwWireResultSetMetadata>,
+    #[prost(message, optional, tag = "3")]
+    stats: Option<ProstResultSetStats>,
+    #[prost(message, optional, tag = "5")]
+    precommit_token: Option<RwWirePrecommitToken>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWirePartialResultSet {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<RwWireResultSetMetadata>,
+    #[prost(message, repeated, tag = "2")]
+    values: Vec<prost_types::Value>,
+    #[prost(message, optional, tag = "5")]
+    stats: Option<ProstResultSetStats>,
+    #[prost(message, optional, tag = "8")]
+    precommit_token: Option<RwWirePrecommitToken>,
+    #[prost(bool, tag = "9")]
+    last: bool,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireRpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireRetryInfo {
+    #[prost(message, optional, tag = "1")]
+    retry_delay: Option<prost_types::Duration>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireExecuteBatchDmlResponse {
+    #[prost(message, repeated, tag = "1")]
+    result_sets: Vec<RwWireResultSet>,
+    #[prost(message, optional, tag = "2")]
+    status: Option<RwWireRpcStatus>,
+    #[prost(message, optional, tag = "3")]
+    precommit_token: Option<RwWirePrecommitToken>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireMutation {
+    #[prost(bytes = "vec", tag = "1")]
+    insert: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    update: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    insert_or_update: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    replace: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    delete: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireCommitRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(bytes = "vec", tag = "2")]
+    transaction_id: Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    mutations: Vec<RwWireMutation>,
+    #[prost(message, optional, tag = "6")]
+    request_options: Option<RwWireRequestOptions>,
+    #[prost(message, optional, tag = "8")]
+    max_commit_delay: Option<prost_types::Duration>,
+    #[prost(message, optional, tag = "9")]
+    precommit_token: Option<RwWirePrecommitToken>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, prost::Message)]
+struct RwWireCommitStats {
+    #[prost(int64, tag = "1")]
+    mutation_count: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireCommitResponse {
+    #[prost(message, optional, tag = "1")]
+    commit_timestamp: Option<prost_types::Timestamp>,
+    #[prost(message, optional, tag = "2")]
+    commit_stats: Option<RwWireCommitStats>,
+    #[prost(message, optional, tag = "4")]
+    precommit_token: Option<RwWirePrecommitToken>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RwWireRollbackRequest {
+    #[prost(string, tag = "1")]
+    session: String,
+    #[prost(bytes = "vec", tag = "2")]
+    transaction_id: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RwWireState {
+    create_session_calls: usize,
+    leader_headers: Vec<(String, String)>,
+    begin_requests: Vec<RwWireBeginTransactionRequest>,
+    sql_requests: Vec<RwWireExecuteSqlRequest>,
+    batch_dml_requests: Vec<RwWireExecuteBatchDmlRequest>,
+    commit_requests: Vec<RwWireCommitRequest>,
+    rollback_requests: Vec<RwWireRollbackRequest>,
+    retry_first_commit: bool,
+    abort_commit_delay_ms: Option<i64>,
+    batch_dml_abort_delay_ms: Option<i64>,
+}
+
+fn encode_base64_standard(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn build_aborted_rpc_status(delay_ms: i64, msg: &str) -> RwWireRpcStatus {
+    let retry_info = RwWireRetryInfo {
+        retry_delay: Some(prost_types::Duration {
+            seconds: delay_ms / 1_000,
+            nanos: ((delay_ms % 1_000) * 1_000_000) as i32,
+        }),
+    };
+    RwWireRpcStatus {
+        code: 10,
+        message: msg.to_string(),
+        details: vec![prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.RetryInfo".to_string(),
+            value: retry_info.encode_to_vec(),
+        }],
+    }
+}
+
+fn prost_grpc_aborted_with_retry_info(delay_ms: i64, msg: &str) -> Response<Full<Bytes>> {
+    let rpc_status = build_aborted_rpc_status(delay_ms, msg);
+    let details_b64 = encode_base64_standard(&rpc_status.encode_to_vec());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/grpc")
+        .header("grpc-status", "10")
+        .header("grpc-message", msg)
+        .header("grpc-status-details-bin", details_b64)
+        .body(Full::new(Bytes::new()))
+        .expect("grpc aborted")
+}
+
+async fn interactive_rw_client(state: Arc<Mutex<RwWireState>>) -> SpannerClient {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        let path = req.uri().path().to_string();
+                        let leader_val = req
+                            .headers()
+                            .get("x-goog-spanner-route-to-leader")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        let raw = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .map(|c| c.to_bytes().to_vec())
+                            .unwrap_or_default();
+                        let payload = if raw.len() >= 5 { &raw[5..] } else { &raw[..] };
+                        let mut guard = state.lock().unwrap();
+                        if path != "/google.spanner.v1.Spanner/CreateSession" {
+                            guard.leader_headers.push((path.clone(), leader_val));
+                        }
+                        let resp = match path.as_str() {
+                            "/google.spanner.v1.Spanner/CreateSession" => {
+                                guard.create_session_calls += 1;
+                                prost_grpc_ok(vec![prost_lpm_frame(&ProstSession {
+                                    name: "projects/p/instances/i/databases/d/sessions/mux-rw"
+                                        .to_string(),
+                                    multiplexed: true,
+                                })])
+                            }
+                            "/google.spanner.v1.Spanner/BeginTransaction" => {
+                                let decoded = RwWireBeginTransactionRequest::decode(payload)
+                                    .expect("decode BeginTransactionRequest");
+                                let idx = guard.begin_requests.len() + 1;
+                                guard.begin_requests.push(decoded);
+                                prost_grpc_ok(vec![prost_lpm_frame(&RwWireTransaction {
+                                    id: format!("tx-{idx}").into_bytes(),
+                                    precommit_token: Some(RwWirePrecommitToken {
+                                        precommit_token: b"tok-1".to_vec(),
+                                        seq_num: 1,
+                                    }),
+                                })])
+                            }
+                            "/google.spanner.v1.Spanner/ExecuteStreamingSql" => {
+                                let decoded = RwWireExecuteSqlRequest::decode(payload)
+                                    .expect("decode ExecuteStreamingSqlRequest");
+                                guard.sql_requests.push(decoded);
+                                let f1 = RwWirePartialResultSet {
+                                    metadata: Some(RwWireResultSetMetadata {
+                                        row_type: Some(ProstStructType {
+                                            fields: vec![ProstStructField {
+                                                name: "balance".to_string(),
+                                                r#type: Some(ProstType { code: 2 }),
+                                            }],
+                                        }),
+                                        transaction: None,
+                                    }),
+                                    values: vec![],
+                                    stats: None,
+                                    precommit_token: Some(RwWirePrecommitToken {
+                                        precommit_token: b"tok-5".to_vec(),
+                                        seq_num: 5,
+                                    }),
+                                    last: false,
+                                };
+                                let f2 = RwWirePartialResultSet {
+                                    metadata: None,
+                                    values: vec![prost_types::Value {
+                                        kind: Some(prost_types::value::Kind::StringValue(
+                                            "42".to_string(),
+                                        )),
+                                    }],
+                                    stats: Some(ProstResultSetStats {
+                                        row_count_exact: None,
+                                    }),
+                                    precommit_token: Some(RwWirePrecommitToken {
+                                        precommit_token: b"tok-stale-3".to_vec(),
+                                        seq_num: 3,
+                                    }),
+                                    last: true,
+                                };
+                                prost_grpc_ok(vec![prost_lpm_frame(&f1), prost_lpm_frame(&f2)])
+                            }
+                            "/google.spanner.v1.Spanner/ExecuteSql" => {
+                                let decoded = RwWireExecuteSqlRequest::decode(payload)
+                                    .expect("decode ExecuteSqlRequest");
+                                guard.sql_requests.push(decoded);
+                                prost_grpc_ok(vec![prost_lpm_frame(&RwWireResultSet {
+                                    metadata: None,
+                                    stats: Some(ProstResultSetStats {
+                                        row_count_exact: Some(2),
+                                    }),
+                                    precommit_token: None,
+                                })])
+                            }
+                            "/google.spanner.v1.Spanner/ExecuteBatchDml" => {
+                                let decoded = RwWireExecuteBatchDmlRequest::decode(payload)
+                                    .expect("decode ExecuteBatchDmlRequest");
+                                let stmt_count = decoded.statements.len();
+                                guard.batch_dml_requests.push(decoded);
+                                if let Some(delay_ms) = guard.batch_dml_abort_delay_ms {
+                                    prost_grpc_ok(vec![prost_lpm_frame(
+                                        &RwWireExecuteBatchDmlResponse {
+                                            result_sets: vec![RwWireResultSet {
+                                                metadata: None,
+                                                stats: Some(ProstResultSetStats {
+                                                    row_count_exact: Some(1),
+                                                }),
+                                                precommit_token: None,
+                                            }],
+                                            status: Some(build_aborted_rpc_status(
+                                                delay_ms,
+                                                "batch dml aborted",
+                                            )),
+                                            precommit_token: None,
+                                        },
+                                    )])
+                                } else {
+                                    let result_sets = (0..stmt_count)
+                                        .map(|i| RwWireResultSet {
+                                            metadata: None,
+                                            stats: Some(ProstResultSetStats {
+                                                row_count_exact: Some(i as i64 + 1),
+                                            }),
+                                            precommit_token: None,
+                                        })
+                                        .collect();
+                                    prost_grpc_ok(vec![prost_lpm_frame(
+                                        &RwWireExecuteBatchDmlResponse {
+                                            result_sets,
+                                            status: Some(RwWireRpcStatus {
+                                                code: 0,
+                                                message: String::new(),
+                                                details: vec![],
+                                            }),
+                                            precommit_token: None,
+                                        },
+                                    )])
+                                }
+                            }
+                            "/google.spanner.v1.Spanner/Commit" => {
+                                let decoded = RwWireCommitRequest::decode(payload)
+                                    .expect("decode CommitRequest");
+                                guard.commit_requests.push(decoded);
+                                if let Some(delay_ms) = guard.abort_commit_delay_ms {
+                                    prost_grpc_aborted_with_retry_info(
+                                        delay_ms,
+                                        "transaction aborted at commit",
+                                    )
+                                } else if guard.retry_first_commit
+                                    && guard.commit_requests.len() == 1
+                                {
+                                    prost_grpc_ok(vec![prost_lpm_frame(&RwWireCommitResponse {
+                                        commit_timestamp: None,
+                                        commit_stats: None,
+                                        precommit_token: Some(RwWirePrecommitToken {
+                                            precommit_token: b"tok-retry-9".to_vec(),
+                                            seq_num: 9,
+                                        }),
+                                    })])
+                                } else {
+                                    prost_grpc_ok(vec![prost_lpm_frame(&RwWireCommitResponse {
+                                        commit_timestamp: Some(prost_types::Timestamp {
+                                            seconds: 1_700_000_000,
+                                            nanos: 123_000,
+                                        }),
+                                        commit_stats: Some(RwWireCommitStats { mutation_count: 1 }),
+                                        precommit_token: None,
+                                    })])
+                                }
+                            }
+                            "/google.spanner.v1.Spanner/Rollback" => {
+                                let decoded = RwWireRollbackRequest::decode(payload)
+                                    .expect("decode RollbackRequest");
+                                guard.rollback_requests.push(decoded);
+                                prost_grpc_ok(vec![prost_lpm_frame(&())])
+                            }
+                            _ => prost_grpc_err(12, "unimplemented"),
+                        };
+                        Ok::<_, Infallible>(resp)
+                    }
+                });
+                let _ = http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+    let mut cfg = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+    cfg.endpoint = format!("http://{addr}");
+    SpannerClient::new(cfg).expect("client")
+}
+
+#[tokio::test]
+async fn interactive_rw_multi_statement_commit_tracks_seqno_tags_leader_and_mutations() {
+    use _spanner::client::SpannerBeginTransactionOptions;
+
+    let state = Arc::new(Mutex::new(RwWireState::default()));
+    let client = interactive_rw_client(Arc::clone(&state)).await;
+
+    let tx1 = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions {
+            transaction_tag: Some("tx-order".to_string()),
+            previous_transaction_id: Some(b"prev-tx-0".to_vec()),
+            exclude_txn_from_change_streams: true,
+            max_commit_delay_ms: Some(15),
+        })
+        .await
+        .expect("begin tx1");
+    assert_eq!(tx1.transaction_id(), b"tx-1");
+
+    let qres = tx1
+        .query(
+            "SELECT balance FROM accounts WHERE id = @id",
+            &[SpannerQueryParameter::from_value(
+                "id",
+                &SpannerValue::Int64(1),
+            )],
+            Some("req-read"),
+        )
+        .await
+        .expect("query");
+    assert_eq!(qres.rows, vec![vec![SpannerValue::Int64(42)]]);
+
+    let dml_count = tx1
+        .execute_dml(
+            "UPDATE accounts SET balance = 50 WHERE id = 1",
+            &[],
+            Some("req-dml"),
+        )
+        .await
+        .expect("execute_dml");
+    assert_eq!(dml_count, 2);
+
+    let batch_counts = tx1
+        .execute_batch_dml(
+            &[
+                SpannerBatchDmlStatement {
+                    sql: "UPDATE accounts SET balance = 51 WHERE id = 2".into(),
+                    params: vec![],
+                },
+                SpannerBatchDmlStatement {
+                    sql: "UPDATE accounts SET balance = 52 WHERE id = 3".into(),
+                    params: vec![],
+                },
+            ],
+            Some("req-batch"),
+        )
+        .await
+        .expect("execute_batch_dml");
+    assert_eq!(batch_counts, vec![1, 2]);
+
+    let mutation = SpannerMutation::insert(
+        "audit",
+        vec!["id".into()],
+        vec![vec![ProtobufValue::String("1".into())]],
+    );
+    let commit_res = tx1.commit(&[mutation]).await.expect("commit");
+    assert_eq!(
+        commit_res.commit_timestamp_micros,
+        Some(1_700_000_000_000_123)
+    );
+    assert_eq!(commit_res.mutation_count, Some(1));
+    assert_eq!(commit_res.retry_count, 0);
+
+    match tx1
+        .execute_dml("UPDATE accounts SET balance = 99", &[], None)
+        .await
+    {
+        Err(SpannerError::Gcp(info)) => assert_eq!(info.code, 9),
+        other => panic!("expected post-commit FAILED_PRECONDITION, got {other:?}"),
+    }
+
+    let tx2 = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions::default())
+        .await
+        .expect("begin tx2");
+    assert_eq!(tx2.transaction_id(), b"tx-2");
+
+    let guard = state.lock().unwrap();
+    assert_eq!(guard.create_session_calls, 1);
+    assert!(
+        guard
+            .leader_headers
+            .iter()
+            .all(|(path, val)| !path.is_empty() && val == "true")
+    );
+
+    assert_eq!(guard.begin_requests.len(), 2);
+    let b0 = &guard.begin_requests[0];
+    assert_eq!(
+        b0.request_options.as_ref().unwrap().transaction_tag,
+        "tx-order"
+    );
+    assert!(b0.options.as_ref().unwrap().exclude_txn_from_change_streams);
+    assert_eq!(
+        b0.options
+            .as_ref()
+            .unwrap()
+            .read_write
+            .as_ref()
+            .unwrap()
+            .multiplexed_session_previous_transaction_id,
+        b"prev-tx-0"
+    );
+
+    assert_eq!(guard.sql_requests.len(), 2);
+    assert_eq!(guard.sql_requests[0].seqno, 1);
+    assert_eq!(guard.sql_requests[1].seqno, 2);
+    assert_eq!(
+        guard.sql_requests[0].transaction.as_ref().unwrap().id,
+        b"tx-1"
+    );
+    assert_eq!(
+        guard.sql_requests[1].transaction.as_ref().unwrap().id,
+        b"tx-1"
+    );
+    assert_eq!(
+        guard.sql_requests[0]
+            .request_options
+            .as_ref()
+            .unwrap()
+            .request_tag,
+        "req-read"
+    );
+    assert_eq!(
+        guard.sql_requests[0]
+            .request_options
+            .as_ref()
+            .unwrap()
+            .transaction_tag,
+        "tx-order"
+    );
+    assert_eq!(guard.batch_dml_requests.len(), 1);
+    assert_eq!(guard.batch_dml_requests[0].seqno, 3);
+    assert_eq!(
+        guard.batch_dml_requests[0].transaction.as_ref().unwrap().id,
+        b"tx-1"
+    );
+
+    assert_eq!(guard.commit_requests.len(), 1);
+    let creq = &guard.commit_requests[0];
+    assert_eq!(creq.transaction_id, b"tx-1");
+    assert_eq!(creq.mutations.len(), 1);
+    assert_eq!(
+        creq.precommit_token,
+        Some(RwWirePrecommitToken {
+            precommit_token: b"tok-5".to_vec(),
+            seq_num: 5,
+        })
+    );
+    assert_eq!(
+        creq.max_commit_delay,
+        Some(prost_types::Duration {
+            seconds: 0,
+            nanos: 15_000_000,
+        })
+    );
+}
+
+#[tokio::test]
+async fn interactive_rw_commit_retries_multiplexed_session_retry_with_empty_mutations() {
+    use _spanner::client::SpannerBeginTransactionOptions;
+
+    let state = Arc::new(Mutex::new(RwWireState {
+        retry_first_commit: true,
+        ..Default::default()
+    }));
+    let client = interactive_rw_client(Arc::clone(&state)).await;
+    let tx = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions::default())
+        .await
+        .expect("begin tx");
+
+    let mutation = SpannerMutation::insert(
+        "audit",
+        vec!["id".into()],
+        vec![vec![ProtobufValue::String("1".into())]],
+    );
+    let commit_res = tx.commit(&[mutation]).await.expect("commit after retry");
+    assert_eq!(commit_res.retry_count, 1);
+    assert_eq!(commit_res.mutation_count, Some(1));
+
+    let guard = state.lock().unwrap();
+    assert_eq!(guard.commit_requests.len(), 2);
+    assert_eq!(guard.commit_requests[0].mutations.len(), 1);
+    assert_eq!(guard.commit_requests[1].mutations.len(), 0);
+    assert_eq!(
+        guard.commit_requests[1].precommit_token,
+        Some(RwWirePrecommitToken {
+            precommit_token: b"tok-retry-9".to_vec(),
+            seq_num: 9,
+        })
+    );
+}
+
+#[tokio::test]
+async fn interactive_rw_commit_abort_extracts_retry_delay_ms_and_prevents_double_rollback() {
+    use _spanner::client::SpannerBeginTransactionOptions;
+
+    let state = Arc::new(Mutex::new(RwWireState {
+        abort_commit_delay_ms: Some(250),
+        ..Default::default()
+    }));
+    let client = interactive_rw_client(Arc::clone(&state)).await;
+    let tx = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions::default())
+        .await
+        .expect("begin tx");
+
+    match tx.commit(&[]).await {
+        Err(SpannerError::Gcp(info)) => {
+            assert_eq!(info.code, 10);
+            assert_eq!(info.retry_delay_ms, Some(250));
+        }
+        other => panic!("expected SpannerError::Gcp Aborted, got {other:?}"),
+    }
+
+    tx.rollback().await.expect("post-abort rollback is no-op");
+    let guard = state.lock().unwrap();
+    assert!(guard.rollback_requests.is_empty());
+}
+
+#[tokio::test]
+async fn interactive_rw_batch_dml_status_failure_surfaces_abort_retry_delay() {
+    use _spanner::client::SpannerBeginTransactionOptions;
+
+    let state = Arc::new(Mutex::new(RwWireState {
+        batch_dml_abort_delay_ms: Some(125),
+        ..Default::default()
+    }));
+    let client = interactive_rw_client(Arc::clone(&state)).await;
+    let tx = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions::default())
+        .await
+        .expect("begin tx");
+
+    match tx
+        .execute_batch_dml(
+            &[SpannerBatchDmlStatement {
+                sql: "UPDATE t SET v = 1".into(),
+                params: vec![],
+            }],
+            None,
+        )
+        .await
+    {
+        Err(SpannerError::Gcp(info)) => {
+            assert_eq!(info.code, 10);
+            assert_eq!(info.retry_delay_ms, Some(125));
+        }
+        other => panic!("expected batch DML Aborted error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn interactive_rw_rollback_sends_tx_id_and_blocks_subsequent_calls() {
+    use _spanner::client::SpannerBeginTransactionOptions;
+
+    let state = Arc::new(Mutex::new(RwWireState::default()));
+    let client = interactive_rw_client(Arc::clone(&state)).await;
+    let tx = client
+        .begin_read_write_transaction(SpannerBeginTransactionOptions::default())
+        .await
+        .expect("begin tx");
+
+    tx.execute_dml("UPDATE t SET v = 1", &[], None)
+        .await
+        .expect("dml");
+    tx.rollback().await.expect("first rollback");
+    tx.rollback().await.expect("idempotent rollback");
+
+    match tx.query("SELECT 1", &[], None).await {
+        Err(SpannerError::Gcp(info)) => assert_eq!(info.code, 9),
+        other => panic!("expected FAILED_PRECONDITION after rollback, got {other:?}"),
+    }
+
+    let guard = state.lock().unwrap();
+    assert_eq!(guard.rollback_requests.len(), 1);
+    assert_eq!(guard.rollback_requests[0].transaction_id, b"tx-1");
 }

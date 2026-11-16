@@ -30,6 +30,10 @@ if TYPE_CHECKING:
         MutationGroup,
         StalenessBound,
     )
+    from vertebra.db.adapters.spanner.queue import (
+        AsyncSpannerQueueStore,
+        SyncSpannerQueueStore,
+    )
     from vertebra.db.adapters.spanner.tools import SpannerToolProvider
     from vertebra.db.adapters.spanner.transactions import (
         AsyncSpannerSnapshot,
@@ -39,10 +43,9 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
-    "SpannerToolProvider",
-    "SpannerEmbeddingPushdown",
     "AsyncSpannerChangeStreamSource",
     "AsyncSpannerDriver",
+    "AsyncSpannerQueueStore",
     "AsyncSpannerSnapshot",
     "AsyncSpannerTransaction",
     "DEFAULT_SPANNER_ENDPOINT",
@@ -54,9 +57,12 @@ __all__ = (
     "SpannerChildPartition",
     "SpannerConfig",
     "SpannerCore",
+    "SpannerEmbeddingPushdown",
+    "SpannerToolProvider",
     "StalenessBound",
     "SyncSpannerChangeStreamSource",
     "SyncSpannerDriver",
+    "SyncSpannerQueueStore",
     "SyncSpannerSnapshot",
     "SyncSpannerTransaction",
 )
@@ -68,6 +74,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.spanner.config",
     "vertebra.db.adapters.spanner.core",
     "vertebra.db.adapters.spanner.mutations",
+    "vertebra.db.adapters.spanner.queue",
     "vertebra.db.adapters.spanner.transactions",
     "vertebra.db.adapters.spanner.driver",
 ]
@@ -77,6 +84,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SpannerEmbeddingPushdown": ("vertebra.db.adapters.spanner.embeddings", "SpannerEmbeddingPushdown"),
     "AsyncSpannerChangeStreamSource": ("vertebra.db.adapters.spanner.change_stream", "AsyncSpannerChangeStreamSource"),
     "AsyncSpannerDriver": ("vertebra.db.adapters.spanner.driver", "AsyncSpannerDriver"),
+    "AsyncSpannerQueueStore": ("vertebra.db.adapters.spanner.queue", "AsyncSpannerQueueStore"),
     "AsyncSpannerSnapshot": ("vertebra.db.adapters.spanner.transactions", "AsyncSpannerSnapshot"),
     "AsyncSpannerTransaction": ("vertebra.db.adapters.spanner.transactions", "AsyncSpannerTransaction"),
     "DEFAULT_SPANNER_ENDPOINT": ("vertebra.db.adapters.spanner.config", "DEFAULT_SPANNER_ENDPOINT"),
@@ -91,6 +99,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "StalenessBound": ("vertebra.db.adapters.spanner.mutations", "StalenessBound"),
     "SyncSpannerChangeStreamSource": ("vertebra.db.adapters.spanner.change_stream", "SyncSpannerChangeStreamSource"),
     "SyncSpannerDriver": ("vertebra.db.adapters.spanner.driver", "SyncSpannerDriver"),
+    "SyncSpannerQueueStore": ("vertebra.db.adapters.spanner.queue", "SyncSpannerQueueStore"),
     "SyncSpannerSnapshot": ("vertebra.db.adapters.spanner.transactions", "SyncSpannerSnapshot"),
     "SyncSpannerTransaction": ("vertebra.db.adapters.spanner.transactions", "SyncSpannerTransaction"),
 }

@@ -48,6 +48,9 @@ sources:
   - id: src-db-ora-queue-py
     resource: src/py/vertebra/db/adapters/oracle/queue.py
     title: "SyncOracleQueueStore and AsyncOracleQueueStore"
+  - id: src-db-spn-queue-py
+    resource: src/py/vertebra/db/adapters/spanner/queue.py
+    title: "SyncSpannerQueueStore and AsyncSpannerQueueStore"
   - id: src-framework-queues-base-py
     resource: src/py/vertebra/framework/queues/base.py::QueueService._build_backend
     title: "Queue URL scheme routing and QueueBackendSettings construction"
@@ -77,8 +80,8 @@ sources:
 # Distributed Queues, Cron Leader Election & Transactional Email
 
 <!-- truth: start -->
-- `capabilities.py` defines `@runtime_checkable SyncQueueStore` and `@runtime_checkable AsyncQueueStore` (`QueueEntry`, `ack`/`nack`) implemented by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`FOR UPDATE OF q SKIP LOCKED`, `pg_notify`) and `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`FOR UPDATE SKIP LOCKED`, TxEventQ) [^src-db-capabilities-py] [^src-db-pg-queue-py] [^src-db-ora-queue-py].
-- `QueueService` (`QueueBackendSettings`, `TaskResultRecord`) and `@task` execute priority, delayed, sync (`enqueue_sync`), and dead-letter jobs across `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend` (`vertebra._redis`), `ValkeyQueueBackend` (`vertebra._valkey`), and `SpannerQueueBackend` (`SyncSpannerQueueStore`/`AsyncSpannerQueueStore` in `spanner-queue-and-rw-transactions`) [^src-framework-queues-base-py] [^src-framework-queues-redis-py] [^src-framework-queues-valkey-py].
+- `capabilities.py` defines `@runtime_checkable SyncQueueStore` and `@runtime_checkable AsyncQueueStore` (`QueueEntry`, `ack`/`nack`) implemented by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`FOR UPDATE OF q SKIP LOCKED`, `pg_notify`), `SyncOracleQueueStore`/`AsyncOracleQueueStore` (`FOR UPDATE SKIP LOCKED`, TxEventQ), and `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` (interactive `ReadWrite` `SELECT ... FOR UPDATE` -> `UPDATE ... THEN RETURN *` / `RETURNING *` across GoogleSQL and Spangres) [^src-db-capabilities-py] [^src-db-pg-queue-py] [^src-db-ora-queue-py] [^src-db-spn-queue-py].
+- `QueueService` (`QueueBackendSettings`, `TaskResultRecord`) and `@task` execute priority, delayed, sync (`enqueue_sync`), and dead-letter jobs across `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend` (`vertebra._redis`), `ValkeyQueueBackend` (`vertebra._valkey`), and `SpannerQueueBackend` (`vertebra._spanner`) [^src-framework-queues-base-py] [^src-framework-queues-redis-py] [^src-framework-queues-valkey-py] [^src-framework-queues-spanner-py].
 - `WorkerRunner` (`server/lanes.py`) enters `Container.scope()` per task attempt and maintains lease heartbeats alongside `CronScheduler` slot-keyed leader election [^src-server-lanes-py].
 - `ChannelsBackend` (`create_channels_backend`) bridges `SyncNotificationSource`/`AsyncNotificationSource` across Memory, Redis, Valkey, PostgreSQL, and Oracle with origin-node deduplication, while `ValkeyStore` (`vertebra._valkey`) and `RedisStore` (`vertebra._redis`) provide RESP3 `CLIENT TRACKING` L1 invalidation and prefix-scoped `SCAN` + `UNLINK` [^src-framework-channels-py] [^src-framework-stores-py].
 - `EmailService` sends transactional email across `MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SesEmailTransport` behind the `EmailTransport` protocol [^src-framework-email-init-py].
@@ -97,7 +100,7 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 | `OracleQueueBackend` | Auto-constructs `SyncOracleQueueStore` / `AsyncOracleQueueStore` (`vertebra-core[oracle]`) executing `FOR UPDATE SKIP LOCKED`, `MERGE INTO vertebra_queue_leases`, heartbeats, DLQ, and TxEventQ wakeups (or accepts `store=` / `executor=`)[^src-framework-queues-oracle-py] [^src-db-ora-queue-py]. |
 | `RedisQueueBackend` | Per-lane Redis Streams (`XADD`, `XREADGROUP`, `XAUTOCLAIM`, `XACK`), sorted-set delayed scheduling (`ZADD`), `TaskResultRecord` persistence, and `SyncRedisNotificationSource` / `AsyncRedisNotificationSource` wakeups over `vertebra._redis` (`vertebra-core[redis]`)[^src-framework-queues-redis-py]. |
 | `ValkeyQueueBackend` | Standalone Valkey Streams backend (`vtb:valkey:queue`), sorted-set promotion, `TaskResultRecord` persistence, and `SyncValkeyNotificationSource` / `AsyncValkeyNotificationSource` wakeups over `vertebra._valkey` (`vertebra-core[valkey]`)[^src-framework-queues-valkey-py]. |
-| `SpannerQueueBackend` | Hash-sharded primary keys (`shard_count` default `16`), GoogleSQL or Spangres DDL, and `FOR UPDATE` claims (`SyncSpannerQueueStore` / `AsyncSpannerQueueStore` delivered in `spanner-queue-and-rw-transactions`)[^src-framework-queues-spanner-py]. |
+| `SpannerQueueBackend` | Auto-constructs `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` (`vertebra-core[spanner]`) with hash-sharded primary keys (`shard_count` default `16`), atomic `SELECT ... FOR UPDATE` -> `UPDATE ... THEN RETURN *` (`RETURNING *` on Spangres) inside `driver.run_in_transaction`, stateless `spn:{shard_id}:{task_id}:{attempt}` receipt tokens, conditional non-stealing `acquire_lease`, adaptive polling wakeups (`next_due_delay`), and asynchronous `ROW DELETION POLICY` / `TTL INTERVAL` background compaction[^src-framework-queues-spanner-py] [^src-db-spn-queue-py]. |
 
 ## 2. Multi-Lane Worker Runner, Scoped DI, Channels & Stores
 
@@ -131,6 +134,7 @@ Provenance sources: [^src-vertebra-storage-src-lib-rs], [^src-tests-unit-framewo
 [^src-db-capabilities-py]: `src/py/vertebra/db/driver/capabilities.py` — `SyncQueueStore`, `AsyncQueueStore`, and `QueueEntry` capability contracts.
 [^src-db-pg-queue-py]: `src/py/vertebra/db/adapters/postgres/queue.py` — `SyncPostgresQueueStore` and `AsyncPostgresQueueStore`.
 [^src-db-ora-queue-py]: `src/py/vertebra/db/adapters/oracle/queue.py` — `SyncOracleQueueStore` and `AsyncOracleQueueStore`.
+[^src-db-spn-queue-py]: `src/py/vertebra/db/adapters/spanner/queue.py` — `SyncSpannerQueueStore` and `AsyncSpannerQueueStore`.
 [^src-framework-queues-base-py]: `src/py/vertebra/framework/queues/base.py::QueueService._build_backend` — Queue URL scheme routing and `QueueBackendSettings` construction.
 [^src-framework-queues-postgres-py]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend over `SyncPostgresQueueStore` and `AsyncPostgresQueueStore`.
 [^src-framework-queues-redis-py]: `src/py/vertebra/framework/queues/redis.py::RedisQueueBackend` — Redis Streams queue backend over `vertebra._redis`.

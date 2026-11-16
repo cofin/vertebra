@@ -136,6 +136,7 @@ fn spanner_error_with(py: Python<'_>, types: &SpannerExceptionTypes, err: Spanne
         SpannerError::InvalidArgument(msg) => GcpErrorInfo::new(3, msg),
         SpannerError::Auth(msg) => GcpErrorInfo::new(16, msg),
         SpannerError::Client(gax_err) => gax_error_info(&gax_err),
+        SpannerError::Gcp(info) => info,
         SpannerError::Protocol(msg) => GcpErrorInfo::new(13, msg),
         SpannerError::Ddl {
             operation,

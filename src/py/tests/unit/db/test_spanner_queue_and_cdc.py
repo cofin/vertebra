@@ -11,9 +11,16 @@ from typing import Any, Literal
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
+from vertebra._vertebra import SpannerAbortedError
 from vertebra.db import cdc
 from vertebra.db.adapters import spanner
-from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver
+from vertebra.db.adapters.spanner import (
+    AsyncSpannerDriver,
+    AsyncSpannerQueueStore,
+    SpannerConfig,
+    SyncSpannerDriver,
+    SyncSpannerQueueStore,
+)
 from vertebra.db.adapters.spanner.change_stream import (
     AsyncSpannerChangeStreamSource,
     SpannerChangeStreamRecord,
@@ -21,9 +28,18 @@ from vertebra.db.adapters.spanner.change_stream import (
     SyncSpannerChangeStreamSource,
 )
 from vertebra.db.cdc import CDCConfig, ChangeFeed
-from vertebra.db.driver.capabilities import AsyncChangeSource, SyncChangeSource
+from vertebra.db.driver.capabilities import (
+    AsyncChangeSource,
+    AsyncQueueStore,
+    QueueEntry,
+    SyncChangeSource,
+    SyncQueueStore,
+)
+from vertebra.extensions.django.tasks import TaskBackend as DjangoVertebraTaskBackend
+from vertebra.extensions.litestar.queues.backend import StoreQueueBackend
 from vertebra.framework.channels import ChannelBus
 from vertebra.framework.queues import (
+    QueueBackendSettings,
     QueueConfig,
     QueueService,
     SpannerQueueBackend,
@@ -38,7 +54,7 @@ from vertebra.typing import (
     MissingDependencyError,
     reset_dependency_cache,
 )
-from vertebra.utils.serializers import encode_json
+from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.uuids import uuid4
 
 
@@ -98,15 +114,18 @@ class _FakeSpannerQueueExecutor:
 
             if "DELETE FROM VERTEBRA_QUEUE_JOBS" in q:
                 shard_id, task_id = int(params[0]), str(params[1])
-                if (shard_id, task_id) in self._jobs:
+                expected_attempt = int(params[2]) if len(params) >= 3 else None
+                job = self._jobs.get((shard_id, task_id))
+                if job is not None and (expected_attempt is None or int(job.get("attempt", 0)) == expected_attempt):
                     del self._jobs[(shard_id, task_id)]
                     return 1
                 return 0
 
             if "SET STATUS = 'ACKED'" in q:
                 shard_id, task_id = int(params[0]), str(params[1])
+                expected_attempt = int(params[2]) if len(params) >= 3 else None
                 job = self._jobs.get((shard_id, task_id))
-                if job is not None:
+                if job is not None and (expected_attempt is None or int(job.get("attempt", 0)) == expected_attempt):
                     job["status"] = "acked"
                     job["locked_until"] = None
                     return 1
@@ -147,6 +166,32 @@ class _FakeSpannerQueueExecutor:
                         promoted += 1
                 return promoted
 
+            if "INSERT INTO VERTEBRA_QUEUE_LEASES" in q:
+                lease_key, owner_id, expires_at, last_slot = params
+                self._leases[str(lease_key)] = {
+                    "lease_key": str(lease_key),
+                    "owner_id": str(owner_id),
+                    "expires_at": float(expires_at),
+                    "last_slot": last_slot,
+                }
+                return 1
+
+            if "UPDATE VERTEBRA_QUEUE_LEASES" in q:
+                owner_id, expires_at, last_slot, lease_key, check_now = params
+                existing = self._leases.get(str(lease_key))
+                if existing is not None and (
+                    float(existing["expires_at"]) <= float(check_now) or str(existing["owner_id"]) == str(owner_id)
+                ):
+                    existing.update(
+                        {
+                            "owner_id": str(owner_id),
+                            "expires_at": float(expires_at),
+                            "last_slot": last_slot,
+                        }
+                    )
+                    return 1
+                return 0
+
             if "UPDATE VERTEBRA_QUEUE_JOBS" in q:
                 status, attempt, sched, locked, handle, shard_id, task_id = params
                 key = (int(shard_id), str(task_id))
@@ -169,8 +214,8 @@ class _FakeSpannerQueueExecutor:
         """Fetch matching rows from mock Spanner tables."""
         async with self._lock:
             q = query.strip().upper()
-            if "FOR UPDATE" in q:
-                lanes, now_ts, limit, locked_until, consumer_name, receipt_handle = params
+            if "FOR UPDATE" in q and "VERTEBRA_QUEUE_JOBS" in q:
+                lanes, now_ts, limit = params
                 target_lanes = set(lanes)
                 matched: list[dict[str, Any]] = []
                 sorted_jobs = sorted(
@@ -191,13 +236,6 @@ class _FakeSpannerQueueExecutor:
                     is_ready_pending = status == "pending" and (sched is None or sched <= now_ts)
                     is_expired_running = status == "running" and locked is not None and locked <= now_ts
                     if is_ready_pending or is_expired_running:
-                        job_handle = f"{receipt_handle}-{job['task_id']}" if receipt_handle else uuid4().hex
-                        job["status"] = "running"
-                        job["locked_until"] = locked_until
-                        job["consumer_name"] = consumer_name
-                        job["receipt_handle"] = job_handle
-                        if is_expired_running:
-                            job["attempt"] = int(job.get("attempt", 1)) + 1
                         matched.append(dict(job))
                 return matched
 
@@ -211,7 +249,19 @@ class _FakeSpannerQueueExecutor:
         """Fetch a single row from mock Spanner tables."""
         async with self._lock:
             q = query.strip().upper()
-            if "VERTEBRA_QUEUE_LEASES" in q:
+            if "UPDATE VERTEBRA_QUEUE_JOBS" in q and ("THEN RETURN *" in q or "RETURNING *" in q):
+                next_attempt, locked_until, consumer_name, handle, shard_id, task_id = params
+                job = self._jobs.get((int(shard_id), str(task_id)))
+                if job is None:
+                    return None
+                job["status"] = "running"
+                job["attempt"] = int(next_attempt)
+                job["locked_until"] = float(locked_until)
+                job["consumer_name"] = str(consumer_name)
+                job["receipt_handle"] = str(handle)
+                return dict(job)
+
+            if "VERTEBRA_QUEUE_LEASES" in q and "ON CONFLICT" in q:
                 lease_key, owner_id, expires_at, last_slot, check_now = params
                 existing = self._leases.get(str(lease_key))
                 if existing is None or existing["expires_at"] <= check_now or existing["owner_id"] == owner_id:
@@ -225,6 +275,16 @@ class _FakeSpannerQueueExecutor:
                     self._leases[str(lease_key)] = record
                     return dict(record)
                 return None
+
+            if "FROM VERTEBRA_QUEUE_LEASES" in q and "FOR UPDATE" in q:
+                lease_key = str(params[0])
+                existing = self._leases.get(lease_key)
+                return dict(existing) if existing is not None else None
+
+            if "SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE SHARD_ID" in q:
+                shard_id, task_id = int(params[0]), str(params[1])
+                existing_job = self._jobs.get((shard_id, task_id))
+                return dict(existing_job) if existing_job is not None else None
 
             if "SELECT * FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID" in q or "WHERE DLQ_ID =" in q:
                 dlq_id = str(params[0])
@@ -374,11 +434,27 @@ async def test_spanner_queue_backend_requires_spanner_extension_and_executor(
 
         monkeypatch.setitem(sys.modules, "vertebra._spanner", types.ModuleType("vertebra._spanner"))
         reset_dependency_cache("vertebra._spanner")
-        with pytest.raises(ImproperConfigurationError, match="requires a SpannerQueueExecutor"):
+        with pytest.raises(ImproperConfigurationError, match="requires a configured spanner://"):
             SpannerQueueBackend()
 
         with pytest.raises(ImproperConfigurationError, match="requires a spanner:// backend_url"):
             SpannerQueueBackend(QueueConfig(), executor=_FakeSpannerQueueExecutor())
+
+        auto_backend = SpannerQueueBackend(
+            QueueConfig(backend_url="spanner://projects/p/instances/i/databases/d?endpoint=http://localhost:9010")
+        )
+        assert isinstance(auto_backend.store, AsyncSpannerQueueStore)
+        assert isinstance(auto_backend.sync_store, SyncSpannerQueueStore)
+        assert not hasattr(auto_backend, "_receipt_index")
+
+        settings_svc = QueueService(
+            QueueBackendSettings(
+                kind="spangres",
+                dsn="spangres://projects/p/instances/i/databases/d?endpoint=http://localhost:9010",
+            )
+        )
+        assert isinstance(settings_svc.backend, SpannerQueueBackend)
+        assert settings_svc.backend.dialect == "spangres"
     finally:
         reset_dependency_cache("vertebra._spanner")
 
@@ -718,3 +794,833 @@ def test_spanner_change_stream_reschedules_completed_partition_and_tracks_root_w
     emitted = source.ingest_records(root_records, partition_token=None)
     assert len(emitted) == 1
     assert source.watermarks[""] == "2026-11-02T00:06:00Z"
+
+
+class _QueueRwTxHandle:
+    """Interactive ReadWrite transaction double staging mutations until commit."""
+
+    def __init__(
+        self,
+        backend: _InMemorySpannerQueueWire,
+        tx_id: bytes,
+    ) -> None:
+        self._backend = backend
+        self._tx_id = tx_id
+        self._closed = False
+        self._jobs = {k: dict(v) for k, v in backend.jobs.items()}
+        self._dlq = {k: dict(v) for k, v in backend.dlq.items()}
+        self._leases = {k: dict(v) for k, v in backend.leases.items()}
+        self._unique_keys = {k: dict(v) for k, v in backend.unique_keys.items()}
+
+    @property
+    def transaction_id(self) -> bytes:
+        return self._tx_id
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        _ = request_tag
+        assert not self._closed
+        return self._backend.run_sql_against(
+            sql,
+            params_json,
+            jobs=self._jobs,
+            dlq=self._dlq,
+            leases=self._leases,
+            unique_keys=self._unique_keys,
+            tx_id=self._tx_id,
+        )
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        res = self.query(sql, params_json, request_tag)
+        return int(res.get("row_count_exact", 0))
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        _ = request_tag
+        items = decode_json(statements_json) if statements_json else []
+        counts: list[int] = []
+        for stmt in items:
+            p_str = encode_json(stmt["params"]) if stmt.get("params") is not None else None
+            counts.append(self.execute_dml(str(stmt["sql"]), p_str))
+        return counts
+
+    def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+        _ = mutations_json
+        assert not self._closed
+        if self._backend.abort_remaining > 0:
+            self._backend.abort_remaining -= 1
+            self._closed = True
+            err = SpannerAbortedError("Transaction aborted due to lock contention")
+            err.retry_delay_ms = 1
+            raise err
+        self._backend.jobs = self._jobs
+        self._backend.dlq = self._dlq
+        self._backend.leases = self._leases
+        self._backend.unique_keys = self._unique_keys
+        self._backend.commits.append(self._tx_id)
+        self._closed = True
+        return {"commit_timestamp_micros": int(time.time() * 1_000_000), "mutation_count": 0, "retry_count": 0}
+
+    def rollback(self) -> None:
+        if not self._closed:
+            self._backend.rollbacks.append(self._tx_id)
+            self._closed = True
+
+
+class _AsyncQueueRwTxHandle:
+    """Async wrapper around _QueueRwTxHandle matching AsyncSpannerReadWriteTransaction."""
+
+    def __init__(self, sync_tx: _QueueRwTxHandle) -> None:
+        self._sync = sync_tx
+
+    @property
+    def transaction_id(self) -> bytes:
+        return self._sync.transaction_id
+
+    async def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        return self._sync.query(sql, params_json, request_tag)
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        return self._sync.execute_dml(sql, params_json, request_tag)
+
+    async def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        return self._sync.execute_batch_dml(statements_json, request_tag)
+
+    async def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+        return self._sync.commit(mutations_json)
+
+    async def rollback(self) -> None:
+        self._sync.rollback()
+
+
+class _InMemorySpannerQueueWire:
+    """Wire-faithful in-memory Spanner client validating GoogleSQL vs Spangres SQL and transactions."""
+
+    def __init__(self, dialect: Literal["googlesql", "spangres"]) -> None:
+        self.dialect = dialect
+        self.jobs: dict[tuple[int, str], dict[str, Any]] = {}
+        self.dlq: dict[str, dict[str, Any]] = {}
+        self.leases: dict[str, dict[str, Any]] = {}
+        self.unique_keys: dict[str, dict[str, Any]] = {}
+        self.ddl_statements: list[str] = []
+        self.tx_statements: list[tuple[bytes | None, str, dict[str, Any]]] = []
+        self.previous_tx_ids: list[bytes | None] = []
+        self.commits: list[bytes] = []
+        self.rollbacks: list[bytes] = []
+        self.abort_remaining = 0
+        self._tx_seq = 0
+
+    def begin_sync_tx(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> _QueueRwTxHandle:
+        _ = (transaction_tag, exclude_txn_from_change_streams, max_commit_delay_ms)
+        self._tx_seq += 1
+        self.previous_tx_ids.append(previous_transaction_id)
+        return _QueueRwTxHandle(self, f"tx-{self._tx_seq}".encode())
+
+    def sync_client(self) -> Any:
+        wire = self
+
+        class _SyncClient:
+            def begin_read_write_transaction(
+                self,
+                transaction_tag: str | None = None,
+                previous_transaction_id: bytes | None = None,
+                exclude_txn_from_change_streams: bool = False,
+                max_commit_delay_ms: int | None = None,
+            ) -> _QueueRwTxHandle:
+                return wire.begin_sync_tx(
+                    transaction_tag,
+                    previous_transaction_id,
+                    exclude_txn_from_change_streams,
+                    max_commit_delay_ms,
+                )
+
+            def query(
+                self,
+                sql: str,
+                params_json: str | None = None,
+                staleness_mode: str = "strong",
+                staleness_value: int | None = None,
+            ) -> dict[str, Any]:
+                _ = (staleness_mode, staleness_value)
+                return wire.run_sql_against(
+                    sql,
+                    params_json,
+                    jobs=wire.jobs,
+                    dlq=wire.dlq,
+                    leases=wire.leases,
+                    unique_keys=wire.unique_keys,
+                    tx_id=None,
+                )
+
+            def execute_dml(
+                self,
+                sql: str,
+                params_json: str | None = None,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+            ) -> int:
+                _ = (request_tag, transaction_tag)
+                res = self.query(sql, params_json)
+                return int(res.get("row_count_exact", 0))
+
+            def execute_batch_dml(
+                self,
+                statements_json: str,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+            ) -> list[int]:
+                _ = (request_tag, transaction_tag)
+                tx = wire.begin_sync_tx()
+                counts = tx.execute_batch_dml(statements_json)
+                tx.commit()
+                return counts
+
+            def update_ddl(
+                self,
+                statements: list[str],
+                operation_id: str | None = None,
+                timeout_seconds: float | None = None,
+            ) -> str:
+                _ = (operation_id, timeout_seconds)
+                wire.ddl_statements.extend(statements)
+                return "op-ddl"
+
+            def close(self) -> None:
+                return None
+
+        return _SyncClient()
+
+    def async_client(self) -> Any:
+        sync_c = self.sync_client()
+
+        class _AsyncClient:
+            async def begin_read_write_transaction(
+                self,
+                transaction_tag: str | None = None,
+                previous_transaction_id: bytes | None = None,
+                exclude_txn_from_change_streams: bool = False,
+                max_commit_delay_ms: int | None = None,
+            ) -> _AsyncQueueRwTxHandle:
+                return _AsyncQueueRwTxHandle(
+                    sync_c.begin_read_write_transaction(
+                        transaction_tag,
+                        previous_transaction_id,
+                        exclude_txn_from_change_streams,
+                        max_commit_delay_ms,
+                    )
+                )
+
+            async def query(
+                self,
+                sql: str,
+                params_json: str | None = None,
+                staleness_mode: str = "strong",
+                staleness_value: int | None = None,
+            ) -> dict[str, Any]:
+                return sync_c.query(sql, params_json, staleness_mode, staleness_value)
+
+            async def execute_dml(
+                self,
+                sql: str,
+                params_json: str | None = None,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+            ) -> int:
+                return sync_c.execute_dml(sql, params_json, request_tag, transaction_tag)
+
+            async def execute_batch_dml(
+                self,
+                statements_json: str,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+            ) -> list[int]:
+                return sync_c.execute_batch_dml(statements_json, request_tag, transaction_tag)
+
+            async def update_ddl(
+                self,
+                statements: list[str],
+                operation_id: str | None = None,
+                timeout_seconds: float | None = None,
+            ) -> str:
+                return sync_c.update_ddl(statements, operation_id, timeout_seconds)
+
+            async def close(self) -> None:
+                sync_c.close()
+
+        return _AsyncClient()
+
+    @staticmethod
+    def _result_from_dicts(rows: list[dict[str, Any]], row_count: int = 0) -> dict[str, Any]:
+        if not rows:
+            return {"columns": [], "rows": [], "row_count_exact": row_count}
+        cols = list(rows[0].keys())
+        return {
+            "columns": cols,
+            "rows": [[r.get(c) for c in cols] for r in rows],
+            "row_count_exact": len(rows),
+        }
+
+    def run_sql_against(
+        self,
+        sql: str,
+        params_json: str | None,
+        *,
+        jobs: dict[tuple[int, str], dict[str, Any]],
+        dlq: dict[str, dict[str, Any]],
+        leases: dict[str, dict[str, Any]],
+        unique_keys: dict[str, dict[str, Any]],
+        tx_id: bytes | None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = decode_json(params_json) if params_json else {}
+        if self.dialect == "spangres":
+            assert "@" not in sql
+            for k in params:
+                assert k.startswith("p") and k[1:].isdigit()
+        else:
+            assert "$1" not in sql
+            assert "RETURNING *" not in sql
+        self.tx_statements.append((tx_id, sql.strip(), params))
+        upper = " ".join(sql.strip().upper().split())
+
+        def _p(gsql_name: str, pg_ord: int) -> Any:
+            return params[f"p{pg_ord}"] if self.dialect == "spangres" else params[gsql_name]
+
+        if upper.startswith("SELECT TASK_ID FROM") and "IDEMPOTENCY_KEY" in upper:
+            idem = str(_p("idempotency_key", 1))
+            for job in jobs.values():
+                if job.get("idempotency_key") == idem and job.get("status") in ("pending", "running"):
+                    return self._result_from_dicts([{"task_id": job["task_id"]}])
+            return self._result_from_dicts([])
+
+        if upper.startswith("INSERT INTO VERTEBRA_QUEUE_JOBS"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            jobs[(shard_id, task_id)] = {
+                "shard_id": shard_id,
+                "task_id": task_id,
+                "task_name": _p("task_name", 3),
+                "lane": _p("lane", 4),
+                "payload": _p("payload", 5),
+                "status": _p("status", 6) if self.dialect == "googlesql" else params["p6"],
+                "attempt": int(_p("attempt", 7)),
+                "max_retries": int(_p("max_retries", 8)),
+                "scheduled_at": _p("scheduled_at", 9),
+                "enqueued_at": float(_p("enqueued_at", 10)),
+                "locked_until": _p("locked_until", 11),
+                "consumer_name": _p("consumer_name", 12),
+                "receipt_handle": _p("receipt_handle", 13),
+                "idempotency_key": _p("idempotency_key", 14),
+                "traceparent": _p("traceparent", 15),
+                "headers": _p("headers", 16),
+                "last_error": None,
+            }
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("SELECT SHARD_ID, TASK_ID, ATTEMPT FROM") and "FOR UPDATE" in upper:
+            assert tx_id is not None
+            lanes = set(_p("lanes", 1))
+            now_ts = float(_p("now_ts", 2))
+            batch_size = int(_p("batch_size", 3))
+            ordered = sorted(
+                jobs.values(),
+                key=lambda j: (
+                    j.get("scheduled_at") if j.get("scheduled_at") is not None else j["enqueued_at"],
+                    j["enqueued_at"],
+                ),
+            )
+            cands: list[dict[str, Any]] = []
+            for job in ordered:
+                if len(cands) >= batch_size:
+                    break
+                if job["lane"] not in lanes:
+                    continue
+                is_pending = job["status"] == "pending" and (
+                    job["scheduled_at"] is None or float(job["scheduled_at"]) <= now_ts
+                )
+                is_expired = (
+                    job["status"] == "running"
+                    and job["locked_until"] is not None
+                    and float(job["locked_until"]) <= now_ts
+                )
+                if is_pending or is_expired:
+                    cands.append({"shard_id": job["shard_id"], "task_id": job["task_id"], "attempt": job["attempt"]})
+            return self._result_from_dicts(cands)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'RUNNING'"):
+            assert tx_id is not None
+            locked_until = float(_p("locked_until", 1))
+            consumer_name = str(_p("consumer_name", 2))
+            receipt_handle = str(_p("receipt_handle", 3))
+            shard_id = int(_p("shard_id", 4))
+            task_id = str(_p("task_id", 5))
+            job = jobs.get((shard_id, task_id))
+            if job is None:
+                return self._result_from_dicts([])
+            job["status"] = "running"
+            job["attempt"] = int(job["attempt"]) + 1
+            job["locked_until"] = locked_until
+            job["consumer_name"] = consumer_name
+            job["receipt_handle"] = receipt_handle
+            return self._result_from_dicts([dict(job)])
+
+        if upper.startswith("DELETE FROM VERTEBRA_QUEUE_JOBS"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            attempt = int(_p("attempt", 3))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and job["status"] == "running" and int(job["attempt"]) == attempt:
+                del jobs[(shard_id, task_id)]
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'ACKED'"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            attempt = int(_p("attempt", 3))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and job["status"] == "running" and int(job["attempt"]) == attempt:
+                job["status"] = "acked"
+                job["locked_until"] = None
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE SHARD_ID"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            job = jobs.get((shard_id, task_id))
+            return self._result_from_dicts([dict(job)] if job is not None else [])
+
+        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE LANE"):
+            lane = str(_p("lane", 1))
+            if "STATUS =" in upper:
+                st = str(_p("status", 2))
+                lim = int(_p("limit", 3))
+                matched = [dict(j) for j in jobs.values() if j["lane"] == lane and j["status"] == st][:lim]
+            else:
+                lim = int(_p("limit", 2))
+                matched = [dict(j) for j in jobs.values() if j["lane"] == lane][:lim]
+            return self._result_from_dicts(matched)
+
+        if upper.startswith("SELECT MIN(SCHEDULED_AT) AS MIN_SCHED"):
+            lanes = set(_p("lanes", 1))
+            now_ts = float(_p("now_ts", 2))
+            vals = [
+                float(j["scheduled_at"])
+                for j in jobs.values()
+                if j["lane"] in lanes
+                and j["status"] == "pending"
+                and j["scheduled_at"] is not None
+                and float(j["scheduled_at"]) > now_ts
+            ]
+            return self._result_from_dicts([{"min_sched": min(vals) if vals else None}])
+
+        if upper.startswith("INSERT INTO VERTEBRA_QUEUE_DLQ"):
+            dlq_id = str(_p("dlq_id", 1))
+            dlq[dlq_id] = {
+                "dlq_id": dlq_id,
+                "shard_id": int(_p("shard_id", 2)),
+                "task_id": str(_p("task_id", 3)),
+                "task_name": str(_p("task_name", 4)),
+                "lane": str(_p("lane", 5)),
+                "payload": str(_p("payload", 6)),
+                "error_type": str(_p("error_type", 7)),
+                "error_message": str(_p("error_message", 8)),
+                "failed_at": float(_p("failed_at", 9)),
+            }
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_DLQ ORDER BY"):
+            lim = int(_p("limit", 1))
+            rows = sorted(dlq.values(), key=lambda d: float(d["failed_at"]), reverse=True)[:lim]
+            return self._result_from_dicts([dict(r) for r in rows])
+
+        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID"):
+            dlq_id = str(_p("dlq_id", 1))
+            item = dlq.get(dlq_id)
+            return self._result_from_dicts([dict(item)] if item is not None else [])
+
+        if upper.startswith("DELETE FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID"):
+            dlq_id = str(_p("dlq_id", 1))
+            if dlq_id in dlq:
+                del dlq[dlq_id]
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'DEAD_LETTER'"):
+            last_err = str(_p("last_error", 1))
+            shard_id = int(_p("shard_id", 2))
+            task_id = str(_p("task_id", 3))
+            attempt = int(_p("attempt", 4))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and int(job["attempt"]) == attempt:
+                job["status"] = "dead_letter"
+                job["locked_until"] = None
+                job["receipt_handle"] = None
+                job["last_error"] = last_err
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'PENDING', SCHEDULED_AT"):
+            sched_at = float(_p("scheduled_at", 1))
+            last_err = str(_p("last_error", 2))
+            shard_id = int(_p("shard_id", 3))
+            task_id = str(_p("task_id", 4))
+            attempt = int(_p("attempt", 5))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and int(job["attempt"]) == attempt:
+                job["status"] = "pending"
+                job["scheduled_at"] = sched_at
+                job["locked_until"] = None
+                job["consumer_name"] = None
+                job["receipt_handle"] = None
+                job["last_error"] = last_err
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET LOCKED_UNTIL"):
+            locked_until = float(_p("locked_until", 1))
+            shard_id = int(_p("shard_id", 2))
+            task_id = str(_p("task_id", 3))
+            worker_id = str(_p("worker_id", 4))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and job["status"] == "running" and job.get("consumer_name") == worker_id:
+                job["locked_until"] = locked_until
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'PENDING', LOCKED_UNTIL = NULL"):
+            now_ts = float(_p("now_ts", 1))
+            reaped = 0
+            for job in jobs.values():
+                if (
+                    job["status"] == "running"
+                    and job["locked_until"] is not None
+                    and float(job["locked_until"]) <= now_ts
+                ):
+                    job["status"] = "pending"
+                    job["locked_until"] = None
+                    job["consumer_name"] = None
+                    job["receipt_handle"] = None
+                    reaped += 1
+            return self._result_from_dicts([], row_count=reaped)
+
+        if upper.startswith("SELECT SHARD_ID, TASK_ID FROM VERTEBRA_QUEUE_JOBS WHERE STATUS = 'PENDING'"):
+            now_ts = float(_p("now_ts", 1))
+            lim = int(_p("limit", 2))
+            due = [
+                {"shard_id": j["shard_id"], "task_id": j["task_id"]}
+                for j in jobs.values()
+                if j["status"] == "pending" and j["scheduled_at"] is not None and float(j["scheduled_at"]) <= now_ts
+            ][:lim]
+            return self._result_from_dicts(due)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET SCHEDULED_AT = NULL"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            job = jobs.get((shard_id, task_id))
+            if job is not None:
+                job["scheduled_at"] = None
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'CANCELLED'"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            job = jobs.get((shard_id, task_id))
+            if job is not None and job["status"] in ("pending", "running"):
+                job["status"] = "cancelled"
+                job["locked_until"] = None
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if "VERTEBRA_QUEUE_LEASES" in upper and "ON CONFLICT" in upper:
+            lease_key = str(params["p1"])
+            owner_id = str(params["p2"])
+            expires_at = float(params["p3"])
+            slot = params["p4"]
+            now_ts = float(params["p5"])
+            existing = leases.get(lease_key)
+            if existing is None or float(existing["expires_at"]) <= now_ts or existing["owner_id"] == owner_id:
+                rec = {
+                    "lease_key": lease_key,
+                    "owner_id": owner_id,
+                    "expires_at": expires_at,
+                    "last_slot": slot if slot is not None else (existing.get("last_slot") if existing else None),
+                }
+                leases[lease_key] = rec
+                return self._result_from_dicts([dict(rec)])
+            return self._result_from_dicts([])
+
+        if upper.startswith("SELECT LEASE_KEY, OWNER_ID, EXPIRES_AT, LAST_SLOT FROM VERTEBRA_QUEUE_LEASES"):
+            lease_key = str(params["lease_key"])
+            existing = leases.get(lease_key)
+            return self._result_from_dicts([dict(existing)] if existing is not None else [])
+
+        if upper.startswith("INSERT INTO VERTEBRA_QUEUE_LEASES"):
+            rec = {
+                "lease_key": str(params["lease_key"]),
+                "owner_id": str(params["owner_id"]),
+                "expires_at": float(params["expires_at"]),
+                "last_slot": params.get("last_slot"),
+            }
+            leases[rec["lease_key"]] = rec
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_LEASES"):
+            lease_key = str(params["lease_key"])
+            leases[lease_key] = {
+                "lease_key": lease_key,
+                "owner_id": str(params["owner_id"]),
+                "expires_at": float(params["expires_at"]),
+                "last_slot": params.get("last_slot"),
+            }
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("DELETE FROM VERTEBRA_QUEUE_LEASES"):
+            lease_key = str(_p("lease_key", 1))
+            owner_id = str(_p("owner_id", 2))
+            existing = leases.get(lease_key)
+            if existing is not None and existing["owner_id"] == owner_id:
+                del leases[lease_key]
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if "VERTEBRA_QUEUE_UNIQUE_KEYS" in upper and "ON CONFLICT" in upper:
+            key = str(params["p1"])
+            expires_at = float(params["p2"])
+            now_ts = float(params["p3"])
+            existing_uk = unique_keys.get(key)
+            if existing_uk is None or float(existing_uk["expires_at"]) <= now_ts:
+                unique_keys[key] = {"unique_key": key, "expires_at": expires_at}
+                return self._result_from_dicts([{"unique_key": key}])
+            return self._result_from_dicts([])
+
+        if upper.startswith("SELECT UNIQUE_KEY, EXPIRES_AT FROM VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            key = str(params["key"])
+            existing_uk = unique_keys.get(key)
+            return self._result_from_dicts([dict(existing_uk)] if existing_uk is not None else [])
+
+        if upper.startswith("INSERT INTO VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            key = str(params["key"])
+            unique_keys[key] = {"unique_key": key, "expires_at": float(params["expires_at"])}
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            key = str(params["key"])
+            unique_keys[key] = {"unique_key": key, "expires_at": float(params["expires_at"])}
+            return self._result_from_dicts([], row_count=1)
+
+        if upper.startswith("DELETE FROM VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            key = str(_p("key", 1))
+            if key in unique_keys:
+                del unique_keys[key]
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        msg = f"Unhandled SQL in _InMemorySpannerQueueWire ({self.dialect}): {sql}"
+        raise AssertionError(msg)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_queue_stores_interactive_rw_claim_abort_retry_fencing_and_leases(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """SyncSpannerQueueStore and AsyncSpannerQueueStore claim atomically via run_in_transaction, retry Aborted, fence attempts, and prevent lease theft across GoogleSQL and Spangres."""
+    wire = _InMemorySpannerQueueWire(dialect)
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        dialect=dialect,
+        endpoint="http://localhost:9010",
+    )
+    sync_drv = SyncSpannerDriver(cfg, client=wire.sync_client())
+    async_drv = AsyncSpannerDriver(cfg, client=wire.async_client())
+    sync_store = SyncSpannerQueueStore(sync_drv, shard_count=8)
+    async_store = AsyncSpannerQueueStore(async_drv, shard_count=8)
+
+    assert isinstance(sync_store, SyncQueueStore)
+    assert isinstance(async_store, AsyncQueueStore)
+
+    await async_store.ensure_schema()
+    assert len(wire.ddl_statements) == 5
+
+    job_id = str(uuid4())
+    enqueued_id = sync_store.enqueue(
+        QueueEntry(
+            job_id=job_id,
+            queue="io",
+            task_name="sync_job",
+            payload=b'{"x": 1}',
+            attempt=1,
+            max_attempts=2,
+            headers={"idempotency_key": "idem-spanner-1"},
+        )
+    )
+    assert enqueued_id == job_id
+    dup_id = await async_store.enqueue(
+        QueueEntry(
+            job_id=str(uuid4()),
+            queue="io",
+            task_name="sync_job",
+            payload=b'{"x": 1}',
+            attempt=1,
+            max_attempts=2,
+            headers={"idempotency_key": "idem-spanner-1"},
+        )
+    )
+    assert dup_id == job_id
+
+    wire.abort_remaining = 1
+    commits_before = len(wire.commits)
+    claimed = await async_store.claim(["io"], limit=2, worker_id="w-1", lease_seconds=30.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == job_id
+    assert claimed[0].attempt == 1
+    assert len(wire.commits) == commits_before + 1
+    assert any(prev is not None for prev in wire.previous_tx_ids)
+
+    claim_tx_id = wire.commits[-1]
+    claim_tx_sqls = [s for tid, s, _ in wire.tx_statements if tid == claim_tx_id]
+    assert len(claim_tx_sqls) == 2
+    assert "FOR UPDATE" in claim_tx_sqls[0].upper()
+    if dialect == "googlesql":
+        assert "THEN RETURN *" in claim_tx_sqls[1].upper()
+    else:
+        assert "RETURNING *" in claim_tx_sqls[1].upper()
+
+    assert await async_store.heartbeat([job_id], worker_id="w-1", lease_seconds=60.0) == 1
+    assert await async_store.ack(job_id, attempt=99) is False
+
+    assert await async_store.nack(job_id, attempt=1, error="transient", retry_delay_s=0.0) is True
+    claimed_retry = sync_store.claim(["io"], limit=1, worker_id="w-2", lease_seconds=30.0)
+    assert len(claimed_retry) == 1
+    assert claimed_retry[0].attempt == 2
+    assert sync_store.ack(job_id, attempt=1) is False
+    assert sync_store.nack(job_id, attempt=2, error="fatal", retry_delay_s=None) is True
+    assert len(wire.dlq) == 1
+
+    assert await async_store.acquire_lease("cron:hourly", owner_id="node-a", ttl_seconds=60.0) is True
+    assert await async_store.acquire_lease("cron:hourly", owner_id="node-b", ttl_seconds=60.0) is False
+    assert await async_store.acquire_lease("cron:hourly", owner_id="node-a", ttl_seconds=90.0) is True
+    assert await async_store.release_lease("cron:hourly", owner_id="node-b") is False
+    assert await async_store.release_lease("cron:hourly", owner_id="node-a") is True
+    assert sync_store.acquire_lease("cron:hourly", owner_id="node-b", ttl_seconds=60.0) is True
+
+    assert sync_store.reserve_unique_key("uk-1", ttl_seconds=60.0) is True
+    assert await async_store.reserve_unique_key("uk-1", ttl_seconds=60.0) is False
+    assert await async_store.release_unique_key("uk-1") is True
+    assert await async_store.reserve_unique_key("uk-1", ttl_seconds=60.0) is True
+
+    await async_store.aclose()
+    sync_store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_queue_backend_integrations_and_stateless_receipt_handles(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """SpannerQueueBackend powers QueueService, litestar-queues StoreQueueBackend, and Django TaskBackend with zero receipt-index leaks."""
+    wire = _InMemorySpannerQueueWire(dialect)
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        dialect=dialect,
+        endpoint="http://localhost:9010",
+    )
+    sync_drv = SyncSpannerDriver(cfg, client=wire.sync_client())
+    async_drv = AsyncSpannerDriver(cfg, client=wire.async_client())
+
+    settings = QueueBackendSettings(
+        kind="spangres" if dialect == "spangres" else "spanner",
+        dsn=f"{'spangres' if dialect == 'spangres' else 'spanner'}://projects/p/instances/i/databases/d",
+        driver=async_drv,
+        sync_driver=sync_drv,
+        visibility_timeout_seconds=0.01,
+        poll_interval_seconds=0.01,
+    )
+    qsvc = QueueService(settings)
+    backend = qsvc.backend
+    assert isinstance(backend, SpannerQueueBackend)
+    assert not hasattr(backend, "_receipt_index")
+
+    for idx in range(25):
+        await backend.enqueue(
+            TaskEnvelope(
+                task_id=f"timeout-{idx}",
+                task_name="noop",
+                lane="io",
+                attempt=1,
+                max_retries=3,
+                enqueued_at=time.time(),
+            )
+        )
+    batch = await backend.dequeue(("io",), batch_size=25, visibility_timeout_s=0.001)
+    assert len(batch) == 25
+    assert all((item.receipt_handle or "").startswith("spn:") for item in batch)
+    await asyncio.sleep(0.005)
+    reclaimed = await backend.dequeue(("io",), batch_size=5, visibility_timeout_s=30.0)
+    assert len(reclaimed) == 5
+    assert all(item.attempt == 2 for item in reclaimed)
+    assert reclaimed[0].receipt_handle is not None
+    await backend.ack(reclaimed[0].receipt_handle)
+    for rest in reclaimed[1:]:
+        await backend.ack(rest)
+    for item in await backend.dequeue(("io",), batch_size=25, visibility_timeout_s=30.0):
+        await backend.ack(item)
+
+    django_backend = DjangoVertebraTaskBackend(alias=f"spanner_{dialect}", params={"OPTIONS": {"queue_service": qsvc}})
+
+    @django_backend.task("multiply_pair")
+    def multiply_pair(a: int, b: int) -> int:
+        return a * b
+
+    dj_res = django_backend.enqueue(multiply_pair, 6, 7)
+    assert dj_res.id != ""
+    drained = await qsvc.drain_once(("io",))
+    assert drained == [42]
+
+    assert backend.store is not None
+    litestar_backend = StoreQueueBackend(store=backend.store)
+    ls_rec = await litestar_backend.enqueue("audit.log", args=("ok",), queue="default", max_retries=1)
+    claimed_ls = await litestar_backend.claim_next(queues=("default",))
+    assert claimed_ls is not None
+    assert claimed_ls.id == ls_rec.id
+    await litestar_backend.complete_task(ls_rec.id, expected_retry_count=0)
+
+    await qsvc.close()

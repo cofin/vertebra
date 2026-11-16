@@ -4,6 +4,7 @@ pub mod arrow_ipc;
 pub mod client;
 pub mod codec;
 pub mod errors;
+pub mod rw_tx;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +13,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
 
-use crate::client::{SpannerClient as NativeSpannerClient, SpannerClientConfig};
+use crate::client::{
+    SpannerBeginTransactionOptions, SpannerClient as NativeSpannerClient, SpannerClientConfig,
+    SpannerReadWriteTx,
+};
 use crate::codec::{
     SpannerBatchWriteResult, SpannerCommitResult, SpannerDialect, SpannerQueryResult,
     SpannerStaleness, SpannerStructField, SpannerValue, parse_batch_dml_statements_json,
@@ -438,6 +442,32 @@ impl PySyncSpannerClient {
             .map_err(|e| spanner_error_to_py(py, e))?;
         query_result_to_py(py, res)
     }
+
+    #[pyo3(signature = (
+        transaction_tag=None,
+        previous_transaction_id=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
+    fn begin_read_write_transaction(
+        &self,
+        py: Python<'_>,
+        transaction_tag: Option<String>,
+        previous_transaction_id: Option<Vec<u8>>,
+        exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
+    ) -> PyResult<PySyncSpannerReadWriteTransaction> {
+        let options = SpannerBeginTransactionOptions {
+            transaction_tag,
+            previous_transaction_id,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        };
+        let tx = py
+            .detach(|| block_on_db(self.inner.begin_read_write_transaction(options)))
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        Ok(PySyncSpannerReadWriteTransaction { inner: tx })
+    }
 }
 
 /// Asynchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._spanner.AsyncSpannerClient`).
@@ -762,6 +792,227 @@ impl PyAsyncSpannerClient {
             SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
+
+    #[pyo3(signature = (
+        transaction_tag=None,
+        previous_transaction_id=None,
+        exclude_txn_from_change_streams=false,
+        max_commit_delay_ms=None
+    ))]
+    fn begin_read_write_transaction(
+        &self,
+        py: Python<'_>,
+        transaction_tag: Option<String>,
+        previous_transaction_id: Option<Vec<u8>>,
+        exclude_txn_from_change_streams: bool,
+        max_commit_delay_ms: Option<u64>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let options = SpannerBeginTransactionOptions {
+            transaction_tag,
+            previous_transaction_id,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        };
+        let client = Arc::clone(&self.inner);
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { client.begin_read_write_transaction(options).await },
+            |py, tx| {
+                let handle = Py::new(py, PyAsyncSpannerReadWriteTransaction { inner: tx })?;
+                Ok(handle.into_any())
+            },
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
+}
+
+/// Stateful synchronous interactive Cloud Spanner `ReadWrite` transaction handle.
+#[pyclass(
+    name = "SyncSpannerReadWriteTransaction",
+    module = "vertebra._spanner",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncSpannerReadWriteTransaction {
+    inner: SpannerReadWriteTx,
+}
+
+#[pymethods]
+impl PySyncSpannerReadWriteTransaction {
+    #[getter]
+    fn transaction_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.transaction_id())
+    }
+
+    #[pyo3(signature = (sql, params_json=None, request_tag=None))]
+    fn query(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params_json: Option<&str>,
+        request_tag: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
+        let res = py
+            .detach(|| block_on_db(self.inner.query(sql, &params, request_tag.as_deref())))
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        query_result_to_py(py, res)
+    }
+
+    #[pyo3(signature = (sql, params_json=None, request_tag=None))]
+    fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params_json: Option<&str>,
+        request_tag: Option<String>,
+    ) -> PyResult<i64> {
+        let params =
+            parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
+        py.detach(|| block_on_db(self.inner.execute_dml(sql, &params, request_tag.as_deref())))
+            .map_err(|e| spanner_error_to_py(py, e))
+    }
+
+    #[pyo3(signature = (statements_json, request_tag=None))]
+    fn execute_batch_dml(
+        &self,
+        py: Python<'_>,
+        statements_json: &str,
+        request_tag: Option<String>,
+    ) -> PyResult<Vec<i64>> {
+        let stmts = parse_batch_dml_statements_json(statements_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        py.detach(|| block_on_db(self.inner.execute_batch_dml(&stmts, request_tag.as_deref())))
+            .map_err(|e| spanner_error_to_py(py, e))
+    }
+
+    #[pyo3(signature = (mutations_json=None))]
+    fn commit(&self, py: Python<'_>, mutations_json: Option<&str>) -> PyResult<Py<PyAny>> {
+        let mutations = match mutations_json {
+            Some(json) => parse_mutations_json(json).map_err(|e| spanner_error_to_py(py, e))?,
+            None => Vec::new(),
+        };
+        let res = py
+            .detach(|| block_on_db(self.inner.commit(&mutations)))
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        commit_result_to_py(py, res)
+    }
+
+    fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| block_on_db(self.inner.rollback()))
+            .map_err(|e| spanner_error_to_py(py, e))
+    }
+}
+
+/// Stateful asynchronous interactive Cloud Spanner `ReadWrite` transaction handle.
+#[pyclass(
+    name = "AsyncSpannerReadWriteTransaction",
+    module = "vertebra._spanner",
+    frozen,
+    immutable_type
+)]
+pub struct PyAsyncSpannerReadWriteTransaction {
+    inner: SpannerReadWriteTx,
+}
+
+#[pymethods]
+impl PyAsyncSpannerReadWriteTransaction {
+    #[getter]
+    fn transaction_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.transaction_id())
+    }
+
+    #[pyo3(signature = (sql, params_json=None, request_tag=None))]
+    fn query(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params_json: Option<String>,
+        request_tag: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        let tx = self.inner.clone();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { tx.query(&sql, &params, request_tag.as_deref()).await },
+            query_result_to_py,
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (sql, params_json=None, request_tag=None))]
+    fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params_json: Option<String>,
+        request_tag: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let params = parse_spanner_parameters_json(params_json.as_deref())
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        let tx = self.inner.clone();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { tx.execute_dml(&sql, &params, request_tag.as_deref()).await },
+            |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (statements_json, request_tag=None))]
+    fn execute_batch_dml(
+        &self,
+        py: Python<'_>,
+        statements_json: String,
+        request_tag: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let stmts = parse_batch_dml_statements_json(&statements_json)
+            .map_err(|e| spanner_error_to_py(py, e))?;
+        let tx = self.inner.clone();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { tx.execute_batch_dml(&stmts, request_tag.as_deref()).await },
+            |py, counts| Ok(counts.into_pyobject(py)?.into_any().unbind()),
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    #[pyo3(signature = (mutations_json=None))]
+    fn commit(
+        &self,
+        py: Python<'_>,
+        mutations_json: Option<String>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let mutations = match mutations_json.as_deref() {
+            Some(json) => parse_mutations_json(json).map_err(|e| spanner_error_to_py(py, e))?,
+            None => Vec::new(),
+        };
+        let tx = self.inner.clone();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { tx.commit(&mutations).await },
+            commit_result_to_py,
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    fn rollback(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let tx = self.inner.clone();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move { tx.rollback().await },
+            |py, ()| Ok(py.None()),
+            spanner_error_to_py,
+            SPANNER_COMPLETION_DRAINER_ATTR,
+        )
+    }
 }
 
 #[pymodule(gil_used = false)]
@@ -771,5 +1022,7 @@ pub fn _spanner(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GIL_USED", false)?;
     m.add_class::<PySyncSpannerClient>()?;
     m.add_class::<PyAsyncSpannerClient>()?;
+    m.add_class::<PySyncSpannerReadWriteTransaction>()?;
+    m.add_class::<PyAsyncSpannerReadWriteTransaction>()?;
     Ok(())
 }

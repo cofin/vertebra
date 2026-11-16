@@ -5,9 +5,9 @@ Synchronous and asynchronous background task queues (`QueueService`, `QueueConfi
 | Component | Classes | Purpose |
 | --- | --- | --- |
 | **Queue Core & Runner** | `QueueConfig`, `QueueBackendSettings`, `TaskRetryPolicy`, `TaskEnvelope`, `TaskResultRecord`, `DeadLetterEntry`, `QueueService`, `WorkerRunner` | Enqueue typed tasks (`enqueue` / `enqueue_sync`) onto `io`, `cpu`, or `agent` lanes with scoped DI, heartbeats, exponential backoff, and dead-letter retention |
-| **Queue Store Protocols** | `SyncQueueStore`, `AsyncQueueStore`, `QueueEntry` | `@runtime_checkable` engine-local queue persistence contracts (`vertebra.db.driver.capabilities`) implemented by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` and `SyncOracleQueueStore`/`AsyncOracleQueueStore` |
+| **Queue Store Protocols** | `SyncQueueStore`, `AsyncQueueStore`, `QueueEntry` | `@runtime_checkable` engine-local queue persistence contracts (`vertebra.db.driver.capabilities`) implemented by `SyncPostgresQueueStore`/`AsyncPostgresQueueStore`, `SyncOracleQueueStore`/`AsyncOracleQueueStore`, and `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` |
 | **Cron Scheduler** | `CronSchedule`, `CronScheduler` | Execute recurring cron schedules with slot-keyed distributed leader lease coordination |
-| **Storage Backends** | `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `SpannerQueueBackend` | Persist and claim task envelopes with auto-constructed native `SKIP LOCKED` stores (`vertebra-core[postgres]`, `vertebra-core[oracle]`), native Streams consumer groups (`vertebra-core[redis]`, `vertebra-core[valkey]`), or hash-sharded `FOR UPDATE` claims (`SpannerQueueBackend`). |
+| **Storage Backends** | `MemoryQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `SpannerQueueBackend` | Persist and claim task envelopes with auto-constructed native `SKIP LOCKED` stores (`vertebra-core[postgres]`, `vertebra-core[oracle]`), interactive `ReadWrite` hash-sharded `FOR UPDATE` stores (`vertebra-core[spanner]`), or native Streams consumer groups (`vertebra-core[redis]`, `vertebra-core[valkey]`). |
 
 ## Queue Configuration, Store Protocols & Service
 
