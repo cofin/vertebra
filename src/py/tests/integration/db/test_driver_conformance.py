@@ -645,7 +645,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         tcp_url="valkey://127.0.0.1:6379/2",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_VALKEY_DSN",),
         container_fixture="vtb_valkey_config",
-        native_extension_module=None,
+        native_extension_module="vertebra._valkey",
     ),
 )
 
@@ -1813,6 +1813,21 @@ def test_redis_driver_raises_missing_dependency_when_wheel_absent(
             AsyncRedisDriver()
     finally:
         reset_dependency_cache("vertebra._redis")
+
+
+def test_valkey_driver_raises_missing_dependency_when_wheel_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SyncValkeyDriver and AsyncValkeyDriver fail loud with MissingDependencyError when vertebra._valkey is absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._valkey", None)
+    reset_dependency_cache("vertebra._valkey")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[valkey\]"):
+            SyncValkeyDriver()
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[valkey\]"):
+            AsyncValkeyDriver()
+    finally:
+        reset_dependency_cache("vertebra._valkey")
 
 
 def test_postgres_conformance_spec_and_version_matrix() -> None:

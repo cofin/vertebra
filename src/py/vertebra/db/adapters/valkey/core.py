@@ -23,6 +23,7 @@ __all__ = (
     "hash_slot",
     "parse_cluster_redirect",
     "redis_hash_slot",
+    "valkey_hash_slot",
 )
 
 HASH_SLOT_COUNT = 16384
@@ -253,7 +254,7 @@ class ValkeyCore:
     def crc16_xmodem(data: bytes | bytearray | memoryview | str) -> int:
         """Compute CRC16-XMODEM (polynomial 0x1021, initial value 0x0000) for Valkey Cluster."""
         raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        native = import_optional("vertebra._vertebra")
+        native = import_optional("vertebra._valkey")
         if native is not None:
             native_fn = getattr(native, "crc16_xmodem", None)
             if callable(native_fn):
@@ -270,9 +271,9 @@ class ValkeyCore:
     def hash_slot(key: str | bytes) -> int:
         """Compute the Valkey Cluster hash slot (0..16383) for a given key string or bytes."""
         raw = key if isinstance(key, bytes) else key.encode("utf-8")
-        native = import_optional("vertebra._vertebra")
+        native = import_optional("vertebra._valkey")
         if native is not None:
-            native_fn = getattr(native, "redis_hash_slot", None)
+            native_fn = getattr(native, "valkey_hash_slot", None) or getattr(native, "hash_slot", None)
             if callable(native_fn):
                 with contextlib.suppress(TypeError):
                     return int(native_fn(raw))
@@ -288,15 +289,14 @@ class ValkeyCore:
         """Alias for hash_slot matching the C-extension export name."""
         return cls.hash_slot(key)
 
+    @classmethod
+    def valkey_hash_slot(cls, key: str | bytes) -> int:
+        """Alias for hash_slot matching the Valkey C-extension export name."""
+        return cls.hash_slot(key)
+
     @staticmethod
     def encode_resp_command(*parts: str | bytes | int | float) -> bytes:
         """Encode arbitrary command parts into a RESP3 array of bulk strings."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None:
-            native_fn = getattr(native, "encode_resp_command", None)
-            if callable(native_fn):
-                with contextlib.suppress(TypeError):
-                    return bytes(native_fn(*parts))
         out = bytearray(f"*{len(parts)}\r\n".encode("ascii"))
         for part in parts:
             if isinstance(part, bytes):
@@ -318,12 +318,6 @@ class ValkeyCore:
         client_name: str | None = None,
     ) -> bytes:
         """Generate the RESP3 HELLO 3 handshake wire frame with optional AUTH and SETNAME."""
-        native = import_optional("vertebra._vertebra")
-        if native is not None:
-            native_fn = getattr(native, "encode_hello3_handshake", None)
-            if callable(native_fn):
-                with contextlib.suppress(TypeError):
-                    return bytes(native_fn(username=username, password=password, client_name=client_name))
         parts: list[str | bytes | int] = ["HELLO", "3"]
         if password is not None:
             parts.extend(["AUTH", username or "default", password])
@@ -334,15 +328,22 @@ class ValkeyCore:
     @staticmethod
     def parse_cluster_redirect(error_message: str | bytes) -> ClusterRedirect | None:
         """Parse a Valkey Cluster MOVED or ASK redirection error."""
-        native = import_optional("vertebra._vertebra")
+        native = import_optional("vertebra._valkey")
         if native is not None:
             native_fn = getattr(native, "parse_cluster_redirect", None)
             if callable(native_fn):
+                msg_str = (
+                    error_message.decode("utf-8", errors="replace")
+                    if isinstance(error_message, bytes)
+                    else str(error_message)
+                )
                 with contextlib.suppress(TypeError):
-                    parsed_native = native_fn(error_message)
+                    parsed_native = native_fn(msg_str)
                     if parsed_native is not None:
                         kind, slot, host, port = parsed_native
-                        return ClusterRedirect(kind=kind, slot=slot, host=host, port=port)
+                        return ClusterRedirect(
+                            kind="MOVED" if kind == "MOVED" else "ASK", slot=slot, host=host, port=port
+                        )
         text = error_message.decode("utf-8", errors="replace") if isinstance(error_message, bytes) else error_message
         text = text.strip()
         if text.startswith("-"):
@@ -406,6 +407,7 @@ class ValkeyCore:
 crc16_xmodem = ValkeyCore.crc16_xmodem
 hash_slot = ValkeyCore.hash_slot
 redis_hash_slot = ValkeyCore.redis_hash_slot
+valkey_hash_slot = ValkeyCore.valkey_hash_slot
 encode_resp_command = ValkeyCore.encode_resp_command
 encode_hello3_handshake = ValkeyCore.encode_hello3_handshake
 parse_cluster_redirect = ValkeyCore.parse_cluster_redirect

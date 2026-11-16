@@ -27,5 +27,6 @@ exclude = [
     "**/py/vertebra/_redis.pyi",
     "**/py/vertebra/_spanner.pyi",
     "**/py/vertebra/_storage.pyi",
+    "**/py/vertebra/_valkey.pyi",
     "**/py/vertebra/_vertebra.pyi",
 ]

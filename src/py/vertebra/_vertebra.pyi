@@ -101,7 +101,6 @@ __all__ = [
     "call_vectorcall",
     "classify_jsonrpc_frame",
     "clear_request_notification",
-    "crc16_xmodem",
     "decode_alloydb_metadata_response",
     "decode_gemini_embed_grpc_frame_to_batch",
     "decode_oracle_vector_binary",
@@ -122,7 +121,6 @@ __all__ = [
     "encode_gemini_embed_contents_grpc_frame",
     "encode_gemini_embed_grpc_frame",
     "encode_gemini_embed_grpc_response_frame",
-    "encode_hello3_handshake",
     "encode_oracle_vector_binary",
     "encode_oracle_vector_f32",
     "encode_oracle_vector_f64",
@@ -133,7 +131,6 @@ __all__ = [
     "encode_pgvector_bit",
     "encode_pgvector_f16",
     "encode_pgvector_f32",
-    "encode_resp_command",
     "encode_ttc_session_attrs",
     "format_gemma_prompt",
     "format_traceparent",
@@ -158,7 +155,6 @@ __all__ = [
     "orm_to_struct_vectorcall",
     "pack_grpc_lpm_frame",
     "parse_bytes",
-    "parse_cluster_redirect",
     "parse_duration",
     "parse_tnsnames_ora",
     "parse_traceparent",
@@ -169,7 +165,6 @@ __all__ = [
     "quote_bracket_identifier",
     "quote_dialect_identifier",
     "quote_identifier",
-    "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
     "run_wsgi_callable",
@@ -1294,17 +1289,6 @@ def duckdb_bootstrap_statements(
     httpfs_connection_caching: bool = True,
     enable_http_metadata_cache: bool = True,
 ) -> list[str]: ...
-def encode_resp_command(args: list[bytes]) -> bytes: ...
-def encode_hello3_handshake(
-    client_name: str = "vertebra",
-    username: str | None = None,
-    password: str | None = None,
-    enable_tracking_bcast: bool = False,
-    prefixes: list[str] = ...,
-) -> bytes: ...
-def crc16_xmodem(data: bytes) -> int: ...
-def redis_hash_slot(key: bytes) -> int: ...
-def parse_cluster_redirect(err_msg: str) -> tuple[str, int, str, int] | None: ...
 
 @final
 class SimilarityMatch:

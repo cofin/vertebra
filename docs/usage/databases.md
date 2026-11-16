@@ -26,6 +26,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     uv add "vertebra-core[spanner]"
     uv add "vertebra-core[sqlite]"
     uv add "vertebra-core[redis]"
+    uv add "vertebra-core[valkey]"
     ```
 
 === "pip"
@@ -40,6 +41,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pip install "vertebra-core[spanner]"
     pip install "vertebra-core[sqlite]"
     pip install "vertebra-core[redis]"
+    pip install "vertebra-core[valkey]"
     ```
 
 === "pdm"
@@ -54,6 +56,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pdm add "vertebra-core[spanner]"
     pdm add "vertebra-core[sqlite]"
     pdm add "vertebra-core[redis]"
+    pdm add "vertebra-core[valkey]"
     ```
 
 === "poetry"
@@ -68,9 +71,10 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[spanner]"
     poetry add "vertebra-core[sqlite]"
     poetry add "vertebra-core[redis]"
+    poetry add "vertebra-core[valkey]"
     ```
 
-Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Redis (`vertebra-core[redis]`, backed by `vertebra._redis`), Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Cloud Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
+Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Redis (`vertebra-core[redis]`, backed by `vertebra._redis`), Valkey (`vertebra-core[valkey]`, backed by `vertebra._valkey`), Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Cloud Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -163,7 +167,7 @@ app = Litestar(
 | **Google BigQuery** | `BigQueryAsyncConfig`, `BigQuerySyncConfig` | `BigQueryConfig` | `SyncBigQueryDriver`, `AsyncBigQueryDriver` | Pure-Rust REST v2 + Storage Read/Write v1 (`VTBARROW` zero-copy Arrow SHM via `select_to_arrow` / `load_from_arrow`), `ObjectTableConfig` (`ObjectRef`), `dry_run` cost ceiling, ADK/Litestar/Events/Artifact stores |
 | **Google Cloud Spanner** | `SpannerAsyncConfig`, `SpannerSyncConfig` | `SpannerConfig` | `SyncSpannerDriver`, `AsyncSpannerDriver` | Pure-Rust GoogleSQL + `Spangres`, cached `multiplexed = true` sessions, wound-wait `Aborted` retry, `BatchWrite`, Data Boost `PartitionQuery` (`select_to_arrow`), `SyncSpannerChangeStreamSource` / `AsyncSpannerChangeStreamSource` |
 | **Redis** | — | `RedisConfig` | `SyncRedisDriver`, `AsyncRedisDriver` | Standalone native `vertebra._redis` (`vertebra-core[redis]`), RESP3 (`HELLO 3`), atomic pipelines, `CLIENT TRACKING` local cache invalidation, Sentinel, and Cluster (`CRC16-XMODEM`) |
-| **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Valkey 8.0+/9.0+ RESP3 client-side caching, Cluster/Sentinel, GCP Memorystore IAM auth |
+| **Valkey** | — | `ValkeyConfig` | `SyncValkeyDriver`, `AsyncValkeyDriver` | Standalone native `vertebra._valkey` (`vertebra-core[valkey]`), Valkey 8.0+/9.0+ RESP3 client-side caching, Valkey 9.0 hash-field expiration (`hexpire`, `httl`), `CLIENT CAPA redirect`, Cluster/Sentinel, GCP Memorystore IAM auth |
 | **DataFusion** | — | `DataFusionConfig` | `DataFusionEngine` | Federated SQL across PostgreSQL, MySQL, SQLite, DuckDB, BigQuery, Cloud Spanner, and Parquet/CSV object storage |
 
 `memory://` is not an engine URL. `MySQLConfig` and `PostgreSQLConfig.from_url("memory://")` raise `ImproperConfigurationError` immediately during config construction; `PostgreSQLConfig(dsn="memory://")`, `RedisConfig`, and `ValkeyConfig` construct from it, while their drivers raise `ImproperConfigurationError` on initialization, and so do the `from_valkey` / `from_redis` factories of `KeyValueStore`, the Litestar `MemoryStore`, the Starlette `CacheStore`, and `SQLAlchemyCacheBackend`. `DatabaseRegistry.parse_url("memory://")` raises `ValueError`. `QueueConfig(backend_url="memory://")`, `SyncObjectStore("memory://")`, and `SQLAlchemyCacheBackend.from_url("memory://")` keep their in-process backends.
@@ -379,6 +383,23 @@ config = RedisConfig.from_url("redis://localhost:6379/0")
 async with AsyncRedisDriver(config) as driver:
     await driver.set("vtb:user:1", b'{"name": "Alice"}', ex=300)
     user_bytes = await driver.get("vtb:user:1")
+    notifications = driver.notification_source()
+    await notifications.subscribe(["user_events"])
+```
+
+### Valkey Native Driver
+
+The native Valkey driver (`vertebra-core[valkey]`, backed by `vertebra._valkey`) provides pure-Rust RESP3 execution, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, pipeline batching, `CLIENT TRACKING` local cache invalidation, Sentinel, and Cluster topology routing:
+
+```python
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
+
+config = ValkeyConfig.from_url("valkey://localhost:6379/0")
+async with AsyncValkeyDriver(config) as driver:
+    await driver.set("vtb:user:1", b'{"name": "Alice"}', ex=300)
+    user_bytes = await driver.get("vtb:user:1")
+    await driver.execute_command("HSET", "vtb:session:1", "token", "xyz", "ip", "127.0.0.1")
+    await driver.hexpire("vtb:session:1", 3600, "token")
     notifications = driver.notification_source()
     await notifications.subscribe(["user_events"])
 ```

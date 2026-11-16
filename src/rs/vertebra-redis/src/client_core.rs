@@ -365,7 +365,7 @@ impl RedisCoreClient {
                 .iter()
                 .map(|k| String::from_utf8_lossy(k).into_owned())
                 .collect();
-            self.client_cache.invalidate_keys(&string_keys);
+            self.client_cache.evict_local(&string_keys);
         }
 
         Ok(count)
@@ -390,7 +390,7 @@ impl RedisCoreClient {
                 .iter()
                 .map(|k| String::from_utf8_lossy(k).into_owned())
                 .collect();
-            self.client_cache.invalidate_keys(&string_keys);
+            self.client_cache.evict_local(&string_keys);
         }
 
         Ok(count)

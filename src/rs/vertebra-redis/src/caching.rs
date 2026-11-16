@@ -64,6 +64,14 @@ impl ClientLruCache {
         state.lru.put(key, CacheEntry { value, expires_at });
     }
 
+    /// Evict keys from the local cache without recording an invalidation event.
+    pub fn evict_local(&self, keys: &[String]) {
+        let mut state = self.inner.lock();
+        for key in keys {
+            state.lru.pop(key);
+        }
+    }
+
     /// Evict a specific list of keys received from an invalidation push frame.
     pub fn invalidate_keys(&self, keys: &[String]) {
         let mut state = self.inner.lock();

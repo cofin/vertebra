@@ -170,6 +170,9 @@ sqlite = [
 storage = [
     "vertebra-storage==0.3.0",
 ]
+valkey = [
+    "vertebra-valkey==0.3.0",
+]
 uvloop = [
     "uvloop>=0.23.0; sys_platform != 'win32'",
 ]
@@ -266,6 +269,7 @@ vertebra-redis = { path = "src/rs/vertebra-redis", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
 vertebra-sqlite = { path = "src/rs/vertebra-sqlite", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
+vertebra-valkey = { path = "src/rs/vertebra-valkey", editable = true }
 
 [tool.maturin]
 python-source = "src/py"
@@ -296,6 +300,7 @@ exclude = [
     { path = "src/py/vertebra/_spanner.pyi", format = "wheel" },
     { path = "src/py/vertebra/_sqlite.pyi", format = "wheel" },
     { path = "src/py/vertebra/_storage.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_valkey.pyi", format = "wheel" },
 ]
 
 [tool.ruff]
@@ -501,6 +506,11 @@ search = 'vertebra-storage=={current_version}'
 replace = 'vertebra-storage=={new_version}'
 
 [[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'vertebra-valkey=={current_version}'
+replace = 'vertebra-valkey=={new_version}'
+
+[[tool.bumpversion.files]]
 filename = "src/py/vertebra/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
@@ -562,6 +572,11 @@ replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
 filename = "src/rs/vertebra-storage/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-valkey/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 

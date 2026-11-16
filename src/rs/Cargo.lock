@@ -6913,6 +6913,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "vertebra-valkey"
+version = "0.3.0"
+dependencies = [
+ "bytes",
+ "lru 0.16.4",
+ "parking_lot",
+ "pyo3",
+ "pyo3-build-config",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "vertebra-core",
+ "vertebra-db",
+ "webpki-root-certs",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

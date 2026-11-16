@@ -648,6 +648,7 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: 
         ("spanner", "vertebra._spanner"),
         ("sqlite", "vertebra._sqlite"),
         ("storage", "vertebra._storage"),
+        ("valkey", "vertebra._valkey"),
     ],
 )
 def test_optional_extension_pyproject_isolation_and_bundler_extra(
@@ -680,6 +681,7 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
             "spanner",
             "sqlite",
             "storage",
+            "valkey",
             "vertebra",
         )
         if other != pkg_slug

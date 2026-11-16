@@ -148,8 +148,8 @@ class RedisCore:
                     return ClusterRedirect(
                         kind=kind,
                         slot=slot,
-                        host=parsed.hostname,
-                        port=parsed.port,
+                        host=parsed_url.hostname,
+                        port=parsed_url.port,
                     )
         return None
 

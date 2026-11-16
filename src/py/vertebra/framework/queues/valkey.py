@@ -24,6 +24,8 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from vertebra._valkey import AsyncValkeyClient
+
 __all__ = (
     "ValkeyQueueBackend",
     "ValkeyStreamClient",
@@ -73,6 +75,21 @@ if current then
 end
 return 0
 """
+
+
+def _normalize_stream_fields(fields: Any) -> dict[str, Any]:
+    """Convert stream entry fields into a normalized string-keyed dictionary."""
+    if isinstance(fields, dict):
+        return {k.decode("utf-8") if isinstance(k, bytes) else str(k): v for k, v in fields.items()}
+    if isinstance(fields, (list, tuple)):
+        if fields and isinstance(fields[0], (list, tuple)) and len(fields[0]) == 2:
+            return {(k.decode("utf-8") if isinstance(k, bytes) else str(k)): v for k, v in fields}
+        res: dict[str, Any] = {}
+        for i in range(0, len(fields) - 1, 2):
+            k = fields[i].decode("utf-8") if isinstance(fields[i], bytes) else str(fields[i])
+            res[k] = fields[i + 1]
+        return res
+    return {}
 
 
 @runtime_checkable
@@ -168,6 +185,142 @@ class ValkeyStreamClient(Protocol):
         ...
 
 
+class _ValkeyStreamAdapter:
+    """Adapter bridging AsyncValkeyClient to the ValkeyStreamClient protocol."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: AsyncValkeyClient) -> None:
+        """Initialize adapter wrapping a native AsyncValkeyClient."""
+        self._client = client
+
+    async def xgroup_create(
+        self,
+        stream: str,
+        group: str,
+        id: str = "$",
+        mkstream: bool = False,
+    ) -> Any:
+        """Create consumer group on stream."""
+        return await self._client.xgroup_create(stream, group, id=id, mkstream=mkstream)
+
+    async def xadd(
+        self,
+        stream: str,
+        fields: Mapping[str, Any],
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        """Append entry to stream."""
+        field_seq: list[tuple[bytes | str, bytes | str]] = [
+            (k, v if isinstance(v, (str, bytes)) else str(v)) for k, v in fields.items()
+        ]
+        res = await self._client.xadd(stream, field_seq, id=id, maxlen=maxlen, approximate=approximate)
+        return res.decode("utf-8") if isinstance(res, bytes) else str(res)
+
+    async def xreadgroup(
+        self,
+        group: str,
+        consumer: str,
+        streams: Mapping[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> list[Any]:
+        """Read entries from streams via consumer group."""
+        stream_seq: list[tuple[bytes | str, str]] = list(streams.items())
+        res = await self._client.xreadgroup(group, consumer, stream_seq, count=count, block_ms=block)
+        return res if res is not None else []
+
+    async def xack(self, stream: str, group: str, *ids: str) -> int:
+        """Acknowledge processed stream entries."""
+        return int(await self._client.xack(stream, group, list(ids)))
+
+    async def xautoclaim(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+    ) -> tuple[str, list[tuple[str, dict[str, Any]]], list[str]]:
+        """Reclaim pending entries exceeding idle time."""
+        res = await self._client.xautoclaim(
+            stream,
+            group,
+            consumer,
+            min_idle_time,
+            start_id=start_id,
+            count=count,
+        )
+        if not res or len(res) < 3:
+            return "0-0", [], []
+        next_id, raw_entries, deleted = res
+        next_id_str = next_id.decode("utf-8") if isinstance(next_id, bytes) else str(next_id)
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for item in raw_entries:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                eid = item[0].decode("utf-8") if isinstance(item[0], bytes) else str(item[0])
+                entries.append((eid, _normalize_stream_fields(item[1])))
+        deleted_list = [d.decode("utf-8") if isinstance(d, bytes) else str(d) for d in deleted]
+        return next_id_str, entries, deleted_list
+
+    async def xrange(
+        self,
+        stream: str,
+        min: str = "-",
+        max: str = "+",
+        count: int | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Read range of stream entries."""
+        res = await self._client.xrange(stream, min=min, max=max, count=count)
+        if not res:
+            return []
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for item in res:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                eid = item[0].decode("utf-8") if isinstance(item[0], bytes) else str(item[0])
+                entries.append((eid, _normalize_stream_fields(item[1])))
+        return entries
+
+    async def xdel(self, stream: str, *ids: str) -> int:
+        """Delete stream entries by ID."""
+        return int(await self._client.xdel(stream, list(ids)))
+
+    async def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
+        """Add members to sorted set."""
+        member_seq: list[tuple[bytes | str, float]] = list(mapping.items())
+        return int(await self._client.zadd(key, member_seq))
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
+        """Evaluate Lua script."""
+        keys = list(keys_and_args[:numkeys])
+        args = list(keys_and_args[numkeys:])
+        return await self._client.eval(script, keys, args)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> Any:
+        """Set key with optional NX and PX options."""
+        return await self._client.set(key, value, nx=nx, px=px)
+
+    async def get(self, key: str) -> str | None:
+        """Get string value by key."""
+        raw = await self._client.get(key)
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+    async def aclose(self) -> None:
+        """Close client connection."""
+        self._client.close()
+
+
 class ValkeyQueueBackend:
     """Distributed task queue backend powered by Valkey Streams and Sorted Sets."""
 
@@ -182,13 +335,12 @@ class ValkeyQueueBackend:
         """Bind the queue backend to a Valkey Streams client.
 
         Args:
-            config: Queue configuration; when client is None, backend_url must carry a redis:// or rediss:// host URL accepted by redis.asyncio.from_url.
+            config: Queue configuration.
             client: Pre-built ValkeyStreamClient bound as given.
 
         Raises:
-            MissingDependencyError: When client is None and redis is not installed.
-            ImproperConfigurationError: When client is None and config.backend_url has no hostname.
-            ValueError: When client is None and client construction rejects the URL scheme.
+            MissingDependencyError: When client is None and vertebra-core[valkey] is not installed.
+            ImproperConfigurationError: When client is None and config.backend_url is invalid.
         """
         self._config = config or QueueConfig(stream_prefix="vtb:valkey:queue")
         self._prefix = self._config.stream_prefix
@@ -397,7 +549,8 @@ class ValkeyQueueBackend:
         raw_entries = await self._client.xrange(dlq_key, count=limit)
         results: list[DeadLetterEntry] = []
         for _, fields in raw_entries:
-            payload = fields.get("payload")
+            norm_fields = _normalize_stream_fields(fields)
+            payload = norm_fields.get("payload")
             if payload:
                 raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
                 entry = msgspec.convert(decode_json(raw_bytes), type=DeadLetterEntry)
@@ -409,8 +562,9 @@ class ValkeyQueueBackend:
         dlq_key = f"{self._prefix}:dlq"
         raw_entries = await self._client.xrange(dlq_key)
         for entry_id, fields in raw_entries:
-            if fields.get("dlq_id") == dlq_id:
-                payload = fields.get("payload")
+            norm_fields = _normalize_stream_fields(fields)
+            if norm_fields.get("dlq_id") == dlq_id:
+                payload = norm_fields.get("payload")
                 if payload:
                     raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
                     entry = msgspec.convert(decode_json(raw_bytes), type=DeadLetterEntry)
@@ -479,9 +633,10 @@ class ValkeyQueueBackend:
         """Close client connection."""
         await self._client.aclose()
 
-    def _decode_envelope(self, fields: Mapping[str, Any], receipt_handle: str) -> TaskEnvelope:
+    def _decode_envelope(self, fields: Any, receipt_handle: str) -> TaskEnvelope:
         """Decode TaskEnvelope from stream entry fields."""
-        payload_data = fields.get("payload")
+        norm_fields = _normalize_stream_fields(fields)
+        payload_data = norm_fields.get("payload")
         if isinstance(payload_data, str):
             payload_data = payload_data.encode("utf-8")
         if not payload_data:
@@ -494,13 +649,27 @@ class ValkeyQueueBackend:
 
     @staticmethod
     def _build_client(config: QueueConfig) -> ValkeyStreamClient:
-        """Build a redis.asyncio client from config.backend_url."""
-        aioredis = ensure_module("redis.asyncio", package="redis", install_package="redis")
-        if not urllib.parse.urlparse(config.backend_url).hostname:
-            msg = (
-                f"Valkey queue backend_url {config.backend_url!r} has no host; "
-                "pass a redis://host:port URL or client= to bind a ValkeyStreamClient"
-            )
+        """Build an AsyncValkeyClient wrapped in _ValkeyStreamAdapter from config.backend_url."""
+        url = config.backend_url
+        if url.startswith("memory://"):
+            msg = "ValkeyQueueBackend does not support memory:// URLs"
             raise ImproperConfigurationError(msg)
-        client: ValkeyStreamClient = aioredis.from_url(config.backend_url)
-        return client
+        if url.startswith("redis://") or url.startswith("rediss://"):
+            msg = "redis:// URLs are not supported by ValkeyQueueBackend; use RedisQueueBackend instead"
+            raise ImproperConfigurationError(msg)
+        if not (url.startswith("valkey://") or url.startswith("valkeys://") or url.startswith("unix://")):
+            msg = f"Unsupported Valkey URL scheme in {url!r}; expected valkey://, valkeys://, or unix://"
+            raise ImproperConfigurationError(msg)
+        parsed = urllib.parse.urlparse(url)
+        if url.startswith("unix://"):
+            path = url.removeprefix("unix://")
+            if not path or not path.strip("/"):
+                msg = f"Valkey queue backend_url {url!r} has no socket path"
+                raise ImproperConfigurationError(msg)
+        elif not parsed.hostname:
+            msg = f"Valkey queue backend_url {url!r} has no host; pass a valkey://host:port URL or client= to bind a ValkeyStreamClient"
+            raise ImproperConfigurationError(msg)
+
+        mod = ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
+        client = mod.AsyncValkeyClient(url=url)
+        return _ValkeyStreamAdapter(client)

@@ -136,6 +136,8 @@ class Resp3FakeServer:
         self._sockets: set[socket.socket] = set()
         self._values: dict[bytes, bytes] = {}
         self._expiries: dict[bytes, float] = {}
+        self._hashes: dict[bytes, dict[bytes, bytes]] = {}
+        self._field_expiries: dict[tuple[bytes, bytes], float] = {}
         self._scripts: dict[str, str] = {}
         self._subscriptions: dict[socket.socket, set[tuple[str, bytes]]] = {}
         self._commands: list[list[bytes]] = []
@@ -188,6 +190,23 @@ class Resp3FakeServer:
         if exp is not None and time.monotonic() >= exp:
             self._values.pop(key, None)
             self._expiries.pop(key, None)
+        if key in self._hashes:
+            fields = list(self._hashes[key])
+            for f in fields:
+                f_exp = self._field_expiries.get((key, f))
+                if f_exp is not None and time.monotonic() >= f_exp:
+                    self._hashes[key].pop(f, None)
+                    self._field_expiries.pop((key, f), None)
+            if not self._hashes[key]:
+                self._hashes.pop(key, None)
+
+    def _extract_hash_fields(self, args: list[bytes], start_idx: int) -> list[bytes]:
+        """Extract hash field names, skipping conditions and FIELDS count if present."""
+        for idx in range(start_idx, len(args)):
+            token = args[idx].decode("ascii", errors="replace").upper()
+            if token == "FIELDS":
+                return args[idx + 2 :]
+        return args[start_idx:]
 
     def _dispatch(self, conn: socket.socket, args: list[bytes]) -> bytes:
         """Execute a parsed RESP3 command under the server lock and return wire reply bytes."""
@@ -235,6 +254,127 @@ class Resp3FakeServer:
                 if exp is None:
                     return _encode(-1)
                 return _encode(max(1, int((exp - time.monotonic()) * 1000)))
+            case "HSET":
+                key = args[1]
+                h = self._hashes.setdefault(key, {})
+                added = 0
+                idx = 2
+                while idx + 1 < len(args):
+                    f, v = args[idx], args[idx + 1]
+                    if f not in h:
+                        added += 1
+                    h[f] = v
+                    idx += 2
+                return _encode(added)
+            case "HGET":
+                key, field = args[1], args[2]
+                self._purge_expired(key)
+                return _encode(self._hashes.get(key, {}).get(field))
+            case "HGETALL":
+                key = args[1]
+                self._purge_expired(key)
+                return _encode(dict(self._hashes.get(key, {})))
+            case "HDEL":
+                key = args[1]
+                removed = 0
+                h = self._hashes.get(key, {})
+                for f in args[2:]:
+                    self._field_expiries.pop((key, f), None)
+                    if h.pop(f, None) is not None:
+                        removed += 1
+                return _encode(removed)
+            case "HEXPIRE":
+                key = args[1]
+                ttl = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res: list[int] = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + ttl
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HPEXPIRE":
+                key = args[1]
+                ttl_ms = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + ttl_ms / 1000.0
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HEXPIREAT":
+                key = args[1]
+                unix_sec = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + max(0.0, unix_sec - time.time())
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HPEXPIREAT":
+                key = args[1]
+                unix_ms = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + max(0.0, unix_ms / 1000.0 - time.time())
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HTTL":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        res.append(max(1, int(self._field_expiries[(key, f)] - time.monotonic())))
+                    else:
+                        res.append(-1)
+                return _encode(res)
+            case "HPTTL":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        res.append(max(1, int((self._field_expiries[(key, f)] - time.monotonic()) * 1000)))
+                    else:
+                        res.append(-1)
+                return _encode(res)
+            case "HPERSIST":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        self._field_expiries.pop((key, f), None)
+                        res.append(1)
+                    else:
+                        res.append(-1)
+                return _encode(res)
             case "SCAN":
                 pattern: str | None = None
                 idx = 2
@@ -251,6 +391,8 @@ class Resp3FakeServer:
             case "FLUSHDB":
                 self._values.clear()
                 self._expiries.clear()
+                self._hashes.clear()
+                self._field_expiries.clear()
                 return _encode("OK")
             case "EVALSHA":
                 sha = args[1].decode("ascii")
@@ -397,6 +539,8 @@ def _encode(value: object) -> bytes:
         return b"_\r\n"
     if isinstance(value, _ErrorReply):
         return f"-{value}\r\n".encode()
+    if isinstance(value, bool):
+        return b"#t\r\n" if value else b"#f\r\n"
     if isinstance(value, int):
         return f":{value}\r\n".encode("ascii")
     if isinstance(value, str):
@@ -405,6 +549,8 @@ def _encode(value: object) -> bytes:
         return f"${len(value)}\r\n".encode("ascii") + value + b"\r\n"
     if isinstance(value, list):
         return f"*{len(value)}\r\n".encode("ascii") + b"".join(_encode(item) for item in value)
+    if isinstance(value, dict):
+        return f"%{len(value)}\r\n".encode("ascii") + b"".join(_encode(k) + _encode(v) for k, v in value.items())
     msg = f"Unsupported RESP3 reply type: {type(value)!r}"
     raise TypeError(msg)
 

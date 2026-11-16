@@ -27,7 +27,7 @@ class ConformanceGate:
     ENGINE_MARKER: ClassVar[str] = "driver_engine"
     LEGACY_MARKER: ClassVar[str] = "conformance"
     SUPPORTED_ENGINES: ClassVar[frozenset[str]] = frozenset(
-        {"duckdb", "mariadb", "mssql", "mysql", "oracle", "redis", "sqlite"}
+        {"duckdb", "mariadb", "mssql", "mysql", "oracle", "redis", "sqlite", "valkey"}
     )
 
     def __init__(self, engines: frozenset[str] = frozenset()) -> None:

@@ -47,11 +47,6 @@ use crate::vector::VectorView;
 use vertebra_db::oracle::tns::{
     parse_tnsnames_ora as rs_parse_tnsnames_ora, resolve_tns_alias as rs_resolve_tns_alias,
 };
-use vertebra_db::resp3::{
-    crc16_xmodem as rs_crc16_xmodem, encode_hello3_handshake as rs_encode_hello3_handshake,
-    encode_resp_command as rs_encode_resp_command,
-    parse_cluster_redirect as rs_parse_cluster_redirect, redis_hash_slot as rs_redis_hash_slot,
-};
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
 #[pyclass(name = "CloudSQLDialer", frozen, immutable_type, from_py_object)]
@@ -981,74 +976,6 @@ pub fn duckdb_bootstrap_statements(
     cfg.bootstrap_statements()
 }
 
-/// Encode a Redis or Valkey RESP3 bulk-string array command.
-#[pyfunction]
-pub fn encode_resp_command<'py>(
-    py: Python<'py>,
-    args: Vec<Vec<u8>>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(move || {
-        let refs: Vec<&[u8]> = args.iter().map(|v| v.as_slice()).collect();
-        rs_encode_resp_command(&refs)
-    });
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Encode a Redis / Valkey `HELLO 3` handshake frame (with optional pipelined `CLIENT TRACKING ON ... BCAST`).
-#[pyfunction]
-#[pyo3(signature = (
-    client_name="vertebra",
-    username=None,
-    password=None,
-    enable_tracking_bcast=false,
-    prefixes=Vec::new()
-))]
-pub fn encode_hello3_handshake<'py>(
-    py: Python<'py>,
-    client_name: &str,
-    username: Option<&str>,
-    password: Option<&str>,
-    enable_tracking_bcast: bool,
-    prefixes: Vec<String>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let bytes = py.detach(|| {
-        let prefix_refs: Vec<&str> = prefixes.iter().map(|s| s.as_str()).collect();
-        rs_encode_hello3_handshake(
-            client_name,
-            username,
-            password,
-            enable_tracking_bcast,
-            &prefix_refs,
-        )
-    });
-    PyBytes::new_with(py, bytes.len(), |buf| {
-        buf.copy_from_slice(&bytes);
-        Ok(())
-    })
-}
-
-/// Compute CRC16-XMODEM for Redis/Valkey Cluster keys.
-#[pyfunction]
-pub fn crc16_xmodem(data: &[u8]) -> u16 {
-    rs_crc16_xmodem(data)
-}
-
-/// Compute Redis/Valkey Cluster hash slot (`0..16383`) supporting `{hash_tag}` extraction.
-#[pyfunction]
-pub fn redis_hash_slot(key: &[u8]) -> u16 {
-    rs_redis_hash_slot(key)
-}
-
-/// Parse a Redis/Valkey Cluster `MOVED` or `ASK` redirection error into `(kind, slot, host, port)`.
-#[pyfunction]
-pub fn parse_cluster_redirect(err_msg: &str) -> Option<(String, u16, String, u16)> {
-    rs_parse_cluster_redirect(err_msg)
-        .map(|r| (r.kind.as_str().to_string(), r.slot, r.host, r.port))
-}
-
 /// Register all `vertebra-db` classes and functions on the `_vertebra` Python module.
 pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CloudSQLDialer>()?;
@@ -1082,11 +1009,6 @@ pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_ttc_session_attrs, m)?)?;
     m.add_function(wrap_pyfunction!(rewrite_mssql_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(duckdb_bootstrap_statements, m)?)?;
-    m.add_function(wrap_pyfunction!(encode_resp_command, m)?)?;
-    m.add_function(wrap_pyfunction!(encode_hello3_handshake, m)?)?;
-    m.add_function(wrap_pyfunction!(crc16_xmodem, m)?)?;
-    m.add_function(wrap_pyfunction!(redis_hash_slot, m)?)?;
-    m.add_function(wrap_pyfunction!(parse_cluster_redirect, m)?)?;
 
     Ok(())
 }

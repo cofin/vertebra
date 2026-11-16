@@ -25,10 +25,10 @@ from vertebra.framework.queues import (
     QueueConfig,
     QueueService,
     RedisQueueBackend,
-    RedisStreamClient,
     TaskEnvelope,
     TaskRetryPolicy,
     ValkeyQueueBackend,
+    ValkeyStreamClient,
     task,
 )
 from vertebra.framework.queues.scheduler import CronScheduler
@@ -1168,7 +1168,7 @@ async def test_postgres_queue_backend_requires_native_postgres_and_executor(
 def test_redis_queue_backend_requires_redis_and_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RedisQueueBackend requires vertebra._redis and a valid URL, while ValkeyQueueBackend requires redis.asyncio."""
+    """RedisQueueBackend requires vertebra._redis and a valid URL, while ValkeyQueueBackend requires vertebra._valkey."""
     monkeypatch.setitem(sys.modules, "vertebra._redis", None)
     reset_dependency_cache("vertebra._redis")
     try:
@@ -1180,23 +1180,23 @@ def test_redis_queue_backend_requires_redis_and_host(
         monkeypatch.delitem(sys.modules, "vertebra._redis", raising=False)
         reset_dependency_cache("vertebra._redis")
 
-    monkeypatch.setitem(sys.modules, "redis.asyncio", None)
-    reset_dependency_cache("redis.asyncio")
+    monkeypatch.setitem(sys.modules, "vertebra._valkey", None)
+    reset_dependency_cache("vertebra._valkey")
     try:
         with pytest.raises(MissingDependencyError) as svc_exc:
             QueueService(QueueConfig(backend_url="valkey://localhost:6379/0"))
-        assert svc_exc.value.package == "redis"
+        assert svc_exc.value.package == "vertebra-core[valkey]"
 
         fake = FakeRedisStreamClient()
-        assert isinstance(fake, RedisStreamClient)
+        assert isinstance(fake, ValkeyStreamClient)
         injected = ValkeyQueueBackend(client=fake)
         assert injected.client is fake
     finally:
-        monkeypatch.delitem(sys.modules, "redis.asyncio", raising=False)
-        reset_dependency_cache("redis.asyncio")
+        monkeypatch.delitem(sys.modules, "vertebra._valkey", raising=False)
+        reset_dependency_cache("vertebra._valkey")
 
     with pytest.raises(ImproperConfigurationError, match="has no host"):
-        ValkeyQueueBackend()
+        ValkeyQueueBackend(QueueConfig(backend_url="valkey:///0"))
 
     fake = FakeRedisStreamClient()
     injected_redis = RedisQueueBackend(client=fake)
@@ -1227,6 +1227,27 @@ def test_redis_queue_backend_url_schemes(url: str, valid: bool, expected_err: st
             RedisQueueBackend(QueueConfig(backend_url=url))
 
 
+@pytest.mark.parametrize(
+    ("url", "valid", "expected_err"),
+    [
+        ("valkey://127.0.0.1:6379/0", True, None),
+        ("valkeys://127.0.0.1:6380/0", True, None),
+        ("unix:///tmp/valkey.sock", True, None),
+        ("memory://", False, "does not support memory://"),
+        ("redis://localhost:6379/0", False, "redis:// URLs are not supported by ValkeyQueueBackend"),
+        ("rediss://localhost:6380/0", False, "redis:// URLs are not supported by ValkeyQueueBackend"),
+    ],
+)
+def test_valkey_queue_backend_url_schemes(url: str, valid: bool, expected_err: str | None) -> None:
+    """ValkeyQueueBackend accepts valkey://, valkeys://, and unix:// while rejecting memory:// and redis://."""
+    if valid:
+        backend = ValkeyQueueBackend(QueueConfig(backend_url=url), client=FakeRedisStreamClient())
+        assert backend is not None
+    else:
+        with pytest.raises(ImproperConfigurationError, match=expected_err or ""):
+            ValkeyQueueBackend(QueueConfig(backend_url=url))
+
+
 def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     """ValkeyQueueBackend and ValkeyStreamClient are isolated from framework.queues.redis."""
     import inspect
@@ -1255,12 +1276,12 @@ def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None
     source = inspect.getsource(valkey_queue_mod)
     assert "vertebra.framework.queues.redis" not in source
     assert "from .redis" not in source
+    assert "redis.asyncio" not in source
 
     fake = FakeRedisStreamClient()
     assert isinstance(fake, DirectValkeyStreamClient)
 
-    import redis.asyncio
-
-    monkeypatch.setattr(redis.asyncio, "from_url", lambda url: fake)
+    monkeypatch.setattr(DirectValkeyQueueBackend, "_build_client", staticmethod(lambda cfg: fake))
     backend = QueueService._build_backend(QueueConfig(backend_url="valkey://localhost:6379/0", stream_prefix="test"))
     assert isinstance(backend, DirectValkeyQueueBackend)
+    assert backend.client is fake

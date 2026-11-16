@@ -1,6 +1,6 @@
-# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`, `_sqlite`, `_redis`)
+# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`, `_sqlite`, `_redis`, `_valkey`)
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 12 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`, `_sqlite.pyi`, `_redis.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 13 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`, `_sqlite.pyi`, `_redis.pyi`, `_valkey.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
 | **`vertebra._sqlite`** | `SyncSQLiteClient`, `AsyncSQLiteClient` | `vertebra-sqlite` (Bundled SQLite 3.45+ + `VTBARROW` SHM) |
 | **`vertebra._redis`** | `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener` | `vertebra-redis` (RESP3 + Client Tracking + Sentinel + Cluster) |
+| **`vertebra._valkey`** | `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener` | `vertebra-valkey` (RESP3 + Hash Expiration + Client Tracking + Sentinel + Cluster) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
 
@@ -226,6 +227,22 @@ The standalone `vertebra._redis` native extension provides `SyncRedisClient`, `A
       show_signature: false
 
 ::: vertebra._redis.SyncRedisClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+## `vertebra._valkey` — Native Valkey RESP3 Client & Hash Expiration
+
+The standalone `vertebra._valkey` native extension provides `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener`, `SyncValkeyPipeline`, and `AsyncValkeyPipeline` with RESP3 wire protocol support, Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpersist`), `CLIENT CAPA redirect`, client-side caching invalidations, Sentinel, and Cluster topology routing.
+
+::: vertebra._valkey.AsyncValkeyClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._valkey.SyncValkeyClient
     options:
       heading_level: 4
       members: false

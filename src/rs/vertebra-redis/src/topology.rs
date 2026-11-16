@@ -48,25 +48,38 @@ pub enum ClusterRedirectAction {
 
 /// Parse a Redis error message to detect MOVED or ASK redirections.
 pub fn check_cluster_redirect(err_msg: &str) -> Option<ClusterRedirectAction> {
-    if let Some(r) = vertebra_db::resp3::parse_cluster_redirect(err_msg) {
-        match r.kind {
-            vertebra_db::resp3::RedirectKind::Moved => {
-                return Some(ClusterRedirectAction::Moved {
-                    slot: r.slot,
-                    host: r.host,
-                    port: r.port,
-                });
-            }
-            vertebra_db::resp3::RedirectKind::Ask => {
-                return Some(ClusterRedirectAction::Ask {
-                    slot: r.slot,
-                    host: r.host,
-                    port: r.port,
-                });
-            }
-        }
+    let trimmed = err_msg.trim();
+    let mut parts = trimmed.split_whitespace();
+    let kind_raw = parts.next()?;
+    let is_moved = match kind_raw {
+        "MOVED" | "moved" => true,
+        "ASK" | "ask" => false,
+        _ => return None,
+    };
+    let slot: u16 = parts.next()?.parse().ok()?;
+    if slot >= 16384 {
+        return None;
     }
-    None
+    let addr = parts.next()?;
+    let (host, port_str) = addr.rsplit_once(':')?;
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
+    if host_clean.is_empty() {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    if is_moved {
+        Some(ClusterRedirectAction::Moved {
+            slot,
+            host: host_clean.to_string(),
+            port,
+        })
+    } else {
+        Some(ClusterRedirectAction::Ask {
+            slot,
+            host: host_clean.to_string(),
+            port,
+        })
+    }
 }
 
 /// Parse a Sentinel `SENTINEL get-master-addr-by-name` response.

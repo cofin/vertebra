@@ -61,7 +61,7 @@ sources:
 <!-- truth: start -->
 - `QueueService` and `@task` execute priority, delayed, and dead-letter jobs across `MemoryQueueBackend`, `RedisQueueBackend`, `ValkeyQueueBackend`, `PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` alongside lease-elected `CronScheduler` and `WorkerRunner` lanes.
 - `OracleQueueBackend`, `PostgreSQLQueueBackend`, and `SpannerQueueBackend` bind an injected `executor=`; without one they raise `MissingDependencyError` when `oracledb`, `vertebra._postgres` (`vertebra-core[postgres]`), or `vertebra._spanner` is missing and `ImproperConfigurationError` otherwise. No live executor ships for these backends.
-- `RedisQueueBackend` executes over native `vertebra._redis` (`vertebra-core[redis]`), validating `redis://`, `rediss://`, and `unix://` schemes with Redis Streams consumer groups (`XADD`, `XREADGROUP`, `XAUTOCLAIM`, `XACK`) and sorted-set delayed task scheduling; `ValkeyQueueBackend` (`vertebra.framework.queues.valkey`) runs over `ValkeyStreamClient` or an injected `client=`.
+- `RedisQueueBackend` executes over native `vertebra._redis` (`vertebra-core[redis]`), validating `redis://`, `rediss://`, and `unix://` schemes with Redis Streams consumer groups (`XADD`, `XREADGROUP`, `XAUTOCLAIM`, `XACK`) and sorted-set delayed task scheduling; `ValkeyQueueBackend` (`vertebra.framework.queues.valkey`) runs over native `vertebra._valkey` (`vertebra-core[valkey]`) validating `valkey://`, `valkeys://`, and `unix://` schemes, or an injected `client=`.
 - `QueueService` routes `""` and `memory` schemes to `MemoryQueueBackend`.
 - `EmailService` sends transactional email across `MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, and `SesEmailTransport` behind the `EmailTransport` protocol.
 <!-- truth: end -->
@@ -70,13 +70,13 @@ Vertebra provides pluggable distributed background task queues, multi-process cr
 
 ## 1. Distributed Queue Backends (`framework/queues/`)
 
-[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) dispatches `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends routed by `QueueService._build_backend`[^src-framework-queues-base-py]; Oracle, PostgreSQL, and Spanner run SQL through an injected executor protocol (`executor=`), while Redis and Valkey run through an injected or URL-built `RedisStreamClient` (`client=`):
+[`QueueService`](../../../../../src/py/vertebra/framework/queues/__init__.py) dispatches `@task` enqueueing, delayed scheduling, dead-letter routing, and retry backoff across six storage backends routed by `QueueService._build_backend`[^src-framework-queues-base-py]; Oracle, PostgreSQL, and Spanner run SQL through an injected executor protocol (`executor=`), while Redis and Valkey run through native `vertebra._redis` / `vertebra._valkey` drivers or an injected `client=` (`RedisStreamClient` / `ValkeyStreamClient`):
 
 | Backend | Implementation & Storage Mechanics |
 | :--- | :--- |
 | `MemoryQueueBackend` | In-process asyncio `PriorityQueue` with monotonic sequence tracking for hermetic unit testing and single-process servers. |
 | `RedisQueueBackend` | Per-lane Redis Streams with consumer groups (`XADD`, `XREADGROUP`, `XAUTOCLAIM` visibility recovery, `XACK`) plus a scheduled sorted set (`ZADD`) promoted into streams by a `ZRANGEBYSCORE` + `XADD` Lua script; backed by native `vertebra._redis` (`vertebra-core[redis]`) with `redis://`, `rediss://`, and `unix://` schemes[^src-framework-queues-redis-py]. |
-| `ValkeyQueueBackend` | Standalone Valkey Streams backend in `vertebra.framework.queues.valkey` with default `stream_prefix` `vtb:valkey:queue`; accepts `valkey://`, `valkeys://`, `redis://`, `rediss://`, and `unix://` endpoints via `ValkeyStreamClient` or an injected `client=`. |
+| `ValkeyQueueBackend` | Standalone Valkey Streams backend in `vertebra.framework.queues.valkey` with default `stream_prefix` `vtb:valkey:queue`; backed by native `vertebra._valkey` (`vertebra-core[valkey]`) with `valkey://`, `valkeys://`, and `unix://` schemes or an injected `client=`. |
 | `PostgreSQLQueueBackend` | `FOR UPDATE SKIP LOCKED` claims over `vertebra_queue_jobs` with `vertebra_queue_dlq` and `vertebra_queue_leases`, `NOTIFY` on `vertebra_queue_wakeup`, through an injected `PostgreSQLQueueExecutor` (`executor=`)[^src-framework-queues-postgres-py]. |
 | `OracleQueueBackend` | `FOR UPDATE SKIP LOCKED` claims over `vertebra_queue_jobs`, leases via `MERGE INTO vertebra_queue_leases`, through an injected `OracleQueueExecutor` (`executor=`)[^src-framework-queues-oracle-py]. |
 | `SpannerQueueBackend` | Hash-sharded primary keys (`shard_count` default `16`), GoogleSQL or Spangres DDL, `FOR UPDATE` claims over `vertebra_queue_jobs` through an injected `SpannerQueueExecutor` (`executor=`)[^src-framework-queues-spanner-py]. |

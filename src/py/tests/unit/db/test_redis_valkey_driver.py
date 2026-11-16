@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from vertebra.db import DatabaseRegistry
+from vertebra.db import DatabaseRegistry, ProgrammingError
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
@@ -405,7 +405,7 @@ async def test_resp3_loopback_server_pipeline_evalsha_and_valkey_push_invalidati
     await driver.execute_command("CLIENT", "TRACKING", "ON")
     assert ["user:1"] in invalidated_keys
 
-    with pytest.raises(Resp3Error, match="ERR unknown command"):
+    with pytest.raises((Resp3Error, ProgrammingError), match="ERR unknown command"):
         await driver.execute_command("UNKNOWN")
 
     stream = driver.subscribe("events").__aiter__()
@@ -656,3 +656,91 @@ def test_redis_drivers_and_store_factories_reject_memory_url(factory: Callable[[
     """Redis and Valkey drivers and store/cache factories reject memory:// URLs with ImproperConfigurationError."""
     with pytest.raises(ImproperConfigurationError, match="memory://"):
         factory()
+
+
+def test_legacy_resp3_bindings_removed_from_vertebra_core() -> None:
+    """Legacy RESP3 functions must not be exposed by vertebra._vertebra."""
+    import vertebra._vertebra as core_mod
+
+    assert not hasattr(core_mod, "encode_resp_command")
+    assert not hasattr(core_mod, "encode_hello3_handshake")
+    assert not hasattr(core_mod, "crc16_xmodem")
+    assert not hasattr(core_mod, "redis_hash_slot")
+    assert not hasattr(core_mod, "parse_cluster_redirect")
+
+
+def test_sync_valkey_9_hash_field_expiration(resp3_server: Resp3FakeServer) -> None:
+    """SyncValkeyDriver executes Valkey 9.0 hash-field expiration commands."""
+    import time
+
+    driver = SyncValkeyDriver(ValkeyConfig(url=resp3_server.valkey_url))
+    try:
+        driver.execute_command("HSET", "myhash", "f1", "v1", "f2", "v2", "f3", "v3")
+
+        res = driver.hexpire("myhash", 60, "f1")
+        assert res == [1]
+        assert driver.httl("myhash", "f1")[0] > 0
+
+        res = driver.hpexpire("myhash", 60000, "f2")
+        assert res == [1]
+        assert driver.hpttl("myhash", "f2")[0] > 0
+
+        target_time = int(time.time()) + 120
+        res = driver.hexpireat("myhash", target_time, "f1")
+        assert res == [1]
+
+        target_time_ms = int(time.time() * 1000) + 120000
+        res = driver.hpexpireat("myhash", target_time_ms, "f2")
+        assert res == [1]
+
+        persist_res = driver.hpersist("myhash", "f1", "f2", "f3")
+        assert persist_res == [1, 1, -1]
+        assert driver.httl("myhash", "f1") == [-1]
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_valkey_9_hash_field_expiration(resp3_server: Resp3FakeServer) -> None:
+    """AsyncValkeyDriver executes Valkey 9.0 hash-field expiration commands."""
+    import time
+
+    driver = AsyncValkeyDriver(ValkeyConfig(url=resp3_server.valkey_url))
+    try:
+        await driver.execute_command("HSET", "myhash_async", "f1", "v1", "f2", "v2")
+
+        res = await driver.hexpire("myhash_async", 100, "f1")
+        assert res == [1]
+        ttl = await driver.httl("myhash_async", "f1")
+        assert ttl[0] > 0
+
+        res_p = await driver.hpexpire("myhash_async", 100000, "f2")
+        assert res_p == [1]
+        pttl = await driver.hpttl("myhash_async", "f2")
+        assert pttl[0] > 0
+
+        now_sec = int(time.time()) + 300
+        res_at = await driver.hexpireat("myhash_async", now_sec, "f1")
+        assert res_at == [1]
+
+        now_ms = int(time.time() * 1000) + 300000
+        res_pat = await driver.hpexpireat("myhash_async", now_ms, "f2")
+        assert res_pat == [1]
+
+        persist_res = await driver.hpersist("myhash_async", "f1", "f2")
+        assert persist_res == [1, 1]
+    finally:
+        await driver.close()
+
+
+def test_valkey_client_capa_negotiation(resp3_server: Resp3FakeServer) -> None:
+    """Valkey driver negotiates CLIENT CAPA redirect during connection establishment."""
+    cfg = ValkeyConfig(url=resp3_server.valkey_url)
+    driver = SyncValkeyDriver(cfg)
+    try:
+        driver.set("capa_key", "capa_val")
+        assert driver.get("capa_key") == b"capa_val"
+        commands = [cmd[0].decode("ascii", errors="replace").upper() for cmd in resp3_server.commands]
+        assert "CLIENT" in commands
+    finally:
+        driver.close()

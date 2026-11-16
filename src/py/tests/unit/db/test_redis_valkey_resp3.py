@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import socket
 import sys
 import threading
@@ -87,57 +88,68 @@ def test_parse_cluster_redirect_moved_and_ask() -> None:
 
 
 def test_sync_socketpair_hello3_client_tracking_and_iam_refresh() -> None:
-    """SyncValkeyDriver over socket.socketpair() must send HELLO 3 with IAM token, CLIENT TRACKING, and refresh on reconnect."""
+    """SyncValkeyDriver must send HELLO 3 with IAM token, CLIENT TRACKING, and refresh on reconnect."""
     tokens = collections.deque(["mock-iam-token-1", "mock-iam-token-2"])
     received_commands: list[list[bytes]] = []
     active_server_socks: list[socket.socket] = []
 
-    def make_socketpair(_addr: tuple[str, int]) -> socket.socket:
-        client_sock, server_sock = socket.socketpair()
-        active_server_socks.append(server_sock)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    host, port = server.getsockname()
 
-        def server_loop() -> None:
-            buf = bytearray()
+    def server_accept_loop() -> None:
+        while True:
             try:
-                while True:
-                    chunk = server_sock.recv(4096)
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                    while buf:
-                        try:
-                            frame, next_offset = Resp3Parser.parse_frame(buf, 0)
-                        except ValueError:
-                            break
-                        del buf[:next_offset]
-                        if isinstance(frame, list) and frame:
-                            received_commands.append(
-                                [bytes(p) if isinstance(p, bytes) else str(p).encode() for p in frame]
-                            )
-                            cmd = frame[0].decode("ascii").upper()
-                            if cmd == "HELLO":
-                                server_sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
-                            elif cmd == "CLIENT":
-                                server_sock.sendall(b"+OK\r\n")
-                            elif cmd == "PING":
-                                server_sock.sendall(b"+PONG\r\n")
-                            else:
-                                server_sock.sendall(b"+OK\r\n")
-            finally:
-                server_sock.close()
+                conn, _ = server.accept()
+            except OSError:
+                break
+            active_server_socks.append(conn)
 
-        threading.Thread(target=server_loop, daemon=True).start()
-        return client_sock
+            def conn_handler(sock: socket.socket) -> None:
+                buf = bytearray()
+                try:
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        while buf:
+                            try:
+                                frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                            except ValueError:
+                                break
+                            del buf[:next_offset]
+                            if isinstance(frame, list) and frame:
+                                received_commands.append(
+                                    [bytes(p) if isinstance(p, bytes) else str(p).encode() for p in frame]
+                                )
+                                cmd = frame[0].decode("ascii").upper()
+                                if cmd == "HELLO":
+                                    sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
+                                elif cmd == "CLIENT":
+                                    sock.sendall(b"+OK\r\n")
+                                elif cmd == "PING":
+                                    sock.sendall(b"+PONG\r\n")
+                                else:
+                                    sock.sendall(b"+OK\r\n")
+                finally:
+                    sock.close()
+
+            threading.Thread(target=conn_handler, args=(conn,), daemon=True).start()
+
+    th = threading.Thread(target=server_accept_loop, daemon=True)
+    th.start()
 
     cfg = ValkeyConfig(
-        url="valkey://127.0.0.1:6379/0",
+        url=f"valkey://127.0.0.1:{port}/0",
         username="iam-user",
         iam_auth_enabled=True,
         token_provider=tokens.popleft,
         enable_client_tracking=True,
         client_tracking_prefixes=("user:", "order:"),
     )
-    driver = SyncValkeyDriver(cfg, socket_factory=make_socketpair)
+    driver = SyncValkeyDriver(cfg)
     try:
         pong = driver.execute_command("PING")
         assert pong == "PONG"
@@ -170,54 +182,72 @@ def test_sync_socketpair_hello3_client_tracking_and_iam_refresh() -> None:
         )
     finally:
         driver.close()
+        server.close()
         for s in active_server_socks:
-            s.close()
+            with contextlib.suppress(OSError):
+                s.close()
 
 
 def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
     """SyncValkeyDriver must enforce bounded OrderedDict LRU eviction and evict on live RESP3 invalidate push frames."""
-    client_sock, server_sock = socket.socketpair()
+    active_server_socks: list[socket.socket] = []
 
-    def server_worker() -> None:
-        buf = bytearray()
-        try:
-            while True:
-                chunk = server_sock.recv(4096)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                while buf:
-                    try:
-                        frame, next_offset = Resp3Parser.parse_frame(buf, 0)
-                    except ValueError:
-                        break
-                    del buf[:next_offset]
-                    if isinstance(frame, list) and frame:
-                        cmd = frame[0].decode("ascii").upper()
-                        if cmd == "HELLO":
-                            server_sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
-                        elif cmd in ("CLIENT", "SET"):
-                            server_sock.sendall(b"+OK\r\n")
-                        elif cmd == "GET":
-                            key = frame[1].decode("utf-8")
-                            val = f"fresh-{key}".encode()
-                            server_sock.sendall(f"${len(val)}\r\n".encode("ascii") + val + b"\r\n")
-                        elif cmd == "PING":
-                            server_sock.sendall(b">2\r\n$10\r\ninvalidate\r\n*1\r\n$6\r\nuser:1\r\n+PONG\r\n")
-                        elif cmd == "ECHO":
-                            server_sock.sendall(b">2\r\n$10\r\ninvalidate\r\n_\r\n$5\r\nflush\r\n")
-        finally:
-            server_sock.close()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    host, port = server.getsockname()
 
-    threading.Thread(target=server_worker, daemon=True).start()
+    def server_accept_loop() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                break
+            active_server_socks.append(conn)
+
+            def server_worker(sock: socket.socket) -> None:
+                buf = bytearray()
+                try:
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        while buf:
+                            try:
+                                frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                            except ValueError:
+                                break
+                            del buf[:next_offset]
+                            if isinstance(frame, list) and frame:
+                                cmd = frame[0].decode("ascii").upper()
+                                if cmd == "HELLO":
+                                    sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
+                                elif cmd in ("CLIENT", "SET"):
+                                    sock.sendall(b"+OK\r\n")
+                                elif cmd == "GET":
+                                    key = frame[1].decode("utf-8")
+                                    val = f"fresh-{key}".encode()
+                                    sock.sendall(f"${len(val)}\r\n".encode("ascii") + val + b"\r\n")
+                                elif cmd == "PING":
+                                    sock.sendall(b">2\r\n$10\r\ninvalidate\r\n*1\r\n$6\r\nuser:1\r\n+PONG\r\n")
+                                elif cmd == "ECHO":
+                                    sock.sendall(b">2\r\n$10\r\ninvalidate\r\n_\r\n$5\r\nflush\r\n")
+                finally:
+                    sock.close()
+
+            threading.Thread(target=server_worker, args=(conn,), daemon=True).start()
+
+    th = threading.Thread(target=server_accept_loop, daemon=True)
+    th.start()
 
     broker = _RecordingBroker()
     cfg = ValkeyConfig(
-        url="valkey://127.0.0.1:6379/0",
+        url=f"valkey://127.0.0.1:{port}/0",
         client_cache_capacity=2,
         enable_client_tracking=True,
     )
-    driver = SyncValkeyDriver(cfg, broker=broker, socket_factory=lambda _addr: client_sock)
+    driver = SyncValkeyDriver(cfg, broker=broker)
     try:
         assert isinstance(driver._client_cache, collections.OrderedDict)
 
@@ -241,7 +271,10 @@ def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
         assert not driver.cached_keys
     finally:
         driver.close()
-        server_sock.close()
+        server.close()
+        for s in active_server_socks:
+            with contextlib.suppress(OSError):
+                s.close()
 
 
 @pytest.mark.anyio

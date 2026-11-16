@@ -352,6 +352,36 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: make redis-wheel-check
 
+  valkey-wheel-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install build and runtime dependencies
+        run: uv sync --frozen --group build
+      - name: Build TypeScript client bundle
+        run: make ts-install && make ts-build
+      - name: Verify vertebra-valkey wheel isolation
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: make valkey-wheel-check
+
   postgres-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -445,6 +475,12 @@ jobs:
             version: ""
             python-version: "3.12"
           - engine: redis
+            version: ""
+            python-version: "3.14t"
+          - engine: valkey
+            version: ""
+            python-version: "3.12"
+          - engine: valkey
             version: ""
             python-version: "3.14t"
     steps:

@@ -56,6 +56,7 @@ SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
     ("vertebra-storage", "src/rs/vertebra-storage/pyproject.toml", "_storage.pyi"),
     ("vertebra-bundler", "src/rs/vertebra-bundler/pyproject.toml", "_bundler.pyi"),
     ("vertebra-redis", "src/rs/vertebra-redis/pyproject.toml", "_redis.pyi"),
+    ("vertebra-valkey", "src/rs/vertebra-valkey/pyproject.toml", "_valkey.pyi"),
 )
 
 
@@ -194,6 +195,7 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
         "_postgres.pyi",
         "_redis.pyi",
         "_sqlite.pyi",
+        "_valkey.pyi",
         "_bigquery.pyi",
         "_spanner.pyi",
         "_storage.pyi",
@@ -204,7 +206,7 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
     assert stub_file.is_file()
 
 
-@pytest.mark.parametrize("extra_name", ["mysql", "mssql", "redis", "sqlite"])
+@pytest.mark.parametrize("extra_name", ["mysql", "mssql", "redis", "sqlite", "valkey"])
 def test_root_pyproject_declares_optional_driver_extra(extra_name: str) -> None:
     """Root `pyproject.toml` maps each optional SQL driver extra to its matching workspace crate."""
     root_toml = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))

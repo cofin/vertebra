@@ -493,7 +493,7 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         SyncMySQLDriver().execute_tuples("SELECT 1")
     with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).get("k")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncValkeyDriver(ValkeyConfig(url="valkey://127.0.0.1:1/0")).set("k", "v")
     with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).publish("chan", b"msg")
