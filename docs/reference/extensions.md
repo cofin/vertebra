@@ -7,7 +7,8 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 | **Litestar** | `VertebraConfig`, `VertebraPlugin`, `RouteCompiler` | Mount Litestar applications on Vertebra, override `litestar run`, and compile static Litestar routes directly into the native router |
 | **Litestar Ecosystem** | `queues`, `security`, `autowire`, `email`, `mcp`, `vite` | First-party decoupled plugins under `vertebra.extensions.litestar.*` |
 | **SQLSpec** | `create_sqlspec_plugin`, `ProxySyncConfig`, `ProxyAsyncConfig` | Bind SQLSpec database sessions, `StatementStack` pipelines, and shared-memory statement caches to request lifecycles |
-| **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), request-scoped sessions, and transactional file attachments |
+| **SQLAlchemy & Alchemy** | `create_alchemy_plugin`, `SyncCacheBackend`, `AsyncCacheBackend`, `ObjectStoreBackend` | Manage SQLAlchemy async/sync engines (`+vtb` dialects), multi-tier `ShmCache`/Redis/Valkey/ObjectStore caching, request-scoped sessions, and transactional file attachments |
+| **Django 6.0+** | `VertebraPlugin`, `CacheBackend`, `DjangoStorage`, `ArrowQuerySet` | Native Django `6.0+` database backends (`postgresql`, `mysql`, `oracle`, `sqlite3`, `spanner`), native `CacheBackend`, object storage, and fastpath routing |
 | **Oracle APEX** | `ApexIslandRegistry`, `ApexGateway` | Reverse-proxy Oracle ORDS/APEX sessions, verify ECID/session state, and hydrate TypeScript UI islands |
 | **gRPC & SHM Broker** | `GrpcServiceRegistry`, `BrokerHost`, `SyncSHMBrokerTransport`, `BrokerPlugin`, `BrokerPool`, `LeaseQuarantinedError` | Dispatch HTTP/2 gRPC methods and share cross-worker SHM broker connection pools and statement caches |
 
@@ -78,6 +79,36 @@ First-party framework extensions connecting Vertebra's native HTTP/IPC runtime t
 ::: vertebra.extensions.sqlalchemy.pool.broker_creator
     options:
       heading_level: 4
+      summary: false
+
+::: vertebra.extensions.alchemy.cache.SyncCacheBackend
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.alchemy.cache.AsyncCacheBackend
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.sqlalchemy.cache.CompiledCache
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.sqlalchemy.cache.ResultCache
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.extensions.django.cache.CacheBackend
+    options:
+      heading_level: 4
+      members: false
       summary: false
 
 ## Oracle APEX Gateway & Island Bridge (`vertebra.extensions.apex`)

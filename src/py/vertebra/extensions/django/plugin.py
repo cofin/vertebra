@@ -12,6 +12,7 @@ from vertebra.extensions.django.offload import offload_middlewares
 from vertebra.extensions.django.openapi import attach_openapi_docs, extract_openapi_schema
 from vertebra.extensions.django.router import RouteCompiler
 from vertebra.extensions.django.vite import ViteBridge, attach_vite
+from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -123,6 +124,18 @@ class VertebraPlugin:
         if wsgi_app is not None:
             self._wsgi_app = wsgi_app
 
+        active_settings = self._settings
+        if active_settings is None:
+            try:
+                from django.conf import settings as django_settings
+
+                if django_settings.configured:
+                    active_settings = django_settings
+            except Exception:
+                active_settings = None
+        if active_settings is not None:
+            self._validate_settings(active_settings)
+
         if self._config.vite is not None:
             self._vite_bridge = attach_vite(self, self._config.vite)
 
@@ -162,6 +175,22 @@ class VertebraPlugin:
             )
 
         return self
+
+    def _validate_settings(self, settings: Any) -> None:
+        """Validate Django settings for unsupported database backends."""
+        databases = getattr(settings, "DATABASES", None)
+        if databases is None and isinstance(settings, dict):
+            databases = settings.get("DATABASES")
+        if isinstance(databases, dict):
+            unsupported = ("bigquery", "duckdb", "mssql")
+            for _alias, db_cfg in databases.items():
+                if isinstance(db_cfg, dict):
+                    raw_engine = db_cfg.get("ENGINE", "")
+                    engine = str(raw_engine).lower()
+                    for unsup in unsupported:
+                        if unsup in engine:
+                            msg = f"Django database backend '{raw_engine}' is unsupported by Vertebra"
+                            raise ImproperConfigurationError(msg)
 
     def wrap_wsgi_application(
         self,

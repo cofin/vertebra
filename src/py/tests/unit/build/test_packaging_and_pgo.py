@@ -644,7 +644,9 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: 
         ("mysql", "vertebra._mysql"),
         ("oracle", "vertebra._oracle"),
         ("postgres", "vertebra._postgres"),
+        ("redis", "vertebra._redis"),
         ("spanner", "vertebra._spanner"),
+        ("sqlite", "vertebra._sqlite"),
         ("storage", "vertebra._storage"),
     ],
 )
@@ -674,7 +676,9 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
             "mysql",
             "oracle",
             "postgres",
+            "redis",
             "spanner",
+            "sqlite",
             "storage",
             "vertebra",
         )

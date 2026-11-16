@@ -20,6 +20,8 @@ All notable changes to Vertebra are documented on this page.
 - `SyncRedisDriver` and `AsyncRedisDriver` (`vertebra.db.adapters.redis`) with connection pooling, transaction pipelines, and pub/sub notification sources (`SyncRedisNotificationSource`, `AsyncRedisNotificationSource`).
 - Cut `RedisQueueBackend` (`vertebra.framework.queues.redis`) over to `vertebra._redis` native Streams/ZSETs and extracted self-contained `ValkeyQueueBackend` (`vertebra.framework.queues.valkey`).
 - Split `NotificationSource` into `@runtime_checkable` `SyncNotificationSource` and `AsyncNotificationSource` across `capabilities.py`, `driver`, `adapters.postgres` (`SyncPostgresListener`, `SyncPostgresNotificationSource`), and `adapters.oracle` (`SyncOracleListener`, `SyncOracleNotificationSource`).
+- Cache-line-aligned seqlock shared-memory `ShmCache` and `ShmCacheStats` (`vertebra._vertebra`), Advanced Alchemy `SyncCacheBackend` and `AsyncCacheBackend` (`shm://`, `memory://`, `valkey://`, `redis://`, `file://`), dogpile.cache backends (`vertebra.shm`, `vertebra.memory`, `vertebra.valkey`, `vertebra.redis`, `vertebra.file`, `create_dogpile_region`), and Django `CacheBackend` (`vertebra.extensions.django.cache.CacheBackend`).
+- Per-engine SQLAlchemy 2.1 dialects (`vertebra.extensions.sqlalchemy.dialects.{postgresql,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}`), split Alembic `DefaultImpl` subclasses and `Operations` (`vertebra.extensions.sqlalchemy.alembic`), `register_alembic_autogenerate_hooks()`, and Django 6.0+ `DatabaseWrapper` backends (`postgresql`, `sqlite3`, `mysql`, `oracle`, and `spanner` via `django-google-spanner`).
 
 ### Changed
 
@@ -36,7 +38,7 @@ All notable changes to Vertebra are documented on this page.
 ### Removed
 
 - Deleted empty compatibility alias `MCPService(MCPCore)` and `--name` flag on `vtb ai mcp serve` ([#114](https://github.com/cofin/vertebra/issues/114)).
-- Removed in-memory fallback broker transports (`SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `use_shm=False`) and duplicate embedded PEP 249 classes inside `vertebra.extensions.sqlalchemy.dialects`.
+- Removed in-memory fallback broker transports (`SyncInMemoryBrokerTransport`, `AsyncInMemoryBrokerTransport`, `use_shm=False`), duplicate embedded PEP 249 classes inside `vertebra.extensions.sqlalchemy.dialects`, and unsupported Django database backend stubs (`bigquery`, `duckdb`, `mssql`).
 
 ## 0.3.0
 

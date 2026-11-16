@@ -46,9 +46,10 @@ pub fn redis_value_to_py(py: Python<'_>, val: redis::Value) -> PyResult<Py<PyAny
     match val {
         redis::Value::Nil => Ok(py.None()),
         redis::Value::Int(i) => Ok(i.into_pyobject(py)?.unbind().into_any()),
-        redis::Value::BulkString(bytes) => {
-            Ok(PyBytes::new(py, &bytes).into_pyobject(py)?.unbind().into_any())
-        }
+        redis::Value::BulkString(bytes) => Ok(PyBytes::new(py, &bytes)
+            .into_pyobject(py)?
+            .unbind()
+            .into_any()),
         redis::Value::Array(items) => {
             let py_list = PyList::empty(py);
             for item in items {
@@ -57,7 +58,10 @@ pub fn redis_value_to_py(py: Python<'_>, val: redis::Value) -> PyResult<Py<PyAny
             Ok(py_list.into_pyobject(py)?.unbind().into_any())
         }
         redis::Value::SimpleString(s) => Ok(s.into_pyobject(py)?.unbind().into_any()),
-        redis::Value::Okay => Ok(PyString::new(py, "OK").into_pyobject(py)?.unbind().into_any()),
+        redis::Value::Okay => Ok(PyString::new(py, "OK")
+            .into_pyobject(py)?
+            .unbind()
+            .into_any()),
         redis::Value::Map(kvs) => {
             let dict = PyDict::new(py);
             for (k, v) in kvs {
@@ -77,14 +81,19 @@ pub fn redis_value_to_py(py: Python<'_>, val: redis::Value) -> PyResult<Py<PyAny
         }
         redis::Value::Double(d) => Ok(d.into_pyobject(py)?.unbind().into_any()),
         redis::Value::Boolean(b) => Ok(PyBool::new(py, b).to_owned().unbind().into_any()),
-        redis::Value::VerbatimString { text, .. } => Ok(text.into_pyobject(py)?.unbind().into_any()),
+        redis::Value::VerbatimString { text, .. } => {
+            Ok(text.into_pyobject(py)?.unbind().into_any())
+        }
         redis::Value::BigNumber(bytes) => {
             if let Ok(s) = std::str::from_utf8(&bytes) {
                 if let Ok(int_val) = s.parse::<i128>() {
                     return Ok(int_val.into_pyobject(py)?.unbind().into_any());
                 }
             }
-            Ok(PyBytes::new(py, &bytes).into_pyobject(py)?.unbind().into_any())
+            Ok(PyBytes::new(py, &bytes)
+                .into_pyobject(py)?
+                .unbind()
+                .into_any())
         }
         redis::Value::Push { kind: _, data } => {
             let py_list = PyList::empty(py);

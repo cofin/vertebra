@@ -1777,7 +1777,9 @@ impl PySyncPostgresClient {
                 })
             })
             .map_err(|e| postgres_error_to_py(py, e))?;
-        Ok(crate::async_client::PySyncPostgresListener::from_listener(listener))
+        Ok(crate::async_client::PySyncPostgresListener::from_listener(
+            listener,
+        ))
     }
 
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.

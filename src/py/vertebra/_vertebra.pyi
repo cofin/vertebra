@@ -74,6 +74,8 @@ __all__ = [
     "RustDbTaskAwaitable",
     "SchemaDigestCache",
     "SerializationFailure",
+    "ShmCache",
+    "ShmCacheStats",
     "SimilarityMatch",
     "SpannerAbortedError",
     "SpannerError",
@@ -1071,6 +1073,65 @@ class StatementCache:
     ) -> bool: ...
     def stats(self) -> StatementCacheStats: ...
     def invalidate_all(self) -> None: ...
+    @property
+    def capacity(self) -> int: ...
+
+@final
+class ShmCacheStats:
+    """Hit/miss, set, and eviction counters for a shared-memory ShmCache."""
+
+    capacity: int
+    """Total slot capacity of the cache."""
+    max_entries: int
+    """Configured maximum entries in the cache."""
+    capacity_bytes: int
+    """Total allocated capacity in bytes."""
+    hits: int
+    """Cumulative cache lookup hits."""
+    misses: int
+    """Cumulative cache lookup misses."""
+    sets: int
+    """Cumulative cache set operations."""
+    evictions: int
+    """Cumulative CLOCK-sweep cache evictions."""
+    expirations: int
+    """Cumulative expired slot hits."""
+
+@final
+class ShmCache:
+    """Cross-worker POSIX shared-memory key-value cache with optimistic seqlock reads and CLOCK eviction."""
+
+    def __new__(
+        cls,
+        name: str,
+        capacity_bytes: int = 1_048_576,
+        max_entries: int = 1024,
+    ) -> Self: ...
+    def get(self, key: str | bytes) -> bytes | None: ...
+    def set(
+        self,
+        key: str | bytes,
+        value: str | bytes,
+        ttl: float | None = None,
+    ) -> bool: ...
+    def delete(self, key: str | bytes) -> bool: ...
+    def add(
+        self,
+        key: str | bytes,
+        value: str | bytes,
+        ttl: float | None = None,
+    ) -> bool: ...
+    def incr(self, key: str | bytes, delta: int = 1) -> int: ...
+    def decr(self, key: str | bytes, delta: int = 1) -> int: ...
+    def touch(self, key: str | bytes, ttl: float | None = None) -> bool: ...
+    def has_key(self, key: str | bytes) -> bool: ...
+    def invalidate_prefix(self, prefix: str | bytes) -> int: ...
+    def clear(self) -> None: ...
+    def stats(self) -> ShmCacheStats: ...
+    def close(self) -> None: ...
+    def unlink(self) -> bool: ...
+    def attach_lease_table(self, broker: LeaseBroker) -> None: ...
+    def drain_invalidations(self, max_frames: int = 64) -> list[bytes]: ...
     @property
     def capacity(self) -> int: ...
 

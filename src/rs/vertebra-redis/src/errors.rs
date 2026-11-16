@@ -138,9 +138,7 @@ pub fn classify_redis_error(err: &redis::RedisError) -> RedisDriverError {
         | redis::ErrorKind::MasterNameNotFoundBySentinel
         | redis::ErrorKind::NoValidReplicasFoundBySentinel
         | redis::ErrorKind::EmptySentinelList
-        | redis::ErrorKind::ClusterConnectionNotFound => {
-            RedisDriverError::operational(msg, true)
-        }
+        | redis::ErrorKind::ClusterConnectionNotFound => RedisDriverError::operational(msg, true),
         _ => {
             if err.is_io_error() || err.is_cluster_error() || err.is_connection_refusal() {
                 RedisDriverError::operational(msg, true)
@@ -185,8 +183,11 @@ fn build_stand_in_py_exceptions(py: Python<'_>) -> PyResult<RedisPyExceptions> {
     let root = py.get_type::<pyo3::exceptions::PyException>();
     let database = new_stand_in_class(py, "DatabaseError", &PyTuple::new(py, [&root])?)?;
     let db_bound = database.bind(py);
-    let improper_config =
-        new_stand_in_class(py, "ImproperConfigurationError", &PyTuple::new(py, [&root])?)?;
+    let improper_config = new_stand_in_class(
+        py,
+        "ImproperConfigurationError",
+        &PyTuple::new(py, [&root])?,
+    )?;
     let operational = new_stand_in_class(py, "OperationalError", &PyTuple::new(py, [db_bound])?)?;
     let programming = new_stand_in_class(py, "ProgrammingError", &PyTuple::new(py, [db_bound])?)?;
     let data = new_stand_in_class(py, "DataError", &PyTuple::new(py, [db_bound])?)?;

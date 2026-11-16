@@ -1674,10 +1674,7 @@ impl PySyncPostgresListener {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "SyncPostgresListener(closed={})",
-            self.listener.is_closed()
-        )
+        format!("SyncPostgresListener(closed={})", self.listener.is_closed())
     }
 }
 

@@ -10,8 +10,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyCapsule, PyString};
 use vertebra_core::broker::{
     BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PartitionStats as RsPartitionStats,
-    PoolPartitionSpec, ShmLeaseTable, ShmStatementCache,
-    StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
+    PoolPartitionSpec, ShmCache as RsShmCache, ShmCacheStats as RsShmCacheStats, ShmLeaseTable,
+    ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::{BROKER_ENGINE_CAPSULE_NAME, BrokerEngineCapsule, ForeignEngineCapsule};
@@ -447,6 +447,12 @@ impl BrokerAttachClient {
 #[derive(Clone)]
 pub struct LeaseBroker {
     table: Arc<ShmLeaseTable>,
+}
+
+impl LeaseBroker {
+    pub fn table(&self) -> Arc<ShmLeaseTable> {
+        Arc::clone(&self.table)
+    }
 }
 
 #[pymethods]
@@ -1157,6 +1163,224 @@ impl StatementCache {
 
     pub fn invalidate_all(&self) {
         self.cache.invalidate_all();
+    }
+
+    #[getter]
+    pub fn capacity(&self) -> u32 {
+        self.cache.capacity()
+    }
+}
+
+#[pyclass(immutable_type)]
+#[derive(Debug, Clone, Copy)]
+pub struct ShmCacheStats {
+    #[pyo3(get)]
+    pub capacity: u32,
+    #[pyo3(get)]
+    pub max_entries: u32,
+    #[pyo3(get)]
+    pub capacity_bytes: u64,
+    #[pyo3(get)]
+    pub hits: u64,
+    #[pyo3(get)]
+    pub misses: u64,
+    #[pyo3(get)]
+    pub sets: u64,
+    #[pyo3(get)]
+    pub evictions: u64,
+    #[pyo3(get)]
+    pub expirations: u64,
+}
+
+impl From<RsShmCacheStats> for ShmCacheStats {
+    fn from(s: RsShmCacheStats) -> Self {
+        Self {
+            capacity: s.capacity,
+            max_entries: s.max_entries,
+            capacity_bytes: s.capacity_bytes,
+            hits: s.hits,
+            misses: s.misses,
+            sets: s.sets,
+            evictions: s.evictions,
+            expirations: s.expirations,
+        }
+    }
+}
+
+#[pyclass(immutable_type)]
+#[derive(Clone)]
+pub struct ShmCache {
+    cache: Arc<RsShmCache>,
+}
+
+#[pymethods]
+impl ShmCache {
+    #[new]
+    #[pyo3(signature = (name, capacity_bytes=1_048_576, max_entries=1024))]
+    pub fn new(
+        py: Python<'_>,
+        name: &str,
+        capacity_bytes: usize,
+        max_entries: u32,
+    ) -> PyResult<Self> {
+        #[cfg(unix)]
+        {
+            let (cache, _created) = py
+                .detach(|| RsShmCache::open_or_create_named(name, capacity_bytes, max_entries))
+                .map_err(broker_err_to_py)?;
+            Ok(Self {
+                cache: Arc::new(cache),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (py, name, capacity_bytes, max_entries);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "ShmCache requires POSIX shared memory",
+            ))
+        }
+    }
+
+    #[pyo3(signature = (key))]
+    pub fn get<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let val = py.detach(|| self.cache.get(&key_bytes));
+        Ok(val.map(|b| PyBytes::new(py, &b)))
+    }
+
+    #[pyo3(signature = (key, value, ttl=None))]
+    pub fn set(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+        ttl: Option<f64>,
+    ) -> PyResult<bool> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let val_bytes = extract_bytes_or_str(value)?;
+        let ttl_ns = ttl.and_then(|t| {
+            if t > 0.0 {
+                Some((t * 1_000_000_000.0) as u64)
+            } else {
+                None
+            }
+        });
+        let ok = py.detach(|| self.cache.set(&key_bytes, &val_bytes, ttl_ns));
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (key))]
+    pub fn delete(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let ok = py.detach(|| self.cache.delete(&key_bytes));
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (key, value, ttl=None))]
+    pub fn add(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+        ttl: Option<f64>,
+    ) -> PyResult<bool> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let val_bytes = extract_bytes_or_str(value)?;
+        let ttl_ns = ttl.and_then(|t| {
+            if t > 0.0 {
+                Some((t * 1_000_000_000.0) as u64)
+            } else {
+                None
+            }
+        });
+        let ok = py.detach(|| self.cache.add(&key_bytes, &val_bytes, ttl_ns));
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (key, delta=1))]
+    pub fn incr(&self, py: Python<'_>, key: &Bound<'_, PyAny>, delta: i64) -> PyResult<i64> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        py.detach(|| self.cache.incr(&key_bytes, delta))
+            .map_err(broker_err_to_py)
+    }
+
+    #[pyo3(signature = (key, delta=1))]
+    pub fn decr(&self, py: Python<'_>, key: &Bound<'_, PyAny>, delta: i64) -> PyResult<i64> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        py.detach(|| self.cache.decr(&key_bytes, delta))
+            .map_err(broker_err_to_py)
+    }
+
+    #[pyo3(signature = (key, ttl=None))]
+    pub fn touch(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        ttl: Option<f64>,
+    ) -> PyResult<bool> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let ttl_ns = ttl.and_then(|t| {
+            if t > 0.0 {
+                Some((t * 1_000_000_000.0) as u64)
+            } else {
+                None
+            }
+        });
+        let ok = py.detach(|| self.cache.touch(&key_bytes, ttl_ns));
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (key))]
+    pub fn has_key(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key_bytes = extract_bytes_or_str(key)?;
+        let ok = py.detach(|| self.cache.has_key(&key_bytes));
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (prefix))]
+    pub fn invalidate_prefix(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<u32> {
+        let prefix_bytes = extract_bytes_or_str(prefix)?;
+        let count = py.detach(|| self.cache.invalidate_prefix(&prefix_bytes));
+        Ok(count)
+    }
+
+    pub fn clear(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.cache.clear());
+        Ok(())
+    }
+
+    pub fn stats(&self, py: Python<'_>) -> PyResult<ShmCacheStats> {
+        let s = py.detach(|| self.cache.stats());
+        Ok(s.into())
+    }
+
+    pub fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    pub fn unlink(&self, py: Python<'_>) -> PyResult<bool> {
+        let ok = py.detach(|| self.cache.unlink());
+        Ok(ok)
+    }
+
+    #[pyo3(signature = (broker))]
+    pub fn attach_lease_table(&self, broker: &LeaseBroker) -> PyResult<()> {
+        self.cache.attach_lease_table(broker.table());
+        Ok(())
+    }
+
+    #[pyo3(signature = (max_frames=64))]
+    pub fn drain_invalidations<'py>(
+        &self,
+        py: Python<'py>,
+        max_frames: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let frames = py.detach(|| self.cache.drain_invalidations(max_frames));
+        Ok(frames.into_iter().map(|b| PyBytes::new(py, &b)).collect())
     }
 
     #[getter]

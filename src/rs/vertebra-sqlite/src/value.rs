@@ -216,27 +216,18 @@ impl BoundParams {
             }
             Self::Named(map) => {
                 for (key, val) in map {
-                    // Try with name as provided, or with prefixes : or $ or @
-                    let idx = stmt
-                        .parameter_index(key)
-                        .or_else(|_| {
-                            let with_colon = format!(":{key}");
-                            stmt.parameter_index(&with_colon)
-                        })
-                        .or_else(|_| {
-                            let with_dollar = format!("${key}");
-                            stmt.parameter_index(&with_dollar)
-                        })
-                        .or_else(|_| {
-                            let with_at = format!("@{key}");
-                            stmt.parameter_index(&with_at)
-                        });
+                    let find_idx =
+                        |name: &str| -> Option<usize> { stmt.parameter_index(name).ok().flatten() };
+                    let idx = find_idx(key)
+                        .or_else(|| find_idx(&format!(":{key}")))
+                        .or_else(|| find_idx(&format!("${key}")))
+                        .or_else(|| find_idx(&format!("@{key}")));
                     match idx {
-                        Ok(Some(i)) => {
+                        Some(i) => {
                             stmt.raw_bind_parameter(i, val)
                                 .map_err(SqliteClientError::from_rusqlite)?;
                         }
-                        _ => {
+                        None => {
                             return Err(SqliteClientError::Programming {
                                 message: format!("unknown parameter name `{key}`"),
                                 code: None,

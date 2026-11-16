@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import contextlib
 import datetime as dt
 import decimal
 import inspect
@@ -19,6 +20,7 @@ from typing import Any, Literal, Self, cast
 import msgspec
 from sqlalchemy import inspect as sa_inspect
 
+from vertebra._vertebra import ShmCache
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.typing import MissingDependencyError
@@ -43,16 +45,37 @@ except ImportError as exc:
         extra="alchemy",
     ) from exc
 
+try:
+    import dogpile.cache as _dogpile_cache
+    import dogpile.cache.api as _dogpile_api
+
+    register_backend: Any = _dogpile_cache.register_backend
+    DogpileBackendApi: Any = _dogpile_api.CacheBackend
+    _HAS_DOGPILE = True
+except ImportError:
+    register_backend = None
+    DogpileBackendApi = object
+    _HAS_DOGPILE = False
+
 __all__ = (
+    "AsyncCacheBackend",
     "AsyncCacheManager",
     "CacheConfig",
     "CacheEntry",
     "CacheStats",
+    "DogpileMemoryBackend",
+    "DogpileRedisBackend",
+    "DogpileShmBackend",
+    "DogpileStorageBackend",
+    "DogpileValkeyBackend",
+    "NO_VALUE",
     "SQLAlchemyCacheBackend",
+    "SyncCacheBackend",
     "ZeroCopyServiceMixin",
     "create_cache_config",
     "msgspec_model_deserializer",
     "msgspec_model_serializer",
+    "register_dogpile_backends",
     "setup_cache_listeners",
 )
 
@@ -85,6 +108,1046 @@ class CacheEntry:
     def is_expired(self, now: float) -> bool:
         """Return True if entry has an expiration timestamp that has elapsed."""
         return self.expires_at is not None and now >= self.expires_at
+
+
+class SyncCacheBackend:
+    """Thread-safe synchronous cache backend for Advanced Alchemy and Vertebra.
+
+    Implements Advanced Alchemy's SyncCacheRegionProtocol over POSIX shared memory (shm://),
+    in-process LRU memory (memory://), Valkey/Redis drivers, or ObjectStore.
+    """
+
+    __slots__ = (
+        "_capacity",
+        "_default_ttl",
+        "_driver_prefix",
+        "_entries",
+        "_evictions",
+        "_expirations",
+        "_format",
+        "_hits",
+        "_key_prefix",
+        "_l1",
+        "_l1_url",
+        "_lock",
+        "_misses",
+        "_region_mode",
+        "_sets",
+        "_shm",
+        "_shm_name",
+        "_store",
+        "_sync_driver",
+        "_url",
+    )
+
+    def __init__(
+        self,
+        url: str = "shm://vertebra-alchemy-cache",
+        *,
+        l1_url: str | None = None,
+        capacity: int | None = 2048,
+        default_ttl: float | timedelta | None = None,
+        shm_name: str | None = None,
+        key_prefix: str = "vtb:aa:",
+        format: Literal["msgpack", "json"] = "msgpack",
+        sync_driver: SyncValkeyDriver | SyncRedisDriver | None = None,
+        region_mode: bool = False,
+    ) -> None:
+        """Initialize synchronous cache backend with URL scheme dispatch and optional L1 tier."""
+        normalized_prefix, driver_prefix = self._normalize_key_prefix(key_prefix)
+        self._url = url
+        self._l1_url = l1_url
+        self._capacity = capacity or 2048
+        self._default_ttl = default_ttl.total_seconds() if isinstance(default_ttl, timedelta) else default_ttl
+        self._shm_name = shm_name
+        self._key_prefix = normalized_prefix
+        self._driver_prefix = driver_prefix
+        self._format = format
+        self._region_mode = region_mode
+        self._entries: collections.OrderedDict[Any, CacheEntry] = collections.OrderedDict()
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+        self._sets = 0
+        self._sync_driver = sync_driver
+        self._store: Any = None
+        self._shm: ShmCache | None = None
+
+        if url.startswith("shm://"):
+            segment = url.removeprefix("shm://").strip("/") or shm_name or "vertebra-alchemy-cache"
+            try:
+                self._shm = ShmCache(segment, capacity_bytes=self._capacity * 1024, max_entries=self._capacity)
+            except Exception:
+                self._shm = None
+        elif url.startswith(("valkey://", "valkeys://")) and self._sync_driver is None:
+            self._sync_driver = SyncValkeyDriver(ValkeyConfig(url=url))
+        elif url.startswith(("redis://", "rediss://")) and self._sync_driver is None:
+            self._sync_driver = SyncRedisDriver(RedisConfig(url=url))
+        elif url.startswith(("s3://", "gs://", "az://", "r2://", "oci://", "file://")):
+            from vertebra.storage import SyncObjectStore
+
+            self._store = SyncObjectStore(url)
+
+        if isinstance(self._sync_driver, SyncValkeyDriver):
+            self._sync_driver.add_invalidation_listener(self._on_driver_invalidate)
+
+        if l1_url is not None and not url.startswith(("shm://", "memory://")):
+            self._l1: SyncCacheBackend | None = SyncCacheBackend(
+                url=l1_url,
+                capacity=self._capacity,
+                default_ttl=self._default_ttl,
+                key_prefix=key_prefix,
+                format=format,
+            )
+        else:
+            self._l1 = None
+
+    @property
+    def capacity(self) -> int | None:
+        """Maximum configured L1 capacity of the cache."""
+        return self._capacity
+
+    @property
+    def default_ttl(self) -> float | None:
+        """Default TTL in seconds for entries without an explicit expiration."""
+        return self._default_ttl
+
+    @property
+    def shm_name(self) -> str | None:
+        """Shared-memory segment name when configured."""
+        return self._shm_name
+
+    @property
+    def key_prefix(self) -> str:
+        """Namespace prefix applied to keys written to the L2 driver."""
+        return self._key_prefix
+
+    @property
+    def sync_driver(self) -> SyncValkeyDriver | SyncRedisDriver | None:
+        """Optional synchronous L2 driver."""
+        return self._sync_driver
+
+    def stats(self) -> CacheStats:
+        """Return snapshot of hit, miss, eviction, and size statistics."""
+        with self._lock:
+            return CacheStats(
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+                expirations=self._expirations,
+                size=len(self._entries),
+                capacity=self._capacity or 0,
+            )
+
+    def configure(
+        self,
+        backend: str = "vertebra.memory",
+        expiration_time: int | None = None,
+        arguments: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Self:
+        """Configure this backend as an Advanced Alchemy SyncCacheRegionProtocol region."""
+        _ = kwargs
+        self._region_mode = True
+        if expiration_time is not None:
+            self._default_ttl = None if expiration_time < 0 else float(expiration_time)
+        args = dict(arguments or {})
+        if "capacity" in args and args["capacity"] is not None:
+            self._capacity = int(args["capacity"])
+        if "shm_name" in args and args["shm_name"] is not None:
+            self._shm_name = str(args["shm_name"])
+        if "key_prefix" in args and args["key_prefix"] is not None:
+            normalized_prefix, driver_prefix = self._normalize_key_prefix(str(args["key_prefix"]))
+            self._key_prefix = normalized_prefix
+            self._driver_prefix = driver_prefix
+        url = args.get("url")
+        if isinstance(url, str):
+            if url.startswith(("valkey://", "valkeys://")) and self._sync_driver is None:
+                self._sync_driver = SyncValkeyDriver(ValkeyConfig(url=url))
+            elif url.startswith(("redis://", "rediss://")) and self._sync_driver is None:
+                self._sync_driver = SyncRedisDriver(RedisConfig(url=url))
+        return self
+
+    def get(
+        self,
+        key: Any,
+        default: Any = None,
+        *,
+        expiration_time: int | float | None = None,
+    ) -> Any:
+        """Retrieve value for key if present and unexpired, else return default (or NO_VALUE in region mode)."""
+        miss_sentinel = NO_VALUE if (default is None and self._region_mode) else default
+
+        if self._l1 is not None and isinstance(key, str):
+            l1_val = self._l1.get(key, default=NO_VALUE)
+            if l1_val is not NO_VALUE and l1_val is not DOGPILE_NO_VALUE:
+                return l1_val
+
+        if self._shm is not None and isinstance(key, str):
+            raw = self._shm.get(self._driver_key(key))
+            if raw is not None:
+                decoded = self._decode_driver_payload(raw)
+                with self._lock:
+                    self._hits += 1
+                if self._l1 is not None:
+                    self._l1.set(key, decoded, expiration_time=expiration_time)
+                return decoded
+
+        with self._lock:
+            now = time.monotonic()
+            entry = self._entries.get(key)
+            if entry is not None:
+                if entry.is_expired(now):
+                    del self._entries[key]
+                    self._expirations += 1
+                else:
+                    self._entries.move_to_end(key)
+                    self._hits += 1
+                    return entry.value
+
+        if self._sync_driver is not None and isinstance(key, str):
+            raw = self._sync_driver.get(self._driver_key(key))
+            if raw is not None:
+                decoded = self._decode_driver_payload(raw)
+                with self._lock:
+                    self._entries[key] = CacheEntry(
+                        value=decoded,
+                        expires_at=self._resolve_expires_at(expiration_time),
+                    )
+                    self._entries.move_to_end(key)
+                    self._evict_if_needed()
+                    self._hits += 1
+                if self._l1 is not None:
+                    self._l1.set(key, decoded, expiration_time=expiration_time)
+                return decoded
+
+        if self._store is not None and isinstance(key, str):
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            try:
+                raw_bytes = self._store.get(store_key)
+                if raw_bytes.startswith(b"VTBSTORE\x01"):
+                    deadline_ms, payload = decode_msgpack(raw_bytes[9:], type=tuple[int | None, bytes])
+                    now_ms = math.floor(time.time() * 1000)
+                    if deadline_ms is not None and now_ms >= deadline_ms:
+                        self._store.delete(store_key)
+                    else:
+                        decoded = self._decode_driver_payload(payload)
+                        with self._lock:
+                            self._hits += 1
+                        if self._l1 is not None:
+                            self._l1.set(key, decoded, expiration_time=expiration_time)
+                        return decoded
+            except Exception:
+                pass
+
+        with self._lock:
+            self._misses += 1
+        return miss_sentinel
+
+    def get_or_create[T](
+        self,
+        key: str,
+        creator: Callable[[], T],
+        expiration_time: int | None = None,
+    ) -> T:
+        """Retrieve cached value for key or compute and store it synchronously."""
+        marker = object()
+        cached = self.get(key, default=marker, expiration_time=expiration_time)
+        if cached is not marker and cached is not NO_VALUE and cached is not DOGPILE_NO_VALUE:
+            return cast("T", cached)
+        created = creator()
+        self.set(key, created, expiration_time=expiration_time)
+        return created
+
+    def set(
+        self,
+        key: Any,
+        value: Any,
+        *,
+        ttl: float | int | timedelta | None = None,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> None:
+        """Store key and value with optional expiration time or TTL."""
+        effective_ttl = ttl if ttl is not None else expiration_time
+        expires_at = self._resolve_expires_at(effective_ttl)
+
+        with self._lock:
+            self._entries[key] = CacheEntry(value=value, expires_at=expires_at)
+            self._entries.move_to_end(key)
+            self._evict_if_needed()
+            self._sets += 1
+
+        if self._shm is not None and isinstance(key, str):
+            dkey = self._driver_key(key)
+            payload = self._encode_driver_payload(value)
+            if len(dkey) <= 128 and len(payload) <= 856:
+                shm_ttl = None
+                if effective_ttl is not None:
+                    sec = (
+                        effective_ttl.total_seconds() if isinstance(effective_ttl, timedelta) else float(effective_ttl)
+                    )
+                    shm_ttl = sec if sec > 0 else None
+                self._shm.set(dkey, payload, ttl=shm_ttl)
+
+        if self._sync_driver is not None and isinstance(key, str):
+            px_ms = self._resolve_driver_px(effective_ttl)
+            dkey = self._driver_key(key)
+            payload = self._encode_driver_payload(value)
+            if px_ms is not None:
+                self._sync_driver.set(dkey, payload, px=px_ms)
+            else:
+                self._sync_driver.set(dkey, payload)
+
+        if self._store is not None and isinstance(key, str):
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            deadline_ms = None
+            if effective_ttl is not None:
+                sec = effective_ttl.total_seconds() if isinstance(effective_ttl, timedelta) else float(effective_ttl)
+                if sec > 0:
+                    deadline_ms = math.floor((time.time() + sec) * 1000)
+            payload = self._encode_driver_payload(value)
+            envelope = b"VTBSTORE\x01" + bytes(encode_msgpack_bytes((deadline_ms, payload)))
+            attrs = {"vertebra-expires-at-ms": str(deadline_ms)} if deadline_ms is not None else {}
+            self._store.put(store_key, envelope, attributes=attrs)
+
+        if self._l1 is not None and isinstance(key, str):
+            self._l1.set(key, value, expiration_time=effective_ttl)
+
+    def delete(self, key: Any) -> bool:
+        """Remove key from cache and return True if removed."""
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            removed = entry is not None
+
+        if self._shm is not None and isinstance(key, str):
+            shm_del = self._shm.delete(self._driver_key(key))
+            removed = removed or shm_del
+
+        if self._sync_driver is not None and isinstance(key, str):
+            deleted_count = self._sync_driver.delete(self._driver_key(key))
+            removed = removed or (deleted_count > 0)
+
+        if self._store is not None and isinstance(key, str):
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            try:
+                existed = bool(self._store.exists(store_key))
+                self._store.delete(store_key)
+                removed = removed or existed
+            except Exception:
+                pass
+
+        if self._l1 is not None and isinstance(key, str):
+            self._l1.delete(key)
+
+        return removed
+
+    def invalidate(self, key: str) -> None:
+        """Invalidate key in accordance with SyncCacheRegionProtocol."""
+        self.delete(key)
+
+    def get_multi(
+        self,
+        keys: Sequence[str],
+        expiration_time: int | None = None,
+    ) -> list[Any]:
+        """Retrieve multiple keys, returning NO_VALUE for missing entries."""
+        return [self.get(key, default=NO_VALUE, expiration_time=expiration_time) for key in keys]
+
+    def set_multi(
+        self,
+        mapping: Mapping[str, Any],
+        expiration_time: int | float | timedelta | None = None,
+    ) -> None:
+        """Store multiple key-value pairs."""
+        for key, value in mapping.items():
+            self.set(key, value, expiration_time=expiration_time)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        """Delete multiple keys from the cache."""
+        for key in keys:
+            self.delete(key)
+
+    def add(
+        self,
+        key: str,
+        value: Any,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> bool:
+        """Store key only if it does not already exist."""
+        if self.has_key(key):
+            return False
+        self.set(key, value, expiration_time=expiration_time)
+        return True
+
+    def incr(self, key: str, delta: int = 1) -> int:
+        """Atomically increment integer value associated with key."""
+        if self._sync_driver is not None:
+            res = self._sync_driver.execute_command("INCRBY", self._driver_key(key), delta)
+            return int(res)
+        if self._shm is not None:
+            return self._shm.incr(self._driver_key(key), delta)
+        with self._lock:
+            cur = self.get(key, default=0)
+            try:
+                new_val = int(cur) + delta
+            except (ValueError, TypeError):
+                new_val = delta
+            self.set(key, new_val)
+            return new_val
+
+    def decr(self, key: str, delta: int = 1) -> int:
+        """Atomically decrement integer value associated with key."""
+        return self.incr(key, -delta)
+
+    def touch(
+        self,
+        key: str,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> bool:
+        """Update expiration timestamp for key without modifying value."""
+        if self._shm is not None:
+            sec = None
+            if expiration_time is not None:
+                sec = (
+                    expiration_time.total_seconds()
+                    if isinstance(expiration_time, timedelta)
+                    else float(expiration_time)
+                )
+            return self._shm.touch(self._driver_key(key), ttl=sec)
+        with self._lock:
+            now = time.monotonic()
+            entry = self._entries.get(key)
+            if entry is not None and not entry.is_expired(now):
+                entry.expires_at = self._resolve_expires_at(expiration_time)
+                return True
+        return False
+
+    def has_key(self, key: str) -> bool:
+        """Return True if unexpired key exists in cache."""
+        val = self.get(key, default=NO_VALUE)
+        return val is not NO_VALUE and val is not DOGPILE_NO_VALUE
+
+    def invalidate_prefix(self, prefix: str) -> int:
+        """Invalidate all entries matching prefix and return count removed."""
+        count = 0
+        if self._shm is not None:
+            count += self._shm.invalidate_prefix(self._driver_key(prefix))
+
+        if self._sync_driver is not None:
+            driver_pref = self._driver_key(prefix)
+            cursor = 0
+            keys: list[str] = []
+            while True:
+                cursor, batch = self._sync_driver.scan(cursor, match=f"{driver_pref}*")
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            if keys:
+                for k in keys:
+                    self._sync_driver.delete(k)
+                count += len(keys)
+
+        with self._lock:
+            to_remove = [k for k in self._entries if isinstance(k, str) and k.startswith(prefix)]
+            for k in to_remove:
+                del self._entries[k]
+                count += 1
+
+        if self._l1 is not None:
+            count += self._l1.invalidate_prefix(prefix)
+
+        return count
+
+    def clear(self) -> None:
+        """Clear all entries matching backend key_prefix."""
+        with self._lock:
+            self._entries.clear()
+
+        if self._shm is not None:
+            self._shm.clear()
+
+        if self._sync_driver is not None:
+            cursor = 0
+            keys = []
+            while True:
+                cursor, batch = self._sync_driver.scan(cursor, match=f"{self._driver_prefix}*")
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            for k in keys:
+                self._sync_driver.delete(k)
+
+        if self._store is not None:
+            try:
+                for obj in self._store.list():
+                    obj_path = str(getattr(obj, "path", obj))
+                    if obj_path.startswith(self._driver_prefix):
+                        self._store.delete(obj_path)
+            except Exception:
+                pass
+
+        if self._l1 is not None:
+            self._l1.clear()
+
+    def close(self) -> None:
+        """Close driver connections."""
+        if self._sync_driver is not None and hasattr(self._sync_driver, "close"):
+            self._sync_driver.close()
+
+    def _driver_key(self, key: str) -> str:
+        """Return prefix-qualified key for L2 driver."""
+        return key if key.startswith(self._driver_prefix) else f"{self._driver_prefix}{key}"
+
+    @staticmethod
+    def _normalize_key_prefix(key_prefix: str) -> tuple[str, str]:
+        """Validate key_prefix and return (normalized_prefix, trailing_colon_driver_prefix)."""
+        stripped = key_prefix.strip(":")
+        if not stripped:
+            msg = f"Invalid key_prefix: {key_prefix!r}"
+            raise ValueError(msg)
+        for segment in stripped.split(":"):
+            if not segment:
+                msg = f"Invalid key_prefix: {key_prefix!r}"
+                raise ValueError(msg)
+            validate_identifier(segment, "key_prefix", allow_hyphens=True)
+        driver_prefix = key_prefix if key_prefix.endswith(":") else f"{key_prefix}:"
+        return key_prefix, driver_prefix
+
+    def _resolve_expires_at(self, ttl: float | int | timedelta | None) -> float | None:
+        """Compute monotonic expiration timestamp from provided or default TTL."""
+        effective_ttl: float | None = None
+        if ttl is not None:
+            effective_ttl = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
+        elif self._default_ttl is not None:
+            effective_ttl = self._default_ttl
+        if effective_ttl is None or effective_ttl < 0:
+            return None
+        return time.monotonic() + effective_ttl
+
+    def _resolve_driver_px(self, ttl: float | int | timedelta | None) -> int | None:
+        """Resolve integer TTL in milliseconds for Valkey/Redis SET PX."""
+        effective_ttl: float | None = None
+        if ttl is not None:
+            effective_ttl = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
+        elif self._default_ttl is not None:
+            effective_ttl = self._default_ttl
+        if effective_ttl is None or effective_ttl <= 0:
+            return None
+        return max(1, math.ceil(effective_ttl * 1000))
+
+    def _evict_if_needed(self) -> None:
+        """Evict oldest entries when capacity is exceeded."""
+        if self._capacity is None:
+            return
+        while len(self._entries) > self._capacity:
+            self._entries.popitem(last=False)
+            self._evictions += 1
+
+    def _on_driver_invalidate(self, keys: Any) -> None:
+        """Evict L1 cache entries when Valkey RESP3 BCAST client-tracking pushes invalidations."""
+        with self._lock:
+            for key in keys:
+                self._entries.pop(key, None)
+                if isinstance(key, str) and key.startswith(self._driver_prefix):
+                    self._entries.pop(key.removeprefix(self._driver_prefix), None)
+
+    @staticmethod
+    def _encode_driver_payload(value: Any) -> bytes:
+        """Serialize arbitrary Python cache values into bytes for L2 storage."""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, bytearray):
+            return bytes(value)
+        return _MSGPACK_MAGIC + bytes(encode_msgpack_bytes(value))
+
+    @staticmethod
+    def _decode_driver_payload(raw: bytes) -> Any:
+        """Deserialize bytes retrieved from L2 storage back into the original value."""
+        if raw.startswith(_MSGPACK_MAGIC):
+            return decode_msgpack(raw[len(_MSGPACK_MAGIC) :])
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw
+
+
+class AsyncCacheBackend:
+    """Thread-safe asynchronous cache backend for Advanced Alchemy and Vertebra.
+
+    Executes operations directly on the event loop over async Valkey/Redis drivers,
+    async ObjectStore, in-process LRU, or POSIX shared memory.
+    """
+
+    __slots__ = (
+        "_async_driver",
+        "_async_store",
+        "_capacity",
+        "_default_ttl",
+        "_driver_prefix",
+        "_format",
+        "_key_prefix",
+        "_l1",
+        "_l1_url",
+        "_shm_name",
+        "_sync_backend",
+        "_url",
+    )
+
+    def __init__(
+        self,
+        url: str = "shm://vertebra-alchemy-cache",
+        *,
+        sync_backend: SyncCacheBackend | None = None,
+        l1_url: str | None = None,
+        capacity: int | None = 2048,
+        default_ttl: float | timedelta | None = None,
+        shm_name: str | None = None,
+        key_prefix: str = "vtb:aa:",
+        format: Literal["msgpack", "json"] = "msgpack",
+        async_driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
+        async_store: Any | None = None,
+    ) -> None:
+        """Initialize asynchronous cache backend with async drivers and sync fallback."""
+        normalized_prefix, driver_prefix = SyncCacheBackend._normalize_key_prefix(key_prefix)
+        self._url = url
+        self._l1_url = l1_url
+        self._capacity = capacity or 2048
+        self._default_ttl = default_ttl.total_seconds() if isinstance(default_ttl, timedelta) else default_ttl
+        self._shm_name = shm_name
+        self._key_prefix = normalized_prefix
+        self._driver_prefix = driver_prefix
+        self._format = format
+        self._async_driver = async_driver
+        self._async_store = async_store
+        self._sync_backend = (
+            sync_backend
+            if sync_backend is not None
+            else SyncCacheBackend(
+                url=url,
+                capacity=capacity,
+                default_ttl=default_ttl,
+                shm_name=shm_name,
+                key_prefix=key_prefix,
+                format=format,
+            )
+        )
+
+        if url.startswith(("valkey://", "valkeys://")) and self._async_driver is None:
+            self._async_driver = AsyncValkeyDriver(ValkeyConfig(url=url))
+        elif url.startswith(("redis://", "rediss://")) and self._async_driver is None:
+            self._async_driver = AsyncRedisDriver(RedisConfig(url=url))
+        elif url.startswith(("s3://", "gs://", "az://", "r2://", "oci://", "file://")) and self._async_store is None:
+            from vertebra.storage import AsyncObjectStore
+
+            self._async_store = AsyncObjectStore(url)
+
+        if l1_url is not None and not url.startswith(("shm://", "memory://")):
+            self._l1: SyncCacheBackend | None = SyncCacheBackend(
+                url=l1_url,
+                capacity=self._capacity,
+                default_ttl=self._default_ttl,
+                key_prefix=key_prefix,
+                format=format,
+            )
+        else:
+            self._l1 = None
+
+    @property
+    def key_prefix(self) -> str:
+        """Namespace prefix applied to keys written to the L2 driver."""
+        return self._key_prefix
+
+    @property
+    def async_driver(self) -> AsyncValkeyDriver | AsyncRedisDriver | None:
+        """Optional asynchronous L2 driver."""
+        return self._async_driver
+
+    def stats(self) -> CacheStats:
+        """Return snapshot of hit, miss, eviction, and size statistics."""
+        return self._sync_backend.stats()
+
+    async def get(
+        self,
+        key: str,
+        default: Any = NO_VALUE,
+        *,
+        expiration_time: int | None = None,
+    ) -> Any:
+        """Retrieve value for key if present and unexpired, else return default."""
+        if self._l1 is not None:
+            l1_val = self._l1.get(key, default=NO_VALUE)
+            if l1_val is not NO_VALUE and l1_val is not DOGPILE_NO_VALUE:
+                return l1_val
+
+        if self._async_driver is not None:
+            raw = await self._async_driver.get(self._sync_backend._driver_key(key))
+            if raw is not None:
+                decoded = self._sync_backend._decode_driver_payload(raw)
+                if self._l1 is not None:
+                    self._l1.set(key, decoded, expiration_time=expiration_time)
+                return decoded
+            return default
+
+        if self._async_store is not None:
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            try:
+                raw_bytes = await self._async_store.get(store_key)
+                if raw_bytes.startswith(b"VTBSTORE\x01"):
+                    deadline_ms, payload = decode_msgpack(raw_bytes[9:], type=tuple[int | None, bytes])
+                    now_ms = math.floor(time.time() * 1000)
+                    if deadline_ms is not None and now_ms >= deadline_ms:
+                        await self._async_store.delete(store_key)
+                    else:
+                        decoded = self._sync_backend._decode_driver_payload(payload)
+                        if self._l1 is not None:
+                            self._l1.set(key, decoded, expiration_time=expiration_time)
+                        return decoded
+            except Exception:
+                pass
+            return default
+
+        return self._sync_backend.get(key, default=default, expiration_time=expiration_time)
+
+    async def get_or_create[T](
+        self,
+        key: str,
+        creator: Callable[[], T | Awaitable[T]],
+        expiration_time: int | None = None,
+    ) -> T:
+        """Retrieve cached value for key or await/call creator on miss."""
+        marker = object()
+        cached = await self.get(key, default=marker, expiration_time=expiration_time)
+        if cached is not marker and cached is not NO_VALUE and cached is not DOGPILE_NO_VALUE:
+            return cast("T", cached)
+        candidate = creator()
+        created: T = await candidate if inspect.isawaitable(candidate) else candidate
+        await self.set(key, created, expiration_time=expiration_time)
+        return created
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> None:
+        """Store key and value with optional expiration time or TTL."""
+        if self._async_driver is not None:
+            px_ms = self._sync_backend._resolve_driver_px(expiration_time)
+            dkey = self._sync_backend._driver_key(key)
+            payload = self._sync_backend._encode_driver_payload(value)
+            if px_ms is not None:
+                await self._async_driver.set(dkey, payload, px=px_ms)
+            else:
+                await self._async_driver.set(dkey, payload)
+
+        if self._async_store is not None:
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            deadline_ms = None
+            if expiration_time is not None:
+                sec = (
+                    expiration_time.total_seconds()
+                    if isinstance(expiration_time, timedelta)
+                    else float(expiration_time)
+                )
+                if sec > 0:
+                    deadline_ms = math.floor((time.time() + sec) * 1000)
+            payload = self._sync_backend._encode_driver_payload(value)
+            envelope = b"VTBSTORE\x01" + bytes(encode_msgpack_bytes((deadline_ms, payload)))
+            attrs = {"vertebra-expires-at-ms": str(deadline_ms)} if deadline_ms is not None else {}
+            await self._async_store.put(store_key, envelope, attributes=attrs)
+
+        if self._l1 is not None:
+            self._l1.set(key, value, expiration_time=expiration_time)
+
+        self._sync_backend.set(key, value, expiration_time=expiration_time)
+
+    async def delete(self, key: str) -> bool:
+        """Remove key from async drivers and sync backend."""
+        removed = False
+        if self._async_driver is not None:
+            del_count = await self._async_driver.delete(self._sync_backend._driver_key(key))
+            removed = del_count > 0
+
+        if self._async_store is not None:
+            store_key = f"{self._driver_prefix}~{key.encode('utf-8').hex()}"
+            try:
+                existed = bool(await self._async_store.exists(store_key))
+                await self._async_store.delete(store_key)
+                removed = existed
+            except Exception:
+                pass
+
+        if self._l1 is not None:
+            self._l1.delete(key)
+
+        return self._sync_backend.delete(key) or removed
+
+    async def get_multi(
+        self,
+        keys: Sequence[str],
+        expiration_time: int | None = None,
+    ) -> list[Any]:
+        """Retrieve multiple keys asynchronously."""
+        results: list[Any] = []
+        for key in keys:
+            results.append(await self.get(key, default=NO_VALUE, expiration_time=expiration_time))
+        return results
+
+    async def set_multi(
+        self,
+        mapping: Mapping[str, Any],
+        expiration_time: int | float | timedelta | None = None,
+    ) -> None:
+        """Store multiple key-value pairs asynchronously."""
+        for key, value in mapping.items():
+            await self.set(key, value, expiration_time=expiration_time)
+
+    async def delete_multi(self, keys: Sequence[str]) -> None:
+        """Delete multiple keys asynchronously."""
+        for key in keys:
+            await self.delete(key)
+
+    async def add(
+        self,
+        key: str,
+        value: Any,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> bool:
+        """Store key only if it does not already exist."""
+        if await self.has_key(key):
+            return False
+        await self.set(key, value, expiration_time=expiration_time)
+        return True
+
+    async def incr(self, key: str, delta: int = 1) -> int:
+        """Atomically increment integer value associated with key."""
+        if self._async_driver is not None:
+            res = await self._async_driver.execute_command("INCRBY", self._sync_backend._driver_key(key), delta)
+            return int(res)
+        return self._sync_backend.incr(key, delta)
+
+    async def decr(self, key: str, delta: int = 1) -> int:
+        """Atomically decrement integer value associated with key."""
+        return await self.incr(key, -delta)
+
+    async def touch(
+        self,
+        key: str,
+        expiration_time: int | float | timedelta | None = None,
+    ) -> bool:
+        """Update expiration timestamp for key without modifying value."""
+        if self._async_driver is not None:
+            px_ms = self._sync_backend._resolve_driver_px(expiration_time)
+            if px_ms is not None:
+                await self._async_driver.execute_command("PEXPIRE", self._sync_backend._driver_key(key), px_ms)
+                return True
+        return self._sync_backend.touch(key, expiration_time=expiration_time)
+
+    async def has_key(self, key: str) -> bool:
+        """Return True if unexpired key exists in cache."""
+        val = await self.get(key, default=NO_VALUE)
+        return val is not NO_VALUE and val is not DOGPILE_NO_VALUE
+
+    async def invalidate_prefix(self, prefix: str) -> int:
+        """Invalidate all entries matching prefix and return count removed."""
+        count = 0
+        if self._async_driver is not None:
+            driver_pref = self._sync_backend._driver_key(prefix)
+            cursor = 0
+            keys: list[str] = []
+            while True:
+                cursor, batch = await self._async_driver.scan(cursor, match=f"{driver_pref}*")
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            if keys:
+                for k in keys:
+                    await self._async_driver.delete(k)
+                count += len(keys)
+
+        count += self._sync_backend.invalidate_prefix(prefix)
+        if self._l1 is not None:
+            count += self._l1.invalidate_prefix(prefix)
+        return count
+
+    async def clear(self) -> None:
+        """Clear all entries matching backend key_prefix."""
+        if self._async_driver is not None:
+            cursor = 0
+            keys = []
+            while True:
+                cursor, batch = await self._async_driver.scan(cursor, match=f"{self._driver_prefix}*")
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            for k in keys:
+                await self._async_driver.delete(k)
+
+        if self._async_store is not None:
+            try:
+                for obj in await self._async_store.list():
+                    obj_path = str(getattr(obj, "path", obj))
+                    if obj_path.startswith(self._driver_prefix):
+                        await self._async_store.delete(obj_path)
+            except Exception:
+                pass
+
+        if self._l1 is not None:
+            self._l1.clear()
+
+        self._sync_backend.clear()
+
+    async def aclose(self) -> None:
+        """Close driver connections."""
+        if self._async_driver is not None and hasattr(self._async_driver, "close"):
+            await self._async_driver.close()
+        self._sync_backend.close()
+
+
+class DogpileShmBackend(DogpileBackendApi):
+    """Dogpile cache backend adapter over POSIX shared memory (shm://)."""
+
+    def __init__(self, arguments: dict[str, Any]) -> None:
+        url = arguments.get("url") or f"shm://{arguments.get('shm_name', 'vertebra-alchemy-cache')}"
+        self.backend = SyncCacheBackend(url, **arguments)
+
+    def get(self, key: str) -> Any:
+        return self.backend.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.backend.set(key, value)
+
+    def delete(self, key: str) -> None:
+        self.backend.delete(key)
+
+    def get_multi(self, keys: Sequence[str]) -> list[Any]:
+        return self.backend.get_multi(keys)
+
+    def set_multi(self, mapping: Mapping[str, Any]) -> None:
+        self.backend.set_multi(mapping)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        self.backend.delete_multi(keys)
+
+
+class DogpileMemoryBackend(DogpileBackendApi):
+    """Dogpile cache backend adapter over in-process memory (memory://)."""
+
+    def __init__(self, arguments: dict[str, Any]) -> None:
+        self.backend = SyncCacheBackend("memory://", **arguments)
+
+    def get(self, key: str) -> Any:
+        return self.backend.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.backend.set(key, value)
+
+    def delete(self, key: str) -> None:
+        self.backend.delete(key)
+
+    def get_multi(self, keys: Sequence[str]) -> list[Any]:
+        return self.backend.get_multi(keys)
+
+    def set_multi(self, mapping: Mapping[str, Any]) -> None:
+        self.backend.set_multi(mapping)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        self.backend.delete_multi(keys)
+
+
+class DogpileValkeyBackend(DogpileBackendApi):
+    """Dogpile cache backend adapter over native Valkey."""
+
+    def __init__(self, arguments: dict[str, Any]) -> None:
+        url = arguments.get("url", "valkey://localhost:6379/0")
+        self.backend = SyncCacheBackend(url, **arguments)
+
+    def get(self, key: str) -> Any:
+        return self.backend.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.backend.set(key, value)
+
+    def delete(self, key: str) -> None:
+        self.backend.delete(key)
+
+    def get_multi(self, keys: Sequence[str]) -> list[Any]:
+        return self.backend.get_multi(keys)
+
+    def set_multi(self, mapping: Mapping[str, Any]) -> None:
+        self.backend.set_multi(mapping)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        self.backend.delete_multi(keys)
+
+
+class DogpileRedisBackend(DogpileBackendApi):
+    """Dogpile cache backend adapter over native Redis."""
+
+    def __init__(self, arguments: dict[str, Any]) -> None:
+        url = arguments.get("url", "redis://localhost:6379/0")
+        self.backend = SyncCacheBackend(url, **arguments)
+
+    def get(self, key: str) -> Any:
+        return self.backend.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.backend.set(key, value)
+
+    def delete(self, key: str) -> None:
+        self.backend.delete(key)
+
+    def get_multi(self, keys: Sequence[str]) -> list[Any]:
+        return self.backend.get_multi(keys)
+
+    def set_multi(self, mapping: Mapping[str, Any]) -> None:
+        self.backend.set_multi(mapping)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        self.backend.delete_multi(keys)
+
+
+class DogpileStorageBackend(DogpileBackendApi):
+    """Dogpile cache backend adapter over native ObjectStore."""
+
+    def __init__(self, arguments: dict[str, Any]) -> None:
+        url = arguments.get("url", "file:///tmp/vertebra-cache")
+        self.backend = SyncCacheBackend(url, **arguments)
+
+    def get(self, key: str) -> Any:
+        return self.backend.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.backend.set(key, value)
+
+    def delete(self, key: str) -> None:
+        self.backend.delete(key)
+
+    def get_multi(self, keys: Sequence[str]) -> list[Any]:
+        return self.backend.get_multi(keys)
+
+    def set_multi(self, mapping: Mapping[str, Any]) -> None:
+        self.backend.set_multi(mapping)
+
+    def delete_multi(self, keys: Sequence[str]) -> None:
+        self.backend.delete_multi(keys)
+
+
+def register_dogpile_backends() -> None:
+    """Register Vertebra dogpile.cache backends if dogpile.cache is installed."""
+    if not _HAS_DOGPILE or register_backend is None:
+        return
+    for name, target in (
+        ("vertebra.shm", DogpileShmBackend),
+        ("vertebra.memory", DogpileMemoryBackend),
+        ("vertebra.valkey", DogpileValkeyBackend),
+        ("vertebra.redis", DogpileRedisBackend),
+        ("vertebra.storage", DogpileStorageBackend),
+    ):
+        with contextlib.suppress(Exception):
+            register_backend(name, "vertebra.extensions.alchemy.cache", target.__name__)
 
 
 class SQLAlchemyCacheBackend(MutableMapping[Any, Any]):
@@ -1179,38 +2242,73 @@ class ZeroCopyServiceMixin:
 
 
 def create_cache_config(
+    url: str | None = "shm://vertebra-alchemy-cache",
     *,
-    url: str | None = None,
+    l1_url: str | None = None,
+    backend: SyncCacheBackend | AsyncCacheBackend | SQLAlchemyCacheBackend | None = None,
     expiration_time: int = 3600,
+    use_dogpile: bool = False,
     key_prefix: str = "vtb:aa:",
     capacity: int = 2048,
     shm_name: str | None = None,
     format: Literal["msgpack", "json"] = "msgpack",
-    backend: SQLAlchemyCacheBackend | None = None,
 ) -> CacheConfig:
-    """Create a pre-wired Advanced Alchemy CacheConfig backed by SQLAlchemyCacheBackend and msgspec."""
-    resolved_backend = (
-        backend
-        if backend is not None
-        else SQLAlchemyCacheBackend.from_url(
-            url,
+    """Create a pre-wired Advanced Alchemy CacheConfig backed by SyncCacheBackend/SQLAlchemyCacheBackend and msgspec."""
+    resolved_url = url or "vertebra.memory"
+    if use_dogpile:
+        register_dogpile_backends()
+        dogpile_name = "vertebra.memory"
+        if resolved_url.startswith("shm://"):
+            dogpile_name = "vertebra.shm"
+        elif resolved_url.startswith(("valkey://", "valkeys://")):
+            dogpile_name = "vertebra.valkey"
+        elif resolved_url.startswith(("redis://", "rediss://")):
+            dogpile_name = "vertebra.redis"
+        elif resolved_url.startswith(("s3://", "gs://", "az://", "r2://", "oci://", "file://")):
+            dogpile_name = "vertebra.storage"
+
+        return CacheConfig(
+            backend=dogpile_name,
+            expiration_time=expiration_time,
+            arguments={
+                "url": resolved_url,
+                "l1_url": l1_url,
+                "capacity": capacity,
+                "shm_name": shm_name,
+                "key_prefix": key_prefix,
+            },
+            key_prefix=key_prefix,
+            enabled=True,
+            serializer=partial(msgspec_model_serializer, format=format),
+            deserializer=partial(msgspec_model_deserializer, format=format),
+        )
+
+    resolved_backend: SyncCacheBackend
+    if isinstance(backend, SyncCacheBackend):
+        resolved_backend = backend
+    elif isinstance(backend, AsyncCacheBackend):
+        resolved_backend = backend._sync_backend
+    else:
+        resolved_backend = SyncCacheBackend(
+            resolved_url,
             capacity=capacity,
             default_ttl=float(expiration_time) if expiration_time > 0 else None,
             shm_name=shm_name,
-            region_mode=True,
             key_prefix=key_prefix,
+            l1_url=l1_url,
+            region_mode=True,
         )
-    )
     resolved_backend._region_mode = True
 
-    def _region_factory(_cfg: CacheConfig) -> SQLAlchemyCacheBackend:
+    def _region_factory(_cfg: CacheConfig) -> SyncCacheBackend:
         return resolved_backend
 
     return CacheConfig(
-        backend=url or "vertebra.memory",
+        backend=resolved_url,
         expiration_time=expiration_time,
         arguments={
-            "url": url,
+            "url": resolved_url,
+            "l1_url": l1_url,
             "capacity": capacity,
             "shm_name": shm_name,
             "key_prefix": key_prefix,

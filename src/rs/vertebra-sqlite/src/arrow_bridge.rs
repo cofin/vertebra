@@ -148,30 +148,39 @@ impl ColumnBuilder {
     }
 }
 
-fn infer_data_type(decl_type: Option<&str>) -> DataType {
-    if let Some(decl) = decl_type {
-        let upper = decl.to_ascii_uppercase();
-        if upper.contains("BOOL") {
-            return DataType::Boolean;
-        }
-        if upper.contains("INT") {
-            return DataType::Int64;
-        }
-        if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
-            return DataType::Float64;
-        }
-        if upper.contains("BLOB") || upper.contains("BINARY") || upper.contains("JSONB") {
-            return DataType::Binary;
-        }
-        if upper.contains("CHAR")
-            || upper.contains("CLOB")
-            || upper.contains("TEXT")
-            || upper.contains("STR")
-        {
-            return DataType::Utf8;
-        }
+fn infer_decl_data_type(decl_type: Option<&str>) -> Option<DataType> {
+    let decl = decl_type?;
+    let upper = decl.to_ascii_uppercase();
+    if upper.contains("BOOL") {
+        return Some(DataType::Boolean);
     }
-    DataType::Utf8
+    if upper.contains("INT") {
+        return Some(DataType::Int64);
+    }
+    if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+        return Some(DataType::Float64);
+    }
+    if upper.contains("BLOB") || upper.contains("BINARY") || upper.contains("JSONB") {
+        return Some(DataType::Binary);
+    }
+    if upper.contains("CHAR")
+        || upper.contains("CLOB")
+        || upper.contains("TEXT")
+        || upper.contains("STR")
+    {
+        return Some(DataType::Utf8);
+    }
+    None
+}
+
+fn infer_value_data_type(val: ValueRef<'_>) -> Option<DataType> {
+    match val {
+        ValueRef::Null => None,
+        ValueRef::Integer(_) => Some(DataType::Int64),
+        ValueRef::Real(_) => Some(DataType::Float64),
+        ValueRef::Text(_) => Some(DataType::Utf8),
+        ValueRef::Blob(_) => Some(DataType::Binary),
+    }
 }
 
 /// Execute a query and stream its results into a `VTBARROW` shared-memory region.
@@ -186,33 +195,82 @@ pub fn execute_select_to_arrow(
         .map_err(SqliteClientError::from_rusqlite)?;
     params.bind_to_stmt(&mut stmt)?;
 
-    let col_names: Vec<String> = stmt.column_names().map(ToString::to_string).collect();
-    let col_count = col_names.len();
-
-    let mut fields = Vec::with_capacity(col_count);
-    for col in stmt.columns() {
-        let name = col.name().to_string();
-        let decl = col.decl_type();
-        let dt = infer_data_type(decl);
-        fields.push(Field::new(name, dt, true));
-    }
-    let schema: SchemaRef = Arc::new(Schema::new(fields));
-
-    let target_batch_size = if batch_size == 0 { 8192 } else { batch_size };
-    let mut rows = stmt.raw_query();
-
-    let mut ipc_buffer = Vec::new();
-    let mut stream_writer = StreamWriter::try_new(&mut ipc_buffer, &schema).map_err(|e| {
-        SqliteClientError::ShmArrow(format!("failed to initialize Arrow IPC stream writer: {e}"))
-    })?;
-
-    let mut total_rows = 0;
-    let mut builders: Vec<ColumnBuilder> = schema
-        .fields()
-        .iter()
-        .map(|f| ColumnBuilder::new(f.data_type(), target_batch_size))
+    let col_meta: Vec<(String, Option<DataType>)> = stmt
+        .columns()
+        .map(|col| {
+            (
+                col.name().to_string(),
+                infer_decl_data_type(col.decl_type()),
+            )
+        })
         .collect();
+    let col_count = col_meta.len();
+    let target_batch_size = if batch_size == 0 { 8192 } else { batch_size };
+
+    let mut rows = stmt.raw_query();
+    let mut ipc_buffer = Vec::new();
+    let mut total_rows = 0;
     let mut current_batch_len = 0;
+
+    let (schema, mut stream_writer, mut builders) =
+        if let Some(row) = rows.next().map_err(SqliteClientError::from_rusqlite)? {
+            let mut fields = Vec::with_capacity(col_count);
+            for (idx, (name, decl_dt)) in col_meta.iter().enumerate() {
+                let dt = if let Some(dt) = decl_dt {
+                    dt.clone()
+                } else {
+                    let val_ref = row.get_ref(idx).map_err(SqliteClientError::from_rusqlite)?;
+                    infer_value_data_type(val_ref).unwrap_or(DataType::Utf8)
+                };
+                fields.push(Field::new(name.clone(), dt, true));
+            }
+            let schema: SchemaRef = Arc::new(Schema::new(fields));
+            let writer = StreamWriter::try_new(&mut ipc_buffer, &schema).map_err(|e| {
+                SqliteClientError::ShmArrow(format!(
+                    "failed to initialize Arrow IPC stream writer: {e}"
+                ))
+            })?;
+            let mut builders: Vec<ColumnBuilder> = schema
+                .fields()
+                .iter()
+                .map(|f| ColumnBuilder::new(f.data_type(), target_batch_size))
+                .collect();
+            for (idx, builder) in builders.iter_mut().enumerate().take(col_count) {
+                let val_ref = row.get_ref(idx).map_err(SqliteClientError::from_rusqlite)?;
+                builder.append_value_ref(val_ref)?;
+            }
+            total_rows = 1;
+            current_batch_len = 1;
+            (schema, writer, builders)
+        } else {
+            let fields: Vec<Field> = col_meta
+                .into_iter()
+                .map(|(name, decl_dt)| Field::new(name, decl_dt.unwrap_or(DataType::Utf8), true))
+                .collect();
+            let schema: SchemaRef = Arc::new(Schema::new(fields));
+            let writer = StreamWriter::try_new(&mut ipc_buffer, &schema).map_err(|e| {
+                SqliteClientError::ShmArrow(format!(
+                    "failed to initialize Arrow IPC stream writer: {e}"
+                ))
+            })?;
+            (schema, writer, Vec::new())
+        };
+
+    if current_batch_len >= target_batch_size && current_batch_len > 0 {
+        let arrays: Vec<ArrayRef> = builders.iter_mut().map(ColumnBuilder::finish).collect();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| {
+            SqliteClientError::ShmArrow(format!("failed to construct RecordBatch: {e}"))
+        })?;
+        stream_writer.write(&batch).map_err(|e| {
+            SqliteClientError::ShmArrow(format!("failed to write Arrow RecordBatch: {e}"))
+        })?;
+        current_batch_len = 0;
+        builders = schema
+            .fields()
+            .iter()
+            .map(|f| ColumnBuilder::new(f.data_type(), target_batch_size))
+            .collect();
+    }
 
     while let Some(row) = rows.next().map_err(SqliteClientError::from_rusqlite)? {
         for (idx, builder) in builders.iter_mut().enumerate().take(col_count) {

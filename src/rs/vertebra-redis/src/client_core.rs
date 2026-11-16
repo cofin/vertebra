@@ -107,10 +107,14 @@ impl RedisCoreClient {
 
         match self.config.topology {
             RedisTopologyMode::Standalone | RedisTopologyMode::Sentinel => {
-                let mut conn_info = redis::IntoConnectionInfo::into_connection_info(effective_url.as_str())
-                    .map_err(|e| classify_redis_error(&e))?;
+                let mut conn_info =
+                    redis::IntoConnectionInfo::into_connection_info(effective_url.as_str())
+                        .map_err(|e| classify_redis_error(&e))?;
                 if self.config.protocol == 3 {
-                    let redis_info = conn_info.redis_settings().clone().set_protocol(redis::ProtocolVersion::RESP3);
+                    let redis_info = conn_info
+                        .redis_settings()
+                        .clone()
+                        .set_protocol(redis::ProtocolVersion::RESP3);
                     conn_info = conn_info.set_redis_settings(redis_info);
                 }
                 let client =
@@ -121,9 +125,7 @@ impl RedisCoreClient {
                 tokio::spawn(async move {
                     while let Some(push) = rx.recv().await {
                         if push.kind == PushKind::Invalidate {
-                            if push.data.is_empty()
-                                || push.data.first() == Some(&Value::Nil)
-                            {
+                            if push.data.is_empty() || push.data.first() == Some(&Value::Nil) {
                                 cache_ref.invalidate_all();
                             } else {
                                 let mut keys = Vec::new();
@@ -132,7 +134,9 @@ impl RedisCoreClient {
                                         Value::Array(sub_items) => {
                                             for sub in sub_items {
                                                 if let Value::BulkString(b) = sub {
-                                                    keys.push(String::from_utf8_lossy(b).into_owned());
+                                                    keys.push(
+                                                        String::from_utf8_lossy(b).into_owned(),
+                                                    );
                                                 }
                                             }
                                         }
@@ -153,8 +157,10 @@ impl RedisCoreClient {
 
                 let mut mgr_config = redis::aio::ConnectionManagerConfig::new();
                 mgr_config = mgr_config.set_number_of_retries(1);
-                mgr_config = mgr_config.set_connection_timeout(Some(std::time::Duration::from_millis(500)));
-                mgr_config = mgr_config.set_response_timeout(Some(std::time::Duration::from_millis(1500)));
+                mgr_config =
+                    mgr_config.set_connection_timeout(Some(std::time::Duration::from_millis(500)));
+                mgr_config =
+                    mgr_config.set_response_timeout(Some(std::time::Duration::from_millis(1500)));
                 if self.config.protocol == 3 {
                     mgr_config = mgr_config.set_push_sender(tx);
                 }
@@ -200,9 +206,9 @@ impl RedisCoreClient {
     pub async fn execute_cmd(&self, cmd: &Cmd) -> Result<Value, RedisDriverError> {
         self.ensure_connected().await?;
         let mut guard = self.conn.lock().await;
-        let conn = guard.as_mut().ok_or_else(|| {
-            RedisDriverError::operational("Redis connection unavailable", true)
-        })?;
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
 
         match conn {
             CoreConnection::Standalone(c) => {
@@ -224,17 +230,19 @@ impl RedisCoreClient {
     pub async fn execute_pipe(&self, pipe: &Pipeline) -> Result<Vec<Value>, RedisDriverError> {
         self.ensure_connected().await?;
         let mut guard = self.conn.lock().await;
-        let conn = guard.as_mut().ok_or_else(|| {
-            RedisDriverError::operational("Redis connection unavailable", true)
-        })?;
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
 
         match conn {
-            CoreConnection::Standalone(c) => {
-                pipe.query_async(c).await.map_err(|e| classify_redis_error(&e))
-            }
-            CoreConnection::Cluster(c) => {
-                pipe.query_async(c).await.map_err(|e| classify_redis_error(&e))
-            }
+            CoreConnection::Standalone(c) => pipe
+                .query_async(c)
+                .await
+                .map_err(|e| classify_redis_error(&e)),
+            CoreConnection::Cluster(c) => pipe
+                .query_async(c)
+                .await
+                .map_err(|e| classify_redis_error(&e)),
         }
     }
 
@@ -330,7 +338,8 @@ impl RedisCoreClient {
             self.client_cache.put(
                 key_str,
                 value.to_vec(),
-                ex.map(|s| s as f64).or_else(|| px.map(|ms| ms as f64 / 1000.0)),
+                ex.map(|s| s as f64)
+                    .or_else(|| px.map(|ms| ms as f64 / 1000.0)),
             );
         }
 
@@ -467,7 +476,11 @@ impl RedisCoreClient {
         }
     }
 
-    pub async fn spublish(&self, shard_channel: &str, message: &[u8]) -> Result<i64, RedisDriverError> {
+    pub async fn spublish(
+        &self,
+        shard_channel: &str,
+        message: &[u8],
+    ) -> Result<i64, RedisDriverError> {
         let mut cmd = redis::cmd("SPUBLISH");
         cmd.arg(shard_channel).arg(message);
         let val = self.execute_cmd(&cmd).await?;
@@ -479,7 +492,10 @@ impl RedisCoreClient {
 
     pub async fn execute_command(&self, args: &[Vec<u8>]) -> Result<Value, RedisDriverError> {
         if args.is_empty() {
-            return Err(RedisDriverError::programming("Empty command passed to execute_command", false));
+            return Err(RedisDriverError::programming(
+                "Empty command passed to execute_command",
+                false,
+            ));
         }
         let cmd_name = String::from_utf8_lossy(&args[0]);
         let mut cmd = redis::cmd(&cmd_name);

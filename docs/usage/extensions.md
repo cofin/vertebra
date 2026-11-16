@@ -112,37 +112,58 @@ config = SQLiteSyncConfig(path=":memory:")
 sqlspec_plugin = create_sqlspec_plugin(config)
 ```
 
-## SQLAlchemy 2.0+, Advanced Alchemy 1.12 & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy 2.0+, Advanced Alchemy 1.12+, Native Caching & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
-`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers and connection leasing:
+`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers, connection leasing, and multi-tier caching:
 
-- **Dialects & Broker Pooling**: Registers `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`postgresql+vtb://`, `postgresql+vtb_async://`, `mysql+vtb://`, `sqlite+vtb://`, `oracle+vtb://`, `mssql+vtb://`, `duckdb+vtb://`, `bigquery+vtb://`, `spanner+vtb://`, `spangres+vtb://`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `AsyncDBAPIModule`, adapted for async SQLAlchemy by `SQLAlchemyAsyncDBAPI` in `vertebra.extensions.sqlalchemy.async_adapter`). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` unconditionally return `NullPool`, `?shm_broker=true` selects `NullPool` on relational dialects, `:memory:` SQLite uses `StaticPool`, and relational file/TCP URLs otherwise default to `QueuePool` / `AsyncAdaptedQueuePool`, while `create_sync_alchemy_config` / `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a shared-memory broker is attached (or pass `broker_creator` directly to SQLAlchemy `create_engine`). Cloud SQL / AlloyDB dialers integrate directly, and missing optional wheels (`vertebra-core[postgres]`, `[mysql]`, `[oracle]`, `[mssql]`, `[duckdb]`, `[bigquery]`, `[spanner]`) raise `MissingDependencyError` while malformed URLs raise DB-API `InterfaceError`.
-- **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB` and Oracle `OSON`.
+- **Dialects & Broker Pooling**: Registers all 36 `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`Sync<Engine>Dialect` / `Async<Engine>Dialect` across `postgresql`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, and `spangres`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `AsyncDBAPIModule`, adapted for async SQLAlchemy by `SQLAlchemyAsyncDBAPI`). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` use `NullPool`, `?shm_broker=true` selects `NullPool` on relational dialects, `:memory:` SQLite uses `StaticPool`, and relational file/TCP URLs default to `QueuePool` / `AsyncAdaptedQueuePool`, while `create_sync_alchemy_config` / `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a shared-memory broker is attached.
+- **Native Caching (`SyncCacheBackend`, `AsyncCacheBackend`, `ShmCache`)**: `SyncCacheBackend` (implementing Advanced Alchemy's `SyncCacheRegionProtocol`) and `AsyncCacheBackend` support `shm://<segment>` (`vertebra._vertebra.ShmCache` seqlock POSIX shared memory + `ShmLeaseTable` ring-buffer L1 invalidation on `b"vtb:cache:inv"`), `valkey://` (`vertebra._valkey`), `redis://` (`vertebra._redis`), `s3://`/`gs://`/`az://`/`r2://`/`oci://`/`file://` (`vertebra._storage` `VTBSTORE\x01`), and `memory://`. `create_cache_config(use_dogpile=False)` wires Advanced Alchemy `CacheConfig(region_factory=...)` and `AsyncCacheManager` directly without third-party dependencies, while `use_dogpile=True` (`vertebra-core[dogpile]`) registers optional `dogpile.cache` backend plugins (`vertebra.shm`, `vertebra.memory`, `vertebra.valkey`, `vertebra.redis`, `vertebra.storage`). SQLAlchemy `CompiledCache` and `ResultCache` reuse the same backends.
+- **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB`, SQLite `JSONB`, and Oracle `OSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
-- **Alembic Custom Operations**: Autogenerates vector index and view DDL operations (`CreateVectorIndexOp`, `CreateViewOp`, `DropViewOp`).
+- **Alembic Custom Operations & Autogenerate**: Registers `+vertebra`/`+vtb` `DefaultImpl` subclasses (`PostgreSQLAlembicImpl`, `MySQLAlembicImpl`, `SQLiteAlembicImpl`, `OracleAlembicImpl`, `MSSQLAlembicImpl`, `DuckDBAlembicImpl`, `BigQueryAlembicImpl`, `SpannerAlembicImpl` batching `UpdateDatabaseDdl` LROs) and autogenerate hooks for `Vector`, `BinaryJSON`, `CreateVectorIndexOp`, `DropVectorIndexOp`, `CreateViewOp`, and `DropViewOp`.
 
 BigQuery, Spanner, and Spangres DBAPI connections use statement autocommit. Their
 `commit()` and `rollback()` calls do not group or undo completed statements;
-setting `autocommit=False` raises `NotSupportedError`. Reason: BigQuery permanent
-DDL cannot run inside a transaction, and the Spanner driver's explicit scope
-buffers writes until commit. Use the native driver's transaction or batching API
-for its engine-specific scope, separately from the SQLAlchemy connection.
+setting `autocommit=False` raises `NotSupportedError`.
 
 ```python
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
     create_async_alchemy_config,
+    create_cache_config,
 )
 from vertebra.storage import SyncObjectStore
 
+cache_cfg, cache_mgr = create_cache_config("shm:///vtb-app-cache")
 alchemy_config = create_async_alchemy_config(
     connection_string="sqlite+vtb_async:///:memory:",
+    cache_config=cache_cfg,
 )
 alchemy_plugin = create_alchemy_plugin(alchemy_config)
 
 store = SyncObjectStore("memory://")
 backend = ObjectStoreBackend(store=store, prefix="uploads")
+```
+
+## Django 6.0+ Databases & Caching (`vertebra.extensions.django`)
+
+Vertebra supports Django `6.0+` (`vertebra-core[django]`) with 5 native `DATABASES` engines over `vertebra.db.dbapi` (`vertebra.extensions.django.db.backends.{postgresql,mysql,oracle,sqlite3,spanner}`, with `spanner` guarded by `django-google-spanner`) and native `CACHES` via `vertebra.extensions.django.cache.CacheBackend` (routing synchronous calls to `SyncCacheBackend` and `a*` async methods directly to `AsyncCacheBackend`). BigQuery, DuckDB, and SQL Server are not supported as Django `DATABASES` backends and raise `ImproperConfigurationError` during startup validation (use SQLAlchemy or SQLSpec instead).
+
+```python
+DATABASES = {
+    "default": {
+        "ENGINE": "vertebra.extensions.django.db.backends.postgresql",
+        "OPTIONS": {"dsn": "postgresql://app_user:secret@localhost:5432/app"},
+    }
+}
+
+CACHES = {
+    "default": {
+        "BACKEND": "vertebra.extensions.django.cache.CacheBackend",
+        "LOCATION": "shm:///vtb-django-cache",
+    }
+}
 ```
 
 ## gRPC Services & Protobuf Schemas (`vertebra.extensions.grpc`)

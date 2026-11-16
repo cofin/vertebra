@@ -4,7 +4,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
-| **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
+| **`vertebra._vertebra`** | `Request`, `Headers`, `Response`, `RequestBatch`, `AsgiScope`, `RsgiScope`, `WsgiEnviron`, `ShmCache`, `ShmCacheStats` | `vertebra-py`, `vertebra-core`, `vertebra-http`, `vertebra-db` |
 | **`vertebra._bundler`** | `BundleConfig`, `BuildResult`, `Bundler`, `SSRPool`, `IsolatedDeclarationsGenerator` | `vertebra-bundler` (Oxc, Rolldown, QuickJS) |
 | **`vertebra._storage`** | `StorageBuffer`, `ObjectMeta`, `SyncObjectStore`, `AsyncObjectStore` | `vertebra-storage` (Rust `object_store` + Tokio) |
 | **`vertebra._bigquery`** | `SyncBigQueryClient`, `AsyncBigQueryClient` | `vertebra-bigquery` (REST v2 + Storage Read/Write gRPC) |
@@ -50,6 +50,18 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       show_signature: false
 
 ::: vertebra._vertebra.WsgiEnviron
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._vertebra.ShmCache
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._vertebra.ShmCacheStats
     options:
       heading_level: 4
       members: false

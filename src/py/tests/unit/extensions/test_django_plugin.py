@@ -60,8 +60,6 @@ from vertebra.extensions.django import (
     mcp_tool,
     vertebra_view,
 )
-from vertebra.extensions.django.db.backends.duckdb import DatabaseWrapper as DuckDBDatabaseWrapper
-from vertebra.extensions.django.db.backends.mssql import DatabaseWrapper as MSSQLDatabaseWrapper
 from vertebra.extensions.django.db.backends.mysql import DatabaseWrapper as MySQLDatabaseWrapper
 from vertebra.extensions.django.db.backends.oracle import DatabaseWrapper as OracleDatabaseWrapper
 from vertebra.extensions.django.db.backends.postgresql import (
@@ -397,15 +395,71 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
     assert oracle_wrapper.engine == "oracle"
     assert oracle_wrapper.wallet_zip == b"PK\x03\x04"
 
-    mssql_wrapper = MSSQLDatabaseWrapper({"NAME": "analytics"})
-    assert mssql_wrapper.engine == "mssql"
 
-    duckdb_wrapper = DuckDBDatabaseWrapper({"NAME": ":memory:"})
-    assert duckdb_wrapper.engine == "duckdb"
-    arrow_out = duckdb_wrapper.select_to_arrow("SELECT 1", rows=records)
-    assert arrow_out.num_rows == 2
-    schema_out = duckdb_wrapper.select_to_schema("SELECT 1", schema_type=OrderRecord, rows=records)
-    assert len(schema_out) == 2
+@pytest.mark.parametrize("backend", ["bigquery", "duckdb", "mssql"])
+def test_unsupported_django_backends_raise_error(backend: str) -> None:
+    """Deleted unsupported Django database backends fail on import and raise ImproperConfigurationError in plugin."""
+    with pytest.raises(ModuleNotFoundError):
+        import_module(f"vertebra.extensions.django.db.backends.{backend}")
+
+    with pytest.raises(ImproperConfigurationError, match="is unsupported by Vertebra"):
+        VertebraPlugin(
+            settings={"DATABASES": {"default": {"ENGINE": f"vertebra.extensions.django.db.backends.{backend}"}}}
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scheme", ["shm", "memory", "file"])
+async def test_django_cache_backend_sync_and_async_matrix(scheme: str, tmp_path: Path) -> None:
+    """CacheBackend executes full sync and async operations across multiple backends with L1 SHM."""
+    if scheme == "file":
+        location = f"file://{tmp_path / 'cache'}"
+    elif scheme == "shm":
+        location = f"shm://dj_test_{time.time_ns()}"
+    else:
+        location = "memory://"
+    params = {"TIMEOUT": 60, "OPTIONS": {"L1_LOCATION": f"shm://dj_l1_{time.time_ns()}"}}
+    cache = CacheBackend(location, params)
+    try:
+        cache.set("k_sync", "v_sync")
+        assert cache.get("k_sync") == "v_sync"
+        assert cache.has_key("k_sync") is True
+        assert cache.add("k_sync", "v_dup") is False
+        assert cache.add("k_sync2", "v_add") is True
+        assert cache.get_many(["k_sync", "k_sync2"]) == {"k_sync": "v_sync", "k_sync2": "v_add"}
+        cache.set_many({"k_m1": "v1", "k_m2": "v2"})
+        assert cache.get("k_m1") == "v1"
+        assert cache.touch("k_sync", timeout=120) is True
+        cache.delete_many(["k_m1", "k_m2"])
+        assert cache.get("k_m1") is None
+        assert cache.delete("k_sync2") is True
+        assert cache.delete("k_missing") is False
+
+        await cache.aset("k_async", "v_async")
+        assert await cache.aget("k_async") == "v_async"
+        assert await cache.ahas_key("k_async") is True
+        assert await cache.aadd("k_async", "v_dup") is False
+        assert await cache.aadd("k_async2", "v_add") is True
+        assert await cache.aget_many(["k_async", "k_async2"]) == {"k_async": "v_async", "k_async2": "v_add"}
+        await cache.aset_many({"k_am1": "av1", "k_am2": "av2"})
+        assert await cache.aget("k_am1") == "av1"
+        assert await cache.atouch("k_async", timeout=120) is True
+        await cache.adelete_many(["k_am1", "k_am2"])
+        assert await cache.aget("k_am1") is None
+        assert await cache.adelete("k_async2") is True
+
+        assert cache.incr("num_sync", delta=10) == 10
+        assert cache.decr("num_sync", delta=3) == 7
+        assert await cache.aincr("num_async", delta=20) == 20
+        assert await cache.adecr("num_async", delta=5) == 15
+
+        cache.clear()
+        assert cache.get("k_sync") is None
+        await cache.aclear()
+        assert await cache.aget("k_async") is None
+    finally:
+        cache.close()
+        await cache.aclose()
 
 
 @pytest.mark.anyio

@@ -50,6 +50,7 @@ class BigQueryConfig(BaseDatabaseConfig, frozen=True, gc=False):
     driver_module: ClassVar[str] = "vertebra.db.adapters.bigquery.driver"
     sync_driver_name: ClassVar[str] = "SyncBigQueryDriver"
     async_driver_name: ClassVar[str] = "AsyncBigQueryDriver"
+    requires_statement_autocommit: ClassVar[bool] = True
 
     project_id: str = ""
     """Google Cloud project identifier owning BigQuery jobs and default datasets."""

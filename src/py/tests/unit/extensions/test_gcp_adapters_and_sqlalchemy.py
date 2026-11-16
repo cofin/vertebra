@@ -47,9 +47,6 @@ from vertebra.extensions.alchemy import (
     normalize_alchemy_url,
 )
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
-from vertebra.extensions.django.db.backends.bigquery.base import (
-    DatabaseWrapper as BigQueryDjangoDatabaseWrapper,
-)
 from vertebra.extensions.django.db.backends.spanner.base import (
     DatabaseWrapper as SpannerDjangoDatabaseWrapper,
 )
@@ -116,7 +113,7 @@ from vertebra.server._fastpath import (
 )
 from vertebra.server._fastpath_core import DirectPlan
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
-from vertebra.typing import ToolPolicyError, ToolProvider
+from vertebra.typing import MissingDependencyError, ToolPolicyError, ToolProvider
 
 
 @pytest.mark.anyio
@@ -300,27 +297,28 @@ async def test_fastpath_zero_copy_arrow_cursor_and_streaming_storage() -> None:
     assert bytes(dj_resp.body) == b"PAR1-binary-data"
 
 
-def test_django_backends_and_shared_provider_fingerprinting() -> None:
+def test_django_backends_and_shared_provider_fingerprinting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify Django BigQuery and Spanner DatabaseWrappers and multi-framework provider sharing."""
     registry = DatabaseRegistry(broker=DatabaseRegistry.default_broker())
 
-    bq_wrapper = BigQueryDjangoDatabaseWrapper(
-        {
-            "NAME": "analytics_ds",
-            "PROJECT": "analytics-proj",
-            "LOCATION": "US",
-            "MAXIMUM_BYTES_BILLED": 50_000_000,
-        }
-    )
-    assert bq_wrapper.vendor == "bigquery"
-    assert bq_wrapper.display_name == "BigQuery (Vertebra)"
-    assert bq_wrapper.driver_scheme == "bigquery"
-    bq_drv = bq_wrapper.native_driver
-    assert isinstance(bq_drv, SyncBigQueryDriver)
-    assert bq_drv.config.project_id == "analytics-proj"
-    assert bq_drv.config.dataset_id == "analytics_ds"
-    assert bq_drv.config.maximum_bytes_billed == 50_000_000
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vertebra.extensions.django.db.backends.bigquery")
 
+    with pytest.raises(MissingDependencyError) as exc_info:
+        SpannerDjangoDatabaseWrapper(
+            {
+                "PROJECT": "core-proj",
+                "INSTANCE": "prod-inst",
+                "NAME": "ledger-db",
+                "DIALECT": "POSTGRESQL",
+            }
+        )
+    assert "django-spanner" in str(exc_info.value)
+
+    monkeypatch.setattr(
+        "vertebra.extensions.django.db.backends.spanner.base.ensure_module",
+        lambda *args, **kwargs: None,
+    )
     spanner_wrapper = SpannerDjangoDatabaseWrapper(
         {
             "PROJECT": "core-proj",
@@ -332,12 +330,15 @@ def test_django_backends_and_shared_provider_fingerprinting() -> None:
     assert spanner_wrapper.vendor == "spanner"
     assert spanner_wrapper.display_name == "Cloud Spanner (Vertebra)"
     assert spanner_wrapper.driver_scheme == "spanner"
-    sp_drv = spanner_wrapper.native_driver
-    assert isinstance(sp_drv, SyncSpannerDriver)
-    assert sp_drv.config.project_id == "core-proj"
-    assert sp_drv.config.instance_id == "prod-inst"
-    assert sp_drv.config.database_id == "ledger-db"
-    assert sp_drv.config.dialect == "spangres"
+    assert spanner_wrapper.Database.paramstyle == "named"
+    conn_params = spanner_wrapper.get_connection_params()
+    cfg = conn_params["config"]
+    assert cfg.project_id == "core-proj"
+    assert cfg.instance_id == "prod-inst"
+    assert cfg.database_id == "ledger-db"
+    assert cfg.dialect == "spangres"
+    conn = spanner_wrapper.get_new_connection(conn_params)
+    assert isinstance(conn.driver, SyncSpannerDriver)
 
     bq_cfg = BigQueryConfig(
         project_id="analytics-proj",

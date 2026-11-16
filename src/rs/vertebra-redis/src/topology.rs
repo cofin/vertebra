@@ -51,10 +51,18 @@ pub fn check_cluster_redirect(err_msg: &str) -> Option<ClusterRedirectAction> {
     if let Some(r) = vertebra_db::resp3::parse_cluster_redirect(err_msg) {
         match r.kind {
             vertebra_db::resp3::RedirectKind::Moved => {
-                return Some(ClusterRedirectAction::Moved { slot: r.slot, host: r.host, port: r.port });
+                return Some(ClusterRedirectAction::Moved {
+                    slot: r.slot,
+                    host: r.host,
+                    port: r.port,
+                });
             }
             vertebra_db::resp3::RedirectKind::Ask => {
-                return Some(ClusterRedirectAction::Ask { slot: r.slot, host: r.host, port: r.port });
+                return Some(ClusterRedirectAction::Ask {
+                    slot: r.slot,
+                    host: r.host,
+                    port: r.port,
+                });
             }
         }
     }

@@ -63,7 +63,10 @@ impl std::fmt::Debug for RedisClientConfig {
             .field("protocol", &self.protocol)
             .field("topology", &self.topology)
             .field("max_redirections", &self.max_redirections)
-            .field("enable_client_side_caching", &self.enable_client_side_caching)
+            .field(
+                "enable_client_side_caching",
+                &self.enable_client_side_caching,
+            )
             .field("enable_gcp_iam_auth", &self.enable_gcp_iam_auth)
             .finish()
     }
@@ -73,19 +76,21 @@ impl std::fmt::Debug for RedisClientConfig {
 pub fn normalize_redis_url(raw: &str) -> Result<String, RedisDriverError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(RedisDriverError::config("Redis connection URL cannot be empty"));
+        return Err(RedisDriverError::config(
+            "Redis connection URL cannot be empty",
+        ));
     }
 
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("valkey://") || lower.starts_with("valkeys://") {
         return Err(RedisDriverError::config(
-            "Valkey URLs ('valkey://', 'valkeys://') are not supported by vertebra._redis; install and use vertebra._valkey via vertebra-core[valkey]."
+            "Valkey URLs ('valkey://', 'valkeys://') are not supported by vertebra._redis; install and use vertebra._valkey via vertebra-core[valkey].",
         ));
     }
 
     if lower.starts_with("memory://") {
         return Err(RedisDriverError::config(
-            "In-memory scheme 'memory://' is not supported by vertebra._redis."
+            "In-memory scheme 'memory://' is not supported by vertebra._redis.",
         ));
     }
 
@@ -145,7 +150,11 @@ impl RedisClientConfig {
         }
 
         if self.topology == RedisTopologyMode::Sentinel
-            && self.sentinel_master_name.as_deref().unwrap_or("").is_empty()
+            && self
+                .sentinel_master_name
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
         {
             return Err(RedisDriverError::config(
                 "sentinel_master_name is required when topology is 'sentinel'.",
@@ -167,9 +176,7 @@ impl RedisClientConfig {
         capsule_any: &Bound<'_, PyAny>,
     ) -> Result<SharedGcpTokenCacheHandle, RedisDriverError> {
         let capsule = capsule_any.cast::<PyCapsule>().map_err(|_| {
-            RedisDriverError::config(
-                "token_cache_capsule must be a valid GcpTokenCache PyCapsule",
-            )
+            RedisDriverError::config("token_cache_capsule must be a valid GcpTokenCache PyCapsule")
         })?;
         let ptr = capsule
             .pointer_checked(Some(GCP_TOKEN_CACHE_CAPSULE_NAME))
@@ -180,6 +187,7 @@ impl RedisClientConfig {
             })?
             .as_ptr()
             .cast::<GcpTokenCacheCapsule>();
-        unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(ptr) }.map_err(RedisDriverError::config)
+        unsafe { SharedGcpTokenCacheHandle::from_capsule_ptr(ptr) }
+            .map_err(RedisDriverError::config)
     }
 }

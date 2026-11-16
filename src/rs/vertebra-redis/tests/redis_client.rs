@@ -50,15 +50,17 @@ fn test_topology_validation() {
 
     cfg.topology = RedisTopologyMode::Cluster;
     let err = cfg.validate().unwrap_err();
-    assert!(err
-        .message()
-        .contains("Unix domain socket URLs cannot be used with cluster"));
+    assert!(
+        err.message()
+            .contains("Unix domain socket URLs cannot be used with cluster")
+    );
 
     cfg.topology = RedisTopologyMode::Sentinel;
     let err2 = cfg.validate().unwrap_err();
-    assert!(err2
-        .message()
-        .contains("Unix domain socket URLs cannot be used with cluster or sentinel"));
+    assert!(
+        err2.message()
+            .contains("Unix domain socket URLs cannot be used with cluster or sentinel")
+    );
 }
 
 #[test]
@@ -76,7 +78,10 @@ fn test_error_classification() {
         "WRONGPASS invalid username-password pair",
     ));
     let classified_wp = classify_redis_error(&wrongpass_err);
-    assert!(matches!(classified_wp, RedisDriverError::Programming { .. }));
+    assert!(matches!(
+        classified_wp,
+        RedisDriverError::Programming { .. }
+    ));
     assert!(!classified_wp.is_transient());
 
     let crossslot_err = redis::RedisError::from((
@@ -84,7 +89,10 @@ fn test_error_classification() {
         "CROSSSLOT Keys in request don't hash to the same slot",
     ));
     let classified_cs = classify_redis_error(&crossslot_err);
-    assert!(matches!(classified_cs, RedisDriverError::Programming { .. }));
+    assert!(matches!(
+        classified_cs,
+        RedisDriverError::Programming { .. }
+    ));
     assert!(!classified_cs.is_transient());
 
     let loading_err = redis::RedisError::from((
@@ -92,7 +100,10 @@ fn test_error_classification() {
         "LOADING Redis is loading the dataset in memory",
     ));
     let classified_loading = classify_redis_error(&loading_err);
-    assert!(matches!(classified_loading, RedisDriverError::Operational { .. }));
+    assert!(matches!(
+        classified_loading,
+        RedisDriverError::Operational { .. }
+    ));
     assert!(classified_loading.is_transient());
 
     let clusterdown_err = redis::RedisError::from((
@@ -100,7 +111,10 @@ fn test_error_classification() {
         "CLUSTERDOWN The cluster is down",
     ));
     let classified_cd = classify_redis_error(&clusterdown_err);
-    assert!(matches!(classified_cd, RedisDriverError::Operational { .. }));
+    assert!(matches!(
+        classified_cd,
+        RedisDriverError::Operational { .. }
+    ));
     assert!(classified_cd.is_transient());
 
     let noscript_err = redis::RedisError::from((
@@ -108,7 +122,10 @@ fn test_error_classification() {
         "NOSCRIPT No matching script. Please use EVAL.",
     ));
     let classified_ns = classify_redis_error(&noscript_err);
-    assert!(matches!(classified_ns, RedisDriverError::Programming { .. }));
+    assert!(matches!(
+        classified_ns,
+        RedisDriverError::Programming { .. }
+    ));
     assert!(!classified_ns.is_transient());
 }
 
@@ -161,7 +178,10 @@ fn test_cluster_redirect_parsing() {
 
     let slot_map = ClusterSlotMap::new();
     slot_map.update_slot(1234, "10.0.0.1".to_string(), 6379);
-    assert_eq!(slot_map.get_slot_node(1234), Some(("10.0.0.1".to_string(), 6379)));
+    assert_eq!(
+        slot_map.get_slot_node(1234),
+        Some(("10.0.0.1".to_string(), 6379))
+    );
     assert_eq!(slot_map.get_slot_node(9999), None);
 }
 

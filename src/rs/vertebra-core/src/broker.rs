@@ -2718,6 +2718,684 @@ impl ShmStatementCache {
     }
 }
 
+// ============================================================================
+// Shared-Memory Key-Value Cache (ShmCache)
+// ============================================================================
+
+pub const SHM_CACHE_MAX_KEY_BYTES: usize = 128;
+pub const SHM_CACHE_MAX_VALUE_BYTES: usize = 856;
+pub const MAX_SHM_CACHE_CAPACITY: u32 = 1 << 20;
+pub const SHM_CACHE_PROBE_STEPS: usize = 16;
+
+#[repr(C, align(64))]
+pub struct ShmCacheSlot {
+    pub seq: AtomicU64,
+    pub key_hash: AtomicU64,
+    pub expiry_ns: AtomicU64,
+    pub val_len: AtomicU32,
+    pub clock_and_flags: AtomicU32,
+    pub key_len: AtomicU16,
+    pub _reserved: [u8; 6],
+    pub key: [AtomicU64; 16],
+    pub value: [AtomicU64; 107],
+}
+
+const _: () = assert!(std::mem::size_of::<ShmCacheSlot>() == 1024);
+const _: () = assert!(std::mem::align_of::<ShmCacheSlot>() == 64);
+
+#[repr(C, align(64))]
+pub struct ShmCacheHeader {
+    pub capacity: u32,
+    pub max_entries: u32,
+    pub capacity_bytes: u64,
+    pub clock_hand: AtomicU32,
+    pub _pad0: [u8; 4],
+    pub hits: AtomicU64,
+    pub misses: AtomicU64,
+    pub sets: AtomicU64,
+    pub evictions: AtomicU64,
+    pub expirations: AtomicU64,
+}
+
+const _: () = assert!(std::mem::size_of::<ShmCacheHeader>() == 64);
+const _: () = assert!(std::mem::align_of::<ShmCacheHeader>() == 64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShmCacheStats {
+    pub capacity: u32,
+    pub max_entries: u32,
+    pub capacity_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub sets: u64,
+    pub evictions: u64,
+    pub expirations: u64,
+}
+
+pub struct ShmCache {
+    header: *mut ShmCacheHeader,
+    slots: *mut ShmCacheSlot,
+    _region: Option<Arc<ShmRegion>>,
+    lease_table: std::sync::RwLock<Option<Arc<ShmLeaseTable>>>,
+}
+
+unsafe impl Send for ShmCache {}
+unsafe impl Sync for ShmCache {}
+
+impl ShmCache {
+    #[inline]
+    pub fn compute_key_hash(key: &[u8]) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for &b in key {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    pub const fn required_size(capacity: u32) -> usize {
+        let base = if capacity < 16 { 16 } else { capacity };
+        let cap = if base > MAX_SHM_CACHE_CAPACITY {
+            MAX_SHM_CACHE_CAPACITY
+        } else {
+            base.next_power_of_two()
+        };
+        let raw = std::mem::size_of::<ShmCacheHeader>()
+            .saturating_add((cap as usize).saturating_mul(std::mem::size_of::<ShmCacheSlot>()));
+        raw.saturating_add(63) & !63
+    }
+
+    pub fn from_region_at_offset(
+        region: Arc<ShmRegion>,
+        offset: usize,
+        capacity: u32,
+        create: bool,
+    ) -> Result<Self, BrokerError> {
+        let base = capacity.max(16);
+        if base > MAX_SHM_CACHE_CAPACITY {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        let cap = base
+            .checked_next_power_of_two()
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let req_size = Self::required_size(cap);
+        let expected_end = offset
+            .checked_add(req_size)
+            .ok_or(BrokerError::InvalidCapacity)?;
+        if region.len() < expected_end {
+            return Err(BrokerError::RegionTooSmall {
+                expected: expected_end,
+                actual: region.len(),
+            });
+        }
+
+        let header_ptr = unsafe { region.as_ptr().add(offset) as *mut ShmCacheHeader };
+        let slots_ptr = unsafe {
+            (header_ptr as *mut u8).add(std::mem::size_of::<ShmCacheHeader>()) as *mut ShmCacheSlot
+        };
+
+        if create {
+            unsafe {
+                std::ptr::write_bytes(region.as_ptr().add(offset), 0, req_size);
+                let hdr = &mut *header_ptr;
+                hdr.capacity = cap;
+                hdr.max_entries = cap;
+                hdr.capacity_bytes = req_size as u64;
+                hdr.clock_hand.store(0, Ordering::Relaxed);
+                hdr.hits.store(0, Ordering::Relaxed);
+                hdr.misses.store(0, Ordering::Relaxed);
+                hdr.sets.store(0, Ordering::Relaxed);
+                hdr.evictions.store(0, Ordering::Relaxed);
+                hdr.expirations.store(0, Ordering::Relaxed);
+            }
+        }
+
+        Ok(Self {
+            header: header_ptr,
+            slots: slots_ptr,
+            _region: Some(region),
+            lease_table: std::sync::RwLock::new(None),
+        })
+    }
+
+    pub fn init_in_region(region: ShmRegion, capacity: u32) -> Result<Self, BrokerError> {
+        Self::from_region_at_offset(Arc::new(region), 0, capacity, true)
+    }
+
+    pub fn attach_region(region: ShmRegion, capacity: u32) -> Result<Self, BrokerError> {
+        Self::from_region_at_offset(Arc::new(region), 0, capacity, false)
+    }
+
+    #[cfg(unix)]
+    pub fn open_or_create_named(
+        name: &str,
+        capacity_bytes: usize,
+        max_entries: u32,
+    ) -> Result<(Self, bool), BrokerError> {
+        let entries_from_bytes = (capacity_bytes / std::mem::size_of::<ShmCacheSlot>()) as u32;
+        let target = max_entries.max(entries_from_bytes).max(16);
+        if target > MAX_SHM_CACHE_CAPACITY {
+            return Err(BrokerError::InvalidCapacity);
+        }
+        let cap = target
+            .checked_next_power_of_two()
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let req_size = Self::required_size(cap);
+        let normalized = if name.starts_with('/') {
+            name.to_string()
+        } else {
+            format!("/{name}")
+        };
+        let attach = ShmRegion::open_or_create_named(&normalized, req_size, |region| {
+            let len = region.len();
+            if len < req_size {
+                return Err(ShmError::InvalidSize);
+            }
+            unsafe {
+                let slice = region.as_mut_slice();
+                slice[..req_size].fill(0);
+                let chdr = &mut *(slice.as_mut_ptr() as *mut ShmCacheHeader);
+                chdr.capacity = cap;
+                chdr.max_entries = cap;
+                chdr.capacity_bytes = req_size as u64;
+                chdr.clock_hand.store(0, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+        .map_err(|e| map_shm_error(e, &normalized))?;
+
+        let (region, created) = match attach {
+            NamedAttach::Created(r) => (r, true),
+            NamedAttach::Attached(r) => (r, false),
+        };
+        let actual_cap = if created {
+            cap
+        } else {
+            let hdr = unsafe { &*(region.as_ptr() as *const ShmCacheHeader) };
+            hdr.capacity.max(16)
+        };
+        let cache = Self::attach_region(region, actual_cap)?;
+        Ok((cache, created))
+    }
+
+    #[inline]
+    fn header(&self) -> &ShmCacheHeader {
+        unsafe { &*self.header }
+    }
+
+    #[inline]
+    fn slot(&self, index: usize) -> &ShmCacheSlot {
+        unsafe { &*self.slots.add(index) }
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> u32 {
+        self.header().capacity
+    }
+
+    pub fn attach_lease_table(&self, table: Arc<ShmLeaseTable>) {
+        if let Ok(mut guard) = self.lease_table.write() {
+            *guard = Some(table);
+        }
+    }
+
+    fn publish_invalidation(&self, payload: &[u8]) {
+        if let Ok(guard) = self.lease_table.read()
+            && let Some(table) = guard.as_ref()
+        {
+            let _ = table.publish_channel(b"vtb:cache:inv", payload, 0, None);
+        }
+    }
+
+    pub fn drain_invalidations(&self, max_frames: usize) -> Vec<Vec<u8>> {
+        if let Ok(guard) = self.lease_table.read()
+            && let Some(table) = guard.as_ref()
+        {
+            let frames = table.drain_channel(b"vtb:cache:inv");
+            return frames
+                .into_iter()
+                .take(max_frames)
+                .map(|f| f.payload)
+                .collect();
+        }
+        Vec::new()
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        if key.is_empty() || key.len() > SHM_CACHE_MAX_KEY_BYTES {
+            self.header().misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+        let now = monotonic_now_ns();
+
+        for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
+            let idx = (start_idx + step) & mask;
+            let slot = self.slot(idx);
+            let seq1 = slot.seq.load(Ordering::Acquire);
+            if seq1 == 0 || (seq1 & 1) != 0 {
+                continue;
+            }
+            if slot.key_hash.load(Ordering::Relaxed) != hash {
+                continue;
+            }
+            let exp = slot.expiry_ns.load(Ordering::Relaxed);
+            if exp > 0 && now >= exp {
+                hdr.expirations.fetch_add(1, Ordering::Relaxed);
+                hdr.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+            let vlen = slot.val_len.load(Ordering::Relaxed) as usize;
+            if klen != key.len() || vlen > SHM_CACHE_MAX_VALUE_BYTES {
+                continue;
+            }
+
+            let mut key_words = [0u64; 16];
+            let num_kwords = klen.div_ceil(8).min(16);
+            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                *w = slot.key[i].load(Ordering::Relaxed);
+            }
+
+            let mut val_words = [0u64; 107];
+            let num_vwords = vlen.div_ceil(8).min(107);
+            for (i, w) in val_words.iter_mut().enumerate().take(num_vwords) {
+                *w = slot.value[i].load(Ordering::Relaxed);
+            }
+
+            std::sync::atomic::fence(Ordering::Acquire);
+            let seq2 = slot.seq.load(Ordering::Relaxed);
+
+            if seq1 == seq2 {
+                let key_bytes =
+                    unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
+                if key_bytes == key {
+                    slot.clock_and_flags
+                        .fetch_or(CLOCK_REF_BIT, Ordering::Relaxed);
+                    hdr.hits.fetch_add(1, Ordering::Relaxed);
+                    let val_bytes = unsafe {
+                        std::slice::from_raw_parts(val_words.as_ptr() as *const u8, vlen)
+                    };
+                    return Some(val_bytes.to_vec());
+                }
+            }
+        }
+
+        hdr.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    pub fn set(&self, key: &[u8], value: &[u8], ttl_ns: Option<u64>) -> bool {
+        if key.is_empty()
+            || key.len() > SHM_CACHE_MAX_KEY_BYTES
+            || value.len() > SHM_CACHE_MAX_VALUE_BYTES
+        {
+            return false;
+        }
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+        let now = monotonic_now_ns();
+        let expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+
+        let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
+        let mut target_idx = None;
+        let mut first_empty_or_expired = None;
+
+        for step in 0..max_probes {
+            let idx = (start_idx + step) & mask;
+            let slot = self.slot(idx);
+            let seq = slot.seq.load(Ordering::Relaxed);
+            if seq == 0 {
+                if first_empty_or_expired.is_none() {
+                    first_empty_or_expired = Some(idx);
+                }
+                continue;
+            }
+            let exp = slot.expiry_ns.load(Ordering::Relaxed);
+            if exp > 0 && now >= exp {
+                if first_empty_or_expired.is_none() {
+                    first_empty_or_expired = Some(idx);
+                }
+                continue;
+            }
+            if (seq & 1) == 0 && slot.key_hash.load(Ordering::Relaxed) == hash {
+                let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+                if klen == key.len() {
+                    let mut key_words = [0u64; 16];
+                    let num_kwords = klen.div_ceil(8).min(16);
+                    for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                        *w = slot.key[i].load(Ordering::Relaxed);
+                    }
+                    let key_bytes = unsafe {
+                        std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen)
+                    };
+                    if key_bytes == key {
+                        target_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if target_idx.is_none() {
+            if let Some(empty_idx) = first_empty_or_expired {
+                target_idx = Some(empty_idx);
+            } else {
+                let mut victim = None;
+                for _ in 0..2 {
+                    for step in 0..max_probes {
+                        let idx = (start_idx + step) & mask;
+                        let slot = self.slot(idx);
+                        let cf = slot.clock_and_flags.load(Ordering::Relaxed);
+                        if (cf & CLOCK_REF_BIT) != 0 {
+                            slot.clock_and_flags
+                                .fetch_and(!CLOCK_REF_BIT, Ordering::Relaxed);
+                        } else {
+                            victim = Some(idx);
+                            break;
+                        }
+                    }
+                    if victim.is_some() {
+                        break;
+                    }
+                }
+                let chosen = victim.unwrap_or(start_idx);
+                target_idx = Some(chosen);
+                hdr.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let idx = target_idx.unwrap();
+        let slot = self.slot(idx);
+
+        let mut even_seq = slot.seq.load(Ordering::Relaxed);
+        if (even_seq & 1) != 0 {
+            even_seq = even_seq.wrapping_add(1);
+        }
+        loop {
+            match slot.seq.compare_exchange_weak(
+                even_seq,
+                even_seq.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    even_seq = if (actual & 1) != 0 {
+                        actual.wrapping_add(1)
+                    } else {
+                        actual
+                    };
+                }
+            }
+        }
+
+        let mut key_buf = [0u8; SHM_CACHE_MAX_KEY_BYTES];
+        key_buf[..key.len()].copy_from_slice(key);
+        let key_words = unsafe { std::slice::from_raw_parts(key_buf.as_ptr() as *const u64, 16) };
+        for (i, &w) in key_words.iter().enumerate() {
+            slot.key[i].store(w, Ordering::Relaxed);
+        }
+
+        let mut val_buf = [0u8; SHM_CACHE_MAX_VALUE_BYTES];
+        val_buf[..value.len()].copy_from_slice(value);
+        let num_val_words = value.len().div_ceil(8).min(107);
+        let val_words =
+            unsafe { std::slice::from_raw_parts(val_buf.as_ptr() as *const u64, num_val_words) };
+        for (i, &w) in val_words.iter().enumerate() {
+            slot.value[i].store(w, Ordering::Relaxed);
+        }
+
+        slot.key_len.store(key.len() as u16, Ordering::Relaxed);
+        slot.val_len.store(value.len() as u32, Ordering::Relaxed);
+        slot.expiry_ns.store(expiry, Ordering::Relaxed);
+        slot.clock_and_flags.store(CLOCK_REF_BIT, Ordering::Relaxed);
+        slot.key_hash.store(hash, Ordering::Relaxed);
+
+        slot.seq.store(even_seq.wrapping_add(2), Ordering::Release);
+        hdr.sets.fetch_add(1, Ordering::Relaxed);
+
+        self.publish_invalidation(key);
+        true
+    }
+
+    pub fn delete(&self, key: &[u8]) -> bool {
+        if key.is_empty() || key.len() > SHM_CACHE_MAX_KEY_BYTES {
+            return false;
+        }
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+
+        for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
+            let idx = (start_idx + step) & mask;
+            let slot = self.slot(idx);
+            let seq = slot.seq.load(Ordering::Relaxed);
+            if seq == 0 || (seq & 1) != 0 {
+                continue;
+            }
+            if slot.key_hash.load(Ordering::Relaxed) != hash {
+                continue;
+            }
+            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+            if klen != key.len() {
+                continue;
+            }
+            let mut key_words = [0u64; 16];
+            let num_kwords = klen.div_ceil(8).min(16);
+            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                *w = slot.key[i].load(Ordering::Relaxed);
+            }
+            let key_bytes =
+                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
+            if key_bytes == key {
+                let mut even_seq = seq;
+                if (even_seq & 1) != 0 {
+                    even_seq = even_seq.wrapping_add(1);
+                }
+                if slot
+                    .seq
+                    .compare_exchange(
+                        even_seq,
+                        even_seq.wrapping_add(1),
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    slot.key_hash.store(0, Ordering::Relaxed);
+                    slot.expiry_ns.store(0, Ordering::Relaxed);
+                    slot.key_len.store(0, Ordering::Relaxed);
+                    slot.val_len.store(0, Ordering::Relaxed);
+                    slot.seq.store(0, Ordering::Release);
+                    self.publish_invalidation(key);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn add(&self, key: &[u8], value: &[u8], ttl_ns: Option<u64>) -> bool {
+        if self.has_key(key) {
+            return false;
+        }
+        self.set(key, value, ttl_ns)
+    }
+
+    pub fn has_key(&self, key: &[u8]) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn touch(&self, key: &[u8], ttl_ns: Option<u64>) -> bool {
+        if key.is_empty() || key.len() > SHM_CACHE_MAX_KEY_BYTES {
+            return false;
+        }
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+        let now = monotonic_now_ns();
+        let new_expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+
+        for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
+            let idx = (start_idx + step) & mask;
+            let slot = self.slot(idx);
+            let seq = slot.seq.load(Ordering::Relaxed);
+            if seq == 0 || (seq & 1) != 0 {
+                continue;
+            }
+            if slot.key_hash.load(Ordering::Relaxed) != hash {
+                continue;
+            }
+            let exp = slot.expiry_ns.load(Ordering::Relaxed);
+            if exp > 0 && now >= exp {
+                return false;
+            }
+            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+            if klen != key.len() {
+                continue;
+            }
+            let mut key_words = [0u64; 16];
+            let num_kwords = klen.div_ceil(8).min(16);
+            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                *w = slot.key[i].load(Ordering::Relaxed);
+            }
+            let key_bytes =
+                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
+            if key_bytes == key {
+                slot.expiry_ns.store(new_expiry, Ordering::Release);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn incr(&self, key: &[u8], delta: i64) -> Result<i64, BrokerError> {
+        if let Some(val) = self.get(key) {
+            let cur = if let Ok(s) = std::str::from_utf8(&val) {
+                s.trim().parse::<i64>().unwrap_or(0)
+            } else if val.len() == 8 {
+                i64::from_le_bytes(val.as_slice().try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
+            let new_val = cur.wrapping_add(delta);
+            let s = new_val.to_string();
+            self.set(key, s.as_bytes(), None);
+            Ok(new_val)
+        } else {
+            let s = delta.to_string();
+            self.set(key, s.as_bytes(), None);
+            Ok(delta)
+        }
+    }
+
+    pub fn decr(&self, key: &[u8], delta: i64) -> Result<i64, BrokerError> {
+        self.incr(key, -delta)
+    }
+
+    pub fn invalidate_prefix(&self, prefix: &[u8]) -> u32 {
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        let mut count = 0u32;
+
+        for idx in 0..cap {
+            let slot = self.slot(idx);
+            let seq = slot.seq.load(Ordering::Relaxed);
+            if seq == 0 || (seq & 1) != 0 {
+                continue;
+            }
+            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+            if klen < prefix.len() {
+                continue;
+            }
+            let mut key_words = [0u64; 16];
+            let num_kwords = klen.div_ceil(8).min(16);
+            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                *w = slot.key[i].load(Ordering::Relaxed);
+            }
+            let key_bytes =
+                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
+            if key_bytes.starts_with(prefix) {
+                let mut even_seq = seq;
+                if (even_seq & 1) != 0 {
+                    even_seq = even_seq.wrapping_add(1);
+                }
+                if slot
+                    .seq
+                    .compare_exchange(
+                        even_seq,
+                        even_seq.wrapping_add(1),
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    slot.key_hash.store(0, Ordering::Relaxed);
+                    slot.expiry_ns.store(0, Ordering::Relaxed);
+                    slot.key_len.store(0, Ordering::Relaxed);
+                    slot.val_len.store(0, Ordering::Relaxed);
+                    slot.seq.store(0, Ordering::Release);
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.publish_invalidation(prefix);
+        }
+        count
+    }
+
+    pub fn clear(&self) {
+        let hdr = self.header();
+        let cap = hdr.capacity as usize;
+        for idx in 0..cap {
+            let slot = self.slot(idx);
+            slot.key_hash.store(0, Ordering::Relaxed);
+            slot.expiry_ns.store(0, Ordering::Relaxed);
+            slot.key_len.store(0, Ordering::Relaxed);
+            slot.val_len.store(0, Ordering::Relaxed);
+            slot.seq.store(0, Ordering::Release);
+        }
+        self.publish_invalidation(b"");
+    }
+
+    pub fn stats(&self) -> ShmCacheStats {
+        let hdr = self.header();
+        ShmCacheStats {
+            capacity: hdr.capacity,
+            max_entries: hdr.max_entries,
+            capacity_bytes: hdr.capacity_bytes,
+            hits: hdr.hits.load(Ordering::Relaxed),
+            misses: hdr.misses.load(Ordering::Relaxed),
+            sets: hdr.sets.load(Ordering::Relaxed),
+            evictions: hdr.evictions.load(Ordering::Relaxed),
+            expirations: hdr.expirations.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn unlink(&self) -> bool {
+        self._region.as_ref().is_some_and(|r| r.unlink_now())
+    }
+
+    #[cfg(not(unix))]
+    pub fn unlink(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3203,5 +3881,36 @@ mod tests {
         let pstats = table.partition_stats(key).unwrap();
         assert_eq!(pstats.active_leases, 0);
         assert_eq!(pstats.quarantined, 0);
+    }
+
+    #[test]
+    fn test_shm_cache_lifecycle() {
+        let name = format!("test-shm-cache-{}", std::process::id());
+        let (cache, created) = ShmCache::open_or_create_named(&name, 1024 * 32, 32).unwrap();
+        assert!(created);
+        assert!(cache.set(b"key1", b"val1", None));
+        assert_eq!(cache.get(b"key1").unwrap(), b"val1");
+        assert!(cache.has_key(b"key1"));
+        assert!(!cache.has_key(b"key2"));
+
+        // incr / decr
+        assert_eq!(cache.incr(b"counter", 5).unwrap(), 5);
+        assert_eq!(cache.incr(b"counter", 2).unwrap(), 7);
+        assert_eq!(cache.decr(b"counter", 3).unwrap(), 4);
+
+        // prefix invalidation
+        cache.set(b"pref:a", b"1", None);
+        cache.set(b"pref:b", b"2", None);
+        assert_eq!(cache.invalidate_prefix(b"pref:"), 2);
+        assert!(!cache.has_key(b"pref:a"));
+
+        // stats
+        let s = cache.stats();
+        assert!(s.hits >= 1);
+        assert!(s.sets >= 5);
+
+        cache.clear();
+        assert!(!cache.has_key(b"key1"));
+        cache.unlink();
     }
 }

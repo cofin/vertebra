@@ -4,21 +4,15 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from vertebra._vertebra import AlloyDBDialer, CloudSQLDialer, LeaseBroker, LeaseGrant
-from vertebra.db.adapters.bigquery import BigQueryConfig
-from vertebra.db.adapters.duckdb import DuckDBConfig
-from vertebra.db.adapters.mssql import MSSQLConfig
-from vertebra.db.adapters.mysql import MySQLConfig
-from vertebra.db.adapters.oracle import OracleConfig
-from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig
-from vertebra.db.adapters.spanner import SpannerConfig
-from vertebra.db.adapters.sqlite import SQLiteConfig
-from vertebra.db.registry import AnyDatabaseConfig, DatabaseRegistry
+from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django.orm import rows_to_structs
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
@@ -108,125 +102,14 @@ class DatabaseWrapperMixin:
             self._async_native_driver = registry.get_shared_driver(cfg)
         return self._async_native_driver
 
-    def _build_native_config(self) -> AnyDatabaseConfig:
-        host = str(self.settings_dict.get("HOST") or "localhost")
-        port = int(self.settings_dict.get("PORT") or self._default_port())
-        name = str(self.settings_dict.get("NAME") or "")
-        user = str(self.settings_dict.get("USER") or "")
-        password = str(self.settings_dict.get("PASSWORD") or "")
-        auth = f"{user}:{password}@" if (user and password) else (f"{user}@" if user else "")
-        if self.vendor == "postgresql":
-            db_name = name or "postgres"
-            dsn = f"postgresql://{auth}{host}:{port}/{db_name}"
-            return PostgreSQLConfig(
-                dsn=dsn,
-                direct_dsn=self.pooler_config.direct_dsn,
-                pooler_mode=cast("PoolerMode", self.pooler_config.pooler_mode),
-                pgbouncer=self.pooler_config.pgbouncer,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                alloydb_instance_uri=self.pooler_config.alloydb_instance_uri,
-                broker=self._broker,
-            )
-        if self.vendor == "mysql":
-            dsn = f"mysql://{auth}{host}:{port}/{name}"
-            return MySQLConfig(
-                dsn=dsn,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                broker=self._broker,
-            )
-        if self.vendor in {"sqlite", "sqlite3"}:
-            db_path = name or ":memory:"
-            return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
-        if self.vendor == "oracle":
-            svc = name or "FREEPDB1"
-            dsn = f"oracle://{auth}{host}:{port}/{svc}"
-            return OracleConfig(
-                dsn=dsn,
-                host=host,
-                port=port,
-                service_name=svc,
-                user=user or "system",
-                password=password,
-                wallet_zip=self.pooler_config.wallet_zip,
-                broker=self._broker,
-            )
-        if self.vendor == "mssql":
-            db_name = name or "master"
-            dsn = f"mssql://{auth}{host}:{port}/{db_name}"
-            return MSSQLConfig(
-                dsn=dsn,
-                host=host,
-                port=port,
-                database=db_name,
-                user=user or "sa",
-                password=password,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                broker=self._broker,
-            )
-        if self.vendor == "duckdb":
-            duck_path = name or ":memory:"
-            return DuckDBConfig(path=duck_path, database=duck_path, broker=self._broker)
-        if self.vendor == "bigquery":
-            options = dict(self.settings_dict.get("OPTIONS") or {})
-            dsn = str(options.get("dsn") or "")
-            if dsn:
-                return BigQueryConfig.from_dsn(dsn)
-            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or name or "test-project")
-            dataset_id = (
-                options.get("dataset_id")
-                or self.settings_dict.get("DATASET")
-                or (name if self.settings_dict.get("PROJECT") and name else None)
-            )
-            location = str(options.get("location") or self.settings_dict.get("LOCATION") or "US")
-            max_billed_raw = options.get("maximum_bytes_billed") or self.settings_dict.get("MAXIMUM_BYTES_BILLED")
-            max_billed = int(max_billed_raw) if max_billed_raw is not None else None
-            rest_endpoint = str(
-                options.get("rest_endpoint")
-                or (
-                    f"http://{host}:{port}"
-                    if host not in {"localhost", ""} and port
-                    else "https://bigquery.googleapis.com"
-                )
-            )
-            storage_endpoint = str(options.get("storage_endpoint") or "https://bigquerystorage.googleapis.com")
-            return BigQueryConfig(
-                project_id=project_id,
-                dataset_id=str(dataset_id) if dataset_id is not None else None,
-                location=location,
-                rest_endpoint=rest_endpoint,
-                storage_endpoint=storage_endpoint,
-                maximum_bytes_billed=max_billed,
-            )
-        if self.vendor == "spanner":
-            options = dict(self.settings_dict.get("OPTIONS") or {})
-            dsn = str(options.get("dsn") or "")
-            if dsn:
-                return SpannerConfig.from_dsn(dsn)
-            if name.startswith("projects/"):
-                return SpannerConfig.from_dsn(f"spanner://{name}")
-            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or "test-project")
-            instance_id = str(options.get("instance_id") or self.settings_dict.get("INSTANCE") or "test-instance")
-            db_name = name or str(options.get("database_id") or "test-db")
-            dialect_raw = str(options.get("dialect") or self.settings_dict.get("DIALECT") or "googlesql").lower()
-            database_role = options.get("database_role")
-            endpoint = str(
-                options.get("endpoint")
-                or (
-                    f"http://{host}:{port}"
-                    if host not in {"localhost", ""} and port
-                    else "https://spanner.googleapis.com"
-                )
-            )
-            return SpannerConfig(
-                project_id=project_id,
-                instance_id=instance_id,
-                database_id=db_name,
-                dialect="spangres" if dialect_raw in {"spangres", "postgresql", "pg"} else "googlesql",
-                database_role=str(database_role) if database_role is not None else None,
-                endpoint=endpoint,
-            )
-        db_path = name or ":memory:"
-        return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
+    def _build_native_config(self) -> BaseDatabaseConfig:
+        """Build native configuration from connection parameters."""
+        params = self.get_connection_params()
+        cfg = params.get("config")
+        if isinstance(cfg, BaseDatabaseConfig):
+            return cfg
+        msg = f"Database configuration not available for {self.vendor}"
+        raise ImproperConfigurationError(msg)
 
     @property
     def engine(self) -> str:
@@ -317,16 +200,20 @@ class DatabaseWrapperMixin:
             opts["dsn"] = self.pooler_config.direct_dsn
         return derived
 
-    @contextmanager
-    def schema_editor(self, *args: Any, **kwargs: Any) -> Iterator[dict[str, Any]]:
+    def schema_editor(self, *args: Any, **kwargs: Any) -> Any:
         """Switch to direct session-mode settings when running DDL / migrations."""
         _ = (args, kwargs)
         direct_settings = self.derive_direct_settings()
-        yield {
-            "pooler_mode": "session",
-            "settings": direct_settings,
-            **direct_settings,
-        }
+
+        @contextmanager
+        def _editor_ctx() -> Iterator[dict[str, Any]]:
+            yield {
+                "pooler_mode": "session",
+                "settings": direct_settings,
+                **direct_settings,
+            }
+
+        return _editor_ctx()
 
     def select_to_arrow(
         self,

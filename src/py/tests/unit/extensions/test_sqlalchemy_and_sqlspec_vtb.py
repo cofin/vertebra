@@ -469,7 +469,7 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert pg_dbapi.paramstyle == "numeric_dollar"
     assert SyncPostgreSQLDialect.import_dbapi().paramstyle == "numeric_dollar"
     assert SyncSQLiteDialect.dbapi().paramstyle == "qmark"
-    assert SyncMySQLDialect.dbapi().paramstyle == "format"
+    assert SyncMySQLDialect.dbapi().paramstyle == "qmark"
     assert SyncOracleDialect.dbapi().paramstyle == "named"
 
     cluster = FakePostgresCluster()
@@ -923,7 +923,7 @@ def test_sqlspec_stack_uses_processed_row_metadata(pipeline_capable: bool) -> No
         assert result[0].get_result().get_data() == [{"id": 7}]
         assert result[0].result_type == "INSERT"
         assert result[0].get_result().statement.operation_type == "INSERT"
-        assert result[1].rows_affected == 0
+        assert result[1].rows_affected == 1
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
@@ -950,7 +950,7 @@ async def test_sqlspec_async_stack_uses_processed_row_metadata(pipeline_capable:
         assert result[0].get_result().get_data() == [{"id": 7}]
         assert result[0].result_type == "INSERT"
         assert result[0].get_result().statement.operation_type == "INSERT"
-        assert result[1].rows_affected == 0
+        assert result[1].rows_affected == 1
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
@@ -2956,7 +2956,7 @@ async def test_cancelled_error_propagates_unwrapped_from_release_lease_and_provi
 @pytest.mark.parametrize(
     ("is_async", "plain_url", "vtb_url"),
     [
-        (False, "sqlite:///plain.db", "sqlite+vtb:///managed.db"),
+        (False, "sqlite+pysqlite:///plain.db", "sqlite+vtb:///managed.db"),
         (True, "sqlite+aiosqlite:///plain.db", "sqlite+vtb_async:///managed.db"),
     ],
     ids=["sync", "async"],

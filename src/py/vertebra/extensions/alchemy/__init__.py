@@ -18,15 +18,18 @@ from vertebra.extensions.alchemy.broker import (
     SyncSHMSessionBroker,
 )
 from vertebra.extensions.alchemy.cache import (
+    AsyncCacheBackend,
     AsyncCacheManager,
     CacheConfig,
     CacheEntry,
     CacheStats,
     SQLAlchemyCacheBackend,
+    SyncCacheBackend,
     ZeroCopyServiceMixin,
     create_cache_config,
     msgspec_model_deserializer,
     msgspec_model_serializer,
+    register_dogpile_backends,
     setup_cache_listeners,
 )
 from vertebra.extensions.alchemy.plugin import (
@@ -45,6 +48,7 @@ from vertebra.extensions.alchemy.storage import (
 
 __all__ = (
     "AsyncBrokerTransport",
+    "AsyncCacheBackend",
     "AsyncCacheManager",
     "AsyncConnectionLease",
     "AsyncSHMBrokerTransport",
@@ -63,6 +67,7 @@ __all__ = (
     "SyncConnectionLease",
     "SyncSHMBrokerTransport",
     "SyncSHMSessionBroker",
+    "SyncCacheBackend",
     "ZeroCopyServiceMixin",
     "create_alchemy_plugin",
     "create_async_alchemy_config",
@@ -74,6 +79,7 @@ __all__ = (
     "msgspec_model_deserializer",
     "msgspec_model_serializer",
     "normalize_alchemy_url",
+    "register_dogpile_backends",
     "register_storage_backend",
     "setup_cache_listeners",
 )

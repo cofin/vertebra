@@ -17,6 +17,7 @@ from vertebra.db.dbapi import (
     AsyncDBAPIModule,
     InterfaceError,
     NotSupportedError,
+    OperationalError,
     ProgrammingError,
     SyncDBAPIConnection,
     SyncDBAPIModule,
@@ -274,7 +275,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         cur_a.execute("CREATE TABLE iso_sync (v INTEGER)")
         cur_a.execute("INSERT INTO iso_sync VALUES (1)")
         cur_b = default_mem_sync_b.cursor()
-        with pytest.raises((DriverOperationalError, DriverProgrammingError)):
+        with pytest.raises((OperationalError, ProgrammingError, DriverOperationalError, DriverProgrammingError)):
             cur_b.execute("SELECT v FROM iso_sync")
     finally:
         default_mem_sync_b.close()
@@ -292,7 +293,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         await cur_aa.execute("CREATE TABLE iso_async (v INTEGER)")
         await cur_aa.execute("INSERT INTO iso_async VALUES (1)")
         cur_ab = default_mem_async_b.cursor()
-        with pytest.raises((DriverOperationalError, DriverProgrammingError)):
+        with pytest.raises((OperationalError, ProgrammingError, DriverOperationalError, DriverProgrammingError)):
             await cur_ab.execute("SELECT v FROM iso_async")
     finally:
         await default_mem_async_b.close()
@@ -643,3 +644,81 @@ async def test_dbapi_sqlite_insert_returning_and_empty_autocommit_commit() -> No
         assert sel_driver.commit_calls == 1
     finally:
         empty_sel_conn.close()
+
+
+@pytest.mark.parametrize(
+    "empty_url",
+    ["", "   ", None],
+)
+def test_dbapi_empty_or_missing_url_raises_interface_error(empty_url: Any) -> None:
+    """Verify empty or omitted connection URLs raise InterfaceError for sync and async DBAPI entry points."""
+    with pytest.raises(InterfaceError):
+        SyncDBAPIConnection(empty_url)
+    with pytest.raises(InterfaceError):
+        connect(empty_url)
+    with pytest.raises(InterfaceError):
+        SyncDBAPIModule().connect(empty_url)
+    with pytest.raises(InterfaceError):
+        AsyncDBAPIConnection(empty_url)
+    with pytest.raises(InterfaceError):
+        AsyncDBAPIModule().connect(empty_url)
+
+
+def test_dbapi_native_exception_translation_to_pep249() -> None:
+    """Verify native vertebra._vertebra exceptions map to PEP 249 dbapi.*Error subclasses."""
+    import vertebra._vertebra as native_vtb
+
+    class _FaultyDriver:
+        dialect = "sqlite"
+
+        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+            if "integrity" in sql:
+                raise native_vtb.IntegrityError("UNIQUE constraint failed")
+            if "operational" in sql:
+                raise native_vtb.OperationalError("database is locked")
+            if "programming" in sql:
+                raise native_vtb.ProgrammingError("syntax error")
+            if "data" in sql:
+                raise native_vtb.DataError("invalid number")
+            raise native_vtb.DatabaseError("generic failure")
+
+        def begin(self) -> None:
+            return None
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", driver=_FaultyDriver(), share_pool=False)
+    try:
+        cur = conn.cursor()
+        with pytest.raises(dbapi_pkg.IntegrityError):
+            cur.execute("integrity")
+        with pytest.raises(dbapi_pkg.OperationalError):
+            cur.execute("operational")
+        with pytest.raises(dbapi_pkg.ProgrammingError):
+            cur.execute("programming")
+        with pytest.raises(dbapi_pkg.DataError):
+            cur.execute("data")
+        with pytest.raises(dbapi_pkg.DatabaseError):
+            cur.execute("generic")
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_sqlite_uses_native_driver_and_has_no_sqlite_conn() -> None:
+    """Verify SyncDBAPIConnection operates solely over SyncSQLiteDriver with zero sqlite3 connection handles."""
+    conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        assert not hasattr(conn, "_sqlite_conn")
+        assert isinstance(conn.driver, SyncSQLiteDriver)
+        cur = conn.cursor()
+        cur.execute("SELECT 100")
+        assert cur.fetchone() == (100,)
+    finally:
+        conn.close()

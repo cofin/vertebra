@@ -82,15 +82,19 @@ async fn run_pubsub_loop(
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    let mut conn_info = match redis::IntoConnectionInfo::into_connection_info(config.normalized_url.as_str()) {
-        Ok(info) => info,
-        Err(e) => {
-            state.push_completion(0, false, Some(e.to_string()));
-            state.closed.store(true, Ordering::Release);
-            return;
-        }
-    };
-    let redis_info = conn_info.redis_settings().clone().set_protocol(redis::ProtocolVersion::RESP3);
+    let mut conn_info =
+        match redis::IntoConnectionInfo::into_connection_info(config.normalized_url.as_str()) {
+            Ok(info) => info,
+            Err(e) => {
+                state.push_completion(0, false, Some(e.to_string()));
+                state.closed.store(true, Ordering::Release);
+                return;
+            }
+        };
+    let redis_info = conn_info
+        .redis_settings()
+        .clone()
+        .set_protocol(redis::ProtocolVersion::RESP3);
     conn_info = conn_info.set_redis_settings(redis_info);
 
     let client = match redis::Client::open(conn_info) {
@@ -105,7 +109,10 @@ async fn run_pubsub_loop(
     let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<redis::PushInfo>();
     let conn_config = redis::AsyncConnectionConfig::new().set_push_sender(push_tx);
 
-    let mut con = match client.get_multiplexed_async_connection_with_config(&conn_config).await {
+    let mut con = match client
+        .get_multiplexed_async_connection_with_config(&conn_config)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             state.push_completion(0, false, Some(e.to_string()));
@@ -229,7 +236,12 @@ async fn run_pubsub_loop(
 }
 
 /// Synchronous dedicated Pub/Sub listener for Redis subscriptions.
-#[pyclass(name = "SyncRedisListener", module = "vertebra._redis", frozen, immutable_type)]
+#[pyclass(
+    name = "SyncRedisListener",
+    module = "vertebra._redis",
+    frozen,
+    immutable_type
+)]
 pub struct SyncRedisListener {
     state: Arc<ListenerState>,
 }
@@ -273,9 +285,15 @@ impl SyncRedisListener {
                 if self.state.closed.load(Ordering::Acquire) {
                     return Err(RedisDriverError::interface("Listener closed", false));
                 }
-                let res = self.state.msg_condvar.wait_for(&mut guard, Duration::from_secs(5));
+                let res = self
+                    .state
+                    .msg_condvar
+                    .wait_for(&mut guard, Duration::from_secs(5));
                 if res.timed_out() {
-                    return Err(RedisDriverError::operational("Subscription confirmation timed out", true));
+                    return Err(RedisDriverError::operational(
+                        "Subscription confirmation timed out",
+                        true,
+                    ));
                 }
             }
         })
@@ -298,7 +316,9 @@ impl SyncRedisListener {
                 channels,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -310,7 +330,9 @@ impl SyncRedisListener {
                 patterns,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -322,7 +344,9 @@ impl SyncRedisListener {
                 shard_channels,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -335,7 +359,9 @@ impl SyncRedisListener {
                 channels,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -348,7 +374,9 @@ impl SyncRedisListener {
                 patterns,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -361,7 +389,9 @@ impl SyncRedisListener {
                 shard_channels,
                 op_id: Some(op_id),
             })
-            .map_err(|_| RedisDriverError::interface("Listener connection closed", false).into_pyerr(py))?;
+            .map_err(|_| {
+                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
+            })?;
         self.wait_completion(py, op_id)
     }
 
@@ -406,12 +436,15 @@ impl SyncRedisListener {
                     Some(p) => PyString::new(py, &p).into_any(),
                     None => py.None().into_bound(py),
                 };
-                Ok(Some(PyTuple::new(py, [
-                    py_kind.into_any(),
-                    py_channel.into_any(),
-                    py_payload.into_any(),
-                    py_pattern,
-                ])?))
+                Ok(Some(PyTuple::new(
+                    py,
+                    [
+                        py_kind.into_any(),
+                        py_channel.into_any(),
+                        py_payload.into_any(),
+                        py_pattern,
+                    ],
+                )?))
             }
             None => Ok(None),
         }
@@ -431,12 +464,15 @@ impl SyncRedisListener {
                 Some(p) => PyString::new(py, &p).into_any(),
                 None => py.None().into_bound(py),
             };
-            res.push(PyTuple::new(py, [
-                py_kind.into_any(),
-                py_channel.into_any(),
-                py_payload.into_any(),
-                py_pattern,
-            ])?);
+            res.push(PyTuple::new(
+                py,
+                [
+                    py_kind.into_any(),
+                    py_channel.into_any(),
+                    py_payload.into_any(),
+                    py_pattern,
+                ],
+            )?);
         }
         Ok(res)
     }
@@ -449,7 +485,12 @@ impl SyncRedisListener {
 }
 
 /// Asynchronous dedicated Pub/Sub listener for Redis subscriptions.
-#[pyclass(name = "AsyncRedisListener", module = "vertebra._redis", frozen, immutable_type)]
+#[pyclass(
+    name = "AsyncRedisListener",
+    module = "vertebra._redis",
+    frozen,
+    immutable_type
+)]
 pub struct AsyncRedisListener {
     state: Arc<ListenerState>,
 }
@@ -485,7 +526,8 @@ impl AsyncRedisListener {
                 if let Some(pos) = guard.iter().position(|(id, _, _)| *id == op_id) {
                     let (_, success, err_msg) = guard.remove(pos).unwrap();
                     if !success {
-                        let msg = err_msg.unwrap_or_else(|| "Redis subscription failed".to_string());
+                        let msg =
+                            err_msg.unwrap_or_else(|| "Redis subscription failed".to_string());
                         return Err(RedisDriverError::programming(msg, false));
                     }
                     return Ok(());
@@ -493,7 +535,9 @@ impl AsyncRedisListener {
                 if start.elapsed() >= timeout {
                     return Ok(());
                 }
-                self.state.msg_condvar.wait_for(&mut guard, Duration::from_millis(50));
+                self.state
+                    .msg_condvar
+                    .wait_for(&mut guard, Duration::from_millis(50));
             }
             Ok(())
         })
@@ -639,12 +683,15 @@ impl AsyncRedisListener {
                     Some(p) => PyString::new(py, &p).into_any(),
                     None => py.None().into_bound(py),
                 };
-                Ok(Some(PyTuple::new(py, [
-                    py_kind.into_any(),
-                    py_channel.into_any(),
-                    py_payload.into_any(),
-                    py_pattern,
-                ])?))
+                Ok(Some(PyTuple::new(
+                    py,
+                    [
+                        py_kind.into_any(),
+                        py_channel.into_any(),
+                        py_payload.into_any(),
+                        py_pattern,
+                    ],
+                )?))
             }
             None => Ok(None),
         }
@@ -664,12 +711,15 @@ impl AsyncRedisListener {
                 Some(p) => PyString::new(py, &p).into_any(),
                 None => py.None().into_bound(py),
             };
-            res.push(PyTuple::new(py, [
-                py_kind.into_any(),
-                py_channel.into_any(),
-                py_payload.into_any(),
-                py_pattern,
-            ])?);
+            res.push(PyTuple::new(
+                py,
+                [
+                    py_kind.into_any(),
+                    py_channel.into_any(),
+                    py_payload.into_any(),
+                    py_pattern,
+                ],
+            )?);
         }
         Ok(res)
     }
@@ -687,11 +737,10 @@ impl AsyncRedisListener {
                 Some(e) => PyString::new(py, &e).into_any(),
                 None => py.None().into_bound(py),
             };
-            res.push(PyTuple::new(py, [
-                py_id.into_any(),
-                py_success.to_owned().into_any(),
-                py_err,
-            ])?);
+            res.push(PyTuple::new(
+                py,
+                [py_id.into_any(), py_success.to_owned().into_any(), py_err],
+            )?);
         }
         Ok(res)
     }
@@ -704,7 +753,11 @@ impl AsyncRedisListener {
     pub fn notifier_fd(&self) -> i32 {
         #[cfg(unix)]
         {
-            self.state.notifier.as_ref().map(|n| n.as_raw_fd()).unwrap_or(-1)
+            self.state
+                .notifier
+                .as_ref()
+                .map(|n| n.as_raw_fd())
+                .unwrap_or(-1)
         }
         #[cfg(not(unix))]
         {

@@ -36,7 +36,9 @@ pub fn crc16_xmodem(data: Bound<'_, PyAny>) -> PyResult<u16> {
     } else if let Ok(b) = data.extract::<&[u8]>() {
         Ok(rs_crc16_xmodem(b))
     } else {
-        Err(pyo3::exceptions::PyTypeError::new_err("data must be str or bytes"))
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "data must be str or bytes",
+        ))
     }
 }
 
@@ -48,7 +50,9 @@ pub fn hash_slot(key: Bound<'_, PyAny>) -> PyResult<u16> {
     } else if let Ok(b) = key.extract::<&[u8]>() {
         Ok(rs_redis_hash_slot(b))
     } else {
-        Err(pyo3::exceptions::PyTypeError::new_err("key must be str or bytes"))
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "key must be str or bytes",
+        ))
     }
 }
 
@@ -60,13 +64,17 @@ pub fn redis_hash_slot(key: Bound<'_, PyAny>) -> PyResult<u16> {
 
 /// Parse a Redis Cluster `MOVED` or `ASK` redirection error into `(kind, slot, host, port)`.
 #[pyfunction]
-pub fn parse_cluster_redirect(err_msg: Bound<'_, PyAny>) -> PyResult<Option<(String, u16, String, u16)>> {
+pub fn parse_cluster_redirect(
+    err_msg: Bound<'_, PyAny>,
+) -> PyResult<Option<(String, u16, String, u16)>> {
     let s = if let Ok(st) = err_msg.extract::<&str>() {
         st
     } else if let Ok(b) = err_msg.extract::<&[u8]>() {
         std::str::from_utf8(b).unwrap_or("")
     } else {
-        return Err(pyo3::exceptions::PyTypeError::new_err("err_msg must be str or bytes"));
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "err_msg must be str or bytes",
+        ));
     };
     Ok(rs_parse_cluster_redirect(s).map(|r| (r.kind.as_str().to_string(), r.slot, r.host, r.port)))
 }
