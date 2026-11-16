@@ -46,6 +46,14 @@ from vertebra.extensions.sqlspec.adapters.spanner import (
 from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerSyncDriver as SQLSpecSyncSpannerDriver,
 )
+from vertebra.extensions.sqlspec.adapters.spanner.core import (
+    farm_fingerprint_shard,
+    farmhash_fingerprint64,
+)
+from vertebra.extensions.sqlspec.adapters.spanner.driver import (
+    _execute_async_select,
+    _execute_sync_select,
+)
 from vertebra.typing import ImproperConfigurationError
 
 
@@ -424,7 +432,9 @@ async def test_spanner_async_config_and_async_stores() -> None:
         connection_instance=core_driver,
         extension_config={"adk": {"vector_dimensions": 4}},
     )
-    async with config.provide_session(transaction=False) as ro_session:
+    async with config.provide_session(transaction=False) as autocommit_session:
+        assert autocommit_session.is_read_only is False
+    async with config.provide_session(transaction=False, read_only=True) as ro_session:
         assert ro_session.is_read_only is True
 
     adk = SpannerAsyncADKStore(config)
@@ -822,3 +832,164 @@ async def test_sqlspec_spanner_batch_write_rejects_max_commit_delay_ms() -> None
     finally:
         sync_core.close()
         await async_core.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_provide_session_rw_transactions_autocommit_and_snapshot_precedence() -> None:
+    """provide_session begins/commits/rolls back RW transactions, defaults transaction=False to autocommit, and prioritizes active_snapshot."""
+    fake_client = _ClosableFakeSpannerClient()
+    sync_core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="tx-lifecycle-db"),
+        client=fake_client,
+    )
+    async_core = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="tx-lifecycle-db"),
+        client=_ClosableFakeAsyncSpannerClient(fake_client),
+    )
+    sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core, share_pool=False)
+    async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core, share_pool=False)
+    try:
+        with sync_cfg.provide_session(transaction=False) as autocommit:
+            assert autocommit.is_read_only is False
+            assert autocommit.in_transaction is False
+            autocommit.execute("CREATE TABLE ledger (id STRING(64) NOT NULL, amount INT64 NOT NULL) PRIMARY KEY (id)")
+            autocommit.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-0", "amount": 10})
+
+        before_tx = len(fake_client.begin_tx_calls)
+        with sync_cfg.provide_session(transaction=True) as rw_sync:
+            assert rw_sync.in_transaction is True
+            rw_sync.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-1", "amount": 25})
+        assert len(fake_client.begin_tx_calls) == before_tx + 1
+        assert len(fake_client.tx_rollbacks) == 0
+
+        with pytest.raises(RuntimeError, match="abort sync tx"), sync_cfg.provide_session(transaction=True) as rw_fail:
+            rw_fail.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-bad", "amount": 99})
+            raise RuntimeError("abort sync tx")
+        assert len(fake_client.tx_rollbacks) == 1
+
+        with sync_cfg.provide_session(transaction=False, read_only=True) as ro_sync:
+            assert ro_sync.is_read_only is True
+            rows = ro_sync.select("SELECT id, amount FROM ledger ORDER BY id")
+            assert [r["id"] for r in rows] == ["row-0", "row-1"]
+
+        async with async_cfg.provide_session(transaction=True) as rw_async:
+            assert rw_async.in_transaction is True
+            await rw_async.execute(
+                "INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-2", "amount": 50}
+            )
+
+        with pytest.raises(RuntimeError, match="abort async tx"):
+            async with async_cfg.provide_session(transaction=True) as rw_async_fail:
+                await rw_async_fail.execute(
+                    "INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-async-bad", "amount": 77}
+                )
+                raise RuntimeError("abort async tx")
+        assert len(fake_client.tx_rollbacks) == 2
+
+        async with async_cfg.provide_session(transaction=False, read_only=True) as ro_async:
+            assert ro_async.is_read_only is True
+            arows = await ro_async.select("SELECT id, amount FROM ledger ORDER BY id")
+            assert [r["id"] for r in arows] == ["row-0", "row-1", "row-2"]
+
+        cursor_called = False
+
+        class _CursorStub:
+            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                nonlocal cursor_called
+                _ = (sql, params)
+                cursor_called = True
+                return [(999,)], ["val"]
+
+        class _SyncSnapshotStub:
+            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                _ = (sql, params)
+                return [(42,)], ["snap_val"]
+
+        class _AsyncSnapshotStub:
+            async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                _ = (sql, params)
+                return [(84,)], ["async_snap_val"]
+
+        sync_rows, sync_cols = _execute_sync_select(
+            _CursorStub(), "SELECT 1", None, active_snapshot=_SyncSnapshotStub()
+        )
+        assert cursor_called is False
+        assert sync_rows == [{"snap_val": 42}]
+        assert sync_cols == ["snap_val"]
+
+        async_rows, async_cols = await _execute_async_select(
+            _CursorStub(), "SELECT 1", None, active_snapshot=_AsyncSnapshotStub()
+        )
+        assert cursor_called is False
+        assert async_rows == [{"async_snap_val": 84}]
+        assert async_cols == ["async_snap_val"]
+    finally:
+        sync_cfg.close()
+        await async_cfg.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_farmhash_fingerprint_cached_core_close_and_adk_error_propagation() -> None:
+    """farmhash_fingerprint64 matches Google reference vectors, close() cleans cached cores, and ADK search propagates errors."""
+    assert farmhash_fingerprint64("") == -7286425919675154353
+    assert farmhash_fingerprint64("abc") == 2640714258260161385
+    assert farmhash_fingerprint64("alphabet") == -2427165924636348523
+    medium_key = "user-session-identifier-with-forty-bytes"
+    long_key = "x" * 96
+    assert farm_fingerprint_shard(medium_key, 16) == abs(farmhash_fingerprint64(medium_key)) % 16
+    assert farm_fingerprint_shard(long_key, 32) == abs(farmhash_fingerprint64(long_key)) % 32
+
+    class _ClosableCoreStub:
+        def __init__(self) -> None:
+            self.closed_count = 0
+
+        def close(self) -> None:
+            self.closed_count += 1
+
+    class _AsyncClosableCoreStub:
+        def __init__(self) -> None:
+            self.closed_count = 0
+
+        async def close(self) -> None:
+            self.closed_count += 1
+
+    sync_stub = _ClosableCoreStub()
+    sync_cfg = SpannerSyncConfig(project_id="p", instance_id="i", database_id="d", share_pool=False)
+    cast(Any, sync_cfg)._cached_core = sync_stub
+    sync_cfg.close()
+    assert sync_stub.closed_count == 1
+    assert sync_cfg._cached_core is None
+
+    async_stub = _AsyncClosableCoreStub()
+    sync_helper_stub = _ClosableCoreStub()
+    async_cfg = SpannerAsyncConfig(project_id="p", instance_id="i", database_id="d", share_pool=False)
+    cast(Any, async_cfg)._cached_core = async_stub
+    cast(Any, async_cfg)._cached_sync_core = sync_helper_stub
+    await async_cfg.close()
+    assert async_stub.closed_count == 1
+    assert sync_helper_stub.closed_count == 1
+    assert async_cfg._cached_core is None
+    assert async_cfg._cached_sync_core is None
+
+    class _BrokenSpannerClient(_ClosableFakeSpannerClient):
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            if "COSINE_DISTANCE" in sql or "SEARCH(" in sql:
+                raise RuntimeError("broken search index")
+            return super().query(sql, params_json, staleness_mode, staleness_ms)
+
+    broken_core = SyncSpannerDriver(SpannerConfig(), client=_BrokenSpannerClient())
+    broken_sync_cfg = SpannerSyncConfig(broken_core.config, connection_instance=broken_core, share_pool=False)
+    mem_store = SpannerSyncADKMemoryStore(broken_sync_cfg)
+    with pytest.raises(RuntimeError, match="broken search index"):
+        mem_store.search_entries("hello", "app", "u1", embedding=[0.1, 0.2])
+
+    broken_async_cfg = SpannerAsyncConfig(broken_core.config, connection_instance=broken_core, share_pool=False)
+    async_mem_store = SpannerAsyncADKMemoryStore(broken_async_cfg)
+    with pytest.raises(RuntimeError, match="broken search index"):
+        await async_mem_store.search_entries("hello", "app", "u1", embedding=[0.1, 0.2])

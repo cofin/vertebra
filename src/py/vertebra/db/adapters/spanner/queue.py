@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
 from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.text import validate_identifier
 from vertebra.utils.uuids import uuid4
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ SPANNER_QUEUE_STORE_DDL_GOOGLESQL: Final[tuple[str, ...]] = (
     ROW DELETION POLICY (OLDER_THAN(expires_at, INTERVAL 0 DAY))
     """,
     """
-    CREATE NULL_FILTERED INDEX IF NOT EXISTS idx_vtb_spanner_queue_ready
+    CREATE INDEX IF NOT EXISTS idx_vtb_spanner_queue_ready
     ON vertebra_queue_jobs (lane, status, scheduled_at, enqueued_at)
     STORING (
         task_name,
@@ -236,7 +237,7 @@ class SyncSpannerQueueStore(SyncQueueStore):
         )
         self._shard_count = max(1, int(shard_count))
         self._cleanup_on_ack = cleanup_on_ack
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     @property
     def dialect(self) -> Literal["googlesql", "spangres"]:
@@ -392,6 +393,60 @@ class SyncSpannerQueueStore(SyncQueueStore):
             return claimed
 
         return cast("list[QueueEntry]", self._driver.run_in_transaction(_tx_claim))
+
+    def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically lock and claim a specific ready job by ``job_id``."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        is_pg = self._dialect == "spangres"
+
+        def _tx_claim_job(tx: SyncSpannerTransaction) -> QueueEntry | None:
+            sel_sql, sel_params = _build_job_for_update(
+                self._table_name,
+                shard_id=shard_id,
+                task_id=job_id,
+                is_pg=is_pg,
+            )
+            row = tx.select_one_or_none(sel_sql, sel_params)
+            if row is None:
+                return None
+            now = time.time()
+            status = str(row.get("status", ""))
+            sched = row.get("scheduled_at")
+            locked = row.get("locked_until")
+            is_ready = status == "pending" and (sched is None or float(sched) <= now)
+            is_expired = (
+                status == "running"
+                and locked is not None
+                and float(locked) <= now
+                and int(row.get("attempt", 0)) < int(row.get("max_retries", 1))
+            )
+            if not (is_ready or is_expired):
+                return None
+            next_attempt = int(row.get("attempt", 0)) + 1
+            if expected_attempt is not None and next_attempt != expected_attempt:
+                return None
+            locked_until = now + float(lease_seconds)
+            handle = format_spanner_receipt_handle(shard_id, job_id, next_attempt)
+            upd_sql, upd_params = _build_claim_update(
+                self._table_name,
+                shard_id=shard_id,
+                task_id=job_id,
+                locked_until=locked_until,
+                consumer_name=worker_id,
+                receipt_handle=handle,
+                is_pg=is_pg,
+            )
+            updated_rows = tx.select(upd_sql, upd_params)
+            return _row_to_entry(updated_rows[0]) if updated_rows else None
+
+        return cast("QueueEntry | None", self._driver.run_in_transaction(_tx_claim_job))
 
     def ack(self, job_id: str, *, attempt: int) -> bool:
         """Acknowledge a fenced ``(job_id, attempt)`` claim."""
@@ -587,6 +642,20 @@ class SyncSpannerQueueStore(SyncQueueStore):
         )
         row = self._driver.select_one_or_none(sql, params)
         return _row_to_entry(row) if row is not None else None
+
+    def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of ``job_id``, or ``None`` if absent."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_get_job(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            is_pg=self._dialect == "spangres",
+        )
+        row = self._driver.select_one_or_none(sql, params)
+        if row is None or row.get("status") is None:
+            return None
+        return str(row["status"])
 
     def list_entries(
         self,
@@ -786,6 +855,10 @@ class SyncSpannerQueueStore(SyncQueueStore):
                 if row is None:
                     return None
                 tx.execute("DELETE FROM vertebra_queue_dlq WHERE dlq_id = $1", (dlq_id,))
+                tx.execute(
+                    f"DELETE FROM {self._table_name} WHERE shard_id = $1 AND task_id = $2 AND status = 'dead_letter'",
+                    (int(row["shard_id"]), str(row["task_id"])),
+                )
                 return dict(row)
             row = tx.select_one_or_none(
                 "SELECT * FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id FOR UPDATE",
@@ -794,6 +867,11 @@ class SyncSpannerQueueStore(SyncQueueStore):
             if row is None:
                 return None
             tx.execute("DELETE FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id", {"dlq_id": dlq_id})
+            tx.execute(
+                f"DELETE FROM {self._table_name} "
+                "WHERE shard_id = @shard_id AND task_id = @task_id AND status = 'dead_letter'",
+                {"shard_id": int(row["shard_id"]), "task_id": str(row["task_id"])},
+            )
             return dict(row)
 
         return cast("dict[str, Any] | None", self._driver.run_in_transaction(_tx_pop))
@@ -825,7 +903,7 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
         )
         self._shard_count = max(1, int(shard_count))
         self._cleanup_on_ack = cleanup_on_ack
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     @property
     def dialect(self) -> Literal["googlesql", "spangres"]:
@@ -981,6 +1059,60 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
             return claimed
 
         return cast("list[QueueEntry]", await self._driver.run_in_transaction(_tx_claim))
+
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically lock and claim a specific ready job asynchronously by ``job_id``."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        is_pg = self._dialect == "spangres"
+
+        async def _tx_claim_job(tx: AsyncSpannerTransaction) -> QueueEntry | None:
+            sel_sql, sel_params = _build_job_for_update(
+                self._table_name,
+                shard_id=shard_id,
+                task_id=job_id,
+                is_pg=is_pg,
+            )
+            row = await tx.select_one_or_none(sel_sql, sel_params)
+            if row is None:
+                return None
+            now = time.time()
+            status = str(row.get("status", ""))
+            sched = row.get("scheduled_at")
+            locked = row.get("locked_until")
+            is_ready = status == "pending" and (sched is None or float(sched) <= now)
+            is_expired = (
+                status == "running"
+                and locked is not None
+                and float(locked) <= now
+                and int(row.get("attempt", 0)) < int(row.get("max_retries", 1))
+            )
+            if not (is_ready or is_expired):
+                return None
+            next_attempt = int(row.get("attempt", 0)) + 1
+            if expected_attempt is not None and next_attempt != expected_attempt:
+                return None
+            locked_until = now + float(lease_seconds)
+            handle = format_spanner_receipt_handle(shard_id, job_id, next_attempt)
+            upd_sql, upd_params = _build_claim_update(
+                self._table_name,
+                shard_id=shard_id,
+                task_id=job_id,
+                locked_until=locked_until,
+                consumer_name=worker_id,
+                receipt_handle=handle,
+                is_pg=is_pg,
+            )
+            updated_rows = await tx.select(upd_sql, upd_params)
+            return _row_to_entry(updated_rows[0]) if updated_rows else None
+
+        return cast("QueueEntry | None", await self._driver.run_in_transaction(_tx_claim_job))
 
     async def ack(self, job_id: str, *, attempt: int) -> bool:
         """Acknowledge a fenced ``(job_id, attempt)`` claim asynchronously."""
@@ -1176,6 +1308,20 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
         )
         row = await self._driver.select_one_or_none(sql, params)
         return _row_to_entry(row) if row is not None else None
+
+    async def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of ``job_id`` asynchronously, or ``None`` if absent."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_get_job(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            is_pg=self._dialect == "spangres",
+        )
+        row = await self._driver.select_one_or_none(sql, params)
+        if row is None or row.get("status") is None:
+            return None
+        return str(row["status"])
 
     async def list_entries(
         self,
@@ -1379,6 +1525,10 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
                 if row is None:
                     return None
                 await tx.execute("DELETE FROM vertebra_queue_dlq WHERE dlq_id = $1", (dlq_id,))
+                await tx.execute(
+                    f"DELETE FROM {self._table_name} WHERE shard_id = $1 AND task_id = $2 AND status = 'dead_letter'",
+                    (int(row["shard_id"]), str(row["task_id"])),
+                )
                 return dict(row)
             row = await tx.select_one_or_none(
                 "SELECT * FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id FOR UPDATE",
@@ -1387,6 +1537,11 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
             if row is None:
                 return None
             await tx.execute("DELETE FROM vertebra_queue_dlq WHERE dlq_id = @dlq_id", {"dlq_id": dlq_id})
+            await tx.execute(
+                f"DELETE FROM {self._table_name} "
+                "WHERE shard_id = @shard_id AND task_id = @task_id AND status = 'dead_letter'",
+                {"shard_id": int(row["shard_id"]), "task_id": str(row["task_id"])},
+            )
             return dict(row)
 
         return cast("dict[str, Any] | None", await self._driver.run_in_transaction(_tx_pop))

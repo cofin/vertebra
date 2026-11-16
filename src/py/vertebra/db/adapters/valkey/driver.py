@@ -14,6 +14,11 @@ from vertebra.db.adapters.valkey.core import (
     ValkeyCore,
     hash_slot,
 )
+from vertebra.db.adapters.valkey.notify import (
+    AsyncValkeyNotificationSource,
+    SyncValkeyNotificationSource,
+    ValkeyNotifyConfig,
+)
 from vertebra.db.driver import VALKEY_DIALECT_TAG, CommonDriverMixin
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
@@ -26,11 +31,6 @@ if TYPE_CHECKING:
         SyncValkeyClient,
         SyncValkeyListener,
         SyncValkeyPipeline,
-    )
-    from vertebra.db.adapters.valkey.notify import (
-        AsyncValkeyNotificationSource,
-        SyncValkeyNotificationSource,
-        ValkeyNotifyConfig,
     )
 
 __all__ = (
@@ -213,12 +213,12 @@ class SyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
             h = node[0] if isinstance(node, (tuple, list)) else node.split(":")[0]
             p = int(node[1]) if isinstance(node, (tuple, list)) else int(node.split(":")[1])
             mod = ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
-            sentinel_client = mod.SyncValkeyClient(
+            sentinel_cfg = mod.ValkeyClientConfig(
                 url=f"valkey://{h}:{p}/0",
                 client_name=self.config.client_name,
-                protocol=self.config.protocol,
-                topology="standalone",
+                protocol_resp3=(self.config.protocol == 3),
             )
+            sentinel_client = mod.SyncValkeyClient(sentinel_cfg)
             try:
                 raw = sentinel_client.execute_command("SENTINEL", "get-master-addr-by-name", name)
                 if isinstance(raw, (list, tuple)) and len(raw) >= 2:
@@ -226,15 +226,15 @@ class SyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
                     m_port = int(raw[1])
                     self._master_address = (m_host, m_port)
                     self._client.close()
-                    self._client = mod.SyncValkeyClient(
+                    master_cfg = mod.ValkeyClientConfig(
                         url=f"valkey://{m_host}:{m_port}/0",
                         username=self.config.username,
                         password=self.config.password,
                         client_name=self.config.client_name,
-                        protocol=self.config.protocol,
-                        topology="standalone",
-                        max_connections=self.config.max_connections,
+                        pool_max_size=self.config.max_connections,
+                        protocol_resp3=(self.config.protocol == 3),
                     )
+                    self._client = mod.SyncValkeyClient(master_cfg)
                     return m_host, m_port
             except Exception:
                 continue
@@ -456,8 +456,6 @@ class SyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
         change_feed: Any = None,
     ) -> SyncValkeyNotificationSource:
         """Create a synchronous notification source bound to this driver."""
-        from vertebra.db.adapters.valkey.notify import SyncValkeyNotificationSource
-
         return SyncValkeyNotificationSource(self, config=config, change_feed=change_feed)
 
     def close(self) -> None:
@@ -676,12 +674,12 @@ class AsyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
             h = node[0] if isinstance(node, (tuple, list)) else node.split(":")[0]
             p = int(node[1]) if isinstance(node, (tuple, list)) else int(node.split(":")[1])
             mod = ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
-            sentinel_client = mod.AsyncValkeyClient(
+            sentinel_cfg = mod.ValkeyClientConfig(
                 url=f"valkey://{h}:{p}/0",
                 client_name=self.config.client_name,
-                protocol=self.config.protocol,
-                topology="standalone",
+                protocol_resp3=(self.config.protocol == 3),
             )
+            sentinel_client = mod.AsyncValkeyClient(sentinel_cfg)
             try:
                 raw = await sentinel_client.execute_command("SENTINEL", "get-master-addr-by-name", name)
                 if isinstance(raw, (list, tuple)) and len(raw) >= 2:
@@ -689,15 +687,15 @@ class AsyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
                     m_port = int(raw[1])
                     self._master_address = (m_host, m_port)
                     await self._client.close()
-                    self._client = mod.AsyncValkeyClient(
+                    master_cfg = mod.ValkeyClientConfig(
                         url=f"valkey://{m_host}:{m_port}/0",
                         username=self.config.username,
                         password=self.config.password,
                         client_name=self.config.client_name,
-                        protocol=self.config.protocol,
-                        topology="standalone",
-                        max_connections=self.config.max_connections,
+                        pool_max_size=self.config.max_connections,
+                        protocol_resp3=(self.config.protocol == 3),
                     )
+                    self._client = mod.AsyncValkeyClient(master_cfg)
                     return m_host, m_port
             except Exception:
                 continue
@@ -911,8 +909,6 @@ class AsyncValkeyDriver(CommonDriverMixin[ValkeyConfig]):
         change_feed: Any = None,
     ) -> AsyncValkeyNotificationSource:
         """Create an asynchronous notification source bound to this driver."""
-        from vertebra.db.adapters.valkey.notify import AsyncValkeyNotificationSource
-
         return AsyncValkeyNotificationSource(self, config=config, change_feed=change_feed)
 
     async def close(self) -> None:

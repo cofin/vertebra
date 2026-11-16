@@ -11,6 +11,11 @@ from vertebra.db.adapters.redis.core import (
     PubSubMessage,
     hash_slot,
 )
+from vertebra.db.adapters.redis.notify import (
+    AsyncRedisNotificationSource,
+    RedisNotifyConfig,
+    SyncRedisNotificationSource,
+)
 from vertebra.db.driver import REDIS_DIALECT_TAG, CommonDriverMixin
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
@@ -23,11 +28,6 @@ if TYPE_CHECKING:
         SyncRedisClient,
         SyncRedisListener,
         SyncRedisPipeline,
-    )
-    from vertebra.db.adapters.redis.notify import (
-        AsyncRedisNotificationSource,
-        RedisNotifyConfig,
-        SyncRedisNotificationSource,
     )
 
 __all__ = (
@@ -331,8 +331,6 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
         change_feed: Any = None,
     ) -> SyncRedisNotificationSource:
         """Create a synchronous notification source bound to this driver."""
-        from vertebra.db.adapters.redis.notify import SyncRedisNotificationSource
-
         return SyncRedisNotificationSource(self, config=config, change_feed=change_feed)
 
     def close(self) -> None:
@@ -570,7 +568,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     async def reconnect(self, password: str | None = None) -> None:
         """Reconnect to Redis with an optional updated password."""
-        self._client.reconnect(password=password)
+        await self._client.reconnect(password=password)
 
     def notification_source(
         self,
@@ -579,8 +577,6 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
         change_feed: Any = None,
     ) -> AsyncRedisNotificationSource:
         """Create an asynchronous notification source bound to this driver."""
-        from vertebra.db.adapters.redis.notify import AsyncRedisNotificationSource
-
         return AsyncRedisNotificationSource(self, config=config, change_feed=change_feed)
 
     async def close(self) -> None:

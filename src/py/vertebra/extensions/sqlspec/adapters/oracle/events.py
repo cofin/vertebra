@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import threading
+import time
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -214,7 +216,11 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
         self._owns_source = False
         self._queue = queue or OracleEventQueueStore(config)
         self._subscribed: set[str] = set()
-        self._stream: Any = None
+        self._cond = threading.Condition()
+        self._raw_queues: dict[str, collections.deque[Any]] = collections.defaultdict(collections.deque)
+        self._pump_thread: threading.Thread | None = None
+        self._pump_done = False
+        self._pump_error: BaseException | None = None
         self._buffers: dict[str, collections.deque[EventMessage]] = collections.defaultdict(collections.deque)
         self._unacked: dict[str, tuple[str, EventMessage]] = {}
         self._closed = False
@@ -261,11 +267,52 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
         """Enqueue multiple Oracle events preserving input order."""
         return [self.publish(channel, payload, metadata) for channel, payload, metadata in events]
 
+    def _pump_sync_stream(self, source: SyncOracleNotificationSource) -> None:
+        try:
+            for raw_ev in source.listen():
+                if self._closed:
+                    break
+                ev_ch = normalize_event_channel_name(raw_ev.channel) if getattr(raw_ev, "channel", None) else ""
+                with self._cond:
+                    self._raw_queues[ev_ch].append(raw_ev)
+                    self._cond.notify_all()
+        except BaseException as exc:
+            with self._cond:
+                self._pump_error = exc
+                self._cond.notify_all()
+        finally:
+            with self._cond:
+                self._pump_done = True
+                self._cond.notify_all()
+
+    def _claim_table_row_sync(self, table_ref: str, norm_channel: str) -> tuple[Any, str] | None:
+        with self._config.provide_session() as driver:
+            row = driver.select_one_or_none(
+                f"SELECT event_id, channel, payload_json, metadata_json, attempts, available_at, created_at "
+                f"FROM {table_ref} WHERE channel = :channel AND status = 'pending' AND available_at <= SYSTIMESTAMP "
+                "ORDER BY available_at ASC FOR UPDATE SKIP LOCKED",
+                {"channel": norm_channel},
+            )
+            if row is None:
+                driver.rollback()
+                return None
+            ev_id = str(oracle_row_value(row, "event_id", 0))
+            res = driver.execute(
+                f"UPDATE {table_ref} SET status = 'leased', attempts = attempts + 1 "
+                "WHERE event_id = :event_id AND status = 'pending'",
+                {"event_id": ev_id},
+            )
+            rows_affected = getattr(res, "rows_affected", None)
+            affected = int(rows_affected) if rows_affected is not None else (int(res) if isinstance(res, int) else 1)
+            driver.commit()
+            if affected <= 0:
+                return None
+            return row, ev_id
+
     def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Dequeue the next Oracle AQ event or pending queue row for `channel`."""
         if self._closed:
             return None
-        _ = poll_interval
         norm_channel = normalize_event_channel_name(channel)
         buffered = self._buffers.get(norm_channel)
         if buffered:
@@ -277,32 +324,57 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
             if norm_channel not in self._subscribed:
                 self._source.subscribe([norm_channel])
                 self._subscribed.add(norm_channel)
-            if self._stream is None:
-                self._stream = iter(self._source.listen())
-            try:
-                raw_ev = next(self._stream)
-            except StopIteration:
+            raw_ev: Any = None
+            with self._cond:
+                raw_q = self._raw_queues[norm_channel]
+                if raw_q:
+                    raw_ev = raw_q.popleft()
+                else:
+                    if self._pump_thread is None or not self._pump_thread.is_alive():
+                        self._pump_done = False
+                        self._pump_error = None
+                        self._pump_thread = threading.Thread(
+                            target=self._pump_sync_stream,
+                            args=(self._source,),
+                            daemon=True,
+                        )
+                        self._pump_thread.start()
+                    if poll_interval <= 0:
+                        if not raw_q and not self._pump_done:
+                            self._cond.wait(timeout=0.01)
+                    else:
+                        deadline = time.monotonic() + float(poll_interval)
+                        while not raw_q and not self._pump_done and not self._closed:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            self._cond.wait(timeout=remaining)
+                    if self._pump_error is not None:
+                        err = self._pump_error
+                        self._pump_error = None
+                        raise err
+                    if raw_q:
+                        raw_ev = raw_q.popleft()
+            if raw_ev is None:
                 return None
             msg = _decode_aq_event(raw_ev.channel or norm_channel, raw_ev.payload, queue_store=self._queue)
             self._unacked[msg.event_id] = (norm_channel, msg)
             return msg
 
         table_ref = oracle_table_ref(self._queue.table_name)
-        with self._config.provide_session() as driver:
-            row = driver.select_one_or_none(
-                f"SELECT event_id, channel, payload_json, metadata_json, attempts, available_at, created_at "
-                f"FROM {table_ref} WHERE channel = :channel AND status = 'pending' "
-                "ORDER BY available_at ASC FETCH FIRST 1 ROWS ONLY",
-                {"channel": norm_channel},
-            )
-            if row is None:
-                return None
-            ev_id = str(oracle_row_value(row, "event_id", 0))
-            driver.execute(
-                f"UPDATE {table_ref} SET status = 'leased', attempts = attempts + 1 WHERE event_id = :event_id",
-                {"event_id": ev_id},
-            )
-            driver.commit()
+        deadline = time.monotonic() + max(0.0, float(poll_interval))
+        claimed: tuple[Any, str] | None = None
+        while not self._closed:
+            claimed = self._claim_table_row_sync(table_ref, norm_channel)
+            if claimed is not None or poll_interval <= 0:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+        if claimed is None:
+            return None
+        row, ev_id = claimed
         payload_dec = oracle_json_loads(oracle_row_value(row, "payload_json", 2))
         meta_dec = oracle_json_loads(oracle_row_value(row, "metadata_json", 3))
         msg = EventMessage(
@@ -339,13 +411,19 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
 
     def shutdown(self) -> None:
         """Close owned Oracle notification sources and clear buffered messages."""
-        self._closed = True
-        self._unacked.clear()
-        self._buffers.clear()
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
         if self._source is not None and self._owns_source:
             with contextlib.suppress(Exception):
                 self._source.close()
-        self._stream = None
+        if self._pump_thread is not None and self._pump_thread.is_alive():
+            self._pump_thread.join(timeout=0.2)
+        with self._cond:
+            self._pump_thread = None
+            self._raw_queues.clear()
+            self._unacked.clear()
+            self._buffers.clear()
 
 
 class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
@@ -367,7 +445,9 @@ class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
         self._owns_source = False
         self._queue = queue or OracleEventQueueStore(config)
         self._subscribed: set[str] = set()
-        self._stream: Any = None
+        self._channel_queues: dict[str, asyncio.Queue[Any]] = {}
+        self._pump_task: asyncio.Task[None] | None = None
+        self._pump_error: BaseException | None = None
         self._buffers: dict[str, collections.deque[EventMessage]] = collections.defaultdict(collections.deque)
         self._unacked: dict[str, tuple[str, EventMessage]] = {}
         self._closed = False
@@ -405,6 +485,43 @@ class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
             ids.append(await self.publish(channel, payload, metadata))
         return ids
 
+    async def _pump_stream(self, source: AsyncOracleNotificationSource) -> None:
+        try:
+            async for raw_ev in source.listen():
+                if self._closed:
+                    break
+                ev_ch = normalize_event_channel_name(raw_ev.channel) if getattr(raw_ev, "channel", None) else ""
+                q = self._channel_queues.setdefault(ev_ch, asyncio.Queue())
+                q.put_nowait(raw_ev)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._pump_error = exc
+
+    async def _claim_table_row_async(self, table_ref: str, norm_channel: str) -> tuple[Any, str] | None:
+        async with self._config.provide_session() as driver:
+            row = await driver.select_one_or_none(
+                f"SELECT event_id, channel, payload_json, metadata_json, attempts, available_at, created_at "
+                f"FROM {table_ref} WHERE channel = :channel AND status = 'pending' AND available_at <= SYSTIMESTAMP "
+                "ORDER BY available_at ASC FOR UPDATE SKIP LOCKED",
+                {"channel": norm_channel},
+            )
+            if row is None:
+                await driver.rollback()
+                return None
+            ev_id = str(oracle_row_value(row, "event_id", 0))
+            res = await driver.execute(
+                f"UPDATE {table_ref} SET status = 'leased', attempts = attempts + 1 "
+                "WHERE event_id = :event_id AND status = 'pending'",
+                {"event_id": ev_id},
+            )
+            rows_affected = getattr(res, "rows_affected", None)
+            affected = int(rows_affected) if rows_affected is not None else (int(res) if isinstance(res, int) else 1)
+            await driver.commit()
+            if affected <= 0:
+                return None
+            return row, ev_id
+
     async def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Asynchronously dequeue the next Oracle AQ event or pending queue row."""
         if self._closed:
@@ -420,33 +537,64 @@ class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
             if norm_channel not in self._subscribed:
                 await self._source.subscribe([norm_channel])
                 self._subscribed.add(norm_channel)
-            if self._stream is None:
-                self._stream = aiter(self._source.listen())
-            try:
-                coro = anext(self._stream)
-                raw_ev = await (asyncio.wait_for(coro, timeout=poll_interval) if poll_interval > 0 else coro)
-            except (StopAsyncIteration, TimeoutError):
+            q = self._channel_queues.setdefault(norm_channel, asyncio.Queue())
+            raw_ev: Any = None
+            if not q.empty():
+                raw_ev = q.get_nowait()
+            else:
+                if self._pump_task is None or self._pump_task.done():
+                    if self._pump_error is not None:
+                        err = self._pump_error
+                        self._pump_error = None
+                        raise err
+                    self._pump_task = asyncio.create_task(self._pump_stream(self._source))
+                if poll_interval <= 0:
+                    await asyncio.sleep(0)
+                    if self._pump_error is not None:
+                        err = self._pump_error
+                        self._pump_error = None
+                        raise err
+                    if not q.empty():
+                        raw_ev = q.get_nowait()
+                else:
+                    get_task = asyncio.create_task(q.get())
+                    done, _ = await asyncio.wait(
+                        {get_task, self._pump_task},
+                        timeout=poll_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if get_task in done:
+                        raw_ev = get_task.result()
+                    else:
+                        get_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await get_task
+                        if self._pump_error is not None:
+                            err = self._pump_error
+                            self._pump_error = None
+                            raise err
+                        if not q.empty():
+                            raw_ev = q.get_nowait()
+            if raw_ev is None:
                 return None
             msg = _decode_aq_event(raw_ev.channel or norm_channel, raw_ev.payload, queue_store=self._queue)
             self._unacked[msg.event_id] = (norm_channel, msg)
             return msg
 
         table_ref = oracle_table_ref(self._queue.table_name)
-        async with self._config.provide_session() as driver:
-            row = await driver.select_one_or_none(
-                f"SELECT event_id, channel, payload_json, metadata_json, attempts, available_at, created_at "
-                f"FROM {table_ref} WHERE channel = :channel AND status = 'pending' "
-                "ORDER BY available_at ASC FETCH FIRST 1 ROWS ONLY",
-                {"channel": norm_channel},
-            )
-            if row is None:
-                return None
-            ev_id = str(oracle_row_value(row, "event_id", 0))
-            await driver.execute(
-                f"UPDATE {table_ref} SET status = 'leased', attempts = attempts + 1 WHERE event_id = :event_id",
-                {"event_id": ev_id},
-            )
-            await driver.commit()
+        deadline = time.monotonic() + max(0.0, float(poll_interval))
+        claimed: tuple[Any, str] | None = None
+        while not self._closed:
+            claimed = await self._claim_table_row_async(table_ref, norm_channel)
+            if claimed is not None or poll_interval <= 0:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
+        if claimed is None:
+            return None
+        row, ev_id = claimed
         payload_dec = oracle_json_loads(oracle_row_value(row, "payload_json", 2))
         meta_dec = oracle_json_loads(oracle_row_value(row, "metadata_json", 3))
         msg = EventMessage(
@@ -485,9 +633,14 @@ class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
     async def shutdown(self) -> None:
         """Asynchronously close owned Oracle notification sources and clear buffered work."""
         self._closed = True
+        if self._pump_task is not None:
+            self._pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._pump_task
+            self._pump_task = None
+        self._channel_queues.clear()
         self._unacked.clear()
         self._buffers.clear()
         if self._source is not None and self._owns_source:
             with contextlib.suppress(Exception):
                 await self._source.aclose()
-        self._stream = None

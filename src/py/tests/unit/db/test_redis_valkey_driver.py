@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
+import os
+import time
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import vertebra._vertebra as core_mod
+import vertebra.db.adapters.redis.notify as redis_notify_mod
+import vertebra.db.adapters.valkey.driver as valkey_driver_mod
 from vertebra.db import DatabaseRegistry, ProgrammingError
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
     SyncRedisDriver,
+)
+from vertebra.db.adapters.redis.notify import (
+    AsyncRedisNotificationSource,
+    RedisNotifyConfig,
 )
 from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
@@ -660,8 +670,6 @@ def test_redis_drivers_and_store_factories_reject_memory_url(factory: Callable[[
 
 def test_legacy_resp3_bindings_removed_from_vertebra_core() -> None:
     """Legacy RESP3 functions must not be exposed by vertebra._vertebra."""
-    import vertebra._vertebra as core_mod
-
     assert not hasattr(core_mod, "encode_resp_command")
     assert not hasattr(core_mod, "encode_hello3_handshake")
     assert not hasattr(core_mod, "crc16_xmodem")
@@ -671,8 +679,6 @@ def test_legacy_resp3_bindings_removed_from_vertebra_core() -> None:
 
 def test_sync_valkey_9_hash_field_expiration(resp3_server: Resp3FakeServer) -> None:
     """SyncValkeyDriver executes Valkey 9.0 hash-field expiration commands."""
-    import time
-
     driver = SyncValkeyDriver(ValkeyConfig(url=resp3_server.valkey_url))
     try:
         driver.execute_command("HSET", "myhash", "f1", "v1", "f2", "v2", "f3", "v3")
@@ -703,8 +709,6 @@ def test_sync_valkey_9_hash_field_expiration(resp3_server: Resp3FakeServer) -> N
 @pytest.mark.anyio
 async def test_async_valkey_9_hash_field_expiration(resp3_server: Resp3FakeServer) -> None:
     """AsyncValkeyDriver executes Valkey 9.0 hash-field expiration commands."""
-    import time
-
     driver = AsyncValkeyDriver(ValkeyConfig(url=resp3_server.valkey_url))
     try:
         await driver.execute_command("HSET", "myhash_async", "f1", "v1", "f2", "v2")
@@ -744,3 +748,211 @@ def test_valkey_client_capa_negotiation(resp3_server: Resp3FakeServer) -> None:
         assert "CLIENT" in commands
     finally:
         driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_redis_driver_reconnect_awaits_native_client() -> None:
+    """AsyncRedisDriver.reconnect awaits the native AsyncRedisClient.reconnect coroutine."""
+    reconnected_passwords: list[str | None] = []
+
+    class _FakeAsyncRedisClient:
+        async def reconnect(self, password: str | None = None) -> None:
+            await asyncio.sleep(0)
+            reconnected_passwords.append(password)
+
+        def close(self) -> None:
+            return None
+
+    fake_client: Any = _FakeAsyncRedisClient()
+    driver = AsyncRedisDriver.__new__(AsyncRedisDriver)
+    driver._active_listener = None
+    driver._client = fake_client
+    await driver.reconnect(password="rotated-token")
+    assert reconnected_passwords == ["rotated-token"]
+    await driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_redis_notification_source_nonblocking_notifier_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AsyncRedisNotificationSource uses submit_*subscribe, notifier_fd, and drain_* without blocking calls."""
+    monkeypatch.setattr(redis_notify_mod, "ensure_module", lambda *_args, **_kwargs: object())
+    r_fd, w_fd = os.pipe()
+    os.set_blocking(r_fd, False)
+
+    class _FakeNonBlockingListener:
+        def __init__(self, *, fail_subscribe: bool = False) -> None:
+            self.closed = False
+            self.submitted_channels: list[list[str]] = []
+            self._fail_subscribe = fail_subscribe
+            self._next_op_id = 0
+            self._completions: collections.deque[tuple[int, bool, str | None]] = collections.deque()
+            self._messages: collections.deque[tuple[str, str, bytes, str | None]] = collections.deque()
+
+        def notifier_fd(self) -> int:
+            return r_fd
+
+        def submit_subscribe(self, channels: list[str]) -> int:
+            self._next_op_id += 1
+            op_id = self._next_op_id
+            self.submitted_channels.append(list(channels))
+            if self._fail_subscribe:
+                self._completions.append((op_id, False, "ERR acl denied"))
+            else:
+                self._completions.append((op_id, True, None))
+            os.write(w_fd, b"\x01")
+            return op_id
+
+        def subscribe(self, _channels: list[str]) -> None:
+            raise AssertionError("Blocking subscribe must not be called when notifier_fd is active")
+
+        def next_message(self, _timeout_ms: int) -> Any:
+            raise AssertionError("Blocking next_message must not be called when notifier_fd is active")
+
+        def drain_completions(self) -> list[tuple[int, bool, str | None]]:
+            items = list(self._completions)
+            self._completions.clear()
+            return items
+
+        def drain_messages(self) -> list[tuple[str, str, bytes, str | None]]:
+            items = list(self._messages)
+            self._messages.clear()
+            return items
+
+        def push_message(self, channel: str, payload: bytes) -> None:
+            self._messages.append(("message", channel, payload, None))
+            os.write(w_fd, b"\x01")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeClient:
+        def __init__(self, listener: _FakeNonBlockingListener) -> None:
+            self._listener = listener
+
+        def listener(self) -> _FakeNonBlockingListener:
+            return self._listener
+
+    try:
+        ok_listener = _FakeNonBlockingListener()
+        client_arg: Any = _FakeClient(ok_listener)
+        source = AsyncRedisNotificationSource(
+            config=RedisNotifyConfig(channels=("jobs",), timeout_ms=25),
+            client=client_arg,
+        )
+
+        async def _consume_one() -> tuple[str, bytes]:
+            async for item in source.listen():
+                return item.channel, item.payload
+            msg = "Stream ended unexpectedly"
+            raise AssertionError(msg)
+
+        first_event_task: asyncio.Task[tuple[str, bytes]] = asyncio.create_task(_consume_one())
+        await asyncio.sleep(0.01)
+        assert source._reader_registered is True
+        assert ok_listener.submitted_channels == [["jobs"]]
+        ok_listener.push_message("jobs", b"wakeup-1")
+        ch_name, payload_bytes = await asyncio.wait_for(first_event_task, timeout=1.0)
+        assert ch_name == "jobs"
+        assert payload_bytes == b"wakeup-1"
+        await source.aclose()
+        assert source._reader_registered is False
+        assert ok_listener.closed is True
+
+        err_listener = _FakeNonBlockingListener(fail_subscribe=True)
+        err_client_arg: Any = _FakeClient(err_listener)
+        err_source = AsyncRedisNotificationSource(
+            config=RedisNotifyConfig(channels=("restricted",), timeout_ms=25),
+            client=err_client_arg,
+        )
+        with pytest.raises(ProgrammingError, match="ERR acl denied"):
+            await err_source.listen().__anext__()
+        await err_source.aclose()
+    finally:
+        os.close(r_fd)
+        os.close(w_fd)
+
+
+@pytest.mark.anyio
+async def test_valkey_discover_sentinel_master_passes_valkey_client_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SyncValkeyDriver and AsyncValkeyDriver discover_sentinel_master pass ValkeyClientConfig instances."""
+    constructed_sync_configs: list[Any] = []
+    constructed_async_configs: list[Any] = []
+
+    class _FakeValkeyClientConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.url = kwargs["url"]
+
+    class _FakeSyncValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            if not isinstance(cfg, _FakeValkeyClientConfig):
+                msg = f"Expected ValkeyClientConfig, got {type(cfg).__name__}"
+                raise TypeError(msg)
+            self.cfg = cfg
+            self.closed = False
+            constructed_sync_configs.append(cfg)
+
+        def execute_command(self, *parts: Any) -> Any:
+            assert parts[:2] == ("SENTINEL", "get-master-addr-by-name")
+            if "26379" in self.cfg.url:
+                raise ConnectionError("seed 1 down")
+            return [b"10.0.0.9", b"6380"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeAsyncValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            if not isinstance(cfg, _FakeValkeyClientConfig):
+                msg = f"Expected ValkeyClientConfig, got {type(cfg).__name__}"
+                raise TypeError(msg)
+            self.cfg = cfg
+            self.closed = False
+            constructed_async_configs.append(cfg)
+
+        async def execute_command(self, *parts: Any) -> Any:
+            assert parts[:2] == ("SENTINEL", "get-master-addr-by-name")
+            if "26379" in self.cfg.url:
+                raise ConnectionError("seed 1 down")
+            return [b"10.0.0.11", b"6381"]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FakeValkeyModule:
+        ValkeyClientConfig = _FakeValkeyClientConfig
+        SyncValkeyClient = _FakeSyncValkeyClient
+        AsyncValkeyClient = _FakeAsyncValkeyClient
+
+    monkeypatch.setattr(valkey_driver_mod, "ensure_module", lambda *_args, **_kwargs: _FakeValkeyModule)
+
+    valkey_cfg = ValkeyConfig(
+        url="valkey://127.0.0.1:6379/0",
+        topology="sentinel",
+        sentinel_master_name="mymaster",
+        sentinel_nodes=(("127.0.0.1", 26379), ("127.0.0.1", 26380)),
+        username="svc",
+        password="secret",
+        client_name="vtb-sentinel",
+    )
+
+    sync_driver = SyncValkeyDriver(valkey_cfg)
+    initial_sync_client: Any = sync_driver._client
+    assert sync_driver.discover_sentinel_master() == ("10.0.0.9", 6380)
+    assert initial_sync_client.closed is True
+    assert constructed_sync_configs[-1].url == "valkey://10.0.0.9:6380/0"
+    assert constructed_sync_configs[-1].kwargs["username"] == "svc"
+    assert constructed_sync_configs[-1].kwargs["password"] == "secret"
+    sync_driver.close()
+
+    async_driver = AsyncValkeyDriver(valkey_cfg)
+    initial_async_client: Any = async_driver._client
+    assert await async_driver.discover_sentinel_master() == ("10.0.0.11", 6381)
+    assert initial_async_client.closed is True
+    active_async_client: Any = async_driver._client
+    assert active_async_client.cfg.url == "valkey://10.0.0.11:6381/0"
+    assert active_async_client.cfg.kwargs["username"] == "svc"
+    assert active_async_client.cfg.kwargs["password"] == "secret"
+    await async_driver.close()

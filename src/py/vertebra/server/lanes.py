@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import logging
 import signal
@@ -36,6 +37,7 @@ __all__ = (
 )
 
 QUEUE_SERVICE_STATE_KEY: Final[str] = "vertebra_queue_service"
+_HELD_LANE_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar("vertebra_held_lane_key", default=None)
 
 log = logging.getLogger(__name__)
 
@@ -73,12 +75,15 @@ class WorkerRunner:
 
     __slots__ = (
         "_container",
+        "_envelope_tasks",
         "_heartbeat_interval_seconds",
         "_in_flight",
         "_lame_duck",
         "_lanes",
+        "_last_reap_at",
         "_metrics",
         "_queue_service",
+        "_reap_interval_seconds",
         "_scheduler",
         "_semaphores",
         "_span_exporter",
@@ -95,12 +100,14 @@ class WorkerRunner:
         scheduler: CronScheduler | None = None,
         container: Container | None = None,
         heartbeat_interval_seconds: float = 10.0,
+        reap_interval_seconds: float = 60.0,
     ) -> None:
         self._lanes: dict[str, LaneConfig] = {lane.queue_name: lane for lane in lanes}
         self._semaphores: dict[str, asyncio.Semaphore] = {
-            lane.queue_name: asyncio.Semaphore(lane.concurrency) for lane in lanes
+            lane.queue_name: asyncio.Semaphore(max(1, lane.concurrency)) for lane in lanes
         }
         self._in_flight: set[asyncio.Task[Any]] = set()
+        self._envelope_tasks: set[asyncio.Task[Any]] = set()
         self._stopping = False
         self._queue_service = queue_service
         self._lame_duck = lame_duck or LameDuckController()
@@ -108,6 +115,8 @@ class WorkerRunner:
         self._scheduler = scheduler
         self._container = container
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._reap_interval_seconds = max(0.0, reap_interval_seconds)
+        self._last_reap_at: float = 0.0
         self._metrics: dict[str, LaneMetrics] = {
             lane.queue_name: LaneMetrics(queue_name=lane.queue_name) for lane in lanes
         }
@@ -116,6 +125,11 @@ class WorkerRunner:
     def lanes(self) -> dict[str, LaneConfig]:
         """Return configured worker lanes keyed by queue name."""
         return dict(self._lanes)
+
+    @property
+    def metrics(self) -> dict[str, LaneMetrics]:
+        """Return current observability metrics keyed by configured queue name."""
+        return dict(self._metrics)
 
     @property
     def lame_duck(self) -> LameDuckController:
@@ -143,6 +157,11 @@ class WorkerRunner:
         return self._heartbeat_interval_seconds
 
     @property
+    def reap_interval_seconds(self) -> float:
+        """Return the interval in seconds between stale-lease reap maintenance sweeps."""
+        return self._reap_interval_seconds
+
+    @property
     def is_stopping(self) -> bool:
         """Return whether runner shutdown has commenced."""
         return self._stopping
@@ -156,17 +175,21 @@ class WorkerRunner:
         if self._stopping:
             msg = f"Cannot submit job to lane {queue_name!r} while runner is stopping"
             raise RuntimeError(msg)
-        semaphore = self._semaphores.get(queue_name)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(10)
-            self._semaphores[queue_name] = semaphore
+        lane_key = self._resolve_lane_key(queue_name)
+        semaphore = self._ensure_semaphore(lane_key)
 
         async def _guarded() -> Any:
             async with semaphore:
-                res = job_factory()
-                if inspect.isawaitable(res):
-                    return await res
-                return res
+                tok = _HELD_LANE_KEY.set(lane_key)
+                self._adjust_in_flight_metric(lane_key, 1)
+                try:
+                    res = job_factory()
+                    if inspect.isawaitable(res):
+                        return await res
+                    return res
+                finally:
+                    self._adjust_in_flight_metric(lane_key, -1)
+                    _HELD_LANE_KEY.reset(tok)
 
         task = asyncio.create_task(_guarded())
         self._in_flight.add(task)
@@ -174,126 +197,30 @@ class WorkerRunner:
         return task
 
     async def process_once(self) -> int:
-        """Pull and process a single task batch across configured lanes, recording telemetry."""
+        """Pull and concurrently process a task batch up to configured lane concurrency."""
         if self._queue_service is None:
             return 0
 
-        target_lanes: list[TaskLane] = []
-        for lane in self._lanes.values():
-            if lane.lane_kind not in target_lanes:
-                target_lanes.append(lane.lane_kind)
-        if not target_lanes:
-            target_lanes = ["cpu", "io", "agent"]
-
-        envelopes = await self._queue_service.backend.dequeue(target_lanes, batch_size=1)
+        await self._maybe_reap_stale()
+        target_lanes = self._target_lanes()
+        batch_limit = self._total_concurrency()
+        envelopes = await self._queue_service.backend.dequeue(target_lanes, batch_size=batch_limit)
         if not envelopes:
             return 0
 
-        env = envelopes[0]
-        semaphore = self._semaphores.get(env.lane)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(10)
-            self._semaphores[env.lane] = semaphore
-
-        async with semaphore:
-            return await self._process_envelope_guarded(env)
-
-    async def _process_envelope_guarded(self, env: TaskEnvelope) -> int:
-        """Execute single task envelope with lease heartbeats, scoped DI, and OpenTelemetry spans."""
-        start_nano = time.time_ns()
-        parent_ctx = TraceContext.parse(env.traceparent) if env.traceparent else None
-        active_trace = parent_ctx.new_child() if parent_ctx else TraceContext.generate()
-        token = TraceContext.set_current(active_trace)
-
-        status = "ok"
-        err_str: str | None = None
-        assert self._queue_service is not None
-        backend = self._queue_service.backend
-        store = getattr(backend, "store", None) or getattr(backend, "_store", None)
-        heartbeat_task: asyncio.Task[None] | None = None
-        stop_heartbeat = asyncio.Event()
-
-        if store is not None and hasattr(store, "heartbeat") and callable(store.heartbeat):
-
-            async def _heartbeat_loop() -> None:
-                while not stop_heartbeat.is_set():
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=self._heartbeat_interval_seconds)
-                    if stop_heartbeat.is_set():
-                        break
-                    with contextlib.suppress(Exception):
-                        res = store.heartbeat(
-                            [env.task_id],
-                            worker_id="worker",
-                            lease_seconds=self._heartbeat_interval_seconds * 3,
-                        )
-                        if inspect.isawaitable(res):
-                            await res
-
-            heartbeat_task = asyncio.create_task(_heartbeat_loop())
-
-        try:
-            await self._queue_service.process_envelope(env, container=self._container)
-            m = self._metrics.get(env.lane)
-            if m:
-                self._metrics[env.lane] = LaneMetrics(
-                    queue_name=env.lane,
-                    processed_total=m.processed_total + 1,
-                    failed_total=m.failed_total,
-                    dlq_total=m.dlq_total,
-                )
-        except Exception as exc:
-            status = "error"
-            err_str = str(exc)
-            m = self._metrics.get(env.lane)
-            if m:
-                self._metrics[env.lane] = LaneMetrics(
-                    queue_name=env.lane,
-                    processed_total=m.processed_total,
-                    failed_total=m.failed_total + 1,
-                    dlq_total=m.dlq_total + (1 if env.attempt >= env.max_retries else 0),
-                )
-            raise
-        finally:
-            stop_heartbeat.set()
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat_task
-            if store is not None and hasattr(store, "reap_stale") and callable(store.reap_stale):
-                with contextlib.suppress(Exception):
-                    res = store.reap_stale()
-                    if inspect.isawaitable(res):
-                        await res
-            end_nano = time.time_ns()
-            old_ctx = getattr(token, "old_value", None)
-            TraceContext.set_current(old_ctx if isinstance(old_ctx, TraceContext) else None)
-            if self._span_exporter is not None:
-                backend_scheme = self._queue_service.config.backend_url.split("://")[0]
-                attrs: dict[str, Any] = {
-                    "messaging.system": backend_scheme,
-                    "messaging.destination.name": env.lane,
-                    "messaging.message.id": env.task_id,
-                    "messaging.operation": "process",
-                    "messaging.worker.lane": env.lane,
-                    "messaging.message.attempt": env.attempt,
-                    "status": status,
-                }
-                if err_str:
-                    attrs["error.message"] = err_str
-                span = SpanData(
-                    name=f"messaging.process {env.task_name}",
-                    trace_id=active_trace.trace_id,
-                    span_id=active_trace.span_id,
-                    parent_span_id=parent_ctx.span_id if parent_ctx else None,
-                    start_ns=start_nano,
-                    duration_ns=end_nano - start_nano,
-                    status_code=200 if status == "ok" else 500,
-                    attributes=attrs,
-                )
-                self._span_exporter.record_span(span)
-
-        return 1
+        held_lane = _HELD_LANE_KEY.get()
+        tasks = [
+            self._spawn_envelope_task(
+                env,
+                skip_semaphore=(len(envelopes) == 1 and held_lane == self._resolve_lane_key(env.lane)),
+            )
+            for env in envelopes
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for item in results:
+            if isinstance(item, BaseException):
+                raise item
+        return len(envelopes)
 
     async def run(
         self,
@@ -301,7 +228,7 @@ class WorkerRunner:
         install_signal_handlers: bool = False,
         poll_interval_s: float = 0.05,
     ) -> None:
-        """Run continuous pull loop across lanes until stopped."""
+        """Run continuous concurrent pull loop across lanes until stopped."""
         if install_signal_handlers:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
@@ -311,18 +238,45 @@ class WorkerRunner:
                         lambda: asyncio.create_task(self._handle_shutdown_signal()),
                     )
 
+        total_cap = self._total_concurrency()
         while not self._stopping:
             if self._scheduler is not None:
                 with contextlib.suppress(Exception):
                     await self._scheduler.tick()
-            processed = await self.process_once()
-            if processed == 0:
+            await self._maybe_reap_stale()
+            if self._queue_service is None:
                 await asyncio.sleep(poll_interval_s)
+                continue
 
-    async def _handle_shutdown_signal(self) -> None:
-        """Trigger graceful lame-duck transition and stop."""
-        self._lame_duck.enter_lame_duck()
-        await self.stop()
+            available = max(0, total_cap - len(self._envelope_tasks))
+            if available == 0:
+                if self._envelope_tasks:
+                    await asyncio.wait(
+                        tuple(self._envelope_tasks),
+                        timeout=poll_interval_s,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    await asyncio.sleep(poll_interval_s)
+                continue
+
+            envelopes = await self._queue_service.backend.dequeue(
+                self._target_lanes(),
+                batch_size=available,
+            )
+            if not envelopes:
+                if self._envelope_tasks:
+                    await asyncio.wait(
+                        tuple(self._envelope_tasks),
+                        timeout=poll_interval_s,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    await asyncio.sleep(poll_interval_s)
+                continue
+
+            for env in envelopes:
+                self._spawn_envelope_task(env)
 
     async def stop(self) -> None:
         """Stop accepting new jobs and drain in-flight tasks within drain timeout."""
@@ -331,9 +285,16 @@ class WorkerRunner:
         if not self._in_flight:
             return
         max_timeout = max((lane.drain_timeout_s for lane in self._lanes.values()), default=30.0)
-        pending = tuple(self._in_flight)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=max_timeout)
+        deadline = time.monotonic() + max_timeout
+        while self._in_flight:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pending = tuple(self._in_flight)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=remaining)
+            if any(not t.done() for t in pending):
+                break
 
     @staticmethod
     def parse_lanes(
@@ -484,6 +445,202 @@ class WorkerRunner:
             log.exception("Oneshot job %r failed with unhandled exception", job_name)
             return 1
         return 0
+
+    def _resolve_lane_key(self, lane_or_queue: str) -> str:
+        """Resolve a configured queue_name key from either queue_name or TaskLane kind."""
+        if lane_or_queue in self._lanes:
+            return lane_or_queue
+        for key, cfg in self._lanes.items():
+            if cfg.lane_kind == lane_or_queue:
+                return key
+        return lane_or_queue
+
+    def _ensure_semaphore(self, lane_key: str) -> asyncio.Semaphore:
+        """Return or initialize the admission semaphore for lane_key."""
+        semaphore = self._semaphores.get(lane_key)
+        if semaphore is None:
+            cfg = self._lanes.get(lane_key)
+            limit = max(1, cfg.concurrency) if cfg is not None else 10
+            semaphore = asyncio.Semaphore(limit)
+            self._semaphores[lane_key] = semaphore
+        if lane_key not in self._metrics:
+            self._metrics[lane_key] = LaneMetrics(queue_name=lane_key)
+        return semaphore
+
+    def _target_lanes(self) -> list[TaskLane]:
+        """Return unique TaskLane kinds configured on this runner."""
+        target_lanes: list[TaskLane] = []
+        for lane in self._lanes.values():
+            if lane.lane_kind not in target_lanes:
+                target_lanes.append(lane.lane_kind)
+        if not target_lanes:
+            target_lanes = ["cpu", "io", "agent"]
+        return target_lanes
+
+    def _total_concurrency(self) -> int:
+        """Return total concurrent task capacity across configured lanes."""
+        if not self._lanes:
+            return 10
+        return max(1, sum(max(1, lane.concurrency) for lane in self._lanes.values()))
+
+    def _adjust_in_flight_metric(self, lane_key: str, delta: int) -> None:
+        """Increment or decrement the in_flight counter for lane_key."""
+        cur = self._metrics.get(lane_key) or LaneMetrics(queue_name=lane_key)
+        self._metrics[lane_key] = LaneMetrics(
+            queue_name=cur.queue_name,
+            in_flight=max(0, cur.in_flight + delta),
+            processed_total=cur.processed_total,
+            failed_total=cur.failed_total,
+            dlq_total=cur.dlq_total,
+        )
+
+    def _spawn_envelope_task(self, env: TaskEnvelope, *, skip_semaphore: bool = False) -> asyncio.Task[int]:
+        """Spawn a tracked asyncio.Task executing env under its resolved lane semaphore."""
+        lane_key = self._resolve_lane_key(env.lane)
+        semaphore = self._ensure_semaphore(lane_key)
+
+        async def _runner() -> int:
+            if skip_semaphore:
+                return await self._process_envelope_guarded(env, lane_key=lane_key, track_metric=False)
+            async with semaphore:
+                return await self._process_envelope_guarded(env, lane_key=lane_key, track_metric=True)
+
+        task = asyncio.create_task(_runner())
+        self._in_flight.add(task)
+        self._envelope_tasks.add(task)
+        task.add_done_callback(self._in_flight.discard)
+        task.add_done_callback(self._envelope_tasks.discard)
+        return task
+
+    async def _maybe_reap_stale(self, *, force: bool = False) -> int:
+        """Run store.reap_stale() at most once per reap_interval_seconds maintenance window."""
+        if self._queue_service is None:
+            return 0
+        now = time.monotonic()
+        if not force and self._last_reap_at > 0.0 and (now - self._last_reap_at) < self._reap_interval_seconds:
+            return 0
+        backend = self._queue_service.backend
+        store = getattr(backend, "store", None) or getattr(backend, "_store", None)
+        if store is None or not hasattr(store, "reap_stale") or not callable(store.reap_stale):
+            self._last_reap_at = now
+            return 0
+        self._last_reap_at = now
+        with contextlib.suppress(Exception):
+            res = store.reap_stale()
+            if inspect.isawaitable(res):
+                return int(await res)
+            return int(res)
+        return 0
+
+    async def _process_envelope_guarded(
+        self,
+        env: TaskEnvelope,
+        *,
+        lane_key: str | None = None,
+        track_metric: bool = True,
+    ) -> int:
+        """Execute single task envelope with lease heartbeats, scoped DI, and OpenTelemetry spans."""
+        resolved_key = lane_key or self._resolve_lane_key(env.lane)
+        if track_metric:
+            self._adjust_in_flight_metric(resolved_key, 1)
+
+        start_nano = time.time_ns()
+        parent_ctx = TraceContext.parse(env.traceparent) if env.traceparent else None
+        active_trace = parent_ctx.new_child() if parent_ctx else TraceContext.generate()
+        token = TraceContext.set_current(active_trace)
+
+        status = "ok"
+        err_str: str | None = None
+        assert self._queue_service is not None
+        backend = self._queue_service.backend
+        store = getattr(backend, "store", None) or getattr(backend, "_store", None)
+        worker_id = str(getattr(self._queue_service.config, "consumer_name", "worker"))
+        heartbeat_task: asyncio.Task[None] | None = None
+        stop_heartbeat = asyncio.Event()
+
+        if store is not None and hasattr(store, "heartbeat") and callable(store.heartbeat):
+
+            async def _heartbeat_loop() -> None:
+                while not stop_heartbeat.is_set():
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=self._heartbeat_interval_seconds)
+                    if stop_heartbeat.is_set():
+                        break
+                    with contextlib.suppress(Exception):
+                        res = store.heartbeat(
+                            [env.task_id],
+                            worker_id=worker_id,
+                            lease_seconds=self._heartbeat_interval_seconds * 3,
+                        )
+                        if inspect.isawaitable(res):
+                            await res
+
+            heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+        try:
+            await self._queue_service.process_envelope(env, container=self._container)
+            cur = self._metrics.get(resolved_key) or LaneMetrics(queue_name=resolved_key)
+            self._metrics[resolved_key] = LaneMetrics(
+                queue_name=cur.queue_name,
+                in_flight=cur.in_flight,
+                processed_total=cur.processed_total + 1,
+                failed_total=cur.failed_total,
+                dlq_total=cur.dlq_total,
+            )
+        except Exception as exc:
+            status = "error"
+            err_str = str(exc)
+            cur = self._metrics.get(resolved_key) or LaneMetrics(queue_name=resolved_key)
+            self._metrics[resolved_key] = LaneMetrics(
+                queue_name=cur.queue_name,
+                in_flight=cur.in_flight,
+                processed_total=cur.processed_total,
+                failed_total=cur.failed_total + 1,
+                dlq_total=cur.dlq_total + (1 if env.attempt >= env.max_retries else 0),
+            )
+            raise
+        finally:
+            stop_heartbeat.set()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+            if track_metric:
+                self._adjust_in_flight_metric(resolved_key, -1)
+            end_nano = time.time_ns()
+            old_ctx = getattr(token, "old_value", None)
+            TraceContext.set_current(old_ctx if isinstance(old_ctx, TraceContext) else None)
+            if self._span_exporter is not None:
+                backend_scheme = self._queue_service.config.backend_url.split("://")[0]
+                attrs: dict[str, Any] = {
+                    "messaging.system": backend_scheme,
+                    "messaging.destination.name": resolved_key,
+                    "messaging.message.id": env.task_id,
+                    "messaging.operation": "process",
+                    "messaging.worker.lane": env.lane,
+                    "messaging.message.attempt": env.attempt,
+                    "status": status,
+                }
+                if err_str:
+                    attrs["error.message"] = err_str
+                span = SpanData(
+                    name=f"messaging.process {env.task_name}",
+                    trace_id=active_trace.trace_id,
+                    span_id=active_trace.span_id,
+                    parent_span_id=parent_ctx.span_id if parent_ctx else None,
+                    start_ns=start_nano,
+                    duration_ns=end_nano - start_nano,
+                    status_code=200 if status == "ok" else 500,
+                    attributes=attrs,
+                )
+                self._span_exporter.record_span(span)
+
+        return 1
+
+    async def _handle_shutdown_signal(self) -> None:
+        """Trigger graceful lame-duck transition and stop."""
+        self._lame_duck.enter_lame_duck()
+        await self.stop()
 
 
 parse_lanes = WorkerRunner.parse_lanes

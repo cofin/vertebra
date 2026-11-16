@@ -1,4 +1,4 @@
-"""Unit and live-wire loopback tests for SyncPostgresPipeline and AsyncPostgresPipeline (`ch16:t04`)."""
+"""Unit and live-wire loopback tests for SyncPostgresPipeline and AsyncPostgresPipeline."""
 
 from __future__ import annotations
 

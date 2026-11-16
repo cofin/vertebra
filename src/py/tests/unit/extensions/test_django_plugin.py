@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import io
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import pyarrow as pa
 import pydantic
 import pytest
 from django.conf import settings
+from django.core.cache.backends.base import DEFAULT_TIMEOUT
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
@@ -377,9 +379,16 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
     assert direct_settings["PORT"] == 5432
     assert direct_settings["OPTIONS"]["pooler_mode"] == "session"
 
-    with pg_wrapper.schema_editor() as editor:
-        assert editor["pooler_mode"] == "session"
-        assert editor["settings"]["PORT"] == 5432
+    with pg_wrapper.schema_editor(atomic=False) as editor:
+        assert isinstance(editor, pg_wrapper.SchemaEditorClass)
+        assert pg_wrapper.settings_dict["HOST"] == "10.0.0.6"
+        assert pg_wrapper.settings_dict["PORT"] == 5432
+        assert pg_wrapper.pooler_config.pooler_mode == "session"
+        assert pg_wrapper.pooler_config.pgbouncer is False
+    assert pg_wrapper.settings_dict["HOST"] == "10.0.0.5"
+    assert pg_wrapper.settings_dict["PORT"] == 6432
+    assert pg_wrapper.pooler_config.pooler_mode == "transaction"
+    assert pg_wrapper.pooler_config.pgbouncer is True
 
     lease_id = pg_wrapper.acquire_lease()
     assert lease_id >= 0
@@ -459,6 +468,17 @@ async def test_django_cache_backend_sync_and_async_matrix(scheme: str, tmp_path:
         assert await cache.aget("k_am1") is None
         assert await cache.adelete("k_async2") is True
 
+        with pytest.raises(ValueError, match="Key 'num_sync' not found"):
+            cache.incr("num_sync", delta=10)
+        with pytest.raises(ValueError, match="Key 'num_sync' not found"):
+            cache.decr("num_sync", delta=3)
+        with pytest.raises(ValueError, match="Key 'num_async' not found"):
+            await cache.aincr("num_async", delta=20)
+        with pytest.raises(ValueError, match="Key 'num_async' not found"):
+            await cache.adecr("num_async", delta=5)
+
+        cache.set("num_sync", 0)
+        await cache.aset("num_async", 0)
         assert cache.incr("num_sync", delta=10) == 10
         assert cache.decr("num_sync", delta=3) == 7
         assert await cache.aincr("num_async", delta=20) == 20
@@ -485,6 +505,9 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
         "user:1": {"name": "Alice"},
         "user:2": {"name": "Bob"},
     }
+    with pytest.raises(ValueError, match="Key 'counter' not found"):
+        await cache.aincr("counter", delta=5)
+    await cache.aset("counter", 0)
     assert await cache.aincr("counter", delta=5) == 5
     assert await cache.adecr("counter", delta=2) == 3
 
@@ -1198,3 +1221,108 @@ def test_django_tasks_backend_and_worker_command() -> None:
     updated_async = async_mult_task.get_result(res_async.id)
     assert updated_async.status == TaskResultStatus.SUCCESSFUL
     assert cast(Any, updated_async.return_value) == 42
+
+
+@pytest.mark.anyio
+async def test_django_cache_relative_ttl_and_zero_timeout_semantics() -> None:
+    """CacheBackend passes relative TTL durations rather than epoch timestamps and honors <=0/None timeouts."""
+    cache = CacheBackend("memory://", {"TIMEOUT": 60, "KEY_PREFIX": "ttltest"})
+    recorded_ttls: list[float | None] = []
+    orig_sync_backend = cache._sync_backend
+
+    class _ProxySyncBackend:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def set(self, key: str, value: Any, expiration_time: float | None = None) -> None:
+            recorded_ttls.append(expiration_time)
+            self._inner.set(key, value, expiration_time=expiration_time)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    cast(Any, cache)._sync_backend = _ProxySyncBackend(orig_sync_backend)
+    try:
+        cache.set("default_ttl", "v1", timeout=DEFAULT_TIMEOUT)
+        cache.set("explicit_ttl", "v2", timeout=30)
+        cache.set("delta_ttl", "v3", timeout=dt.timedelta(seconds=45))
+        cache.set("forever_ttl", "v4", timeout=None)
+
+        assert recorded_ttls == [60.0, 30.0, 45.0, -1.0]
+        assert cache.get("forever_ttl") == "v4"
+
+        cache.set("default_ttl", "expired", timeout=0)
+        assert cache.get("default_ttl") is None
+
+        cache.set("explicit_ttl", "expired", timeout=-5)
+        assert cache.get("explicit_ttl") is None
+
+        assert cache.add("forever_ttl", "dup", timeout=0) is False
+        assert cache.get("forever_ttl") == "v4"
+        assert cache.add("never_stored", "skip", timeout=0) is True
+        assert cache.get("never_stored") is None
+
+        assert cache.touch("forever_ttl", timeout=0) is True
+        assert cache.get("forever_ttl") is None
+        assert cache.touch("forever_ttl", timeout=0) is False
+
+        cache.set_many({"m1": 1, "m2": 2}, timeout=30)
+        assert cache.get("m1") == 1
+        cache.set_many({"m1": 10, "m2": 20}, timeout=0)
+        assert cache.get("m1") is None
+        assert cache.get("m2") is None
+
+        await cache.aset("async_forever", "av", timeout=None)
+        assert await cache.aget("async_forever") == "av"
+        assert await cache.aadd("async_forever", "dup", timeout=0) is False
+        assert await cache.aadd("async_skip", "skip", timeout=-1) is True
+        assert await cache.aget("async_skip") is None
+        assert await cache.atouch("async_forever", timeout=0) is True
+        assert await cache.aget("async_forever") is None
+        assert await cache.atouch("async_forever", timeout=0) is False
+    finally:
+        cache.close()
+        await cache.aclose()
+
+
+def test_django_database_wrapper_cursor_select_to_arrow_and_schema(tmp_path: Path) -> None:
+    """select_to_arrow and select_to_schema execute SQL via self.cursor() when rows is None."""
+    sqlite_wrapper = SQLiteDatabaseWrapper({"NAME": str(tmp_path / "django_select_cursor.db")})
+    try:
+        with sqlite_wrapper.cursor() as cur:
+            cur.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT NOT NULL, qty INTEGER NOT NULL)")
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [1, "A-100", 10])
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [2, "B-200", 5])
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [3, "C-300", 1])
+
+        arrow_tbl = sqlite_wrapper.select_to_arrow(
+            "SELECT id, sku, qty FROM orders WHERE qty >= ? ORDER BY id",
+            [5],
+        )
+        assert isinstance(arrow_tbl, pa.Table)
+        assert arrow_tbl.num_rows == 2
+        assert arrow_tbl.column_names == ["id", "sku", "qty"]
+        assert arrow_tbl.to_pylist() == [
+            {"id": 1, "sku": "A-100", "qty": 10},
+            {"id": 2, "sku": "B-200", "qty": 5},
+        ]
+
+        empty_tbl = sqlite_wrapper.select_to_arrow(
+            "SELECT id, sku, qty FROM orders WHERE qty > ?",
+            [999],
+        )
+        assert isinstance(empty_tbl, pa.Table)
+        assert empty_tbl.num_rows == 0
+        assert empty_tbl.column_names == ["id", "sku", "qty"]
+
+        structs = sqlite_wrapper.select_to_schema(
+            "SELECT id, sku, qty FROM orders WHERE qty >= ? ORDER BY id",
+            [5],
+            schema_type=OrderRecord,
+        )
+        assert structs == [
+            OrderRecord(id=1, sku="A-100", qty=10),
+            OrderRecord(id=2, sku="B-200", qty=5),
+        ]
+    finally:
+        sqlite_wrapper.close()

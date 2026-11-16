@@ -59,14 +59,10 @@ class SyncOracleDialect(_SyncDialectMixin, BaseOracleDialect):
         """Compile a multi-table DELETE ... USING statement for Oracle."""
         return clause.to_sql()
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the Oracle dialect."""
-        if isinstance(col_type, type):
-            name = getattr(col_type, "__name__", "")
-            if name in ("Vector", "OracleVector", "BinaryJSON", "MsgspecJSON"):
-                return col_type()
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using Oracle colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)
 
 
 class AsyncOracleDialect(_AsyncDialectMixin, BaseOracleDialect):
@@ -107,11 +103,7 @@ class AsyncOracleDialect(_AsyncDialectMixin, BaseOracleDialect):
         """Compile a multi-table DELETE ... USING statement for Oracle."""
         return clause.to_sql()
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the Oracle dialect."""
-        if isinstance(col_type, type):
-            name = getattr(col_type, "__name__", "")
-            if name in ("Vector", "OracleVector", "BinaryJSON", "MsgspecJSON"):
-                return col_type()
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using Oracle colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)

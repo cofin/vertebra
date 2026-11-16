@@ -100,6 +100,8 @@ class _RecordingSyncSnapshot:
 
     def query(self, sql: str, parameters: Any = None, **kwargs: Any) -> list[dict[str, Any]]:
         self.parent.calls.append(("snapshot_query", (sql, parameters, self.staleness), dict(kwargs)))
+        if self.parent.description_cols:
+            return [dict(zip(self.parent.description_cols, row, strict=False)) for row in self.parent.description_rows]
         return list(self.parent.select_rows)
 
     def close(self) -> None:
@@ -216,6 +218,8 @@ class _RecordingAsyncSnapshot:
 
     async def query(self, sql: str, parameters: Any = None, **kwargs: Any) -> list[dict[str, Any]]:
         self.parent.calls.append(("snapshot_query", (sql, parameters, self.staleness), dict(kwargs)))
+        if self.parent.description_cols:
+            return [dict(zip(self.parent.description_cols, row, strict=False)) for row in self.parent.description_rows]
         return list(self.parent.select_rows)
 
     async def close(self) -> None:
@@ -557,7 +561,7 @@ def test_spanner_async_provide_session_and_driver() -> None:
     )
 
     async def _run() -> None:
-        async with cfg.provide_session(transaction=False) as ro:
+        async with cfg.provide_session(transaction=False, read_only=True) as ro:
             assert ro.is_read_only is True
             rows = await ro.select("SELECT id, name FROM users")
             assert rows == [{"id": 2, "name": "bob"}]
@@ -760,6 +764,7 @@ def test_spanner_stores_adk_artifacts_events_and_litestar() -> None:
     )
     assert len(rrf_hits) == 2 and rrf_hits[0]["id"] == "mem-1"
 
+    google_native.select_rows = []
     google_native.description_cols = []
     google_native.description_rows = []
     art_store = SpannerSyncADKArtifactStore(google_cfg, storage_backend=backend)

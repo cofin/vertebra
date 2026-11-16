@@ -566,7 +566,7 @@ async def test_async_mssql_driver_loopback_execution_arrow_and_cancel() -> None:
 
 
 def test_mssql_clean_break_surface_and_zero_row_colmetadata() -> None:
-    """Verify PY-07 clean-break method surface (no *_transaction aliases) and 0-row COLMETADATA preservation."""
+    """Verify clean-break method surface (no *_transaction aliases) and 0-row COLMETADATA preservation."""
     assert not hasattr(mssql_native.SyncMSSQLClient, "begin_transaction")
     assert not hasattr(mssql_native.SyncMSSQLClient, "commit_transaction")
     assert not hasattr(mssql_native.SyncMSSQLClient, "rollback_transaction")

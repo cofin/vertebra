@@ -2775,10 +2775,29 @@ pub struct ShmCacheStats {
 pub struct ShmCache {
     header: *mut ShmCacheHeader,
     slots: *mut ShmCacheSlot,
+    capacity: usize,
     _region: Option<Arc<ShmRegion>>,
     lease_table: std::sync::RwLock<Option<Arc<ShmLeaseTable>>>,
 }
 
+#[derive(Clone, Copy)]
+enum CacheSlotSnapshot {
+    Empty,
+    Tombstone {
+        seq: u64,
+    },
+    Unreadable,
+    Occupied {
+        seq: u64,
+        key_hash: u64,
+        expiry_ns: u64,
+        key_len: usize,
+        key_words: [u64; 16],
+    },
+}
+
+// SAFETY: All `ShmCacheHeader` and `ShmCacheSlot` fields accessed after initialization use atomics,
+// and `capacity` is validated once and stored immutably on `ShmCache`.
 unsafe impl Send for ShmCache {}
 unsafe impl Sync for ShmCache {}
 
@@ -2811,33 +2830,32 @@ impl ShmCache {
         capacity: u32,
         create: bool,
     ) -> Result<Self, BrokerError> {
-        let base = capacity.max(16);
-        if base > MAX_SHM_CACHE_CAPACITY {
+        if !offset.is_multiple_of(std::mem::align_of::<ShmCacheHeader>()) {
             return Err(BrokerError::InvalidCapacity);
         }
-        let cap = base
-            .checked_next_power_of_two()
-            .ok_or(BrokerError::InvalidCapacity)?;
-        let req_size = Self::required_size(cap);
-        let expected_end = offset
-            .checked_add(req_size)
-            .ok_or(BrokerError::InvalidCapacity)?;
-        if region.len() < expected_end {
-            return Err(BrokerError::RegionTooSmall {
-                expected: expected_end,
-                actual: region.len(),
-            });
-        }
 
-        let header_ptr = unsafe { region.as_ptr().add(offset) as *mut ShmCacheHeader };
-        let slots_ptr = unsafe {
-            (header_ptr as *mut u8).add(std::mem::size_of::<ShmCacheHeader>()) as *mut ShmCacheSlot
-        };
-
-        if create {
+        let validated_cap = if create {
+            let base = capacity.max(16);
+            if base > MAX_SHM_CACHE_CAPACITY {
+                return Err(BrokerError::InvalidCapacity);
+            }
+            let cap = base
+                .checked_next_power_of_two()
+                .ok_or(BrokerError::InvalidCapacity)?;
+            let req_size = Self::required_size(cap);
+            let expected_end = offset
+                .checked_add(req_size)
+                .ok_or(BrokerError::InvalidCapacity)?;
+            if region.len() < expected_end {
+                return Err(BrokerError::RegionTooSmall {
+                    expected: expected_end,
+                    actual: region.len(),
+                });
+            }
+            // SAFETY: `region` spans at least `offset + req_size` bytes and `offset` is 64B-aligned.
             unsafe {
                 std::ptr::write_bytes(region.as_ptr().add(offset), 0, req_size);
-                let hdr = &mut *header_ptr;
+                let hdr = &mut *(region.as_ptr().add(offset) as *mut ShmCacheHeader);
                 hdr.capacity = cap;
                 hdr.max_entries = cap;
                 hdr.capacity_bytes = req_size as u64;
@@ -2848,11 +2866,51 @@ impl ShmCache {
                 hdr.evictions.store(0, Ordering::Relaxed);
                 hdr.expirations.store(0, Ordering::Relaxed);
             }
-        }
+            cap
+        } else {
+            let hdr_end = offset
+                .checked_add(std::mem::size_of::<ShmCacheHeader>())
+                .ok_or(BrokerError::InvalidCapacity)?;
+            if region.len() < hdr_end {
+                return Err(BrokerError::RegionTooSmall {
+                    expected: hdr_end,
+                    actual: region.len(),
+                });
+            }
+            // SAFETY: `region` spans at least `offset + size_of::<ShmCacheHeader>()` and `offset` is 64B-aligned.
+            let cap = unsafe {
+                std::ptr::addr_of!(
+                    (*(region.as_ptr().add(offset) as *const ShmCacheHeader)).capacity
+                )
+                .read_volatile()
+            };
+            if !(16..=MAX_SHM_CACHE_CAPACITY).contains(&cap) || !cap.is_power_of_two() {
+                return Err(BrokerError::InvalidCapacity);
+            }
+            let req_size = Self::required_size(cap);
+            let expected_end = offset
+                .checked_add(req_size)
+                .ok_or(BrokerError::InvalidCapacity)?;
+            if region.len() < expected_end {
+                return Err(BrokerError::RegionTooSmall {
+                    expected: expected_end,
+                    actual: region.len(),
+                });
+            }
+            cap
+        };
+
+        // SAFETY: `offset + Self::required_size(validated_cap) <= region.len()` was verified above.
+        let header_ptr = unsafe { region.as_ptr().add(offset) as *mut ShmCacheHeader };
+        // SAFETY: `slots_ptr` immediately follows `ShmCacheHeader` within the validated region.
+        let slots_ptr = unsafe {
+            (header_ptr as *mut u8).add(std::mem::size_of::<ShmCacheHeader>()) as *mut ShmCacheSlot
+        };
 
         Ok(Self {
             header: header_ptr,
             slots: slots_ptr,
+            capacity: validated_cap as usize,
             _region: Some(region),
             lease_table: std::sync::RwLock::new(None),
         })
@@ -2891,6 +2949,7 @@ impl ShmCache {
             if len < req_size {
                 return Err(ShmError::InvalidSize);
             }
+            // SAFETY: Exclusive initialization closure owns `region` up to `req_size`.
             unsafe {
                 let slice = region.as_mut_slice();
                 slice[..req_size].fill(0);
@@ -2904,33 +2963,202 @@ impl ShmCache {
         })
         .map_err(|e| map_shm_error(e, &normalized))?;
 
-        let (region, created) = match attach {
+        let (mut region, created) = match attach {
             NamedAttach::Created(r) => (r, true),
             NamedAttach::Attached(r) => (r, false),
         };
-        let actual_cap = if created {
-            cap
-        } else {
-            let hdr = unsafe { &*(region.as_ptr() as *const ShmCacheHeader) };
-            hdr.capacity.max(16)
-        };
-        let cache = Self::attach_region(region, actual_cap)?;
+        if !created && region.len() >= std::mem::size_of::<ShmCacheHeader>() {
+            // SAFETY: `region.len() >= size_of::<ShmCacheHeader>()`.
+            let hdr_cap = unsafe {
+                std::ptr::addr_of!((*(region.as_ptr() as *const ShmCacheHeader)).capacity)
+                    .read_volatile()
+            };
+            if (16..=MAX_SHM_CACHE_CAPACITY).contains(&hdr_cap) && hdr_cap.is_power_of_two() {
+                let needed = Self::required_size(hdr_cap);
+                if region.len() < needed {
+                    drop(region);
+                    region = ShmRegion::open_named(&normalized, needed)
+                        .map_err(|e| map_shm_error(e, &normalized))?;
+                }
+            }
+        }
+        let cache = Self::attach_region(region, cap)?;
         Ok((cache, created))
     }
 
     #[inline]
     fn header(&self) -> &ShmCacheHeader {
+        // SAFETY: `self.header` points to a validated `ShmCacheHeader` kept alive by `self._region`.
         unsafe { &*self.header }
     }
 
     #[inline]
     fn slot(&self, index: usize) -> &ShmCacheSlot {
+        debug_assert!(index < self.capacity);
+        // SAFETY: `index < self.capacity` and `self.slots` was validated for `self.capacity` entries.
         unsafe { &*self.slots.add(index) }
     }
 
     #[inline]
     pub fn capacity(&self) -> u32 {
-        self.header().capacity
+        self.capacity as u32
+    }
+
+    #[inline]
+    fn unlock_slot(slot: &ShmCacheSlot, odd_seq: u64) {
+        debug_assert_eq!(odd_seq & 1, 1);
+        let next_even = odd_seq.wrapping_add(1);
+        let pub_seq = if next_even == 0 { 2 } else { next_even };
+        slot.seq.store(pub_seq, Ordering::Release);
+    }
+
+    #[inline]
+    fn write_tombstone_locked(slot: &ShmCacheSlot, odd_seq: u64) {
+        slot.key_hash.store(0, Ordering::Relaxed);
+        slot.expiry_ns.store(0, Ordering::Relaxed);
+        slot.key_len.store(0, Ordering::Relaxed);
+        slot.val_len.store(0, Ordering::Relaxed);
+        slot.clock_and_flags.store(0, Ordering::Relaxed);
+        Self::unlock_slot(slot, odd_seq);
+    }
+
+    #[inline]
+    fn write_entry_locked(
+        slot: &ShmCacheSlot,
+        odd_seq: u64,
+        hash: u64,
+        key: &[u8],
+        value: &[u8],
+        expiry_ns: u64,
+    ) {
+        debug_assert!(key.len() <= SHM_CACHE_MAX_KEY_BYTES);
+        debug_assert!(value.len() <= SHM_CACHE_MAX_VALUE_BYTES);
+
+        let mut key_buf = [0u8; SHM_CACHE_MAX_KEY_BYTES];
+        key_buf[..key.len()].copy_from_slice(key);
+        let num_key_words = key.len().div_ceil(8);
+        for i in 0..num_key_words {
+            let off = i * 8;
+            let w = u64::from_ne_bytes(key_buf[off..off + 8].try_into().unwrap());
+            slot.key[i].store(w, Ordering::Relaxed);
+        }
+
+        let mut val_buf = [0u8; SHM_CACHE_MAX_VALUE_BYTES];
+        val_buf[..value.len()].copy_from_slice(value);
+        let num_val_words = value.len().div_ceil(8);
+        for i in 0..num_val_words {
+            let off = i * 8;
+            let w = u64::from_ne_bytes(val_buf[off..off + 8].try_into().unwrap());
+            slot.value[i].store(w, Ordering::Relaxed);
+        }
+
+        slot.key_len.store(key.len() as u16, Ordering::Relaxed);
+        slot.val_len.store(value.len() as u32, Ordering::Relaxed);
+        slot.expiry_ns.store(expiry_ns, Ordering::Relaxed);
+        slot.clock_and_flags.store(CLOCK_REF_BIT, Ordering::Relaxed);
+        slot.key_hash.store(hash, Ordering::Relaxed);
+        Self::unlock_slot(slot, odd_seq);
+    }
+
+    fn read_slot_snapshot(slot: &ShmCacheSlot) -> CacheSlotSnapshot {
+        let mut last_odd_seq = 0u64;
+        let mut stuck_spins = 0u32;
+        loop {
+            let seq1 = slot.seq.load(Ordering::Acquire);
+            if seq1 == 0 {
+                return CacheSlotSnapshot::Empty;
+            }
+            if (seq1 & 1) != 0 {
+                if seq1 == last_odd_seq {
+                    stuck_spins += 1;
+                    if stuck_spins > 2048 {
+                        return CacheSlotSnapshot::Unreadable;
+                    }
+                    if stuck_spins > 64 {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                } else {
+                    last_odd_seq = seq1;
+                    stuck_spins = 1;
+                    std::hint::spin_loop();
+                }
+                continue;
+            }
+            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+            if klen == 0 {
+                std::sync::atomic::fence(Ordering::Acquire);
+                if slot.seq.load(Ordering::Relaxed) == seq1 {
+                    return CacheSlotSnapshot::Tombstone { seq: seq1 };
+                }
+                std::hint::spin_loop();
+                continue;
+            }
+            if klen > SHM_CACHE_MAX_KEY_BYTES {
+                std::sync::atomic::fence(Ordering::Acquire);
+                if slot.seq.load(Ordering::Relaxed) == seq1 {
+                    return CacheSlotSnapshot::Unreadable;
+                }
+                std::hint::spin_loop();
+                continue;
+            }
+            let key_hash = slot.key_hash.load(Ordering::Relaxed);
+            let expiry_ns = slot.expiry_ns.load(Ordering::Relaxed);
+            let vlen = slot.val_len.load(Ordering::Relaxed) as usize;
+            if vlen > SHM_CACHE_MAX_VALUE_BYTES {
+                std::sync::atomic::fence(Ordering::Acquire);
+                if slot.seq.load(Ordering::Relaxed) == seq1 {
+                    return CacheSlotSnapshot::Unreadable;
+                }
+                std::hint::spin_loop();
+                continue;
+            }
+            let mut key_words = [0u64; 16];
+            let num_kwords = klen.div_ceil(8);
+            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                *w = slot.key[i].load(Ordering::Relaxed);
+            }
+            std::sync::atomic::fence(Ordering::Acquire);
+            if slot.seq.load(Ordering::Relaxed) == seq1 {
+                return CacheSlotSnapshot::Occupied {
+                    seq: seq1,
+                    key_hash,
+                    expiry_ns,
+                    key_len: klen,
+                    key_words,
+                };
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    #[inline]
+    fn key_words_eq(key_words: &[u64; 16], klen: usize, expected: &[u8]) -> bool {
+        if klen != expected.len() || klen > SHM_CACHE_MAX_KEY_BYTES {
+            return false;
+        }
+        // SAFETY: `klen <= SHM_CACHE_MAX_KEY_BYTES` (128) == `size_of_val(key_words)`.
+        let key_bytes =
+            unsafe { std::slice::from_raw_parts(key_words.as_ptr().cast::<u8>(), klen) };
+        key_bytes == expected
+    }
+
+    fn select_clock_victim(&self, start_idx: usize, max_probes: usize, mask: usize) -> usize {
+        for _ in 0..2 {
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                let cf = slot.clock_and_flags.load(Ordering::Relaxed);
+                if (cf & CLOCK_REF_BIT) != 0 {
+                    slot.clock_and_flags
+                        .fetch_and(!CLOCK_REF_BIT, Ordering::Relaxed);
+                } else {
+                    return idx;
+                }
+            }
+        }
+        start_idx
     }
 
     pub fn attach_lease_table(&self, table: Arc<ShmLeaseTable>) {
@@ -2968,7 +3196,7 @@ impl ShmCache {
         }
         let hash = Self::compute_key_hash(key);
         let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        let cap = self.capacity;
         let mask = cap - 1;
         let start_idx = (hash as usize) & mask;
         let now = monotonic_now_ns();
@@ -2976,52 +3204,107 @@ impl ShmCache {
         for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
             let idx = (start_idx + step) & mask;
             let slot = self.slot(idx);
-            let seq1 = slot.seq.load(Ordering::Acquire);
-            if seq1 == 0 || (seq1 & 1) != 0 {
-                continue;
-            }
-            if slot.key_hash.load(Ordering::Relaxed) != hash {
-                continue;
-            }
-            let exp = slot.expiry_ns.load(Ordering::Relaxed);
-            if exp > 0 && now >= exp {
-                hdr.expirations.fetch_add(1, Ordering::Relaxed);
-                hdr.misses.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
-            let vlen = slot.val_len.load(Ordering::Relaxed) as usize;
-            if klen != key.len() || vlen > SHM_CACHE_MAX_VALUE_BYTES {
-                continue;
-            }
+            let mut last_odd_seq = 0u64;
+            let mut stuck_spins = 0u32;
 
-            let mut key_words = [0u64; 16];
-            let num_kwords = klen.div_ceil(8).min(16);
-            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
-                *w = slot.key[i].load(Ordering::Relaxed);
-            }
-
-            let mut val_words = [0u64; 107];
-            let num_vwords = vlen.div_ceil(8).min(107);
-            for (i, w) in val_words.iter_mut().enumerate().take(num_vwords) {
-                *w = slot.value[i].load(Ordering::Relaxed);
-            }
-
-            std::sync::atomic::fence(Ordering::Acquire);
-            let seq2 = slot.seq.load(Ordering::Relaxed);
-
-            if seq1 == seq2 {
-                let key_bytes =
-                    unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
-                if key_bytes == key {
-                    slot.clock_and_flags
-                        .fetch_or(CLOCK_REF_BIT, Ordering::Relaxed);
-                    hdr.hits.fetch_add(1, Ordering::Relaxed);
-                    let val_bytes = unsafe {
-                        std::slice::from_raw_parts(val_words.as_ptr() as *const u8, vlen)
-                    };
-                    return Some(val_bytes.to_vec());
+            loop {
+                let seq1 = slot.seq.load(Ordering::Acquire);
+                if seq1 == 0 {
+                    hdr.misses.fetch_add(1, Ordering::Relaxed);
+                    return None;
                 }
+                if (seq1 & 1) != 0 {
+                    if seq1 == last_odd_seq {
+                        stuck_spins += 1;
+                        if stuck_spins > 2048 {
+                            break;
+                        }
+                        if stuck_spins > 64 {
+                            std::thread::yield_now();
+                        } else {
+                            std::hint::spin_loop();
+                        }
+                    } else {
+                        last_odd_seq = seq1;
+                        stuck_spins = 1;
+                        std::hint::spin_loop();
+                    }
+                    continue;
+                }
+                let klen = slot.key_len.load(Ordering::Relaxed) as usize;
+                if klen == 0 {
+                    std::sync::atomic::fence(Ordering::Acquire);
+                    if slot.seq.load(Ordering::Relaxed) == seq1 {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                    continue;
+                }
+                if klen > SHM_CACHE_MAX_KEY_BYTES {
+                    std::sync::atomic::fence(Ordering::Acquire);
+                    if slot.seq.load(Ordering::Relaxed) == seq1 {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let slot_hash = slot.key_hash.load(Ordering::Relaxed);
+                if slot_hash != hash || klen != key.len() {
+                    std::sync::atomic::fence(Ordering::Acquire);
+                    if slot.seq.load(Ordering::Relaxed) == seq1 {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let exp = slot.expiry_ns.load(Ordering::Relaxed);
+                let vlen = slot.val_len.load(Ordering::Relaxed) as usize;
+                if vlen > SHM_CACHE_MAX_VALUE_BYTES {
+                    std::sync::atomic::fence(Ordering::Acquire);
+                    if slot.seq.load(Ordering::Relaxed) == seq1 {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                    continue;
+                }
+
+                let mut key_words = [0u64; 16];
+                let num_kwords = klen.div_ceil(8);
+                for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
+                    *w = slot.key[i].load(Ordering::Relaxed);
+                }
+
+                let expired = exp > 0 && now >= exp;
+                let mut val_words = [0u64; 107];
+                if !expired {
+                    let num_vwords = vlen.div_ceil(8);
+                    for (i, w) in val_words.iter_mut().enumerate().take(num_vwords) {
+                        *w = slot.value[i].load(Ordering::Relaxed);
+                    }
+                }
+
+                std::sync::atomic::fence(Ordering::Acquire);
+                let seq2 = slot.seq.load(Ordering::Relaxed);
+                if seq1 != seq2 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+
+                if !Self::key_words_eq(&key_words, klen, key) {
+                    break;
+                }
+                if expired {
+                    hdr.expirations.fetch_add(1, Ordering::Relaxed);
+                    hdr.misses.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                slot.clock_and_flags
+                    .fetch_or(CLOCK_REF_BIT, Ordering::Relaxed);
+                hdr.hits.fetch_add(1, Ordering::Relaxed);
+                // SAFETY: `vlen <= SHM_CACHE_MAX_VALUE_BYTES` (856) == `size_of_val(&val_words)`.
+                let val_bytes =
+                    unsafe { std::slice::from_raw_parts(val_words.as_ptr().cast::<u8>(), vlen) };
+                return Some(val_bytes.to_vec());
             }
         }
 
@@ -3038,132 +3321,83 @@ impl ShmCache {
         }
         let hash = Self::compute_key_hash(key);
         let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        let cap = self.capacity;
         let mask = cap - 1;
         let start_idx = (hash as usize) & mask;
-        let now = monotonic_now_ns();
-        let expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
-
         let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
-        let mut target_idx = None;
-        let mut first_empty_or_expired = None;
 
-        for step in 0..max_probes {
-            let idx = (start_idx + step) & mask;
-            let slot = self.slot(idx);
-            let seq = slot.seq.load(Ordering::Relaxed);
-            if seq == 0 {
-                if first_empty_or_expired.is_none() {
-                    first_empty_or_expired = Some(idx);
-                }
-                continue;
-            }
-            let exp = slot.expiry_ns.load(Ordering::Relaxed);
-            if exp > 0 && now >= exp {
-                if first_empty_or_expired.is_none() {
-                    first_empty_or_expired = Some(idx);
-                }
-                continue;
-            }
-            if (seq & 1) == 0 && slot.key_hash.load(Ordering::Relaxed) == hash {
-                let klen = slot.key_len.load(Ordering::Relaxed) as usize;
-                if klen == key.len() {
-                    let mut key_words = [0u64; 16];
-                    let num_kwords = klen.div_ceil(8).min(16);
-                    for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
-                        *w = slot.key[i].load(Ordering::Relaxed);
-                    }
-                    let key_bytes = unsafe {
-                        std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen)
-                    };
-                    if key_bytes == key {
-                        target_idx = Some(idx);
+        for _attempt in 0..65_536 {
+            let now = monotonic_now_ns();
+            let expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+            let mut existing_match: Option<(usize, u64)> = None;
+            let mut first_reusable: Option<(usize, u64)> = None;
+
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, 0));
+                        }
                         break;
                     }
-                }
-            }
-        }
-
-        if target_idx.is_none() {
-            if let Some(empty_idx) = first_empty_or_expired {
-                target_idx = Some(empty_idx);
-            } else {
-                let mut victim = None;
-                for _ in 0..2 {
-                    for step in 0..max_probes {
-                        let idx = (start_idx + step) & mask;
-                        let slot = self.slot(idx);
-                        let cf = slot.clock_and_flags.load(Ordering::Relaxed);
-                        if (cf & CLOCK_REF_BIT) != 0 {
-                            slot.clock_and_flags
-                                .fetch_and(!CLOCK_REF_BIT, Ordering::Relaxed);
-                        } else {
-                            victim = Some(idx);
-                            break;
+                    CacheSlotSnapshot::Tombstone { seq } => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
                         }
                     }
-                    if victim.is_some() {
-                        break;
+                    CacheSlotSnapshot::Unreadable => {}
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        key_hash,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                    } => {
+                        if key_hash == hash && Self::key_words_eq(&key_words, key_len, key) {
+                            existing_match = Some((idx, seq));
+                            break;
+                        }
+                        if expiry_ns > 0 && now >= expiry_ns && first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
+                        }
                     }
                 }
-                let chosen = victim.unwrap_or(start_idx);
-                target_idx = Some(chosen);
-                hdr.evictions.fetch_add(1, Ordering::Relaxed);
             }
-        }
 
-        let idx = target_idx.unwrap();
-        let slot = self.slot(idx);
-
-        let mut even_seq = slot.seq.load(Ordering::Relaxed);
-        if (even_seq & 1) != 0 {
-            even_seq = even_seq.wrapping_add(1);
-        }
-        loop {
-            match slot.seq.compare_exchange_weak(
-                even_seq,
-                even_seq.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => {
-                    even_seq = if (actual & 1) != 0 {
-                        actual.wrapping_add(1)
-                    } else {
-                        actual
-                    };
+            let (target_idx, expected_seq, is_eviction) = if let Some((idx, seq)) = existing_match {
+                (idx, seq, false)
+            } else if let Some((idx, seq)) = first_reusable {
+                (idx, seq, false)
+            } else {
+                let chosen = self.select_clock_victim(start_idx, max_probes, mask);
+                let seq = self.slot(chosen).seq.load(Ordering::Acquire);
+                if (seq & 1) != 0 {
+                    std::hint::spin_loop();
+                    continue;
                 }
+                (chosen, seq, true)
+            };
+
+            let slot = self.slot(target_idx);
+            let odd_seq = expected_seq.wrapping_add(1);
+            if slot
+                .seq
+                .compare_exchange(expected_seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                Self::write_entry_locked(slot, odd_seq, hash, key, value, expiry);
+                if is_eviction {
+                    hdr.evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                hdr.sets.fetch_add(1, Ordering::Relaxed);
+                self.publish_invalidation(key);
+                return true;
             }
+            std::hint::spin_loop();
         }
-
-        let mut key_buf = [0u8; SHM_CACHE_MAX_KEY_BYTES];
-        key_buf[..key.len()].copy_from_slice(key);
-        let key_words = unsafe { std::slice::from_raw_parts(key_buf.as_ptr() as *const u64, 16) };
-        for (i, &w) in key_words.iter().enumerate() {
-            slot.key[i].store(w, Ordering::Relaxed);
-        }
-
-        let mut val_buf = [0u8; SHM_CACHE_MAX_VALUE_BYTES];
-        val_buf[..value.len()].copy_from_slice(value);
-        let num_val_words = value.len().div_ceil(8).min(107);
-        let val_words =
-            unsafe { std::slice::from_raw_parts(val_buf.as_ptr() as *const u64, num_val_words) };
-        for (i, &w) in val_words.iter().enumerate() {
-            slot.value[i].store(w, Ordering::Relaxed);
-        }
-
-        slot.key_len.store(key.len() as u16, Ordering::Relaxed);
-        slot.val_len.store(value.len() as u32, Ordering::Relaxed);
-        slot.expiry_ns.store(expiry, Ordering::Relaxed);
-        slot.clock_and_flags.store(CLOCK_REF_BIT, Ordering::Relaxed);
-        slot.key_hash.store(hash, Ordering::Relaxed);
-
-        slot.seq.store(even_seq.wrapping_add(2), Ordering::Release);
-        hdr.sets.fetch_add(1, Ordering::Relaxed);
-
-        self.publish_invalidation(key);
-        true
+        false
     }
 
     pub fn delete(&self, key: &[u8]) -> bool {
@@ -3171,65 +3405,147 @@ impl ShmCache {
             return false;
         }
         let hash = Self::compute_key_hash(key);
-        let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        let cap = self.capacity;
         let mask = cap - 1;
         let start_idx = (hash as usize) & mask;
+        let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
 
-        for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
-            let idx = (start_idx + step) & mask;
-            let slot = self.slot(idx);
-            let seq = slot.seq.load(Ordering::Relaxed);
-            if seq == 0 || (seq & 1) != 0 {
-                continue;
-            }
-            if slot.key_hash.load(Ordering::Relaxed) != hash {
-                continue;
-            }
-            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
-            if klen != key.len() {
-                continue;
-            }
-            let mut key_words = [0u64; 16];
-            let num_kwords = klen.div_ceil(8).min(16);
-            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
-                *w = slot.key[i].load(Ordering::Relaxed);
-            }
-            let key_bytes =
-                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
-            if key_bytes == key {
-                let mut even_seq = seq;
-                if (even_seq & 1) != 0 {
-                    even_seq = even_seq.wrapping_add(1);
-                }
-                if slot
-                    .seq
-                    .compare_exchange(
-                        even_seq,
-                        even_seq.wrapping_add(1),
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    slot.key_hash.store(0, Ordering::Relaxed);
-                    slot.expiry_ns.store(0, Ordering::Relaxed);
-                    slot.key_len.store(0, Ordering::Relaxed);
-                    slot.val_len.store(0, Ordering::Relaxed);
-                    slot.seq.store(0, Ordering::Release);
-                    self.publish_invalidation(key);
-                    return true;
+        for _attempt in 0..65_536 {
+            let now = monotonic_now_ns();
+            let mut contended = false;
+
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty => return false,
+                    CacheSlotSnapshot::Tombstone { .. } | CacheSlotSnapshot::Unreadable => {}
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        key_hash,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                    } => {
+                        if key_hash == hash && Self::key_words_eq(&key_words, key_len, key) {
+                            let was_live = expiry_ns == 0 || now < expiry_ns;
+                            let odd_seq = seq.wrapping_add(1);
+                            if slot
+                                .seq
+                                .compare_exchange(seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                Self::write_tombstone_locked(slot, odd_seq);
+                                if was_live {
+                                    self.publish_invalidation(key);
+                                }
+                                return was_live;
+                            }
+                            contended = true;
+                            break;
+                        }
+                    }
                 }
             }
+
+            if !contended {
+                return false;
+            }
+            std::hint::spin_loop();
         }
         false
     }
 
     pub fn add(&self, key: &[u8], value: &[u8], ttl_ns: Option<u64>) -> bool {
-        if self.has_key(key) {
+        if key.is_empty()
+            || key.len() > SHM_CACHE_MAX_KEY_BYTES
+            || value.len() > SHM_CACHE_MAX_VALUE_BYTES
+        {
             return false;
         }
-        self.set(key, value, ttl_ns)
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = self.capacity;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+        let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
+
+        for _attempt in 0..65_536 {
+            let now = monotonic_now_ns();
+            let expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+            let mut existing_expired: Option<(usize, u64)> = None;
+            let mut first_reusable: Option<(usize, u64)> = None;
+
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, 0));
+                        }
+                        break;
+                    }
+                    CacheSlotSnapshot::Tombstone { seq } => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
+                        }
+                    }
+                    CacheSlotSnapshot::Unreadable => {}
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        key_hash,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                    } => {
+                        if key_hash == hash && Self::key_words_eq(&key_words, key_len, key) {
+                            if expiry_ns == 0 || now < expiry_ns {
+                                return false;
+                            }
+                            existing_expired = Some((idx, seq));
+                            break;
+                        }
+                        if expiry_ns > 0 && now >= expiry_ns && first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
+                        }
+                    }
+                }
+            }
+
+            let (target_idx, expected_seq, is_eviction) = if let Some((idx, seq)) = existing_expired
+            {
+                (idx, seq, false)
+            } else if let Some((idx, seq)) = first_reusable {
+                (idx, seq, false)
+            } else {
+                let chosen = self.select_clock_victim(start_idx, max_probes, mask);
+                let seq = self.slot(chosen).seq.load(Ordering::Acquire);
+                if (seq & 1) != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                (chosen, seq, true)
+            };
+
+            let slot = self.slot(target_idx);
+            let odd_seq = expected_seq.wrapping_add(1);
+            if slot
+                .seq
+                .compare_exchange(expected_seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                Self::write_entry_locked(slot, odd_seq, hash, key, value, expiry);
+                if is_eviction {
+                    hdr.evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                hdr.sets.fetch_add(1, Ordering::Relaxed);
+                self.publish_invalidation(key);
+                return true;
+            }
+            std::hint::spin_loop();
+        }
+        false
     }
 
     pub fn has_key(&self, key: &[u8]) -> bool {
@@ -3241,113 +3557,247 @@ impl ShmCache {
             return false;
         }
         let hash = Self::compute_key_hash(key);
-        let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        let cap = self.capacity;
         let mask = cap - 1;
         let start_idx = (hash as usize) & mask;
-        let now = monotonic_now_ns();
-        let new_expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+        let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
 
-        for step in 0..SHM_CACHE_PROBE_STEPS.min(cap) {
-            let idx = (start_idx + step) & mask;
-            let slot = self.slot(idx);
-            let seq = slot.seq.load(Ordering::Relaxed);
-            if seq == 0 || (seq & 1) != 0 {
-                continue;
+        for _attempt in 0..65_536 {
+            let now = monotonic_now_ns();
+            let new_expiry = ttl_ns.map(|ns| now.saturating_add(ns)).unwrap_or(0);
+            let mut contended = false;
+
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty => return false,
+                    CacheSlotSnapshot::Tombstone { .. } | CacheSlotSnapshot::Unreadable => {}
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        key_hash,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                    } => {
+                        if key_hash == hash && Self::key_words_eq(&key_words, key_len, key) {
+                            if expiry_ns > 0 && now >= expiry_ns {
+                                return false;
+                            }
+                            let odd_seq = seq.wrapping_add(1);
+                            if slot
+                                .seq
+                                .compare_exchange(seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                slot.expiry_ns.store(new_expiry, Ordering::Relaxed);
+                                slot.clock_and_flags
+                                    .fetch_or(CLOCK_REF_BIT, Ordering::Relaxed);
+                                Self::unlock_slot(slot, odd_seq);
+                                return true;
+                            }
+                            contended = true;
+                            break;
+                        }
+                    }
+                }
             }
-            if slot.key_hash.load(Ordering::Relaxed) != hash {
-                continue;
-            }
-            let exp = slot.expiry_ns.load(Ordering::Relaxed);
-            if exp > 0 && now >= exp {
+
+            if !contended {
                 return false;
             }
-            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
-            if klen != key.len() {
-                continue;
-            }
-            let mut key_words = [0u64; 16];
-            let num_kwords = klen.div_ceil(8).min(16);
-            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
-                *w = slot.key[i].load(Ordering::Relaxed);
-            }
-            let key_bytes =
-                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
-            if key_bytes == key {
-                slot.expiry_ns.store(new_expiry, Ordering::Release);
-                return true;
-            }
+            std::hint::spin_loop();
         }
         false
     }
 
     pub fn incr(&self, key: &[u8], delta: i64) -> Result<i64, BrokerError> {
-        if let Some(val) = self.get(key) {
-            let cur = if let Ok(s) = std::str::from_utf8(&val) {
-                s.trim().parse::<i64>().unwrap_or(0)
-            } else if val.len() == 8 {
-                i64::from_le_bytes(val.as_slice().try_into().unwrap_or([0; 8]))
-            } else {
-                0
-            };
-            let new_val = cur.wrapping_add(delta);
-            let s = new_val.to_string();
-            self.set(key, s.as_bytes(), None);
-            Ok(new_val)
-        } else {
-            let s = delta.to_string();
-            self.set(key, s.as_bytes(), None);
-            Ok(delta)
+        if key.is_empty() || key.len() > SHM_CACHE_MAX_KEY_BYTES {
+            return Err(BrokerError::InvalidCapacity);
         }
+        let hash = Self::compute_key_hash(key);
+        let hdr = self.header();
+        let cap = self.capacity;
+        let mask = cap - 1;
+        let start_idx = (hash as usize) & mask;
+        let max_probes = SHM_CACHE_PROBE_STEPS.min(cap);
+
+        for _attempt in 0..65_536 {
+            let now = monotonic_now_ns();
+            let mut existing_match: Option<(usize, u64)> = None;
+            let mut first_reusable: Option<(usize, u64)> = None;
+
+            for step in 0..max_probes {
+                let idx = (start_idx + step) & mask;
+                let slot = self.slot(idx);
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, 0));
+                        }
+                        break;
+                    }
+                    CacheSlotSnapshot::Tombstone { seq } => {
+                        if first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
+                        }
+                    }
+                    CacheSlotSnapshot::Unreadable => {}
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        key_hash,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                    } => {
+                        if key_hash == hash && Self::key_words_eq(&key_words, key_len, key) {
+                            existing_match = Some((idx, seq));
+                            break;
+                        }
+                        if expiry_ns > 0 && now >= expiry_ns && first_reusable.is_none() {
+                            first_reusable = Some((idx, seq));
+                        }
+                    }
+                }
+            }
+
+            if let Some((idx, expected_seq)) = existing_match {
+                let slot = self.slot(idx);
+                let odd_seq = expected_seq.wrapping_add(1);
+                if slot
+                    .seq
+                    .compare_exchange(expected_seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let exp = slot.expiry_ns.load(Ordering::Relaxed);
+                    let live = exp == 0 || now < exp;
+                    let (new_val, preserved_expiry) = if live {
+                        let vlen = slot.val_len.load(Ordering::Relaxed) as usize;
+                        let cur = if vlen <= SHM_CACHE_MAX_VALUE_BYTES {
+                            let mut val_words = [0u64; 107];
+                            let num_vwords = vlen.div_ceil(8);
+                            for (i, w) in val_words.iter_mut().enumerate().take(num_vwords) {
+                                *w = slot.value[i].load(Ordering::Relaxed);
+                            }
+                            // SAFETY: `vlen <= SHM_CACHE_MAX_VALUE_BYTES` (856) == `size_of_val(&val_words)`.
+                            let val_bytes = unsafe {
+                                std::slice::from_raw_parts(val_words.as_ptr().cast::<u8>(), vlen)
+                            };
+                            if let Ok(s) = std::str::from_utf8(val_bytes) {
+                                s.trim().parse::<i64>().unwrap_or(0)
+                            } else if val_bytes.len() == 8 {
+                                i64::from_le_bytes(val_bytes.try_into().unwrap_or([0; 8]))
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        (cur.wrapping_add(delta), exp)
+                    } else {
+                        (delta, 0)
+                    };
+                    let encoded = new_val.to_string();
+                    Self::write_entry_locked(
+                        slot,
+                        odd_seq,
+                        hash,
+                        key,
+                        encoded.as_bytes(),
+                        preserved_expiry,
+                    );
+                    hdr.sets.fetch_add(1, Ordering::Relaxed);
+                    self.publish_invalidation(key);
+                    return Ok(new_val);
+                }
+                std::hint::spin_loop();
+                continue;
+            }
+
+            let (target_idx, expected_seq, is_eviction) = if let Some((idx, seq)) = first_reusable {
+                (idx, seq, false)
+            } else {
+                let chosen = self.select_clock_victim(start_idx, max_probes, mask);
+                let seq = self.slot(chosen).seq.load(Ordering::Acquire);
+                if (seq & 1) != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                (chosen, seq, true)
+            };
+
+            let slot = self.slot(target_idx);
+            let odd_seq = expected_seq.wrapping_add(1);
+            if slot
+                .seq
+                .compare_exchange(expected_seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let encoded = delta.to_string();
+                Self::write_entry_locked(slot, odd_seq, hash, key, encoded.as_bytes(), 0);
+                if is_eviction {
+                    hdr.evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                hdr.sets.fetch_add(1, Ordering::Relaxed);
+                self.publish_invalidation(key);
+                return Ok(delta);
+            }
+            std::hint::spin_loop();
+        }
+        Err(BrokerError::PoolExhausted)
     }
 
     pub fn decr(&self, key: &[u8], delta: i64) -> Result<i64, BrokerError> {
-        self.incr(key, -delta)
+        self.incr(key, delta.wrapping_neg())
     }
 
     pub fn invalidate_prefix(&self, prefix: &[u8]) -> u32 {
-        let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        if prefix.len() > SHM_CACHE_MAX_KEY_BYTES {
+            return 0;
+        }
+        let cap = self.capacity;
+        let now = monotonic_now_ns();
         let mut count = 0u32;
 
         for idx in 0..cap {
             let slot = self.slot(idx);
-            let seq = slot.seq.load(Ordering::Relaxed);
-            if seq == 0 || (seq & 1) != 0 {
-                continue;
-            }
-            let klen = slot.key_len.load(Ordering::Relaxed) as usize;
-            if klen < prefix.len() {
-                continue;
-            }
-            let mut key_words = [0u64; 16];
-            let num_kwords = klen.div_ceil(8).min(16);
-            for (i, w) in key_words.iter_mut().enumerate().take(num_kwords) {
-                *w = slot.key[i].load(Ordering::Relaxed);
-            }
-            let key_bytes =
-                unsafe { std::slice::from_raw_parts(key_words.as_ptr() as *const u8, klen) };
-            if key_bytes.starts_with(prefix) {
-                let mut even_seq = seq;
-                if (even_seq & 1) != 0 {
-                    even_seq = even_seq.wrapping_add(1);
-                }
-                if slot
-                    .seq
-                    .compare_exchange(
-                        even_seq,
-                        even_seq.wrapping_add(1),
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    slot.key_hash.store(0, Ordering::Relaxed);
-                    slot.expiry_ns.store(0, Ordering::Relaxed);
-                    slot.key_len.store(0, Ordering::Relaxed);
-                    slot.val_len.store(0, Ordering::Relaxed);
-                    slot.seq.store(0, Ordering::Release);
-                    count += 1;
+            for _attempt in 0..64 {
+                match Self::read_slot_snapshot(slot) {
+                    CacheSlotSnapshot::Empty
+                    | CacheSlotSnapshot::Tombstone { .. }
+                    | CacheSlotSnapshot::Unreadable => break,
+                    CacheSlotSnapshot::Occupied {
+                        seq,
+                        expiry_ns,
+                        key_len,
+                        key_words,
+                        ..
+                    } => {
+                        if key_len < prefix.len() || key_len > SHM_CACHE_MAX_KEY_BYTES {
+                            break;
+                        }
+                        // SAFETY: `key_len <= SHM_CACHE_MAX_KEY_BYTES` (128) == `size_of_val(&key_words)`.
+                        let key_bytes = unsafe {
+                            std::slice::from_raw_parts(key_words.as_ptr().cast::<u8>(), key_len)
+                        };
+                        if !key_bytes.starts_with(prefix) {
+                            break;
+                        }
+                        let was_live = expiry_ns == 0 || now < expiry_ns;
+                        let odd_seq = seq.wrapping_add(1);
+                        if slot
+                            .seq
+                            .compare_exchange(seq, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            Self::write_tombstone_locked(slot, odd_seq);
+                            if was_live {
+                                count += 1;
+                            }
+                            break;
+                        }
+                        std::hint::spin_loop();
+                    }
                 }
             }
         }
@@ -3358,15 +3808,29 @@ impl ShmCache {
     }
 
     pub fn clear(&self) {
-        let hdr = self.header();
-        let cap = hdr.capacity as usize;
+        let cap = self.capacity;
         for idx in 0..cap {
             let slot = self.slot(idx);
-            slot.key_hash.store(0, Ordering::Relaxed);
-            slot.expiry_ns.store(0, Ordering::Relaxed);
-            slot.key_len.store(0, Ordering::Relaxed);
-            slot.val_len.store(0, Ordering::Relaxed);
-            slot.seq.store(0, Ordering::Release);
+            for _spin in 0..64 {
+                let seq1 = slot.seq.load(Ordering::Acquire);
+                if seq1 == 0 {
+                    break;
+                }
+                if (seq1 & 1) != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let odd_seq = seq1.wrapping_add(1);
+                if slot
+                    .seq
+                    .compare_exchange_weak(seq1, odd_seq, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    Self::write_tombstone_locked(slot, odd_seq);
+                    break;
+                }
+                std::hint::spin_loop();
+            }
         }
         self.publish_invalidation(b"");
     }
@@ -3374,7 +3838,7 @@ impl ShmCache {
     pub fn stats(&self) -> ShmCacheStats {
         let hdr = self.header();
         ShmCacheStats {
-            capacity: hdr.capacity,
+            capacity: self.capacity as u32,
             max_entries: hdr.max_entries,
             capacity_bytes: hdr.capacity_bytes,
             hits: hdr.hits.load(Ordering::Relaxed),
@@ -3912,5 +4376,154 @@ mod tests {
         cache.clear();
         assert!(!cache.has_key(b"key1"));
         cache.unlink();
+    }
+
+    #[test]
+    fn test_shm_cache_attach_validates_capacity_and_corrupted_slot_lengths() {
+        let req_size = ShmCache::required_size(16);
+        let region = Arc::new(ShmRegion::create(req_size).unwrap());
+        let cache = ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, true).unwrap();
+        assert_eq!(cache.capacity(), 16);
+        assert!(cache.set(b"alpha", b"1", None));
+
+        // Corrupting `hdr.capacity` to 0, non-power-of-two, or oversized must reject attach
+        // while existing `cache` keeps its validated local capacity.
+        unsafe {
+            let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
+            hdr.capacity = 0;
+        }
+        assert_eq!(
+            ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, false).err(),
+            Some(BrokerError::InvalidCapacity)
+        );
+        unsafe {
+            let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
+            hdr.capacity = 24;
+        }
+        assert_eq!(
+            ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, false).err(),
+            Some(BrokerError::InvalidCapacity)
+        );
+        unsafe {
+            let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
+            hdr.capacity = 64;
+        }
+        assert!(matches!(
+            ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, false).err(),
+            Some(BrokerError::RegionTooSmall { .. })
+        ));
+        // Existing attached instance does not re-read corrupted `hdr.capacity`.
+        assert_eq!(cache.capacity(), 16);
+        assert_eq!(cache.get(b"alpha").as_deref(), Some(&b"1"[..]));
+
+        // Corrupt `key_len` and `val_len` on slot 0 beyond stack buffer bounds and verify no OOB.
+        let slot0 = cache.slot(0);
+        slot0.seq.store(2, Ordering::Relaxed);
+        slot0.key_len.store(u16::MAX, Ordering::Relaxed);
+        slot0.val_len.store(u32::MAX, Ordering::Relaxed);
+        slot0
+            .key_hash
+            .store(ShmCache::compute_key_hash(b"probe"), Ordering::Relaxed);
+        slot0.seq.store(4, Ordering::Release);
+
+        assert_eq!(cache.get(b"probe"), None);
+        assert_eq!(cache.invalidate_prefix(b""), 1);
+        assert!(!cache.delete(b"probe"));
+        assert!(!cache.touch(b"probe", None));
+    }
+
+    #[test]
+    fn test_shm_cache_tombstone_monotonicity_and_expired_collision_probing() {
+        let req_size = ShmCache::required_size(16);
+        let region = ShmRegion::create(req_size).unwrap();
+        let cache = ShmCache::init_in_region(region, 16).unwrap();
+
+        // Find three distinct keys hashing to the same bucket index (`hash & 15`).
+        let target_bucket = (ShmCache::compute_key_hash(b"k0") as usize) & 15;
+        let mut colliding = vec![b"k0".to_vec()];
+        let mut candidate = 1u64;
+        while colliding.len() < 3 {
+            let k = format!("cand-{candidate}").into_bytes();
+            if ((ShmCache::compute_key_hash(&k) as usize) & 15) == target_bucket {
+                colliding.push(k);
+            }
+            candidate += 1;
+        }
+        let (k0, k1, k2) = (&colliding[0], &colliding[1], &colliding[2]);
+
+        assert!(cache.set(k0, b"v0", Some(40_000_000))); // 40ms TTL -> expires after k1/k2 land behind it
+        assert!(cache.set(k1, b"v1", None));
+        assert!(cache.set(k2, b"v2", None));
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Expired `k0` at the head of the chain must NOT abort linear probing for `k1` or `k2`.
+        assert_eq!(cache.get(k0), None);
+        assert_eq!(cache.get(k1).as_deref(), Some(&b"v1"[..]));
+        assert_eq!(cache.get(k2).as_deref(), Some(&b"v2"[..]));
+
+        // Deleting `k1` creates a tombstone (`seq != 0`, `key_len == 0`) without breaking `k2`.
+        assert!(cache.delete(k1));
+        let slot1 = cache.slot((target_bucket + 1) & 15);
+        assert_ne!(slot1.seq.load(Ordering::Acquire), 0);
+        assert_eq!(slot1.key_len.load(Ordering::Acquire), 0);
+        assert_eq!(cache.get(k2).as_deref(), Some(&b"v2"[..]));
+
+        // Updating `k2` must update `k2` in place despite earlier expired/tombstone slots.
+        assert!(cache.set(k2, b"v2-updated", None));
+        assert_eq!(cache.get(k2).as_deref(), Some(&b"v2-updated"[..]));
+        assert!(cache.delete(k2));
+        assert_eq!(cache.get(k2), None);
+
+        // Wrap-around from `u64::MAX - 1` must publish `2`, never `0`.
+        slot1.seq.store(u64::MAX - 1, Ordering::Release);
+        cache.clear();
+        assert_eq!(slot1.seq.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn test_shm_cache_concurrent_atomic_add_and_incr_preserves_ttl() {
+        let req_size = ShmCache::required_size(64);
+        let region = ShmRegion::create(req_size).unwrap();
+        let cache = Arc::new(ShmCache::init_in_region(region, 64).unwrap());
+
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let wins: usize = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(8);
+            for i in 0..8usize {
+                let c = Arc::clone(&cache);
+                let b = Arc::clone(&barrier);
+                handles.push(s.spawn(move || {
+                    b.wait();
+                    usize::from(c.add(b"once-key", format!("val-{i}").as_bytes(), None))
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).sum()
+        });
+        assert_eq!(wins, 1);
+
+        assert!(cache.set(b"ttl-counter", b"10", Some(60_000_000_000)));
+        let bucket = (ShmCache::compute_key_hash(b"ttl-counter") as usize) & 63;
+        let orig_expiry = cache.slot(bucket).expiry_ns.load(Ordering::Acquire);
+        assert!(orig_expiry > 0);
+
+        let barrier2 = Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let c = Arc::clone(&cache);
+                let b = Arc::clone(&barrier2);
+                s.spawn(move || {
+                    b.wait();
+                    for _ in 0..50 {
+                        c.incr(b"ttl-counter", 1).unwrap();
+                    }
+                });
+            }
+        });
+
+        assert_eq!(cache.get(b"ttl-counter").as_deref(), Some(&b"410"[..]));
+        assert_eq!(
+            cache.slot(bucket).expiry_ns.load(Ordering::Acquire),
+            orig_expiry
+        );
     }
 }

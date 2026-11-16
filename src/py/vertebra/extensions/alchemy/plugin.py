@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
+from vertebra.db.registry import SCHEME_REGISTRY
 from vertebra.extensions.alchemy.cache import (
     AsyncCacheManager,
     CacheConfig,
@@ -62,8 +63,6 @@ def normalize_alchemy_url(connection_string: str, *, is_async: bool = True) -> s
         return connection_string
     lowered = scheme.lower()
     driver_suffix = "+vtb_async" if is_async else "+vtb"
-    from vertebra.db.registry import SCHEME_REGISTRY
-
     cfg_cls = SCHEME_REGISTRY.get(lowered)
     if cfg_cls is not None:
         target_engine = "spangres" if lowered == "spangres" else cfg_cls.url_schemes[0]

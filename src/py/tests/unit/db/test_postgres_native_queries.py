@@ -1,4 +1,4 @@
-"""Unit and loopback tests for native Postgres query, query_multi, and transaction facades (`ch14:t04`)."""
+"""Unit and loopback tests for native Postgres query, query_multi, and transaction facades."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from vertebra.db.adapters.postgres.types import (
     PostgresQueryResult,
     _project_public_row,
 )
+from vertebra.db.dbapi._async import AsyncDBAPIConnection
 from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
 
 
@@ -548,3 +549,125 @@ async def test_async_postgres_queue_store_lifecycle() -> None:
     await store.release_unique_key("key-async")
     assert await store.acquire_lease("lease-async", owner_id="w1", ttl_seconds=30.0) is True
     await store.release_lease("lease-async", owner_id="w1")
+
+
+@pytest.mark.anyio
+async def test_postgres_queue_store_table_validation_reap_stale_and_pop_dead_letter() -> None:
+    """Verify Postgres queue stores validate table_name, bump or dead-letter stale claims, and pop dead-letter rows."""
+    sync_drv = _FakeSyncPostgresDriver()
+    async_drv = _FakeAsyncPostgresDriver()
+
+    with pytest.raises(ValueError, match="table_name"):
+        SyncPostgresQueueStore(cast("Any", sync_drv), table_name="jobs; DROP TABLE users")
+    with pytest.raises(ValueError, match="table_name"):
+        AsyncPostgresQueueStore(cast("Any", async_drv), table_name="jobs; DROP TABLE users")
+
+    sync_store = SyncPostgresQueueStore(cast("Any", sync_drv), table_name="custom_queue_jobs")
+    async_store = AsyncPostgresQueueStore(cast("Any", async_drv), table_name="custom_queue_jobs")
+
+    assert sync_store.reap_stale() == 1
+    sync_reap_sql = sync_drv.executed[-1][0]
+    assert "CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END" in sync_reap_sql
+    assert "CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END" in sync_reap_sql
+
+    assert await async_store.reap_stale() == 1
+    async_reap_sql = async_drv.executed[-1][0]
+    assert "CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END" in async_reap_sql
+    assert "CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END" in async_reap_sql
+
+    async_drv.select_rows = [
+        {
+            "job_id": "dlq-1",
+            "queue": "io",
+            "task_name": "tasks.fail",
+            "payload": b'{"ok": false}',
+            "attempt": 3,
+            "max_attempts": 3,
+            "lease_until_ms": 0,
+            "scheduled_at_ms": None,
+            "headers": "{}",
+        }
+    ]
+    popped = await async_store.pop_dead_letter("dlq-1")
+    assert popped is not None
+    assert popped.job_id == "dlq-1"
+    assert "DELETE FROM custom_queue_jobs" in async_drv.executed[-1][0]
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_awaits_lastrowid_across_insert_branches() -> None:
+    """Verify AsyncDBAPICursor.execute awaits async last_insert_rowid across DML and RETURNING INSERT paths."""
+
+    class _DmlNoRowidDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute_dml(self, sql: str, params: Any) -> tuple[int, int | None]:
+            _ = (sql, params)
+            return 1, None
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 101
+
+    class _ExecuteOnlyDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute(self, sql: str, params: Any) -> int:
+            _ = (sql, params)
+            return 1
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 202
+
+    class _ReturningDescDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute_with_description(
+            self, sql: str, params: Any
+        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            _ = (sql, params)
+            return [(303,)], ("id",)
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 303
+
+    class _ReturningSelectDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, params)
+            return [{"id": 404}]
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 404
+
+    conn_dml = AsyncDBAPIConnection(driver=_DmlNoRowidDriver(), share_pool=False)
+    cur_dml = conn_dml.cursor()
+    await cur_dml.execute("INSERT INTO widgets (name) VALUES ($1)", ("a",))
+    assert cur_dml.lastrowid == 101
+    await conn_dml.close()
+
+    conn_exec = AsyncDBAPIConnection(driver=_ExecuteOnlyDriver(), share_pool=False)
+    cur_exec = conn_exec.cursor()
+    await cur_exec.execute("INSERT INTO widgets (name) VALUES ($1)", ("b",))
+    assert cur_exec.lastrowid == 202
+    await cur_exec.execute("UPDATE widgets SET name = $1", ("c",))
+    assert cur_exec.lastrowid is None
+    await conn_exec.close()
+
+    conn_ret = AsyncDBAPIConnection(driver=_ReturningDescDriver(), share_pool=False)
+    cur_ret = conn_ret.cursor()
+    await cur_ret.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("d",))
+    assert cur_ret.lastrowid == 303
+    assert await cur_ret.fetchone() == (303,)
+    await conn_ret.close()
+
+    conn_sel = AsyncDBAPIConnection(driver=_ReturningSelectDriver(), share_pool=False)
+    cur_sel = conn_sel.cursor()
+    await cur_sel.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("e",))
+    assert cur_sel.lastrowid == 404
+    assert await cur_sel.fetchone() == (404,)
+    await conn_sel.close()

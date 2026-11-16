@@ -2122,15 +2122,23 @@ class OracleSyncADKArtifactStore(_BaseSyncADKArtifactStore["OracleSyncConfig"]):
             raise
 
     def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """List distinct artifact filenames for `(app_name, user_id, session_id)`."""
+        """List distinct artifact filenames for `(app_name, user_id)` across user and optional session scope."""
         table_ref = oracle_table_ref(self._artifact_table)
         try:
             with self._config.provide_session() as driver:
-                rows = driver.select(
-                    f"SELECT DISTINCT filename FROM {table_ref} "
-                    "WHERE app_name = :app_name AND user_id = :user_id AND session_id = :session_id ORDER BY filename ASC",
-                    {"app_name": app_name, "user_id": user_id, "session_id": session_id or ""},
-                )
+                if session_id is not None:
+                    rows = driver.select(
+                        f"SELECT DISTINCT filename FROM {table_ref} "
+                        "WHERE app_name = :app_name AND user_id = :user_id "
+                        "AND session_id IN ('', :session_id) ORDER BY filename ASC",
+                        {"app_name": app_name, "user_id": user_id, "session_id": session_id},
+                    )
+                else:
+                    rows = driver.select(
+                        f"SELECT DISTINCT filename FROM {table_ref} "
+                        "WHERE app_name = :app_name AND user_id = :user_id AND session_id = '' ORDER BY filename ASC",
+                        {"app_name": app_name, "user_id": user_id},
+                    )
             return [str(oracle_row_value(r, "filename", 0)) for r in rows]
         except Exception as exc:
             if is_oracle_table_missing(exc):
@@ -2398,15 +2406,23 @@ class OracleAsyncADKArtifactStore(_BaseAsyncADKArtifactStore["OracleAsyncConfig"
             raise
 
     async def list_artifact_keys(self, app_name: str, user_id: str, session_id: str | None = None) -> list[str]:
-        """Asynchronously list distinct artifact filenames."""
+        """Asynchronously list distinct artifact filenames across user and optional session scope."""
         table_ref = oracle_table_ref(self._artifact_table)
         try:
             async with self._config.provide_session() as driver:
-                rows = await driver.select(
-                    f"SELECT DISTINCT filename FROM {table_ref} "
-                    "WHERE app_name = :app_name AND user_id = :user_id AND session_id = :session_id ORDER BY filename ASC",
-                    {"app_name": app_name, "user_id": user_id, "session_id": session_id or ""},
-                )
+                if session_id is not None:
+                    rows = await driver.select(
+                        f"SELECT DISTINCT filename FROM {table_ref} "
+                        "WHERE app_name = :app_name AND user_id = :user_id "
+                        "AND session_id IN ('', :session_id) ORDER BY filename ASC",
+                        {"app_name": app_name, "user_id": user_id, "session_id": session_id},
+                    )
+                else:
+                    rows = await driver.select(
+                        f"SELECT DISTINCT filename FROM {table_ref} "
+                        "WHERE app_name = :app_name AND user_id = :user_id AND session_id = '' ORDER BY filename ASC",
+                        {"app_name": app_name, "user_id": user_id},
+                    )
             return [str(oracle_row_value(r, "filename", 0)) for r in rows]
         except Exception as exc:
             if is_oracle_table_missing(exc):

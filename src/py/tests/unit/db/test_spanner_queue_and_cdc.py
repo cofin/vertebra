@@ -321,7 +321,10 @@ async def test_spanner_queue_backend_lifecycle_dlq_and_leases() -> None:
     backend = SpannerQueueBackend(cfg, executor=_FakeSpannerQueueExecutor(), shard_count=16)
 
     gsql_ddls = backend.ddl_statements("googlesql")
-    assert any("NULL_FILTERED INDEX" in s and "STORING" in s for s in gsql_ddls)
+    assert any(
+        "CREATE INDEX IF NOT EXISTS idx_vtb_spanner_queue_ready" in s and "NULL_FILTERED" not in s and "STORING" in s
+        for s in gsql_ddls
+    )
     assert any("ROW DELETION POLICY" in s for s in gsql_ddls)
     pg_ddls = backend.ddl_statements("spangres")
     assert any("INCLUDE" in s for s in pg_ddls)
@@ -1206,8 +1209,13 @@ class _InMemorySpannerQueueWire:
         if upper.startswith("DELETE FROM VERTEBRA_QUEUE_JOBS"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
-            attempt = int(_p("attempt", 3))
             target_job = jobs.get((shard_id, task_id))
+            if "STATUS = 'DEAD_LETTER'" in upper:
+                if target_job is not None and target_job["status"] == "dead_letter":
+                    del jobs[(shard_id, task_id)]
+                    return self._result_from_dicts([], row_count=1)
+                return self._result_from_dicts([], row_count=0)
+            attempt = int(_p("attempt", 3))
             if target_job is not None and target_job["status"] == "running" and int(target_job["attempt"]) == attempt:
                 del jobs[(shard_id, task_id)]
                 return self._result_from_dicts([], row_count=1)
@@ -1627,9 +1635,64 @@ async def test_spanner_queue_backend_integrations_and_stateless_receipt_handles(
     assert backend.store is not None
     litestar_backend = StoreQueueBackend(store=backend.store)
     ls_rec = await litestar_backend.enqueue("audit.log", args=("ok",), queue="default", max_retries=1)
-    claimed_ls = await litestar_backend.claim_next(queues=("default",))
+    claimed_ls = await litestar_backend.claim_task(ls_rec.id, expected_retry_count=0)
     assert claimed_ls is not None
     assert claimed_ls.id == ls_rec.id
+    assert claimed_ls.status == "running"
+    assert await litestar_backend.claim_task(ls_rec.id, expected_retry_count=0) is None
     await litestar_backend.complete_task(ls_rec.id, expected_retry_count=0)
 
     await qsvc.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_queue_store_table_validation_and_store_dlq_replay(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """Verify Spanner queue stores reject unsafe table_name and replay_dlq cleans up dead_letter rows."""
+    wire = _InMemorySpannerQueueWire(dialect)
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        dialect=dialect,
+        endpoint="http://localhost:9010",
+    )
+    sync_drv = SyncSpannerDriver(cfg, client=wire.sync_client())
+    async_drv = AsyncSpannerDriver(cfg, client=wire.async_client())
+
+    with pytest.raises(ValueError, match="table_name"):
+        SyncSpannerQueueStore(sync_drv, table_name="bad; DROP TABLE vertebra_queue_jobs")
+    with pytest.raises(ValueError, match="table_name"):
+        AsyncSpannerQueueStore(async_drv, table_name="bad; DROP TABLE vertebra_queue_jobs")
+
+    settings = QueueBackendSettings(
+        kind="spangres" if dialect == "spangres" else "spanner",
+        dsn=f"{'spangres' if dialect == 'spangres' else 'spanner'}://projects/p/instances/i/databases/d",
+        driver=async_drv,
+        sync_driver=sync_drv,
+    )
+    backend = SpannerQueueBackend(settings)
+    env = TaskEnvelope(
+        task_id="dlq-replay-1",
+        task_name="flaky",
+        lane="io",
+        attempt=1,
+        max_retries=1,
+        enqueued_at=time.time(),
+    )
+    await backend.enqueue(env)
+    claimed = await backend.dequeue(("io",), batch_size=1)
+    assert len(claimed) == 1
+    dlq_entry = await backend.nack(claimed[0], error="boom", send_to_dlq=True)
+    assert dlq_entry is not None
+
+    replayed = await backend.replay_dlq(dlq_entry.dlq_id)
+    assert replayed is not None
+    reclaimed = await backend.dequeue(("io",), batch_size=1)
+    assert len(reclaimed) == 1
+    assert reclaimed[0].task_id == "dlq-replay-1"
+    assert reclaimed[0].attempt == 1
+    await backend.ack(reclaimed[0])
+    await backend.close()

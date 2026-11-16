@@ -47,9 +47,11 @@ local items = redis.call('ZRANGEBYSCORE', scheduled_key, '-inf', now_ts, 'LIMIT'
 local promoted = 0
 for _, raw in ipairs(items) do
     local ok, data = pcall(cjson.decode, raw)
-    if ok and data and data.lane then
-        local stream_key = prefix .. ':lane:' .. data.lane
-        redis.call('XADD', stream_key, '*', 'payload', raw, 'lane', data.lane, 'task_name', data.task_name or '')
+    local lane = ok and type(data) == 'table' and (data.lane or data[3]) or nil
+    local task_name = ok and type(data) == 'table' and (data.task_name or data[2] or '') or ''
+    if ok and data and lane then
+        local stream_key = prefix .. ':lane:' .. lane
+        redis.call('XADD', stream_key, '*', 'payload', raw, 'lane', lane, 'task_name', task_name)
         redis.call('ZREM', scheduled_key, raw)
         promoted = promoted + 1
     end

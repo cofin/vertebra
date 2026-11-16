@@ -1,11 +1,13 @@
 """Template-method SQLSpec dispatch bases and shared configuration wrappers over Vertebra drivers."""
 
+import contextlib
 import threading
 from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, Self, cast
 
 import msgspec
+from anyio import CancelScope
 
 from vertebra._vertebra import (
     BigQueryError,
@@ -1346,6 +1348,159 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         return [msgspec.convert(row, type=schema_type) for row in rows]
 
 
+_ADAPTER_META_KEYS: frozenset[str] = frozenset(
+    {
+        "bind_key",
+        "broker",
+        "share_pool",
+        "arrow_threshold_rows",
+        "statement_config",
+        "migration_config",
+        "driver_features",
+        "extension_config",
+        "observability_config",
+        "connection_config",
+    }
+)
+_URL_ALIAS_KEYS: tuple[str, ...] = ("url", "dsn", "conninfo", "connection_string")
+
+
+def _resolve_adapter_driver_config[ConfigT](
+    adapter: Any,
+    config: ConfigT | Any | None,
+    connection_config: Mapping[str, Any] | None,
+    kwargs: Mapping[str, Any],
+    *,
+    broker: Any,
+) -> ConfigT:
+    """Resolve `driver_config` invoking subclass `build_connection_config` when defined."""
+    if config is not None and not isinstance(config, (str, Mapping)):
+        return cast("ConfigT", config)
+
+    merged_kwargs: dict[str, Any] = dict(connection_config) if isinstance(connection_config, Mapping) else {}
+    if isinstance(config, Mapping):
+        merged_kwargs.update(config)
+    merged_kwargs.update(kwargs)
+
+    build_fn = getattr(adapter, "build_connection_config", None)
+    config_cls = getattr(adapter, "_config_cls", None)
+    struct_fields = set(getattr(config_cls, "__struct_fields__", ())) if config_cls is not None else set()
+
+    if callable(build_fn):
+        raw_url: str | None = config if isinstance(config, str) and config.strip() else None
+        if raw_url is None:
+            for source in (kwargs, connection_config or {}):
+                if isinstance(source, Mapping):
+                    for alias in _URL_ALIAS_KEYS:
+                        candidate = source.get(alias)
+                        if isinstance(candidate, str) and candidate.strip():
+                            raw_url = candidate
+                            break
+                if raw_url is not None:
+                    break
+
+        if raw_url is not None:
+            extra_fields = {k: v for k, v in merged_kwargs.items() if k not in _URL_ALIAS_KEYS}
+            base_cfg = build_fn(raw_url, None, {})
+            if broker is not None and "broker" not in extra_fields and hasattr(base_cfg, "broker"):
+                extra_fields["broker"] = broker
+            if extra_fields:
+                if isinstance(base_cfg, msgspec.Struct):
+                    return cast("ConfigT", msgspec.structs.replace(base_cfg, **extra_fields))
+                return cast("ConfigT", build_fn(raw_url, None, extra_fields))
+            return cast("ConfigT", base_cfg)
+
+        if broker is not None and "broker" not in merged_kwargs and (not struct_fields or "broker" in struct_fields):
+            merged_kwargs["broker"] = broker
+        return cast("ConfigT", build_fn(None, None, merged_kwargs))
+
+    if isinstance(config, str) and config.strip():
+        merged_kwargs.setdefault("dsn" if "dsn" in struct_fields else "url", config)
+
+    if struct_fields and "url" in merged_kwargs and "url" not in struct_fields:
+        url_val = merged_kwargs.pop("url")
+        if isinstance(url_val, str) and url_val.strip():
+            from_url_fn = getattr(config_cls, "from_url", None)
+            if callable(from_url_fn) and "dsn" not in merged_kwargs:
+                base_from_url = from_url_fn(url_val)
+                if broker is not None and "broker" not in merged_kwargs and "broker" in struct_fields:
+                    merged_kwargs["broker"] = broker
+                if merged_kwargs and isinstance(base_from_url, msgspec.Struct):
+                    return cast("ConfigT", msgspec.structs.replace(base_from_url, **merged_kwargs))
+                return cast("ConfigT", base_from_url)
+            if "dsn" in struct_fields and "dsn" not in merged_kwargs:
+                merged_kwargs["dsn"] = url_val
+
+    if broker is not None and "broker" not in merged_kwargs and (not struct_fields or "broker" in struct_fields):
+        merged_kwargs["broker"] = broker
+    if config_cls is None:
+        msg = f"{type(adapter).__name__} must define _config_cls or build_connection_config"
+        raise TypeError(msg)
+    return cast("ConfigT", config_cls(**merged_kwargs))
+
+
+def _derive_adapter_pool(adapter: Any, overrides: Mapping[str, Any]) -> Any:
+    """Clone `SyncAdapterConfig` or `AsyncAdapterConfig` with non-mutating field overrides."""
+    adapter_kwargs: dict[str, Any] = {
+        "bind_key": str(overrides.get("bind_key", adapter.bind_key)),
+        "broker": overrides.get("broker", adapter.broker),
+        "share_pool": bool(overrides.get("share_pool", adapter.share_pool)),
+        "arrow_threshold_rows": int(overrides.get("arrow_threshold_rows", adapter.arrow_threshold_rows)),
+        "statement_config": overrides.get("statement_config", adapter.statement_config),
+        "migration_config": (
+            dict(overrides["migration_config"])
+            if isinstance(overrides.get("migration_config"), Mapping)
+            else dict(adapter.migration_config)
+            if isinstance(adapter.migration_config, Mapping)
+            else adapter.migration_config
+        ),
+        "driver_features": dict(overrides.get("driver_features", adapter.driver_features)),
+        "extension_config": dict(overrides.get("extension_config", adapter.extension_config)),
+        "observability_config": overrides.get("observability_config", adapter.observability_config),
+    }
+
+    override_conn = overrides.get("connection_config")
+    cfg_overrides: dict[str, Any] = dict(override_conn) if isinstance(override_conn, Mapping) else {}
+    cfg_overrides.update({k: v for k, v in overrides.items() if k not in _ADAPTER_META_KEYS})
+
+    has_url_override = any(alias in cfg_overrides for alias in _URL_ALIAS_KEYS)
+    if not has_url_override and isinstance(adapter.driver_config, msgspec.Struct):
+        struct_fields = set(adapter.driver_config.__struct_fields__)
+        struct_updates = {k: v for k, v in cfg_overrides.items() if k in struct_fields}
+        extra_kwargs = {k: v for k, v in cfg_overrides.items() if k not in struct_fields}
+        if "broker" in overrides and "broker" in struct_fields:
+            struct_updates["broker"] = overrides["broker"]
+        derived_cfg = (
+            msgspec.structs.replace(adapter.driver_config, **struct_updates)
+            if struct_updates
+            else adapter.driver_config
+        )
+        merged_conn = dict(adapter.connection_config)
+        merged_conn.update(cfg_overrides)
+        return type(adapter)(
+            derived_cfg,
+            connection_config=merged_conn,
+            **adapter_kwargs,
+            **extra_kwargs,
+        )
+
+    merged_connection = dict(adapter.connection_config)
+    if has_url_override:
+        for alias in _URL_ALIAS_KEYS:
+            merged_connection.pop(alias, None)
+    elif not any(alias in merged_connection for alias in _URL_ALIAS_KEYS):
+        struct_fields = set(getattr(adapter.driver_config, "__struct_fields__", ()))
+        if "dsn" in struct_fields and getattr(adapter.driver_config, "dsn", None):
+            merged_connection["dsn"] = adapter.driver_config.dsn
+        elif "url" in struct_fields and getattr(adapter.driver_config, "url", None):
+            merged_connection["url"] = adapter.driver_config.url
+    merged_connection.update(cfg_overrides)
+    return type(adapter)(
+        **adapter_kwargs,
+        **{k: v for k, v in merged_connection.items() if k not in _ADAPTER_META_KEYS},
+    )
+
+
 class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseConfig[Any, Any, DriverT]):
     """Synchronous SQLSpec database configuration backed by a Vertebra native driver."""
 
@@ -1359,7 +1514,7 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
 
     def __init__(
         self,
-        config: ConfigT | None = None,
+        config: ConfigT | str | None = None,
         *,
         bind_key: str = "default",
         broker: Any = None,
@@ -1387,14 +1542,13 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
             self.broker = None
         self.arrow_threshold_rows = arrow_threshold_rows
 
-        cfg_kwargs: dict[str, Any] = dict(connection_config) if isinstance(connection_config, Mapping) else {}
-        cfg_kwargs.update(kwargs)
-        if config is not None:
-            self.driver_config: ConfigT = config
-        else:
-            if self.broker is not None and "broker" not in cfg_kwargs:
-                cfg_kwargs["broker"] = self.broker
-            self.driver_config = self._config_cls(**cfg_kwargs)
+        self.driver_config: ConfigT = _resolve_adapter_driver_config(
+            self,
+            config,
+            connection_config,
+            kwargs,
+            broker=self.broker,
+        )
         self._driver_instance: DriverT | None = None
         resolved_stmt_config = (
             statement_config if statement_config is not None else self.driver_type._default_statement_config()
@@ -1440,10 +1594,18 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
 
     @contextmanager
     def provide_session(self, *args: Any, **kwargs: Any) -> Iterator[DriverT]:
-        """Yield a synchronous SQLSpec adapter session."""
+        """Yield a synchronous SQLSpec adapter session, rolling back active transactions on exception."""
         _ = (args, kwargs)
         driver = self.create_driver()
-        yield driver
+        try:
+            yield driver
+        except Exception:
+            in_tx_fn = getattr(driver, "_connection_in_transaction", None)
+            in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
+            if in_tx:
+                with contextlib.suppress(Exception):
+                    driver.rollback()
+            raise
 
     @contextmanager
     def provide_connection(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
@@ -1481,36 +1643,9 @@ class SyncAdapterConfig[ConfigT, DriverT: SyncDriverAdapterBase](SyncDatabaseCon
         """Close the cached driver reference."""
         self.close()
 
-    def derive_pool(self, **overrides: Any) -> "SyncAdapterConfig[ConfigT, DriverT]":
+    def derive_pool(self, **overrides: Any) -> Self:
         """Clone this synchronous adapter config with non-mutating field overrides."""
-        url_or_dsn = getattr(self.driver_config, "url", None) or getattr(self.driver_config, "dsn", None)
-        merged_connection = dict(self.connection_config)
-        if url_or_dsn and "url" not in merged_connection and "dsn" not in merged_connection:
-            merged_connection["url"] = url_or_dsn
-        merged_connection.update(overrides)
-        return type(self)(
-            bind_key=str(overrides.get("bind_key", self.bind_key)),
-            broker=overrides.get("broker", self.broker),
-            share_pool=bool(overrides.get("share_pool", self.share_pool)),
-            arrow_threshold_rows=int(overrides.get("arrow_threshold_rows", self.arrow_threshold_rows)),
-            statement_config=overrides.get("statement_config", self.statement_config),
-            driver_features=dict(overrides.get("driver_features", self.driver_features)),
-            extension_config=dict(overrides.get("extension_config", self.extension_config)),
-            **{
-                key: value
-                for key, value in merged_connection.items()
-                if key
-                not in {
-                    "bind_key",
-                    "broker",
-                    "share_pool",
-                    "arrow_threshold_rows",
-                    "statement_config",
-                    "driver_features",
-                    "extension_config",
-                }
-            },
-        )
+        return cast("Self", _derive_adapter_pool(self, overrides))
 
 
 class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabaseConfig[Any, Any, DriverT]):
@@ -1526,7 +1661,7 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
 
     def __init__(
         self,
-        config: ConfigT | None = None,
+        config: ConfigT | str | None = None,
         *,
         bind_key: str = "default",
         broker: Any = None,
@@ -1554,14 +1689,13 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
             self.broker = None
         self.arrow_threshold_rows = arrow_threshold_rows
 
-        cfg_kwargs: dict[str, Any] = dict(connection_config) if isinstance(connection_config, Mapping) else {}
-        cfg_kwargs.update(kwargs)
-        if config is not None:
-            self.driver_config: ConfigT = config
-        else:
-            if self.broker is not None and "broker" not in cfg_kwargs:
-                cfg_kwargs["broker"] = self.broker
-            self.driver_config = self._config_cls(**cfg_kwargs)
+        self.driver_config: ConfigT = _resolve_adapter_driver_config(
+            self,
+            config,
+            connection_config,
+            kwargs,
+            broker=self.broker,
+        )
         self._driver_instance: DriverT | None = None
         resolved_stmt_config = (
             statement_config if statement_config is not None else self.driver_type._default_statement_config()
@@ -1607,10 +1741,20 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
 
     @asynccontextmanager
     async def provide_session(self, *args: Any, **kwargs: Any) -> AsyncIterator[DriverT]:
-        """Yield an asynchronous SQLSpec adapter session."""
+        """Yield an asynchronous SQLSpec adapter session, rolling back active transactions on exception."""
         _ = (args, kwargs)
         driver = self.create_driver()
-        yield driver
+        try:
+            yield driver
+        except Exception:
+            in_tx_fn = getattr(driver, "_connection_in_transaction", None)
+            in_tx = bool(in_tx_fn()) if callable(in_tx_fn) else bool(getattr(driver, "in_transaction", False))
+            if in_tx:
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    res = driver.rollback()
+                    if hasattr(res, "__await__"):
+                        await res
+            raise
 
     @asynccontextmanager
     async def provide_connection(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
@@ -1637,7 +1781,7 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
         """Release the async adapter pool reference."""
         await self.close()
 
-    def provide_pool(self, *args: Any, **kwargs: Any) -> Any:
+    async def provide_pool(self, *args: Any, **kwargs: Any) -> Any:
         """Return the active async pool driver for SQLSpec lifecycle hooks."""
         _ = (args, kwargs)
         return self.create_driver()
@@ -1650,36 +1794,9 @@ class AsyncAdapterConfig[ConfigT, DriverT: AsyncDriverAdapterBase](AsyncDatabase
         """Close the cached async driver reference."""
         await self.close()
 
-    def derive_pool(self, **overrides: Any) -> "AsyncAdapterConfig[ConfigT, DriverT]":
+    def derive_pool(self, **overrides: Any) -> Self:
         """Clone this asynchronous adapter config with non-mutating field overrides."""
-        url_or_dsn = getattr(self.driver_config, "url", None) or getattr(self.driver_config, "dsn", None)
-        merged_connection = dict(self.connection_config)
-        if url_or_dsn and "url" not in merged_connection and "dsn" not in merged_connection:
-            merged_connection["url"] = url_or_dsn
-        merged_connection.update(overrides)
-        return type(self)(
-            bind_key=str(overrides.get("bind_key", self.bind_key)),
-            broker=overrides.get("broker", self.broker),
-            share_pool=bool(overrides.get("share_pool", self.share_pool)),
-            arrow_threshold_rows=int(overrides.get("arrow_threshold_rows", self.arrow_threshold_rows)),
-            statement_config=overrides.get("statement_config", self.statement_config),
-            driver_features=dict(overrides.get("driver_features", self.driver_features)),
-            extension_config=dict(overrides.get("extension_config", self.extension_config)),
-            **{
-                key: value
-                for key, value in merged_connection.items()
-                if key
-                not in {
-                    "bind_key",
-                    "broker",
-                    "share_pool",
-                    "arrow_threshold_rows",
-                    "statement_config",
-                    "driver_features",
-                    "extension_config",
-                }
-            },
-        )
+        return cast("Self", _derive_adapter_pool(self, overrides))
 
 
 def prepare_many_statement(

@@ -2,19 +2,265 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use redis::sentinel::{SentinelClient, SentinelNodeConnectionInfo, SentinelServerType};
 use redis::{Cmd, Pipeline, PushInfo, PushKind, Value};
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task::AbortHandle;
 
 use crate::caching::ClientLruCache;
 use crate::config::{RedisClientConfig, RedisTopologyMode};
 use crate::errors::{RedisDriverError, classify_redis_error};
-use crate::topology::ClusterSlotMap;
+use crate::topology::{ClusterSlotMap, parse_sentinel_master_addr};
 
 enum CoreConnection {
     Standalone(redis::aio::ConnectionManager),
     Cluster(redis::cluster_async::ClusterConnection),
+}
+
+fn extract_url_credentials_and_db(normalized_url: &str) -> (Option<String>, Option<String>, i64) {
+    if let Ok(parsed) = url::Url::parse(normalized_url) {
+        let user = (!parsed.username().is_empty()).then(|| parsed.username().to_string());
+        let pass = parsed.password().map(str::to_string);
+        let db = parsed
+            .path()
+            .trim_start_matches('/')
+            .parse::<i64>()
+            .unwrap_or(0);
+        (user, pass, db)
+    } else {
+        (None, None, 0)
+    }
+}
+
+fn apply_redis_settings(
+    mut conn_info: redis::ConnectionInfo,
+    protocol: u8,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> redis::ConnectionInfo {
+    let mut settings = conn_info.redis_settings().clone();
+    settings = settings.set_protocol(if protocol == 3 {
+        redis::ProtocolVersion::RESP3
+    } else {
+        redis::ProtocolVersion::RESP2
+    });
+    if let Some(u) = username {
+        settings = settings.set_username(u);
+    }
+    if let Some(p) = password {
+        settings = settings.set_password(p);
+    }
+    conn_info = conn_info.set_redis_settings(settings);
+    conn_info
+}
+
+pub(crate) async fn resolve_effective_credentials(
+    config: &RedisClientConfig,
+    password_override: Option<String>,
+) -> Result<(Option<String>, Option<String>, i64), RedisDriverError> {
+    let (url_user, url_pass, db) = extract_url_credentials_and_db(&config.normalized_url);
+    let effective_username = config.username.clone().or(url_user);
+    let mut effective_password = password_override
+        .or_else(|| config.password.clone())
+        .or(url_pass);
+
+    if config.enable_gcp_iam_auth
+        && let Some(ref handle) = config.iam_token_handle
+    {
+        let snap = handle
+            .get_or_refresh()
+            .await
+            .map_err(|e| RedisDriverError::operational(e, true))?;
+        effective_password = Some(snap.access_token.clone());
+    }
+
+    Ok((effective_username, effective_password, db))
+}
+
+pub(crate) async fn open_redis_client_for_config(
+    config: &RedisClientConfig,
+    effective_username: Option<&str>,
+    effective_password: Option<&str>,
+    db: i64,
+) -> Result<redis::Client, RedisDriverError> {
+    match config.topology {
+        RedisTopologyMode::Standalone | RedisTopologyMode::Cluster => {
+            let conn_info =
+                redis::IntoConnectionInfo::into_connection_info(config.normalized_url.as_str())
+                    .map_err(|e| classify_redis_error(&e))?;
+            let conn_info = apply_redis_settings(
+                conn_info,
+                config.protocol,
+                effective_username,
+                effective_password,
+            );
+            redis::Client::open(conn_info).map_err(|e| classify_redis_error(&e))
+        }
+        RedisTopologyMode::Sentinel => {
+            let master_name = config
+                .sentinel_master_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    RedisDriverError::config(
+                        "sentinel_master_name is required when topology is 'sentinel'.",
+                    )
+                })?;
+            let scheme = if config.uses_tls() { "rediss" } else { "redis" };
+            let sentinel_urls: Vec<String> = if !config.sentinel_nodes.is_empty() {
+                config
+                    .sentinel_nodes
+                    .iter()
+                    .map(|(h, p)| {
+                        if h.contains(':') && !h.starts_with('[') {
+                            format!("{scheme}://[{h}]:{p}")
+                        } else {
+                            format!("{scheme}://{h}:{p}")
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![config.normalized_url.clone()]
+            };
+
+            let mut master_redis_info = redis::RedisConnectionInfo::default().set_db(db);
+            master_redis_info = master_redis_info.set_protocol(if config.protocol == 3 {
+                redis::ProtocolVersion::RESP3
+            } else {
+                redis::ProtocolVersion::RESP2
+            });
+            if let Some(u) = effective_username {
+                master_redis_info = master_redis_info.set_username(u);
+            }
+            if let Some(p) = effective_password {
+                master_redis_info = master_redis_info.set_password(p);
+            }
+            let mut node_info =
+                SentinelNodeConnectionInfo::default().set_redis_connection_info(master_redis_info);
+            if config.uses_tls() {
+                node_info = node_info.set_tls_mode(redis::TlsMode::Secure);
+            }
+
+            let mut primary_err = match SentinelClient::build(
+                sentinel_urls.clone(),
+                master_name,
+                Some(node_info),
+                SentinelServerType::Master,
+            ) {
+                Ok(mut sc) => {
+                    match tokio::time::timeout(Duration::from_secs(2), sc.async_get_client()).await
+                    {
+                        Ok(Ok(master_client)) => return Ok(master_client),
+                        Ok(Err(e)) => Some(classify_redis_error(&e)),
+                        Err(_) => Some(RedisDriverError::operational(
+                            "Sentinel master discovery timed out",
+                            true,
+                        )),
+                    }
+                }
+                Err(e) => Some(classify_redis_error(&e)),
+            };
+
+            // Fallback direct `SENTINEL get-master-addr-by-name` probe (supports minimal Sentinel
+            // responders that implement get-master-addr-by-name without ROLE).
+            for s_url in &sentinel_urls {
+                let Ok(s_info) = redis::IntoConnectionInfo::into_connection_info(s_url.as_str())
+                else {
+                    continue;
+                };
+                let Ok(s_client) = redis::Client::open(s_info) else {
+                    continue;
+                };
+                let Ok(Ok(mut s_conn)) = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    s_client.get_multiplexed_async_connection(),
+                )
+                .await
+                else {
+                    continue;
+                };
+                let mut sentinel_cmd = redis::cmd("SENTINEL");
+                sentinel_cmd.arg("get-master-addr-by-name").arg(master_name);
+                if let Ok(Ok(resp)) = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    sentinel_cmd.query_async::<Value>(&mut s_conn),
+                )
+                .await
+                {
+                    match parse_sentinel_master_addr(&resp) {
+                        Ok((m_host, m_port)) => {
+                            let master_url = if m_host.contains(':') && !m_host.starts_with('[') {
+                                format!("{scheme}://[{m_host}]:{m_port}/{db}")
+                            } else {
+                                format!("{scheme}://{m_host}:{m_port}/{db}")
+                            };
+                            let m_info = redis::IntoConnectionInfo::into_connection_info(
+                                master_url.as_str(),
+                            )
+                            .map_err(|e| classify_redis_error(&e))?;
+                            let m_info = apply_redis_settings(
+                                m_info,
+                                config.protocol,
+                                effective_username,
+                                effective_password,
+                            );
+                            return redis::Client::open(m_info)
+                                .map_err(|e| classify_redis_error(&e));
+                        }
+                        Err(err) => primary_err = Some(err),
+                    }
+                }
+            }
+
+            Err(primary_err.unwrap_or_else(|| {
+                RedisDriverError::operational("Unable to resolve master from Redis Sentinel", true)
+            }))
+        }
+    }
+}
+
+fn infer_command_timeout(args: &[Vec<u8>]) -> Option<Duration> {
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+    if args.is_empty() {
+        return Some(DEFAULT_TIMEOUT);
+    }
+    let cmd_upper = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+    match cmd_upper.as_str() {
+        "XREADGROUP" | "XREAD" => {
+            for i in 1..args.len().saturating_sub(1) {
+                if args[i].eq_ignore_ascii_case(b"BLOCK")
+                    && let Ok(s) = std::str::from_utf8(&args[i + 1])
+                    && let Ok(ms) = s.parse::<u64>()
+                {
+                    return if ms == 0 {
+                        None
+                    } else {
+                        Some(Duration::from_millis(ms).saturating_add(DEFAULT_TIMEOUT))
+                    };
+                }
+            }
+            Some(DEFAULT_TIMEOUT)
+        }
+        "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "BLMOVE" | "BZPOPMIN" | "BZPOPMAX" => {
+            if let Some(last) = args.last()
+                && let Ok(s) = std::str::from_utf8(last)
+                && let Ok(secs) = s.parse::<f64>()
+                && secs.is_finite()
+                && secs >= 0.0
+            {
+                return if secs == 0.0 {
+                    None
+                } else {
+                    Some(Duration::from_secs_f64(secs).saturating_add(DEFAULT_TIMEOUT))
+                };
+            }
+            Some(DEFAULT_TIMEOUT)
+        }
+        _ => Some(DEFAULT_TIMEOUT),
+    }
 }
 
 /// Core thread-safe Redis client supporting Standalone, Sentinel, and Cluster topologies.
@@ -22,9 +268,11 @@ pub struct RedisCoreClient {
     pub config: RedisClientConfig,
     pub client_cache: Arc<ClientLruCache>,
     pub slot_map: Arc<ClusterSlotMap>,
-    conn: TokioMutex<Option<CoreConnection>>,
+    conn: Arc<TokioMutex<Option<CoreConnection>>>,
     closed: AtomicBool,
+    tracking_enabled: AtomicBool,
     active_password: RwLock<Option<String>>,
+    push_abort: Mutex<Option<AbortHandle>>,
 }
 
 impl RedisCoreClient {
@@ -38,9 +286,11 @@ impl RedisCoreClient {
             config,
             client_cache,
             slot_map,
-            conn: TokioMutex::new(None),
+            conn: Arc::new(TokioMutex::new(None)),
             closed: AtomicBool::new(false),
+            tracking_enabled: AtomicBool::new(false),
             active_password,
+            push_abort: Mutex::new(None),
         }))
     }
 
@@ -48,21 +298,68 @@ impl RedisCoreClient {
         self.closed.load(Ordering::Acquire)
     }
 
+    pub fn has_active_connection(&self) -> bool {
+        self.conn.try_lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    pub fn is_caching_active(&self) -> bool {
+        self.config.enable_client_side_caching && self.tracking_enabled.load(Ordering::Acquire)
+    }
+
+    pub fn pubsub_config(&self) -> RedisClientConfig {
+        let mut cfg = self.config.clone();
+        if let Some(pw) = self.active_password.read().clone() {
+            cfg.password = Some(pw);
+        }
+        cfg
+    }
+
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        self.tracking_enabled.store(false, Ordering::Release);
         self.client_cache.invalidate_all();
+        if let Some(abort) = self.push_abort.lock().take() {
+            abort.abort();
+        }
+        if let Ok(mut guard) = self.conn.try_lock() {
+            *guard = None;
+        } else {
+            let conn_arc = Arc::clone(&self.conn);
+            vertebra_db::py_async::db_runtime_handle().spawn(async move {
+                let mut guard = conn_arc.lock().await;
+                *guard = None;
+            });
+        }
     }
 
     /// Update dynamic credentials (e.g. IAM token) and force reconnect.
     pub async fn reconnect(&self, new_password: Option<&str>) -> Result<(), RedisDriverError> {
+        if self.is_closed() {
+            return Err(RedisDriverError::interface("Redis client is closed", false));
+        }
         if let Some(pw) = new_password {
             *self.active_password.write() = Some(pw.to_string());
         }
-        let mut guard = self.conn.lock().await;
-        *guard = None;
-        drop(guard);
+        if let Some(abort) = self.push_abort.lock().take() {
+            abort.abort();
+        }
+        {
+            let mut guard = self.conn.lock().await;
+            *guard = None;
+        }
+        self.tracking_enabled.store(false, Ordering::Release);
         self.ensure_connected().await?;
         Ok(())
+    }
+
+    fn build_client_tracking_cmd(&self) -> Cmd {
+        let mut cmd = redis::cmd("CLIENT");
+        cmd.arg("TRACKING").arg("ON");
+        for prefix in &self.config.client_tracking_prefixes {
+            cmd.arg("PREFIX").arg(prefix.as_str());
+        }
+        cmd.arg("BCAST");
+        cmd
     }
 
     /// Ensure the client connection is open, establishing it lazily if needed.
@@ -72,6 +369,10 @@ impl RedisCoreClient {
         }
 
         let mut guard = self.conn.lock().await;
+        if self.is_closed() {
+            *guard = None;
+            return Err(RedisDriverError::interface("Redis client is closed", false));
+        }
         if guard.is_some() {
             return Ok(());
         }
@@ -80,49 +381,26 @@ impl RedisCoreClient {
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
 
-        let mut effective_password = self.active_password.read().clone();
-        if self.config.enable_gcp_iam_auth {
-            if let Some(ref handle) = self.config.iam_token_handle {
-                let snap = handle
-                    .get_or_refresh()
-                    .await
-                    .map_err(|e| RedisDriverError::operational(e, true))?;
-                effective_password = Some(snap.access_token.clone());
-                *self.active_password.write() = effective_password.clone();
-            }
+        let current_pw = self.active_password.read().clone();
+        let (effective_username, effective_password, db) =
+            resolve_effective_credentials(&self.config, current_pw).await?;
+        if let Some(ref pw) = effective_password {
+            *self.active_password.write() = Some(pw.clone());
         }
-
-        let effective_url = match &effective_password {
-            Some(pw) => {
-                let mut u = url::Url::parse(&self.config.normalized_url)
-                    .map_err(|e| RedisDriverError::config(e.to_string()))?;
-                let _ = u.set_password(Some(pw));
-                if let Some(ref user) = self.config.username {
-                    let _ = u.set_username(user);
-                }
-                u.to_string()
-            }
-            None => self.config.normalized_url.clone(),
-        };
 
         match self.config.topology {
             RedisTopologyMode::Standalone | RedisTopologyMode::Sentinel => {
-                let mut conn_info =
-                    redis::IntoConnectionInfo::into_connection_info(effective_url.as_str())
-                        .map_err(|e| classify_redis_error(&e))?;
-                if self.config.protocol == 3 {
-                    let redis_info = conn_info
-                        .redis_settings()
-                        .clone()
-                        .set_protocol(redis::ProtocolVersion::RESP3);
-                    conn_info = conn_info.set_redis_settings(redis_info);
-                }
-                let client =
-                    redis::Client::open(conn_info).map_err(|e| classify_redis_error(&e))?;
+                let client = open_redis_client_for_config(
+                    &self.config,
+                    effective_username.as_deref(),
+                    effective_password.as_deref(),
+                    db,
+                )
+                .await?;
 
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PushInfo>();
                 let cache_ref = Arc::clone(&self.client_cache);
-                tokio::spawn(async move {
+                let jh = tokio::spawn(async move {
                     while let Some(push) = rx.recv().await {
                         if push.kind == PushKind::Invalidate {
                             if push.data.is_empty() || push.data.first() == Some(&Value::Nil) {
@@ -154,47 +432,111 @@ impl RedisCoreClient {
                         }
                     }
                 });
+                if let Some(prev) = self.push_abort.lock().replace(jh.abort_handle()) {
+                    prev.abort();
+                }
 
                 let mut mgr_config = redis::aio::ConnectionManagerConfig::new();
                 mgr_config = mgr_config.set_number_of_retries(1);
-                mgr_config =
-                    mgr_config.set_connection_timeout(Some(std::time::Duration::from_millis(500)));
-                mgr_config =
-                    mgr_config.set_response_timeout(Some(std::time::Duration::from_millis(1500)));
+                mgr_config = mgr_config.set_connection_timeout(Some(Duration::from_millis(500)));
+                mgr_config = mgr_config.set_response_timeout(None);
                 if self.config.protocol == 3 {
                     mgr_config = mgr_config.set_push_sender(tx);
                 }
-                let conn_mgr = tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
+                let mut conn_mgr = tokio::time::timeout(
+                    Duration::from_millis(1500),
                     client.get_connection_manager_with_config(mgr_config),
                 )
                 .await
                 .map_err(|_| RedisDriverError::operational("connection attempt timed out", true))?
                 .map_err(|e| classify_redis_error(&e))?;
 
+                if self.config.enable_client_side_caching && self.config.protocol == 3 {
+                    let track_cmd = self.build_client_tracking_cmd();
+                    let ok = matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            track_cmd.query_async::<Value>(&mut conn_mgr),
+                        )
+                        .await,
+                        Ok(Ok(_))
+                    );
+                    self.tracking_enabled.store(ok, Ordering::Release);
+                } else {
+                    self.tracking_enabled.store(false, Ordering::Release);
+                }
+
+                if self.is_closed() {
+                    *guard = None;
+                    return Err(RedisDriverError::interface("Redis client is closed", false));
+                }
                 *guard = Some(CoreConnection::Standalone(conn_mgr));
             }
             RedisTopologyMode::Cluster => {
-                let nodes = if !self.config.cluster_nodes.is_empty() {
+                let scheme = if self.config.uses_tls() {
+                    "rediss"
+                } else {
+                    "redis"
+                };
+                let nodes: Vec<String> = if !self.config.cluster_nodes.is_empty() {
                     self.config
                         .cluster_nodes
                         .iter()
-                        .map(|(h, p)| format!("redis://{h}:{p}"))
+                        .map(|(h, p)| {
+                            if h.contains(':') && !h.starts_with('[') {
+                                format!("{scheme}://[{h}]:{p}")
+                            } else {
+                                format!("{scheme}://{h}:{p}")
+                            }
+                        })
                         .collect()
                 } else {
-                    vec![effective_url]
+                    vec![self.config.normalized_url.clone()]
                 };
 
-                let cluster_client = redis::cluster::ClusterClient::builder(nodes)
-                    .use_protocol(redis::ProtocolVersion::RESP3)
-                    .build()
-                    .map_err(|e| classify_redis_error(&e))?;
+                let mut builder = redis::cluster::ClusterClient::builder(nodes).use_protocol(
+                    if self.config.protocol == 3 {
+                        redis::ProtocolVersion::RESP3
+                    } else {
+                        redis::ProtocolVersion::RESP2
+                    },
+                );
+                if let Some(ref u) = effective_username {
+                    builder = builder.username(u);
+                }
+                if let Some(ref p) = effective_password {
+                    builder = builder.password(p);
+                }
+                if self.config.uses_tls() {
+                    builder = builder.tls(redis::TlsMode::Secure);
+                }
 
-                let cluster_conn = cluster_client
+                let cluster_client = builder.build().map_err(|e| classify_redis_error(&e))?;
+
+                let mut cluster_conn = cluster_client
                     .get_async_connection()
                     .await
                     .map_err(|e| classify_redis_error(&e))?;
 
+                if self.config.enable_client_side_caching && self.config.protocol == 3 {
+                    let track_cmd = self.build_client_tracking_cmd();
+                    let ok = matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            track_cmd.query_async::<Value>(&mut cluster_conn),
+                        )
+                        .await,
+                        Ok(Ok(_))
+                    );
+                    self.tracking_enabled.store(ok, Ordering::Release);
+                } else {
+                    self.tracking_enabled.store(false, Ordering::Release);
+                }
+
+                if self.is_closed() {
+                    *guard = None;
+                    return Err(RedisDriverError::interface("Redis client is closed", false));
+                }
                 *guard = Some(CoreConnection::Cluster(cluster_conn));
             }
         }
@@ -202,34 +544,60 @@ impl RedisCoreClient {
         Ok(())
     }
 
-    /// Execute a command asynchronously on the active connection.
-    pub async fn execute_cmd(&self, cmd: &Cmd) -> Result<Value, RedisDriverError> {
+    /// Execute a command asynchronously on the active connection with an explicit optional timeout.
+    pub async fn execute_cmd_with_timeout(
+        &self,
+        cmd: &Cmd,
+        timeout: Option<Duration>,
+    ) -> Result<Value, RedisDriverError> {
         self.ensure_connected().await?;
         let mut guard = self.conn.lock().await;
+        if self.is_closed() {
+            *guard = None;
+            return Err(RedisDriverError::interface("Redis client is closed", false));
+        }
         let conn = guard
             .as_mut()
             .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
 
-        match conn {
-            CoreConnection::Standalone(c) => {
-                tokio::time::timeout(std::time::Duration::from_secs(2), cmd.query_async(c))
+        match (conn, timeout) {
+            (CoreConnection::Standalone(c), Some(dur)) => {
+                tokio::time::timeout(dur, cmd.query_async(c))
                     .await
                     .map_err(|_| RedisDriverError::operational("command timed out", true))?
                     .map_err(|e| classify_redis_error(&e))
             }
-            CoreConnection::Cluster(c) => {
-                tokio::time::timeout(std::time::Duration::from_secs(2), cmd.query_async(c))
+            (CoreConnection::Standalone(c), None) => cmd
+                .query_async(c)
+                .await
+                .map_err(|e| classify_redis_error(&e)),
+            (CoreConnection::Cluster(c), Some(dur)) => {
+                tokio::time::timeout(dur, cmd.query_async(c))
                     .await
                     .map_err(|_| RedisDriverError::operational("command timed out", true))?
                     .map_err(|e| classify_redis_error(&e))
             }
+            (CoreConnection::Cluster(c), None) => cmd
+                .query_async(c)
+                .await
+                .map_err(|e| classify_redis_error(&e)),
         }
+    }
+
+    /// Execute a command asynchronously on the active connection.
+    pub async fn execute_cmd(&self, cmd: &Cmd) -> Result<Value, RedisDriverError> {
+        self.execute_cmd_with_timeout(cmd, Some(Duration::from_secs(2)))
+            .await
     }
 
     /// Execute a pipeline asynchronously on the active connection.
     pub async fn execute_pipe(&self, pipe: &Pipeline) -> Result<Vec<Value>, RedisDriverError> {
         self.ensure_connected().await?;
         let mut guard = self.conn.lock().await;
+        if self.is_closed() {
+            *guard = None;
+            return Err(RedisDriverError::interface("Redis client is closed", false));
+        }
         let conn = guard
             .as_mut()
             .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
@@ -250,10 +618,10 @@ impl RedisCoreClient {
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, RedisDriverError> {
         let key_str = String::from_utf8_lossy(key);
-        if self.config.enable_client_side_caching {
-            if let Some(cached) = self.client_cache.get(&key_str) {
-                return Ok(Some(cached));
-            }
+        if self.is_caching_active()
+            && let Some(cached) = self.client_cache.get(&key_str)
+        {
+            return Ok(Some(cached));
         }
 
         let mut cmd = redis::cmd("GET");
@@ -263,7 +631,7 @@ impl RedisCoreClient {
         match val {
             Value::Nil => Ok(None),
             Value::BulkString(bytes) => {
-                if self.config.enable_client_side_caching {
+                if self.is_caching_active() {
                     self.client_cache.put(
                         key_str.into_owned(),
                         bytes.clone(),
@@ -274,7 +642,7 @@ impl RedisCoreClient {
             }
             Value::SimpleString(s) => {
                 let bytes = s.into_bytes();
-                if self.config.enable_client_side_caching {
+                if self.is_caching_active() {
                     self.client_cache.put(
                         key_str.into_owned(),
                         bytes.clone(),
@@ -333,7 +701,7 @@ impl RedisCoreClient {
             _ => false,
         };
 
-        if success && self.config.enable_client_side_caching {
+        if success && self.is_caching_active() {
             let key_str = String::from_utf8_lossy(key).into_owned();
             self.client_cache.put(
                 key_str,
@@ -502,7 +870,8 @@ impl RedisCoreClient {
         for arg in &args[1..] {
             cmd.arg(arg.as_slice());
         }
-        self.execute_cmd(&cmd).await
+        let timeout = infer_command_timeout(args);
+        self.execute_cmd_with_timeout(&cmd, timeout).await
     }
 
     pub async fn execute_pipeline(

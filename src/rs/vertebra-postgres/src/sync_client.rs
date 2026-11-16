@@ -1763,6 +1763,12 @@ impl PySyncPostgresClient {
         #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
         #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
     ) -> PyResult<crate::async_client::PySyncPostgresListener> {
+        if self.session.is_client_closed() {
+            return Err(postgres_error_to_py(
+                py,
+                PostgresError::Interface("Postgres client is closed".to_string()),
+            ));
+        }
         let validated = extract_listener_channels(py, channels)?;
         let cfg = self.session.config().clone();
         let options = crate::notifications::ListenerOptions {

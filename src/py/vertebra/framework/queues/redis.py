@@ -47,9 +47,11 @@ local items = redis.call('ZRANGEBYSCORE', scheduled_key, '-inf', now_ts, 'LIMIT'
 local promoted = 0
 for _, raw in ipairs(items) do
     local ok, data = pcall(cjson.decode, raw)
-    if ok and data and data.lane then
-        local stream_key = prefix .. ':lane:' .. data.lane
-        redis.call('XADD', stream_key, '*', 'payload', raw, 'lane', data.lane, 'task_name', data.task_name or '')
+    local lane = ok and type(data) == 'table' and (data.lane or data[3]) or nil
+    local task_name = ok and type(data) == 'table' and (data.task_name or data[2] or '') or ''
+    if ok and data and lane then
+        local stream_key = prefix .. ':lane:' .. lane
+        redis.call('XADD', stream_key, '*', 'payload', raw, 'lane', lane, 'task_name', task_name)
         redis.call('ZREM', scheduled_key, raw)
         promoted = promoted + 1
     end
@@ -450,7 +452,8 @@ class RedisQueueBackend:
             MissingDependencyError: When client is None and vertebra-core[redis] is not installed.
             ImproperConfigurationError: When client is None and config.backend_url is invalid.
         """
-        ensure_module("vertebra._redis", package="vertebra-core[redis]", extra="redis")
+        if client is None:
+            ensure_module("vertebra._redis", package="vertebra-core[redis]", extra="redis")
         self._config = config or QueueConfig()
         self._prefix = getattr(self._config, "stream_prefix", "vtb:queue")
         self._notification_source = notification_source
@@ -731,27 +734,6 @@ class RedisQueueBackend:
                 maxlen=dlq_max_len,
             )
             return dlq_entry
-
-        now = time.time()
-        delay = delay_seconds if delay_seconds is not None else 1.0
-        retry_env = TaskEnvelope(
-            task_id=envelope.task_id,
-            task_name=envelope.task_name,
-            lane=envelope.lane,
-            args=envelope.args,
-            kwargs=envelope.kwargs,
-            attempt=envelope.attempt + 1,
-            max_retries=envelope.max_retries,
-            enqueued_at=envelope.enqueued_at,
-            scheduled_at=now + delay,
-            idempotency_key=envelope.idempotency_key,
-            traceparent=envelope.traceparent,
-            receipt_handle=None,
-        )
-        retry_payload = encode_json_bytes(retry_env).decode("utf-8")
-        scheduled_key = f"{self._prefix}:scheduled"
-        await self._client.zadd(scheduled_key, {retry_payload: now + delay})
-        return None
 
         now = time.time()
         delay = delay_seconds if delay_seconds is not None else 1.0

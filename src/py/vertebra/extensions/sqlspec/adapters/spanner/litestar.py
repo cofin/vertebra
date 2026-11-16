@@ -123,12 +123,12 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         """Create the Litestar session table in Cloud Spanner."""
         ddl = self._table_ddl()
         if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
+            async with self._config.provide_session(transaction=False) as driver:
                 await driver.execute(ddl)
             return
 
         def _sync_create() -> None:
-            with self._config.provide_session(transaction=True) as driver:
+            with self._config.provide_session(transaction=False) as driver:
                 driver.execute(ddl)
 
         await async_(_sync_create)()
@@ -146,7 +146,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         if self._is_async_config():
             try:
-                async with self._config.provide_session(transaction=False) as driver:
+                async with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = await driver.select_one_or_none(select_sql, point_params)
                 if row is None:
                     return None
@@ -177,7 +177,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         def _sync_get() -> bytes | None:
             try:
-                with self._config.provide_session(transaction=False) as driver:
+                with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = driver.select_one_or_none(select_sql, point_params)
                 if row is None:
                     return None
@@ -272,7 +272,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         if self._is_async_config():
             try:
-                async with self._config.provide_session(transaction=False) as driver:
+                async with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = await driver.select_one_or_none(sql, params)
                 if row is None:
                     return False
@@ -285,7 +285,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         def _sync_exists() -> bool:
             try:
-                with self._config.provide_session(transaction=False) as driver:
+                with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = driver.select_one_or_none(sql, params)
                 if row is None:
                     return False
@@ -307,7 +307,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         if self._is_async_config():
             try:
-                async with self._config.provide_session(transaction=False) as driver:
+                async with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = await driver.select_one_or_none(sql, params)
                 if row is None or row.get("expires_at") is None:
                     return None
@@ -320,7 +320,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
 
         def _sync_expires_in() -> int | None:
             try:
-                with self._config.provide_session(transaction=False) as driver:
+                with self._config.provide_session(transaction=False, read_only=True) as driver:
                     row = driver.select_one_or_none(sql, params)
                 if row is None or row.get("expires_at") is None:
                     return None

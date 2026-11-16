@@ -465,11 +465,21 @@ pub fn resp_to_py(py: Python<'_>, val: RespValue) -> PyResult<Py<PyAny>> {
         }
         RespValue::Set(items) => {
             let set = PySet::empty(py)?;
-            for item in items {
+            let mut iter = items.into_iter();
+            while let Some(item) = iter.next() {
                 let obj = resp_to_py(py, item)?;
-                if set.add(&obj).is_err() {
+                if let Err(err) = set.add(&obj) {
+                    if !err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
+                        return Err(err);
+                    }
                     let list = PyList::empty(py);
+                    for existing in set.iter() {
+                        list.append(existing)?;
+                    }
                     list.append(obj)?;
+                    for rest in iter {
+                        list.append(resp_to_py(py, rest)?)?;
+                    }
                     return Ok(list.into_any().unbind());
                 }
             }

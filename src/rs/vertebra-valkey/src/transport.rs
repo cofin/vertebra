@@ -323,7 +323,8 @@ impl RespConnection {
         })?
         .map_err(ValkeyError::from)?;
 
-        let reply = self.read_reply().await?;
+        let read_timeout = self.effective_read_timeout(args);
+        let reply = self.read_reply_with_timeout(read_timeout).await?;
         reply.into_result()
     }
 
@@ -355,10 +356,77 @@ impl RespConnection {
         .map_err(ValkeyError::from)?;
 
         let mut replies = Vec::with_capacity(cmds.len());
-        for _ in 0..cmds.len() {
-            replies.push(self.read_reply().await?);
+        for cmd in cmds {
+            let read_timeout = self.effective_read_timeout(cmd);
+            replies.push(self.read_reply_with_timeout(read_timeout).await?);
         }
         Ok(replies)
+    }
+
+    fn effective_read_timeout(&self, args: &[Vec<u8>]) -> Option<Duration> {
+        let Some(first) = args.first() else {
+            return Some(self.command_timeout);
+        };
+        if first.eq_ignore_ascii_case(b"XREADGROUP") || first.eq_ignore_ascii_case(b"XREAD") {
+            let mut idx = if first.eq_ignore_ascii_case(b"XREADGROUP")
+                && args
+                    .get(1)
+                    .is_some_and(|v| v.eq_ignore_ascii_case(b"GROUP"))
+            {
+                4
+            } else {
+                1
+            };
+            while idx < args.len() {
+                let tok = &args[idx];
+                if tok.eq_ignore_ascii_case(b"STREAMS") {
+                    break;
+                }
+                if tok.eq_ignore_ascii_case(b"COUNT") {
+                    idx += 2;
+                    continue;
+                }
+                if tok.eq_ignore_ascii_case(b"BLOCK") {
+                    if let Some(raw_ms) = args.get(idx + 1)
+                        && let Ok(s) = std::str::from_utf8(raw_ms)
+                        && let Ok(ms) = s.parse::<u64>()
+                    {
+                        return if ms == 0 {
+                            None
+                        } else {
+                            Some(
+                                self.command_timeout
+                                    .saturating_add(Duration::from_millis(ms)),
+                            )
+                        };
+                    }
+                    break;
+                }
+                idx += 1;
+            }
+        } else if (first.eq_ignore_ascii_case(b"BLPOP")
+            || first.eq_ignore_ascii_case(b"BRPOP")
+            || first.eq_ignore_ascii_case(b"BRPOPLPUSH")
+            || first.eq_ignore_ascii_case(b"BLMOVE")
+            || first.eq_ignore_ascii_case(b"BZPOPMIN")
+            || first.eq_ignore_ascii_case(b"BZPOPMAX"))
+            && args.len() >= 3
+            && let Some(raw_secs) = args.last()
+            && let Ok(s) = std::str::from_utf8(raw_secs)
+            && let Ok(secs) = s.parse::<f64>()
+            && secs.is_finite()
+            && secs >= 0.0
+        {
+            return if secs == 0.0 {
+                None
+            } else {
+                Some(
+                    self.command_timeout
+                        .saturating_add(Duration::from_secs_f64(secs)),
+                )
+            };
+        }
+        Some(self.command_timeout)
     }
 
     /// Non-blocking drain of any already-arrived RESP3 push frames (such as `>invalidate`).
@@ -412,15 +480,26 @@ impl RespConnection {
 
     /// Read the next non-invalidation RESP3 reply frame, forwarding `>invalidate` pushes to tracking.
     pub async fn read_reply(&mut self) -> Result<RespValue, ValkeyError> {
-        let timeout = self.command_timeout;
-        tokio::time::timeout(timeout, self.read_reply_inner())
+        self.read_reply_with_timeout(Some(self.command_timeout))
             .await
-            .map_err(|_| {
-                ValkeyError::connection(format!(
-                    "Timed out waiting for Valkey response after {} ms",
-                    timeout.as_millis()
-                ))
-            })?
+    }
+
+    /// Read the next non-invalidation RESP3 reply frame with an optional deadline (`None` = un-timed).
+    pub async fn read_reply_with_timeout(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<RespValue, ValkeyError> {
+        match timeout {
+            Some(dur) => tokio::time::timeout(dur, self.read_reply_inner())
+                .await
+                .map_err(|_| {
+                    ValkeyError::connection(format!(
+                        "Timed out waiting for Valkey response after {} ms",
+                        dur.as_millis()
+                    ))
+                })?,
+            None => self.read_reply_inner().await,
+        }
     }
 
     async fn read_reply_inner(&mut self) -> Result<RespValue, ValkeyError> {

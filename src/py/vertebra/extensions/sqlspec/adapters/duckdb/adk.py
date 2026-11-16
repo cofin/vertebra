@@ -22,6 +22,7 @@ from vertebra.storage import ArtifactReference
 
 if TYPE_CHECKING:
     from sqlspec.extensions.adk import StoredEvent, StoredSession
+    from sqlspec.extensions.adk.artifact._types import StoredArtifact
     from sqlspec.extensions.adk.memory._types import StoredMemory
     from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore as _BaseAsyncADKMemoryStore
     from sqlspec.extensions.adk.memory.store import BaseSyncADKMemoryStore as _BaseSyncADKMemoryStore
@@ -268,8 +269,8 @@ def _decode_embedding(raw: Any) -> list[float] | None:
 
 def _row_to_memory(row: Any, *, deserializer: Callable[[Any], Any]) -> "StoredMemory":
     author = duckdb_row_value(row, "author", 6)
-    meta_raw = duckdb_row_value(row, "metadata_json", 9)
-    emb_raw = duckdb_row_value(row, "embedding", 10)
+    meta_raw = duckdb_row_value(row, "metadata_json", 10)
+    emb_raw = duckdb_row_value(row, "embedding", 11)
     return cast(
         "StoredMemory",
         {
@@ -284,7 +285,7 @@ def _row_to_memory(row: Any, *, deserializer: Callable[[Any], Any]) -> "StoredMe
             "content_json": duckdb_json_dict(duckdb_row_value(row, "content_json", 8), deserializer=deserializer),
             "content_text": str(duckdb_row_value(row, "content_text", 9)),
             "metadata_json": duckdb_json_dict(meta_raw, deserializer=deserializer) if meta_raw is not None else None,
-            "inserted_at": _ensure_utc(duckdb_row_value(row, "inserted_at", 11)),
+            "inserted_at": _ensure_utc(duckdb_row_value(row, "inserted_at", 12)),
             "embedding": _decode_embedding(emb_raw),
         },
     )
@@ -1619,21 +1620,25 @@ class DuckDBSyncADKMemoryStore(_BaseSyncADKMemoryStore[Any]):
             except Exception as exc:
                 if is_duckdb_table_missing(exc):
                     return []
-                rows = None
+                raise
 
         if rows is None and has_query and self._use_fts:
-            with self._config.provide_session() as driver:
-                if self._ensure_fts_extension(driver):
-                    fts_sql, fts_params = _fts_search_sql(
-                        self._memory_table,
-                        query,
-                        app_name,
-                        user_id,
-                        scope_filter,
-                        limit_value if embedding is None else max(limit_value * 5, 50),
-                    )
-                    with contextlib.suppress(Exception):
+            try:
+                with self._config.provide_session() as driver:
+                    if self._ensure_fts_extension(driver):
+                        fts_sql, fts_params = _fts_search_sql(
+                            self._memory_table,
+                            query,
+                            app_name,
+                            user_id,
+                            scope_filter,
+                            limit_value if embedding is None else max(limit_value * 5, 50),
+                        )
                         rows = driver.select(fts_sql, *fts_params)
+            except Exception as exc:
+                if is_duckdb_table_missing(exc):
+                    return []
+                raise
 
         if rows is None:
             fetch_limit = limit_value if embedding is None else max(limit_value * 5, 50)
@@ -1834,21 +1839,25 @@ class DuckDBAsyncADKMemoryStore(_BaseAsyncADKMemoryStore[Any]):
             except Exception as exc:
                 if is_duckdb_table_missing(exc):
                     return []
-                rows = None
+                raise
 
         if rows is None and has_query and self._use_fts:
-            async with self._config.provide_session() as driver:
-                if await self._ensure_fts_extension(driver):
-                    fts_sql, fts_params = _fts_search_sql(
-                        self._memory_table,
-                        query,
-                        app_name,
-                        user_id,
-                        scope_filter,
-                        limit_value if embedding is None else max(limit_value * 5, 50),
-                    )
-                    with contextlib.suppress(Exception):
+            try:
+                async with self._config.provide_session() as driver:
+                    if await self._ensure_fts_extension(driver):
+                        fts_sql, fts_params = _fts_search_sql(
+                            self._memory_table,
+                            query,
+                            app_name,
+                            user_id,
+                            scope_filter,
+                            limit_value if embedding is None else max(limit_value * 5, 50),
+                        )
                         rows = await driver.select(fts_sql, *fts_params)
+            except Exception as exc:
+                if is_duckdb_table_missing(exc):
+                    return []
+                raise
 
         if rows is None:
             fetch_limit = limit_value if embedding is None else max(limit_value * 5, 50)
@@ -2145,19 +2154,19 @@ class DuckDBSyncADKArtifactStore(_DuckDBArtifactStoreCommon):
         user_id: str,
         filename: str,
         session_id: str | None = None,
-    ) -> list[int]:
-        """List ascending version numbers for a stored artifact synchronously."""
+    ) -> list["StoredArtifact"]:
+        """List ascending `StoredArtifact` records for a stored artifact synchronously."""
         table_ref = format_duckdb_identifier(self._artifact_table)
         session_val = session_id if session_id is not None else ""
         with self._config.provide_session() as driver:
             rows = driver.select(
-                f"SELECT version FROM {table_ref} WHERE app_name = ? AND user_id = ? AND session_id = ? AND filename = ? ORDER BY version ASC",
+                f"SELECT * FROM {table_ref} WHERE app_name = ? AND user_id = ? AND session_id = ? AND filename = ? ORDER BY version ASC",
                 app_name,
                 user_id,
                 session_val,
                 filename,
             )
-        return [int(r["version"]) for r in rows]
+        return [cast("StoredArtifact", self._row_to_artifact_record(r)) for r in rows]
 
     def delete_artifact(
         self,
@@ -2368,19 +2377,19 @@ class DuckDBAsyncADKArtifactStore(_DuckDBArtifactStoreCommon):
         user_id: str,
         filename: str,
         session_id: str | None = None,
-    ) -> list[int]:
-        """List ascending version numbers for a stored artifact asynchronously."""
+    ) -> list["StoredArtifact"]:
+        """List ascending `StoredArtifact` records for a stored artifact asynchronously."""
         table_ref = format_duckdb_identifier(self._artifact_table)
         session_val = session_id if session_id is not None else ""
         async with self._config.provide_session() as driver:
             rows = await driver.select(
-                f"SELECT version FROM {table_ref} WHERE app_name = ? AND user_id = ? AND session_id = ? AND filename = ? ORDER BY version ASC",
+                f"SELECT * FROM {table_ref} WHERE app_name = ? AND user_id = ? AND session_id = ? AND filename = ? ORDER BY version ASC",
                 app_name,
                 user_id,
                 session_val,
                 filename,
             )
-        return [int(r["version"]) for r in rows]
+        return [cast("StoredArtifact", self._row_to_artifact_record(r)) for r in rows]
 
     async def delete_artifact(
         self,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
 from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -85,7 +86,7 @@ class SyncOracleQueueStore(SyncQueueStore):
         """Initialize the queue store with a synchronous Oracle driver."""
         self._driver = driver
         self._notification_source = notification_source
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
@@ -200,7 +201,7 @@ class SyncOracleQueueStore(SyncQueueStore):
         WHERE queue IN ({in_clause})
           AND (
               (status = 'ready' AND (scheduled_at_ms IS NULL OR scheduled_at_ms <= :now_ms))
-              OR (status = 'claimed' AND lease_until_ms <= :now_ms)
+              OR (status = 'claimed' AND lease_until_ms <= :now_ms AND attempt < max_attempts)
           )
         ORDER BY created_at_ms ASC
         FETCH FIRST :limit_val ROWS ONLY
@@ -241,12 +242,67 @@ class SyncOracleQueueStore(SyncQueueStore):
                 results.append(_row_to_entry(lowered))
         return results
 
+    def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically claim a specific ready job by job_id under a visibility lease."""
+        now_ms = int(time.time() * 1000)
+        lease_until_ms = now_ms + int(lease_seconds * 1000)
+        select_sql = f"""
+        SELECT job_id, queue, task_name, payload, attempt, max_attempts, status,
+               lease_until_ms, scheduled_at_ms, headers
+        FROM {self._table_name}
+        WHERE job_id = :job_id
+          AND (
+              (status = 'ready' AND (scheduled_at_ms IS NULL OR scheduled_at_ms <= :now_ms))
+              OR (status = 'claimed' AND lease_until_ms <= :now_ms AND attempt < max_attempts)
+          )
+        FOR UPDATE SKIP LOCKED
+        """
+        with self._driver.transaction():
+            row = self._driver.select_one_or_none(select_sql, {"job_id": job_id, "now_ms": now_ms})
+            if row is None:
+                return None
+            lowered = {k.lower(): v for k, v in row.items()}
+            prev_status = str(lowered["status"])
+            curr_attempt = int(lowered["attempt"])
+            next_attempt = curr_attempt + 1 if prev_status == "claimed" else curr_attempt
+            if expected_attempt is not None and next_attempt != expected_attempt:
+                return None
+            update_sql = f"""
+            UPDATE {self._table_name}
+            SET status = 'claimed',
+                worker_id = :worker_id,
+                lease_until_ms = :lease_until_ms,
+                attempt = :next_attempt,
+                updated_at_ms = :now_ms
+            WHERE job_id = :job_id
+            """
+            self._driver.execute(
+                update_sql,
+                {
+                    "worker_id": worker_id,
+                    "lease_until_ms": lease_until_ms,
+                    "next_attempt": next_attempt,
+                    "now_ms": now_ms,
+                    "job_id": job_id,
+                },
+            )
+            lowered["attempt"] = next_attempt
+            lowered["lease_until_ms"] = lease_until_ms
+            return _row_to_entry(lowered)
+
     def ack(self, job_id: str, *, attempt: int) -> bool:
         """Mark a fenced (job_id, attempt) claim as completed."""
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'completed', updated_at_ms = :now_ms
+        SET status = 'completed', lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
         WHERE job_id = :job_id AND attempt = :attempt AND status = 'claimed'
         """
         affected = self._driver.execute(sql, {"job_id": job_id, "attempt": attempt, "now_ms": now_ms})
@@ -269,7 +325,7 @@ class SyncOracleQueueStore(SyncQueueStore):
         if entry.attempt >= entry.max_attempts or retry_delay_s is None:
             sql = f"""
             UPDATE {self._table_name}
-            SET status = 'dead_letter', last_error = :error, updated_at_ms = :now_ms
+            SET status = 'dead_letter', last_error = :error, lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
             WHERE job_id = :job_id AND attempt = :attempt AND status = 'claimed'
             """
             affected = self._driver.execute(
@@ -327,11 +383,20 @@ class SyncOracleQueueStore(SyncQueueStore):
         return self._driver.execute(sql, params)
 
     def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
-        """Reap abandoned in-flight claims back into ready status."""
+        """Reap abandoned in-flight claims by bumping attempt or transitioning exhausted jobs to dead_letter."""
+        _ = lease_seconds
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'ready', worker_id = NULL, lease_until_ms = 0, updated_at_ms = :now_ms
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
+            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
+            last_error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(last_error, TO_CLOB('Visibility lease expired'))
+                ELSE last_error
+            END,
+            worker_id = NULL,
+            lease_until_ms = 0,
+            updated_at_ms = :now_ms
         WHERE status = 'claimed' AND lease_until_ms <= :now_ms
         """
         return self._driver.execute(sql, {"now_ms": now_ms})
@@ -355,7 +420,7 @@ class SyncOracleQueueStore(SyncQueueStore):
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'cancelled', updated_at_ms = :now_ms
+        SET status = 'cancelled', lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
         WHERE job_id = :job_id AND status IN ('ready', 'claimed')
         """
         affected = self._driver.execute(sql, {"job_id": job_id, "now_ms": now_ms})
@@ -371,6 +436,34 @@ class SyncOracleQueueStore(SyncQueueStore):
         """
         row = self._driver.select_one_or_none(sql, {"job_id": job_id})
         return _row_to_entry(row) if row is not None else None
+
+    def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of job_id, or None if absent."""
+        sql = f"SELECT status FROM {self._table_name} WHERE job_id = :job_id"
+        row = self._driver.select_one_or_none(sql, {"job_id": job_id})
+        if row is None:
+            return None
+        lowered = {k.lower(): v for k, v in row.items()}
+        return str(lowered["status"]) if lowered.get("status") is not None else None
+
+    def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
+        """Atomically remove and return a dead-lettered queue entry by job_id."""
+        select_sql = f"""
+        SELECT job_id, queue, task_name, payload, attempt, max_attempts,
+               lease_until_ms, scheduled_at_ms, headers
+        FROM {self._table_name}
+        WHERE job_id = :job_id AND status = 'dead_letter'
+        FOR UPDATE
+        """
+        with self._driver.transaction():
+            row = self._driver.select_one_or_none(select_sql, {"job_id": job_id})
+            if row is None:
+                return None
+            self._driver.execute(
+                f"DELETE FROM {self._table_name} WHERE job_id = :job_id AND status = 'dead_letter'",
+                {"job_id": job_id},
+            )
+            return _row_to_entry(row)
 
     def list_entries(
         self,
@@ -502,7 +595,7 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         """Initialize the asynchronous queue store with an Oracle driver."""
         self._driver = driver
         self._notification_source = notification_source
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     async def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
@@ -621,7 +714,7 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         WHERE queue IN ({in_clause})
           AND (
               (status = 'ready' AND (scheduled_at_ms IS NULL OR scheduled_at_ms <= :now_ms))
-              OR (status = 'claimed' AND lease_until_ms <= :now_ms)
+              OR (status = 'claimed' AND lease_until_ms <= :now_ms AND attempt < max_attempts)
           )
         ORDER BY created_at_ms ASC
         FETCH FIRST :limit_val ROWS ONLY
@@ -662,12 +755,67 @@ class AsyncOracleQueueStore(AsyncQueueStore):
                 results.append(_row_to_entry(lowered))
         return results
 
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically claim a specific ready job asynchronously by job_id under a visibility lease."""
+        now_ms = int(time.time() * 1000)
+        lease_until_ms = now_ms + int(lease_seconds * 1000)
+        select_sql = f"""
+        SELECT job_id, queue, task_name, payload, attempt, max_attempts, status,
+               lease_until_ms, scheduled_at_ms, headers
+        FROM {self._table_name}
+        WHERE job_id = :job_id
+          AND (
+              (status = 'ready' AND (scheduled_at_ms IS NULL OR scheduled_at_ms <= :now_ms))
+              OR (status = 'claimed' AND lease_until_ms <= :now_ms AND attempt < max_attempts)
+          )
+        FOR UPDATE SKIP LOCKED
+        """
+        async with self._driver.transaction():
+            row = await self._driver.select_one_or_none(select_sql, {"job_id": job_id, "now_ms": now_ms})
+            if row is None:
+                return None
+            lowered = {k.lower(): v for k, v in row.items()}
+            prev_status = str(lowered["status"])
+            curr_attempt = int(lowered["attempt"])
+            next_attempt = curr_attempt + 1 if prev_status == "claimed" else curr_attempt
+            if expected_attempt is not None and next_attempt != expected_attempt:
+                return None
+            update_sql = f"""
+            UPDATE {self._table_name}
+            SET status = 'claimed',
+                worker_id = :worker_id,
+                lease_until_ms = :lease_until_ms,
+                attempt = :next_attempt,
+                updated_at_ms = :now_ms
+            WHERE job_id = :job_id
+            """
+            await self._driver.execute(
+                update_sql,
+                {
+                    "worker_id": worker_id,
+                    "lease_until_ms": lease_until_ms,
+                    "next_attempt": next_attempt,
+                    "now_ms": now_ms,
+                    "job_id": job_id,
+                },
+            )
+            lowered["attempt"] = next_attempt
+            lowered["lease_until_ms"] = lease_until_ms
+            return _row_to_entry(lowered)
+
     async def ack(self, job_id: str, *, attempt: int) -> bool:
         """Mark a fenced (job_id, attempt) claim as completed asynchronously."""
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'completed', updated_at_ms = :now_ms
+        SET status = 'completed', lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
         WHERE job_id = :job_id AND attempt = :attempt AND status = 'claimed'
         """
         affected = await self._driver.execute(sql, {"job_id": job_id, "attempt": attempt, "now_ms": now_ms})
@@ -690,7 +838,7 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         if entry.attempt >= entry.max_attempts or retry_delay_s is None:
             sql = f"""
             UPDATE {self._table_name}
-            SET status = 'dead_letter', last_error = :error, updated_at_ms = :now_ms
+            SET status = 'dead_letter', last_error = :error, lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
             WHERE job_id = :job_id AND attempt = :attempt AND status = 'claimed'
             """
             affected = await self._driver.execute(
@@ -748,11 +896,20 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         return await self._driver.execute(sql, params)
 
     async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
-        """Reap abandoned in-flight claims back into ready status asynchronously."""
+        """Reap abandoned in-flight claims asynchronously by bumping attempt or dead-lettering."""
+        _ = lease_seconds
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'ready', worker_id = NULL, lease_until_ms = 0, updated_at_ms = :now_ms
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
+            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
+            last_error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(last_error, TO_CLOB('Visibility lease expired'))
+                ELSE last_error
+            END,
+            worker_id = NULL,
+            lease_until_ms = 0,
+            updated_at_ms = :now_ms
         WHERE status = 'claimed' AND lease_until_ms <= :now_ms
         """
         return await self._driver.execute(sql, {"now_ms": now_ms})
@@ -776,7 +933,7 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'cancelled', updated_at_ms = :now_ms
+        SET status = 'cancelled', lease_until_ms = 0, worker_id = NULL, updated_at_ms = :now_ms
         WHERE job_id = :job_id AND status IN ('ready', 'claimed')
         """
         affected = await self._driver.execute(sql, {"job_id": job_id, "now_ms": now_ms})
@@ -792,6 +949,34 @@ class AsyncOracleQueueStore(AsyncQueueStore):
         """
         row = await self._driver.select_one_or_none(sql, {"job_id": job_id})
         return _row_to_entry(row) if row is not None else None
+
+    async def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of job_id asynchronously, or None if absent."""
+        sql = f"SELECT status FROM {self._table_name} WHERE job_id = :job_id"
+        row = await self._driver.select_one_or_none(sql, {"job_id": job_id})
+        if row is None:
+            return None
+        lowered = {k.lower(): v for k, v in row.items()}
+        return str(lowered["status"]) if lowered.get("status") is not None else None
+
+    async def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
+        """Atomically remove and return a dead-lettered queue entry asynchronously by job_id."""
+        select_sql = f"""
+        SELECT job_id, queue, task_name, payload, attempt, max_attempts,
+               lease_until_ms, scheduled_at_ms, headers
+        FROM {self._table_name}
+        WHERE job_id = :job_id AND status = 'dead_letter'
+        FOR UPDATE
+        """
+        async with self._driver.transaction():
+            row = await self._driver.select_one_or_none(select_sql, {"job_id": job_id})
+            if row is None:
+                return None
+            await self._driver.execute(
+                f"DELETE FROM {self._table_name} WHERE job_id = :job_id AND status = 'dead_letter'",
+                {"job_id": job_id},
+            )
+            return _row_to_entry(row)
 
     async def list_entries(
         self,

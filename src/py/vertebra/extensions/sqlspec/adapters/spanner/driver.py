@@ -126,13 +126,19 @@ def _execute_sync_select(
     staleness: StalenessBound | None = None,
     active_snapshot: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    if (
-        active_snapshot is not None
-        and callable(getattr(active_snapshot, "query", None))
-        and not callable(getattr(cursor, "execute_with_description", None))
-    ):
-        raw_rows = active_snapshot.query(sql, params)
-        return _normalize_row_dicts(raw_rows, None)
+    if active_snapshot is not None:
+        snap_desc = getattr(active_snapshot, "execute_with_description", None)
+        if callable(snap_desc):
+            raw_rows, col_names = snap_desc(sql, params)
+            return _normalize_row_dicts(raw_rows, col_names)
+        snap_query = getattr(active_snapshot, "query", None)
+        if callable(snap_query):
+            raw_rows = snap_query(sql, params)
+            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
+        snap_select = getattr(active_snapshot, "select", None)
+        if callable(snap_select):
+            raw_rows = snap_select(sql, params)
+            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
     desc_fn = getattr(cursor, "execute_with_description", None)
     if callable(desc_fn):
         if staleness is not None:
@@ -162,13 +168,19 @@ async def _execute_async_select(
     staleness: StalenessBound | None = None,
     active_snapshot: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    if (
-        active_snapshot is not None
-        and callable(getattr(active_snapshot, "query", None))
-        and not callable(getattr(cursor, "execute_with_description", None))
-    ):
-        raw_rows = await active_snapshot.query(sql, params)
-        return _normalize_row_dicts(raw_rows, None)
+    if active_snapshot is not None:
+        snap_desc = getattr(active_snapshot, "execute_with_description", None)
+        if callable(snap_desc):
+            raw_rows, col_names = await snap_desc(sql, params)
+            return _normalize_row_dicts(raw_rows, col_names)
+        snap_query = getattr(active_snapshot, "query", None)
+        if callable(snap_query):
+            raw_rows = await snap_query(sql, params)
+            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
+        snap_select = getattr(active_snapshot, "select", None)
+        if callable(snap_select):
+            raw_rows = await snap_select(sql, params)
+            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
     desc_fn = getattr(cursor, "execute_with_description", None)
     if callable(desc_fn):
         if staleness is not None:
@@ -234,6 +246,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         self.dialect = sqlspec_dialect_name(inferred)
         self._read_only: bool = bool(read_only)
         self._in_transaction: bool = bool(in_transaction)
+        self._session_managed_tx: bool = bool(in_transaction)
         self._staleness: StalenessBound | None = staleness
         self._active_snapshot: Any = active_snapshot
         self._storage_backend: ObjectStoreBackend | None = storage_backend
@@ -649,17 +662,23 @@ class SpannerSyncDriver(BaseSyncDriver):
     def begin(self) -> None:
         """Begin an explicit interactive Spanner ``ReadWrite`` transaction."""
         self._require_writable("ReadWrite transaction")
+        if self._session_managed_tx and self._in_transaction:
+            return
         self.connection.begin()
+        self._in_transaction = True
 
     def commit(self) -> None:
         """Commit the active interactive Spanner ``ReadWrite`` transaction."""
-        if not self._read_only:
-            self.connection.commit()
+        if self._read_only or (self._session_managed_tx and self._in_transaction):
+            return
+        self.connection.commit()
+        self._in_transaction = False
 
     def rollback(self) -> None:
         """Roll back the active interactive Spanner ``ReadWrite`` transaction."""
         if not self._read_only:
             self.connection.rollback()
+            self._in_transaction = False
 
     def create_savepoint(self, name: str) -> None:
         """Raise ``NotSupportedError`` because Cloud Spanner does not support SQL savepoints."""
@@ -712,6 +731,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         self.dialect = sqlspec_dialect_name(inferred)
         self._read_only: bool = bool(read_only)
         self._in_transaction: bool = bool(in_transaction)
+        self._session_managed_tx: bool = bool(in_transaction)
         self._staleness: StalenessBound | None = staleness
         self._active_snapshot: Any = active_snapshot
         self._storage_backend: ObjectStoreBackend | None = storage_backend
@@ -1127,17 +1147,23 @@ class SpannerAsyncDriver(BaseAsyncDriver):
     async def begin(self) -> None:
         """Begin an interactive async Spanner ``ReadWrite`` transaction."""
         self._require_writable("ReadWrite transaction")
+        if self._session_managed_tx and self._in_transaction:
+            return
         await self.connection.begin()
+        self._in_transaction = True
 
     async def commit(self) -> None:
         """Commit the active interactive async Spanner ``ReadWrite`` transaction."""
-        if not self._read_only:
-            await self.connection.commit()
+        if self._read_only or (self._session_managed_tx and self._in_transaction):
+            return
+        await self.connection.commit()
+        self._in_transaction = False
 
     async def rollback(self) -> None:
         """Roll back the active interactive async Spanner ``ReadWrite`` transaction."""
         if not self._read_only:
             await self.connection.rollback()
+            self._in_transaction = False
 
     async def create_savepoint(self, name: str) -> None:
         """Raise ``NotSupportedError`` because Cloud Spanner does not support SQL savepoints."""

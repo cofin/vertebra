@@ -526,7 +526,7 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
     dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
     assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
-    assert SyncMySQLDialect.type_descriptor(vec) is vec
+    assert SyncMySQLDialect().type_descriptor(vec) is vec
     assert SyncMySQLClient is not None
     assert AsyncMySQLClient is not None
 

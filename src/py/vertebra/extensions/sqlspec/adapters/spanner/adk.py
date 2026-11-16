@@ -9,6 +9,7 @@ from sqlspec.extensions.adk.store import BaseAsyncADKStore, BaseSyncADKStore
 from sqlspec.utils.serializers import from_json, to_json
 
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
+    is_spanner_table_missing,
     normalize_spanner_dialect,
     object_to_artifact_reference,
     parse_utc_timestamp,
@@ -575,7 +576,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
 
     def create_tables(self) -> None:
         """Create all Spanner ADK tables inside a writable session."""
-        with self._config.provide_session(transaction=True) as driver:
+        with self._config.provide_session(transaction=False) as driver:
             for ddl in self.ddl_statements():
                 driver.execute(ddl)
 
@@ -651,7 +652,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
             f"SELECT id, app_name, user_id, state, create_time, update_time FROM {table} "
             "WHERE id = @id AND app_name = @app_name AND user_id = @user_id LIMIT 1"
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, {"id": session_id, "app_name": app_name, "user_id": user_id})
         return cast("Any", _row_to_stored_session(dict(row))) if row is not None else None
 
@@ -704,7 +705,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
             params["limit"] = int(limit)
         if offset is not None:
             params["offset"] = int(offset)
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = driver.select(sql, params)
         return [cast("Any", _row_to_stored_session(dict(row))) for row in rows]
 
@@ -843,7 +844,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
             "SELECT id, app_name, user_id, session_id, invocation_id, timestamp, event_data "
             f"FROM {events_table} WHERE {where} ORDER BY timestamp ASC{limit_sql}"
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = driver.select(sql, params)
         return [cast("Any", _row_to_stored_event(dict(row))) for row in rows]
 
@@ -851,7 +852,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
         """Load shared application-scoped ADK state via a lock-free snapshot."""
         table = validate_spanner_identifier(self._app_state_table, "app_state_table")
         sql = f"SELECT state FROM {table} WHERE app_name = @app_name LIMIT 1"
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, {"app_name": app_name})
         return _decode_json_dict(row.get("state")) if row is not None else None
 
@@ -870,7 +871,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
         """Load user-scoped ADK state via a lock-free snapshot."""
         table = validate_spanner_identifier(self._user_state_table, "user_state_table")
         sql = f"SELECT state FROM {table} WHERE app_name = @app_name AND user_id = @user_id LIMIT 1"
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, {"app_name": app_name, "user_id": user_id})
         return _decode_json_dict(row.get("state")) if row is not None else None
 
@@ -895,7 +896,7 @@ class SpannerSyncADKStore(BaseSyncADKStore[Any]):
         table = validate_spanner_identifier(self._metadata_table, "metadata_table")
         key_col = _metadata_key_col(_config_dialect(self._config))
         sql = f"SELECT value FROM {table} WHERE {key_col} = @key LIMIT 1"
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, {"key": key})
         return str(row["value"]) if row is not None and row.get("value") is not None else None
 
@@ -987,7 +988,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
             await self._user_states_table_ddl(),
             await self._metadata_table_ddl(),
         ]
-        async with self._config.provide_session(transaction=True) as driver:
+        async with self._config.provide_session(transaction=False) as driver:
             for ddl in ddls:
                 await driver.execute(ddl)
 
@@ -1063,7 +1064,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
             f"SELECT id, app_name, user_id, state, create_time, update_time FROM {table} "
             "WHERE id = @id AND app_name = @app_name AND user_id = @user_id LIMIT 1"
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, {"id": session_id, "app_name": app_name, "user_id": user_id})
         return cast("Any", _row_to_stored_session(dict(row))) if row is not None else None
 
@@ -1116,7 +1117,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
             params["limit"] = int(limit)
         if offset is not None:
             params["offset"] = int(offset)
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = await driver.select(sql, params)
         return [cast("Any", _row_to_stored_session(dict(row))) for row in rows]
 
@@ -1255,7 +1256,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
             "SELECT id, app_name, user_id, session_id, invocation_id, timestamp, event_data "
             f"FROM {events_table} WHERE {where} ORDER BY timestamp ASC{limit_sql}"
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = await driver.select(sql, params)
         return [cast("Any", _row_to_stored_event(dict(row))) for row in rows]
 
@@ -1263,7 +1264,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
         """Load shared application-scoped ADK state asynchronously via a lock-free snapshot."""
         table = validate_spanner_identifier(self._app_state_table, "app_state_table")
         sql = f"SELECT state FROM {table} WHERE app_name = @app_name LIMIT 1"
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, {"app_name": app_name})
         return _decode_json_dict(row.get("state")) if row is not None else None
 
@@ -1282,7 +1283,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
         """Load user-scoped ADK state asynchronously via a lock-free snapshot."""
         table = validate_spanner_identifier(self._user_state_table, "user_state_table")
         sql = f"SELECT state FROM {table} WHERE app_name = @app_name AND user_id = @user_id LIMIT 1"
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, {"app_name": app_name, "user_id": user_id})
         return _decode_json_dict(row.get("state")) if row is not None else None
 
@@ -1307,7 +1308,7 @@ class SpannerAsyncADKStore(BaseAsyncADKStore[Any]):
         table = validate_spanner_identifier(self._metadata_table, "metadata_table")
         key_col = _metadata_key_col(_config_dialect(self._config))
         sql = f"SELECT value FROM {table} WHERE {key_col} = @key LIMIT 1"
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, {"key": key})
         return str(row["value"]) if row is not None and row.get("value") is not None else None
 
@@ -1615,7 +1616,7 @@ class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore[
         """Create the Spanner memory table, ScaNN vector index, search index, and property graph."""
         if not self._enabled:
             return
-        with self._config.provide_session(transaction=True) as driver:
+        with self._config.provide_session(transaction=False) as driver:
             for stmt in self._memory_table_ddl():
                 driver.execute(stmt)
 
@@ -1672,30 +1673,30 @@ class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore[
         if not self._enabled:
             return []
         top_k = limit if limit is not None else self._max_results
-        with self._config.provide_session(transaction=False) as driver:
-            if embedding is not None:
-                vec_sql, vec_params = self.build_vector_search_sql(
-                    app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
-                )
-                vec_params["query_embedding"] = [float(x) for x in embedding]
-                try:
+        dialect = _config_dialect(self._config)
+        try:
+            with self._config.provide_session(transaction=False, read_only=True) as driver:
+                if dialect == "googlesql" and embedding is not None:
+                    vec_sql, vec_params = self.build_vector_search_sql(
+                        app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
+                    )
+                    vec_params["query_embedding"] = [float(x) for x in embedding]
                     rows = [dict(row) for row in driver.select(vec_sql, vec_params)]
                     return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
-                except Exception:
-                    pass
-            if self._use_fts and query.strip():
-                fts_sql, fts_params = self.build_fts_search_sql(
-                    app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
-                )
-                try:
+                if dialect == "googlesql" and self._use_fts and query.strip():
+                    fts_sql, fts_params = self.build_fts_search_sql(
+                        app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
+                    )
                     rows = [dict(row) for row in driver.select(fts_sql, fts_params)]
                     return _rank_memory_rows(rows, query=query, embedding=None, top_k=top_k)
-                except Exception:
-                    pass
-            cand_sql, cand_params = self._candidate_select_sql(
-                app_name=app_name, user_id=user_id, scope_filter=scope_filter
-            )
-            rows = [dict(row) for row in driver.select(cand_sql, cand_params)]
+                cand_sql, cand_params = self._candidate_select_sql(
+                    app_name=app_name, user_id=user_id, scope_filter=scope_filter
+                )
+                rows = [dict(row) for row in driver.select(cand_sql, cand_params)]
+        except Exception as exc:
+            if is_spanner_table_missing(exc):
+                return []
+            raise
         return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
 
     def hybrid_rrf_search(
@@ -1713,7 +1714,7 @@ class SpannerSyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseSyncADKMemoryStore[
         cand_sql, cand_params = self._candidate_select_sql(
             app_name=app_name, user_id=user_id, scope_filter=scope_filter
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = [dict(row) for row in driver.select(cand_sql, cand_params)]
         if not rows:
             return []
@@ -1795,7 +1796,7 @@ class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStor
         if not self._enabled:
             return
         ddls = await self._memory_table_ddl()
-        async with self._config.provide_session(transaction=True) as driver:
+        async with self._config.provide_session(transaction=False) as driver:
             for stmt in ddls:
                 await driver.execute(stmt)
 
@@ -1852,33 +1853,33 @@ class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStor
         if not self._enabled:
             return []
         top_k = limit if limit is not None else self._max_results
-        async with self._config.provide_session(transaction=False) as driver:
-            if embedding is not None:
-                vec_sql, vec_params = self.build_vector_search_sql(
-                    app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
-                )
-                vec_params["query_embedding"] = [float(x) for x in embedding]
-                try:
+        dialect = _config_dialect(self._config)
+        try:
+            async with self._config.provide_session(transaction=False, read_only=True) as driver:
+                if dialect == "googlesql" and embedding is not None:
+                    vec_sql, vec_params = self.build_vector_search_sql(
+                        app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
+                    )
+                    vec_params["query_embedding"] = [float(x) for x in embedding]
                     raw_rows = await driver.select(vec_sql, vec_params)
                     rows = [dict(row) for row in raw_rows]
                     return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
-                except Exception:
-                    pass
-            if self._use_fts and query.strip():
-                fts_sql, fts_params = self.build_fts_search_sql(
-                    app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
-                )
-                try:
+                if dialect == "googlesql" and self._use_fts and query.strip():
+                    fts_sql, fts_params = self.build_fts_search_sql(
+                        app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
+                    )
                     raw_rows = await driver.select(fts_sql, fts_params)
                     rows = [dict(row) for row in raw_rows]
                     return _rank_memory_rows(rows, query=query, embedding=None, top_k=top_k)
-                except Exception:
-                    pass
-            cand_sql, cand_params = self._candidate_select_sql(
-                app_name=app_name, user_id=user_id, scope_filter=scope_filter
-            )
-            raw_rows = await driver.select(cand_sql, cand_params)
-            rows = [dict(row) for row in raw_rows]
+                cand_sql, cand_params = self._candidate_select_sql(
+                    app_name=app_name, user_id=user_id, scope_filter=scope_filter
+                )
+                raw_rows = await driver.select(cand_sql, cand_params)
+                rows = [dict(row) for row in raw_rows]
+        except Exception as exc:
+            if is_spanner_table_missing(exc):
+                return []
+            raise
         return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
 
     async def hybrid_rrf_search(
@@ -1896,7 +1897,7 @@ class SpannerAsyncADKMemoryStore(_SpannerADKMemoryMixin, _BaseAsyncADKMemoryStor
         cand_sql, cand_params = self._candidate_select_sql(
             app_name=app_name, user_id=user_id, scope_filter=scope_filter
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             raw_rows = await driver.select(cand_sql, cand_params)
             rows = [dict(row) for row in raw_rows]
         if not rows:
@@ -2079,7 +2080,7 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
     def create_table(self) -> None:
         """Create the Spanner artifact metadata table inside a writable session."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
-        with self._config.provide_session(transaction=True) as driver:
+        with self._config.provide_session(transaction=False) as driver:
             driver.execute(ddl)
 
     def insert_artifact(self, record: Any) -> None:
@@ -2127,7 +2128,7 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
             "SELECT app_name, user_id, session_id, filename, version, mime_type, canonical_uri, "
             f"custom_metadata, created_at FROM {table} WHERE {where} ORDER BY version DESC LIMIT 1"
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, params)
         return cast("Any", _row_to_stored_artifact(dict(row))) if row is not None else None
 
@@ -2141,7 +2142,7 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
             where = "app_name = @app_name AND user_id = @user_id AND (session_id = @session_id OR session_id IS NULL)"
             params["session_id"] = session_id
         sql = f"SELECT DISTINCT filename FROM {table} WHERE {where} ORDER BY filename ASC"
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = driver.select(sql, params)
         return [str(row["filename"]) for row in rows if row.get("filename") is not None]
 
@@ -2159,7 +2160,7 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
             "SELECT app_name, user_id, session_id, filename, version, mime_type, canonical_uri, "
             f"custom_metadata, created_at FROM {table} WHERE {where} ORDER BY version ASC"
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = driver.select(sql, params)
         return [cast("Any", _row_to_stored_artifact(dict(row))) for row in rows]
 
@@ -2189,7 +2190,7 @@ class SpannerSyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseSyncADKArtifact
         table = validate_spanner_identifier(self._artifact_table, "artifact_table")
         where, params = _artifact_scope_where(app_name, user_id, filename, session_id)
         sql = f"SELECT COALESCE(MAX(version), -1) AS max_ver FROM {table} WHERE {where}"
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = driver.select_one_or_none(sql, params)
         max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
         return max_ver + 1
@@ -2283,7 +2284,7 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
     async def create_table(self) -> None:
         """Create the Spanner artifact metadata table asynchronously."""
         ddl = _artifact_ddl(self._config, self._artifact_table)
-        async with self._config.provide_session(transaction=True) as driver:
+        async with self._config.provide_session(transaction=False) as driver:
             await driver.execute(ddl)
 
     async def insert_artifact(self, record: Any) -> None:
@@ -2331,7 +2332,7 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
             "SELECT app_name, user_id, session_id, filename, version, mime_type, canonical_uri, "
             f"custom_metadata, created_at FROM {table} WHERE {where} ORDER BY version DESC LIMIT 1"
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, params)
         return cast("Any", _row_to_stored_artifact(dict(row))) if row is not None else None
 
@@ -2345,7 +2346,7 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
             where = "app_name = @app_name AND user_id = @user_id AND (session_id = @session_id OR session_id IS NULL)"
             params["session_id"] = session_id
         sql = f"SELECT DISTINCT filename FROM {table} WHERE {where} ORDER BY filename ASC"
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = await driver.select(sql, params)
         return [str(row["filename"]) for row in rows if row.get("filename") is not None]
 
@@ -2363,7 +2364,7 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
             "SELECT app_name, user_id, session_id, filename, version, mime_type, canonical_uri, "
             f"custom_metadata, created_at FROM {table} WHERE {where} ORDER BY version ASC"
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = await driver.select(sql, params)
         return [cast("Any", _row_to_stored_artifact(dict(row))) for row in rows]
 
@@ -2393,7 +2394,7 @@ class SpannerAsyncADKArtifactStore(_SpannerADKArtifactMixin, _BaseAsyncADKArtifa
         table = validate_spanner_identifier(self._artifact_table, "artifact_table")
         where, params = _artifact_scope_where(app_name, user_id, filename, session_id)
         sql = f"SELECT COALESCE(MAX(version), -1) AS max_ver FROM {table} WHERE {where}"
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             row = await driver.select_one_or_none(sql, params)
         max_ver = int(row.get("max_ver", -1)) if row is not None and row.get("max_ver") is not None else -1
         return max_ver + 1

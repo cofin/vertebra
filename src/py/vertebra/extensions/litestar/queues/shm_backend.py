@@ -34,7 +34,7 @@ __all__ = (
 )
 
 
-class SHMQueueBackendConfig(msgspec.Struct):
+class SHMQueueBackendConfig(msgspec.Struct, frozen=True):
     """Configuration for vertebra_shm queue backend."""
 
     backend_name: ClassVar[str] = "vertebra_shm"

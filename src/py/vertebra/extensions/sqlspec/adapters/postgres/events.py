@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import threading
+import time
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -150,7 +152,11 @@ class PostgresSyncEventsBackend(SyncEventBackendProtocol):
         self._owns_source = False
         self._queue = queue or PostgresEventQueueStore(config)
         self._subscribed: set[str] = set()
-        self._stream: Any = None
+        self._cond = threading.Condition()
+        self._raw_queues: dict[str, collections.deque[Any]] = collections.defaultdict(collections.deque)
+        self._pump_thread: threading.Thread | None = None
+        self._pump_done = False
+        self._pump_error: BaseException | None = None
         self._spilled_buffers: dict[str, collections.deque[EventMessage]] = collections.defaultdict(collections.deque)
         self._unacked: dict[str, tuple[str, EventMessage]] = {}
         self._closed = False
@@ -241,6 +247,24 @@ class PostgresSyncEventsBackend(SyncEventBackendProtocol):
         """Publish multiple channel payloads preserving input event order."""
         return [self.publish(channel, payload, metadata) for channel, payload, metadata in events]
 
+    def _pump_sync_stream(self, source: SyncPostgresNotificationSource) -> None:
+        try:
+            for event in source.listen():
+                if self._closed:
+                    break
+                ev_ch = normalize_event_channel_name(event.channel) if getattr(event, "channel", None) else ""
+                with self._cond:
+                    self._raw_queues[ev_ch].append(event)
+                    self._cond.notify_all()
+        except BaseException as exc:
+            with self._cond:
+                self._pump_error = exc
+                self._cond.notify_all()
+        finally:
+            with self._cond:
+                self._pump_done = True
+                self._cond.notify_all()
+
     def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Listen for notifications on `channel`, hydrating any table-spilled payloads."""
         if self._closed:
@@ -256,13 +280,39 @@ class PostgresSyncEventsBackend(SyncEventBackendProtocol):
         if norm_channel not in self._subscribed:
             source.subscribe([norm_channel])
             self._subscribed.add(norm_channel)
-        if self._stream is None:
-            self._stream = iter(source.listen())
 
-        _ = poll_interval
-        try:
-            event = next(self._stream)
-        except StopIteration:
+        event: Any = None
+        with self._cond:
+            raw_q = self._raw_queues[norm_channel]
+            if raw_q:
+                event = raw_q.popleft()
+            else:
+                if self._pump_thread is None or not self._pump_thread.is_alive():
+                    self._pump_done = False
+                    self._pump_error = None
+                    self._pump_thread = threading.Thread(
+                        target=self._pump_sync_stream,
+                        args=(source,),
+                        daemon=True,
+                    )
+                    self._pump_thread.start()
+                if poll_interval <= 0:
+                    if not raw_q and not self._pump_done:
+                        self._cond.wait(timeout=0.01)
+                else:
+                    deadline = time.monotonic() + float(poll_interval)
+                    while not raw_q and not self._pump_done and not self._closed:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._cond.wait(timeout=remaining)
+                if self._pump_error is not None:
+                    err = self._pump_error
+                    self._pump_error = None
+                    raise err
+                if raw_q:
+                    event = raw_q.popleft()
+        if event is None:
             return None
 
         raw_payload = event.payload
@@ -327,13 +377,19 @@ class PostgresSyncEventsBackend(SyncEventBackendProtocol):
 
     def shutdown(self) -> None:
         """Close owned PostgreSQL notification listeners and clear buffered deliveries."""
-        self._closed = True
-        self._unacked.clear()
-        self._spilled_buffers.clear()
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
         if self._source is not None and self._owns_source:
             with contextlib.suppress(Exception):
                 self._source.close()
-        self._stream = None
+        if self._pump_thread is not None and self._pump_thread.is_alive():
+            self._pump_thread.join(timeout=0.2)
+        with self._cond:
+            self._pump_thread = None
+            self._raw_queues.clear()
+            self._unacked.clear()
+            self._spilled_buffers.clear()
 
 
 class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
@@ -355,7 +411,9 @@ class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
         self._owns_source = False
         self._queue = queue or PostgresEventQueueStore(config)
         self._subscribed: set[str] = set()
-        self._stream: Any = None
+        self._channel_queues: dict[str, asyncio.Queue[Any]] = {}
+        self._pump_task: asyncio.Task[None] | None = None
+        self._pump_error: BaseException | None = None
         self._spilled_buffers: dict[str, collections.deque[EventMessage]] = collections.defaultdict(collections.deque)
         self._unacked: dict[str, tuple[str, EventMessage]] = {}
         self._closed = False
@@ -449,6 +507,19 @@ class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
             ids.append(await self.publish(channel, payload, metadata))
         return ids
 
+    async def _pump_stream(self, source: AsyncPostgresNotificationSource) -> None:
+        try:
+            async for event in source.listen():
+                if self._closed:
+                    break
+                ev_ch = normalize_event_channel_name(event.channel) if getattr(event, "channel", None) else ""
+                q = self._channel_queues.setdefault(ev_ch, asyncio.Queue())
+                q.put_nowait(event)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._pump_error = exc
+
     async def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Asynchronously dequeue a notification event on `channel`, hydrating spilled rows."""
         if self._closed:
@@ -464,13 +535,46 @@ class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
         if norm_channel not in self._subscribed:
             await source.subscribe([norm_channel])
             self._subscribed.add(norm_channel)
-        if self._stream is None:
-            self._stream = aiter(source.listen())
+        q = self._channel_queues.setdefault(norm_channel, asyncio.Queue())
 
-        try:
-            coro = anext(self._stream)
-            event = await (asyncio.wait_for(coro, timeout=poll_interval) if poll_interval > 0 else coro)
-        except (StopAsyncIteration, TimeoutError):
+        event: Any = None
+        if not q.empty():
+            event = q.get_nowait()
+        else:
+            if self._pump_task is None or self._pump_task.done():
+                if self._pump_error is not None:
+                    err = self._pump_error
+                    self._pump_error = None
+                    raise err
+                self._pump_task = asyncio.create_task(self._pump_stream(source))
+            if poll_interval <= 0:
+                await asyncio.sleep(0)
+                if self._pump_error is not None:
+                    err = self._pump_error
+                    self._pump_error = None
+                    raise err
+                if not q.empty():
+                    event = q.get_nowait()
+            else:
+                get_task = asyncio.create_task(q.get())
+                done, _ = await asyncio.wait(
+                    {get_task, self._pump_task},
+                    timeout=poll_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if get_task in done:
+                    event = get_task.result()
+                else:
+                    get_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await get_task
+                    if self._pump_error is not None:
+                        err = self._pump_error
+                        self._pump_error = None
+                        raise err
+                    if not q.empty():
+                        event = q.get_nowait()
+        if event is None:
             return None
 
         raw_payload = event.payload
@@ -537,9 +641,14 @@ class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
     async def shutdown(self) -> None:
         """Close owned async PostgreSQL listeners and clear buffered events."""
         self._closed = True
+        if self._pump_task is not None:
+            self._pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._pump_task
+            self._pump_task = None
+        self._channel_queues.clear()
         self._unacked.clear()
         self._spilled_buffers.clear()
         if self._source is not None and self._owns_source:
             with contextlib.suppress(Exception):
                 await self._source.aclose()
-        self._stream = None

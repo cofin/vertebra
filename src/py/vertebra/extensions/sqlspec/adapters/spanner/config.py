@@ -1,6 +1,8 @@
 """Cloud Spanner and Spangres SQLSpec synchronous and asynchronous adapter configurations."""
 
 import asyncio
+import contextlib
+import inspect
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, ClassVar, Literal
@@ -174,6 +176,16 @@ class _SyncSpannerAsyncProxy:
     def last_commit_stats(self) -> dict[str, Any]:
         """Return commit statistics recorded on the synchronous driver."""
         return dict(getattr(self._sync, "last_commit_stats", {}) or {})
+
+    @property
+    def active_transaction(self) -> Any:
+        """Return the active interactive transaction on the synchronous driver, if any."""
+        return getattr(self._sync, "active_transaction", None)
+
+    @property
+    def transaction_id(self) -> bytes | None:
+        """Return the active transaction identifier bytes on the synchronous driver, if any."""
+        return getattr(self._sync, "transaction_id", None)
 
     def snapshot(
         self,
@@ -506,20 +518,47 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
         core = self._resolve_core_driver()
         return SpannerConnectionShim(core) if isinstance(core, SyncSpannerDriver) else core
 
+    def close(self) -> None:
+        """Close the cached synchronous Spanner core driver and adapter pool."""
+        if self._cached_core is not None:
+            close_fn = getattr(self._cached_core, "close", None)
+            if callable(close_fn):
+                close_fn()
+            self._cached_core = None
+        super().close()
+
     @contextmanager
     def provide_session(
         self,
         *args: Any,
         transaction: bool = False,
         staleness: StalenessBound | None = None,
+        read_only: bool | None = None,
         **kwargs: Any,
     ) -> Iterator[SpannerSyncDriver]:
-        """Yield an isolated ``SpannerSyncDriver`` bound to a ReadOnly snapshot or ReadWrite transaction."""
+        """Yield an isolated ``SpannerSyncDriver`` for autocommit, ReadOnly snapshot, or ReadWrite transaction."""
         _ = args, kwargs
         core = self._resolve_core_driver()
         storage = self.resolve_storage_backend()
         features = dict(self.driver_features)
         if not transaction:
+            use_snapshot = bool(read_only) if read_only is not None else (staleness is not None)
+            if not use_snapshot:
+                yield SpannerSyncDriver(
+                    core,
+                    statement_config=self.statement_config,
+                    driver_features=features,
+                    observability=self.observability_config,
+                    shared_pool=bool(self.share_pool),
+                    tenant_predicate=self.tenant_predicate,
+                    tenant_id=self.tenant_id,
+                    read_only=False,
+                    in_transaction=False,
+                    staleness=None,
+                    active_snapshot=None,
+                    storage_backend=storage,
+                )
+                return
             snapshot_fn = getattr(core, "snapshot", None)
             if callable(snapshot_fn):
                 snap_ctx = snapshot_fn(staleness, multi_use=True)
@@ -570,7 +609,10 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
                 storage_backend=storage,
             )
             return
-        yield SpannerSyncDriver(
+        begin_fn = getattr(core, "begin", None)
+        if callable(begin_fn):
+            begin_fn()
+        session_driver = SpannerSyncDriver(
             core,
             statement_config=self.statement_config,
             driver_features=features,
@@ -582,6 +624,20 @@ class SpannerSyncConfig(SyncAdapterConfig[SpannerConfig, SpannerSyncDriver]):
             in_transaction=True,
             storage_backend=storage,
         )
+        try:
+            yield session_driver
+        except BaseException:
+            if session_driver.in_transaction:
+                rollback_fn = getattr(core, "rollback", None)
+                if callable(rollback_fn):
+                    with contextlib.suppress(Exception):
+                        rollback_fn()
+            raise
+        else:
+            if session_driver.in_transaction:
+                commit_fn = getattr(core, "commit", None)
+                if callable(commit_fn):
+                    commit_fn()
 
 
 class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
@@ -773,20 +829,54 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
         core = self._resolve_sync_core_driver()
         return SpannerConnectionShim(core) if isinstance(core, SyncSpannerDriver) else core
 
+    async def close(self) -> None:
+        """Close cached asynchronous and synchronous Spanner core drivers and adapter pool."""
+        if self._cached_core is not None:
+            close_fn = getattr(self._cached_core, "close", None)
+            if callable(close_fn):
+                res = close_fn()
+                if inspect.isawaitable(res):
+                    await res
+            self._cached_core = None
+        if self._cached_sync_core is not None:
+            sync_close_fn = getattr(self._cached_sync_core, "close", None)
+            if callable(sync_close_fn):
+                await asyncio.to_thread(sync_close_fn)
+            self._cached_sync_core = None
+        await super().close()
+
     @asynccontextmanager
     async def provide_session(
         self,
         *args: Any,
         transaction: bool = False,
         staleness: StalenessBound | None = None,
+        read_only: bool | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[SpannerAsyncDriver]:
-        """Yield an isolated ``SpannerAsyncDriver`` bound to a ReadOnly snapshot or ReadWrite transaction."""
+        """Yield an isolated ``SpannerAsyncDriver`` for autocommit, ReadOnly snapshot, or ReadWrite transaction."""
         _ = args, kwargs
         core = self._resolve_core_driver()
         storage = self.resolve_storage_backend()
         features = dict(self.driver_features)
         if not transaction:
+            use_snapshot = bool(read_only) if read_only is not None else (staleness is not None)
+            if not use_snapshot:
+                yield SpannerAsyncDriver(
+                    core,
+                    statement_config=self.statement_config,
+                    driver_features=features,
+                    observability=self.observability_config,
+                    shared_pool=bool(self.share_pool),
+                    tenant_predicate=self.tenant_predicate,
+                    tenant_id=self.tenant_id,
+                    read_only=False,
+                    in_transaction=False,
+                    staleness=None,
+                    active_snapshot=None,
+                    storage_backend=storage,
+                )
+                return
             snapshot_fn = getattr(core, "snapshot", None)
             if callable(snapshot_fn):
                 snap_ctx = snapshot_fn(staleness, multi_use=True)
@@ -854,7 +944,12 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
                 storage_backend=storage,
             )
             return
-        yield SpannerAsyncDriver(
+        begin_fn = getattr(core, "begin", None)
+        if callable(begin_fn):
+            res = begin_fn()
+            if inspect.isawaitable(res):
+                await res
+        session_driver = SpannerAsyncDriver(
             core,
             statement_config=self.statement_config,
             driver_features=features,
@@ -866,6 +961,24 @@ class SpannerAsyncConfig(AsyncAdapterConfig[SpannerConfig, SpannerAsyncDriver]):
             in_transaction=True,
             storage_backend=storage,
         )
+        try:
+            yield session_driver
+        except BaseException:
+            if session_driver.in_transaction:
+                rollback_fn = getattr(core, "rollback", None)
+                if callable(rollback_fn):
+                    with contextlib.suppress(Exception):
+                        rb_res = rollback_fn()
+                        if inspect.isawaitable(rb_res):
+                            await asyncio.shield(rb_res)
+            raise
+        else:
+            if session_driver.in_transaction:
+                commit_fn = getattr(core, "commit", None)
+                if callable(commit_fn):
+                    cm_res = commit_fn()
+                    if inspect.isawaitable(cm_res):
+                        await cm_res
 
 
 class SpangresSyncConfig(SpannerSyncConfig):

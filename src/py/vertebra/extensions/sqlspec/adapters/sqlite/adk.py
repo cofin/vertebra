@@ -26,7 +26,7 @@ from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     unpack_embedding,
     validate_fts_options,
 )
-from vertebra.storage._store import ArtifactReference
+from vertebra.storage import ArtifactReference
 from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
@@ -1519,9 +1519,14 @@ class SQLiteSyncADKMemoryStore(_BaseSyncADKMemoryStore[Any]):
                 f"JOIN {self._memory_table}_fts fts ON m.rowid = fts.rowid "
                 f"WHERE {where_scope} AND fts.content_text MATCH ? ORDER BY m.timestamp DESC LIMIT ?"
             )
-            with contextlib.suppress(Exception), self._config.provide_session() as driver:
-                self._ensure_pragmas(driver)
-                rows = driver.select(fts_sql, *scope_params, query, fetch_limit)
+            try:
+                with self._config.provide_session() as driver:
+                    self._ensure_pragmas(driver)
+                    rows = driver.select(fts_sql, *scope_params, query, fetch_limit)
+            except SQLParsingError as exc:
+                if _is_missing_table_error(exc):
+                    return []
+                raise
         if rows is None:
             where_scope, scope_params = build_sqlite_scope_clause("", app_name, user_id, scope_filter)
             if has_query:
@@ -1726,10 +1731,14 @@ class SQLiteAsyncADKMemoryStore(_BaseAsyncADKMemoryStore[Any]):
                 f"JOIN {self._memory_table}_fts fts ON m.rowid = fts.rowid "
                 f"WHERE {where_scope} AND fts.content_text MATCH ? ORDER BY m.timestamp DESC LIMIT ?"
             )
-            with contextlib.suppress(Exception):
+            try:
                 async with self._config.provide_session() as driver:
                     await self._ensure_pragmas(driver)
                     rows = await driver.select(fts_sql, *scope_params, query, fetch_limit)
+            except SQLParsingError as exc:
+                if _is_missing_table_error(exc):
+                    return []
+                raise
         if rows is None:
             where_scope, scope_params = build_sqlite_scope_clause("", app_name, user_id, scope_filter)
             if has_query:

@@ -11,7 +11,10 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import warnings
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -21,7 +24,10 @@ from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types.file_object import FileObject, StoredObject
-from sqlalchemy import String, create_engine, delete, insert, select, update
+from alembic.ddl.impl import DefaultImpl
+from sqlalchemy import JSON as SAJSON
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, delete, insert, select, update
+from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.util.concurrency import greenlet_spawn
@@ -33,7 +39,9 @@ from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError
 from sqlspec.exceptions import StackExecutionError
+from sqlspec.utils.serializers import from_json
 
+import vertebra.extensions.alchemy.cache as alchemy_cache_mod
 import vertebra.extensions.sqlspec as sqlspec_extension
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import LeaseBroker
@@ -41,12 +49,21 @@ from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.dbapi import AsyncDBAPIConnection, InterfaceError, SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
     create_async_alchemy_config,
     create_sync_alchemy_config,
+)
+from vertebra.extensions.alchemy.cache import (
+    AsyncCacheBackend,
+    DogpileMemoryBackend,
+    DogpileStorageBackend,
+    SQLAlchemyCacheBackend,
+    SyncCacheBackend,
+    create_cache_config,
 )
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
@@ -72,7 +89,26 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
     dialects,
 )
+from vertebra.extensions.sqlalchemy.alembic.impl import (
+    BigQueryAlembicImpl,
+    DuckDBAlembicImpl,
+    SpangresAlembicImpl,
+    SpannerAlembicImpl,
+)
 from vertebra.extensions.sqlalchemy.async_adapter import AsyncAdapt_dbapi_connection, SQLAlchemyAsyncDBAPI
+from vertebra.extensions.sqlalchemy.cache import CompiledCache
+from vertebra.extensions.sqlalchemy.dialects import (
+    AsyncMSSQLDialect,
+    AsyncMySQLDialect,
+    AsyncOracleDialect,
+    AsyncPostgreSQLDialect,
+    AsyncSpangresDialect,
+    SyncBigQueryDialect,
+    SyncDuckDBDialect,
+    SyncMSSQLDialect,
+    SyncSpangresDialect,
+    SyncSpannerDialect,
+)
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool, broker_creator
 from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
@@ -94,6 +130,32 @@ from vertebra.extensions.sqlspec.adapters import (
 from vertebra.extensions.sqlspec.adapters import (
     PostgresSyncDriver as SQLSpecPostgresSyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.duckdb import (
+    DuckDBAsyncADKArtifactStore,
+    DuckDBAsyncADKMemoryStore,
+    DuckDBAsyncConfig,
+    DuckDBSyncADKArtifactStore,
+    DuckDBSyncADKMemoryStore,
+    DuckDBSyncConfig,
+)
+from vertebra.extensions.sqlspec.adapters.duckdb.adk import _row_to_memory as _duckdb_row_to_memory
+from vertebra.extensions.sqlspec.adapters.oracle import (
+    OracleAsyncADKArtifactStore,
+    OracleAsyncConfig,
+    OracleAsyncEventsBackend,
+    OracleSyncADKArtifactStore,
+    OracleSyncConfig,
+    OracleSyncEventsBackend,
+)
+from vertebra.extensions.sqlspec.adapters.postgres import PostgresAsyncEventsBackend
+from vertebra.extensions.sqlspec.adapters.postgres.adk import _row_to_stored_memory as _pg_row_to_stored_memory
+from vertebra.extensions.sqlspec.adapters.sqlite import (
+    SQLiteAsyncADKMemoryStore,
+    SQLiteAsyncConfig,
+    SQLiteSyncADKMemoryStore,
+    SQLiteSyncConfig,
+)
+from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.plugin import ProxyAsyncConfig, ProxySyncConfig
 from vertebra.extensions.sqlspec.provider import (
     AsyncBrokerLeaseSource,
@@ -511,8 +573,9 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
 
     vec = Vector(768)
     bjson = BinaryJSON()
-    assert SyncPostgreSQLDialect.type_descriptor(vec) is vec
-    assert SyncPostgreSQLDialect.type_descriptor(bjson) is bjson
+    pg_dialect = cast(Any, SyncPostgreSQLDialect)()
+    assert pg_dialect.type_descriptor(vec) is vec
+    assert pg_dialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio
@@ -3204,3 +3267,502 @@ async def test_sqlspec_provider_idle_commit_cancelled_quarantine_and_stack_cance
         assert async_stack_proxy._in_tx is False
     finally:
         await async_stack_proxy.close()
+
+
+@pytest.mark.anyio
+async def test_alchemy_cache_bytes_roundtrip_shm_oversize_eviction_remote_async_dogpile_and_compiled_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache backends preserve UTF-8 bytes vs str, evict stale SHM on >856B, avoid sync remote clients in async, and wire Dogpile/CompiledCache."""
+    raw_entity_bytes = b'{"id": 1, "name": "Alice"}'
+    raw_entity_str = '{"id": 1, "name": "Alice"}'
+    encoded_bytes = SyncCacheBackend._encode_driver_payload(raw_entity_bytes)
+    encoded_str = SyncCacheBackend._encode_driver_payload(raw_entity_str)
+    assert encoded_bytes != encoded_str
+    assert SyncCacheBackend._decode_driver_payload(encoded_bytes) == raw_entity_bytes
+    assert isinstance(SyncCacheBackend._decode_driver_payload(encoded_bytes), bytes)
+    assert SyncCacheBackend._decode_driver_payload(encoded_str) == raw_entity_str
+    assert isinstance(SyncCacheBackend._decode_driver_payload(encoded_str), str)
+
+    file_cache = SyncCacheBackend(f"file://{tmp_path / 'l2_store'}")
+    file_cache.set("entity:bytes", raw_entity_bytes)
+    file_cache.set("entity:str", raw_entity_str)
+    file_cache.set("entity:dict", {"id": 1, "ok": True})
+    file_cache._entries.clear()
+    fetched_bytes = file_cache.get("entity:bytes")
+    fetched_str = file_cache.get("entity:str")
+    assert isinstance(fetched_bytes, bytes) and fetched_bytes == raw_entity_bytes
+    assert isinstance(fetched_str, str) and fetched_str == raw_entity_str
+    assert file_cache.get("entity:dict") == {"id": 1, "ok": True}
+
+    def _broken_shm_cache(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("SHM segment creation failed")
+
+    monkeypatch.setattr(alchemy_cache_mod, "ShmCache", _broken_shm_cache)
+    with pytest.raises(OSError, match="SHM segment creation failed"):
+        SyncCacheBackend("shm://broken-segment")
+
+    class _RecordingShmStub:
+        def __init__(self) -> None:
+            self.data: dict[str, bytes] = {}
+            self.deleted_keys: list[str] = []
+
+        def get(self, key: str) -> bytes | None:
+            return self.data.get(key)
+
+        def set(self, key: str, value: bytes, ttl: float | None = None) -> None:
+            _ = ttl
+            self.data[key] = bytes(value)
+
+        def delete(self, key: str) -> bool:
+            self.deleted_keys.append(key)
+            return self.data.pop(key, None) is not None
+
+        def clear(self) -> None:
+            self.data.clear()
+
+    oversize_cache = SyncCacheBackend(f"file://{tmp_path / 'oversize_l2'}")
+    shm_stub = _RecordingShmStub()
+    cast(Any, oversize_cache)._shm = shm_stub
+    oversize_cache.set("profile:1", b"small-payload")
+    assert len(shm_stub.data) == 1
+    big_payload = b"x" * 1024
+    oversize_cache.set("profile:1", big_payload)
+    assert len(shm_stub.deleted_keys) == 1
+    assert shm_stub.data == {}
+    oversize_cache._entries.clear()
+    assert oversize_cache.get("profile:1") == big_payload
+
+    class _DummyAsyncDriver:
+        async def get(self, _k: str) -> Any:
+            return None
+
+    async_remote = AsyncCacheBackend(
+        "valkey://127.0.0.1:6379/0",
+        async_driver=cast(Any, _DummyAsyncDriver()),
+    )
+    assert async_remote._sync_backend._url == "memory://"
+    assert async_remote._sync_backend._sync_driver is None
+    assert async_remote._sync_backend._store is None
+
+    async_storage = AsyncCacheBackend(f"file://{tmp_path / 'async_only_store'}")
+    assert async_storage._sync_backend._url == "memory://"
+    assert async_storage._sync_backend._store is None
+    await async_storage.set("async:bytes", raw_entity_bytes)
+    async_storage._sync_backend.clear()
+    roundtripped = await async_storage.get("async:bytes")
+    assert isinstance(roundtripped, bytes) and roundtripped == raw_entity_bytes
+
+    dp_mem = DogpileMemoryBackend({"url": "memory://", "capacity": 64, "key_prefix": "dp"})
+    dp_mem.set("k1", b"v1")
+    assert dp_mem.get("k1") == b"v1"
+    dp_store = DogpileStorageBackend({"url": f"file://{tmp_path / 'dogpile_store'}", "capacity": 64})
+    dp_store.set("k2", b"v2")
+    assert dp_store.get("k2") == b"v2"
+
+    dp_cfg = create_cache_config("memory://", use_dogpile=True)
+    assert dp_cfg.backend == "vertebra.memory"
+
+    sa_backend = SQLAlchemyCacheBackend(capacity=64)
+    preserved_cfg = create_cache_config("memory://", backend=sa_backend)
+    assert preserved_cfg.region_factory is not None
+    assert preserved_cfg.region_factory(preserved_cfg) is sa_backend
+
+    compiled_cache = CompiledCache(capacity=16)
+    assert len(compiled_cache) == 0
+    compiled_cache[("stmt", 1)] = "PLAN_A"
+    compiled_cache["stmt_2"] = "PLAN_B"
+    assert len(compiled_cache) == 2
+    assert set(compiled_cache) == {("stmt", 1), "stmt_2"}
+    del compiled_cache["stmt_2"]
+    assert len(compiled_cache) == 1
+    compiled_cache.clear()
+    assert len(compiled_cache) == 0
+    assert list(compiled_cache) == []
+
+
+def test_sqlalchemy_dialects_type_descriptor_spangres_numeric_dollar_and_alembic_bare_names() -> None:
+    """SQLAlchemy dialects adapt colspecs via instance type_descriptor, compile Spangres $1..$N, and register bare Alembic names."""
+    dialect_classes: list[type[Any]] = [
+        SyncPostgreSQLDialect,
+        AsyncPostgreSQLDialect,
+        SyncOracleDialect,
+        AsyncOracleDialect,
+        SyncMySQLDialect,
+        AsyncMySQLDialect,
+        SyncMSSQLDialect,
+        AsyncMSSQLDialect,
+    ]
+    vec = Vector(4)
+    bjson = BinaryJSON()
+    generic_json = SAJSON()
+    generic_uuid = SAUuid()
+    for dialect_cls in dialect_classes:
+        inst = dialect_cls()
+        assert inst.type_descriptor(vec) is vec
+        assert inst.type_descriptor(bjson) is bjson
+        adapted_json = inst.type_descriptor(generic_json)
+        adapted_uuid = inst.type_descriptor(generic_uuid)
+        assert adapted_json is not None
+        assert adapted_uuid is not None
+    assert type(cast(Any, SyncPostgreSQLDialect)().type_descriptor(generic_json)) is not SAJSON
+
+    meta = MetaData()
+    tbl = Table("accounts", meta, Column("id", Integer), Column("email", String))
+    for spangres_cls in (SyncSpangresDialect, AsyncSpangresDialect):
+        sp_dialect = cast(Any, spangres_cls)()
+        assert sp_dialect.paramstyle == "numeric_dollar"
+        assert sp_dialect.default_paramstyle == "numeric_dollar"
+        assert sp_dialect.positional is True
+        compiled_sel = select(tbl).where(tbl.c.id == 42, tbl.c.email == "a@b.c").compile(dialect=sp_dialect)
+        sql_text = str(compiled_sel)
+        assert "$1" in sql_text and "$2" in sql_text
+        assert "%(" not in sql_text
+        compiled_ins = insert(tbl).values(id=1, email="x@y.z").compile(dialect=sp_dialect)
+        ins_text = str(compiled_ins)
+        assert "$1" in ins_text and "$2" in ins_text
+
+    AlembicImpl.register_all()
+    assert DefaultImpl.get_by_dialect(SyncDuckDBDialect()) is DuckDBAlembicImpl
+    assert DefaultImpl.get_by_dialect(SyncBigQueryDialect()) is BigQueryAlembicImpl
+    assert DefaultImpl.get_by_dialect(SyncSpannerDialect()) is SpannerAlembicImpl
+    assert DefaultImpl.get_by_dialect(cast(Any, SyncSpangresDialect)()) is SpangresAlembicImpl
+
+
+@pytest.mark.anyio
+async def test_sqlspec_adk_tuple_mapping_artifact_versions_session_scope_and_search_errors() -> None:
+    """ADK stores map positional memory tuples accurately, return StoredArtifact dicts, scope Oracle keys, and propagate search errors."""
+    ts = datetime(2026, 11, 16, 8, 0, tzinfo=UTC)
+    ins_ts = datetime(2026, 11, 16, 8, 5, tzinfo=UTC)
+
+    duck_tuple = (
+        "m-1",
+        "s-1",
+        "app",
+        "u-1",
+        "user",
+        "ev-1",
+        "assistant",
+        ts,
+        '{"text": "hi"}',
+        "hi",
+        '{"tag": "v1"}',
+        [0.25, 0.75],
+        ins_ts,
+    )
+    duck_mem = _duckdb_row_to_memory(duck_tuple, deserializer=from_json)
+    assert duck_mem["metadata_json"] == {"tag": "v1"}
+    assert duck_mem["embedding"] == [0.25, 0.75]
+    assert duck_mem["inserted_at"] == ins_ts
+
+    pg_tuple = (
+        "m-2",
+        "s-2",
+        "app",
+        "u-2",
+        "user",
+        "ev-2",
+        "assistant",
+        ts,
+        '{"text": "pg"}',
+        "pg",
+        '{"k": "v"}',
+        ins_ts,
+        "[0.5, -0.5]",
+    )
+    pg_mem = _pg_row_to_stored_memory(pg_tuple)
+    assert pg_mem["timestamp"] == ts
+    assert pg_mem["inserted_at"] == ins_ts
+    assert pg_mem["embedding"] == [0.5, -0.5]
+
+    sample_art_rows = [
+        {
+            "app_name": "app",
+            "user_id": "u1",
+            "session_id": "s1",
+            "filename": "report.pdf",
+            "version": 1,
+            "mime_type": "application/pdf",
+            "canonical_uri": "memory://bucket/report_v1.pdf",
+            "custom_metadata": '{"rev": 1}',
+            "size": 128,
+            "updated": ts,
+            "signed_url": None,
+            "created_at": ts,
+        }
+    ]
+
+    class _StubSyncSessionDriver:
+        def __init__(self, rows: list[dict[str, Any]], captured: list[tuple[str, Any]]) -> None:
+            self._rows = rows
+            self._captured = captured
+
+        def select(self, query: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            self._captured.append((query, args or kwargs))
+            return list(self._rows)
+
+    class _StubAsyncSessionDriver:
+        def __init__(self, rows: list[dict[str, Any]], captured: list[tuple[str, Any]]) -> None:
+            self._rows = rows
+            self._captured = captured
+
+        async def select(self, query: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            self._captured.append((query, args or kwargs))
+            return list(self._rows)
+
+    class _StubSyncCfg:
+        def __init__(self, rows: list[dict[str, Any]], *, fail_sql: str | None = None) -> None:
+            self.extension_config: dict[str, Any] = {"adk": {"use_fts": True, "memory_use_fts": True}}
+            self.rows = rows
+            self.fail_sql = fail_sql
+            self.captured: list[tuple[str, Any]] = []
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            cfg = self
+
+            class _Ctx:
+                def __enter__(self) -> Any:
+                    if cfg.fail_sql is not None:
+
+                        class _FailingDriver:
+                            def execute(self, *_a: Any, **_kw: Any) -> int:
+                                return 0
+
+                            def select(self, query: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+                                if cfg.fail_sql and cfg.fail_sql in query:
+                                    raise RuntimeError("fts engine failure")
+                                return []
+
+                        return _FailingDriver()
+                    return _StubSyncSessionDriver(cfg.rows, cfg.captured)
+
+                def __exit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _Ctx()
+
+    class _StubAsyncCfg:
+        def __init__(self, rows: list[dict[str, Any]], *, fail_sql: str | None = None) -> None:
+            self.extension_config: dict[str, Any] = {"adk": {"use_fts": True, "memory_use_fts": True}}
+            self.rows = rows
+            self.fail_sql = fail_sql
+            self.captured: list[tuple[str, Any]] = []
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            cfg = self
+
+            class _AsyncCtx:
+                async def __aenter__(self) -> Any:
+                    if cfg.fail_sql is not None:
+
+                        class _FailingAsyncDriver:
+                            async def execute(self, *_a: Any, **_kw: Any) -> int:
+                                return 0
+
+                            async def select(self, query: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+                                if cfg.fail_sql and cfg.fail_sql in query:
+                                    raise RuntimeError("fts engine failure")
+                                return []
+
+                        return _FailingAsyncDriver()
+                    return _StubAsyncSessionDriver(cfg.rows, cfg.captured)
+
+                async def __aexit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _AsyncCtx()
+
+    duck_sync_art = DuckDBSyncADKArtifactStore(cast(DuckDBSyncConfig, _StubSyncCfg(sample_art_rows)))
+    sync_versions = duck_sync_art.list_artifact_versions("app", "u1", "report.pdf", session_id="s1")
+    assert len(sync_versions) == 1
+    assert isinstance(sync_versions[0], dict)
+    assert sync_versions[0]["canonical_uri"] == "memory://bucket/report_v1.pdf"
+
+    duck_async_art = DuckDBAsyncADKArtifactStore(cast(DuckDBAsyncConfig, _StubAsyncCfg(sample_art_rows)))
+    async_versions = await duck_async_art.list_artifact_versions("app", "u1", "report.pdf", session_id="s1")
+    assert len(async_versions) == 1
+    assert isinstance(async_versions[0], dict)
+    assert async_versions[0]["version"] == 1
+
+    ora_sync_cfg = _StubSyncCfg([{"filename": "a.txt"}, {"filename": "user:b.txt"}])
+    ora_sync_art = OracleSyncADKArtifactStore(cast(OracleSyncConfig, ora_sync_cfg))
+    assert ora_sync_art.list_artifact_keys("app", "u1", session_id="sess-9") == ["a.txt", "user:b.txt"]
+    assert "session_id IN ('', :session_id)" in ora_sync_cfg.captured[-1][0]
+    ora_sync_art.list_artifact_keys("app", "u1", session_id=None)
+    assert "session_id = ''" in ora_sync_cfg.captured[-1][0]
+
+    ora_async_cfg = _StubAsyncCfg([{"filename": "a.txt"}])
+    ora_async_art = OracleAsyncADKArtifactStore(cast(OracleAsyncConfig, ora_async_cfg))
+    assert await ora_async_art.list_artifact_keys("app", "u1", session_id="sess-9") == ["a.txt"]
+    assert "session_id IN ('', :session_id)" in ora_async_cfg.captured[-1][0]
+    await ora_async_art.list_artifact_keys("app", "u1", session_id=None)
+    assert "session_id = ''" in ora_async_cfg.captured[-1][0]
+
+    duck_fail_sync = DuckDBSyncADKMemoryStore(cast(DuckDBSyncConfig, _StubSyncCfg([], fail_sql="match_bm25")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        duck_fail_sync.search_entries("needle", "app", "u1")
+
+    duck_fail_async = DuckDBAsyncADKMemoryStore(cast(DuckDBAsyncConfig, _StubAsyncCfg([], fail_sql="match_bm25")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        await duck_fail_async.search_entries("needle", "app", "u1")
+
+    sqlite_fail_sync = SQLiteSyncADKMemoryStore(cast(SQLiteSyncConfig, _StubSyncCfg([], fail_sql="MATCH")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        sqlite_fail_sync.search_entries("needle", "app", "u1")
+
+    sqlite_fail_async = SQLiteAsyncADKMemoryStore(cast(SQLiteAsyncConfig, _StubAsyncCfg([], fail_sql="MATCH")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        await sqlite_fail_async.search_entries("needle", "app", "u1")
+
+
+@pytest.mark.anyio
+async def test_sqlspec_events_async_pump_survives_timeout_sync_poll_interval_and_oracle_skip_locked() -> None:
+    """Async event backends keep source.listen() alive across poll timeouts, honor sync poll_interval, and use SKIP LOCKED in Oracle."""
+
+    class _FakeNotifyFrame:
+        def __init__(self, channel: str, payload: str) -> None:
+            self.channel = channel
+            self.payload = payload
+
+    class _PumpedAsyncNotifySource:
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[_FakeNotifyFrame] = asyncio.Queue()
+            self.listen_calls = 0
+            self.closed_by_cancel = False
+            self.subscribed: list[str] = []
+
+        async def subscribe(self, channels: list[str]) -> None:
+            self.subscribed.extend(channels)
+
+        async def unsubscribe(self, _channels: list[str]) -> None:
+            return None
+
+        async def publish(self, channel: str, payload: str | bytes) -> None:
+            text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+            await self.queue.put(_FakeNotifyFrame(channel, text))
+
+        async def close(self) -> None:
+            return None
+
+        async def listen(self) -> AsyncIterator[_FakeNotifyFrame]:
+            self.listen_calls += 1
+            try:
+                while True:
+                    item = await self.queue.get()
+                    yield item
+            except asyncio.CancelledError:
+                self.closed_by_cancel = True
+                raise
+
+    pg_source = _PumpedAsyncNotifySource()
+    pg_cfg = PostgresAsyncConfig(dsn="postgresql://localhost:5432/app", share_pool=False)
+    pg_events = PostgresAsyncEventsBackend(pg_cfg, source=cast(Any, pg_source))
+    try:
+        assert await pg_events.dequeue("orders", poll_interval=0.01) is None
+        assert await pg_events.dequeue("orders", poll_interval=0.01) is None
+        assert pg_source.listen_calls == 1
+        assert pg_source.closed_by_cancel is False
+
+        ev_id = await pg_events.publish("orders", {"order_id": 101})
+        msg = await pg_events.dequeue("orders", poll_interval=0.2)
+        assert msg is not None
+        assert msg.event_id == ev_id
+        assert msg.payload == {"order_id": 101}
+    finally:
+        await pg_events.shutdown()
+
+    ora_source = _PumpedAsyncNotifySource()
+    ora_cfg = OracleAsyncConfig(dsn="oracle://scott:tiger@localhost:1521/FREEPDB1", share_pool=False)
+    ora_events = OracleAsyncEventsBackend(ora_cfg, source=cast(Any, ora_source))
+    try:
+        assert await ora_events.dequeue("alerts", poll_interval=0.01) is None
+        assert ora_source.listen_calls == 1
+        assert ora_source.closed_by_cancel is False
+        ora_ev_id = await ora_events.publish("alerts", {"severity": "high"})
+        ora_msg = await ora_events.dequeue("alerts", poll_interval=0.2)
+        assert ora_msg is not None
+        assert ora_msg.event_id == ora_ev_id
+        assert ora_msg.payload == {"severity": "high"}
+    finally:
+        await ora_events.shutdown()
+
+    cf_source = _PumpedAsyncNotifySource()
+    cf_async = ChangeFeedAsyncEventBackend(
+        ChangeFeed(CDCConfig(channel="cdc_async")),
+        notify_source=cast(Any, cf_source),
+    )
+    try:
+        assert await cf_async.dequeue("stream_a", poll_interval=0.01) is None
+        assert cf_source.listen_calls == 1
+        assert cf_source.closed_by_cancel is False
+        await cf_async.publish("stream_b", {"target": "b"})
+        await cf_async.publish("stream_a", {"target": "a"})
+        msg_a = await cf_async.dequeue("stream_a", poll_interval=0.2)
+        msg_b = await cf_async.dequeue("stream_b", poll_interval=0.2)
+        assert msg_a is not None and msg_a.payload == {"target": "a"}
+        assert msg_b is not None and msg_b.payload == {"target": "b"}
+    finally:
+        await cf_async.shutdown()
+
+    cf_sync = ChangeFeedSyncEventBackend(ChangeFeed(CDCConfig(channel="cdc_sync")))
+    try:
+        t0 = time.monotonic()
+        assert cf_sync.dequeue("jobs", poll_interval=0.03) is None
+        assert (time.monotonic() - t0) >= 0.02
+
+        def _delayed_pub() -> None:
+            time.sleep(0.015)
+            cf_sync.publish("jobs", {"job_id": 7})
+
+        pub_thread = threading.Thread(target=_delayed_pub)
+        pub_thread.start()
+        woken = cf_sync.dequeue("jobs", poll_interval=0.5)
+        pub_thread.join()
+        assert woken is not None and woken.payload == {"job_id": 7}
+    finally:
+        cf_sync.shutdown()
+
+    executed_oracle_sql: list[str] = []
+
+    class _OracleTableFallbackSyncCfg:
+        extension_config: dict[str, Any] = {}
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            class _Ctx:
+                def __enter__(self) -> Any:
+                    class _Drv:
+                        def select_one_or_none(self, query: str, _params: Any = None) -> Any:
+                            executed_oracle_sql.append(query)
+                            return {
+                                "event_id": "ev-ora-1",
+                                "channel": "billing",
+                                "payload_json": '{"ok": true}',
+                                "metadata_json": None,
+                                "attempts": 0,
+                                "available_at": datetime.now(UTC),
+                                "created_at": datetime.now(UTC),
+                            }
+
+                        def execute(self, query: str, _params: Any = None) -> int:
+                            executed_oracle_sql.append(query)
+                            return 1
+
+                        def commit(self) -> None:
+                            return None
+
+                        def rollback(self) -> None:
+                            return None
+
+                    return _Drv()
+
+                def __exit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _Ctx()
+
+    ora_table_sync = OracleSyncEventsBackend(cast(OracleSyncConfig, _OracleTableFallbackSyncCfg()))
+    claimed = ora_table_sync.dequeue("billing", poll_interval=0.01)
+    assert claimed is not None and claimed.event_id == "ev-ora-1"
+    assert any("FOR UPDATE SKIP LOCKED" in q for q in executed_oracle_sql)
+    assert any("AND status = 'pending'" in q for q in executed_oracle_sql)

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
 from vertebra.utils.serializers import decode_json, encode_json
+from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -84,7 +85,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
         """Initialize the queue store with a synchronous driver and optional notification publisher."""
         self._driver = driver
         self._notification_source = notification_source
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
@@ -178,7 +179,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
             WHERE q.queue = ANY($1)
               AND (
                   (q.status = 'ready' AND (q.scheduled_at_ms IS NULL OR q.scheduled_at_ms <= $2))
-                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2)
+                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2 AND q.attempt < q.max_attempts)
               )
             ORDER BY q.created_at_ms ASC
             LIMIT $3
@@ -198,12 +199,45 @@ class SyncPostgresQueueStore(SyncQueueStore):
         rows = self._driver.select(sql, (list(queues), now_ms, limit, worker_id, lease_until_ms))
         return [_row_to_entry(r) for r in rows]
 
+    def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically claim a specific ready job by job_id under a visibility lease."""
+        now_ms = int(time.time() * 1000)
+        lease_until_ms = now_ms + int(lease_seconds * 1000)
+        sql = f"""
+        UPDATE {self._table_name} u
+        SET status = 'claimed',
+            worker_id = $3,
+            lease_until_ms = $4,
+            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
+            updated_at_ms = $2
+        WHERE u.job_id = $1
+          AND (
+              (u.status = 'ready' AND (u.scheduled_at_ms IS NULL OR u.scheduled_at_ms <= $2))
+              OR (u.status = 'claimed' AND u.lease_until_ms <= $2 AND u.attempt < u.max_attempts)
+          )
+          AND (
+              $5::INT IS NULL
+              OR (CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END) = $5
+          )
+        RETURNING u.job_id, u.queue, u.task_name, u.payload, u.attempt, u.max_attempts,
+                  u.lease_until_ms, u.scheduled_at_ms, u.headers
+        """
+        rows = self._driver.select(sql, (job_id, now_ms, worker_id, lease_until_ms, expected_attempt))
+        return _row_to_entry(rows[0]) if rows else None
+
     def ack(self, job_id: str, *, attempt: int) -> bool:
         """Mark a fenced (job_id, attempt) claim as completed."""
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'completed', updated_at_ms = $3
+        SET status = 'completed', lease_until_ms = 0, worker_id = NULL, updated_at_ms = $3
         WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
         """
         affected = self._driver.execute(sql, (job_id, attempt, now_ms))
@@ -226,7 +260,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
         if entry.attempt >= entry.max_attempts or retry_delay_s is None:
             sql = f"""
             UPDATE {self._table_name}
-            SET status = 'dead_letter', last_error = $3, updated_at_ms = $4
+            SET status = 'dead_letter', last_error = $3, lease_until_ms = 0, worker_id = NULL, updated_at_ms = $4
             WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
             """
             affected = self._driver.execute(sql, (job_id, attempt, error, now_ms))
@@ -267,11 +301,20 @@ class SyncPostgresQueueStore(SyncQueueStore):
         return self._driver.execute(sql, (new_lease_ms, now_ms, list(job_ids), worker_id))
 
     def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
-        """Reap abandoned in-flight claims back into ready status."""
+        """Reap abandoned in-flight claims by bumping attempt or transitioning exhausted jobs to dead_letter."""
+        _ = lease_seconds
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'ready', worker_id = NULL, lease_until_ms = 0, updated_at_ms = $1
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
+            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
+            last_error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(last_error, 'Visibility lease expired')
+                ELSE last_error
+            END,
+            worker_id = NULL,
+            lease_until_ms = 0,
+            updated_at_ms = $1
         WHERE status = 'claimed' AND lease_until_ms <= $1
         """
         return self._driver.execute(sql, (now_ms,))
@@ -299,7 +342,7 @@ class SyncPostgresQueueStore(SyncQueueStore):
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'cancelled', updated_at_ms = $2
+        SET status = 'cancelled', lease_until_ms = 0, worker_id = NULL, updated_at_ms = $2
         WHERE job_id = $1 AND status IN ('ready', 'claimed')
         """
         affected = self._driver.execute(sql, (job_id, now_ms))
@@ -315,6 +358,25 @@ class SyncPostgresQueueStore(SyncQueueStore):
         """
         row = self._driver.select_one_or_none(sql, (job_id,))
         return _row_to_entry(row) if row is not None else None
+
+    def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of job_id, or None if absent."""
+        sql = f"SELECT status FROM {self._table_name} WHERE job_id = $1"
+        row = self._driver.select_one_or_none(sql, (job_id,))
+        if row is None or row.get("status") is None:
+            return None
+        return str(row["status"])
+
+    def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
+        """Atomically remove and return a dead-lettered queue entry by job_id."""
+        sql = f"""
+        DELETE FROM {self._table_name}
+        WHERE job_id = $1 AND status = 'dead_letter'
+        RETURNING job_id, queue, task_name, payload, attempt, max_attempts,
+                  lease_until_ms, scheduled_at_ms, headers
+        """
+        rows = self._driver.select(sql, (job_id,))
+        return _row_to_entry(rows[0]) if rows else None
 
     def list_entries(
         self,
@@ -422,7 +484,7 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         """Initialize the asynchronous queue store with a driver and optional notification publisher."""
         self._driver = driver
         self._notification_source = notification_source
-        self._table_name = table_name
+        self._table_name = validate_identifier(table_name, "table_name")
 
     async def ensure_schema(self) -> None:
         """Idempotently create queue, lease, and uniqueness tables and indexes."""
@@ -520,7 +582,7 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
             WHERE q.queue = ANY($1)
               AND (
                   (q.status = 'ready' AND (q.scheduled_at_ms IS NULL OR q.scheduled_at_ms <= $2))
-                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2)
+                  OR (q.status = 'claimed' AND q.lease_until_ms <= $2 AND q.attempt < q.max_attempts)
               )
             ORDER BY q.created_at_ms ASC
             LIMIT $3
@@ -540,12 +602,45 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         rows = await self._driver.select(sql, (list(queues), now_ms, limit, worker_id, lease_until_ms))
         return [_row_to_entry(r) for r in rows]
 
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        """Atomically claim a specific ready job asynchronously by job_id under a visibility lease."""
+        now_ms = int(time.time() * 1000)
+        lease_until_ms = now_ms + int(lease_seconds * 1000)
+        sql = f"""
+        UPDATE {self._table_name} u
+        SET status = 'claimed',
+            worker_id = $3,
+            lease_until_ms = $4,
+            attempt = CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END,
+            updated_at_ms = $2
+        WHERE u.job_id = $1
+          AND (
+              (u.status = 'ready' AND (u.scheduled_at_ms IS NULL OR u.scheduled_at_ms <= $2))
+              OR (u.status = 'claimed' AND u.lease_until_ms <= $2 AND u.attempt < u.max_attempts)
+          )
+          AND (
+              $5::INT IS NULL
+              OR (CASE WHEN u.status = 'claimed' THEN u.attempt + 1 ELSE u.attempt END) = $5
+          )
+        RETURNING u.job_id, u.queue, u.task_name, u.payload, u.attempt, u.max_attempts,
+                  u.lease_until_ms, u.scheduled_at_ms, u.headers
+        """
+        rows = await self._driver.select(sql, (job_id, now_ms, worker_id, lease_until_ms, expected_attempt))
+        return _row_to_entry(rows[0]) if rows else None
+
     async def ack(self, job_id: str, *, attempt: int) -> bool:
         """Mark a fenced (job_id, attempt) claim as completed asynchronously."""
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'completed', updated_at_ms = $3
+        SET status = 'completed', lease_until_ms = 0, worker_id = NULL, updated_at_ms = $3
         WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
         """
         affected = await self._driver.execute(sql, (job_id, attempt, now_ms))
@@ -568,7 +663,7 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         if entry.attempt >= entry.max_attempts or retry_delay_s is None:
             sql = f"""
             UPDATE {self._table_name}
-            SET status = 'dead_letter', last_error = $3, updated_at_ms = $4
+            SET status = 'dead_letter', last_error = $3, lease_until_ms = 0, worker_id = NULL, updated_at_ms = $4
             WHERE job_id = $1 AND attempt = $2 AND status = 'claimed'
             """
             affected = await self._driver.execute(sql, (job_id, attempt, error, now_ms))
@@ -609,11 +704,20 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         return await self._driver.execute(sql, (new_lease_ms, now_ms, list(job_ids), worker_id))
 
     async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
-        """Reap abandoned in-flight claims back into ready status asynchronously."""
+        """Reap abandoned in-flight claims asynchronously by bumping attempt or dead-lettering."""
+        _ = lease_seconds
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'ready', worker_id = NULL, lease_until_ms = 0, updated_at_ms = $1
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END,
+            attempt = CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END,
+            last_error = CASE
+                WHEN attempt >= max_attempts THEN COALESCE(last_error, 'Visibility lease expired')
+                ELSE last_error
+            END,
+            worker_id = NULL,
+            lease_until_ms = 0,
+            updated_at_ms = $1
         WHERE status = 'claimed' AND lease_until_ms <= $1
         """
         return await self._driver.execute(sql, (now_ms,))
@@ -641,7 +745,7 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         now_ms = int(time.time() * 1000)
         sql = f"""
         UPDATE {self._table_name}
-        SET status = 'cancelled', updated_at_ms = $2
+        SET status = 'cancelled', lease_until_ms = 0, worker_id = NULL, updated_at_ms = $2
         WHERE job_id = $1 AND status IN ('ready', 'claimed')
         """
         affected = await self._driver.execute(sql, (job_id, now_ms))
@@ -657,6 +761,25 @@ class AsyncPostgresQueueStore(AsyncQueueStore):
         """
         row = await self._driver.select_one_or_none(sql, (job_id,))
         return _row_to_entry(row) if row is not None else None
+
+    async def get_entry_status(self, job_id: str) -> str | None:
+        """Retrieve the current status string of job_id asynchronously, or None if absent."""
+        sql = f"SELECT status FROM {self._table_name} WHERE job_id = $1"
+        row = await self._driver.select_one_or_none(sql, (job_id,))
+        if row is None or row.get("status") is None:
+            return None
+        return str(row["status"])
+
+    async def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
+        """Atomically remove and return a dead-lettered queue entry asynchronously by job_id."""
+        sql = f"""
+        DELETE FROM {self._table_name}
+        WHERE job_id = $1 AND status = 'dead_letter'
+        RETURNING job_id, queue, task_name, payload, attempt, max_attempts,
+                  lease_until_ms, scheduled_at_ms, headers
+        """
+        rows = await self._driver.select(sql, (job_id,))
+        return _row_to_entry(rows[0]) if rows else None
 
     async def list_entries(
         self,

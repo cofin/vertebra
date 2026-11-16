@@ -5,13 +5,14 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyByteArray, PyBytes, PyCapsule, PyString};
 use vertebra_core::broker::{
     BrokerError, LeaseGrant as RsLeaseGrant, LeaseTableStats, PartitionStats as RsPartitionStats,
-    PoolPartitionSpec, ShmCache as RsShmCache, ShmCacheStats as RsShmCacheStats, ShmLeaseTable,
-    ShmStatementCache, StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
+    PoolPartitionSpec, SHM_CACHE_MAX_KEY_BYTES, SHM_CACHE_MAX_VALUE_BYTES, ShmCache as RsShmCache,
+    ShmCacheStats as RsShmCacheStats, ShmLeaseTable, ShmStatementCache,
+    StatementCacheStats as RsStatementCacheStats, StatementPlanEntry,
 };
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::{BROKER_ENGINE_CAPSULE_NAME, BrokerEngineCapsule, ForeignEngineCapsule};
@@ -1207,6 +1208,30 @@ impl From<RsShmCacheStats> for ShmCacheStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedTtl {
+    Immortal,
+    ExpireNow,
+    DurationNs(u64),
+}
+
+fn parse_py_ttl(ttl: Option<f64>) -> PyResult<ParsedTtl> {
+    match ttl {
+        None => Ok(ParsedTtl::Immortal),
+        Some(t) if !t.is_finite() => Err(PyValueError::new_err("ttl must be a finite number")),
+        Some(t) if t <= 0.0 => Ok(ParsedTtl::ExpireNow),
+        Some(t) => {
+            let scaled = t * 1_000_000_000.0;
+            let ns = if scaled >= (u64::MAX as f64) {
+                u64::MAX
+            } else {
+                (scaled.ceil() as u64).max(1)
+            };
+            Ok(ParsedTtl::DurationNs(ns))
+        }
+    }
+}
+
 #[pyclass(immutable_type)]
 #[derive(Clone)]
 pub struct ShmCache {
@@ -1262,14 +1287,26 @@ impl ShmCache {
     ) -> PyResult<bool> {
         let key_bytes = extract_bytes_or_str(key)?;
         let val_bytes = extract_bytes_or_str(value)?;
-        let ttl_ns = ttl.and_then(|t| {
-            if t > 0.0 {
-                Some((t * 1_000_000_000.0) as u64)
-            } else {
-                None
+        let parsed_ttl = parse_py_ttl(ttl)?;
+        let ok = match parsed_ttl {
+            ParsedTtl::Immortal => py.detach(|| self.cache.set(&key_bytes, &val_bytes, None)),
+            ParsedTtl::DurationNs(ns) => {
+                py.detach(|| self.cache.set(&key_bytes, &val_bytes, Some(ns)))
             }
-        });
-        let ok = py.detach(|| self.cache.set(&key_bytes, &val_bytes, ttl_ns));
+            ParsedTtl::ExpireNow => {
+                if key_bytes.is_empty()
+                    || key_bytes.len() > SHM_CACHE_MAX_KEY_BYTES
+                    || val_bytes.len() > SHM_CACHE_MAX_VALUE_BYTES
+                {
+                    false
+                } else {
+                    py.detach(|| {
+                        self.cache.delete(&key_bytes);
+                        true
+                    })
+                }
+            }
+        };
         Ok(ok)
     }
 
@@ -1290,14 +1327,23 @@ impl ShmCache {
     ) -> PyResult<bool> {
         let key_bytes = extract_bytes_or_str(key)?;
         let val_bytes = extract_bytes_or_str(value)?;
-        let ttl_ns = ttl.and_then(|t| {
-            if t > 0.0 {
-                Some((t * 1_000_000_000.0) as u64)
-            } else {
-                None
+        let parsed_ttl = parse_py_ttl(ttl)?;
+        let ok = match parsed_ttl {
+            ParsedTtl::Immortal => py.detach(|| self.cache.add(&key_bytes, &val_bytes, None)),
+            ParsedTtl::DurationNs(ns) => {
+                py.detach(|| self.cache.add(&key_bytes, &val_bytes, Some(ns)))
             }
-        });
-        let ok = py.detach(|| self.cache.add(&key_bytes, &val_bytes, ttl_ns));
+            ParsedTtl::ExpireNow => {
+                if key_bytes.is_empty()
+                    || key_bytes.len() > SHM_CACHE_MAX_KEY_BYTES
+                    || val_bytes.len() > SHM_CACHE_MAX_VALUE_BYTES
+                {
+                    false
+                } else {
+                    py.detach(|| !self.cache.has_key(&key_bytes))
+                }
+            }
+        };
         Ok(ok)
     }
 
@@ -1323,14 +1369,12 @@ impl ShmCache {
         ttl: Option<f64>,
     ) -> PyResult<bool> {
         let key_bytes = extract_bytes_or_str(key)?;
-        let ttl_ns = ttl.and_then(|t| {
-            if t > 0.0 {
-                Some((t * 1_000_000_000.0) as u64)
-            } else {
-                None
-            }
-        });
-        let ok = py.detach(|| self.cache.touch(&key_bytes, ttl_ns));
+        let parsed_ttl = parse_py_ttl(ttl)?;
+        let ok = match parsed_ttl {
+            ParsedTtl::Immortal => py.detach(|| self.cache.touch(&key_bytes, None)),
+            ParsedTtl::DurationNs(ns) => py.detach(|| self.cache.touch(&key_bytes, Some(ns))),
+            ParsedTtl::ExpireNow => py.detach(|| self.cache.delete(&key_bytes)),
+        };
         Ok(ok)
     }
 

@@ -8,13 +8,15 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import pyarrow as pa
 import pytest
 from sqlspec import StatementStack
 from sqlspec.exceptions import NotFoundError as SQLSpecNotFoundError
-from sqlspec.exceptions import StackExecutionError
+from sqlspec.exceptions import PermissionDeniedError, StackExecutionError
 
 from tests.unit.db.test_bigquery import _MockBigQueryRestServer
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
+from vertebra._vertebra import BigQueryError
 from vertebra.db import ArrowCursor, NotFoundError, NotSupportedError
 from vertebra.db.adapters.bigquery import (
     AsyncBigQueryDriver as CoreAsyncBigQueryDriver,
@@ -1253,3 +1255,171 @@ async def test_bigquery_async_driver_rejects_per_call_tenant_id(method_name: str
     with pytest.raises(NotSupportedError, match="Tenant session enforcement is unsupported for BigQuery"):
         await calls[method_name]()
     assert engine.executed_sql == []
+
+
+@pytest.mark.anyio
+async def test_bigquery_execute_many_compiles_parameters_and_maps_arrow_dry_run_exceptions() -> None:
+    """BigQuery drivers compile execute_many parameters and map native errors on select_to_arrow, load_from_arrow, and dry_run."""
+    recorded_many: list[tuple[str, list[Any]]] = []
+
+    class _ManyRecordingSyncDriver(_SimulatedSyncCoreDriver):
+        def execute_many(
+            self,
+            sql: str,
+            parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        ) -> int:
+            recorded_many.append((sql, [dict(p) if isinstance(p, Mapping) else list(p) for p in parameter_sets]))
+            return len(parameter_sets)
+
+    class _ManyRecordingAsyncDriver(_SimulatedAsyncCoreDriver):
+        async def execute_many(
+            self,
+            sql: str,
+            parameter_sets: Sequence[Mapping[str, Any] | Sequence[Any]],
+        ) -> int:
+            recorded_many.append((sql, [dict(p) if isinstance(p, Mapping) else list(p) for p in parameter_sets]))
+            return len(parameter_sets)
+
+    engine = _InMemoryBigQueryEngine()
+    sync_driver = BigQuerySyncDriver(_ManyRecordingSyncDriver(engine))
+    sync_driver.execute_many(
+        "INSERT INTO metrics (id, name, score) VALUES (?, ?, ?)",
+        [(10, "ten", 1.5), (20, "twenty", 2.5)],
+    )
+    assert len(recorded_many) == 1
+    compiled_sql, compiled_sets = recorded_many[0]
+    assert "@" in compiled_sql
+    assert "?" not in compiled_sql
+    assert len(compiled_sets) == 2
+    assert all(isinstance(item, dict) and len(item) == 3 for item in compiled_sets)
+    assert list(compiled_sets[0].values()) == [10, "ten", 1.5]
+    assert list(compiled_sets[1].values()) == [20, "twenty", 2.5]
+
+    recorded_many.clear()
+    async_driver = BigQueryAsyncDriver(_ManyRecordingAsyncDriver(engine))
+    await async_driver.execute_many(
+        "INSERT INTO metrics (id, name, score) VALUES (:id, :name, :score)",
+        [
+            {"id": 30, "name": "thirty", "score": 3.5},
+            {"id": 40, "name": "forty", "score": 4.5},
+        ],
+    )
+    assert len(recorded_many) == 1
+    acompiled_sql, acompiled_sets = recorded_many[0]
+    assert "@id" in acompiled_sql
+    assert ":id" not in acompiled_sql
+    assert acompiled_sets == [
+        {"id": 30, "name": "thirty", "score": 3.5},
+        {"id": 40, "name": "forty", "score": 4.5},
+    ]
+
+    class _FailingSyncCore(_SimulatedSyncCoreDriver):
+        def select_to_arrow(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            **_kwargs: Any,
+        ) -> ArrowCursor:
+            _ = (sql, parameters)
+            raise BigQueryError("Permission denied on dataset")
+
+        def load_from_arrow(self, table_name: str, data: Any, **_kwargs: Any) -> int:
+            _ = (table_name, data)
+            raise BigQueryError("Permission denied on dataset")
+
+        def dry_run(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        ) -> BigQueryDryRunResult:
+            _ = (sql, parameters)
+            raise BigQueryError("Permission denied on dataset")
+
+    class _FailingAsyncCore(_SimulatedAsyncCoreDriver):
+        async def select_to_arrow(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            **_kwargs: Any,
+        ) -> ArrowCursor:
+            _ = (sql, parameters)
+            raise BigQueryError("Permission denied on dataset")
+
+        async def load_from_arrow(self, table_name: str, data: Any, **_kwargs: Any) -> int:
+            _ = (table_name, data)
+            raise BigQueryError("Permission denied on dataset")
+
+        async def dry_run(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        ) -> BigQueryDryRunResult:
+            _ = (sql, parameters)
+            raise BigQueryError("Permission denied on dataset")
+
+    sample_tbl = pa.table({"id": [1], "name": ["x"], "score": [1.0]})
+    failing_sync = BigQuerySyncDriver(_FailingSyncCore(engine))
+    with pytest.raises(PermissionDeniedError):
+        failing_sync.select_to_arrow("SELECT * FROM metrics")
+    with pytest.raises(PermissionDeniedError):
+        failing_sync.load_from_arrow("metrics", sample_tbl)
+    with pytest.raises(PermissionDeniedError):
+        failing_sync.dry_run("SELECT * FROM metrics")
+
+    failing_async = BigQueryAsyncDriver(_FailingAsyncCore(engine))
+    with pytest.raises(PermissionDeniedError):
+        await failing_async.select_to_arrow("SELECT * FROM metrics")
+    with pytest.raises(PermissionDeniedError):
+        await failing_async.load_from_arrow("metrics", sample_tbl)
+    with pytest.raises(PermissionDeniedError):
+        await failing_async.dry_run("SELECT * FROM metrics")
+
+
+@pytest.mark.anyio
+async def test_bigquery_adk_memory_search_propagates_non_missing_table_errors() -> None:
+    """BigQuery sync and async ADK memory search propagate query errors instead of silently scanning."""
+
+    class _BrokenSearchSyncCore(_SimulatedSyncCoreDriver):
+        def select(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            *,
+            schema_type: type[Any] | None = None,
+        ) -> list[Any]:
+            if "COSINE" in sql or "SEARCH(" in sql:
+                raise RuntimeError("vector index corrupted")
+            return super().select(sql, parameters, schema_type=schema_type)
+
+    class _BrokenSearchAsyncCore(_SimulatedAsyncCoreDriver):
+        async def select(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            *,
+            schema_type: type[Any] | None = None,
+        ) -> list[Any]:
+            if "COSINE" in sql or "SEARCH(" in sql:
+                raise RuntimeError("vector index corrupted")
+            return await super().select(sql, parameters, schema_type=schema_type)
+
+    engine = _InMemoryBigQueryEngine()
+    sync_cfg = BigQuerySyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        connection_instance=_BrokenSearchSyncCore(engine),
+        share_pool=False,
+    )
+    sync_mem = BigQuerySyncADKMemoryStore(sync_cfg)
+    with pytest.raises(RuntimeError, match="vector index corrupted"):
+        sync_mem.search_entries("alpha", "app", "u1", embedding=[0.1, 0.2])
+
+    async_cfg = BigQueryAsyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        connection_instance=_BrokenSearchAsyncCore(engine),
+        share_pool=False,
+    )
+    async_mem = BigQueryAsyncADKMemoryStore(async_cfg)
+    with pytest.raises(RuntimeError, match="vector index corrupted"):
+        await async_mem.search_entries("alpha", "app", "u1", embedding=[0.1, 0.2])

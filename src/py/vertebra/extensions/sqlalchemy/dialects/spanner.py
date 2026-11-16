@@ -138,11 +138,13 @@ class AsyncSpannerDialect(_AsyncDialectMixin, _BaseSpannerDialect):
 
 
 class SyncSpangresDialect(_SyncDialectMixin, PGDialect):
-    """SQLAlchemy 2.1 synchronous dialect for Cloud Spanner Spangres (+vtb / +vertebra)."""
+    """SQLAlchemy 2.1 synchronous dialect for Spanner Spangres (+vtb / +vertebra)."""
 
     name = "spangres"
     driver = "vtb"
-    paramstyle = "pyformat"
+    default_paramstyle = "numeric_dollar"
+    paramstyle = "numeric_dollar"
+    positional = True
     supports_statement_cache = True
     supports_native_jsonb = True
 
@@ -153,18 +155,20 @@ class SyncSpangresDialect(_SyncDialectMixin, PGDialect):
 
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return NullPool so Cloud Spanner Spangres multiplexes over DatabaseRegistry gRPC channels."""
+        """Return NullPool so Spanner Spangres multiplexes over DatabaseRegistry gRPC channels."""
         _ = url
         return NullPool
 
 
 class AsyncSpangresDialect(_AsyncDialectMixin, PGDialect):
-    """SQLAlchemy 2.1 asynchronous dialect for Cloud Spanner Spangres (+vtb_async / +vertebra_async)."""
+    """SQLAlchemy 2.1 asynchronous dialect for Spanner Spangres (+vtb_async / +vertebra_async)."""
 
     name = "spangres"
     driver = "vtb_async"
     is_async = True
-    paramstyle = "pyformat"
+    default_paramstyle = "numeric_dollar"
+    paramstyle = "numeric_dollar"
+    positional = True
     supports_statement_cache = True
     supports_native_jsonb = True
 
@@ -175,6 +179,6 @@ class AsyncSpangresDialect(_AsyncDialectMixin, PGDialect):
 
     @classmethod
     def get_pool_class(cls, url: URL) -> type[Pool]:
-        """Return NullPool so Cloud Spanner Spangres multiplexes over DatabaseRegistry gRPC channels."""
+        """Return NullPool so Spanner Spangres multiplexes over DatabaseRegistry gRPC channels."""
         _ = url
         return NullPool

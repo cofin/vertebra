@@ -66,10 +66,10 @@ class SyncPostgreSQLDialect(_SyncDialectMixin, PGDialect):
         """Compile a multi-table DELETE ... USING statement."""
         return clause.to_sql()
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the PostgreSQL dialect."""
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using PostgreSQL colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)
 
 
 class AsyncPostgreSQLDialect(_AsyncDialectMixin, PGDialect):
@@ -116,7 +116,7 @@ class AsyncPostgreSQLDialect(_AsyncDialectMixin, PGDialect):
         """Compile a multi-table DELETE ... USING statement."""
         return clause.to_sql()
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the PostgreSQL dialect."""
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using PostgreSQL colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)

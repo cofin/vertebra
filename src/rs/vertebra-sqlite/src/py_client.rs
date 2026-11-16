@@ -4,11 +4,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList, PySequence, PyTuple};
 use vertebra_core::broker::DIALECT_TAG_SQLITE;
-use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
+use vertebra_core::dbrpc::DbRpcOp;
+use vertebra_core::shm::ShmRegion;
+use vertebra_db::arrow_shm::{
+    ACTIVE_ARROW_SHM_REGIONS, normalize_shm_name, release_shm_arrow_frame,
+    write_shm_arrow_region_unregistered,
+};
 use vertebra_db::broker_capsule::{BrokerEngineBackend, BrokerPoolBackend};
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr_and_cancel,
@@ -38,9 +43,40 @@ fn scalar_to_sqlite_value(scalar: &DbRpcScalar) -> SqliteValue {
     }
 }
 
+fn sqlite_err_class(err: &SqliteClientError) -> &'static str {
+    match err {
+        SqliteClientError::InvalidInput(_) => "InterfaceError",
+        SqliteClientError::Operational { .. } | SqliteClientError::ShmArrow(_) => {
+            "OperationalError"
+        }
+        SqliteClientError::Integrity { .. } => "IntegrityError",
+        SqliteClientError::Programming { .. } => "ProgrammingError",
+        SqliteClientError::Data { .. } => "DataError",
+        SqliteClientError::NotFound(_) => "NotFoundError",
+        SqliteClientError::Cancelled(_) => "QueryCancelledError",
+    }
+}
+
+fn validate_savepoint_name(raw: &str) -> Result<String, SqliteClientError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(SqliteClientError::Programming {
+            message: format!("invalid SQLite savepoint identifier `{raw}`"),
+            code: None,
+            sqlstate: Some("42000"),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Shared-memory broker backend for SQLite (`DIALECT_TAG_SQLITE = 3`).
 pub struct SqliteBrokerBackend {
     pools: RwLock<HashMap<u64, Arc<SqlitePool>>>,
+    active_shm: Mutex<HashMap<String, (u64, Arc<ShmRegion>)>>,
     next_pool_id: std::sync::atomic::AtomicU64,
 }
 
@@ -56,8 +92,80 @@ impl SqliteBrokerBackend {
     pub fn new() -> Self {
         Self {
             pools: RwLock::new(HashMap::new()),
+            active_shm: Mutex::new(HashMap::new()),
             next_pool_id: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    /// Retain `region` in the active SHM map until explicit release or backend/pool close.
+    pub fn retain_shm(&self, pool_id: u64, shm_name: &str, region: Arc<ShmRegion>) -> String {
+        let norm = normalize_shm_name(shm_name);
+        ACTIVE_ARROW_SHM_REGIONS.insert(norm.clone(), Arc::clone(&region));
+        self.active_shm
+            .lock()
+            .insert(norm.clone(), (pool_id, region));
+        norm
+    }
+
+    /// Release and unlink a retained `VTBARROW` shared-memory segment by name.
+    pub fn release_shm(&self, shm_name: &str) -> bool {
+        let norm = normalize_shm_name(shm_name);
+        let removed_local = self.active_shm.lock().remove(&norm);
+        let removed_global = release_shm_arrow_frame(&norm);
+        if let Some((_, region)) = removed_local {
+            #[cfg(unix)]
+            let _ = region.unlink_now();
+            drop(region);
+            true
+        } else {
+            removed_global
+        }
+    }
+
+    /// Return the number of retained `VTBARROW` SHM segments currently held open.
+    #[must_use]
+    pub fn active_shm_count(&self) -> usize {
+        self.active_shm.lock().len()
+    }
+
+    fn release_pool_shm(&self, pool_id: u64) {
+        let names: Vec<String> = {
+            let guard = self.active_shm.lock();
+            guard
+                .iter()
+                .filter_map(|(k, (pid, _))| (*pid == pool_id).then_some(k.clone()))
+                .collect()
+        };
+        for name in names {
+            self.release_shm(&name);
+        }
+    }
+
+    /// Close all pools and release all retained shared-memory segments.
+    pub fn close(&self) {
+        let pools: Vec<Arc<SqlitePool>> =
+            self.pools.write().drain().map(|(_, pool)| pool).collect();
+        for pool in pools {
+            pool.close();
+        }
+        let shms: Vec<(String, Arc<ShmRegion>)> = self
+            .active_shm
+            .lock()
+            .drain()
+            .map(|(k, (_, region))| (k, region))
+            .collect();
+        for (name, region) in shms {
+            let _ = release_shm_arrow_frame(&name);
+            #[cfg(unix)]
+            let _ = region.unlink_now();
+            drop(region);
+        }
+    }
+}
+
+impl Drop for SqliteBrokerBackend {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -117,6 +225,114 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
         let req = decode_dbrpc_request_frame(frame)
             .map_err(|e| format!("DBRPC request decode error: {e:?}"))?;
 
+        match req.op {
+            DbRpcOp::Begin => {
+                let mode = match req.sql.as_deref() {
+                    Some(raw) => {
+                        let trimmed = raw.trim().trim_end_matches(';').trim();
+                        let upper = trimmed.to_ascii_uppercase();
+                        if upper == "BEGIN" {
+                            String::new()
+                        } else if let Some(rest) = upper.strip_prefix("BEGIN ") {
+                            rest.trim().to_string()
+                        } else {
+                            trimmed.to_string()
+                        }
+                    }
+                    None => "IMMEDIATE".to_string(),
+                };
+                return match pool.begin(mode) {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                    )),
+                    Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+                        req.request_id,
+                        sqlite_err_class(&e),
+                        e.to_string(),
+                    ))),
+                };
+            }
+            DbRpcOp::Commit => {
+                return match pool.commit() {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                    )),
+                    Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+                        req.request_id,
+                        sqlite_err_class(&e),
+                        e.to_string(),
+                    ))),
+                };
+            }
+            DbRpcOp::Rollback => {
+                let res = if let Some(sp) = req.savepoint.as_deref().filter(|s| !s.is_empty()) {
+                    validate_savepoint_name(sp).and_then(|ident| {
+                        pool.execute(
+                            format!("ROLLBACK TO SAVEPOINT \"{ident}\""),
+                            BoundParams::Empty,
+                        )
+                        .map(|_| ())
+                    })
+                } else {
+                    pool.rollback()
+                };
+                return match res {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                    )),
+                    Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+                        req.request_id,
+                        sqlite_err_class(&e),
+                        e.to_string(),
+                    ))),
+                };
+            }
+            DbRpcOp::Savepoint => {
+                let raw_sp = req
+                    .savepoint
+                    .as_deref()
+                    .or(req.sql.as_deref())
+                    .ok_or_else(|| "DBRPC Savepoint frame missing savepoint name".to_string())?;
+                let res = validate_savepoint_name(raw_sp).and_then(|ident| {
+                    pool.execute(format!("SAVEPOINT \"{ident}\""), BoundParams::Empty)
+                        .map(|_| ())
+                });
+                return match res {
+                    Ok(()) => Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                    )),
+                    Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+                        req.request_id,
+                        sqlite_err_class(&e),
+                        e.to_string(),
+                    ))),
+                };
+            }
+            DbRpcOp::FetchChunk => {
+                if let Some(shm_name) = req.savepoint.as_deref().or(req.sql.as_deref())
+                    && !shm_name.trim().is_empty()
+                {
+                    self.release_shm(shm_name);
+                }
+                return Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                ));
+            }
+            DbRpcOp::Cancel => {
+                pool.cancel();
+                return Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                ));
+            }
+            DbRpcOp::Close => {
+                self.close_pool(pool_id);
+                return Ok(encode_dbrpc_response_frame(
+                    &DbRpcEncodedResponse::ok_count(req.request_id, 0, None),
+                ));
+            }
+            DbRpcOp::Execute | DbRpcOp::ExecuteMany => {}
+        }
+
         let raw_sql = req
             .sql
             .as_deref()
@@ -130,34 +346,60 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
 
         let trimmed = norm_sql.trim_start();
         let upper = trimmed.to_ascii_uppercase();
-        let is_query = upper.starts_with("SELECT")
-            || upper.starts_with("EXPLAIN")
-            || upper.starts_with("WITH");
+        let is_query = req.op == DbRpcOp::Execute
+            && (upper.starts_with("SELECT")
+                || upper.starts_with("EXPLAIN")
+                || upper.starts_with("WITH"));
 
         if is_query {
             match pool.select_to_arrow(norm_sql, params, 8192) {
                 Ok(ArrowResultPayload::Shm {
                     shm_name,
                     row_count,
+                    region,
                     ..
-                }) => Ok(encode_dbrpc_response_frame(
-                    &DbRpcEncodedResponse::ok_arrow_shm(
-                        req.request_id,
-                        row_count as i64,
-                        Vec::new(),
-                        shm_name,
-                    ),
-                )),
-                Ok(ArrowResultPayload::Inline { .. }) => {
-                    Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
-                        req.request_id,
-                        "SqliteError",
-                        "inline arrow not supported over broker DBRPC".to_string(),
-                    )))
+                }) => {
+                    let retained_name = self.retain_shm(pool_id, &shm_name, region);
+                    Ok(encode_dbrpc_response_frame(
+                        &DbRpcEncodedResponse::ok_arrow_shm(
+                            req.request_id,
+                            row_count as i64,
+                            Vec::new(),
+                            retained_name,
+                        ),
+                    ))
+                }
+                Ok(ArrowResultPayload::Inline {
+                    ipc_bytes,
+                    row_count,
+                    ..
+                }) => {
+                    static INLINE_BROKER_SEQ: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    let seq = INLINE_BROKER_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let candidate = format!("/vtb_sqlite_bkr_{}_{seq}", std::process::id());
+                    match write_shm_arrow_region_unregistered(&candidate, &ipc_bytes) {
+                        Ok((name, _, region)) => {
+                            let retained_name = self.retain_shm(pool_id, &name, region);
+                            Ok(encode_dbrpc_response_frame(
+                                &DbRpcEncodedResponse::ok_arrow_shm(
+                                    req.request_id,
+                                    row_count as i64,
+                                    Vec::new(),
+                                    retained_name,
+                                ),
+                            ))
+                        }
+                        Err(err) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
+                            req.request_id,
+                            "OperationalError",
+                            err,
+                        ))),
+                    }
                 }
                 Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
                     req.request_id,
-                    "SqliteError",
+                    sqlite_err_class(&e),
                     e.to_string(),
                 ))),
             }
@@ -168,7 +410,7 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
                 )),
                 Err(e) => Ok(encode_dbrpc_response_frame(&DbRpcEncodedResponse::error(
                     req.request_id,
-                    "SqliteError",
+                    sqlite_err_class(&e),
                     e.to_string(),
                 ))),
             }
@@ -179,6 +421,7 @@ impl BrokerPoolBackend for SqliteBrokerBackend {
         if let Some(pool) = self.pools.write().remove(&pool_id) {
             pool.close();
         }
+        self.release_pool_shm(pool_id);
     }
 }
 
@@ -281,8 +524,10 @@ fn arrow_payload_to_py_cursor(py: Python<'_>, payload: ArrowResultPayload) -> Py
             row_count,
             ..
         } => {
-            let shm_seq = std::process::id();
-            let shm_name = format!("/vtb_sqlite_inline_{shm_seq}");
+            static INLINE_CURSOR_SEQ: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let seq = INLINE_CURSOR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let shm_name = format!("/vtb_sqlite_inline_{}_{seq}", std::process::id());
             let (name, len, region) = write_shm_arrow_region_unregistered(&shm_name, &ipc_bytes)
                 .map_err(SqliteClientError::ShmArrow)
                 .map_err(|e| e.into_py_err(py))?;
@@ -335,7 +580,9 @@ impl SyncSQLiteClient {
         )
         .map_err(|e| e.into_py_err(py))?;
 
-        let pool = SqlitePool::open(config).map_err(|e| e.into_py_err(py))?;
+        let pool = py
+            .detach(|| SqlitePool::open(config))
+            .map_err(|e| e.into_py_err(py))?;
         Ok(Self { pool })
     }
 
@@ -512,8 +759,9 @@ impl SyncSQLiteClient {
         Ok(())
     }
 
-    pub fn close(&self) -> PyResult<()> {
-        self.pool.close();
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let pool = Arc::clone(&self.pool);
+        py.detach(move || pool.close());
         Ok(())
     }
 
@@ -568,7 +816,9 @@ impl AsyncSQLiteClient {
         )
         .map_err(|e| e.into_py_err(py))?;
 
-        let pool = SqlitePool::open(config).map_err(|e| e.into_py_err(py))?;
+        let pool = py
+            .detach(|| SqlitePool::open(config))
+            .map_err(|e| e.into_py_err(py))?;
         Ok(Self { pool })
     }
 
@@ -613,14 +863,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.execute(sql_owned, bound))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.execute_with_op_id(op_id, sql_owned, bound)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             |py, err| err.into_py_err(py),
@@ -646,14 +898,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.execute_many(sql_owned, seq))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.execute_many_with_op_id(op_id, sql_owned, seq)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             |py, err| err.into_py_err(py),
@@ -677,14 +931,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.execute_script(script_owned))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.execute_script_with_op_id(op_id, script_owned)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, ()| Ok(py.None()),
             |py, err| err.into_py_err(py),
@@ -710,14 +966,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.execute_pipeline(ops, use_savepoint))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.execute_pipeline_with_op_id(op_id, ops, use_savepoint)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, results| {
                 let py_list = PyList::empty(py);
@@ -750,14 +1008,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.fetch_all(sql_owned, bound))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.fetch_all_with_op_id(op_id, sql_owned, bound)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, qr| qr.into_py(py),
             |py, err| err.into_py_err(py),
@@ -786,7 +1046,7 @@ impl AsyncSQLiteClient {
             py,
             async move {
                 tokio::task::spawn_blocking(move || {
-                    pool.select_to_arrow(sql_owned, bound, batch_size)
+                    pool.select_to_arrow_with_op_id(op_id, sql_owned, bound, batch_size)
                 })
                 .await
                 .map_err(|e| SqliteClientError::Operational {
@@ -820,14 +1080,16 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.load_from_arrow(tbl_owned, bytes))
-                    .await
-                    .map_err(|e| SqliteClientError::Operational {
-                        message: e.to_string(),
-                        code: None,
-                        sqlstate: Some("08000"),
-                        is_transient: false,
-                    })?
+                tokio::task::spawn_blocking(move || {
+                    pool.load_from_arrow_with_op_id(op_id, tbl_owned, bytes)
+                })
+                .await
+                .map_err(|e| SqliteClientError::Operational {
+                    message: e.to_string(),
+                    code: None,
+                    sqlstate: Some("08000"),
+                    is_transient: false,
+                })?
             },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
             |py, err| err.into_py_err(py),
@@ -855,7 +1117,7 @@ impl AsyncSQLiteClient {
             py,
             async move {
                 tokio::task::spawn_blocking(move || {
-                    pool.backup_to(target_owned, pages_per_step, sleep_ms)
+                    pool.backup_to_with_op_id(op_id, target_owned, pages_per_step, sleep_ms)
                 })
                 .await
                 .map_err(|e| SqliteClientError::Operational {
@@ -891,7 +1153,7 @@ impl AsyncSQLiteClient {
             py,
             async move {
                 tokio::task::spawn_blocking(move || {
-                    pool.restore_from(source_owned, pages_per_step, sleep_ms)
+                    pool.restore_from_with_op_id(op_id, source_owned, pages_per_step, sleep_ms)
                 })
                 .await
                 .map_err(|e| SqliteClientError::Operational {
@@ -924,7 +1186,7 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.begin(mode_owned))
+                tokio::task::spawn_blocking(move || pool.begin_with_op_id(op_id, mode_owned))
                     .await
                     .map_err(|e| SqliteClientError::Operational {
                         message: e.to_string(),
@@ -950,7 +1212,7 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.commit())
+                tokio::task::spawn_blocking(move || pool.commit_with_op_id(op_id))
                     .await
                     .map_err(|e| SqliteClientError::Operational {
                         message: e.to_string(),
@@ -976,7 +1238,7 @@ impl AsyncSQLiteClient {
         spawn_rust_db_task_with_attr_and_cancel(
             py,
             async move {
-                tokio::task::spawn_blocking(move || pool.rollback())
+                tokio::task::spawn_blocking(move || pool.rollback_with_op_id(op_id))
                     .await
                     .map_err(|e| SqliteClientError::Operational {
                         message: e.to_string(),
@@ -1027,5 +1289,156 @@ impl AsyncSQLiteClient {
         SyncSQLiteClient {
             pool: Arc::clone(&self.pool),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vertebra_core::dbrpc::{DBRPC_VERSION, DbRpcHeader};
+    use vertebra_db::arrow_shm::read_shm_arrow_frame;
+
+    fn make_dbrpc_frame(
+        op: DbRpcOp,
+        request_id: u64,
+        sql: Option<&str>,
+        savepoint: Option<&str>,
+    ) -> Vec<u8> {
+        let hdr = DbRpcHeader::new(op, request_id, 0, 1);
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&hdr.encode());
+        frame.push(0x99); // 9-element array
+        frame.push(DBRPC_VERSION as u8);
+        frame.push(op as u8);
+        frame.push(request_id as u8);
+        frame.push(0);
+        frame.push(1);
+        match sql {
+            Some(s) => {
+                let b = s.as_bytes();
+                frame.push(0xd9);
+                frame.push(b.len() as u8);
+                frame.extend_from_slice(b);
+            }
+            None => frame.push(0xc0),
+        }
+        frame.push(0x90); // empty params
+        match savepoint {
+            Some(sp) => {
+                let b = sp.as_bytes();
+                frame.push(0xd9);
+                frame.push(b.len() as u8);
+                frame.extend_from_slice(b);
+            }
+            None => frame.push(0xc0),
+        }
+        frame.push(0); // chunk_rows
+        frame
+    }
+
+    #[test]
+    fn test_sqlite_broker_retains_shm_and_dispatches_control_ops_without_sql() {
+        let backend = SqliteBrokerBackend::new();
+        let pool_id = backend.open_pool(":memory:", 2).unwrap();
+
+        // Control ops without `req.sql` must succeed instead of failing with missing SQL.
+        let begin_resp = backend
+            .execute(pool_id, &make_dbrpc_frame(DbRpcOp::Begin, 1, None, None))
+            .unwrap();
+        assert!(!begin_resp.is_empty());
+
+        let create_resp = backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(
+                    DbRpcOp::Execute,
+                    2,
+                    Some("CREATE TABLE items (id INT PRIMARY KEY, name TEXT)"),
+                    None,
+                ),
+            )
+            .unwrap();
+        assert!(!create_resp.is_empty());
+
+        let sp_resp = backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(DbRpcOp::Savepoint, 3, None, Some("sp1")),
+            )
+            .unwrap();
+        assert!(!sp_resp.is_empty());
+
+        backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(
+                    DbRpcOp::Execute,
+                    4,
+                    Some("INSERT INTO items VALUES (1, 'discarded')"),
+                    None,
+                ),
+            )
+            .unwrap();
+
+        backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(DbRpcOp::Rollback, 5, None, Some("sp1")),
+            )
+            .unwrap();
+
+        backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(
+                    DbRpcOp::Execute,
+                    6,
+                    Some("INSERT INTO items VALUES (2, 'kept')"),
+                    None,
+                ),
+            )
+            .unwrap();
+
+        backend
+            .execute(pool_id, &make_dbrpc_frame(DbRpcOp::Commit, 7, None, None))
+            .unwrap();
+
+        // SELECT over DBRPC must retain the Arrow SHM region until explicit release or close.
+        let sel_resp = backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(
+                    DbRpcOp::Execute,
+                    8,
+                    Some("SELECT id, name FROM items"),
+                    None,
+                ),
+            )
+            .unwrap();
+        assert_eq!(backend.active_shm_count(), 1);
+        let shm_name = {
+            let guard = backend.active_shm.lock();
+            guard.keys().next().unwrap().clone()
+        };
+        assert!(!sel_resp.is_empty());
+        let ipc = read_shm_arrow_frame(&shm_name).expect("SHM segment must remain attached");
+        assert!(!ipc.is_empty());
+
+        // Release via FetchChunk control frame with shm_name in savepoint.
+        backend
+            .execute(
+                pool_id,
+                &make_dbrpc_frame(DbRpcOp::FetchChunk, 9, None, Some(&shm_name)),
+            )
+            .unwrap();
+        assert_eq!(backend.active_shm_count(), 0);
+
+        backend
+            .execute(pool_id, &make_dbrpc_frame(DbRpcOp::Cancel, 10, None, None))
+            .unwrap();
+        backend
+            .execute(pool_id, &make_dbrpc_frame(DbRpcOp::Close, 11, None, None))
+            .unwrap();
+        assert!(backend.pools.read().is_empty());
     }
 }

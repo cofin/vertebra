@@ -24,7 +24,9 @@ use crate::codec::{
     RespValue, build_hash_expire_cmd, build_hash_field_query_cmd, decode_int_list, resp_to_py,
     sha1_hex,
 };
-use crate::config::{ValkeyClientConfig, ValkeyConfigInner, ValkeyTarget};
+use crate::config::{
+    ValkeyClientConfig, ValkeyConfigInner, ValkeyTarget, await_pending_python_token,
+};
 use crate::error::{ValkeyError, ValkeyErrorKind};
 use crate::pubsub::{AsyncValkeyListener, SyncValkeyListener};
 use crate::sentinel::{
@@ -1446,6 +1448,18 @@ fn decode_pipeline_py(
     Ok(list.into_any().unbind())
 }
 
+fn exec_sync_valkey<F, T>(py: Python<'_>, engine: &Arc<ValkeyEngine>, fut: F) -> PyResult<T>
+where
+    F: std::future::Future<Output = Result<T, ValkeyError>> + Send,
+    T: Send,
+{
+    engine
+        .config
+        .ensure_python_token_sync(py, false)
+        .map_err(|e| e.to_py_err(py))?;
+    py.detach(|| block_on_db(fut)).map_err(|e| e.to_py_err(py))
+}
+
 fn spawn_valkey_task<'py, F, T, MapOk>(
     py: Python<'py>,
     fut: F,
@@ -1471,6 +1485,32 @@ where
         |py, err| err.to_py_err(py),
         move || cancel_trigger.notify_one(),
         VALKEY_COMPLETION_DRAINER_ATTR,
+    )
+}
+
+fn spawn_valkey_cmd_task<'py, F, T, MapOk>(
+    py: Python<'py>,
+    config: &ValkeyConfigInner,
+    fut: F,
+    map_ok: MapOk,
+) -> PyResult<Bound<'py, RustDbTaskAwaitable>>
+where
+    F: std::future::Future<Output = Result<T, ValkeyError>> + Send + 'static,
+    T: Send + 'static,
+    MapOk: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+{
+    let pending_tok = config
+        .prepare_python_token_async(py, false)
+        .map_err(|e| e.to_py_err(py))?;
+    spawn_valkey_task(
+        py,
+        async move {
+            if let Some(rx) = pending_tok {
+                await_pending_python_token(rx).await?;
+            }
+            fut.await
+        },
+        map_ok,
     )
 }
 
@@ -1878,16 +1918,15 @@ impl SyncValkeyClient {
 
     pub fn ping(&self, py: Python<'_>) -> PyResult<bool> {
         let engine = Arc::clone(&self.engine);
-        py.detach(|| block_on_db(async move { engine.ping().await }))
-            .map_err(|e| e.to_py_err(py))
+        exec_sync_valkey(py, &self.engine, async move { engine.ping().await })
     }
 
     pub fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        let res = py
-            .detach(|| block_on_db(async move { engine.get_bytes(key_bytes).await }))
-            .map_err(|e| e.to_py_err(py))?;
+        let res = exec_sync_valkey(py, &self.engine, async move {
+            engine.get_bytes(key_bytes).await
+        })?;
         match res {
             Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
             None => Ok(py.None()),
@@ -1897,9 +1936,9 @@ impl SyncValkeyClient {
     pub fn mget(&self, py: Python<'_>, keys: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key_list = extract_bytes_list(keys)?;
         let engine = Arc::clone(&self.engine);
-        let res = py
-            .detach(|| block_on_db(async move { engine.mget_bytes(key_list).await }))
-            .map_err(|e| e.to_py_err(py))?;
+        let res = exec_sync_valkey(py, &self.engine, async move {
+            engine.mget_bytes(key_list).await
+        })?;
         let out = PyList::empty(py);
         for item in res {
             match item {
@@ -1924,96 +1963,78 @@ impl SyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let val_bytes = extract_bytes_arg(value)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move { engine.set_bytes(key_bytes, val_bytes, px, ex, nx, xx).await })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.set_bytes(key_bytes, val_bytes, px, ex, nx, xx).await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     #[pyo3(signature = (*keys))]
     pub fn delete(&self, py: Python<'_>, keys: &Bound<'_, PyAny>) -> PyResult<i64> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move { engine.multi_key_int_cmd("DEL", key_list, true).await })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.multi_key_int_cmd("DEL", key_list, true).await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     #[pyo3(signature = (*keys))]
     pub fn unlink(&self, py: Python<'_>, keys: &Bound<'_, PyAny>) -> PyResult<i64> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move { engine.multi_key_int_cmd("UNLINK", key_list, true).await })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.multi_key_int_cmd("UNLINK", key_list, true).await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     #[pyo3(signature = (*keys))]
     pub fn exists(&self, py: Python<'_>, keys: &Bound<'_, PyAny>) -> PyResult<i64> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move { engine.multi_key_int_cmd("EXISTS", key_list, false).await })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.multi_key_int_cmd("EXISTS", key_list, false).await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     pub fn expire(&self, py: Python<'_>, key: &Bound<'_, PyAny>, seconds: i64) -> PyResult<bool> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        let n = py
-            .detach(|| {
-                block_on_db(async move {
-                    engine
-                        .single_key_int_arg_cmd("EXPIRE", key_bytes, Some(seconds), false)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let n = exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .single_key_int_arg_cmd("EXPIRE", key_bytes, Some(seconds), false)
+                .await
+        })?;
         Ok(n > 0)
     }
 
     pub fn pexpire(&self, py: Python<'_>, key: &Bound<'_, PyAny>, ms: i64) -> PyResult<bool> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        let n = py
-            .detach(|| {
-                block_on_db(async move {
-                    engine
-                        .single_key_int_arg_cmd("PEXPIRE", key_bytes, Some(ms), false)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let n = exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .single_key_int_arg_cmd("PEXPIRE", key_bytes, Some(ms), false)
+                .await
+        })?;
         Ok(n > 0)
     }
 
     pub fn ttl(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<i64> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move {
-                engine
-                    .single_key_int_arg_cmd("TTL", key_bytes, None, true)
-                    .await
-            })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .single_key_int_arg_cmd("TTL", key_bytes, None, true)
+                .await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     pub fn pttl(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<i64> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move {
-                engine
-                    .single_key_int_arg_cmd("PTTL", key_bytes, None, true)
-                    .await
-            })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .single_key_int_arg_cmd("PTTL", key_bytes, None, true)
+                .await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     #[pyo3(signature = (key, amount = 1))]
@@ -2025,14 +2046,10 @@ impl SyncValkeyClient {
             key_bytes.clone(),
             amount.to_string().into_bytes(),
         ];
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from INCRBY").to_py_err(py))
     }
@@ -2046,14 +2063,10 @@ impl SyncValkeyClient {
             key_bytes.clone(),
             amount.to_string().into_bytes(),
         ];
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from DECRBY").to_py_err(py))
     }
@@ -2067,9 +2080,9 @@ impl SyncValkeyClient {
         count: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let engine = Arc::clone(&self.engine);
-        let (next_cur, keys) = py
-            .detach(|| block_on_db(async move { engine.scan(cursor, match_pattern, count).await }))
-            .map_err(|e| e.to_py_err(py))?;
+        let (next_cur, keys) = exec_sync_valkey(py, &self.engine, async move {
+            engine.scan(cursor, match_pattern, count).await
+        })?;
         let py_keys = PyList::empty(py);
         for k in keys {
             py_keys.append(PyBytes::new(py, &k))?;
@@ -2094,17 +2107,17 @@ impl SyncValkeyClient {
     ) -> PyResult<i64> {
         let prefix_bytes = extract_bytes_arg(prefix)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| {
-            block_on_db(async move { engine.scan_unlink_prefix(prefix_bytes, count).await })
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.scan_unlink_prefix(prefix_bytes, count).await
         })
-        .map_err(|e| e.to_py_err(py))
     }
 
     #[pyo3(signature = (*, asynchronous = false))]
     pub fn flushdb(&self, py: Python<'_>, asynchronous: bool) -> PyResult<bool> {
         let engine = Arc::clone(&self.engine);
-        py.detach(|| block_on_db(async move { engine.flushdb(asynchronous).await }))
-            .map_err(|e| e.to_py_err(py))
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.flushdb(asynchronous).await
+        })
     }
 
     pub fn publish(
@@ -2116,11 +2129,9 @@ impl SyncValkeyClient {
         let msg_bytes = extract_bytes_arg(message)?;
         let engine = Arc::clone(&self.engine);
         let cmd = vec![b"PUBLISH".to_vec(), channel.into_bytes(), msg_bytes];
-        let resp = py
-            .detach(|| {
-                block_on_db(async move { engine.execute_command_routed(cmd, &[], false).await })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            engine.execute_command_routed(cmd, &[], false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from PUBLISH").to_py_err(py))
     }
@@ -2137,14 +2148,10 @@ impl SyncValkeyClient {
         let pairs = extract_hset_pairs(py, mapping, value)?;
         let cmd = build_hset_cmd(&key_bytes, &pairs);
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from HSET").to_py_err(py))
     }
@@ -2159,14 +2166,10 @@ impl SyncValkeyClient {
         let field_bytes = extract_bytes_arg(field)?;
         let cmd = vec![b"HGET".to_vec(), key_bytes.clone(), field_bytes];
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, true).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, true).await
+        })?;
         match resp.into_result().map_err(|e| e.to_py_err(py))? {
             RespValue::Null => Ok(py.None()),
             val => match val.as_bytes() {
@@ -2180,14 +2183,10 @@ impl SyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = vec![b"HGETALL".to_vec(), key_bytes.clone()];
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, true).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, true).await
+        })?;
         decode_hgetall_py(py, resp)
     }
 
@@ -2208,14 +2207,10 @@ impl SyncValkeyClient {
         cmd.push(key_bytes.clone());
         cmd.extend(field_list);
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from HDEL").to_py_err(py))
     }
@@ -2301,8 +2296,9 @@ impl SyncValkeyClient {
     pub fn script_load(&self, py: Python<'_>, script: &Bound<'_, PyAny>) -> PyResult<String> {
         let script_bytes = extract_bytes_arg(script)?;
         let engine = Arc::clone(&self.engine);
-        py.detach(|| block_on_db(async move { engine.script_load(script_bytes).await }))
-            .map_err(|e| e.to_py_err(py))
+        exec_sync_valkey(py, &self.engine, async move {
+            engine.script_load(script_bytes).await
+        })
     }
 
     #[pyo3(signature = (script, keys = None, args = None))]
@@ -2323,15 +2319,11 @@ impl SyncValkeyClient {
             _ => Vec::new(),
         };
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    engine
-                        .eval_with_fallback(script_bytes, key_list, arg_list)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .eval_with_fallback(script_bytes, key_list, arg_list)
+                .await
+        })?;
         resp_to_py(py, resp)
     }
 
@@ -2357,15 +2349,11 @@ impl SyncValkeyClient {
             _ => None,
         };
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    engine
-                        .evalsha_with_optional_fallback(sha1, key_list, arg_list, script_bytes)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            engine
+                .evalsha_with_optional_fallback(sha1, key_list, arg_list, script_bytes)
+                .await
+        })?;
         resp_to_py(py, resp)
     }
 
@@ -2383,16 +2371,12 @@ impl SyncValkeyClient {
         }
         let (keys, read_only) = classify_generic_command(&cmd[0], &cmd);
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
-                    engine
-                        .execute_command_routed(cmd, &key_refs, read_only)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+            engine
+                .execute_command_routed(cmd, &key_refs, read_only)
+                .await
+        })?;
         resp_to_py(py, resp)
     }
 
@@ -2408,14 +2392,10 @@ impl SyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xgroup_create(&key_bytes, &group, id, mkstream);
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         Ok(resp.as_bool_ok().unwrap_or(true))
     }
 
@@ -2435,14 +2415,10 @@ impl SyncValkeyClient {
         let cmd = build_xadd(&key_bytes, &pairs, id, maxlen, approximate, nomkstream)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_str()
             .map(std::borrow::Cow::into_owned)
             .ok_or_else(|| ValkeyError::data("XADD returned non-string entry id").to_py_err(py))
@@ -2464,14 +2440,10 @@ impl SyncValkeyClient {
             .map_err(|e| e.to_py_err(py))?;
         let keys: Vec<Vec<u8>> = stream_pairs.into_iter().map(|(k, _)| k).collect();
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         decode_xreadgroup_py(py, resp)
     }
 
@@ -2487,14 +2459,10 @@ impl SyncValkeyClient {
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xack(&key_bytes, &group, &id_list).map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from XACK").to_py_err(py))
     }
@@ -2522,14 +2490,10 @@ impl SyncValkeyClient {
             justid,
         );
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         decode_xautoclaim_py(py, resp)
     }
 
@@ -2545,14 +2509,10 @@ impl SyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xrange(&key_bytes, min, max, count);
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, true).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, true).await
+        })?;
         decode_xrange_py(py, resp)
     }
 
@@ -2567,14 +2527,10 @@ impl SyncValkeyClient {
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xdel(&key_bytes, &id_list).map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from XDEL").to_py_err(py))
     }
@@ -2596,14 +2552,10 @@ impl SyncValkeyClient {
         let cmd = build_zadd(&key_bytes, &member_list, nx, xx, gt, lt, ch)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         resp.as_i64()
             .ok_or_else(|| ValkeyError::data("Expected integer from ZADD").to_py_err(py))
     }
@@ -2639,14 +2591,10 @@ impl SyncValkeyClient {
         )
         .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine.execute_command_routed(cmd, &key_refs, false).await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine.execute_command_routed(cmd, &key_refs, false).await
+        })?;
         decode_int_list(resp).map_err(|e| e.to_py_err(py))
     }
 
@@ -2663,16 +2611,12 @@ impl SyncValkeyClient {
         let cmd = build_hash_field_query_cmd(cmd_name, &key_bytes, &field_list)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        let resp = py
-            .detach(|| {
-                block_on_db(async move {
-                    let key_refs = [key_bytes.as_slice()];
-                    engine
-                        .execute_command_routed(cmd, &key_refs, read_only)
-                        .await
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let resp = exec_sync_valkey(py, &self.engine, async move {
+            let key_refs = [key_bytes.as_slice()];
+            engine
+                .execute_command_routed(cmd, &key_refs, read_only)
+                .await
+        })?;
         decode_int_list(resp).map_err(|e| e.to_py_err(py))
     }
 }
@@ -2822,9 +2766,12 @@ impl AsyncValkeyClient {
 
     pub fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(py, async move { engine.ping().await }, |py, ok| {
-            Ok(PyBool::new(py, ok).to_owned().into_any().unbind())
-        })
+        spawn_valkey_cmd_task(
+            py,
+            &self.engine.config,
+            async move { engine.ping().await },
+            |py, ok| Ok(PyBool::new(py, ok).to_owned().into_any().unbind()),
+        )
     }
 
     pub fn get<'py>(
@@ -2834,8 +2781,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.get_bytes(key_bytes).await },
             |py, opt| match opt {
                 Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
@@ -2851,8 +2799,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_list = extract_bytes_list(keys)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.mget_bytes(key_list).await },
             |py, items| {
                 let list = PyList::empty(py);
@@ -2881,8 +2830,9 @@ impl AsyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let val_bytes = extract_bytes_arg(value)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.set_bytes(key_bytes, val_bytes, px, ex, nx, xx).await },
             |py, ok| Ok(PyBool::new(py, ok).to_owned().into_any().unbind()),
         )
@@ -2896,8 +2846,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.multi_key_int_cmd("DEL", key_list, true).await },
             |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
         )
@@ -2911,8 +2862,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.multi_key_int_cmd("UNLINK", key_list, true).await },
             |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
         )
@@ -2926,8 +2878,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_list = extract_varargs_bytes(keys)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.multi_key_int_cmd("EXISTS", key_list, false).await },
             |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
         )
@@ -2941,8 +2894,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .single_key_int_arg_cmd("EXPIRE", key_bytes, Some(seconds), false)
@@ -2960,8 +2914,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .single_key_int_arg_cmd("PEXPIRE", key_bytes, Some(ms), false)
@@ -2978,8 +2933,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .single_key_int_arg_cmd("TTL", key_bytes, None, true)
@@ -2996,8 +2952,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let key_bytes = extract_bytes_arg(key)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .single_key_int_arg_cmd("PTTL", key_bytes, None, true)
@@ -3021,8 +2978,9 @@ impl AsyncValkeyClient {
             key_bytes.clone(),
             amount.to_string().into_bytes(),
         ];
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3047,8 +3005,9 @@ impl AsyncValkeyClient {
             key_bytes.clone(),
             amount.to_string().into_bytes(),
         ];
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3068,8 +3027,9 @@ impl AsyncValkeyClient {
         count: Option<u64>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.scan(cursor, match_pattern, count).await },
             |py, (next_cur, keys)| {
                 let py_keys = PyList::empty(py);
@@ -3098,8 +3058,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let prefix_bytes = extract_bytes_arg(prefix)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.scan_unlink_prefix(prefix_bytes, count).await },
             |py, n| Ok(n.into_pyobject(py)?.into_any().unbind()),
         )
@@ -3112,8 +3073,9 @@ impl AsyncValkeyClient {
         asynchronous: bool,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.flushdb(asynchronous).await },
             |py, ok| Ok(PyBool::new(py, ok).to_owned().into_any().unbind()),
         )
@@ -3128,8 +3090,9 @@ impl AsyncValkeyClient {
         let msg_bytes = extract_bytes_arg(message)?;
         let engine = Arc::clone(&self.engine);
         let cmd = vec![b"PUBLISH".to_vec(), channel.into_bytes(), msg_bytes];
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let resp = engine.execute_command_routed(cmd, &[], false).await?;
                 resp.as_i64()
@@ -3151,8 +3114,9 @@ impl AsyncValkeyClient {
         let pairs = extract_hset_pairs(py, mapping, value)?;
         let cmd = build_hset_cmd(&key_bytes, &pairs);
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3173,8 +3137,9 @@ impl AsyncValkeyClient {
         let field_bytes = extract_bytes_arg(field)?;
         let cmd = vec![b"HGET".to_vec(), key_bytes.clone(), field_bytes];
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, true).await?;
@@ -3198,8 +3163,9 @@ impl AsyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = vec![b"HGETALL".to_vec(), key_bytes.clone()];
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 engine.execute_command_routed(cmd, &key_refs, true).await
@@ -3225,8 +3191,9 @@ impl AsyncValkeyClient {
         cmd.push(key_bytes.clone());
         cmd.extend(field_list);
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3322,8 +3289,9 @@ impl AsyncValkeyClient {
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let script_bytes = extract_bytes_arg(script)?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move { engine.script_load(script_bytes).await },
             |py, sha| Ok(sha.into_pyobject(py)?.into_any().unbind()),
         )
@@ -3347,8 +3315,9 @@ impl AsyncValkeyClient {
             _ => Vec::new(),
         };
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .eval_with_fallback(script_bytes, key_list, arg_list)
@@ -3380,8 +3349,9 @@ impl AsyncValkeyClient {
             _ => None,
         };
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 engine
                     .evalsha_with_optional_fallback(sha1, key_list, arg_list, script_bytes)
@@ -3409,8 +3379,9 @@ impl AsyncValkeyClient {
         }
         let (keys, read_only) = classify_generic_command(&cmd[0], &cmd);
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
                 engine
@@ -3433,8 +3404,9 @@ impl AsyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xgroup_create(&key_bytes, &group, id, mkstream);
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3460,8 +3432,9 @@ impl AsyncValkeyClient {
         let cmd = build_xadd(&key_bytes, &pairs, id, maxlen, approximate, nomkstream)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3489,8 +3462,9 @@ impl AsyncValkeyClient {
             .map_err(|e| e.to_py_err(py))?;
         let keys: Vec<Vec<u8>> = stream_pairs.into_iter().map(|(k, _)| k).collect();
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
                 engine.execute_command_routed(cmd, &key_refs, false).await
@@ -3511,8 +3485,9 @@ impl AsyncValkeyClient {
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xack(&key_bytes, &group, &id_list).map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3546,8 +3521,9 @@ impl AsyncValkeyClient {
             justid,
         );
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 engine.execute_command_routed(cmd, &key_refs, false).await
@@ -3568,8 +3544,9 @@ impl AsyncValkeyClient {
         let key_bytes = extract_bytes_arg(key)?;
         let cmd = build_xrange(&key_bytes, min, max, count);
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 engine.execute_command_routed(cmd, &key_refs, true).await
@@ -3589,8 +3566,9 @@ impl AsyncValkeyClient {
         let id_list = crate::pubsub::extract_string_args(ids)?;
         let cmd = build_xdel(&key_bytes, &id_list).map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3618,8 +3596,9 @@ impl AsyncValkeyClient {
         let cmd = build_zadd(&key_bytes, &member_list, nx, xx, gt, lt, ch)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3661,8 +3640,9 @@ impl AsyncValkeyClient {
         )
         .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine.execute_command_routed(cmd, &key_refs, false).await?;
@@ -3685,8 +3665,9 @@ impl AsyncValkeyClient {
         let cmd = build_hash_field_query_cmd(cmd_name, &key_bytes, &field_list)
             .map_err(|e| e.to_py_err(py))?;
         let engine = Arc::clone(&self.engine);
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.engine.config,
             async move {
                 let key_refs = [key_bytes.as_slice()];
                 let resp = engine
@@ -4498,13 +4479,9 @@ impl SyncValkeyPipeline {
         let queued = self.inner.drain_all();
         let engine = Arc::clone(&self.inner.engine);
         let transaction = self.inner.transaction;
-        let items = py
-            .detach(|| {
-                block_on_db(
-                    async move { engine.execute_pipeline_commands(queued, transaction).await },
-                )
-            })
-            .map_err(|e| e.to_py_err(py))?;
+        let items = exec_sync_valkey(py, &self.inner.engine, async move {
+            engine.execute_pipeline_commands(queued, transaction).await
+        })?;
         decode_pipeline_py(py, items)
     }
 
@@ -4924,8 +4901,9 @@ impl AsyncValkeyPipeline {
         let queued = self.inner.drain_all();
         let engine = Arc::clone(&self.inner.engine);
         let transaction = self.inner.transaction;
-        spawn_valkey_task(
+        spawn_valkey_cmd_task(
             py,
+            &self.inner.engine.config,
             async move { engine.execute_pipeline_commands(queued, transaction).await },
             decode_pipeline_py,
         )

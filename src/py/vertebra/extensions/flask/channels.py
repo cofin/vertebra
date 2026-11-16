@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import queue
+import threading
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,8 @@ class ChannelsBackend:
         "_bus",
         "_closed",
         "_node_id",
+        "_pump_lock",
+        "_pump_thread",
         "_queue",
         "_subscribed_channels",
         "_sync_notification_source",
@@ -59,7 +62,9 @@ class ChannelsBackend:
         self._node_id = str(node_id) if node_id is not None else uuid.uuid4().hex
         self._closed = False
         self._subscribed_channels: set[str] = set()
-        self._queue: queue.Queue[ChannelMessage] = queue.Queue(maxsize=256)
+        self._queue: queue.Queue[ChannelMessage | None] = queue.Queue(maxsize=256)
+        self._pump_lock = threading.Lock()
+        self._pump_thread: threading.Thread | None = None
         if bus is not None:
             self._bus = bus
             self._sync_notification_source = bus.sync_notification_source
@@ -124,36 +129,64 @@ class ChannelsBackend:
             self._sync_notification_source.unsubscribe(topics)
 
     def listen(self, channels: Iterable[str] | None = None) -> Iterator[ChannelMessage]:
-        """Blocking synchronous generator yielding ChannelMessage items across subscribed channels."""
+        """Blocking synchronous generator yielding local and cross-node ChannelMessage items."""
         if self._closed:
             return
         if channels is not None:
             self.subscribe(channels)
 
         if self._sync_notification_source is not None:
-            for event in self._sync_notification_source.listen():
-                if self._closed:
-                    break
-                if self._subscribed_channels and event.channel not in self._subscribed_channels:
-                    continue
-                extracted = self._bus._unpack_envelope(event.channel, event.payload)
-                if extracted is not None:
-                    ch, data = extracted
-                    yield ChannelMessage(channel=ch, data=data)
-        else:
-            while not self._closed:
-                try:
-                    item = self._queue.get(timeout=0.2)
-                    yield item
-                except queue.Empty:
-                    continue
+            self._ensure_pump_thread()
+
+        while not self._closed:
+            try:
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            if self._subscribed_channels and item.channel not in self._subscribed_channels:
+                continue
+            yield item
 
     def close(self) -> None:
         """Close sync channels backend and release underlying resources."""
         self._closed = True
+        with contextlib.suppress(queue.Full):
+            self._queue.put_nowait(None)
         self._bus.remove_listener(self._on_bus_message)
         self._bus.close()
         self._subscribed_channels.clear()
+
+    def _ensure_pump_thread(self) -> None:
+        """Start background pump forwarding remote SyncNotificationSource events into self._bus."""
+        with self._pump_lock:
+            if self._pump_thread is not None and self._pump_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._pump_remote_notifications,
+                name=f"vtb-flask-channels-{self._node_id[:8]}",
+                daemon=True,
+            )
+            self._pump_thread = thread
+            thread.start()
+
+    def _pump_remote_notifications(self) -> None:
+        """Consume cross-node notifications and fan them into self._bus without self-echo."""
+        source = self._sync_notification_source
+        if source is None:
+            return
+        with contextlib.suppress(Exception):
+            for event in source.listen():
+                if self._closed:
+                    break
+                if event.sender_id is not None and event.sender_id == self._node_id:
+                    continue
+                extracted = self._bus._unpack_envelope(event.channel, event.payload)
+                if extracted is None:
+                    continue
+                ch, data = extracted
+                self._bus._fan_in_local(ch, data)
 
 
 def attach_channels(

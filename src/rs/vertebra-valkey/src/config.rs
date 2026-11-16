@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -26,21 +28,265 @@ pub enum ValkeyTarget {
     Unix { path: PathBuf },
 }
 
-/// Abstracted Google Cloud Memorystore for Valkey IAM token source.
-pub enum GcpAuthSource {
-    Handle(SharedGcpTokenCacheHandle),
-    PythonCallable(Py<PyAny>),
+pub type PendingPythonTokenRx = tokio::sync::watch::Receiver<Option<Result<(), ValkeyError>>>;
+type PendingPythonTokenTx = tokio::sync::watch::Sender<Option<Result<(), ValkeyError>>>;
+
+struct PythonTokenState {
+    cached: Option<(String, u64)>,
+    inflight: Option<PendingPythonTokenRx>,
 }
 
-impl Clone for GcpAuthSource {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Handle(h) => Self::Handle(h.clone()),
-            Self::PythonCallable(obj) => {
-                Python::attach(|py| Self::PythonCallable(obj.clone_ref(py)))
+/// Thread-safe cache for a Python `token_provider` callable resolved strictly on Python caller threads.
+pub struct PythonTokenProvider {
+    callable: Py<PyAny>,
+    state: SyncRwLock<PythonTokenState>,
+    next_generation: AtomicU64,
+}
+
+impl PythonTokenProvider {
+    /// Wrap a Python `token_provider` callable with an initially empty pure-Rust credential cache.
+    #[must_use]
+    pub fn new(callable: Py<PyAny>) -> Arc<Self> {
+        Arc::new(Self {
+            callable,
+            state: SyncRwLock::new(PythonTokenState {
+                cached: None,
+                inflight: None,
+            }),
+            next_generation: AtomicU64::new(1),
+        })
+    }
+
+    /// Return whether a valid token is currently cached in pure Rust.
+    #[must_use]
+    pub fn has_cached_token(&self) -> bool {
+        self.state.read().cached.is_some()
+    }
+
+    /// Store a newly resolved non-empty token and advance the generation counter.
+    pub fn store_token(&self, token: String) -> Result<u64, ValkeyError> {
+        if token.is_empty() {
+            return Err(ValkeyError::gcp_auth(
+                "IAM token_provider returned an empty token",
+                false,
+            ));
+        }
+        let gen_id = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.state.write();
+        guard.cached = Some((token, gen_id));
+        guard.inflight = None;
+        Ok(gen_id)
+    }
+
+    fn clear_inflight(&self) {
+        let mut guard = self.state.write();
+        guard.inflight = None;
+    }
+
+    /// Read or invalidate the cached token from a Tokio worker without attaching to Python.
+    pub fn resolve_cached(
+        &self,
+        invalidate_generation: Option<u64>,
+    ) -> Result<(String, u64), ValkeyError> {
+        if let Some(inv_gen) = invalidate_generation {
+            let mut guard = self.state.write();
+            if guard.cached.as_ref().is_some_and(|(_, g)| *g == inv_gen) {
+                guard.cached = None;
             }
+            if let Some((ref tok, g)) = guard.cached {
+                return Ok((tok.clone(), g));
+            }
+            return Err(ValkeyError::from_server_error(
+                "WRONGPASS IAM token rejected; refresh required".to_string(),
+            ));
+        }
+        let guard = self.state.read();
+        if let Some((ref tok, g)) = guard.cached {
+            Ok((tok.clone(), g))
+        } else {
+            Err(ValkeyError::gcp_auth(
+                "IAM Python token_provider cache is unprimed",
+                true,
+            ))
         }
     }
+
+    /// Invoke the Python `token_provider` synchronously on the caller's Python thread before `py.detach`.
+    pub fn ensure_token_sync(
+        &self,
+        py: Python<'_>,
+        force_refresh: bool,
+    ) -> Result<(), ValkeyError> {
+        if !force_refresh && self.has_cached_token() {
+            return Ok(());
+        }
+        let res = self.callable.bind(py).call0().map_err(|e| {
+            ValkeyError::gcp_auth(format!("IAM token_provider callback failed: {e}"), false)
+        })?;
+        let val = if res.hasattr("__await__").unwrap_or(false) {
+            let asyncio = py.import("asyncio").map_err(|e| {
+                ValkeyError::operational(format!("Failed to import asyncio: {e}"), false)
+            })?;
+            if asyncio.call_method0("get_running_loop").is_ok() {
+                return Err(ValkeyError::config(
+                    "Async IAM token_provider cannot be invoked from a synchronous Valkey client inside a running event loop",
+                ));
+            }
+            asyncio.call_method1("run", (&res,)).map_err(|e| {
+                ValkeyError::gcp_auth(format!("IAM async token_provider failed: {e}"), false)
+            })?
+        } else {
+            res
+        };
+        let token = val
+            .extract::<String>()
+            .map_err(|e| ValkeyError::config(format!("IAM token_provider must return str: {e}")))?;
+        self.store_token(token)?;
+        Ok(())
+    }
+
+    /// Prime or schedule the Python `token_provider` on the caller's Python thread before spawning a Tokio task.
+    pub fn prepare_token_async(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        force_refresh: bool,
+    ) -> Result<Option<PendingPythonTokenRx>, ValkeyError> {
+        if !force_refresh {
+            let guard = self.state.read();
+            if guard.cached.is_some() {
+                return Ok(None);
+            }
+            if let Some(ref rx) = guard.inflight {
+                return Ok(Some(rx.clone()));
+            }
+        }
+
+        let res = self.callable.bind(py).call0().map_err(|e| {
+            ValkeyError::gcp_auth(format!("IAM token_provider callback failed: {e}"), false)
+        })?;
+        if !res.hasattr("__await__").unwrap_or(false) {
+            let token = res.extract::<String>().map_err(|e| {
+                ValkeyError::config(format!("IAM token_provider must return str: {e}"))
+            })?;
+            self.store_token(token)?;
+            return Ok(None);
+        }
+
+        let asyncio = py.import("asyncio").map_err(|e| {
+            ValkeyError::operational(format!("Failed to import asyncio: {e}"), false)
+        })?;
+        let py_task = asyncio
+            .call_method1("ensure_future", (&res,))
+            .map_err(|e| {
+                ValkeyError::gcp_auth(
+                    format!("Failed to schedule async IAM token_provider: {e}"),
+                    false,
+                )
+            })?;
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        {
+            let mut guard = self.state.write();
+            if force_refresh {
+                guard.cached = None;
+            }
+            guard.inflight = Some(rx.clone());
+        }
+        let cb = Py::new(
+            py,
+            ValkeyTokenDoneCallback {
+                provider: Arc::clone(self),
+                tx: SyncMutex::new(Some(tx)),
+            },
+        )
+        .map_err(|e| ValkeyError::operational(format!("Callback alloc failed: {e}"), false))?;
+        py_task
+            .call_method1("add_done_callback", (cb,))
+            .map_err(|e| {
+                self.clear_inflight();
+                ValkeyError::operational(format!("Failed to attach IAM token callback: {e}"), false)
+            })?;
+        Ok(Some(rx))
+    }
+}
+
+/// Await completion of a Python-loop-scheduled async `token_provider` purely in Rust.
+pub async fn await_pending_python_token(mut rx: PendingPythonTokenRx) -> Result<(), ValkeyError> {
+    loop {
+        if let Some(res) = rx.borrow_and_update().clone() {
+            return res;
+        }
+        if rx.changed().await.is_err() {
+            if let Some(res) = rx.borrow().clone() {
+                return res;
+            }
+            return Err(ValkeyError::cancelled(
+                "IAM async token_provider task ended before producing a token",
+            ));
+        }
+    }
+}
+
+#[pyclass(
+    name = "_ValkeyTokenDoneCallback",
+    module = "vertebra._valkey",
+    frozen,
+    immutable_type
+)]
+struct ValkeyTokenDoneCallback {
+    provider: Arc<PythonTokenProvider>,
+    tx: SyncMutex<Option<PendingPythonTokenTx>>,
+}
+
+#[pymethods]
+impl ValkeyTokenDoneCallback {
+    fn __call__(&self, task: &Bound<'_, PyAny>) -> PyResult<()> {
+        let outcome = if task
+            .call_method0("cancelled")
+            .and_then(|v| v.extract::<bool>())
+            .unwrap_or(false)
+        {
+            self.provider.clear_inflight();
+            Err(ValkeyError::cancelled(
+                "IAM async token_provider was cancelled",
+            ))
+        } else {
+            match task.call_method0("result") {
+                Ok(val) => match val.extract::<String>() {
+                    Ok(token) => match self.provider.store_token(token) {
+                        Ok(_) => Ok(()),
+                        Err(e) => {
+                            self.provider.clear_inflight();
+                            Err(e)
+                        }
+                    },
+                    Err(e) => {
+                        self.provider.clear_inflight();
+                        Err(ValkeyError::config(format!(
+                            "IAM token_provider must return str: {e}"
+                        )))
+                    }
+                },
+                Err(err) => {
+                    self.provider.clear_inflight();
+                    Err(ValkeyError::gcp_auth(
+                        format!("IAM async token_provider failed: {err}"),
+                        false,
+                    ))
+                }
+            }
+        };
+        if let Some(tx) = self.tx.lock().take() {
+            let _ = tx.send(Some(outcome));
+        }
+        Ok(())
+    }
+}
+
+/// Abstracted Google Cloud Memorystore for Valkey IAM token source.
+#[derive(Clone)]
+pub enum GcpAuthSource {
+    Handle(SharedGcpTokenCacheHandle),
+    PythonCallable(Arc<PythonTokenProvider>),
 }
 
 impl std::fmt::Debug for GcpAuthSource {
@@ -500,51 +746,54 @@ impl ValkeyConfigInner {
                     Some(snap.generation),
                 ))
             }
-            GcpAuthSource::PythonCallable(py_fn) => {
-                let callable = Python::attach(|py| py_fn.clone_ref(py));
-                let token = tokio::task::spawn_blocking(move || {
-                    Python::attach(|py| -> Result<String, ValkeyError> {
-                        let res = callable.bind(py).call0().map_err(|e| {
-                            ValkeyError::gcp_auth(
-                                format!("IAM token_provider callback failed: {e}"),
-                                false,
-                            )
-                        })?;
-                        let val = if let Ok(asyncio) = py.import("asyncio") {
-                            if let Ok(is_coro) = asyncio.call_method1("iscoroutine", (&res,)) {
-                                if is_coro.extract::<bool>().unwrap_or(false) {
-                                    asyncio.call_method1("run", (&res,)).map_err(|e| {
-                                        ValkeyError::gcp_auth(
-                                            format!("IAM async token_provider failed: {e}"),
-                                            false,
-                                        )
-                                    })?
-                                } else {
-                                    res
-                                }
-                            } else {
-                                res
-                            }
-                        } else {
-                            res
-                        };
-                        val.extract::<String>().map_err(|e| {
-                            ValkeyError::config(format!("IAM token_provider must return str: {e}"))
-                        })
-                    })
-                })
-                .await
-                .map_err(|e| {
-                    ValkeyError::operational(format!("IAM callback panicked: {e}"), false)
-                })??;
-                if token.is_empty() {
-                    return Err(ValkeyError::gcp_auth(
-                        "IAM token_provider returned an empty token",
-                        false,
-                    ));
-                }
-                Ok((Some(effective_user), Some(token), None))
+            GcpAuthSource::PythonCallable(provider) => {
+                let (token, gen_id) = provider.resolve_cached(invalidate_generation)?;
+                Ok((Some(effective_user), Some(token), Some(gen_id)))
             }
+        }
+    }
+
+    /// Ensure any Python `token_provider` is resolved on the caller's Python thread before `py.detach`.
+    pub fn ensure_python_token_sync(
+        &self,
+        py: Python<'_>,
+        force_refresh: bool,
+    ) -> Result<(), ValkeyError> {
+        if !self.enable_gcp_memorystore_iam {
+            return Ok(());
+        }
+        if let Some(GcpAuthSource::PythonCallable(ref provider)) = self.gcp_auth {
+            provider.ensure_token_sync(py, force_refresh)?;
+        }
+        Ok(())
+    }
+
+    /// Return `true` when IAM auth uses a Python callable whose cached token was invalidated.
+    #[must_use]
+    pub fn has_unprimed_python_token(&self) -> bool {
+        if !self.enable_gcp_memorystore_iam {
+            return false;
+        }
+        matches!(
+            self.gcp_auth,
+            Some(GcpAuthSource::PythonCallable(ref provider)) if !provider.has_cached_token()
+        )
+    }
+
+    /// Prime or schedule any Python `token_provider` on the caller's Python thread before spawning a Tokio task.
+    pub fn prepare_python_token_async(
+        &self,
+        py: Python<'_>,
+        force_refresh: bool,
+    ) -> Result<Option<PendingPythonTokenRx>, ValkeyError> {
+        if !self.enable_gcp_memorystore_iam {
+            return Ok(None);
+        }
+        match self.gcp_auth {
+            Some(GcpAuthSource::PythonCallable(ref provider)) => {
+                provider.prepare_token_async(py, force_refresh)
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -700,7 +949,9 @@ fn extract_gcp_auth_source(
         return extract_capsule(capsule);
     }
     if provider_obj.is_callable() {
-        return Ok(GcpAuthSource::PythonCallable(provider_obj.clone().unbind()));
+        return Ok(GcpAuthSource::PythonCallable(PythonTokenProvider::new(
+            provider_obj.clone().unbind(),
+        )));
     }
     let _ = py;
     Err(ValkeyError::config(

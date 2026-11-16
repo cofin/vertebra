@@ -10,8 +10,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use vertebra_core::notify::Notifier;
 
+use crate::client_core::{open_redis_client_for_config, resolve_effective_credentials};
 use crate::config::RedisClientConfig;
-use crate::errors::RedisDriverError;
+use crate::errors::{RedisDriverError, classify_redis_error};
+
+const MAX_PUBSUB_MESSAGES: usize = 4096;
+const MAX_PUBSUB_COMPLETIONS: usize = 1024;
+const SUBSCRIBE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type PubSubMessageTuple = (String, String, Vec<u8>, Option<String>);
 
@@ -43,20 +48,40 @@ enum PubSubCommand {
     Close,
 }
 
+impl PubSubCommand {
+    fn op_id(&self) -> Option<usize> {
+        match self {
+            Self::Subscribe { op_id, .. }
+            | Self::Psubscribe { op_id, .. }
+            | Self::Ssubscribe { op_id, .. }
+            | Self::Unsubscribe { op_id, .. }
+            | Self::Punsubscribe { op_id, .. }
+            | Self::Sunsubscribe { op_id, .. } => *op_id,
+            Self::Close => None,
+        }
+    }
+}
+
 struct ListenerState {
     messages: Mutex<VecDeque<PubSubMessageTuple>>,
     msg_condvar: Condvar,
     completions: Mutex<VecDeque<(usize, bool, Option<String>)>>,
+    comp_condvar: Condvar,
+    dial_error: Mutex<Option<String>>,
     notifier: Option<Notifier>,
     next_op_id: AtomicUsize,
     closed: AtomicBool,
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<PubSubCommand>,
 }
 
 impl ListenerState {
     fn push_message(&self, msg: PubSubMessageTuple) {
-        let mut queue = self.messages.lock();
-        queue.push_back(msg);
+        {
+            let mut queue = self.messages.lock();
+            if queue.len() >= MAX_PUBSUB_MESSAGES {
+                queue.pop_front();
+            }
+            queue.push_back(msg);
+        }
         self.msg_condvar.notify_one();
         if let Some(ref notif) = self.notifier {
             let _ = notif.notify();
@@ -64,17 +89,127 @@ impl ListenerState {
     }
 
     fn push_completion(&self, op_id: usize, success: bool, err_msg: Option<String>) {
-        let mut queue = self.completions.lock();
-        queue.push_back((op_id, success, err_msg));
-        self.msg_condvar.notify_all();
+        {
+            let mut queue = self.completions.lock();
+            if queue.len() >= MAX_PUBSUB_COMPLETIONS {
+                queue.pop_front();
+            }
+            queue.push_back((op_id, success, err_msg));
+        }
+        self.comp_condvar.notify_all();
         if let Some(ref notif) = self.notifier {
             let _ = notif.notify();
         }
     }
+
+    fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.msg_condvar.notify_all();
+        self.comp_condvar.notify_all();
+        if let Some(ref notif) = self.notifier {
+            let _ = notif.notify();
+        }
+    }
+
+    fn wait_completion(&self, op_id: usize, timeout: Duration) -> Result<(), RedisDriverError> {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.completions.lock();
+        loop {
+            if let Some(idx) = guard.iter().position(|(id, _, _)| *id == op_id) {
+                let (_, ok, err) = guard.remove(idx).unwrap();
+                if ok {
+                    return Ok(());
+                }
+                return Err(RedisDriverError::operational(
+                    err.as_deref().unwrap_or("Redis subscription failed"),
+                    false,
+                ));
+            }
+            if self.closed.load(Ordering::Acquire) {
+                if let Some(dial_err) = self.dial_error.lock().clone() {
+                    return Err(RedisDriverError::operational(dial_err, true));
+                }
+                return Err(RedisDriverError::interface("Listener closed", false));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(RedisDriverError::operational(
+                    "Subscription confirmation timed out",
+                    true,
+                ));
+            }
+            let res = self.comp_condvar.wait_for(&mut guard, deadline - now);
+            if res.timed_out() {
+                if let Some(idx) = guard.iter().position(|(id, _, _)| *id == op_id) {
+                    let (_, ok, err) = guard.remove(idx).unwrap();
+                    if ok {
+                        return Ok(());
+                    }
+                    return Err(RedisDriverError::operational(
+                        err.as_deref().unwrap_or("Redis subscription failed"),
+                        false,
+                    ));
+                }
+                return Err(RedisDriverError::operational(
+                    "Subscription confirmation timed out",
+                    true,
+                ));
+            }
+        }
+    }
+
+    fn next_message_blocking(&self, timeout_ms: Option<u64>) -> Option<PubSubMessageTuple> {
+        let mut guard = self.messages.lock();
+        match timeout_ms {
+            Some(ms) => {
+                let deadline = Instant::now() + Duration::from_millis(ms);
+                loop {
+                    if let Some(m) = guard.pop_front() {
+                        return Some(m);
+                    }
+                    if self.closed.load(Ordering::Acquire) {
+                        return None;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return None;
+                    }
+                    let result = self.msg_condvar.wait_for(&mut guard, deadline - now);
+                    if result.timed_out() {
+                        return guard.pop_front();
+                    }
+                }
+            }
+            None => loop {
+                if let Some(m) = guard.pop_front() {
+                    return Some(m);
+                }
+                if self.closed.load(Ordering::Acquire) {
+                    return None;
+                }
+                self.msg_condvar.wait(&mut guard);
+            },
+        }
+    }
+}
+
+fn fail_pubsub_dial(
+    state: &ListenerState,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PubSubCommand>,
+    err_msg: String,
+) {
+    *state.dial_error.lock() = Some(err_msg.clone());
+    cmd_rx.close();
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let Some(id) = cmd.op_id() {
+            state.push_completion(id, false, Some(err_msg.clone()));
+        }
+    }
+    state.mark_closed();
 }
 
 async fn run_pubsub_loop(
-    config: RedisClientConfig,
+    mut config: RedisClientConfig,
     state: Arc<ListenerState>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<PubSubCommand>,
 ) {
@@ -82,26 +217,29 @@ async fn run_pubsub_loop(
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    let mut conn_info =
-        match redis::IntoConnectionInfo::into_connection_info(config.normalized_url.as_str()) {
-            Ok(info) => info,
+    // Pub/Sub multiplexed push delivery requires RESP3 push frames.
+    config.protocol = 3;
+
+    let (effective_username, effective_password, db) =
+        match resolve_effective_credentials(&config, config.password.clone()).await {
+            Ok(creds) => creds,
             Err(e) => {
-                state.push_completion(0, false, Some(e.to_string()));
-                state.closed.store(true, Ordering::Release);
+                fail_pubsub_dial(&state, &mut cmd_rx, e.message().to_string());
                 return;
             }
         };
-    let redis_info = conn_info
-        .redis_settings()
-        .clone()
-        .set_protocol(redis::ProtocolVersion::RESP3);
-    conn_info = conn_info.set_redis_settings(redis_info);
 
-    let client = match redis::Client::open(conn_info) {
+    let client = match open_redis_client_for_config(
+        &config,
+        effective_username.as_deref(),
+        effective_password.as_deref(),
+        db,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
-            state.push_completion(0, false, Some(e.to_string()));
-            state.closed.store(true, Ordering::Release);
+            fail_pubsub_dial(&state, &mut cmd_rx, e.message().to_string());
             return;
         }
     };
@@ -109,14 +247,24 @@ async fn run_pubsub_loop(
     let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<redis::PushInfo>();
     let conn_config = redis::AsyncConnectionConfig::new().set_push_sender(push_tx);
 
-    let mut con = match client
-        .get_multiplexed_async_connection_with_config(&conn_config)
-        .await
+    let mut con = match tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get_multiplexed_async_connection_with_config(&conn_config),
+    )
+    .await
     {
-        Ok(c) => c,
-        Err(e) => {
-            state.push_completion(0, false, Some(e.to_string()));
-            state.closed.store(true, Ordering::Release);
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            let err = classify_redis_error(&e);
+            fail_pubsub_dial(&state, &mut cmd_rx, err.message().to_string());
+            return;
+        }
+        Err(_) => {
+            fail_pubsub_dial(
+                &state,
+                &mut cmd_rx,
+                "Pub/Sub connection attempt timed out".to_string(),
+            );
             return;
         }
     };
@@ -202,25 +350,26 @@ async fn run_pubsub_loop(
                                 };
                                 state.push_message((kind_str.to_string(), channel, payload, None));
                             }
-                        } else if kind_str == "pmessage" {
-                            if let (Some(pat_val), Some(ch_val), Some(pl_val)) = (iter.next(), iter.next(), iter.next()) {
-                                let pattern = match pat_val {
-                                    redis::Value::BulkString(b) => String::from_utf8_lossy(&b).to_string(),
-                                    redis::Value::SimpleString(s) => s,
-                                    _ => String::new(),
-                                };
-                                let channel = match ch_val {
-                                    redis::Value::BulkString(b) => String::from_utf8_lossy(&b).to_string(),
-                                    redis::Value::SimpleString(s) => s,
-                                    _ => String::new(),
-                                };
-                                let payload = match pl_val {
-                                    redis::Value::BulkString(b) => b,
-                                    redis::Value::SimpleString(s) => s.into_bytes(),
-                                    _ => Vec::new(),
-                                };
-                                state.push_message((kind_str.to_string(), channel, payload, Some(pattern)));
-                            }
+                        } else if kind_str == "pmessage"
+                            && let (Some(pat_val), Some(ch_val), Some(pl_val)) =
+                                (iter.next(), iter.next(), iter.next())
+                        {
+                            let pattern = match pat_val {
+                                redis::Value::BulkString(b) => String::from_utf8_lossy(&b).to_string(),
+                                redis::Value::SimpleString(s) => s,
+                                _ => String::new(),
+                            };
+                            let channel = match ch_val {
+                                redis::Value::BulkString(b) => String::from_utf8_lossy(&b).to_string(),
+                                redis::Value::SimpleString(s) => s,
+                                _ => String::new(),
+                            };
+                            let payload = match pl_val {
+                                redis::Value::BulkString(b) => b,
+                                redis::Value::SimpleString(s) => s.into_bytes(),
+                                _ => Vec::new(),
+                            };
+                            state.push_message((kind_str.to_string(), channel, payload, Some(pattern)));
                         }
                     }
                     None => {
@@ -231,8 +380,13 @@ async fn run_pubsub_loop(
         }
     }
 
-    state.closed.store(true, Ordering::Release);
-    state.msg_condvar.notify_all();
+    cmd_rx.close();
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let Some(id) = cmd.op_id() {
+            state.push_completion(id, false, Some("Listener closed".to_string()));
+        }
+    }
+    state.mark_closed();
 }
 
 /// Synchronous dedicated Pub/Sub listener for Redis subscriptions.
@@ -244,6 +398,14 @@ async fn run_pubsub_loop(
 )]
 pub struct SyncRedisListener {
     state: Arc<ListenerState>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<PubSubCommand>,
+}
+
+impl Drop for SyncRedisListener {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(PubSubCommand::Close);
+        self.state.mark_closed();
+    }
 }
 
 impl SyncRedisListener {
@@ -253,10 +415,11 @@ impl SyncRedisListener {
             messages: Mutex::new(VecDeque::new()),
             msg_condvar: Condvar::new(),
             completions: Mutex::new(VecDeque::new()),
+            comp_condvar: Condvar::new(),
+            dial_error: Mutex::new(None),
             notifier: None,
             next_op_id: AtomicUsize::new(1),
             closed: AtomicBool::new(false),
-            cmd_tx,
         });
 
         let st_clone = Arc::clone(&state);
@@ -264,40 +427,20 @@ impl SyncRedisListener {
             run_pubsub_loop(config, st_clone, cmd_rx).await;
         });
 
-        Ok(Self { state })
+        Ok(Self { state, cmd_tx })
     }
 
-    fn wait_completion(&self, py: Python<'_>, op_id: usize) -> PyResult<()> {
-        py.detach(|| {
-            let mut guard = self.state.completions.lock();
-            loop {
-                if let Some(idx) = guard.iter().position(|(id, _, _)| *id == op_id) {
-                    let (_, ok, err) = guard.remove(idx).unwrap();
-                    if ok {
-                        return Ok(());
-                    } else {
-                        return Err(RedisDriverError::operational(
-                            err.as_deref().unwrap_or("Subscription failed"),
-                            false,
-                        ));
-                    }
-                }
-                if self.state.closed.load(Ordering::Acquire) {
-                    return Err(RedisDriverError::interface("Listener closed", false));
-                }
-                let res = self
-                    .state
-                    .msg_condvar
-                    .wait_for(&mut guard, Duration::from_secs(5));
-                if res.timed_out() {
-                    return Err(RedisDriverError::operational(
-                        "Subscription confirmation timed out",
-                        true,
-                    ));
-                }
-            }
-        })
-        .map_err(|e| e.into_pyerr(py))
+    fn send_and_wait(&self, py: Python<'_>, cmd: PubSubCommand, op_id: usize) -> PyResult<()> {
+        if self.cmd_tx.send(cmd).is_err() {
+            let err = if let Some(dial_err) = self.state.dial_error.lock().clone() {
+                RedisDriverError::operational(dial_err, true)
+            } else {
+                RedisDriverError::interface("Listener connection closed", false)
+            };
+            return Err(err.into_pyerr(py));
+        }
+        py.detach(|| self.state.wait_completion(op_id, SUBSCRIBE_CONFIRM_TIMEOUT))
+            .map_err(|e| e.into_pyerr(py))
     }
 }
 
@@ -310,89 +453,77 @@ impl SyncRedisListener {
 
     pub fn subscribe(&self, py: Python<'_>, channels: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Subscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Subscribe {
                 channels,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     pub fn psubscribe(&self, py: Python<'_>, patterns: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Psubscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Psubscribe {
                 patterns,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     pub fn ssubscribe(&self, py: Python<'_>, shard_channels: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Ssubscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Ssubscribe {
                 shard_channels,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (channels = Vec::new()))]
     pub fn unsubscribe(&self, py: Python<'_>, channels: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Unsubscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Unsubscribe {
                 channels,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (patterns = Vec::new()))]
     pub fn punsubscribe(&self, py: Python<'_>, patterns: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Punsubscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Punsubscribe {
                 patterns,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (shard_channels = Vec::new()))]
     pub fn sunsubscribe(&self, py: Python<'_>, shard_channels: Vec<String>) -> PyResult<()> {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        self.state
-            .cmd_tx
-            .send(PubSubCommand::Sunsubscribe {
+        self.send_and_wait(
+            py,
+            PubSubCommand::Sunsubscribe {
                 shard_channels,
                 op_id: Some(op_id),
-            })
-            .map_err(|_| {
-                RedisDriverError::interface("Listener connection closed", false).into_pyerr(py)
-            })?;
-        self.wait_completion(py, op_id)
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (timeout_ms = None))]
@@ -401,31 +532,7 @@ impl SyncRedisListener {
         py: Python<'py>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyTuple>>> {
-        let msg = py.detach(|| {
-            let mut guard = self.state.messages.lock();
-            if let Some(m) = guard.pop_front() {
-                return Some(m);
-            }
-            if self.state.closed.load(Ordering::Acquire) {
-                return None;
-            }
-
-            match timeout_ms {
-                Some(ms) => {
-                    let dur = Duration::from_millis(ms);
-                    let result = self.state.msg_condvar.wait_for(&mut guard, dur);
-                    if result.timed_out() {
-                        None
-                    } else {
-                        guard.pop_front()
-                    }
-                }
-                None => {
-                    self.state.msg_condvar.wait(&mut guard);
-                    guard.pop_front()
-                }
-            }
-        });
+        let msg = py.detach(|| self.state.next_message_blocking(timeout_ms));
 
         match msg {
             Some((kind, channel, payload, pattern)) => {
@@ -478,9 +585,8 @@ impl SyncRedisListener {
     }
 
     pub fn close(&self) {
-        self.state.closed.store(true, Ordering::Release);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Close);
-        self.state.msg_condvar.notify_all();
+        let _ = self.cmd_tx.send(PubSubCommand::Close);
+        self.state.mark_closed();
     }
 }
 
@@ -493,6 +599,14 @@ impl SyncRedisListener {
 )]
 pub struct AsyncRedisListener {
     state: Arc<ListenerState>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<PubSubCommand>,
+}
+
+impl Drop for AsyncRedisListener {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(PubSubCommand::Close);
+        self.state.mark_closed();
+    }
 }
 
 impl AsyncRedisListener {
@@ -503,10 +617,11 @@ impl AsyncRedisListener {
             messages: Mutex::new(VecDeque::new()),
             msg_condvar: Condvar::new(),
             completions: Mutex::new(VecDeque::new()),
+            comp_condvar: Condvar::new(),
+            dial_error: Mutex::new(None),
             notifier,
             next_op_id: AtomicUsize::new(1),
             closed: AtomicBool::new(false),
-            cmd_tx,
         });
 
         let st_clone = Arc::clone(&state);
@@ -514,34 +629,25 @@ impl AsyncRedisListener {
             run_pubsub_loop(config, st_clone, cmd_rx).await;
         });
 
-        Ok(Self { state })
+        Ok(Self { state, cmd_tx })
+    }
+
+    fn submit_command(&self, cmd: PubSubCommand, op_id: usize) -> usize {
+        if self.cmd_tx.send(cmd).is_err() {
+            let err_msg = self
+                .state
+                .dial_error
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "Listener connection closed".to_string());
+            self.state.push_completion(op_id, false, Some(err_msg));
+        }
+        op_id
     }
 
     fn wait_completion(&self, py: Python<'_>, op_id: usize) -> PyResult<()> {
-        py.detach(|| {
-            let mut guard = self.state.completions.lock();
-            let start = Instant::now();
-            let timeout = Duration::from_millis(1000);
-            while !self.state.closed.load(Ordering::Acquire) {
-                if let Some(pos) = guard.iter().position(|(id, _, _)| *id == op_id) {
-                    let (_, success, err_msg) = guard.remove(pos).unwrap();
-                    if !success {
-                        let msg =
-                            err_msg.unwrap_or_else(|| "Redis subscription failed".to_string());
-                        return Err(RedisDriverError::programming(msg, false));
-                    }
-                    return Ok(());
-                }
-                if start.elapsed() >= timeout {
-                    return Ok(());
-                }
-                self.state
-                    .msg_condvar
-                    .wait_for(&mut guard, Duration::from_millis(50));
-            }
-            Ok(())
-        })
-        .map_err(|e: RedisDriverError| e.into_pyerr(py))
+        py.detach(|| self.state.wait_completion(op_id, SUBSCRIBE_CONFIRM_TIMEOUT))
+            .map_err(|e: RedisDriverError| e.into_pyerr(py))
     }
 }
 
@@ -554,59 +660,71 @@ impl AsyncRedisListener {
 
     pub fn submit_subscribe(&self, channels: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Subscribe {
-            channels,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Subscribe {
+                channels,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     pub fn submit_psubscribe(&self, patterns: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Psubscribe {
-            patterns,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Psubscribe {
+                patterns,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     pub fn submit_ssubscribe(&self, shard_channels: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Ssubscribe {
-            shard_channels,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Ssubscribe {
+                shard_channels,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (channels = Vec::new()))]
     pub fn submit_unsubscribe(&self, channels: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Unsubscribe {
-            channels,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Unsubscribe {
+                channels,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (patterns = Vec::new()))]
     pub fn submit_punsubscribe(&self, patterns: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Punsubscribe {
-            patterns,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Punsubscribe {
+                patterns,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     #[pyo3(signature = (shard_channels = Vec::new()))]
     pub fn submit_sunsubscribe(&self, shard_channels: Vec<String>) -> usize {
         let op_id = self.state.next_op_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Sunsubscribe {
-            shard_channels,
-            op_id: Some(op_id),
-        });
-        op_id
+        self.submit_command(
+            PubSubCommand::Sunsubscribe {
+                shard_channels,
+                op_id: Some(op_id),
+            },
+            op_id,
+        )
     }
 
     pub fn subscribe(&self, py: Python<'_>, channels: Vec<String>) -> PyResult<()> {
@@ -648,31 +766,7 @@ impl AsyncRedisListener {
         py: Python<'py>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyTuple>>> {
-        let msg = py.detach(|| {
-            let mut guard = self.state.messages.lock();
-            if let Some(m) = guard.pop_front() {
-                return Some(m);
-            }
-            if self.state.closed.load(Ordering::Acquire) {
-                return None;
-            }
-
-            match timeout_ms {
-                Some(ms) => {
-                    let dur = Duration::from_millis(ms);
-                    let result = self.state.msg_condvar.wait_for(&mut guard, dur);
-                    if result.timed_out() {
-                        None
-                    } else {
-                        guard.pop_front()
-                    }
-                }
-                None => {
-                    self.state.msg_condvar.wait(&mut guard);
-                    guard.pop_front()
-                }
-            }
-        });
+        let msg = py.detach(|| self.state.next_message_blocking(timeout_ms));
 
         match msg {
             Some((kind, channel, payload, pattern)) => {
@@ -766,8 +860,58 @@ impl AsyncRedisListener {
     }
 
     pub fn close(&self) {
-        self.state.closed.store(true, Ordering::Release);
-        let _ = self.state.cmd_tx.send(PubSubCommand::Close);
-        self.state.msg_condvar.notify_all();
+        let _ = self.cmd_tx.send(PubSubCommand::Close);
+        self.state.mark_closed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_completion_ack_does_not_wake_next_message_with_spurious_none() {
+        let (_cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel::<PubSubCommand>();
+        let state = Arc::new(ListenerState {
+            messages: Mutex::new(VecDeque::new()),
+            msg_condvar: Condvar::new(),
+            completions: Mutex::new(VecDeque::new()),
+            comp_condvar: Condvar::new(),
+            dial_error: Mutex::new(None),
+            notifier: None,
+            next_op_id: AtomicUsize::new(1),
+            closed: AtomicBool::new(false),
+        });
+
+        let state_reader = Arc::clone(&state);
+        let reader = std::thread::spawn(move || state_reader.next_message_blocking(None));
+
+        std::thread::sleep(Duration::from_millis(15));
+        // Push a subscribe completion AND spuriously notify msg_condvar while listener is still open.
+        state.push_completion(1, true, None);
+        state.msg_condvar.notify_all();
+        std::thread::sleep(Duration::from_millis(15));
+
+        // Now deliver an actual message; next_message(None) must return this message, not None!
+        state.push_message((
+            "message".to_string(),
+            "chan".to_string(),
+            b"hello".to_vec(),
+            None,
+        ));
+        let received = reader.join().unwrap();
+        assert_eq!(
+            received,
+            Some((
+                "message".to_string(),
+                "chan".to_string(),
+                b"hello".to_vec(),
+                None
+            ))
+        );
+
+        // Timeout on wait_completion must return Err, never Ok(()).
+        let timeout_res = state.wait_completion(999, Duration::from_millis(20));
+        assert!(timeout_res.is_err());
     }
 }

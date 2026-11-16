@@ -186,7 +186,7 @@ impl SpannerReadWriteTx {
         };
 
         let channel = self.client.grpc_channel().await?;
-        let mut grpc = Grpc::new(channel);
+        let mut grpc = Grpc::new(channel).max_decoding_message_size(usize::MAX);
         grpc.ready().await.map_err(|err| {
             SpannerError::Gcp(GcpErrorInfo::new(
                 14,
@@ -194,17 +194,23 @@ impl SpannerReadWriteTx {
             ))
         })?;
         let tonic_req = self.client.build_grpc_request(request, true).await?;
-        let mut stream = grpc
+        let path_and_query = EXECUTE_STREAMING_SQL_PATH
+            .parse()
+            .map_err(|e| SpannerError::Protocol(format!("invalid gRPC path: {e}")))?;
+        let mut stream = match grpc
             .server_streaming(
                 tonic_req,
-                EXECUTE_STREAMING_SQL_PATH
-                    .parse()
-                    .map_err(|e| SpannerError::Protocol(format!("invalid gRPC path: {e}")))?,
+                path_and_query,
                 ProstCodec::<ProtoExecuteSqlRequest, ProtoPartialResultSet>::default(),
             )
             .await
-            .map_err(|status| status_to_spanner_error(&status))?
-            .into_inner();
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(status) => {
+                let err = status_to_spanner_error(&status);
+                return Err(self.record_error_if_aborted(err).await);
+            }
+        };
 
         let mut decoder = PartialResultDecoder::default();
         while let Some(item) = stream.next().await {
@@ -588,6 +594,7 @@ impl SpannerReadWriteTx {
 impl SpannerClient {
     /// Lazily connect and cache the `tonic::transport::Channel` targeting `effective_endpoint`.
     pub(crate) async fn grpc_channel(&self) -> Result<Channel, SpannerError> {
+        vertebra_db::gcp::install_rustls_ring_provider();
         self.grpc_channel
             .get_or_try_init(|| async {
                 let endpoint_str = self.effective_endpoint();
@@ -702,7 +709,7 @@ impl SpannerClient {
         Req: Message + Send + 'static,
         Resp: Message + Default + Send + 'static,
     {
-        let mut grpc = Grpc::new(channel.clone());
+        let mut grpc = Grpc::new(channel.clone()).max_decoding_message_size(usize::MAX);
         grpc.ready().await.map_err(|err| {
             SpannerError::Gcp(GcpErrorInfo::new(
                 14,

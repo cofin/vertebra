@@ -885,13 +885,8 @@ impl Drop for SyncOracleListener {
     fn drop(&mut self) {
         self.state.mark_closed();
         self.break_handle.break_execution();
-        let handle_opt = {
-            let mut guard = self.join_handle.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take()
-        };
-        if let Some(handle) = handle_opt {
-            let _ = handle.join();
-        }
+        let mut guard = self.join_handle.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.take();
     }
 }
 

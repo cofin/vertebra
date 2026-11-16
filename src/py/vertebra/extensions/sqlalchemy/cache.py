@@ -6,6 +6,7 @@ from collections.abc import Iterator, MutableMapping
 from typing import Any
 
 from vertebra.extensions.alchemy.cache import (
+    NO_VALUE,
     AsyncCacheBackend,
     CacheEntry,
     CacheStats,
@@ -27,41 +28,65 @@ __all__ = (
 class CompiledCache(MutableMapping[Any, Any]):
     """Thread-safe compiled statement cache for SQLAlchemy execution_options."""
 
-    __slots__ = ("_backend", "_capacity")
+    __slots__ = ("_backend", "_capacity", "_key_map")
 
     def __init__(self, capacity: int = 1024, *, backend: SyncCacheBackend | None = None) -> None:
         """Initialize compiled cache with maximum capacity and backing cache."""
         self._backend = backend or SyncCacheBackend("memory://", capacity=capacity)
         self._capacity = capacity
+        self._key_map: dict[str, Any] = {}
+
+    @staticmethod
+    def _normalize_key(key: Any) -> str:
+        """Normalize an arbitrary SQLAlchemy cache key into a unique string key."""
+        return key if isinstance(key, str) else f"__repr__:{key!r}"
 
     def __getitem__(self, key: Any) -> Any:
         """Retrieve compiled statement plan from cache."""
-        val = self._backend.get(str(key), default=None)
-        if val is None:
+        norm = self._normalize_key(key)
+        val = self._backend.get(norm, default=NO_VALUE)
+        if val is NO_VALUE:
+            self._key_map.pop(norm, None)
             raise KeyError(key)
         return val
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Store compiled statement plan into cache."""
-        self._backend.set(str(key), value)
+        norm = self._normalize_key(key)
+        self._backend.set(norm, value)
+        self._key_map[norm] = key
+        if len(self._key_map) > max(64, self._backend.size * 2):
+            live = set(self._backend.keys())
+            stale = [k for k in self._key_map if k not in live]
+            for k in stale:
+                self._key_map.pop(k, None)
 
     def __delitem__(self, key: Any) -> None:
         """Remove compiled statement plan from cache."""
-        if not self._backend.has_key(str(key)):
+        norm = self._normalize_key(key)
+        if not self._backend.has_key(norm):
+            self._key_map.pop(norm, None)
             raise KeyError(key)
-        self._backend.delete(str(key))
+        self._key_map.pop(norm, None)
+        self._backend.delete(norm)
 
     def __iter__(self) -> Iterator[Any]:
-        """Iterate over compiled cache entries."""
-        return iter([])
+        """Iterate over currently live compiled cache keys."""
+        live_keys = self._backend.keys()
+        return iter([self._key_map.get(k, k) for k in live_keys])
 
     def __len__(self) -> int:
         """Return number of cached compiled statements."""
-        return len(self._backend) if hasattr(self._backend, "__len__") else 0
+        return self._backend.size
 
     def __contains__(self, key: Any) -> bool:
         """Check if compiled statement key exists in cache."""
-        return self._backend.has_key(str(key))
+        return self._backend.has_key(self._normalize_key(key))
+
+    def clear(self) -> None:
+        """Remove all compiled statement plans from the backing cache."""
+        self._key_map.clear()
+        self._backend.clear()
 
 
 class ResultCache:

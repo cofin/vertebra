@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import collections
+import contextlib
 import hashlib
+import threading
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 from uuid import uuid4
@@ -130,11 +134,16 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
     __slots__ = (
         "_checkpoint_key",
         "_checkpoints",
+        "_cond",
         "_event_channels",
         "_feed",
         "_notify_buffer",
         "_notify_ceiling_bytes",
+        "_notify_done",
+        "_notify_error",
         "_notify_source",
+        "_notify_stop",
+        "_notify_thread",
         "_queue_leased",
         "_queue_store",
         "_queues",
@@ -170,6 +179,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
             SyncTableEventQueue(queue_store._config) if queue_store is not None else None
         )
         self._schema_ready = False
+        self._cond = threading.Condition()
         self._queues: dict[str, collections.deque[str]] = {}
         self._unacked: dict[str, tuple[str, str]] = {}
         self._queue_leased: set[str] = set()
@@ -177,6 +187,10 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         self._checkpoints: dict[str, str] = {}
         self._subscribed_channels: set[str] = set()
         self._notify_buffer: dict[str, collections.deque[bytes | str]] = {}
+        self._notify_thread: threading.Thread | None = None
+        self._notify_done = False
+        self._notify_stop = False
+        self._notify_error: BaseException | None = None
 
     @property
     def feed(self) -> ChangeFeed:
@@ -310,11 +324,13 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
 
         _ = metadata
         wire_envelope, event = self._feed.publish_event(operation="publish", payload=payload)
-        if channel not in self._queues:
-            self._queues[channel] = collections.deque()
-        self._queues[channel].append(wire_envelope)
         event_id_str = str(event.event_id)
-        self._event_channels[event_id_str] = channel
+        with self._cond:
+            if channel not in self._queues:
+                self._queues[channel] = collections.deque()
+            self._queues[channel].append(wire_envelope)
+            self._event_channels[event_id_str] = channel
+            self._cond.notify_all()
         return event_id_str
 
     def publish_many(
@@ -324,6 +340,23 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         """Publish multiple events sequentially and return their generated event IDs."""
         return [self.publish(ch, p, meta) for ch, p, meta in events]
 
+    def _pump_notify_sync(self, source: SyncNotificationSource) -> None:
+        try:
+            for frame in source.listen():
+                if self._notify_stop:
+                    break
+                with self._cond:
+                    self._notify_buffer.setdefault(frame.channel, collections.deque()).append(frame.payload)
+                    self._cond.notify_all()
+        except BaseException as exc:
+            with self._cond:
+                self._notify_error = exc
+                self._cond.notify_all()
+        finally:
+            with self._cond:
+                self._notify_done = True
+                self._cond.notify_all()
+
     def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Dequeue the next event for ``channel``, hydrating durable or ObjectStore spills."""
         if self._notify_source is not None:
@@ -331,15 +364,38 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
                 self._notify_source.subscribe([channel])
                 self._subscribed_channels.add(channel)
             raw_payload: bytes | str | None = None
-            buffered = self._notify_buffer.get(channel)
-            if buffered:
-                raw_payload = buffered.popleft()
-            else:
-                for frame in self._notify_source.listen():
-                    if frame.channel == channel:
-                        raw_payload = frame.payload
-                        break
-                    self._notify_buffer.setdefault(frame.channel, collections.deque()).append(frame.payload)
+            with self._cond:
+                buffered = self._notify_buffer.get(channel)
+                if buffered:
+                    raw_payload = buffered.popleft()
+                else:
+                    if self._notify_thread is None or not self._notify_thread.is_alive():
+                        self._notify_done = False
+                        self._notify_stop = False
+                        self._notify_error = None
+                        self._notify_thread = threading.Thread(
+                            target=self._pump_notify_sync,
+                            args=(self._notify_source,),
+                            daemon=True,
+                        )
+                        self._notify_thread.start()
+                    if poll_interval <= 0:
+                        if not self._notify_buffer.get(channel) and not self._notify_done:
+                            self._cond.wait(timeout=0.01)
+                    else:
+                        deadline = time.monotonic() + float(poll_interval)
+                        while not self._notify_buffer.get(channel) and not self._notify_done and not self._notify_stop:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            self._cond.wait(timeout=remaining)
+                    if self._notify_error is not None:
+                        err = self._notify_error
+                        self._notify_error = None
+                        raise err
+                    buffered = self._notify_buffer.get(channel)
+                    if buffered:
+                        raw_payload = buffered.popleft()
             if raw_payload is None:
                 return None
             spilled_id = _decode_wakeup_event_id(raw_payload)
@@ -365,15 +421,24 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
                 self._event_channels[message.event_id] = channel
             return message
 
-        _ = poll_interval
-        q = self._queues.get(channel)
-        if not q:
-            return None
-        wire_envelope = q.popleft()
+        with self._cond:
+            q = self._queues.get(channel)
+            if not q and poll_interval > 0:
+                deadline = time.monotonic() + float(poll_interval)
+                while not self._queues.get(channel):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._cond.wait(timeout=remaining)
+            q = self._queues.get(channel)
+            if not q:
+                return None
+            wire_envelope = q.popleft()
         change_event: ChangeEvent = self._feed.hydrate_notification(wire_envelope)
         event_id_str = str(change_event.event_id)
-        self._unacked[event_id_str] = (channel, wire_envelope)
-        self._event_channels[event_id_str] = channel
+        with self._cond:
+            self._unacked[event_id_str] = (channel, wire_envelope)
+            self._event_channels[event_id_str] = channel
         now = datetime.now(UTC)
         return EventMessage(
             event_id=event_id_str,
@@ -392,7 +457,8 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
             self._table_queue.ack(event_id)
             self._queue_leased.discard(event_id)
         else:
-            self._unacked.pop(event_id, None)
+            with self._cond:
+                self._unacked.pop(event_id, None)
         channel = self._event_channels.pop(event_id, None)
         if channel is not None and self._queue_store is not None:
             self.save_checkpoint(channel, event_id)
@@ -403,23 +469,32 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
             self._table_queue.nack(event_id)
             self._queue_leased.discard(event_id)
             return
-        entry = self._unacked.pop(event_id, None)
-        if entry is not None:
-            channel, wire_envelope = entry
-            if channel not in self._queues:
-                self._queues[channel] = collections.deque()
-            self._queues[channel].appendleft(wire_envelope)
+        with self._cond:
+            entry = self._unacked.pop(event_id, None)
+            if entry is not None:
+                channel, wire_envelope = entry
+                if channel not in self._queues:
+                    self._queues[channel] = collections.deque()
+                self._queues[channel].appendleft(wire_envelope)
+                self._cond.notify_all()
 
     def shutdown(self) -> None:
         """Release transient buffers while leaving durable checkpoints and queue rows intact."""
+        with self._cond:
+            self._notify_stop = True
+            self._cond.notify_all()
         if self._notify_source is not None and self._subscribed_channels:
             self._notify_source.unsubscribe(sorted(self._subscribed_channels))
-        self._queues.clear()
-        self._unacked.clear()
-        self._queue_leased.clear()
-        self._event_channels.clear()
-        self._notify_buffer.clear()
-        self._subscribed_channels.clear()
+        if self._notify_thread is not None and self._notify_thread.is_alive():
+            self._notify_thread.join(timeout=0.2)
+        with self._cond:
+            self._notify_thread = None
+            self._queues.clear()
+            self._unacked.clear()
+            self._queue_leased.clear()
+            self._event_channels.clear()
+            self._notify_buffer.clear()
+            self._subscribed_channels.clear()
 
 
 class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
@@ -437,9 +512,13 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         "_checkpoints",
         "_event_channels",
         "_feed",
-        "_notify_buffer",
         "_notify_ceiling_bytes",
+        "_notify_error",
+        "_notify_pump_task",
+        "_notify_queues",
         "_notify_source",
+        "_notify_stop",
+        "_queue_events",
         "_queue_leased",
         "_queue_store",
         "_queues",
@@ -477,12 +556,16 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         )
         self._schema_ready = False
         self._queues: dict[str, collections.deque[str]] = {}
+        self._queue_events: dict[str, asyncio.Event] = {}
         self._unacked: dict[str, tuple[str, str]] = {}
         self._queue_leased: set[str] = set()
         self._event_channels: dict[str, str] = {}
         self._checkpoints: dict[str, str] = {}
         self._subscribed_channels: set[str] = set()
-        self._notify_buffer: dict[str, collections.deque[bytes | str]] = {}
+        self._notify_queues: dict[str, asyncio.Queue[bytes | str]] = {}
+        self._notify_pump_task: asyncio.Task[None] | None = None
+        self._notify_stop = False
+        self._notify_error: BaseException | None = None
 
     @property
     def feed(self) -> ChangeFeed:
@@ -619,6 +702,7 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         if channel not in self._queues:
             self._queues[channel] = collections.deque()
         self._queues[channel].append(wire_envelope)
+        self._queue_events.setdefault(channel, asyncio.Event()).set()
         event_id_str = str(event.event_id)
         self._event_channels[event_id_str] = channel
         return event_id_str
@@ -630,22 +714,63 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         """Publish multiple events asynchronously and return their generated event IDs."""
         return [await self.publish(ch, p, meta) for ch, p, meta in events]
 
+    async def _pump_notify_async(self, source: AsyncNotificationSource) -> None:
+        try:
+            async for frame in source.listen():
+                if self._notify_stop:
+                    break
+                q = self._notify_queues.setdefault(frame.channel, asyncio.Queue())
+                q.put_nowait(frame.payload)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._notify_error = exc
+
     async def dequeue(self, channel: str, poll_interval: float) -> EventMessage | None:
         """Dequeue the next event asynchronously, hydrating durable or ObjectStore spills."""
         if self._notify_source is not None:
             if channel not in self._subscribed_channels:
                 await self._notify_source.subscribe([channel])
                 self._subscribed_channels.add(channel)
+            q = self._notify_queues.setdefault(channel, asyncio.Queue())
             raw_payload: bytes | str | None = None
-            buffered = self._notify_buffer.get(channel)
-            if buffered:
-                raw_payload = buffered.popleft()
+            if not q.empty():
+                raw_payload = q.get_nowait()
             else:
-                async for frame in self._notify_source.listen():
-                    if frame.channel == channel:
-                        raw_payload = frame.payload
-                        break
-                    self._notify_buffer.setdefault(frame.channel, collections.deque()).append(frame.payload)
+                if self._notify_pump_task is None or self._notify_pump_task.done():
+                    if self._notify_error is not None:
+                        err = self._notify_error
+                        self._notify_error = None
+                        raise err
+                    self._notify_stop = False
+                    self._notify_pump_task = asyncio.create_task(self._pump_notify_async(self._notify_source))
+                if poll_interval <= 0:
+                    await asyncio.sleep(0)
+                    if self._notify_error is not None:
+                        err = self._notify_error
+                        self._notify_error = None
+                        raise err
+                    if not q.empty():
+                        raw_payload = q.get_nowait()
+                else:
+                    get_task = asyncio.create_task(q.get())
+                    done, _ = await asyncio.wait(
+                        {get_task, self._notify_pump_task},
+                        timeout=poll_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if get_task in done:
+                        raw_payload = get_task.result()
+                    else:
+                        get_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await get_task
+                        if self._notify_error is not None:
+                            err = self._notify_error
+                            self._notify_error = None
+                            raise err
+                        if not q.empty():
+                            raw_payload = q.get_nowait()
             if raw_payload is None:
                 return None
             spilled_id = _decode_wakeup_event_id(raw_payload)
@@ -671,11 +796,17 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
                 self._event_channels[message.event_id] = channel
             return message
 
-        _ = poll_interval
-        q = self._queues.get(channel)
-        if not q:
+        q_mem = self._queues.get(channel)
+        if not q_mem and poll_interval > 0:
+            ev = self._queue_events.setdefault(channel, asyncio.Event())
+            ev.clear()
+            if not self._queues.get(channel):
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(ev.wait(), timeout=poll_interval)
+            q_mem = self._queues.get(channel)
+        if not q_mem:
             return None
-        wire_envelope = q.popleft()
+        wire_envelope = q_mem.popleft()
         change_event: ChangeEvent = self._feed.hydrate_notification(wire_envelope)
         event_id_str = str(change_event.event_id)
         self._unacked[event_id_str] = (channel, wire_envelope)
@@ -715,14 +846,22 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
             if channel not in self._queues:
                 self._queues[channel] = collections.deque()
             self._queues[channel].appendleft(wire_envelope)
+            self._queue_events.setdefault(channel, asyncio.Event()).set()
 
     async def shutdown(self) -> None:
         """Release transient buffers while leaving durable checkpoints and queue rows intact."""
+        self._notify_stop = True
+        if self._notify_pump_task is not None:
+            self._notify_pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._notify_pump_task
+            self._notify_pump_task = None
         if self._notify_source is not None and self._subscribed_channels:
             await self._notify_source.unsubscribe(sorted(self._subscribed_channels))
         self._queues.clear()
+        self._queue_events.clear()
         self._unacked.clear()
         self._queue_leased.clear()
         self._event_channels.clear()
-        self._notify_buffer.clear()
+        self._notify_queues.clear()
         self._subscribed_channels.clear()

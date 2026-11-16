@@ -204,3 +204,177 @@ fn test_lazy_client_creation_and_close() {
     client.close();
     assert!(client.is_closed());
 }
+
+#[test]
+fn test_client_lru_invalidations_capped_at_4096() {
+    let cache = ClientLruCache::new(16);
+    let keys: Vec<String> = (0..5000).map(|i| format!("inv:{i}")).collect();
+    cache.invalidate_keys(&keys);
+    let drained = cache.drain_invalidations();
+    assert_eq!(drained.len(), 4096);
+    assert_eq!(drained.first().map(String::as_str), Some("inv:904"));
+    assert_eq!(drained.last().map(String::as_str), Some("inv:4999"));
+}
+
+#[tokio::test]
+async fn test_client_tracking_handshake_sentinel_blocking_xreadgroup_and_close() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use vertebra_redis::streams;
+
+    let commands_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    fn pop_resp_cmd(buf: &mut Vec<u8>) -> Option<Vec<String>> {
+        if buf.is_empty() || buf[0] != b'*' {
+            return None;
+        }
+        let line_end = buf.windows(2).position(|w| w == b"\r\n")?;
+        let argc: usize = std::str::from_utf8(&buf[1..line_end]).ok()?.parse().ok()?;
+        let mut pos = line_end + 2;
+        let mut parts = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            if pos >= buf.len() || buf[pos] != b'$' {
+                return None;
+            }
+            let rel_end = buf[pos..].windows(2).position(|w| w == b"\r\n")?;
+            let blen: usize = std::str::from_utf8(&buf[pos + 1..pos + rel_end])
+                .ok()?
+                .parse()
+                .ok()?;
+            let data_start = pos + rel_end + 2;
+            let data_end = data_start + blen;
+            if data_end + 2 > buf.len() {
+                return None;
+            }
+            parts.push(String::from_utf8_lossy(&buf[data_start..data_end]).into_owned());
+            pos = data_end + 2;
+        }
+        buf.drain(..pos);
+        Some(parts)
+    }
+
+    // Mock Redis Master speaking minimal RESP3 (handling pipelined handshake frames).
+    let master_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let master_port = master_listener.local_addr().unwrap().port();
+    let seen_clone = Arc::clone(&commands_seen);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = master_listener.accept().await {
+            let seen = Arc::clone(&seen_clone);
+            tokio::spawn(async move {
+                let mut acc = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while let Ok(n) = sock.read(&mut tmp).await {
+                    if n == 0 {
+                        break;
+                    }
+                    acc.extend_from_slice(&tmp[..n]);
+                    while let Some(parts) = pop_resp_cmd(&mut acc) {
+                        seen.lock().unwrap().push(parts.join(" "));
+                        let op = parts
+                            .first()
+                            .map(|s| s.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        if op == "HELLO" {
+                            let _ = sock
+                                .write_all(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                                .await;
+                        } else if op == "XREADGROUP" {
+                            // Sleep 1600ms (> old 1500ms ConnectionManager timeout) before replying!
+                            tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+                            let _ = sock.write_all(b"_\r\n").await;
+                        } else if op == "GET" {
+                            let _ = sock.write_all(b"$5\r\nhello\r\n").await;
+                        } else {
+                            let _ = sock.write_all(b"+OK\r\n").await;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // Mock Sentinel returning `[127.0.0.1, master_port]` to `SENTINEL get-master-addr-by-name`.
+    let sentinel_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sentinel_port = sentinel_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = sentinel_listener.accept().await {
+            tokio::spawn(async move {
+                let mut acc = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while let Ok(n) = sock.read(&mut tmp).await {
+                    if n == 0 {
+                        break;
+                    }
+                    acc.extend_from_slice(&tmp[..n]);
+                    while let Some(parts) = pop_resp_cmd(&mut acc) {
+                        let op = parts
+                            .first()
+                            .map(|s| s.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        if op == "HELLO" {
+                            let _ = sock
+                                .write_all(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                                .await;
+                        } else if op == "CLIENT" {
+                            let _ = sock.write_all(b"+OK\r\n").await;
+                        } else if op == "SENTINEL" {
+                            let p = master_port.to_string();
+                            let reply = format!("*2\r\n$9\r\n127.0.0.1\r\n${}\r\n{p}\r\n", p.len());
+                            let _ = sock.write_all(reply.as_bytes()).await;
+                        } else {
+                            let _ = sock
+                                .write_all(b"-ERR unsupported in mock sentinel\r\n")
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let mut cfg = RedisClientConfig::new(&format!("redis://127.0.0.1:{sentinel_port}/0")).unwrap();
+    cfg.topology = RedisTopologyMode::Sentinel;
+    cfg.sentinel_master_name = Some("mymaster".to_string());
+    cfg.sentinel_nodes = vec![("127.0.0.1".to_string(), sentinel_port)];
+    cfg.enable_client_side_caching = true;
+    cfg.client_tracking_prefixes = vec!["user:".to_string()];
+
+    let client = RedisCoreClient::new(cfg).unwrap();
+    let val = client.get(b"user:1").await.unwrap();
+    assert_eq!(val.as_deref(), Some(&b"hello"[..]));
+    assert!(client.is_caching_active());
+    assert!(client.has_active_connection());
+
+    {
+        let recorded = commands_seen
+            .lock()
+            .unwrap()
+            .join("\n")
+            .to_ascii_uppercase();
+        assert!(
+            recorded.contains("TRACKING"),
+            "expected CLIENT TRACKING ON: {recorded}"
+        );
+        assert!(recorded.contains("BCAST"), "expected BCAST: {recorded}");
+    }
+
+    // Blocking XREADGROUP with block_ms=1700 must not prematurely time out at 1.5s.
+    let xres = streams::xreadgroup(
+        &client,
+        "grp",
+        "c1",
+        &[("mystream".to_string(), ">".to_string())],
+        Some(1),
+        Some(1700),
+    )
+    .await
+    .unwrap();
+    assert_eq!(xres, Value::Nil);
+
+    // close() must drop the stored connection immediately.
+    client.close();
+    assert!(client.is_closed());
+    assert!(!client.has_active_connection());
+}

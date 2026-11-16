@@ -461,3 +461,88 @@ fn test_arrow_load_and_select_roundtrip() {
         _ => panic!("expected SHM payload"),
     }
 }
+
+#[test]
+fn test_execute_many_constraint_violation_rolls_back_and_returns_err() {
+    let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open pool");
+    pool.execute(
+        "CREATE TABLE uniq_items (id INTEGER PRIMARY KEY, label TEXT NOT NULL)".to_string(),
+        BoundParams::Empty,
+    )
+    .expect("create table");
+
+    let params_seq = vec![
+        BoundParams::Positional(vec![
+            SqliteValue::Integer(1),
+            SqliteValue::Text("one".to_string()),
+        ]),
+        BoundParams::Positional(vec![
+            SqliteValue::Integer(1), // duplicate PK must error and roll back row 1
+            SqliteValue::Text("dup".to_string()),
+        ]),
+    ];
+
+    let err = pool
+        .execute_many(
+            "INSERT INTO uniq_items (id, label) VALUES (?, ?)".to_string(),
+            params_seq,
+        )
+        .expect_err("duplicate PK in execute_many must return Err");
+    assert_eq!(err.sqlstate(), Some("23505"));
+    assert!(!pool.in_transaction());
+
+    let res = pool
+        .fetch_all(
+            "SELECT count(*) FROM uniq_items".to_string(),
+            BoundParams::Empty,
+        )
+        .expect("count after rollback");
+    assert_eq!(res.rows[0][0], SqliteValue::Integer(0));
+}
+
+#[test]
+fn test_begin_mode_whitelist_and_op_id_cancellation() {
+    let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open pool");
+
+    // Whitelisted BEGIN modes succeed.
+    for mode in ["", "deferred", "IMMEDIATE", " EXCLUSIVE "] {
+        pool.begin(mode.to_string()).expect("valid begin mode");
+        assert!(pool.in_transaction());
+        pool.rollback().expect("rollback");
+        assert!(!pool.in_transaction());
+    }
+
+    // Non-whitelisted / injection attempt is rejected before touching SQLite.
+    let bad = pool.begin("IMMEDIATE; CREATE TABLE pwned(x INT)".to_string());
+    assert!(bad.is_err());
+    assert!(!pool.in_transaction());
+
+    // Pre-cancelled op_id aborts before execution.
+    let pre_op = pool.next_op_id();
+    assert!(pool.cancel_operation(pre_op));
+    let pre_res = pool.fetch_all_with_op_id(pre_op, "SELECT 42".to_string(), BoundParams::Empty);
+    assert!(pre_res.is_err());
+
+    // In-flight op_id cancellation interrupts that exact op_id.
+    let live_op = pool.next_op_id();
+    let pool_clone = Arc::clone(&pool);
+    let handle = thread::spawn(move || {
+        pool_clone.fetch_all_with_op_id(
+            live_op,
+            "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) SELECT count(*) FROM cnt"
+                .to_string(),
+            BoundParams::Empty,
+        )
+    });
+    thread::sleep(Duration::from_millis(20));
+    assert!(pool.cancel_operation(live_op));
+    assert!(handle.join().expect("join cancelled query").is_err());
+
+    // Pool close joins worker threads cleanly and rejects subsequent queries.
+    pool.close();
+    assert!(pool.is_closed());
+    assert!(
+        pool.fetch_all("SELECT 1".to_string(), BoundParams::Empty)
+            .is_err()
+    );
+}

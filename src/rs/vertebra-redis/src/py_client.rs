@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PySequence, PyTuple};
 use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr};
@@ -75,10 +76,28 @@ fn parse_streams_arg(streams_obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, St
 
 // --- Pipelines ---
 
-#[pyclass(name = "SyncRedisPipeline", module = "vertebra._redis", immutable_type)]
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(
+        name = "SyncRedisPipeline",
+        module = "vertebra._redis",
+        frozen,
+        immutable_type,
+        freelist = 128
+    )
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(
+        name = "SyncRedisPipeline",
+        module = "vertebra._redis",
+        frozen,
+        immutable_type
+    )
+)]
 pub struct SyncRedisPipeline {
     client: Arc<RedisCoreClient>,
-    commands: Vec<Vec<Vec<u8>>>,
+    commands: Mutex<Vec<Vec<Vec<u8>>>>,
     atomic: bool,
 }
 
@@ -86,7 +105,7 @@ impl SyncRedisPipeline {
     pub fn new(client: Arc<RedisCoreClient>, atomic: bool) -> Self {
         Self {
             client,
-            commands: Vec::new(),
+            commands: Mutex::new(Vec::new()),
             atomic,
         }
     }
@@ -94,17 +113,14 @@ impl SyncRedisPipeline {
 
 #[pymethods]
 impl SyncRedisPipeline {
-    pub fn execute_command(
-        mut slf: PyRefMut<'_, Self>,
-        args: Bound<'_, PyAny>,
-    ) -> PyResult<Py<Self>> {
+    pub fn execute_command(slf: PyRef<'_, Self>, args: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
         let cmd_args = py_seq_to_redis_args(&args)?;
-        slf.commands.push(cmd_args);
+        slf.commands.lock().push(cmd_args);
         Ok(slf.into())
     }
 
-    pub fn results(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let cmds = std::mem::take(&mut self.commands);
+    pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cmds = std::mem::take(&mut *self.commands.lock());
         let client = Arc::clone(&self.client);
         let atomic = self.atomic;
 
@@ -120,14 +136,28 @@ impl SyncRedisPipeline {
     }
 }
 
-#[pyclass(
-    name = "AsyncRedisPipeline",
-    module = "vertebra._redis",
-    immutable_type
+#[cfg_attr(
+    not(Py_GIL_DISABLED),
+    pyclass(
+        name = "AsyncRedisPipeline",
+        module = "vertebra._redis",
+        frozen,
+        immutable_type,
+        freelist = 128
+    )
+)]
+#[cfg_attr(
+    Py_GIL_DISABLED,
+    pyclass(
+        name = "AsyncRedisPipeline",
+        module = "vertebra._redis",
+        frozen,
+        immutable_type
+    )
 )]
 pub struct AsyncRedisPipeline {
     client: Arc<RedisCoreClient>,
-    commands: Vec<Vec<Vec<u8>>>,
+    commands: Mutex<Vec<Vec<Vec<u8>>>>,
     atomic: bool,
 }
 
@@ -135,7 +165,7 @@ impl AsyncRedisPipeline {
     pub fn new(client: Arc<RedisCoreClient>, atomic: bool) -> Self {
         Self {
             client,
-            commands: Vec::new(),
+            commands: Mutex::new(Vec::new()),
             atomic,
         }
     }
@@ -143,17 +173,14 @@ impl AsyncRedisPipeline {
 
 #[pymethods]
 impl AsyncRedisPipeline {
-    pub fn execute_command(
-        mut slf: PyRefMut<'_, Self>,
-        args: Bound<'_, PyAny>,
-    ) -> PyResult<Py<Self>> {
+    pub fn execute_command(slf: PyRef<'_, Self>, args: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
         let cmd_args = py_seq_to_redis_args(&args)?;
-        slf.commands.push(cmd_args);
+        slf.commands.lock().push(cmd_args);
         Ok(slf.into())
     }
 
-    pub fn results(&mut self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
-        let cmds = std::mem::take(&mut self.commands);
+    pub fn results(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let cmds = std::mem::take(&mut *self.commands.lock());
         let client = Arc::clone(&self.client);
         let atomic = self.atomic;
 
@@ -172,7 +199,7 @@ impl AsyncRedisPipeline {
         )
     }
 
-    pub fn submit_results(&mut self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+    pub fn submit_results(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
         self.results(py)
     }
 }
@@ -427,7 +454,7 @@ impl SyncRedisClient {
     }
 
     pub fn create_listener(&self, py: Python<'_>) -> PyResult<SyncRedisListener> {
-        SyncRedisListener::new(self.client.config.clone()).map_err(|e| e.into_pyerr(py))
+        SyncRedisListener::new(self.client.pubsub_config()).map_err(|e| e.into_pyerr(py))
     }
 
     pub fn listener(&self, py: Python<'_>) -> PyResult<SyncRedisListener> {
@@ -950,7 +977,7 @@ impl AsyncRedisClient {
     }
 
     pub fn create_listener(&self, py: Python<'_>) -> PyResult<AsyncRedisListener> {
-        AsyncRedisListener::new(self.client.config.clone()).map_err(|e| e.into_pyerr(py))
+        AsyncRedisListener::new(self.client.pubsub_config()).map_err(|e| e.into_pyerr(py))
     }
 
     pub fn listener(&self, py: Python<'_>) -> PyResult<AsyncRedisListener> {

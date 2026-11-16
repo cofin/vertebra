@@ -26,12 +26,12 @@ flowchart LR
 | **Oracle** | `oracle://` (`OracleQueueBackend`) | `SyncOracleQueueStore` / `AsyncOracleQueueStore` (`FOR UPDATE SKIP LOCKED` + TxEventQ / `DBMS_AQ` wakeups) | `vertebra-core[oracle]` (or custom `store=` / `executor=`) |
 | **Redis** | `redis://`, `rediss://`, `unix://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[redis]`, or `client=` (`RedisStreamClient`) |
 | **Valkey** | `valkey://`, `valkeys://`, `unix://` (`ValkeyQueueBackend`) | Valkey Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[valkey]`, or `client=` (`ValkeyStreamClient`) |
-| **Cloud Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` (hash-sharded keys + interactive `ReadWrite` `FOR UPDATE` claims + dead-letter table) | `vertebra-core[spanner]` (or custom `store=` / `executor=`) |
+| **Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` (hash-sharded keys + interactive `ReadWrite` `FOR UPDATE` claims + dead-letter table) | `vertebra-core[spanner]` (or custom `store=` / `executor=`) |
 
 `PostgreSQLQueueBackend`, `OracleQueueBackend`, and `SpannerQueueBackend` automatically construct `SyncPostgresQueueStore` / `AsyncPostgresQueueStore`, `SyncOracleQueueStore` / `AsyncOracleQueueStore`, and `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` from configured drivers or DSNs (`QueueBackendSettings`), raising `MissingDependencyError` when `vertebra-core[postgres]`, `vertebra-core[oracle]`, or `vertebra-core[spanner]` is not installed. `RedisQueueBackend` and `ValkeyQueueBackend` run directly on `vertebra-core[redis]` and `vertebra-core[valkey]` across both async (`enqueue`) and sync (`enqueue_sync`) producers.
 
-!!! note "Cloud Spanner Wakeup & TTL Compaction Notes"
-    Cloud Spanner has no low-latency `LISTEN/NOTIFY` push channel, so `SpannerQueueBackend` wakes idle workers via bounded adaptive polling (`poll_interval_seconds`, shortened automatically by `next_due_delay` when delayed jobs are pending). `ROW DELETION POLICY` (GoogleSQL) and `TTL INTERVAL` (Spangres) reclaim expired rows asynchronously via background Spanner storage compaction rather than synchronously at expiration time; `cleanup_on_ack=True` deletes acknowledged rows immediately.
+!!! note "Spanner Wakeup & TTL Compaction Notes"
+    Spanner has no low-latency `LISTEN/NOTIFY` push channel, so `SpannerQueueBackend` wakes idle workers via bounded adaptive polling (`poll_interval_seconds`, shortened automatically by `next_due_delay` when delayed jobs are pending). `ROW DELETION POLICY` (GoogleSQL) and `TTL INTERVAL` (Spangres) reclaim expired rows asynchronously via background Spanner storage compaction rather than synchronously at expiration time; `cleanup_on_ack=True` deletes acknowledged rows immediately.
 
 Install the optional wheel for your selected queue backend:
 

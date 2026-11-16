@@ -11,6 +11,7 @@ from sqlspec.utils.serializers import from_json, to_json
 from vertebra.db.adapters.bigquery import ObjectRef, ObjectTableConfig
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     bigquery_partition_clauses,
+    is_bigquery_table_missing,
     object_ref_to_artifact_reference,
     parse_utc_timestamp,
     positive_int_or_none,
@@ -1422,34 +1423,33 @@ class BigQuerySyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseSyncADKMemoryStor
         scope_filter: Literal["all", "user", "app"] = "all",
         embedding: Sequence[float] | None = None,
     ) -> list["StoredMemory"]:
-        """Search ADK memory entries via ``VECTOR_SEARCH`` / ``SEARCH`` with portable fallback ranking."""
+        """Search ADK memory entries via ``VECTOR_SEARCH`` or ``SEARCH``."""
         if not self._enabled:
             return []
         top_k = limit if limit is not None else self._max_results
-        with self._config.provide_session() as driver:
-            if embedding is not None:
-                vec_sql, vec_params = self.build_vector_search_sql(
-                    app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
-                )
-                vec_params["query_embedding"] = [float(x) for x in embedding]
-                try:
+        try:
+            with self._config.provide_session() as driver:
+                if embedding is not None:
+                    vec_sql, vec_params = self.build_vector_search_sql(
+                        app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
+                    )
+                    vec_params["query_embedding"] = [float(x) for x in embedding]
                     rows = [dict(row) for row in driver.select(vec_sql, vec_params)]
                     return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
-                except Exception:
-                    pass
-            if self._use_fts and query.strip():
-                fts_sql, fts_params = self.build_fts_search_sql(
-                    app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
-                )
-                try:
+                if self._use_fts and query.strip():
+                    fts_sql, fts_params = self.build_fts_search_sql(
+                        app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
+                    )
                     rows = [dict(row) for row in driver.select(fts_sql, fts_params)]
                     return _rank_memory_rows(rows, query=query, embedding=None, top_k=top_k)
-                except Exception:
-                    pass
-            cand_sql, cand_params = self._candidate_select_sql(
-                app_name=app_name, user_id=user_id, scope_filter=scope_filter
-            )
-            rows = [dict(row) for row in driver.select(cand_sql, cand_params)]
+                cand_sql, cand_params = self._candidate_select_sql(
+                    app_name=app_name, user_id=user_id, scope_filter=scope_filter
+                )
+                rows = [dict(row) for row in driver.select(cand_sql, cand_params)]
+        except Exception as exc:
+            if is_bigquery_table_missing(exc):
+                return []
+            raise
         return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
 
     def delete_entries_by_session(self, session_id: str) -> int:
@@ -1570,37 +1570,36 @@ class BigQueryAsyncADKMemoryStore(_BigQueryADKMemoryMixin, _BaseAsyncADKMemorySt
         scope_filter: Literal["all", "user", "app"] = "all",
         embedding: Sequence[float] | None = None,
     ) -> list["StoredMemory"]:
-        """Search ADK memory entries asynchronously via ``VECTOR_SEARCH`` / ``SEARCH`` with fallback."""
+        """Search ADK memory entries asynchronously via ``VECTOR_SEARCH`` or ``SEARCH``."""
         if not self._enabled:
             return []
         top_k = limit if limit is not None else self._max_results
-        async with self._config.provide_session() as driver:
-            if embedding is not None:
-                vec_sql, vec_params = self.build_vector_search_sql(
-                    app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
-                )
-                vec_params["query_embedding"] = [float(x) for x in embedding]
-                try:
+        try:
+            async with self._config.provide_session() as driver:
+                if embedding is not None:
+                    vec_sql, vec_params = self.build_vector_search_sql(
+                        app_name=app_name, user_id=user_id, scope_filter=scope_filter, top_k=top_k
+                    )
+                    vec_params["query_embedding"] = [float(x) for x in embedding]
                     raw_rows = await driver.select(vec_sql, vec_params)
                     rows = [dict(row) for row in raw_rows]
                     return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
-                except Exception:
-                    pass
-            if self._use_fts and query.strip():
-                fts_sql, fts_params = self.build_fts_search_sql(
-                    app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
-                )
-                try:
+                if self._use_fts and query.strip():
+                    fts_sql, fts_params = self.build_fts_search_sql(
+                        app_name=app_name, user_id=user_id, query=query, scope_filter=scope_filter, top_k=top_k
+                    )
                     raw_rows = await driver.select(fts_sql, fts_params)
                     rows = [dict(row) for row in raw_rows]
                     return _rank_memory_rows(rows, query=query, embedding=None, top_k=top_k)
-                except Exception:
-                    pass
-            cand_sql, cand_params = self._candidate_select_sql(
-                app_name=app_name, user_id=user_id, scope_filter=scope_filter
-            )
-            raw_rows = await driver.select(cand_sql, cand_params)
-            rows = [dict(row) for row in raw_rows]
+                cand_sql, cand_params = self._candidate_select_sql(
+                    app_name=app_name, user_id=user_id, scope_filter=scope_filter
+                )
+                raw_rows = await driver.select(cand_sql, cand_params)
+                rows = [dict(row) for row in raw_rows]
+        except Exception as exc:
+            if is_bigquery_table_missing(exc):
+                return []
+            raise
         return _rank_memory_rows(rows, query=query, embedding=embedding, top_k=top_k)
 
     async def delete_entries_by_session(self, session_id: str) -> int:

@@ -1000,7 +1000,7 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     )
     assert interleave_sql == ", INTERLEAVE IN PARENT Singers ON DELETE CASCADE"
 
-    assert SyncSpangresDialect.paramstyle == "pyformat"
+    assert SyncSpangresDialect.paramstyle == "numeric_dollar"
     assert AsyncSpangresDialect.is_async is True
 
     vec32 = Vector(dimensions=768, precision="float32", column_name="embedding")

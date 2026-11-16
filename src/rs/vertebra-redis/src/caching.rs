@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 use parking_lot::Mutex;
 
+const MAX_INVALIDATION_EVENTS: usize = 4096;
+
 #[derive(Clone, Debug)]
 struct CacheEntry {
     value: Vec<u8>,
@@ -21,6 +23,15 @@ pub struct ClientLruCache {
 struct LruCacheState {
     lru: LruCache<String, CacheEntry>,
     invalidations: VecDeque<String>,
+}
+
+impl LruCacheState {
+    fn push_invalidation(&mut self, key: String) {
+        if self.invalidations.len() >= MAX_INVALIDATION_EVENTS {
+            self.invalidations.pop_front();
+        }
+        self.invalidations.push_back(key);
+    }
 }
 
 fn current_timestamp_secs() -> f64 {
@@ -46,11 +57,11 @@ impl ClientLruCache {
         let mut state = self.inner.lock();
         if let Some(entry) = state.lru.get(key) {
             let now = current_timestamp_secs();
-            if let Some(exp) = entry.expires_at {
-                if now > exp {
-                    state.lru.pop(key);
-                    return None;
-                }
+            if let Some(exp) = entry.expires_at
+                && now >= exp
+            {
+                state.lru.pop(key);
+                return None;
             }
             return Some(entry.value.clone());
         }
@@ -77,7 +88,7 @@ impl ClientLruCache {
         let mut state = self.inner.lock();
         for key in keys {
             state.lru.pop(key);
-            state.invalidations.push_back(key.clone());
+            state.push_invalidation(key.clone());
         }
     }
 
@@ -87,7 +98,7 @@ impl ClientLruCache {
         let existing: Vec<String> = state.lru.iter().map(|(k, _)| k.clone()).collect();
         state.lru.clear();
         for k in existing {
-            state.invalidations.push_back(k);
+            state.push_invalidation(k);
         }
     }
 

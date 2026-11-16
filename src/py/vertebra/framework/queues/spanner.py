@@ -626,6 +626,8 @@ class SpannerQueueBackend:
             if row is None:
                 return None
             env = _decode_dlq_envelope(row)
+            if env.idempotency_key:
+                await self._store.release_unique_key(env.idempotency_key)
             replayed = msgspec.structs.replace(env, attempt=1, scheduled_at=None, receipt_handle=None)
             return await self.enqueue(replayed)
 

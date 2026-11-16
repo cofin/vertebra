@@ -1,7 +1,6 @@
 """Core protocol helpers, exception mapping, connection shim, and typed parameter encoding for Spanner."""
 
 import base64
-import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -52,6 +51,7 @@ __all__ = (
     "encode_spanner_parameters",
     "encode_typed_spanner_value",
     "farm_fingerprint_shard",
+    "farmhash_fingerprint64",
     "is_spanner_table_missing",
     "map_spanner_exception",
     "normalize_spanner_dialect",
@@ -251,11 +251,193 @@ def map_spanner_exception(exc: BaseException) -> Exception | None:
     return map_native_database_exception(exc) or OperationalError(message)
 
 
+_FARMHASH_MASK64: Final[int] = 0xFFFFFFFFFFFFFFFF
+_FARMHASH_K0: Final[int] = 0xC3A5C85C97CB3127
+_FARMHASH_K1: Final[int] = 0xB492B66FBE98F273
+_FARMHASH_K2: Final[int] = 0x9AE16A3B2F90404F
+
+
+def _farmhash_rot64(val: int, shift: int) -> int:
+    val &= _FARMHASH_MASK64
+    return val if shift == 0 else (((val >> shift) | (val << (64 - shift))) & _FARMHASH_MASK64)
+
+
+def _farmhash_shift_mix(val: int) -> int:
+    val &= _FARMHASH_MASK64
+    return (val ^ (val >> 47)) & _FARMHASH_MASK64
+
+
+def _farmhash_len_16(u: int, v: int, mul: int) -> int:
+    a = ((u ^ v) * mul) & _FARMHASH_MASK64
+    a ^= a >> 47
+    b = ((v ^ a) * mul) & _FARMHASH_MASK64
+    b ^= b >> 47
+    return (b * mul) & _FARMHASH_MASK64
+
+
+def _farmhash_fetch64(buf: bytes, offset: int) -> int:
+    return int.from_bytes(buf[offset : offset + 8], "little", signed=False)
+
+
+def _farmhash_fetch32(buf: bytes, offset: int) -> int:
+    return int.from_bytes(buf[offset : offset + 4], "little", signed=False)
+
+
+def _farmhash_weak_len_32(buf: bytes, offset: int, a: int, b: int) -> tuple[int, int]:
+    w = _farmhash_fetch64(buf, offset)
+    x = _farmhash_fetch64(buf, offset + 8)
+    y = _farmhash_fetch64(buf, offset + 16)
+    z = _farmhash_fetch64(buf, offset + 24)
+    a = (a + w) & _FARMHASH_MASK64
+    b = _farmhash_rot64((b + a + z) & _FARMHASH_MASK64, 21)
+    c = a
+    a = (a + x) & _FARMHASH_MASK64
+    a = (a + y) & _FARMHASH_MASK64
+    b = (b + _farmhash_rot64(a, 44)) & _FARMHASH_MASK64
+    return (a + z) & _FARMHASH_MASK64, (b + c) & _FARMHASH_MASK64
+
+
+def _farmhash_len_0_to_16(buf: bytes) -> int:
+    length = len(buf)
+    if length >= 8:
+        mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+        a = (_farmhash_fetch64(buf, 0) + _FARMHASH_K2) & _FARMHASH_MASK64
+        b = _farmhash_fetch64(buf, length - 8)
+        c = (_farmhash_rot64(b, 37) * mul + a) & _FARMHASH_MASK64
+        d = ((_farmhash_rot64(a, 25) + b) * mul) & _FARMHASH_MASK64
+        return _farmhash_len_16(c, d, mul)
+    if length >= 4:
+        mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+        a = _farmhash_fetch32(buf, 0)
+        return _farmhash_len_16((length + (a << 3)) & _FARMHASH_MASK64, _farmhash_fetch32(buf, length - 4), mul)
+    if length > 0:
+        a = buf[0]
+        b = buf[length >> 1]
+        c = buf[length - 1]
+        y = (a + (b << 8)) & 0xFFFFFFFF
+        z = (length + (c << 2)) & 0xFFFFFFFF
+        return (_farmhash_shift_mix(((y * _FARMHASH_K2) ^ (z * _FARMHASH_K0)) & _FARMHASH_MASK64) * _FARMHASH_K2) & (
+            _FARMHASH_MASK64
+        )
+    return _FARMHASH_K2
+
+
+def _farmhash_len_17_to_32(buf: bytes) -> int:
+    length = len(buf)
+    mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+    a = (_farmhash_fetch64(buf, 0) * _FARMHASH_K1) & _FARMHASH_MASK64
+    b = _farmhash_fetch64(buf, 8)
+    c = (_farmhash_fetch64(buf, length - 8) * mul) & _FARMHASH_MASK64
+    d = (_farmhash_fetch64(buf, length - 16) * _FARMHASH_K2) & _FARMHASH_MASK64
+    return _farmhash_len_16(
+        (_farmhash_rot64((a + b) & _FARMHASH_MASK64, 43) + _farmhash_rot64(c, 30) + d) & _FARMHASH_MASK64,
+        (a + _farmhash_rot64((b + _FARMHASH_K2) & _FARMHASH_MASK64, 18) + c) & _FARMHASH_MASK64,
+        mul,
+    )
+
+
+def _farmhash_len_33_to_64(buf: bytes) -> int:
+    length = len(buf)
+    mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+    a = (_farmhash_fetch64(buf, 0) * _FARMHASH_K2) & _FARMHASH_MASK64
+    b = _farmhash_fetch64(buf, 8)
+    c = (_farmhash_fetch64(buf, length - 8) * mul) & _FARMHASH_MASK64
+    d = (_farmhash_fetch64(buf, length - 16) * _FARMHASH_K2) & _FARMHASH_MASK64
+    y = (_farmhash_rot64((a + b) & _FARMHASH_MASK64, 43) + _farmhash_rot64(c, 30) + d) & _FARMHASH_MASK64
+    z = _farmhash_len_16(
+        y, (a + _farmhash_rot64((b + _FARMHASH_K2) & _FARMHASH_MASK64, 18) + c) & _FARMHASH_MASK64, mul
+    )
+    e = (_farmhash_fetch64(buf, 16) * mul) & _FARMHASH_MASK64
+    f = _farmhash_fetch64(buf, 24)
+    g = ((y + _farmhash_fetch64(buf, length - 32)) * mul) & _FARMHASH_MASK64
+    h = ((z + _farmhash_fetch64(buf, length - 24)) * mul) & _FARMHASH_MASK64
+    return _farmhash_len_16(
+        (_farmhash_rot64((e + f) & _FARMHASH_MASK64, 43) + _farmhash_rot64(g, 30) + h) & _FARMHASH_MASK64,
+        (e + _farmhash_rot64((f + a) & _FARMHASH_MASK64, 18) + g) & _FARMHASH_MASK64,
+        mul,
+    )
+
+
+def farmhash_fingerprint64(value: bytes | str) -> int:
+    """Compute Google's FarmHash ``Fingerprint64`` as a signed 64-bit integer matching ``FARM_FINGERPRINT``."""
+    buf = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+    length = len(buf)
+    if length <= 16:
+        u64 = _farmhash_len_0_to_16(buf)
+    elif length <= 32:
+        u64 = _farmhash_len_17_to_32(buf)
+    elif length <= 64:
+        u64 = _farmhash_len_33_to_64(buf)
+    else:
+        seed = 81
+        x = seed
+        y = (seed * _FARMHASH_K1 + 113) & _FARMHASH_MASK64
+        z = (_farmhash_shift_mix((y * _FARMHASH_K2 + 113) & _FARMHASH_MASK64) * _FARMHASH_K2) & _FARMHASH_MASK64
+        v0, v1 = 0, 0
+        w0, w1 = 0, 0
+        x = (x * _FARMHASH_K2 + _farmhash_fetch64(buf, 0)) & _FARMHASH_MASK64
+        end = ((length - 1) // 64) * 64
+        last64 = end + ((length - 1) & 63) - 63
+        offset = 0
+        while True:
+            x = (
+                _farmhash_rot64((x + y + v0 + _farmhash_fetch64(buf, offset + 8)) & _FARMHASH_MASK64, 37) * _FARMHASH_K1
+            ) & _FARMHASH_MASK64
+            y = (
+                _farmhash_rot64((y + v1 + _farmhash_fetch64(buf, offset + 48)) & _FARMHASH_MASK64, 42) * _FARMHASH_K1
+            ) & _FARMHASH_MASK64
+            x ^= w1
+            y = (y + v0 + _farmhash_fetch64(buf, offset + 40)) & _FARMHASH_MASK64
+            z = (_farmhash_rot64((z + w0) & _FARMHASH_MASK64, 33) * _FARMHASH_K1) & _FARMHASH_MASK64
+            v0, v1 = _farmhash_weak_len_32(
+                buf,
+                offset,
+                (v1 * _FARMHASH_K1) & _FARMHASH_MASK64,
+                (x + w0) & _FARMHASH_MASK64,
+            )
+            w0, w1 = _farmhash_weak_len_32(
+                buf,
+                offset + 32,
+                (z + w1) & _FARMHASH_MASK64,
+                (y + _farmhash_fetch64(buf, offset + 16)) & _FARMHASH_MASK64,
+            )
+            z, x = x, z
+            offset += 64
+            if offset == end:
+                break
+        mul = (_FARMHASH_K1 + ((z & 0xFF) << 1)) & _FARMHASH_MASK64
+        offset = last64
+        w0 = (w0 + ((length - 1) & 63)) & _FARMHASH_MASK64
+        v0 = (v0 + w0) & _FARMHASH_MASK64
+        w0 = (w0 + v0) & _FARMHASH_MASK64
+        x = (
+            _farmhash_rot64((x + y + v0 + _farmhash_fetch64(buf, offset + 8)) & _FARMHASH_MASK64, 37) * mul
+        ) & _FARMHASH_MASK64
+        y = (
+            _farmhash_rot64((y + v1 + _farmhash_fetch64(buf, offset + 48)) & _FARMHASH_MASK64, 42) * mul
+        ) & _FARMHASH_MASK64
+        x ^= w1
+        y = (y + v0 + _farmhash_fetch64(buf, offset + 40)) & _FARMHASH_MASK64
+        z = (_farmhash_rot64((z + w0) & _FARMHASH_MASK64, 33) * mul) & _FARMHASH_MASK64
+        v0, v1 = _farmhash_weak_len_32(buf, offset, (v1 * mul) & _FARMHASH_MASK64, (x + w0) & _FARMHASH_MASK64)
+        w0, w1 = _farmhash_weak_len_32(
+            buf,
+            offset + 32,
+            (z + w1) & _FARMHASH_MASK64,
+            (y + _farmhash_fetch64(buf, offset + 16)) & _FARMHASH_MASK64,
+        )
+        z, x = x, z
+        u64 = _farmhash_len_16(
+            (_farmhash_len_16(v0, w0, mul) + _farmhash_shift_mix(y) * _FARMHASH_K0 + z) & _FARMHASH_MASK64,
+            (_farmhash_len_16(v1, w1, mul) + x) & _FARMHASH_MASK64,
+            mul,
+        )
+    return u64 - 0x10000000000000000 if u64 >= 0x8000000000000000 else u64
+
+
 def farm_fingerprint_shard(value: str, shard_count: int = 16) -> int:
     """Compute a deterministic non-negative shard index matching ``MOD(ABS(FARM_FINGERPRINT(...)), N)``."""
-    digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
-    raw = int.from_bytes(digest, "little", signed=False)
-    return raw % max(1, int(shard_count))
+    return abs(farmhash_fingerprint64(value)) % max(1, int(shard_count))
 
 
 def parse_utc_timestamp(value: Any) -> datetime:

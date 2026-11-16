@@ -461,7 +461,7 @@ def _row_to_stored_memory(row: Any, *, deserializer: Any = None) -> StoredMemory
     """Decode a PostgreSQL memory row mapping into a `StoredMemory` dictionary."""
     raw_content = pg_row_value(row, "content_json", 8)
     raw_meta = pg_row_value(row, "metadata_json", 10)
-    raw_embedding = pg_row_value(row, "embedding", 7)
+    raw_embedding = pg_row_value(row, "embedding", 12)
     decoded_embedding: list[float] | None = None
     if raw_embedding is not None:
         if isinstance(raw_embedding, str):

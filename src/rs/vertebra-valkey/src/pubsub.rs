@@ -1,21 +1,23 @@
 //! Dedicated Valkey Pub/Sub (`SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`) listeners.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use parking_lot::Mutex as SyncMutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify};
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, block_on_db, spawn_rust_db_task_with_attr_and_cancel,
 };
 
 use crate::cluster::{ClusterTopology, is_read_only_command};
 use crate::codec::{RespValue, encode_owned_command, try_decode_frame};
-use crate::config::{ValkeyConfigInner, ValkeyTarget};
+use crate::config::{ValkeyConfigInner, ValkeyTarget, await_pending_python_token};
 use crate::error::ValkeyError;
 use crate::sentinel::{
     build_get_master_addr_cmd, parse_get_master_addr_reply, parse_sentinel_addr,
@@ -23,6 +25,9 @@ use crate::sentinel::{
 };
 use crate::transport::{RespConnection, ValkeyStream};
 use crate::{VALKEY_COMPLETION_DRAINER_ATTR, valkey_hash_slot};
+
+/// Maximum buffered Pub/Sub messages before oldest-drop backpressure engages.
+pub const MAX_PUBSUB_MESSAGES: usize = 4096;
 
 /// Decoded Pub/Sub message delivered by [`ValkeyListenerCore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +53,62 @@ impl ValkeyPubSubMessage {
     }
 }
 
+/// Drop-restoring guard that pushes an undelivered [`ValkeyPubSubMessage`] back to the front of
+/// the listener queue if the awaiting Python `Future` is cancelled before `map_ok` runs.
+pub struct PendingDeliveryGuard {
+    messages: Arc<SyncMutex<VecDeque<ValkeyPubSubMessage>>>,
+    msg_notify: Arc<Notify>,
+    msg: Option<ValkeyPubSubMessage>,
+}
+
+impl PendingDeliveryGuard {
+    #[must_use]
+    pub fn new(
+        messages: Arc<SyncMutex<VecDeque<ValkeyPubSubMessage>>>,
+        msg_notify: Arc<Notify>,
+        msg: ValkeyPubSubMessage,
+    ) -> Self {
+        Self {
+            messages,
+            msg_notify,
+            msg: Some(msg),
+        }
+    }
+
+    /// Take ownership of the guarded message, disarming drop restoration.
+    pub fn into_message(mut self) -> ValkeyPubSubMessage {
+        self.msg
+            .take()
+            .expect("PendingDeliveryGuard consumed exactly once")
+    }
+
+    /// Convert into a Python dictionary and disarm drop restoration only after conversion succeeds.
+    pub fn into_py_dict(mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dict = self
+            .msg
+            .as_ref()
+            .expect("PendingDeliveryGuard holds a message")
+            .to_py_dict(py)?;
+        self.msg = None;
+        Ok(dict)
+    }
+}
+
+impl Drop for PendingDeliveryGuard {
+    fn drop(&mut self) {
+        if let Some(msg) = self.msg.take() {
+            {
+                let mut q = self.messages.lock();
+                if q.len() >= MAX_PUBSUB_MESSAGES {
+                    let _ = q.pop_back();
+                }
+                q.push_front(msg);
+            }
+            self.msg_notify.notify_one();
+        }
+    }
+}
+
 struct ListenerSession {
     writer: WriteHalf<ValkeyStream>,
     reader_task: tokio::task::JoinHandle<()>,
@@ -57,8 +118,9 @@ struct ListenerSession {
 pub struct ValkeyListenerCore {
     config: Arc<ValkeyConfigInner>,
     session: Mutex<Option<ListenerSession>>,
-    msg_rx: Mutex<mpsc::UnboundedReceiver<ValkeyPubSubMessage>>,
-    msg_tx: mpsc::UnboundedSender<ValkeyPubSubMessage>,
+    reader_abort: SyncMutex<Option<tokio::task::AbortHandle>>,
+    messages: Arc<SyncMutex<VecDeque<ValkeyPubSubMessage>>>,
+    msg_notify: Arc<Notify>,
     ack_notify: Arc<Notify>,
     close_notify: Arc<Notify>,
     closed: Arc<AtomicBool>,
@@ -68,12 +130,12 @@ impl ValkeyListenerCore {
     /// Create a disconnected Pub/Sub listener handle.
     #[must_use]
     pub fn new(config: Arc<ValkeyConfigInner>) -> Arc<Self> {
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             config,
             session: Mutex::new(None),
-            msg_rx: Mutex::new(msg_rx),
-            msg_tx,
+            reader_abort: SyncMutex::new(None),
+            messages: Arc::new(SyncMutex::new(VecDeque::new())),
+            msg_notify: Arc::new(Notify::new()),
             ack_notify: Arc::new(Notify::new()),
             close_notify: Arc::new(Notify::new()),
             closed: Arc::new(AtomicBool::new(false)),
@@ -81,8 +143,27 @@ impl ValkeyListenerCore {
     }
 
     #[must_use]
+    pub fn config(&self) -> &Arc<ValkeyConfigInner> {
+        &self.config
+    }
+
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn abort_sync(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Some(abort) = self.reader_abort.lock().take() {
+            abort.abort();
+        }
+        self.ack_notify.notify_waiters();
+        self.close_notify.notify_waiters();
+        self.msg_notify.notify_waiters();
+    }
+
+    fn pop_message(&self) -> Option<ValkeyPubSubMessage> {
+        self.messages.lock().pop_front()
     }
 
     async fn ensure_connected(&self, slot_hint: Option<u16>) -> Result<(), ValkeyError> {
@@ -97,7 +178,8 @@ impl ValkeyListenerCore {
         let target = self.resolve_listener_target(slot_hint).await?;
         let conn = RespConnection::establish(&target, &self.config, false, true, None).await?;
         let (reader, writer, initial_buf) = conn.into_split();
-        let msg_tx = self.msg_tx.clone();
+        let messages = Arc::clone(&self.messages);
+        let msg_notify = Arc::clone(&self.msg_notify);
         let ack_notify = Arc::clone(&self.ack_notify);
         let close_notify = Arc::clone(&self.close_notify);
         let closed = Arc::clone(&self.closed);
@@ -106,13 +188,21 @@ impl ValkeyListenerCore {
             run_listener_reader(
                 reader,
                 initial_buf,
-                msg_tx,
+                messages,
+                msg_notify,
                 ack_notify,
                 close_notify,
                 closed,
             )
             .await;
         });
+        *self.reader_abort.lock() = Some(reader_task.abort_handle());
+        if self.is_closed() {
+            if let Some(abort) = self.reader_abort.lock().take() {
+                abort.abort();
+            }
+            return Err(ValkeyError::interface("Valkey listener is closed"));
+        }
 
         *guard = Some(ListenerSession {
             writer,
@@ -344,42 +434,76 @@ impl ValkeyListenerCore {
         &self,
         timeout_ms: Option<u64>,
     ) -> Result<Option<ValkeyPubSubMessage>, ValkeyError> {
-        let mut rx = self.msg_rx.lock().await;
-        if let Ok(msg) = rx.try_recv() {
-            return Ok(Some(msg));
-        }
-        if self.is_closed() {
-            return Ok(None);
-        }
+        let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+        loop {
+            let msg_notified = self.msg_notify.notified();
+            let close_notified = self.close_notify.notified();
+            tokio::pin!(msg_notified);
+            tokio::pin!(close_notified);
+            msg_notified.as_mut().enable();
+            close_notified.as_mut().enable();
 
-        match timeout_ms {
-            Some(ms) => {
-                let sleep_fut = tokio::time::sleep(Duration::from_millis(ms));
-                tokio::pin!(sleep_fut);
-                tokio::select! {
-                    maybe_msg = rx.recv() => Ok(maybe_msg),
-                    _ = self.close_notify.notified() => Ok(rx.try_recv().ok()),
-                    _ = &mut sleep_fut => Ok(None),
-                }
+            if let Some(msg) = self.pop_message() {
+                return Ok(Some(msg));
             }
-            None => {
-                tokio::select! {
-                    maybe_msg = rx.recv() => Ok(maybe_msg),
-                    _ = self.close_notify.notified() => Ok(rx.try_recv().ok()),
+            if self.is_closed() {
+                return Ok(None);
+            }
+
+            match deadline {
+                Some(dl) => {
+                    let now = Instant::now();
+                    if now >= dl {
+                        return Ok(self.pop_message());
+                    }
+                    let sleep_fut = tokio::time::sleep(dl - now);
+                    tokio::pin!(sleep_fut);
+                    tokio::select! {
+                        () = &mut msg_notified => {}
+                        () = &mut close_notified => {
+                            return Ok(self.pop_message());
+                        }
+                        () = &mut sleep_fut => {
+                            return Ok(self.pop_message());
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        () = &mut msg_notified => {}
+                        () = &mut close_notified => {
+                            return Ok(self.pop_message());
+                        }
+                    }
                 }
             }
         }
     }
 
+    /// Wait for the next delivered message wrapped in a [`PendingDeliveryGuard`].
+    pub async fn next_message_guarded(
+        &self,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<PendingDeliveryGuard>, ValkeyError> {
+        let maybe_msg = self.next_message(timeout_ms).await?;
+        Ok(maybe_msg.map(|msg| {
+            PendingDeliveryGuard::new(
+                Arc::clone(&self.messages),
+                Arc::clone(&self.msg_notify),
+                msg,
+            )
+        }))
+    }
+
     /// Drain currently buffered messages without blocking.
     pub async fn drain_messages(&self, max_messages: usize) -> Vec<ValkeyPubSubMessage> {
         let limit = max_messages.max(1);
-        let mut rx = self.msg_rx.lock().await;
-        let mut out = Vec::new();
+        let mut q = self.messages.lock();
+        let mut out = Vec::with_capacity(q.len().min(limit));
         while out.len() < limit {
-            match rx.try_recv() {
-                Ok(msg) => out.push(msg),
-                Err(_) => break,
+            match q.pop_front() {
+                Some(msg) => out.push(msg),
+                None => break,
             }
         }
         out
@@ -387,7 +511,7 @@ impl ValkeyListenerCore {
 
     /// Close the listener, terminate its socket/reader task, and unblock waiting callers.
     pub async fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.abort_sync();
         let sess_opt = self.session.lock().await.take();
         if let Some(mut sess) = sess_opt {
             let _ = sess.writer.shutdown().await;
@@ -395,13 +519,21 @@ impl ValkeyListenerCore {
         }
         self.ack_notify.notify_waiters();
         self.close_notify.notify_waiters();
+        self.msg_notify.notify_waiters();
+    }
+}
+
+impl Drop for ValkeyListenerCore {
+    fn drop(&mut self) {
+        self.abort_sync();
     }
 }
 
 async fn run_listener_reader(
     mut reader: ReadHalf<ValkeyStream>,
     mut read_buf: BytesMut,
-    msg_tx: mpsc::UnboundedSender<ValkeyPubSubMessage>,
+    messages: Arc<SyncMutex<VecDeque<ValkeyPubSubMessage>>>,
+    msg_notify: Arc<Notify>,
     ack_notify: Arc<Notify>,
     close_notify: Arc<Notify>,
     closed: Arc<AtomicBool>,
@@ -411,16 +543,22 @@ async fn run_listener_reader(
         loop {
             match try_decode_frame(&mut read_buf) {
                 Ok(Some(frame)) => {
-                    if let Some(parsed) = parse_pubsub_frame(frame, &ack_notify)
-                        && msg_tx.send(parsed).is_err()
-                    {
-                        closed.store(true, Ordering::Release);
-                        close_notify.notify_waiters();
-                        return;
+                    if let Some(parsed) = parse_pubsub_frame(frame, &ack_notify) {
+                        {
+                            let mut q = messages.lock();
+                            if q.len() >= MAX_PUBSUB_MESSAGES {
+                                let _ = q.pop_front();
+                            }
+                            q.push_back(parsed);
+                        }
+                        msg_notify.notify_one();
                     }
                 }
                 Ok(None) => break,
                 Err(_) => {
+                    closed.store(true, Ordering::Release);
+                    ack_notify.notify_waiters();
+                    msg_notify.notify_waiters();
                     close_notify.notify_waiters();
                     return;
                 }
@@ -428,12 +566,17 @@ async fn run_listener_reader(
         }
 
         if closed.load(Ordering::Acquire) {
+            ack_notify.notify_waiters();
+            msg_notify.notify_waiters();
             close_notify.notify_waiters();
             return;
         }
 
         match reader.read(&mut scratch).await {
             Ok(0) | Err(_) => {
+                closed.store(true, Ordering::Release);
+                ack_notify.notify_waiters();
+                msg_notify.notify_waiters();
                 close_notify.notify_waiters();
                 return;
             }
@@ -544,6 +687,10 @@ impl SyncValkeyListener {
     #[pyo3(signature = (*channels))]
     pub fn subscribe(&self, py: Python<'_>, channels: &Bound<'_, PyAny>) -> PyResult<()> {
         let chs = extract_string_args(channels)?;
+        self.core
+            .config()
+            .ensure_python_token_sync(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         py.detach(|| block_on_db(async move { core.subscribe(&chs).await }))
             .map_err(|e| e.to_py_err(py))
@@ -552,6 +699,10 @@ impl SyncValkeyListener {
     #[pyo3(signature = (*patterns))]
     pub fn psubscribe(&self, py: Python<'_>, patterns: &Bound<'_, PyAny>) -> PyResult<()> {
         let pats = extract_string_args(patterns)?;
+        self.core
+            .config()
+            .ensure_python_token_sync(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         py.detach(|| block_on_db(async move { core.psubscribe(&pats).await }))
             .map_err(|e| e.to_py_err(py))
@@ -560,6 +711,10 @@ impl SyncValkeyListener {
     #[pyo3(signature = (*channels))]
     pub fn ssubscribe(&self, py: Python<'_>, channels: &Bound<'_, PyAny>) -> PyResult<()> {
         let chs = extract_string_args(channels)?;
+        self.core
+            .config()
+            .ensure_python_token_sync(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         py.detach(|| block_on_db(async move { core.ssubscribe(&chs).await }))
             .map_err(|e| e.to_py_err(py))
@@ -636,6 +791,12 @@ impl SyncValkeyListener {
     }
 }
 
+impl Drop for SyncValkeyListener {
+    fn drop(&mut self) {
+        self.core.abort_sync();
+    }
+}
+
 /// Asynchronous Valkey Pub/Sub listener backed by `DbCompletionDrainer`.
 #[cfg_attr(
     not(Py_GIL_DISABLED),
@@ -671,10 +832,20 @@ impl AsyncValkeyListener {
         channels: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let chs = extract_string_args(channels)?;
+        let pending_tok = self
+            .core
+            .config()
+            .prepare_python_token_async(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
-            async move { core.subscribe(&chs).await },
+            async move {
+                if let Some(rx) = pending_tok {
+                    await_pending_python_token(rx).await?;
+                }
+                core.subscribe(&chs).await
+            },
             |py, ()| Ok(py.None()),
             |py, e| e.to_py_err(py),
             || {},
@@ -689,10 +860,20 @@ impl AsyncValkeyListener {
         patterns: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let pats = extract_string_args(patterns)?;
+        let pending_tok = self
+            .core
+            .config()
+            .prepare_python_token_async(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
-            async move { core.psubscribe(&pats).await },
+            async move {
+                if let Some(rx) = pending_tok {
+                    await_pending_python_token(rx).await?;
+                }
+                core.psubscribe(&pats).await
+            },
             |py, ()| Ok(py.None()),
             |py, e| e.to_py_err(py),
             || {},
@@ -707,10 +888,20 @@ impl AsyncValkeyListener {
         channels: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let chs = extract_string_args(channels)?;
+        let pending_tok = self
+            .core
+            .config()
+            .prepare_python_token_async(py, false)
+            .map_err(|e| e.to_py_err(py))?;
         let core = Arc::clone(&self.core);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
-            async move { core.ssubscribe(&chs).await },
+            async move {
+                if let Some(rx) = pending_tok {
+                    await_pending_python_token(rx).await?;
+                }
+                core.ssubscribe(&chs).await
+            },
             |py, ()| Ok(py.None()),
             |py, e| e.to_py_err(py),
             || {},
@@ -779,15 +970,26 @@ impl AsyncValkeyListener {
         timeout_ms: Option<u64>,
     ) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {
         let core = Arc::clone(&self.core);
+        let cancel_notify = Arc::new(Notify::new());
+        let cancel_wait = Arc::clone(&cancel_notify);
+        let cancel_trigger = Arc::clone(&cancel_notify);
         spawn_rust_db_task_with_attr_and_cancel(
             py,
-            async move { core.next_message(timeout_ms).await },
-            |py, msg_opt| match msg_opt {
-                Some(m) => m.to_py_dict(py),
+            async move {
+                tokio::select! {
+                    biased;
+                    () = cancel_wait.notified() => {
+                        Err(ValkeyError::cancelled("Valkey next_message cancelled"))
+                    }
+                    res = core.next_message_guarded(timeout_ms) => res,
+                }
+            },
+            |py, guard_opt| match guard_opt {
+                Some(guard) => guard.into_py_dict(py),
                 None => Ok(py.None()),
             },
             |py, e| e.to_py_err(py),
-            || {},
+            move || cancel_trigger.notify_one(),
             VALKEY_COMPLETION_DRAINER_ATTR,
         )
     }
@@ -857,5 +1059,11 @@ impl AsyncValkeyListener {
             || {},
             VALKEY_COMPLETION_DRAINER_ATTR,
         )
+    }
+}
+
+impl Drop for AsyncValkeyListener {
+    fn drop(&mut self) {
+        self.core.abort_sync();
     }
 }

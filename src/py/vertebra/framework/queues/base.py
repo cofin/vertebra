@@ -9,13 +9,17 @@ import random
 import time
 import urllib.parse
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
 
 import msgspec
 
+from vertebra.db.driver.capabilities import QueueEntry
+from vertebra.framework.di import inspect_callable_bindings
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.module_loader import import_string
+from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -625,9 +629,6 @@ class QueueService:
             return cast("TaskEnvelope", sync_fn(envelope))
         store = getattr(self._backend, "sync_store", None) or getattr(self._backend, "store", None)
         if store is not None and hasattr(store, "enqueue") and callable(store.enqueue):
-            from vertebra.db.driver.capabilities import QueueEntry
-            from vertebra.utils.serializers import encode_json_bytes
-
             sched_ms = int(envelope.scheduled_at * 1000) if envelope.scheduled_at is not None else None
             headers_dict: dict[str, str] = {}
             if envelope.idempotency_key:
@@ -704,8 +705,6 @@ class QueueService:
                 async with eff_container.scope(
                     extra_context={"envelope": envelope, "task_id": envelope.task_id}
                 ) as scope:
-                    from vertebra.framework.di import inspect_callable_bindings
-
                     bindings = inspect_callable_bindings(tdef.fn)
                     resolved_kwargs = dict(envelope.kwargs)
                     num_pos = len(envelope.args)
@@ -799,11 +798,8 @@ class QueueService:
         day_of_week: int = 0,
     ) -> list[Any]:
         """Enqueue and execute all registered cron tasks matching the specified timestamp components."""
-        from datetime import UTC, datetime
-
-        from vertebra.framework.queues.scheduler import CronScheduler
-
-        sched = self._scheduler or CronScheduler(self)
+        scheduler_cls = import_string("vertebra.framework.queues.scheduler.CronScheduler")
+        sched = self._scheduler or scheduler_cls(self)
         target_dt = datetime(2026, month, day_of_month, hour, minute, 0, tzinfo=UTC)
         count = await sched.tick(now=target_dt)
         if count == 0:
@@ -820,9 +816,8 @@ class QueueService:
         if isinstance(config, QueueBackendSettings):
             kind = config.kind.lower()
             if kind == "shm":
-                from vertebra.framework.queues.backends import SHMQueueBackend
-
-                return SHMQueueBackend(config=config)
+                shm_cls = import_string("vertebra.framework.queues.backends.SHMQueueBackend")
+                return cast("QueueBackend", shm_cls(config=config))
             if kind == "memory":
                 return MemoryQueueBackend(QueueConfig(backend_url="memory://"))
             if kind in ("redis",):
@@ -848,9 +843,8 @@ class QueueService:
         if scheme in ("", "memory"):
             return MemoryQueueBackend(config)
         if scheme in ("shm",):
-            from vertebra.framework.queues.backends import SHMQueueBackend
-
-            return SHMQueueBackend(config=config)
+            shm_cls = import_string("vertebra.framework.queues.backends.SHMQueueBackend")
+            return cast("QueueBackend", shm_cls(config=config))
         if scheme in ("redis", "rediss"):
             backend_cls = import_string("vertebra.framework.queues.redis.RedisQueueBackend")
             return cast("QueueBackend", backend_cls(config))

@@ -87,7 +87,15 @@ pub async fn xreadgroup(
     for (_, id) in streams {
         cmd.arg(id.as_str());
     }
-    client.execute_cmd(&cmd).await
+    let timeout = match block_ms {
+        None => Some(std::time::Duration::from_secs(2)),
+        Some(0) => None,
+        Some(ms) => Some(
+            std::time::Duration::from_millis(ms as u64)
+                .saturating_add(std::time::Duration::from_secs(2)),
+        ),
+    };
+    client.execute_cmd_with_timeout(&cmd, timeout).await
 }
 
 /// Acknowledge processed stream entries.

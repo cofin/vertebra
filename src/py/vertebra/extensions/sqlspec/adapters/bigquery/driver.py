@@ -206,8 +206,9 @@ class BigQuerySyncDriver(BaseSyncDriver):
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch against BigQuery."""
-        sql, _ = self._compile_for_native(statement)
-        param_sets = encode_typed_bigquery_many(statement.parameters)
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, prepared = self._compiled_sql(statement, effective_config)
+        param_sets = encode_typed_bigquery_many(prepared)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         execute_many_fn = getattr(cursor, "execute_many", None)
@@ -289,9 +290,12 @@ class BigQuerySyncDriver(BaseSyncDriver):
             if not prepared.is_processed:
                 prepared.compile()
             sql, params = self._compile_for_native(prepared)
-            arrow_cursor = native_arrow_fn(sql, params, **native_kwargs)
-            arrow_data, num_rows = _arrow_cursor_to_pyarrow(arrow_cursor, return_format)
-            return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
+            exc_handler = self.handle_database_exceptions()
+            with exc_handler:
+                arrow_cursor = native_arrow_fn(sql, params, **native_kwargs)
+                arrow_data, num_rows = _arrow_cursor_to_pyarrow(arrow_cursor, return_format)
+                return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
+            self._check_pending_exception(exc_handler)
         return super().select_to_arrow(
             statement,
             *parameters,
@@ -343,27 +347,31 @@ class BigQuerySyncDriver(BaseSyncDriver):
                 telemetry=telemetry,
             )
         write_disposition = "WRITE_TRUNCATE" if overwrite else "WRITE_APPEND"
-        loaded = load_fn(
-            table,
-            payload,
-            mode="PENDING",
-            write_disposition=write_disposition,
-        )
-        rows_processed = int(loaded) if isinstance(loaded, int) else inferred_rows
-        return self._storage_job(
-            {
-                "destination": table,
-                "rows_processed": rows_processed,
-                "bytes_processed": len(payload),
-                "format": "arrow_ipc",
-                "extra": {
-                    "mode": "PENDING",
-                    "write_disposition": write_disposition,
+        exc_handler = self.handle_database_exceptions()
+        with exc_handler:
+            loaded = load_fn(
+                table,
+                payload,
+                mode="PENDING",
+                write_disposition=write_disposition,
+            )
+            rows_processed = int(loaded) if isinstance(loaded, int) else inferred_rows
+            return self._storage_job(
+                {
+                    "destination": table,
+                    "rows_processed": rows_processed,
+                    "bytes_processed": len(payload),
+                    "format": "arrow_ipc",
+                    "extra": {
+                        "mode": "PENDING",
+                        "write_disposition": write_disposition,
+                    },
                 },
-            },
-            telemetry,
-            status="completed",
-        )
+                telemetry,
+                status="completed",
+            )
+        self._check_pending_exception(exc_handler)
+        return self._storage_job({"destination": table}, telemetry, status="failed")
 
     def dry_run(
         self,
@@ -380,7 +388,11 @@ class BigQuerySyncDriver(BaseSyncDriver):
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
         sql, params = self._compile_for_native(sql_obj)
-        return self.connection.dry_run(sql, params)
+        exc_handler = self.handle_database_exceptions()
+        with exc_handler:
+            return self.connection.dry_run(sql, params)
+        self._check_pending_exception(exc_handler)
+        return None
 
     def execute_stack(
         self,
@@ -510,8 +522,9 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
         """Execute a parameterized batch asynchronously against BigQuery."""
-        sql, _ = self._compile_for_native(statement)
-        param_sets = encode_typed_bigquery_many(statement.parameters)
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        sql, prepared = self._compiled_sql(statement, effective_config)
+        param_sets = encode_typed_bigquery_many(prepared)
         if not param_sets:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         execute_many_fn = getattr(cursor, "execute_many", None)
@@ -593,9 +606,12 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             if not prepared.is_processed:
                 prepared.compile()
             sql, params = self._compile_for_native(prepared)
-            arrow_cursor = await native_arrow_fn(sql, params, **native_kwargs)
-            arrow_data, num_rows = _arrow_cursor_to_pyarrow(arrow_cursor, return_format)
-            return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
+            exc_handler = self.handle_database_exceptions()
+            async with exc_handler:
+                arrow_cursor = await native_arrow_fn(sql, params, **native_kwargs)
+                arrow_data, num_rows = _arrow_cursor_to_pyarrow(arrow_cursor, return_format)
+                return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
+            self._check_pending_exception(exc_handler)
         return await super().select_to_arrow(
             statement,
             *parameters,
@@ -647,27 +663,31 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
                 telemetry=telemetry,
             )
         write_disposition = "WRITE_TRUNCATE" if overwrite else "WRITE_APPEND"
-        loaded = await load_fn(
-            table,
-            payload,
-            mode="PENDING",
-            write_disposition=write_disposition,
-        )
-        rows_processed = int(loaded) if isinstance(loaded, int) else inferred_rows
-        return self._storage_job(
-            {
-                "destination": table,
-                "rows_processed": rows_processed,
-                "bytes_processed": len(payload),
-                "format": "arrow_ipc",
-                "extra": {
-                    "mode": "PENDING",
-                    "write_disposition": write_disposition,
+        exc_handler = self.handle_database_exceptions()
+        async with exc_handler:
+            loaded = await load_fn(
+                table,
+                payload,
+                mode="PENDING",
+                write_disposition=write_disposition,
+            )
+            rows_processed = int(loaded) if isinstance(loaded, int) else inferred_rows
+            return self._storage_job(
+                {
+                    "destination": table,
+                    "rows_processed": rows_processed,
+                    "bytes_processed": len(payload),
+                    "format": "arrow_ipc",
+                    "extra": {
+                        "mode": "PENDING",
+                        "write_disposition": write_disposition,
+                    },
                 },
-            },
-            telemetry,
-            status="completed",
-        )
+                telemetry,
+                status="completed",
+            )
+        self._check_pending_exception(exc_handler)
+        return self._storage_job({"destination": table}, telemetry, status="failed")
 
     async def execute_stack(
         self,
@@ -695,7 +715,11 @@ class BigQueryAsyncDriver(BaseAsyncDriver):
             else SQL(statement, parameters, statement_config=self.statement_config)
         )
         sql, params = self._compile_for_native(sql_obj)
-        return await self.connection.dry_run(sql, params)
+        exc_handler = self.handle_database_exceptions()
+        async with exc_handler:
+            return await self.connection.dry_run(sql, params)
+        self._check_pending_exception(exc_handler)
+        return None
 
     async def create_object_table(self, config: ObjectTableConfig, *, if_not_exists: bool = True) -> None:
         """Create a BigQuery Object Table asynchronously referencing Cloud Storage objects."""

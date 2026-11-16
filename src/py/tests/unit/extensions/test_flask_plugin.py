@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import collections
+import fnmatch
+import queue
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -13,10 +16,13 @@ import pytest
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
 from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.db.driver import NotificationEvent, SyncNotificationSource
 from vertebra.extensions.flask import (
     AsyncAPIDocsConfig,
     AsyncObjectStore,
     AsyncStorageRegistry,
+    CacheBackend,
+    ChannelsBackend,
     FastPath,
     FlaskCachingBackend,
     JWTAuthGuard,
@@ -43,11 +49,22 @@ from vertebra.extensions.flask import (
     vertebra_route,
 )
 from vertebra.extensions.flask.fastpath import CompiledRoute as FlaskCompiledRoute
+from vertebra.framework.queues import (
+    CronLease,
+    DeadLetterEntry,
+    QueueService,
+    TaskLane,
+)
+from vertebra.framework.queues import (
+    QueueBackend as QueueBackendProtocol,
+)
+from vertebra.framework.queues import TaskEnvelope as CoreTaskEnvelope
+from vertebra.server._channels import ChannelEnvelope
 from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath
-from vertebra.utils.serializers import decode_json
+from vertebra.utils.serializers import decode_json, encode_msgpack_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Sequence
 
 
 class CreateOrderPayload(msgspec.Struct, frozen=True, gc=False):
@@ -499,3 +516,230 @@ def test_flask_compiled_route_inherits_base_and_attaches_fastpath() -> None:
     plugin = VertebraPlugin(app, config=VertebraConfig(offload_middlewares=False))
     assert plugin.fastpath is not None
     assert get_attached_fastpath(app) is plugin.fastpath
+
+
+@pytest.mark.anyio
+async def test_flask_channels_sync_notification_source_local_and_remote_fanin() -> None:
+    """Flask ChannelsBackend pumps SyncNotificationSource into ChannelBus without dropping local messages."""
+
+    class _EchoSyncNotificationSource(SyncNotificationSource):
+        def __init__(self) -> None:
+            self.subscribed: set[str] = set()
+            self.events: queue.Queue[NotificationEvent | None] = queue.Queue()
+            self.closed = False
+
+        def publish(self, channel: str, payload: bytes | str) -> None:
+            raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+            self.events.put(NotificationEvent(channel=channel, payload=raw, sender_id=None, metadata={}))
+
+        def subscribe(self, channels: Sequence[str]) -> None:
+            self.subscribed.update(channels)
+
+        def unsubscribe(self, channels: Sequence[str] = ()) -> None:
+            for ch in channels:
+                self.subscribed.discard(ch)
+
+        def listen(self) -> Iterator[NotificationEvent]:
+            while not self.closed:
+                item = self.events.get()
+                if item is None:
+                    break
+                yield item
+
+        def close(self) -> None:
+            self.closed = True
+            self.events.put(None)
+
+    source = _EchoSyncNotificationSource()
+    channels = ChannelsBackend(
+        history=8,
+        sync_notification_source=source,
+        node_id="node-a",
+    )
+    try:
+        stream = channels.listen(["orders"])
+        channels.publish("orders", b"local-order-1")
+        remote_envelope = b"vtb:env:" + encode_msgpack_bytes(
+            ChannelEnvelope(origin_node_id="node-b", channel="orders", payload=b"remote-order-2")
+        )
+        source.events.put(NotificationEvent(channel="orders", payload=remote_envelope, sender_id="node-b", metadata={}))
+
+        first = next(stream)
+        second = next(stream)
+        assert (first.channel, first.data) == ("orders", b"local-order-1")
+        assert (second.channel, second.data) == ("orders", b"remote-order-2")
+        history = await channels.bus.get_history("orders")
+        assert history == [b"local-order-1", b"remote-order-2"]
+    finally:
+        channels.close()
+        assert source.closed is True
+
+
+@pytest.mark.anyio
+async def test_flask_cache_backend_remote_client_sync_and_clear_prefix() -> None:
+    """Flask CacheBackend routes sync get/set/delete/clear and aclear through remote_client."""
+
+    class _RemoteCacheClient:
+        def __init__(self) -> None:
+            self.data: dict[str, bytes] = {"other_ns:keep": b'"untouched"'}
+            self.ttls: dict[str, int | None] = {}
+
+        def get(self, key: str) -> bytes | None:
+            return self.data.get(key)
+
+        def set(self, key: str, value: bytes, *, ex: int | None = None) -> None:
+            self.data[key] = bytes(value)
+            self.ttls[key] = ex
+
+        def delete(self, key: str) -> int:
+            return 1 if self.data.pop(key, None) is not None else 0
+
+        def scan(self, cursor: int = 0, *, match: str | None = None) -> tuple[int, list[str]]:
+            _ = cursor
+            keys = [k for k in self.data if match is None or fnmatch.fnmatch(k, match)]
+            return 0, keys
+
+        def unlink(self, *keys: str) -> int:
+            removed = 0
+            for key in keys:
+                if self.data.pop(key, None) is not None:
+                    removed += 1
+            return removed
+
+    remote = _RemoteCacheClient()
+    writer = CacheBackend(default_timeout=45, key_prefix="flask_test:", remote_client=remote)
+    reader = CacheBackend(default_timeout=45, key_prefix="flask_test:", remote_client=remote)
+
+    assert writer.set("alpha", {"v": 10}) is True
+    assert remote.ttls["flask_test:alpha"] == 45
+    assert reader.get("alpha") == {"v": 10}
+    assert reader.delete("alpha") is True
+    assert reader.get("alpha") is None
+
+    writer.set("beta", [1, 2, 3])
+    writer.set("gamma", "ok")
+    assert writer.clear() is True
+    assert reader.get("beta") is None
+    assert reader.get("gamma") is None
+    assert remote.data == {"other_ns:keep": b'"untouched"'}
+
+    await writer.aset("delta", {"async": True})
+    assert await reader.aget("delta") == {"async": True}
+    assert await writer.aclear() is True
+    assert await reader.aget("delta") is None
+    assert remote.data == {"other_ns:keep": b'"untouched"'}
+
+
+@pytest.mark.anyio
+async def test_flask_queue_backend_delegates_to_durable_backend_without_lanes_attr() -> None:
+    """Flask QueueBackend dequeue, adequeue, and run_next delegate to durable QueueService backends."""
+
+    class _DurableQueueBackend(QueueBackendProtocol):
+        def __init__(self) -> None:
+            self.ready: collections.deque[CoreTaskEnvelope] = collections.deque()
+            self.acked: list[str] = []
+            self.promoted: int = 0
+
+        def enqueue_sync(self, envelope: CoreTaskEnvelope) -> CoreTaskEnvelope:
+            self.ready.append(envelope)
+            return envelope
+
+        async def enqueue(self, envelope: CoreTaskEnvelope) -> CoreTaskEnvelope:
+            self.ready.append(envelope)
+            return envelope
+
+        async def dequeue(
+            self,
+            lanes: Sequence[TaskLane],
+            *,
+            batch_size: int = 1,
+            timeout_seconds: float = 0.0,
+        ) -> list[CoreTaskEnvelope]:
+            _ = timeout_seconds
+            claimed: list[CoreTaskEnvelope] = []
+            remaining: collections.deque[CoreTaskEnvelope] = collections.deque()
+            while self.ready:
+                item = self.ready.popleft()
+                if item.lane in lanes and len(claimed) < batch_size:
+                    claimed.append(item)
+                else:
+                    remaining.append(item)
+            self.ready = remaining
+            return claimed
+
+        async def ack(self, envelope: CoreTaskEnvelope) -> None:
+            self.acked.append(envelope.task_id)
+
+        async def nack(
+            self,
+            envelope: CoreTaskEnvelope,
+            *,
+            error: Exception | str,
+            delay_seconds: float | None = None,
+            send_to_dlq: bool = False,
+        ) -> DeadLetterEntry | None:
+            _ = (envelope, error, delay_seconds, send_to_dlq)
+            return None
+
+        async def promote_scheduled(self, *, now: float | None = None, batch_size: int = 100) -> int:
+            _ = (now, batch_size)
+            self.promoted += 1
+            return 0
+
+        async def list_dlq(self, *, limit: int = 100) -> list[DeadLetterEntry]:
+            _ = limit
+            return []
+
+        async def replay_dlq(self, dlq_id: str) -> CoreTaskEnvelope | None:
+            _ = dlq_id
+            return None
+
+        async def acquire_lease(
+            self,
+            lease_key: str,
+            owner_id: str,
+            ttl_seconds: float,
+            *,
+            slot: str | None = None,
+        ) -> CronLease | None:
+            _ = (lease_key, owner_id, ttl_seconds, slot)
+            return None
+
+        async def renew_lease(
+            self,
+            lease_key: str,
+            owner_id: str,
+            ttl_seconds: float,
+            *,
+            slot: str | None = None,
+        ) -> CronLease | None:
+            _ = (lease_key, owner_id, ttl_seconds, slot)
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    durable = _DurableQueueBackend()
+    assert not hasattr(durable, "_lanes")
+    svc = QueueService(backend=durable)
+    flask_queue = QueueBackend(queue_service=svc)
+
+    @flask_queue.task("sum_pair")
+    def sum_pair(x: int, y: int) -> int:
+        return x + y
+
+    env1 = flask_queue.enqueue("sum_pair", 3, 4)
+    popped_sync = flask_queue.dequeue()
+    assert popped_sync is not None
+    assert popped_sync.id == env1.id
+    assert popped_sync.args == (3, 4)
+
+    env2 = await flask_queue.aenqueue("sum_pair", 10, 20)
+    popped_async = await flask_queue.adequeue()
+    assert popped_async is not None
+    assert popped_async.id == env2.id
+
+    env3 = flask_queue.enqueue("sum_pair", 8, 9)
+    assert flask_queue.run_next() == 17
+    assert durable.acked == [env1.id, env2.id, env3.id]
+    assert durable.promoted >= 3

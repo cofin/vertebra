@@ -22,14 +22,10 @@ class SyncMySQLDialect(_SyncDialectMixin, BaseMySQLDialect):
     default_paramstyle = "qmark"
     paramstyle = "qmark"
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the MySQL dialect."""
-        if isinstance(col_type, type):
-            name = getattr(col_type, "__name__", "")
-            if name in ("Vector", "BinaryJSON", "MsgspecJSON"):
-                return col_type()
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using MySQL colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)
 
 
 class AsyncMySQLDialect(_AsyncDialectMixin, BaseMySQLDialect):
@@ -41,11 +37,7 @@ class AsyncMySQLDialect(_AsyncDialectMixin, BaseMySQLDialect):
     default_paramstyle = "qmark"
     paramstyle = "qmark"
 
-    @classmethod
-    def type_descriptor(cls, col_type: Any) -> Any:
-        """Adapt Vector or BinaryJSON column type for the MySQL dialect."""
-        if isinstance(col_type, type):
-            name = getattr(col_type, "__name__", "")
-            if name in ("Vector", "BinaryJSON", "MsgspecJSON"):
-                return col_type()
-        return col_type
+    def type_descriptor(self, typeobj: Any) -> Any:
+        """Adapt SQLAlchemy and custom column types using MySQL colspecs."""
+        parent_descriptor: Any = super().type_descriptor
+        return parent_descriptor(typeobj)

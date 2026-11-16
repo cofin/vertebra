@@ -13,7 +13,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._mysql`** | `SyncMySQLClient`, `AsyncMySQLClient`, `MySQLWireTestServer` | `vertebra-mysql` (MySQL Binary Protocol + `VTBARROW` SHM) |
 | **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncOracleListener`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
 | **`vertebra._postgres`** | `SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `SyncPostgresListener`, `AsyncPostgresListener`, `AsyncPostgresReplication` | `vertebra-postgres` (PostgreSQL Protocol 3.0 + `PGCOPY` + `pgoutput` + `VTBARROW` SHM) |
-| **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
+| **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Spanner Data + DatabaseAdmin) |
 | **`vertebra._sqlite`** | `SyncSQLiteClient`, `AsyncSQLiteClient` | `vertebra-sqlite` (Bundled SQLite 3.45+ + `VTBARROW` SHM) |
 | **`vertebra._redis`** | `SyncRedisClient`, `AsyncRedisClient`, `SyncRedisListener`, `AsyncRedisListener` | `vertebra-redis` (RESP3 + Client Tracking + Sentinel + Cluster) |
 | **`vertebra._valkey`** | `SyncValkeyClient`, `AsyncValkeyClient`, `SyncValkeyListener`, `AsyncValkeyListener` | `vertebra-valkey` (RESP3 + Hash Expiration + Client Tracking + Sentinel + Cluster) |

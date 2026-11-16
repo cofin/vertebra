@@ -3,6 +3,7 @@
 import array
 import asyncio
 import contextlib
+import datetime as dt
 import gc
 import gzip
 import hashlib
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import threading
 import warnings
+import weakref
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
@@ -19,12 +21,15 @@ from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
+import pyarrow as pa
 import pytest
+from sqlspec.storage.registry import StorageRegistry
 
 import vertebra._storage as native_st
 import vertebra.storage as storage
 from vertebra._storage import StorageBuffer
 from vertebra.db.arrow import ArrowCursor
+from vertebra.extensions.sqlspec.storage import ObjectStoreBackend, register_storage_alias
 from vertebra.storage import (
     ArtifactReference,
     AsyncObjectStore,
@@ -3638,9 +3643,6 @@ async def test_write_batches_midstream_reader_failure_aborts_upload(asynchronous
 
 def test_artifact_reference_and_metadata_gc_collection() -> None:
     """ArtifactReference is frozen/SQL-free and ObjectMeta/PutResult participate in cycle GC."""
-    import datetime as dt
-    import weakref
-
     assert ObjectMeta.__struct_config__.gc is True
     assert PutResult.__struct_config__.gc is True
 
@@ -3683,9 +3685,6 @@ def test_artifact_reference_and_metadata_gc_collection() -> None:
 
 def test_sqlspec_object_store_backend_validation_and_uri_resolution(tmp_path: Path) -> None:
     """Verify ObjectStoreBackend configuration validation, base_path scoping, and traversal guards."""
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
-    from vertebra.typing import ImproperConfigurationError
-
     with pytest.raises(ImproperConfigurationError, match="requires an explicit store"):
         ObjectStoreBackend("")
 
@@ -3708,10 +3707,6 @@ def test_sqlspec_object_store_backend_validation_and_uri_resolution(tmp_path: Pa
 @pytest.mark.parametrize("scheme", ["memory", "file"])
 def test_sqlspec_object_store_backend_sync_and_async_parity(scheme: str, tmp_path: Path) -> None:
     """Verify sync and async ObjectStoreBackend CRUD, streaming, file open, and Arrow operations."""
-    import pyarrow as pa
-
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
-
     uri = "memory://" if scheme == "memory" else f"file://{tmp_path}"
     backend = ObjectStoreBackend(uri, base_path="root")
 
@@ -3817,10 +3812,6 @@ def test_sqlspec_object_store_backend_sync_and_async_parity(scheme: str, tmp_pat
 
 def test_sqlspec_object_store_backend_signing_and_registry_alias() -> None:
     """Verify ObjectStoreBackend presigning parity and StorageRegistry alias registration."""
-    from sqlspec.storage.registry import StorageRegistry
-
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend, register_storage_alias
-
     unsigned = ObjectStoreBackend("memory://")
     assert unsigned.supports_signing is False
     with pytest.raises(NotImplementedError):

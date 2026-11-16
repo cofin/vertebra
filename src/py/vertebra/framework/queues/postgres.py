@@ -9,10 +9,22 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import msgspec
 
+from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver
+from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver
+from vertebra.db.adapters.postgres.config import PostgreSQLConfig
+from vertebra.db.adapters.postgres.notify import (
+    AsyncPostgresNotificationSource,
+    SyncPostgresNotificationSource,
+)
+from vertebra.db.adapters.postgres.queue import (
+    AsyncPostgresQueueStore,
+    SyncPostgresQueueStore,
+)
 from vertebra.db.driver.capabilities import QueueEntry
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
+    QueueBackendSettings,
     QueueConfig,
     TaskEnvelope,
     TaskLane,
@@ -23,13 +35,6 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from vertebra.db.adapters.postgres import PostgreSQLConfig
-    from vertebra.db.adapters.postgres.queue import (
-        AsyncPostgresQueueStore,
-        SyncPostgresQueueStore,
-    )
-    from vertebra.framework.queues.base import QueueBackendSettings
 
 __all__ = (
     "CLAIM_POSTGRES_JOBS_SQL",
@@ -141,23 +146,37 @@ class PostgreSQLQueueBackend:
         config: QueueConfig | QueueBackendSettings | None = None,
         *,
         postgres_config: PostgreSQLConfig | None = None,
+        driver: AsyncPostgreSQLDriver | None = None,
+        sync_driver: SyncPostgreSQLDriver | None = None,
         executor: PostgreSQLQueueExecutor | None = None,
         store: AsyncPostgresQueueStore | None = None,
         sync_store: SyncPostgresQueueStore | None = None,
     ) -> None:
-        """Bind the queue backend to native queue stores or an injected PostgreSQLQueueExecutor.
+        """Bind the queue backend to native queue stores, drivers, or an injected PostgreSQLQueueExecutor.
 
         Args:
             config: Optional queue configuration or settings.
             postgres_config: Optional PostgreSQL adapter configuration supplying ``direct_dsn`` for LISTEN/NOTIFY.
+            driver: Optional pre-constructed AsyncPostgreSQLDriver.
+            sync_driver: Optional pre-constructed SyncPostgreSQLDriver.
             executor: Optional PostgreSQLQueueExecutor bound as given.
             store: Optional pre-constructed AsyncPostgresQueueStore.
             sync_store: Optional pre-constructed SyncPostgresQueueStore.
 
         Raises:
-            MissingDependencyError: When neither executor nor store is passed and ``vertebra._postgres`` is not installed.
-            ImproperConfigurationError: When neither executor nor store is passed and no valid PostgreSQL DSN is configured.
+            MissingDependencyError: When neither executor, store, nor driver is passed and ``vertebra._postgres`` is not installed.
+            ImproperConfigurationError: When neither executor, store, nor driver is passed and no valid PostgreSQL DSN is configured.
         """
+        if isinstance(config, QueueBackendSettings):
+            if store is None and config.store is not None:
+                store = cast("AsyncPostgresQueueStore", config.store)
+            if sync_store is None and config.sync_store is not None:
+                sync_store = cast("SyncPostgresQueueStore", config.sync_store)
+            if driver is None and config.driver is not None:
+                driver = cast("AsyncPostgreSQLDriver", config.driver)
+            if sync_driver is None and config.sync_driver is not None:
+                sync_driver = cast("SyncPostgreSQLDriver", config.sync_driver)
+
         self._config = config or QueueConfig()
         self._postgres_config = postgres_config
         self._direct_dsn = postgres_config.effective_direct_dsn if postgres_config else self._config.backend_url
@@ -165,9 +184,27 @@ class PostgreSQLQueueBackend:
             self._executor: PostgreSQLQueueExecutor | None = executor
             self._store: AsyncPostgresQueueStore | None = store
             self._sync_store: SyncPostgresQueueStore | None = sync_store
-        elif store is not None:
+        elif store is not None or sync_store is not None:
             self._store = store
             self._sync_store = sync_store
+            self._executor = None
+        elif driver is not None or sync_driver is not None:
+            self._store = (
+                AsyncPostgresQueueStore(
+                    driver,
+                    notification_source=AsyncPostgresNotificationSource(driver),
+                )
+                if driver is not None
+                else None
+            )
+            self._sync_store = (
+                SyncPostgresQueueStore(
+                    sync_driver,
+                    notification_source=SyncPostgresNotificationSource(sync_driver),
+                )
+                if sync_driver is not None
+                else None
+            )
             self._executor = None
         else:
             ensure_module("vertebra._postgres", package="vertebra-core[postgres]", extra="postgres")
@@ -175,19 +212,7 @@ class PostgreSQLQueueBackend:
             if not dsn or dsn in ("postgres://", "postgresql://"):
                 msg = "PostgreSQLQueueBackend requires a configured PostgreSQL DSN, store, or executor"
                 raise ImproperConfigurationError(msg)
-            from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver
-            from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver
-            from vertebra.db.adapters.postgres.config import PostgreSQLConfig as NativePostgreSQLConfig
-            from vertebra.db.adapters.postgres.notify import (
-                AsyncPostgresNotificationSource,
-                SyncPostgresNotificationSource,
-            )
-            from vertebra.db.adapters.postgres.queue import (
-                AsyncPostgresQueueStore,
-                SyncPostgresQueueStore,
-            )
-
-            resolved_cfg = self._postgres_config or NativePostgreSQLConfig(dsn=dsn)
+            resolved_cfg = self._postgres_config or PostgreSQLConfig(dsn=dsn)
             async_drv = AsyncPostgreSQLDriver(resolved_cfg)
             sync_drv = SyncPostgreSQLDriver(resolved_cfg)
             self._store = AsyncPostgresQueueStore(
@@ -423,7 +448,7 @@ class PostgreSQLQueueBackend:
                     retry_delay_s=None,
                 )
                 return DeadLetterEntry(
-                    dlq_id=uuid.uuid4().hex,
+                    dlq_id=envelope.task_id,
                     envelope=envelope,
                     error_type=err_type,
                     error_message=err_msg,
@@ -504,12 +529,20 @@ class PostgreSQLQueueBackend:
     async def list_dlq(self, *, limit: int = 100) -> list[DeadLetterEntry]:
         """Fetch dead-letter entries from the DLQ table."""
         if self._store is not None:
-            default_lane = getattr(self._config, "default_lane", "default")
-            dead_entries = await self._store.list_entries(
-                str(default_lane),
-                status="dead_letter",
-                limit=limit,
-            )
+            default_lane = str(getattr(self._config, "default_lane", "io"))
+            lanes_to_scan = tuple(dict.fromkeys(("cpu", "io", "agent", default_lane)))
+            dead_entries: list[QueueEntry] = []
+            for lane_name in lanes_to_scan:
+                remaining = limit - len(dead_entries)
+                if remaining <= 0:
+                    break
+                dead_entries.extend(
+                    await self._store.list_entries(
+                        lane_name,
+                        status="dead_letter",
+                        limit=remaining,
+                    )
+                )
             dlq_list: list[DeadLetterEntry] = []
             for de in dead_entries:
                 try:
@@ -557,7 +590,11 @@ class PostgreSQLQueueBackend:
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Replay dead-letter job by re-enqueuing into jobs table and deleting from DLQ."""
         if self._store is not None:
-            entry = await self._store.get_entry(dlq_id)
+            pop_fn = getattr(self._store, "pop_dead_letter", None)
+            if callable(pop_fn):
+                entry = await pop_fn(dlq_id)
+            else:
+                entry = await self._store.get_entry(dlq_id)
             if entry is None:
                 return None
             try:
@@ -570,6 +607,9 @@ class PostgreSQLQueueBackend:
                     attempt=1,
                     max_retries=entry.max_attempts,
                 )
+            idem_key = env.idempotency_key or entry.headers.get("idempotency_key")
+            if idem_key:
+                await self._store.release_unique_key(idem_key)
             replayed = msgspec.structs.replace(
                 env,
                 attempt=1,

@@ -17,6 +17,7 @@ from vertebra.typing import MissingDependencyError
 try:
     from django.tasks import TaskResult, TaskResultStatus
     from django.tasks.backends.base import BaseTaskBackend
+    from django.tasks.base import Task as DjangoTask
     from django.tasks.base import TaskError
     from django.tasks.exceptions import TaskResultDoesNotExist
 except ImportError as exc:
@@ -48,6 +49,7 @@ class _TaskRecord(msgspec.Struct, kw_only=True):
     last_attempted_at: datetime | None = None
     args: list[Any] = msgspec.field(default_factory=list)
     kwargs: dict[str, Any] = msgspec.field(default_factory=dict)
+    queue_name: str = "default"
     backend: str = "default"
     errors: list[TaskError] = msgspec.field(default_factory=list)
     worker_ids: list[str] = msgspec.field(default_factory=list)
@@ -108,12 +110,15 @@ class TaskBackend(BaseTaskBackend):
         if hasattr(task, "validate_task") or hasattr(task, "func"):
             self.validate_task(task)
 
-        if len(args) == 2 and isinstance(args[0], (tuple, list)) and isinstance(args[1], dict) and not kwargs:
+        if (
+            isinstance(task, DjangoTask)
+            and len(args) == 2
+            and isinstance(args[0], (tuple, list))
+            and isinstance(args[1], dict)
+            and not kwargs
+        ):
             resolved_args = list(args[0])
             resolved_kwargs = dict(args[1])
-        elif len(args) == 1 and isinstance(args[0], (tuple, list)) and not kwargs:
-            resolved_args = list(args[0])
-            resolved_kwargs = {}
         else:
             resolved_args = list(args)
             resolved_kwargs = dict(kwargs)
@@ -145,6 +150,7 @@ class TaskBackend(BaseTaskBackend):
             enqueued_at=now,
             args=resolved_args,
             kwargs=resolved_kwargs,
+            queue_name=queue_name,
             backend=self.alias,
         )
         with _RESULTS_LOCK:
@@ -162,12 +168,15 @@ class TaskBackend(BaseTaskBackend):
         if hasattr(task, "validate_task") or hasattr(task, "func"):
             self.validate_task(task)
 
-        if len(args) == 2 and isinstance(args[0], (tuple, list)) and isinstance(args[1], dict) and not kwargs:
+        if (
+            isinstance(task, DjangoTask)
+            and len(args) == 2
+            and isinstance(args[0], (tuple, list))
+            and isinstance(args[1], dict)
+            and not kwargs
+        ):
             resolved_args = list(args[0])
             resolved_kwargs = dict(args[1])
-        elif len(args) == 1 and isinstance(args[0], (tuple, list)) and not kwargs:
-            resolved_args = list(args[0])
-            resolved_kwargs = {}
         else:
             resolved_args = list(args)
             resolved_kwargs = dict(kwargs)
@@ -199,6 +208,7 @@ class TaskBackend(BaseTaskBackend):
             enqueued_at=now,
             args=resolved_args,
             kwargs=resolved_kwargs,
+            queue_name=queue_name,
             backend=self.alias,
         )
         with _RESULTS_LOCK:
@@ -214,6 +224,12 @@ class TaskBackend(BaseTaskBackend):
             msg = f"Task result {result_id!r} does not exist."
             raise TaskResultDoesNotExist(msg)
         return self._build_result(record)
+
+    def get_task_queue_name(self, task_id: str) -> str | None:
+        """Return the Django queue_name recorded for task_id, if tracked."""
+        with _RESULTS_LOCK:
+            record = self._results.get(task_id)
+        return record.queue_name if record is not None else None
 
     async def aget_result(self, result_id: str) -> TaskResult[Any, Any]:
         """Retrieve a task result by id asynchronously."""

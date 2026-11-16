@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 from vertebra.db.dbapi._sync import (
@@ -87,17 +88,20 @@ class AsyncDBAPICursor:
                 self._rows = []
                 self.description = None
                 self.rowcount = int(affected)
-                self.lastrowid = captured_rowid
+                self.lastrowid = (
+                    captured_rowid if captured_rowid is not None else await self._resolve_driver_lastrowid(operation)
+                )
             elif not is_row_ret and self._driver is not None and hasattr(self._driver, "execute"):
                 affected = await self._driver.execute(operation, params)
                 self._rows = []
                 self.description = None
                 self.rowcount = int(affected)
+                self.lastrowid = await self._resolve_driver_lastrowid(operation)
             elif self._driver is not None and hasattr(self._driver, "execute_with_description"):
                 raw_res = await self._driver.execute_with_description(operation, params)
                 self._rows, self.description = coerce_dbapi_rows_and_desc(raw_res)
                 self.rowcount = len(self._rows)
-                self.lastrowid = self._resolve_driver_lastrowid(operation)
+                self.lastrowid = await self._resolve_driver_lastrowid(operation)
             elif self._driver is not None and hasattr(self._driver, "execute_tuples"):
                 self._rows = await self._driver.execute_tuples(operation, params)
                 self.description = (
@@ -106,7 +110,7 @@ class AsyncDBAPICursor:
                     else None
                 )
                 self.rowcount = len(self._rows)
-                self.lastrowid = self._resolve_driver_lastrowid(operation)
+                self.lastrowid = await self._resolve_driver_lastrowid(operation)
             elif self._driver is not None and hasattr(self._driver, "select"):
                 select_params = params if params else None
                 dict_rows = await self._driver.select(operation, select_params)
@@ -118,7 +122,7 @@ class AsyncDBAPICursor:
                     self._rows = []
                     self.description = None
                 self.rowcount = len(self._rows)
-                self.lastrowid = self._resolve_driver_lastrowid(operation)
+                self.lastrowid = await self._resolve_driver_lastrowid(operation)
             else:
                 self._rows = []
                 self.description = None
@@ -235,7 +239,7 @@ class AsyncDBAPICursor:
         if self._conn.closed:
             raise InterfaceError("Cannot operate on a closed connection.")
 
-    def _resolve_driver_lastrowid(self, operation: str) -> int | None:
+    async def _resolve_driver_lastrowid(self, operation: str) -> int | None:
         if not is_insert_sql(operation):
             return None
         driver = self._conn.driver
@@ -247,6 +251,8 @@ class AsyncDBAPICursor:
         last_rowid_fn = getattr(driver, "last_insert_rowid", None)
         if callable(last_rowid_fn):
             val = last_rowid_fn()
+            if inspect.isawaitable(val):
+                val = await val
             return int(val) if val is not None else None
         return None
 

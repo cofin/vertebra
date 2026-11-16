@@ -107,7 +107,7 @@ def create_channels_backend(
                 sync_driver_cls = redis_mod.SyncRedisDriver
                 async_source_cls = redis_mod.AsyncRedisNotificationSource
                 sync_source_cls = redis_mod.SyncRedisNotificationSource
-                cfg = config_cls(url=url) if url else config_cls(**kwargs)
+                cfg = config_cls(url=url, **kwargs) if url else config_cls(**kwargs)
                 async_source = async_source_cls(async_driver_cls(cfg))
                 sync_source = sync_source_cls(sync_driver_cls(cfg))
         elif resolved_backend == "valkey":
@@ -118,18 +118,18 @@ def create_channels_backend(
                 sync_driver_cls = valkey_mod.SyncValkeyDriver
                 async_source_cls = valkey_mod.AsyncValkeyNotificationSource
                 sync_source_cls = valkey_mod.SyncValkeyNotificationSource
-                cfg = config_cls(url=url) if url else config_cls(**kwargs)
+                cfg = config_cls(url=url, **kwargs) if url else config_cls(**kwargs)
                 async_source = async_source_cls(async_driver_cls(cfg))
                 sync_source = sync_source_cls(sync_driver_cls(cfg))
         elif resolved_backend in ("postgres", "postgresql"):
             pg_mod = import_optional("vertebra.db.adapters.postgres")
             if pg_mod is not None:
-                config_cls = pg_mod.PostgresConfig
-                async_driver_cls = pg_mod.AsyncPostgresDriver
-                sync_driver_cls = pg_mod.SyncPostgresDriver
+                config_cls = pg_mod.PostgreSQLConfig
+                async_driver_cls = pg_mod.AsyncPostgreSQLDriver
+                sync_driver_cls = pg_mod.SyncPostgreSQLDriver
                 async_source_cls = pg_mod.AsyncPostgresNotificationSource
                 sync_source_cls = pg_mod.SyncPostgresNotificationSource
-                cfg = config_cls(url=url) if url else config_cls(**kwargs)
+                cfg = config_cls(dsn=url, **kwargs) if url else config_cls(**kwargs)
                 async_source = async_source_cls(async_driver_cls(cfg))
                 sync_source = sync_source_cls(sync_driver_cls(cfg))
         elif resolved_backend == "oracle":
@@ -140,7 +140,7 @@ def create_channels_backend(
                 sync_driver_cls = oracle_mod.SyncOracleDriver
                 async_source_cls = oracle_mod.AsyncOracleNotificationSource
                 sync_source_cls = oracle_mod.SyncOracleNotificationSource
-                cfg = config_cls(url=url) if url else config_cls(**kwargs)
+                cfg = config_cls(dsn=url, **kwargs) if url else config_cls(**kwargs)
                 async_source = async_source_cls(async_driver_cls(cfg))
                 sync_source = sync_source_cls(sync_driver_cls(cfg))
 

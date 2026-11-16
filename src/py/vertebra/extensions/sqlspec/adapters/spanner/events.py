@@ -186,7 +186,7 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
 
     def create_tables_sync(self) -> None:
         """Create the Spanner event queue table and covering index synchronously."""
-        with self._config.provide_session(transaction=True) as driver:
+        with self._config.provide_session(transaction=False) as driver:
             for stmt in self.create_statements():
                 driver.execute(stmt)
 
@@ -194,7 +194,7 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
         """Create the Spanner event queue table and covering index asynchronously."""
         statements = self.create_statements()
         if self._is_async_config():
-            async with self._config.provide_session(transaction=True) as driver:
+            async with self._config.provide_session(transaction=False) as driver:
                 for stmt in statements:
                     await driver.execute(stmt)
             return
@@ -304,7 +304,7 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
             f"FROM {table} WHERE channel = @channel AND status = @status "
             "ORDER BY available_at ASC LIMIT @limit"
         )
-        with self._config.provide_session(transaction=False) as driver:
+        with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = driver.select(sql, {"channel": channel, "status": "PENDING", "limit": int(limit)})
         return [
             {
@@ -332,7 +332,7 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
             f"FROM {table} WHERE channel = @channel AND status = @status "
             "ORDER BY available_at ASC LIMIT @limit"
         )
-        async with self._config.provide_session(transaction=False) as driver:
+        async with self._config.provide_session(transaction=False, read_only=True) as driver:
             rows = await driver.select(sql, {"channel": channel, "status": "PENDING", "limit": int(limit)})
         return [
             {

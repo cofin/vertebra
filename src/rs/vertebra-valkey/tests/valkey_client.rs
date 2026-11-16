@@ -1074,3 +1074,263 @@ async fn unix_domain_socket_roundtrip() {
     srv.abort();
     let _ = std::fs::remove_file(&sock_path);
 }
+
+#[tokio::test]
+async fn pubsub_drop_abort_eof_closed_and_pending_delivery_guard_restore() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (eof_done_tx, eof_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let srv = tokio::spawn(async move {
+        // Connection 1: send 2 messages, wait for signal, then close socket (EOF).
+        let (mut sock1, _) = listener.accept().await.unwrap();
+        let _ = sock1.set_nodelay(true);
+        let mut buf1 = BytesMut::new();
+        while let Some(parts) = read_next_cmd(&mut sock1, &mut buf1).await {
+            match parts[0].to_ascii_uppercase().as_str() {
+                "HELLO" => {
+                    sock1
+                        .write_all(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                        .await
+                        .unwrap();
+                }
+                "CLIENT" => {
+                    sock1.write_all(b"+OK\r\n").await.unwrap();
+                }
+                "SUBSCRIBE" => {
+                    let ack = encode_push(&[
+                        encode_bulk(b"subscribe"),
+                        encode_bulk(parts[1].as_bytes()),
+                        b":1\r\n".to_vec(),
+                    ]);
+                    let m1 = encode_push(&[
+                        encode_bulk(b"message"),
+                        encode_bulk(b"ch"),
+                        encode_bulk(b"first"),
+                    ]);
+                    let m2 = encode_push(&[
+                        encode_bulk(b"message"),
+                        encode_bulk(b"ch"),
+                        encode_bulk(b"second"),
+                    ]);
+                    sock1.write_all(&ack).await.unwrap();
+                    sock1.write_all(&m1).await.unwrap();
+                    sock1.write_all(&m2).await.unwrap();
+                    break;
+                }
+                _ => {
+                    sock1.write_all(b"+OK\r\n").await.unwrap();
+                }
+            }
+        }
+        let _ = eof_done_rx.await;
+        drop(sock1);
+
+        // Connection 2: verify dropping ValkeyListenerCore aborts reader and closes client socket.
+        let (mut sock2, _) = listener.accept().await.unwrap();
+        let _ = sock2.set_nodelay(true);
+        let mut buf2 = BytesMut::new();
+        while let Some(parts) = read_next_cmd(&mut sock2, &mut buf2).await {
+            match parts[0].to_ascii_uppercase().as_str() {
+                "HELLO" => {
+                    sock2
+                        .write_all(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                        .await
+                        .unwrap();
+                }
+                "CLIENT" => {
+                    sock2.write_all(b"+OK\r\n").await.unwrap();
+                }
+                "SUBSCRIBE" => {
+                    let ack = encode_push(&[
+                        encode_bulk(b"subscribe"),
+                        encode_bulk(parts[1].as_bytes()),
+                        b":1\r\n".to_vec(),
+                    ]);
+                    sock2.write_all(&ack).await.unwrap();
+                    break;
+                }
+                _ => {
+                    sock2.write_all(b"+OK\r\n").await.unwrap();
+                }
+            }
+        }
+        let mut probe = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(2), sock2.read(&mut probe))
+            .await
+            .expect("reader task abort should close client socket promptly")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+    });
+
+    // Part 1: PendingDeliveryGuard drop restores message in FIFO order; EOF marks closed before waking.
+    let core1 = ValkeyListenerCore::new(Arc::new(make_base_config("127.0.0.1", addr.port())));
+    core1.subscribe(&["ch".to_string()]).await.unwrap();
+    {
+        let unconsumed_guard = core1
+            .next_message_guarded(Some(1000))
+            .await
+            .unwrap()
+            .expect("expected first message");
+        // Drop `unconsumed_guard` without consuming to simulate cancelled Python future!
+        drop(unconsumed_guard);
+    }
+    let restored = core1.next_message(Some(1000)).await.unwrap().unwrap();
+    assert_eq!(restored.data.as_ref(), b"first");
+    let second = core1.next_message(Some(1000)).await.unwrap().unwrap();
+    assert_eq!(second.data.as_ref(), b"second");
+
+    let _ = eof_done_tx.send(());
+    let eof_res = core1.next_message(Some(1000)).await.unwrap();
+    assert!(eof_res.is_none());
+    assert!(
+        core1.is_closed(),
+        "EOF must set closed=true before notifying waiters"
+    );
+
+    // Part 2: Dropping ValkeyListenerCore without close() aborts reader task and closes TCP socket.
+    let core2 = ValkeyListenerCore::new(Arc::new(make_base_config("127.0.0.1", addr.port())));
+    core2.subscribe(&["ch2".to_string()]).await.unwrap();
+    drop(core2);
+
+    srv.await.unwrap();
+}
+
+#[tokio::test]
+async fn xreadgroup_block_extends_deadline_and_zero_is_untimed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let srv = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let _ = sock.set_nodelay(true);
+        let mut buf = BytesMut::new();
+        while let Some(parts) = read_next_cmd(&mut sock, &mut buf).await {
+            match parts[0].to_ascii_uppercase().as_str() {
+                "HELLO" => {
+                    sock.write_all(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                        .await
+                        .unwrap();
+                }
+                "CLIENT" => {
+                    sock.write_all(b"+OK\r\n").await.unwrap();
+                }
+                "XREADGROUP" => {
+                    // Sleep longer than command_timeout (60ms) to verify BLOCK extension.
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    sock.write_all(b"_\r\n").await.unwrap();
+                }
+                _ => {
+                    sock.write_all(b"+OK\r\n").await.unwrap();
+                }
+            }
+        }
+    });
+
+    let mut cfg = make_base_config("127.0.0.1", addr.port());
+    cfg.command_timeout = Duration::from_millis(60);
+    let engine = ValkeyEngine::new(Arc::new(cfg));
+
+    // BLOCK 250 -> effective read timeout = 60ms + 250ms = 310ms > 120ms sleep.
+    let cmd_bounded = _valkey::streams::build_xreadgroup(
+        "grp",
+        "c1",
+        &[(b"mystream".to_vec(), ">".to_string())],
+        Some(1),
+        Some(250),
+        false,
+    )
+    .unwrap();
+    let r1 = engine
+        .execute_command_routed(cmd_bounded, &[b"mystream"], false)
+        .await
+        .expect("XREADGROUP BLOCK 250 should extend read deadline past command_timeout");
+    assert_eq!(r1, RespValue::Null);
+
+    // BLOCK 0 -> un-timed read > 120ms sleep.
+    let cmd_infinite = _valkey::streams::build_xreadgroup(
+        "grp",
+        "c1",
+        &[(b"mystream".to_vec(), ">".to_string())],
+        Some(1),
+        Some(0),
+        false,
+    )
+    .unwrap();
+    let r2 = engine
+        .execute_command_routed(cmd_infinite, &[b"mystream"], false)
+        .await
+        .expect("XREADGROUP BLOCK 0 should use un-timed read");
+    assert_eq!(r2, RespValue::Null);
+
+    engine.close().await;
+    srv.abort();
+}
+
+#[test]
+fn resp_to_py_set_unhashable_fallback_preserves_all_elements() {
+    use pyo3::prelude::*;
+
+    Python::initialize();
+    Python::attach(|py| {
+        let resp_set = RespValue::Set(vec![
+            RespValue::BulkString(Bytes::from_static(b"alpha")),
+            RespValue::BulkString(Bytes::from_static(b"beta")),
+            RespValue::Array(vec![RespValue::Integer(1), RespValue::Integer(2)]),
+            RespValue::BulkString(Bytes::from_static(b"gamma")),
+        ]);
+        let py_obj = _valkey::codec::resp_to_py(py, resp_set).unwrap();
+        let bound = py_obj.bind(py);
+        let list = bound.cast::<pyo3::types::PyList>().unwrap();
+        assert_eq!(list.len(), 4);
+
+        let mut saw_alpha = false;
+        let mut saw_beta = false;
+        let mut saw_list = false;
+        let mut saw_gamma = false;
+        for item in list.iter() {
+            if let Ok(py_bytes) = item.cast::<pyo3::types::PyBytes>() {
+                let b = py_bytes.as_bytes();
+                if b == b"alpha" {
+                    saw_alpha = true;
+                } else if b == b"beta" {
+                    saw_beta = true;
+                } else if b == b"gamma" {
+                    saw_gamma = true;
+                }
+            } else if let Ok(v) = item.extract::<Vec<i64>>()
+                && v == vec![1, 2]
+            {
+                saw_list = true;
+            }
+        }
+        assert!(
+            saw_alpha && saw_beta && saw_list && saw_gamma,
+            "All prior set elements, the unhashable element, and remaining elements must be preserved"
+        );
+
+        // Verify GcpAuthSource::PythonCallable primes on Python thread and clones/resolves detached!
+        let builtins = py.import("builtins").unwrap();
+        let py_callable = builtins
+            .getattr("str")
+            .unwrap()
+            .call1(("tok-from-py",))
+            .unwrap();
+        let ns = pyo3::types::PyDict::new(py);
+        ns.set_item("tok", py_callable).unwrap();
+        let provider_fn = py.eval(c"lambda: tok", Some(&ns), None).unwrap().unbind();
+        let provider = _valkey::config::PythonTokenProvider::new(provider_fn);
+        provider.ensure_token_sync(py, false).unwrap();
+        let src = GcpAuthSource::PythonCallable(provider);
+        py.detach(move || {
+            let cloned = src.clone();
+            if let GcpAuthSource::PythonCallable(ref p) = cloned {
+                let (tok, gen_id) = p.resolve_cached(None).unwrap();
+                assert_eq!(tok, "tok-from-py");
+                assert!(gen_id >= 1);
+            } else {
+                panic!("expected PythonCallable");
+            }
+        });
+    });
+}

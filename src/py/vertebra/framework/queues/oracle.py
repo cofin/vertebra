@@ -9,10 +9,22 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import msgspec
 
+from vertebra.db.adapters.oracle._async import AsyncOracleDriver
+from vertebra.db.adapters.oracle._sync import SyncOracleDriver
+from vertebra.db.adapters.oracle.config import OracleConfig
+from vertebra.db.adapters.oracle.notify import (
+    AsyncOracleNotificationSource,
+    SyncOracleNotificationSource,
+)
+from vertebra.db.adapters.oracle.queue import (
+    AsyncOracleQueueStore,
+    SyncOracleQueueStore,
+)
 from vertebra.db.driver.capabilities import QueueEntry
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
+    QueueBackendSettings,
     QueueConfig,
     TaskEnvelope,
     TaskLane,
@@ -23,12 +35,6 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from vertebra.db.adapters.oracle.queue import (
-        AsyncOracleQueueStore,
-        SyncOracleQueueStore,
-    )
-    from vertebra.framework.queues.base import QueueBackendSettings
 
 __all__ = (
     "CLAIM_ORACLE_JOBS_SQL",
@@ -75,16 +81,16 @@ CREATE TABLE vertebra_queue_leases (
 """
 
 CLAIM_ORACLE_JOBS_SQL = """
-SELECT task_id, task_name, lane, payload, attempt, max_retries,
+SELECT task_id, task_name, lane, payload, status, attempt, max_retries,
        enqueued_at, scheduled_at, idempotency_key, traceparent
 FROM vertebra_queue_jobs
-WHERE lane IN (:lanes)
+WHERE lane IN (:1)
   AND (
-      (status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= :now_ts))
-      OR (status = 'running' AND locked_until <= :now_ts)
+      (status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= :2))
+      OR (status = 'running' AND locked_until <= :2)
   )
 ORDER BY COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
-FETCH FIRST :batch_size ROWS ONLY
+FETCH FIRST :3 ROWS ONLY
 FOR UPDATE SKIP LOCKED
 """
 
@@ -123,7 +129,9 @@ class OracleQueueBackend:
         self,
         config: QueueConfig | QueueBackendSettings | None = None,
         *,
-        oracle_config: Any = None,
+        oracle_config: OracleConfig | None = None,
+        driver: AsyncOracleDriver | None = None,
+        sync_driver: SyncOracleDriver | None = None,
         executor: OracleQueueExecutor | None = None,
         store: AsyncOracleQueueStore | None = None,
         sync_store: SyncOracleQueueStore | None = None,
@@ -133,23 +141,53 @@ class OracleQueueBackend:
         Args:
             config: Optional queue configuration settings or QueueBackendSettings.
             oracle_config: Optional Oracle connection configuration.
+            driver: Optional pre-constructed AsyncOracleDriver.
+            sync_driver: Optional pre-constructed SyncOracleDriver.
             executor: Optional OracleQueueExecutor binding a transactional cursor executor.
             store: Optional pre-constructed AsyncOracleQueueStore.
             sync_store: Optional pre-constructed SyncOracleQueueStore.
 
         Raises:
-            MissingDependencyError: When neither executor nor store is passed and ``vertebra._oracle`` is not installed.
-            ImproperConfigurationError: When neither executor nor store is passed and no valid Oracle DSN is configured.
+            MissingDependencyError: When neither executor, store, nor driver is passed and ``vertebra._oracle`` is not installed.
+            ImproperConfigurationError: When neither executor, store, nor driver is passed and no valid Oracle DSN is configured.
         """
+        if isinstance(config, QueueBackendSettings):
+            if store is None and config.store is not None:
+                store = cast("AsyncOracleQueueStore", config.store)
+            if sync_store is None and config.sync_store is not None:
+                sync_store = cast("SyncOracleQueueStore", config.sync_store)
+            if driver is None and config.driver is not None:
+                driver = cast("AsyncOracleDriver", config.driver)
+            if sync_driver is None and config.sync_driver is not None:
+                sync_driver = cast("SyncOracleDriver", config.sync_driver)
+
         self._config = config or QueueConfig()
         self._oracle_config = oracle_config
         if executor is not None:
             self._executor: OracleQueueExecutor | None = executor
             self._store: AsyncOracleQueueStore | None = store
             self._sync_store: SyncOracleQueueStore | None = sync_store
-        elif store is not None:
+        elif store is not None or sync_store is not None:
             self._store = store
             self._sync_store = sync_store
+            self._executor = None
+        elif driver is not None or sync_driver is not None:
+            self._store = (
+                AsyncOracleQueueStore(
+                    driver,
+                    notification_source=AsyncOracleNotificationSource(driver),
+                )
+                if driver is not None
+                else None
+            )
+            self._sync_store = (
+                SyncOracleQueueStore(
+                    sync_driver,
+                    notification_source=SyncOracleNotificationSource(sync_driver),
+                )
+                if sync_driver is not None
+                else None
+            )
             self._executor = None
         else:
             ensure_module("vertebra._oracle", package="vertebra-core[oracle]", extra="oracle")
@@ -157,18 +195,6 @@ class OracleQueueBackend:
             if not dsn or dsn in ("oracle://",):
                 msg = "OracleQueueBackend requires a configured Oracle DSN, store, or executor"
                 raise ImproperConfigurationError(msg)
-            from vertebra.db.adapters.oracle._async import AsyncOracleDriver
-            from vertebra.db.adapters.oracle._sync import SyncOracleDriver
-            from vertebra.db.adapters.oracle.config import OracleConfig
-            from vertebra.db.adapters.oracle.notify import (
-                AsyncOracleNotificationSource,
-                SyncOracleNotificationSource,
-            )
-            from vertebra.db.adapters.oracle.queue import (
-                AsyncOracleQueueStore,
-                SyncOracleQueueStore,
-            )
-
             resolved_ora_cfg = self._oracle_config or OracleConfig(dsn=dsn)
             async_drv = AsyncOracleDriver(resolved_ora_cfg)
             sync_drv = SyncOracleDriver(resolved_ora_cfg)
@@ -314,33 +340,11 @@ class OracleQueueBackend:
                 envelopes.append(env)
             return envelopes
         assert self._executor is not None
-        now = time.time()
-        lock_until = now + self._config.visibility_timeout_seconds
-        handle = uuid.uuid4().hex
-
-        rows = await self._executor.fetch_all(
-            CLAIM_ORACLE_JOBS_SQL,
-            list(lanes),
-            now,
-            batch_size,
-            lock_until,
-            self._config.consumer_name,
-            handle,
-        )
-
+        rows = await self._claim_via_executor(lanes, batch_size=batch_size)
         if not rows and timeout_seconds > 0:
             poll_sleep = min(timeout_seconds, self._config.poll_interval_seconds)
             await asyncio.sleep(poll_sleep)
-            now_retry = time.time()
-            rows = await self._executor.fetch_all(
-                CLAIM_ORACLE_JOBS_SQL,
-                list(lanes),
-                now_retry,
-                batch_size,
-                now_retry + self._config.visibility_timeout_seconds,
-                self._config.consumer_name,
-                handle,
-            )
+            rows = await self._claim_via_executor(lanes, batch_size=batch_size)
 
         envelopes_ex: list[TaskEnvelope] = []
         for r in rows:
@@ -390,7 +394,7 @@ class OracleQueueBackend:
                     retry_delay_s=None,
                 )
                 return DeadLetterEntry(
-                    dlq_id=uuid.uuid4().hex,
+                    dlq_id=envelope.task_id,
                     envelope=envelope,
                     error_type=err_type,
                     error_message=err_msg,
@@ -475,12 +479,20 @@ class OracleQueueBackend:
     async def list_dlq(self, *, limit: int = 100) -> list[DeadLetterEntry]:
         """Fetch dead-letter entries from the DLQ table."""
         if self._store is not None:
-            default_lane = getattr(self._config, "default_lane", "default")
-            dead_entries = await self._store.list_entries(
-                str(default_lane),
-                status="dead_letter",
-                limit=limit,
-            )
+            default_lane = str(getattr(self._config, "default_lane", "io"))
+            lanes_to_scan = tuple(dict.fromkeys(("cpu", "io", "agent", default_lane)))
+            dead_entries: list[QueueEntry] = []
+            for lane_name in lanes_to_scan:
+                remaining = limit - len(dead_entries)
+                if remaining <= 0:
+                    break
+                dead_entries.extend(
+                    await self._store.list_entries(
+                        lane_name,
+                        status="dead_letter",
+                        limit=remaining,
+                    )
+                )
             dlq_list: list[DeadLetterEntry] = []
             for de in dead_entries:
                 try:
@@ -528,7 +540,11 @@ class OracleQueueBackend:
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Re-enqueue task from dead-letter queue and commit."""
         if self._store is not None:
-            entry = await self._store.get_entry(dlq_id)
+            pop_fn = getattr(self._store, "pop_dead_letter", None)
+            if callable(pop_fn):
+                entry = await pop_fn(dlq_id)
+            else:
+                entry = await self._store.get_entry(dlq_id)
             if entry is None:
                 return None
             try:
@@ -541,6 +557,9 @@ class OracleQueueBackend:
                     attempt=1,
                     max_retries=entry.max_attempts,
                 )
+            idem_key = env.idempotency_key or entry.headers.get("idempotency_key")
+            if idem_key:
+                await self._store.release_unique_key(idem_key)
             replayed = msgspec.structs.replace(
                 env,
                 attempt=1,
@@ -602,7 +621,7 @@ class OracleQueueBackend:
           INSERT (lease_key, owner_id, expires_at, last_slot)
           VALUES (src.lease_key, src.owner_id, src.expires_at, src.last_slot)
         """
-        row = await self._executor.fetch_one(
+        affected = await self._executor.execute(
             sql,
             lease_key,
             owner_id,
@@ -610,15 +629,30 @@ class OracleQueueBackend:
             slot,
             now,
         )
+        if affected <= 0:
+            await self._executor.commit()
+            return None
+        row = await self._executor.fetch_one(
+            "SELECT lease_key, owner_id, expires_at, last_slot FROM vertebra_queue_leases WHERE lease_key = :1",
+            lease_key,
+        )
         await self._executor.commit()
-        if row:
+        if row is None:
             return CronLease(
-                lease_key=row["lease_key"],
-                owner_id=row["owner_id"],
-                expires_at=row["expires_at"],
-                last_slot=row.get("last_slot"),
+                lease_key=lease_key,
+                owner_id=owner_id,
+                expires_at=expires_at,
+                last_slot=slot,
             )
-        return None
+        lowered = {k.lower(): v for k, v in row.items()}
+        if str(lowered.get("owner_id", "")) != owner_id:
+            return None
+        return CronLease(
+            lease_key=str(lowered["lease_key"]),
+            owner_id=str(lowered["owner_id"]),
+            expires_at=float(lowered["expires_at"]),
+            last_slot=lowered.get("last_slot"),
+        )
 
     async def renew_lease(
         self,
@@ -639,3 +673,80 @@ class OracleQueueBackend:
             self._sync_store.close()
         if self._executor is not None:
             await self._executor.close()
+
+    async def _claim_via_executor(
+        self,
+        lanes: Sequence[TaskLane],
+        *,
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        """Select ready rows via dynamic positional binds, mark running, and commit."""
+        assert self._executor is not None
+        if not lanes or batch_size <= 0:
+            return []
+        lane_vals = [str(lane) for lane in lanes]
+        now = time.time()
+        lock_until = now + self._config.visibility_timeout_seconds
+        select_sql = _build_oracle_claim_sql(len(lane_vals))
+        candidates = await self._executor.fetch_all(
+            select_sql,
+            *lane_vals,
+            now,
+            batch_size,
+        )
+        if not candidates:
+            await self._executor.commit()
+            return []
+        claimed_rows: list[dict[str, Any]] = []
+        for cand in candidates:
+            lowered = {k.lower(): v for k, v in cand.items()}
+            task_id = str(lowered["task_id"])
+            prev_status = str(lowered.get("status", "pending"))
+            curr_attempt = int(lowered.get("attempt", 1))
+            next_attempt = curr_attempt + 1 if prev_status == "running" else curr_attempt
+            row_handle = uuid.uuid4().hex
+            await self._executor.execute(
+                """
+                UPDATE vertebra_queue_jobs
+                SET status = :1,
+                    attempt = :2,
+                    locked_until = :3,
+                    consumer_name = :4,
+                    receipt_handle = :5
+                WHERE task_id = :6
+                """,
+                "running",
+                next_attempt,
+                lock_until,
+                self._config.consumer_name,
+                row_handle,
+                task_id,
+            )
+            lowered["status"] = "running"
+            lowered["attempt"] = next_attempt
+            lowered["locked_until"] = lock_until
+            lowered["consumer_name"] = self._config.consumer_name
+            lowered["receipt_handle"] = row_handle
+            claimed_rows.append(lowered)
+        await self._executor.commit()
+        return claimed_rows
+
+
+def _build_oracle_claim_sql(num_lanes: int) -> str:
+    """Build Oracle SELECT ... FOR UPDATE SKIP LOCKED SQL with dynamic :1..:N lane binds."""
+    lane_binds = ", ".join(f":{idx}" for idx in range(1, num_lanes + 1))
+    now_idx = num_lanes + 1
+    limit_idx = num_lanes + 2
+    return f"""
+    SELECT task_id, task_name, lane, payload, status, attempt, max_retries,
+           enqueued_at, scheduled_at, idempotency_key, traceparent
+    FROM vertebra_queue_jobs
+    WHERE lane IN ({lane_binds})
+      AND (
+          (status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= :{now_idx}))
+          OR (status = 'running' AND locked_until <= :{now_idx})
+      )
+    ORDER BY COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
+    FETCH FIRST :{limit_idx} ROWS ONLY
+    FOR UPDATE SKIP LOCKED
+    """
