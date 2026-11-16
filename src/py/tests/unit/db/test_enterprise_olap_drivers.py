@@ -105,10 +105,10 @@ from vertebra.extensions.sqlspec.adapters import (
     OracleAsyncDriver,
     OracleSyncConfig,
     OracleSyncDriver,
-    PostgreSQLAsyncConfig,
-    PostgreSQLAsyncDriver,
-    PostgreSQLSyncConfig,
-    PostgreSQLSyncDriver,
+    PostgresAsyncConfig,
+    PostgresAsyncDriver,
+    PostgresSyncConfig,
+    PostgresSyncDriver,
     SQLiteAsyncConfig,
     SQLiteSyncConfig,
     TenantPredicate,
@@ -550,7 +550,7 @@ def test_duckdb_post_init_bootstrap_and_arrow_shm_streaming() -> None:
 @pytest.mark.parametrize(
     ("sync_cfg_cls", "async_cfg_cls", "async_drv_cls"),
     [
-        (PostgreSQLSyncConfig, PostgreSQLAsyncConfig, AsyncPostgreSQLDriver),
+        (PostgresSyncConfig, PostgresAsyncConfig, AsyncPostgreSQLDriver),
         (MySQLSyncConfig, MySQLAsyncConfig, AsyncMySQLDriver),
         (SQLiteSyncConfig, SQLiteAsyncConfig, AsyncSQLiteDriver),
         (MSSQLSyncConfig, MSSQLAsyncConfig, AsyncMSSQLDriver),
@@ -687,7 +687,7 @@ def test_driver_schema_hydration_load_from_arrow_and_topologies() -> None:
             alloydb_instance_uri="projects/p/locations/r/clusters/c/instances/i",
         )
 
-    pg_sync_adapter = PostgreSQLSyncConfig(pg_cfg)
+    pg_sync_adapter = PostgresSyncConfig(pg_cfg)
     direct_sync_adapter = pg_sync_adapter.derive_direct_config()
     assert direct_sync_adapter.driver_config.pooler_mode == "session"
 
@@ -821,7 +821,7 @@ def _arrow_ipc_stream_bytes(table: pa.Table) -> bytes:
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
-    return sink.getvalue().to_pybytes()
+    return bytes(sink.getvalue().to_pybytes())
 
 
 def _raise_on_row_materialization(*_args: Any, **_kwargs: Any) -> Any:
@@ -992,7 +992,7 @@ def test_sync_tenant_session_setting_preserves_failure_identity(engine: str, mon
         raise failure
 
     monkeypatch.setattr(type(native), "execute", fail)
-    adapter = PostgreSQLSyncDriver(native) if engine == "postgres" else OracleSyncDriver(native)
+    adapter = PostgresSyncDriver(native) if engine == "postgres" else OracleSyncDriver(native)
     try:
         with pytest.raises(RuntimeError) as raised:
             adapter.apply_tenant_predicate(TenantPredicate(table_alias="t", tenant_value="acme"))
@@ -1014,7 +1014,7 @@ async def test_async_tenant_session_setting_preserves_failure_identity(
         raise failure
 
     monkeypatch.setattr(type(native), "execute", fail)
-    adapter = PostgreSQLAsyncDriver(native) if engine == "postgres" else OracleAsyncDriver(native)
+    adapter = PostgresAsyncDriver(native) if engine == "postgres" else OracleAsyncDriver(native)
     try:
         with pytest.raises(RuntimeError) as raised:
             await adapter.apply_tenant_predicate(TenantPredicate(table_alias="t", tenant_value="acme"))
@@ -1031,8 +1031,8 @@ def test_postgresql_tenant_session_prepares_numeric_binds(config_defaults: bool)
         PostgreSQLConfig(dsn="postgresql://localhost:5432/app"),
         pool=FakeSyncPostgresPool(cluster),
     )
-    config = PostgreSQLSyncConfig(native.config, broker=object(), share_pool=False)
-    adapter = PostgreSQLSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    config = PostgresSyncConfig(native.config, broker=object(), share_pool=False)
+    adapter = PostgresSyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
         result = adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
         assert result == "o.tenant_id = $1"
@@ -1053,8 +1053,8 @@ async def test_postgresql_tenant_session_prepares_async_numeric_binds(config_def
         PostgreSQLConfig(dsn="postgresql://localhost:5432/app"),
         pool=FakeAsyncPostgresPool(cluster),
     )
-    config = PostgreSQLAsyncConfig(native.config, broker=object(), share_pool=False)
-    adapter = PostgreSQLAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
+    config = PostgresAsyncConfig(native.config, broker=object(), share_pool=False)
+    adapter = PostgresAsyncDriver(native, statement_config=config.statement_config if config_defaults else None)
     try:
         result = await adapter.apply_tenant_predicate(TenantPredicate(table_alias="o", tenant_value="acme"))
         assert result == "o.tenant_id = $1"
@@ -1329,7 +1329,7 @@ def test_duckdb_driver_executes_on_duckdb_engine() -> None:
         driver.commit()
         assert driver.execute_tuples("SELECT max(v) FROM tx_items") == [(9,)]
 
-        assert driver.commit() is None
-        assert driver.rollback() is None
+        driver.commit()
+        driver.rollback()
     finally:
         driver.close()

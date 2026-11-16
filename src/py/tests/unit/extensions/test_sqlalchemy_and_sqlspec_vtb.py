@@ -11,9 +11,12 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import warnings
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pytest
@@ -21,7 +24,10 @@ from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types.file_object import FileObject, StoredObject
-from sqlalchemy import String, create_engine, delete, select, update
+from alembic.ddl.impl import DefaultImpl
+from sqlalchemy import JSON as SAJSON
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, delete, insert, select, update
+from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.util.concurrency import greenlet_spawn
@@ -33,7 +39,9 @@ from sqlspec.core.statement import StatementConfig
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError
 from sqlspec.exceptions import StackExecutionError
+from sqlspec.utils.serializers import from_json
 
+import vertebra.extensions.alchemy.cache as alchemy_cache_mod
 import vertebra.extensions.sqlspec as sqlspec_extension
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import LeaseBroker
@@ -41,12 +49,21 @@ from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
+from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.dbapi import AsyncDBAPIConnection, InterfaceError, SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.alchemy import (
     ObjectStoreBackend,
     create_alchemy_plugin,
     create_async_alchemy_config,
     create_sync_alchemy_config,
+)
+from vertebra.extensions.alchemy.cache import (
+    AsyncCacheBackend,
+    DogpileMemoryBackend,
+    DogpileStorageBackend,
+    SQLAlchemyCacheBackend,
+    SyncCacheBackend,
+    create_cache_config,
 )
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
@@ -72,13 +89,32 @@ from vertebra.extensions.sqlalchemy import (
     Vector,
     dialects,
 )
+from vertebra.extensions.sqlalchemy.alembic.impl import (
+    BigQueryAlembicImpl,
+    DuckDBAlembicImpl,
+    SpangresAlembicImpl,
+    SpannerAlembicImpl,
+)
 from vertebra.extensions.sqlalchemy.async_adapter import AsyncAdapt_dbapi_connection, SQLAlchemyAsyncDBAPI
+from vertebra.extensions.sqlalchemy.cache import CompiledCache
+from vertebra.extensions.sqlalchemy.dialects import (
+    AsyncMSSQLDialect,
+    AsyncMySQLDialect,
+    AsyncOracleDialect,
+    AsyncPostgreSQLDialect,
+    AsyncSpangresDialect,
+    SyncBigQueryDialect,
+    SyncDuckDBDialect,
+    SyncMSSQLDialect,
+    SyncSpangresDialect,
+    SyncSpannerDialect,
+)
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool, broker_creator
 from vertebra.extensions.sqlspec.adapters import (
     MySQLAsyncConfig,
     MySQLSyncConfig,
-    PostgreSQLAsyncConfig,
-    PostgreSQLSyncConfig,
+    PostgresAsyncConfig,
+    PostgresSyncConfig,
     SQLiteAsyncDriver,
     SQLiteSyncDriver,
 )
@@ -89,11 +125,37 @@ from vertebra.extensions.sqlspec.adapters import (
     MySQLSyncDriver as SQLSpecMySQLSyncDriver,
 )
 from vertebra.extensions.sqlspec.adapters import (
-    PostgreSQLAsyncDriver as SQLSpecPostgreSQLAsyncDriver,
+    PostgresAsyncDriver as SQLSpecPostgresAsyncDriver,
 )
 from vertebra.extensions.sqlspec.adapters import (
-    PostgreSQLSyncDriver as SQLSpecPostgreSQLSyncDriver,
+    PostgresSyncDriver as SQLSpecPostgresSyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.duckdb import (
+    DuckDBAsyncADKArtifactStore,
+    DuckDBAsyncADKMemoryStore,
+    DuckDBAsyncConfig,
+    DuckDBSyncADKArtifactStore,
+    DuckDBSyncADKMemoryStore,
+    DuckDBSyncConfig,
+)
+from vertebra.extensions.sqlspec.adapters.duckdb.adk import _row_to_memory as _duckdb_row_to_memory
+from vertebra.extensions.sqlspec.adapters.oracle import (
+    OracleAsyncADKArtifactStore,
+    OracleAsyncConfig,
+    OracleAsyncEventsBackend,
+    OracleSyncADKArtifactStore,
+    OracleSyncConfig,
+    OracleSyncEventsBackend,
+)
+from vertebra.extensions.sqlspec.adapters.postgres import PostgresAsyncEventsBackend
+from vertebra.extensions.sqlspec.adapters.postgres.adk import _row_to_stored_memory as _pg_row_to_stored_memory
+from vertebra.extensions.sqlspec.adapters.sqlite import (
+    SQLiteAsyncADKMemoryStore,
+    SQLiteAsyncConfig,
+    SQLiteSyncADKMemoryStore,
+    SQLiteSyncConfig,
+)
+from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.plugin import ProxyAsyncConfig, ProxySyncConfig
 from vertebra.extensions.sqlspec.provider import (
     AsyncBrokerLeaseSource,
@@ -237,17 +299,17 @@ def test_sqlite_vtb_sync_engine_ddl_dml_and_rollback() -> None:
         BaseTestModel.metadata.create_all(conn)
 
     with engine.connect() as conn:
-        conn.execute(ItemRecord.__table__.insert().values(id=1, name="first"))
+        conn.execute(insert(ItemRecord).values(id=1, name="first"))
         conn.commit()
 
     with engine.connect() as conn:
         rows = conn.execute(select(ItemRecord).where(ItemRecord.id == 1)).fetchall()
         assert len(rows) == 1
-        assert rows[0][1] == "first"
+        assert rows[0]._mapping["name"] == "first"
 
     with engine.connect() as conn:
         trans = conn.begin()
-        conn.execute(ItemRecord.__table__.insert().values(id=2, name="rolled_back"))
+        conn.execute(insert(ItemRecord).values(id=2, name="rolled_back"))
         trans.rollback()
 
     with engine.connect() as conn:
@@ -469,7 +531,7 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
     assert pg_dbapi.paramstyle == "numeric_dollar"
     assert SyncPostgreSQLDialect.import_dbapi().paramstyle == "numeric_dollar"
     assert SyncSQLiteDialect.dbapi().paramstyle == "qmark"
-    assert SyncMySQLDialect.dbapi().paramstyle == "format"
+    assert SyncMySQLDialect.dbapi().paramstyle == "qmark"
     assert SyncOracleDialect.dbapi().paramstyle == "named"
 
     cluster = FakePostgresCluster()
@@ -511,8 +573,9 @@ def test_postgres_vtb_dialect_dbapi_and_compiler_features() -> None:
 
     vec = Vector(768)
     bjson = BinaryJSON()
-    assert SyncPostgreSQLDialect.type_descriptor(vec) is vec
-    assert SyncPostgreSQLDialect.type_descriptor(bjson) is bjson
+    pg_dialect = cast(Any, SyncPostgreSQLDialect)()
+    assert pg_dialect.type_descriptor(vec) is vec
+    assert pg_dialect.type_descriptor(bjson) is bjson
 
 
 @pytest.mark.anyio
@@ -801,7 +864,7 @@ def test_sqlspec_stack_ordered_results_and_binds(pipeline_capable: bool) -> None
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[1].get_result().get_data() == [{"id": 7}]
         assert result[2].get_result().get_data() == [{"n": 1}]
-        if pipeline_capable:
+        if isinstance(native, _SyncPipelinePort):
             assert native.pipeline_calls == 1
             assert [item[0] for item in native.queued] == ["execute", "select", "select"]
     finally:
@@ -825,7 +888,7 @@ async def test_sqlspec_async_stack_ordered_results_and_binds(pipeline_capable: b
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[1].get_result().get_data() == [{"id": 7}]
         assert result[2].get_result().get_data() == [{"n": 1}]
-        if pipeline_capable:
+        if isinstance(native, _AsyncPipelinePort):
             assert native.pipeline_calls == 1
             assert [item[0] for item in native.queued] == ["execute", "select", "select"]
     finally:
@@ -852,13 +915,13 @@ def test_sqlspec_stack_errors_roll_back_or_continue(continue_on_error: bool, pip
             assert result[1].is_error()
             assert result[0].rows_affected == result[2].rows_affected == 1
             assert native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
-            if pipeline_capable:
+            if isinstance(native, _SyncPipelinePort):
                 assert native.pipeline_calls == 0
         else:
             with pytest.raises(Exception, match="missing_table"):
                 driver.execute_stack(stack)
             assert native.select("SELECT id FROM stack_items") == []
-            if pipeline_capable:
+            if isinstance(native, _SyncPipelinePort):
                 assert native.pipeline_calls == 1
     finally:
         native.close()
@@ -887,13 +950,13 @@ async def test_sqlspec_async_stack_errors_roll_back_or_continue(
             assert result[1].is_error()
             assert result[0].rows_affected == result[2].rows_affected == 1
             assert await native.select("SELECT id FROM stack_items ORDER BY id") == [{"id": 1}, {"id": 3}]
-            if pipeline_capable:
+            if isinstance(native, _AsyncPipelinePort):
                 assert native.pipeline_calls == 0
         else:
             with pytest.raises(Exception, match="missing_table"):
                 await driver.execute_stack(stack)
             assert await native.select("SELECT id FROM stack_items") == []
-            if pipeline_capable:
+            if isinstance(native, _AsyncPipelinePort):
                 assert native.pipeline_calls == 1
     finally:
         await native.close()
@@ -923,11 +986,11 @@ def test_sqlspec_stack_uses_processed_row_metadata(pipeline_capable: bool) -> No
         assert result[0].get_result().get_data() == [{"id": 7}]
         assert result[0].result_type == "INSERT"
         assert result[0].get_result().statement.operation_type == "INSERT"
-        assert result[1].rows_affected == 0
+        assert result[1].rows_affected == 1
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
-        if pipeline_capable:
+        if isinstance(native, _SyncPipelinePort):
             assert [item[0] for item in native.queued] == ["select", "execute", "select"]
     finally:
         native.close()
@@ -950,11 +1013,11 @@ async def test_sqlspec_async_stack_uses_processed_row_metadata(pipeline_capable:
         assert result[0].get_result().get_data() == [{"id": 7}]
         assert result[0].result_type == "INSERT"
         assert result[0].get_result().statement.operation_type == "INSERT"
-        assert result[1].rows_affected == 0
+        assert result[1].rows_affected == 1
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert result[2].result_type == "SELECT"
         assert result[2].get_result().statement.operation_type == "SELECT"
-        if pipeline_capable:
+        if isinstance(native, _AsyncPipelinePort):
             assert [item[0] for item in native.queued] == ["select", "execute", "select"]
     finally:
         await native.close()
@@ -1155,14 +1218,26 @@ class _NativeBindConnection:
         return None
 
 
-class _AsyncNativeBindConnection(_NativeBindConnection):
+class _AsyncNativeBindConnection:
     """Async DBAPI port retaining actual SQL and bind observations."""
+
+    def __init__(self) -> None:
+        self._sync = _NativeBindConnection()
+        self.raw = self._sync.raw
+        self.calls = self._sync.calls
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._sync.in_transaction
+
+    def connection(self) -> Any:
+        return self
 
     def acquire(self) -> Any:
         return self
 
     def cursor(self) -> Any:
-        cursor = super().cursor()
+        cursor = self._sync.cursor()
 
         class Cursor:
             @property
@@ -1171,13 +1246,13 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
 
             @property
             def rowcount(self) -> int:
-                return cursor.rowcount
+                return int(cursor.rowcount)
 
             async def execute(self, sql: str, params: Any = None) -> None:
                 cursor.execute(sql, params)
 
             async def fetchall(self) -> list[Any]:
-                return cursor.fetchall()
+                return list(cursor.fetchall())
 
             async def close(self) -> None:
                 cursor.close()
@@ -1191,7 +1266,7 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
         return Cursor()
 
     async def execute(self, sql: str, params: Any = None) -> int:
-        return super().execute(sql, params)
+        return self._sync.execute(sql, params)
 
     async def execute_many(self, sql: str, param_sets: Any) -> int:
         total = 0
@@ -1200,31 +1275,31 @@ class _AsyncNativeBindConnection(_NativeBindConnection):
         return total
 
     async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], list[str]]:
-        return super().execute_with_description(sql, params)
+        return self._sync.execute_with_description(sql, params)
 
     async def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-        return super().fetch_all(sql, params)
+        return self._sync.fetch_all(sql, params)
 
     async def begin(self) -> None:
-        super().begin()
+        self._sync.begin()
 
     async def savepoint(self, name: str) -> None:
-        super().savepoint(name)
+        self._sync.savepoint(name)
 
     async def release_savepoint(self, name: str) -> None:
-        super().release_savepoint(name)
+        self._sync.release_savepoint(name)
 
     async def rollback_to_savepoint(self, name: str) -> None:
-        super().rollback_to_savepoint(name)
+        self._sync.rollback_to_savepoint(name)
 
     async def commit(self) -> None:
-        super().commit()
+        self._sync.commit()
 
     async def rollback(self) -> None:
-        super().rollback()
+        self._sync.rollback()
 
     async def close(self) -> None:
-        super().close()
+        self._sync.close()
 
     async def __aenter__(self) -> Any:
         return self
@@ -1244,8 +1319,8 @@ def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config
             PostgreSQLConfig(dsn="postgresql://localhost/db"),
             pool=FakeSyncPostgresPool(cluster),
         )
-        config: Any = PostgreSQLSyncConfig(native.config)
-        driver: Any = SQLSpecPostgreSQLSyncDriver(
+        config: Any = PostgresSyncConfig(native.config)
+        driver: Any = SQLSpecPostgresSyncDriver(
             native, statement_config=config.statement_config if config_defaults else None
         )
         insert_sql = "INSERT INTO stack_items VALUES ($1)"
@@ -1281,9 +1356,9 @@ def test_sqlspec_stack_preserves_native_dbapi_binds_and_rows(engine: str, config
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[2].get_result().get_data() == [{"id": 9}]
         assert port.calls == [
-            ("INSERT INTO stack_items VALUES (%s)", [7]),
-            ("UPDATE stack_items SET id = %s WHERE id = %s", [9, 7]),
-            ("SELECT id FROM stack_items WHERE id = %s", [9]),
+            ("INSERT INTO stack_items VALUES (?)", [7]),
+            ("UPDATE stack_items SET id = ? WHERE id = ?", [9, 7]),
+            ("SELECT id FROM stack_items WHERE id = ?", [9]),
         ]
         assert port.raw.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
     finally:
@@ -1302,8 +1377,8 @@ async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine:
             PostgreSQLConfig(dsn="postgresql://localhost/db"),
             pool=FakeAsyncPostgresPool(cluster),
         )
-        config: Any = PostgreSQLAsyncConfig(native.config)
-        driver: Any = SQLSpecPostgreSQLAsyncDriver(
+        config: Any = PostgresAsyncConfig(native.config)
+        driver: Any = SQLSpecPostgresAsyncDriver(
             native, statement_config=config.statement_config if config_defaults else None
         )
         insert_sql = "INSERT INTO stack_items VALUES ($1)"
@@ -1339,9 +1414,13 @@ async def test_sqlspec_async_stack_preserves_native_dbapi_binds_and_rows(engine:
         )
         assert [item.rows_affected for item in result] == [1, 1, 1]
         assert result[2].get_result().get_data() == [{"id": 9}]
-        assert [sql for sql, _ in port.calls] == [insert_sql, update_sql, select_sql]
+        assert [sql for sql, _ in port.calls] == [
+            "INSERT INTO stack_items VALUES (?)",
+            "UPDATE stack_items SET id = ? WHERE id = ?",
+            "SELECT id FROM stack_items WHERE id = ?",
+        ]
         assert [list(params) for _, params in port.calls] == [[7], [9, 7], [9]]
-        assert all("%s" in sql for sql, _ in port.calls)
+        assert all("?" in sql for sql, _ in port.calls)
         assert port.raw.execute("SELECT id FROM stack_items").fetchall() == [(9,)]
     finally:
         await native.close()
@@ -1351,8 +1430,8 @@ def test_sqlspec_explicit_statement_config_remains_authoritative() -> None:
     """Caller-owned statement configuration controls compilation and retains object identity."""
     port = _NativeBindConnection()
     statement_config = SQL("SELECT 1").statement_config
-    config = PostgreSQLSyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
-    driver = SQLSpecPostgreSQLSyncDriver(port, statement_config=config.statement_config)
+    config = PostgresSyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
+    driver = SQLSpecPostgresSyncDriver(port, statement_config=config.statement_config)
     try:
         result = driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
         assert config.statement_config is statement_config
@@ -1369,8 +1448,8 @@ async def test_sqlspec_async_explicit_statement_config_remains_authoritative() -
     """Async native defaults yield to the caller's SQLSpec parameter configuration."""
     port = _AsyncNativeBindConnection()
     statement_config = SQL("SELECT 1").statement_config
-    config = PostgreSQLAsyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
-    driver = SQLSpecPostgreSQLAsyncDriver(port, statement_config=config.statement_config)
+    config = PostgresAsyncConfig(PostgreSQLConfig(dsn="postgresql://localhost/db"), statement_config=statement_config)
+    driver = SQLSpecPostgresAsyncDriver(port, statement_config=config.statement_config)
     try:
         result = await driver.execute_stack(StatementStack().push_execute("INSERT INTO stack_items VALUES (:id)", id=7))
         assert config.statement_config is statement_config
@@ -1452,7 +1531,7 @@ def test_sqlspec_batch_stack_compiles_native_binds(override_config: bool) -> Non
     """Batch stack processing applies the same native parameter profile as single execution."""
     if override_config:
         port = _NativeBindConnection()
-        driver = SQLSpecPostgreSQLSyncDriver(port)
+        driver = SQLSpecPostgresSyncDriver(port)
         config: StatementConfig | None = StatementConfig(dialect="postgres")
         try:
             result = driver.execute_stack(
@@ -1474,7 +1553,7 @@ def test_sqlspec_batch_stack_compiles_native_binds(override_config: bool) -> Non
         PostgreSQLConfig(dsn="postgresql://localhost/db"),
         pool=FakeSyncPostgresPool(cluster),
     )
-    driver = SQLSpecPostgreSQLSyncDriver(native)
+    driver = SQLSpecPostgresSyncDriver(native)
     try:
         result = driver.execute_stack(
             StatementStack().push_execute_many("INSERT INTO stack_items VALUES (?)", [(7,), (9,)])
@@ -1493,7 +1572,7 @@ async def test_sqlspec_async_batch_stack_compiles_native_binds(override_config: 
     """Async batch stack parameters compile to native numeric binds or the explicit override."""
     if override_config:
         port = _AsyncNativeBindConnection()
-        driver = SQLSpecPostgreSQLAsyncDriver(port)
+        driver = SQLSpecPostgresAsyncDriver(port)
         config: StatementConfig | None = StatementConfig(dialect="postgres")
         try:
             result = await driver.execute_stack(
@@ -1515,7 +1594,7 @@ async def test_sqlspec_async_batch_stack_compiles_native_binds(override_config: 
         PostgreSQLConfig(dsn="postgresql://localhost/db"),
         pool=FakeAsyncPostgresPool(cluster),
     )
-    driver = SQLSpecPostgreSQLAsyncDriver(native)
+    driver = SQLSpecPostgresAsyncDriver(native)
     try:
         result = await driver.execute_stack(
             StatementStack().push_execute_many("INSERT INTO stack_items VALUES (?)", [(7,), (9,)])
@@ -1570,12 +1649,14 @@ def test_sync_dbapi_connection_driver_ownership_and_broker_isolation() -> None:
     url = "postgresql+vtb://localhost:5432/ownership_sync_db"
     shared_conn = SyncDBAPIConnection(url, share_pool=True)
     shared_driver = shared_conn.driver
+    assert isinstance(shared_driver, SyncPostgreSQLDriver)
     assert shared_driver is DatabaseRegistry.default().get_shared_sync_driver(shared_conn.config)
     shared_conn.close()
     assert shared_driver._closed is False
 
     owned_conn = SyncDBAPIConnection(url, share_pool=False)
     owned_driver = owned_conn.driver
+    assert isinstance(owned_driver, SyncPostgreSQLDriver)
     assert owned_driver is not shared_driver
     owned_conn.close()
     assert owned_driver._closed is True
@@ -1584,6 +1665,7 @@ def test_sync_dbapi_connection_driver_ownership_and_broker_isolation() -> None:
     custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
     broker_conn = SyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
     broker_driver = broker_conn.driver
+    assert isinstance(broker_driver, SyncPostgreSQLDriver)
     assert broker_driver is not shared_driver
     assert broker_driver.config.broker is custom_broker
     broker_conn.close()
@@ -1599,12 +1681,14 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     url = "postgresql+vtb_async://localhost:5432/ownership_async_db"
     shared_conn = AsyncDBAPIConnection(url, share_pool=True)
     shared_driver = shared_conn.driver
+    assert isinstance(shared_driver, AsyncPostgreSQLDriver)
     assert shared_driver is DatabaseRegistry.default().get_shared_driver(shared_conn.config)
     await shared_conn.close()
     assert shared_driver._closed is False
 
     owned_conn = AsyncDBAPIConnection(url, share_pool=False)
     owned_driver = owned_conn.driver
+    assert isinstance(owned_driver, AsyncPostgreSQLDriver)
     assert owned_driver is not shared_driver
     await owned_conn.close()
     assert owned_driver._closed is True
@@ -1613,6 +1697,7 @@ async def test_async_dbapi_connection_driver_ownership_broker_isolation_and_clos
     custom_broker = LeaseBroker(pool_size=4, max_overflow=2)
     broker_conn = AsyncDBAPIConnection(url, broker=custom_broker, share_pool=True)
     broker_driver = broker_conn.driver
+    assert isinstance(broker_driver, AsyncPostgreSQLDriver)
     assert broker_driver is not shared_driver
     assert broker_driver.config.broker is custom_broker
     await broker_conn.close()
@@ -2387,7 +2472,7 @@ def test_broker_pool_shared_contention_dispose_creator_failure_bind_class_and_no
         pg_engine = pg_cfg.get_engine()
         try:
             assert pg_cfg.connection_string == "postgresql+vtb://user:secret@db.internal:5432/orders?shm_broker=true"
-            assert SyncPostgreSQLDialect().create_connect_args(pg_engine.url) == (
+            assert cast("Any", SyncPostgreSQLDialect)().create_connect_args(pg_engine.url) == (
                 [],
                 {"url": "postgresql+vtb://user:secret@db.internal:5432/orders"},
             )
@@ -2496,10 +2581,13 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
         def _create_failing_async() -> Any:
             return AsyncAdapt_dbapi_connection(
                 async_dbapi,
-                FailingAsyncRollbackConnection(
-                    driver=AsyncSQLiteDriver(),
-                    broker=rollback_t,
-                    lease_managed=True,
+                cast(
+                    "Any",
+                    FailingAsyncRollbackConnection(
+                        driver=AsyncSQLiteDriver(),
+                        broker=rollback_t,
+                        lease_managed=True,
+                    ),
                 ),
             )
 
@@ -2533,7 +2621,7 @@ async def test_async_broker_pool_shared_contention_dispose_and_real_rollback_fai
 @pytest.mark.anyio
 @pytest.mark.parametrize("return_format", ["table", "batch", "batches", "reader"])
 async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type_error(
-    return_format: str,
+    return_format: Literal["table", "batch", "batches", "reader"],
 ) -> None:
     """Verify streams, Arrow formats/native_only, named/mapping params, nested tx, worker quarantine, and _send_rpc."""
     sqlite_cfg = StatementConfig(
@@ -2572,7 +2660,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         assert stack_results[2].result.num_rows == 6
 
         with pytest.raises(TypeError):
-            proxy_sync.execute_stack("not-a-stack")
+            proxy_sync.execute_stack(cast("Any", "not-a-stack"))
         with pytest.raises(ValueError):
             proxy_sync.execute_stack(StatementStack())
 
@@ -2614,7 +2702,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
             assert arrow_payload.read_all().num_rows == 6
 
         with pytest.raises(ValueError, match="Unsupported Arrow return_format"):
-            proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format="invalid")
+            proxy_sync.select_to_arrow("SELECT id FROM items ORDER BY id", return_format=cast("Any", "invalid"))
     finally:
         proxy_sync.close()
         sync_provider.close()
@@ -2645,7 +2733,7 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
         call_count += 1
         return 42
 
-    bad_proxy = ProxySyncDriver(_bad_rpc_transport)
+    bad_proxy = ProxySyncDriver(cast("Any", _bad_rpc_transport))
     try:
         with pytest.raises(TypeError, match="Unexpected RPC transport response type"):
             bad_proxy.acquire_lease()
@@ -2701,9 +2789,10 @@ async def test_proxy_drivers_streams_arrow_formats_stacks_nested_tx_and_rpc_type
 
         assert proxy_async.dispatch_select_stream(SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1) is None
         with pytest.raises(SQLSpecImproperConfigurationError):
-            await proxy_async.select_stream(
+            async with proxy_async.select_stream(
                 SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=True
-            )
+            ):
+                pass
         async with proxy_async.select_stream(
             SQL("SELECT id, name FROM items ORDER BY id"), chunk_size=1, native_only=False
         ) as open_astream:
@@ -2956,7 +3045,7 @@ async def test_cancelled_error_propagates_unwrapped_from_release_lease_and_provi
 @pytest.mark.parametrize(
     ("is_async", "plain_url", "vtb_url"),
     [
-        (False, "sqlite:///plain.db", "sqlite+vtb:///managed.db"),
+        (False, "sqlite+pysqlite:///plain.db", "sqlite+vtb:///managed.db"),
         (True, "sqlite+aiosqlite:///plain.db", "sqlite+vtb_async:///managed.db"),
     ],
     ids=["sync", "async"],
@@ -3178,3 +3267,502 @@ async def test_sqlspec_provider_idle_commit_cancelled_quarantine_and_stack_cance
         assert async_stack_proxy._in_tx is False
     finally:
         await async_stack_proxy.close()
+
+
+@pytest.mark.anyio
+async def test_alchemy_cache_bytes_roundtrip_shm_oversize_eviction_remote_async_dogpile_and_compiled_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache backends preserve UTF-8 bytes vs str, evict stale SHM on >856B, avoid sync remote clients in async, and wire Dogpile/CompiledCache."""
+    raw_entity_bytes = b'{"id": 1, "name": "Alice"}'
+    raw_entity_str = '{"id": 1, "name": "Alice"}'
+    encoded_bytes = SyncCacheBackend._encode_driver_payload(raw_entity_bytes)
+    encoded_str = SyncCacheBackend._encode_driver_payload(raw_entity_str)
+    assert encoded_bytes != encoded_str
+    assert SyncCacheBackend._decode_driver_payload(encoded_bytes) == raw_entity_bytes
+    assert isinstance(SyncCacheBackend._decode_driver_payload(encoded_bytes), bytes)
+    assert SyncCacheBackend._decode_driver_payload(encoded_str) == raw_entity_str
+    assert isinstance(SyncCacheBackend._decode_driver_payload(encoded_str), str)
+
+    file_cache = SyncCacheBackend(f"file://{tmp_path / 'l2_store'}")
+    file_cache.set("entity:bytes", raw_entity_bytes)
+    file_cache.set("entity:str", raw_entity_str)
+    file_cache.set("entity:dict", {"id": 1, "ok": True})
+    file_cache._entries.clear()
+    fetched_bytes = file_cache.get("entity:bytes")
+    fetched_str = file_cache.get("entity:str")
+    assert isinstance(fetched_bytes, bytes) and fetched_bytes == raw_entity_bytes
+    assert isinstance(fetched_str, str) and fetched_str == raw_entity_str
+    assert file_cache.get("entity:dict") == {"id": 1, "ok": True}
+
+    def _broken_shm_cache(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("SHM segment creation failed")
+
+    monkeypatch.setattr(alchemy_cache_mod, "ShmCache", _broken_shm_cache)
+    with pytest.raises(OSError, match="SHM segment creation failed"):
+        SyncCacheBackend("shm://broken-segment")
+
+    class _RecordingShmStub:
+        def __init__(self) -> None:
+            self.data: dict[str, bytes] = {}
+            self.deleted_keys: list[str] = []
+
+        def get(self, key: str) -> bytes | None:
+            return self.data.get(key)
+
+        def set(self, key: str, value: bytes, ttl: float | None = None) -> None:
+            _ = ttl
+            self.data[key] = bytes(value)
+
+        def delete(self, key: str) -> bool:
+            self.deleted_keys.append(key)
+            return self.data.pop(key, None) is not None
+
+        def clear(self) -> None:
+            self.data.clear()
+
+    oversize_cache = SyncCacheBackend(f"file://{tmp_path / 'oversize_l2'}")
+    shm_stub = _RecordingShmStub()
+    cast(Any, oversize_cache)._shm = shm_stub
+    oversize_cache.set("profile:1", b"small-payload")
+    assert len(shm_stub.data) == 1
+    big_payload = b"x" * 1024
+    oversize_cache.set("profile:1", big_payload)
+    assert len(shm_stub.deleted_keys) == 1
+    assert shm_stub.data == {}
+    oversize_cache._entries.clear()
+    assert oversize_cache.get("profile:1") == big_payload
+
+    class _DummyAsyncDriver:
+        async def get(self, _k: str) -> Any:
+            return None
+
+    async_remote = AsyncCacheBackend(
+        "valkey://127.0.0.1:6379/0",
+        async_driver=cast(Any, _DummyAsyncDriver()),
+    )
+    assert async_remote._sync_backend._url == "memory://"
+    assert async_remote._sync_backend._sync_driver is None
+    assert async_remote._sync_backend._store is None
+
+    async_storage = AsyncCacheBackend(f"file://{tmp_path / 'async_only_store'}")
+    assert async_storage._sync_backend._url == "memory://"
+    assert async_storage._sync_backend._store is None
+    await async_storage.set("async:bytes", raw_entity_bytes)
+    async_storage._sync_backend.clear()
+    roundtripped = await async_storage.get("async:bytes")
+    assert isinstance(roundtripped, bytes) and roundtripped == raw_entity_bytes
+
+    dp_mem = DogpileMemoryBackend({"url": "memory://", "capacity": 64, "key_prefix": "dp"})
+    dp_mem.set("k1", b"v1")
+    assert dp_mem.get("k1") == b"v1"
+    dp_store = DogpileStorageBackend({"url": f"file://{tmp_path / 'dogpile_store'}", "capacity": 64})
+    dp_store.set("k2", b"v2")
+    assert dp_store.get("k2") == b"v2"
+
+    dp_cfg = create_cache_config("memory://", use_dogpile=True)
+    assert dp_cfg.backend == "vertebra.memory"
+
+    sa_backend = SQLAlchemyCacheBackend(capacity=64)
+    preserved_cfg = create_cache_config("memory://", backend=sa_backend)
+    assert preserved_cfg.region_factory is not None
+    assert preserved_cfg.region_factory(preserved_cfg) is sa_backend
+
+    compiled_cache = CompiledCache(capacity=16)
+    assert len(compiled_cache) == 0
+    compiled_cache[("stmt", 1)] = "PLAN_A"
+    compiled_cache["stmt_2"] = "PLAN_B"
+    assert len(compiled_cache) == 2
+    assert set(compiled_cache) == {("stmt", 1), "stmt_2"}
+    del compiled_cache["stmt_2"]
+    assert len(compiled_cache) == 1
+    compiled_cache.clear()
+    assert len(compiled_cache) == 0
+    assert list(compiled_cache) == []
+
+
+def test_sqlalchemy_dialects_type_descriptor_spangres_numeric_dollar_and_alembic_bare_names() -> None:
+    """SQLAlchemy dialects adapt colspecs via instance type_descriptor, compile Spangres $1..$N, and register bare Alembic names."""
+    dialect_classes: list[type[Any]] = [
+        SyncPostgreSQLDialect,
+        AsyncPostgreSQLDialect,
+        SyncOracleDialect,
+        AsyncOracleDialect,
+        SyncMySQLDialect,
+        AsyncMySQLDialect,
+        SyncMSSQLDialect,
+        AsyncMSSQLDialect,
+    ]
+    vec = Vector(4)
+    bjson = BinaryJSON()
+    generic_json = SAJSON()
+    generic_uuid = SAUuid()
+    for dialect_cls in dialect_classes:
+        inst = dialect_cls()
+        assert inst.type_descriptor(vec) is vec
+        assert inst.type_descriptor(bjson) is bjson
+        adapted_json = inst.type_descriptor(generic_json)
+        adapted_uuid = inst.type_descriptor(generic_uuid)
+        assert adapted_json is not None
+        assert adapted_uuid is not None
+    assert type(cast(Any, SyncPostgreSQLDialect)().type_descriptor(generic_json)) is not SAJSON
+
+    meta = MetaData()
+    tbl = Table("accounts", meta, Column("id", Integer), Column("email", String))
+    for spangres_cls in (SyncSpangresDialect, AsyncSpangresDialect):
+        sp_dialect = cast(Any, spangres_cls)()
+        assert sp_dialect.paramstyle == "numeric_dollar"
+        assert sp_dialect.default_paramstyle == "numeric_dollar"
+        assert sp_dialect.positional is True
+        compiled_sel = select(tbl).where(tbl.c.id == 42, tbl.c.email == "a@b.c").compile(dialect=sp_dialect)
+        sql_text = str(compiled_sel)
+        assert "$1" in sql_text and "$2" in sql_text
+        assert "%(" not in sql_text
+        compiled_ins = insert(tbl).values(id=1, email="x@y.z").compile(dialect=sp_dialect)
+        ins_text = str(compiled_ins)
+        assert "$1" in ins_text and "$2" in ins_text
+
+    AlembicImpl.register_all()
+    assert DefaultImpl.get_by_dialect(SyncDuckDBDialect()) is DuckDBAlembicImpl
+    assert DefaultImpl.get_by_dialect(SyncBigQueryDialect()) is BigQueryAlembicImpl
+    assert DefaultImpl.get_by_dialect(SyncSpannerDialect()) is SpannerAlembicImpl
+    assert DefaultImpl.get_by_dialect(cast(Any, SyncSpangresDialect)()) is SpangresAlembicImpl
+
+
+@pytest.mark.anyio
+async def test_sqlspec_adk_tuple_mapping_artifact_versions_session_scope_and_search_errors() -> None:
+    """ADK stores map positional memory tuples accurately, return StoredArtifact dicts, scope Oracle keys, and propagate search errors."""
+    ts = datetime(2026, 11, 16, 8, 0, tzinfo=UTC)
+    ins_ts = datetime(2026, 11, 16, 8, 5, tzinfo=UTC)
+
+    duck_tuple = (
+        "m-1",
+        "s-1",
+        "app",
+        "u-1",
+        "user",
+        "ev-1",
+        "assistant",
+        ts,
+        '{"text": "hi"}',
+        "hi",
+        '{"tag": "v1"}',
+        [0.25, 0.75],
+        ins_ts,
+    )
+    duck_mem = _duckdb_row_to_memory(duck_tuple, deserializer=from_json)
+    assert duck_mem["metadata_json"] == {"tag": "v1"}
+    assert duck_mem["embedding"] == [0.25, 0.75]
+    assert duck_mem["inserted_at"] == ins_ts
+
+    pg_tuple = (
+        "m-2",
+        "s-2",
+        "app",
+        "u-2",
+        "user",
+        "ev-2",
+        "assistant",
+        ts,
+        '{"text": "pg"}',
+        "pg",
+        '{"k": "v"}',
+        ins_ts,
+        "[0.5, -0.5]",
+    )
+    pg_mem = _pg_row_to_stored_memory(pg_tuple)
+    assert pg_mem["timestamp"] == ts
+    assert pg_mem["inserted_at"] == ins_ts
+    assert pg_mem["embedding"] == [0.5, -0.5]
+
+    sample_art_rows = [
+        {
+            "app_name": "app",
+            "user_id": "u1",
+            "session_id": "s1",
+            "filename": "report.pdf",
+            "version": 1,
+            "mime_type": "application/pdf",
+            "canonical_uri": "memory://bucket/report_v1.pdf",
+            "custom_metadata": '{"rev": 1}',
+            "size": 128,
+            "updated": ts,
+            "signed_url": None,
+            "created_at": ts,
+        }
+    ]
+
+    class _StubSyncSessionDriver:
+        def __init__(self, rows: list[dict[str, Any]], captured: list[tuple[str, Any]]) -> None:
+            self._rows = rows
+            self._captured = captured
+
+        def select(self, query: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            self._captured.append((query, args or kwargs))
+            return list(self._rows)
+
+    class _StubAsyncSessionDriver:
+        def __init__(self, rows: list[dict[str, Any]], captured: list[tuple[str, Any]]) -> None:
+            self._rows = rows
+            self._captured = captured
+
+        async def select(self, query: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            self._captured.append((query, args or kwargs))
+            return list(self._rows)
+
+    class _StubSyncCfg:
+        def __init__(self, rows: list[dict[str, Any]], *, fail_sql: str | None = None) -> None:
+            self.extension_config: dict[str, Any] = {"adk": {"use_fts": True, "memory_use_fts": True}}
+            self.rows = rows
+            self.fail_sql = fail_sql
+            self.captured: list[tuple[str, Any]] = []
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            cfg = self
+
+            class _Ctx:
+                def __enter__(self) -> Any:
+                    if cfg.fail_sql is not None:
+
+                        class _FailingDriver:
+                            def execute(self, *_a: Any, **_kw: Any) -> int:
+                                return 0
+
+                            def select(self, query: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+                                if cfg.fail_sql and cfg.fail_sql in query:
+                                    raise RuntimeError("fts engine failure")
+                                return []
+
+                        return _FailingDriver()
+                    return _StubSyncSessionDriver(cfg.rows, cfg.captured)
+
+                def __exit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _Ctx()
+
+    class _StubAsyncCfg:
+        def __init__(self, rows: list[dict[str, Any]], *, fail_sql: str | None = None) -> None:
+            self.extension_config: dict[str, Any] = {"adk": {"use_fts": True, "memory_use_fts": True}}
+            self.rows = rows
+            self.fail_sql = fail_sql
+            self.captured: list[tuple[str, Any]] = []
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            cfg = self
+
+            class _AsyncCtx:
+                async def __aenter__(self) -> Any:
+                    if cfg.fail_sql is not None:
+
+                        class _FailingAsyncDriver:
+                            async def execute(self, *_a: Any, **_kw: Any) -> int:
+                                return 0
+
+                            async def select(self, query: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+                                if cfg.fail_sql and cfg.fail_sql in query:
+                                    raise RuntimeError("fts engine failure")
+                                return []
+
+                        return _FailingAsyncDriver()
+                    return _StubAsyncSessionDriver(cfg.rows, cfg.captured)
+
+                async def __aexit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _AsyncCtx()
+
+    duck_sync_art = DuckDBSyncADKArtifactStore(cast(DuckDBSyncConfig, _StubSyncCfg(sample_art_rows)))
+    sync_versions = duck_sync_art.list_artifact_versions("app", "u1", "report.pdf", session_id="s1")
+    assert len(sync_versions) == 1
+    assert isinstance(sync_versions[0], dict)
+    assert sync_versions[0]["canonical_uri"] == "memory://bucket/report_v1.pdf"
+
+    duck_async_art = DuckDBAsyncADKArtifactStore(cast(DuckDBAsyncConfig, _StubAsyncCfg(sample_art_rows)))
+    async_versions = await duck_async_art.list_artifact_versions("app", "u1", "report.pdf", session_id="s1")
+    assert len(async_versions) == 1
+    assert isinstance(async_versions[0], dict)
+    assert async_versions[0]["version"] == 1
+
+    ora_sync_cfg = _StubSyncCfg([{"filename": "a.txt"}, {"filename": "user:b.txt"}])
+    ora_sync_art = OracleSyncADKArtifactStore(cast(OracleSyncConfig, ora_sync_cfg))
+    assert ora_sync_art.list_artifact_keys("app", "u1", session_id="sess-9") == ["a.txt", "user:b.txt"]
+    assert "session_id IN ('', :session_id)" in ora_sync_cfg.captured[-1][0]
+    ora_sync_art.list_artifact_keys("app", "u1", session_id=None)
+    assert "session_id = ''" in ora_sync_cfg.captured[-1][0]
+
+    ora_async_cfg = _StubAsyncCfg([{"filename": "a.txt"}])
+    ora_async_art = OracleAsyncADKArtifactStore(cast(OracleAsyncConfig, ora_async_cfg))
+    assert await ora_async_art.list_artifact_keys("app", "u1", session_id="sess-9") == ["a.txt"]
+    assert "session_id IN ('', :session_id)" in ora_async_cfg.captured[-1][0]
+    await ora_async_art.list_artifact_keys("app", "u1", session_id=None)
+    assert "session_id = ''" in ora_async_cfg.captured[-1][0]
+
+    duck_fail_sync = DuckDBSyncADKMemoryStore(cast(DuckDBSyncConfig, _StubSyncCfg([], fail_sql="match_bm25")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        duck_fail_sync.search_entries("needle", "app", "u1")
+
+    duck_fail_async = DuckDBAsyncADKMemoryStore(cast(DuckDBAsyncConfig, _StubAsyncCfg([], fail_sql="match_bm25")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        await duck_fail_async.search_entries("needle", "app", "u1")
+
+    sqlite_fail_sync = SQLiteSyncADKMemoryStore(cast(SQLiteSyncConfig, _StubSyncCfg([], fail_sql="MATCH")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        sqlite_fail_sync.search_entries("needle", "app", "u1")
+
+    sqlite_fail_async = SQLiteAsyncADKMemoryStore(cast(SQLiteAsyncConfig, _StubAsyncCfg([], fail_sql="MATCH")))
+    with pytest.raises(RuntimeError, match="fts engine failure"):
+        await sqlite_fail_async.search_entries("needle", "app", "u1")
+
+
+@pytest.mark.anyio
+async def test_sqlspec_events_async_pump_survives_timeout_sync_poll_interval_and_oracle_skip_locked() -> None:
+    """Async event backends keep source.listen() alive across poll timeouts, honor sync poll_interval, and use SKIP LOCKED in Oracle."""
+
+    class _FakeNotifyFrame:
+        def __init__(self, channel: str, payload: str) -> None:
+            self.channel = channel
+            self.payload = payload
+
+    class _PumpedAsyncNotifySource:
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[_FakeNotifyFrame] = asyncio.Queue()
+            self.listen_calls = 0
+            self.closed_by_cancel = False
+            self.subscribed: list[str] = []
+
+        async def subscribe(self, channels: list[str]) -> None:
+            self.subscribed.extend(channels)
+
+        async def unsubscribe(self, _channels: list[str]) -> None:
+            return None
+
+        async def publish(self, channel: str, payload: str | bytes) -> None:
+            text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+            await self.queue.put(_FakeNotifyFrame(channel, text))
+
+        async def close(self) -> None:
+            return None
+
+        async def listen(self) -> AsyncIterator[_FakeNotifyFrame]:
+            self.listen_calls += 1
+            try:
+                while True:
+                    item = await self.queue.get()
+                    yield item
+            except asyncio.CancelledError:
+                self.closed_by_cancel = True
+                raise
+
+    pg_source = _PumpedAsyncNotifySource()
+    pg_cfg = PostgresAsyncConfig(dsn="postgresql://localhost:5432/app", share_pool=False)
+    pg_events = PostgresAsyncEventsBackend(pg_cfg, source=cast(Any, pg_source))
+    try:
+        assert await pg_events.dequeue("orders", poll_interval=0.01) is None
+        assert await pg_events.dequeue("orders", poll_interval=0.01) is None
+        assert pg_source.listen_calls == 1
+        assert pg_source.closed_by_cancel is False
+
+        ev_id = await pg_events.publish("orders", {"order_id": 101})
+        msg = await pg_events.dequeue("orders", poll_interval=0.2)
+        assert msg is not None
+        assert msg.event_id == ev_id
+        assert msg.payload == {"order_id": 101}
+    finally:
+        await pg_events.shutdown()
+
+    ora_source = _PumpedAsyncNotifySource()
+    ora_cfg = OracleAsyncConfig(dsn="oracle://scott:tiger@localhost:1521/FREEPDB1", share_pool=False)
+    ora_events = OracleAsyncEventsBackend(ora_cfg, source=cast(Any, ora_source))
+    try:
+        assert await ora_events.dequeue("alerts", poll_interval=0.01) is None
+        assert ora_source.listen_calls == 1
+        assert ora_source.closed_by_cancel is False
+        ora_ev_id = await ora_events.publish("alerts", {"severity": "high"})
+        ora_msg = await ora_events.dequeue("alerts", poll_interval=0.2)
+        assert ora_msg is not None
+        assert ora_msg.event_id == ora_ev_id
+        assert ora_msg.payload == {"severity": "high"}
+    finally:
+        await ora_events.shutdown()
+
+    cf_source = _PumpedAsyncNotifySource()
+    cf_async = ChangeFeedAsyncEventBackend(
+        ChangeFeed(CDCConfig(channel="cdc_async")),
+        notify_source=cast(Any, cf_source),
+    )
+    try:
+        assert await cf_async.dequeue("stream_a", poll_interval=0.01) is None
+        assert cf_source.listen_calls == 1
+        assert cf_source.closed_by_cancel is False
+        await cf_async.publish("stream_b", {"target": "b"})
+        await cf_async.publish("stream_a", {"target": "a"})
+        msg_a = await cf_async.dequeue("stream_a", poll_interval=0.2)
+        msg_b = await cf_async.dequeue("stream_b", poll_interval=0.2)
+        assert msg_a is not None and msg_a.payload == {"target": "a"}
+        assert msg_b is not None and msg_b.payload == {"target": "b"}
+    finally:
+        await cf_async.shutdown()
+
+    cf_sync = ChangeFeedSyncEventBackend(ChangeFeed(CDCConfig(channel="cdc_sync")))
+    try:
+        t0 = time.monotonic()
+        assert cf_sync.dequeue("jobs", poll_interval=0.03) is None
+        assert (time.monotonic() - t0) >= 0.02
+
+        def _delayed_pub() -> None:
+            time.sleep(0.015)
+            cf_sync.publish("jobs", {"job_id": 7})
+
+        pub_thread = threading.Thread(target=_delayed_pub)
+        pub_thread.start()
+        woken = cf_sync.dequeue("jobs", poll_interval=0.5)
+        pub_thread.join()
+        assert woken is not None and woken.payload == {"job_id": 7}
+    finally:
+        cf_sync.shutdown()
+
+    executed_oracle_sql: list[str] = []
+
+    class _OracleTableFallbackSyncCfg:
+        extension_config: dict[str, Any] = {}
+
+        def provide_session(self, *_args: Any, **_kwargs: Any) -> Any:
+            class _Ctx:
+                def __enter__(self) -> Any:
+                    class _Drv:
+                        def select_one_or_none(self, query: str, _params: Any = None) -> Any:
+                            executed_oracle_sql.append(query)
+                            return {
+                                "event_id": "ev-ora-1",
+                                "channel": "billing",
+                                "payload_json": '{"ok": true}',
+                                "metadata_json": None,
+                                "attempts": 0,
+                                "available_at": datetime.now(UTC),
+                                "created_at": datetime.now(UTC),
+                            }
+
+                        def execute(self, query: str, _params: Any = None) -> int:
+                            executed_oracle_sql.append(query)
+                            return 1
+
+                        def commit(self) -> None:
+                            return None
+
+                        def rollback(self) -> None:
+                            return None
+
+                    return _Drv()
+
+                def __exit__(self, *_exc: Any) -> None:
+                    return None
+
+            return _Ctx()
+
+    ora_table_sync = OracleSyncEventsBackend(cast(OracleSyncConfig, _OracleTableFallbackSyncCfg()))
+    claimed = ora_table_sync.dequeue("billing", poll_interval=0.01)
+    assert claimed is not None and claimed.event_id == "ev-ora-1"
+    assert any("FOR UPDATE SKIP LOCKED" in q for q in executed_oracle_sql)
+    assert any("AND status = 'pending'" in q for q in executed_oracle_sql)

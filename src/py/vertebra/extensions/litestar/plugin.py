@@ -18,7 +18,6 @@ from vertebra.cli._launch import (
 )
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
-from vertebra.extensions.litestar.channels import swap_channels_backend
 from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledRoute,
@@ -206,8 +205,6 @@ class VertebraPlugin:
             with contextlib.suppress(TypeError, AttributeError):
                 state["vertebra_offload_config_json"] = offload_json
 
-        if self._config.swap_memory_channels:
-            swap_channels_backend(app)
         if self._config.swap_memory_response_cache:
             swap_response_cache_store(app)
         if self._config.enable_direct_handler_fastpath:

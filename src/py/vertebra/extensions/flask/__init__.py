@@ -9,7 +9,7 @@ from vertebra.utils.module_loader import lazy_exports
 if TYPE_CHECKING:
     from vertebra.db.registry import provide_driver
     from vertebra.extensions.flask.cache import CacheBackend, FlaskCachingBackend
-    from vertebra.extensions.flask.channels import ChannelMessage, ChannelsBackend
+    from vertebra.extensions.flask.channels import ChannelMessage, ChannelsBackend, attach_channels
     from vertebra.extensions.flask.config import VertebraConfig
     from vertebra.extensions.flask.fastpath import (
         CompiledRoute,
@@ -102,6 +102,7 @@ __all__ = (
     "WebMCPConfig",
     "WebMCPManifest",
     "WebMCPToolDescriptor",
+    "attach_channels",
     "attach_mcp_routes",
     "attach_openapi_docs",
     "attach_storage",
@@ -161,6 +162,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "WebMCPConfig": ("vertebra.extensions.flask.mcp", "WebMCPConfig"),
     "WebMCPManifest": ("vertebra.extensions.flask.mcp", "WebMCPManifest"),
     "WebMCPToolDescriptor": ("vertebra.extensions.flask.mcp", "WebMCPToolDescriptor"),
+    "attach_channels": ("vertebra.extensions.flask.channels", "attach_channels"),
     "attach_mcp_routes": ("vertebra.extensions.flask.mcp", "attach_mcp_routes"),
     "attach_openapi_docs": ("vertebra.extensions.flask.openapi", "attach_openapi_docs"),
     "attach_storage": ("vertebra.extensions.flask.storage", "attach_storage"),

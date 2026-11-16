@@ -93,7 +93,7 @@ def serve(
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit broker stats as JSON.")
 def status(shm_name: str, as_json: bool) -> None:
     """Inspect live shared-memory lease and quarantine statistics."""
-    native_mod = ensure_module("vertebra._vertebra")
+    native_mod = ensure_module("vertebra._vertebra", package="vertebra-core")
     native = native_mod.LeaseBroker.open_named(shm_name)
     stats = native.stats()
     payload = {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import importlib
 import io
@@ -14,7 +15,7 @@ import zipfile
 from collections import deque
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import msgspec
 import pyarrow as pa
@@ -30,10 +31,12 @@ from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
     AsyncOraclePipeline,
     AsyncOraclePool,
+    AsyncOracleQueueStore,
     OracleEmbeddingPushdown,
     SyncOracleDriver,
     SyncOraclePipeline,
     SyncOraclePool,
+    SyncOracleQueueStore,
 )
 from vertebra.db.adapters.oracle.config import (
     DEFAULT_ORACLE_DSN,
@@ -47,7 +50,7 @@ from vertebra.db.adapters.oracle.config import (
 )
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.adapters.oracle.notify import (
-    OracleNotificationSource,
+    AsyncOracleNotificationSource,
     OracleNotifyConfig,
     validate_oracle_channel_name,
 )
@@ -63,9 +66,16 @@ from vertebra.db.driver import (
     ProgrammingError,
     QueryCancelledError,
 )
-from vertebra.db.driver.capabilities import AsyncPipelineCapable, NotificationSource, SyncPipelineCapable
+from vertebra.db.driver.capabilities import (
+    AsyncNotificationSource,
+    AsyncPipelineCapable,
+    AsyncQueueStore,
+    QueueEntry,
+    SyncPipelineCapable,
+    SyncQueueStore,
+)
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
-from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, OracleSyncDriver
+from vertebra.extensions.sqlspec.adapters.oracle import OracleAsyncDriver, OracleSyncDriver
 from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
@@ -2231,7 +2241,8 @@ async def test_pipeline_rolls_back_when_caller_raises_after_results() -> None:
 
         with pytest.raises(InterfaceError, match="unexecuted operations"), driver.pipeline() as pipe2:
             pipe2.execute("INSERT INTO items (id, label) VALUES (:1, :2)", (2, "unflushed"))
-        assert driver.transaction_events == ("BEGIN", "ROLLBACK", "BEGIN", "ROLLBACK")
+        second_events: tuple[str, ...] = driver.transaction_events
+        assert second_events == ("BEGIN", "ROLLBACK", "BEGIN", "ROLLBACK")
 
     async_stub = _StubAsyncOracleClient()
     async_stub.queued_pipeline.append(outcomes)
@@ -2647,13 +2658,13 @@ def test_validate_oracle_channel_name_rejects_invalid_identifiers(
 
 @pytest.mark.anyio
 async def test_oracle_notification_source_protocol_publish_subscribe_listen_and_change_feed() -> None:
-    """Verify NotificationSource protocol compliance, publish/subscribe/listen, and ChangeFeed envelopes."""
+    """Verify notification source protocol compliance, publish/subscribe/listen, and ChangeFeed envelopes."""
     async_stub = _StubAsyncOracleClient()
     async with AsyncOracleDriver(client=async_stub) as driver:
         source = driver.notification_source(
             OracleNotifyConfig(queue_prefix="VTB_AQ_", poll_timeout=0.05),
         )
-        assert isinstance(source, NotificationSource)
+        assert isinstance(source, AsyncNotificationSource)
 
         with pytest.raises(ProgrammingError) as exc_info:
             async for _ in source.listen():
@@ -2718,7 +2729,7 @@ async def test_oracle_notification_source_reconnect_backoff_and_cancellation_cle
         ]
     )
     async with AsyncOracleDriver(client=async_stub) as driver:
-        source = OracleNotificationSource(
+        source = AsyncOracleNotificationSource(
             driver,
             OracleNotifyConfig(
                 reconnect_initial_delay=0.25,
@@ -2933,3 +2944,210 @@ def test_oracle_driver_defers_native_extension_import() -> None:
         assert isinstance(flag, bool)
     finally:
         sys.modules.update(saved)
+
+
+class _FakeSyncOracleDriver:
+    """Synchronous Oracle driver fake for queue store testing."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self.select_rows: list[dict[str, Any]] = []
+        self.affected_rows: int = 1
+
+    def execute(self, sql: str, parameters: Mapping[str, Any] | None = None) -> int:
+        self.executed.append((sql, parameters))
+        return self.affected_rows
+
+    def select(self, sql: str, parameters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        self.executed.append((sql, parameters))
+        return list(self.select_rows)
+
+    def select_one_or_none(self, sql: str, parameters: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+        self.executed.append((sql, parameters))
+        return self.select_rows[0] if self.select_rows else None
+
+    def in_transaction(self) -> bool:
+        return False
+
+    @contextlib.contextmanager
+    def transaction(self) -> Any:
+        yield self
+
+
+class _FakeAsyncOracleDriver:
+    """Asynchronous Oracle driver fake for queue store testing."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self.select_rows: list[dict[str, Any]] = []
+        self.affected_rows: int = 1
+
+    async def execute(self, sql: str, parameters: Mapping[str, Any] | None = None) -> int:
+        self.executed.append((sql, parameters))
+        return self.affected_rows
+
+    async def select(self, sql: str, parameters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        self.executed.append((sql, parameters))
+        return list(self.select_rows)
+
+    async def select_one_or_none(self, sql: str, parameters: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+        self.executed.append((sql, parameters))
+        return self.select_rows[0] if self.select_rows else None
+
+    def in_transaction(self) -> bool:
+        return False
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> Any:
+        yield self
+
+
+class _FakeSyncOracleNotifySource:
+    """Fake synchronous Oracle notification source capturing published events."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    def publish(self, channel: str, payload: str) -> None:
+        self.published.append((channel, payload))
+
+
+class _FakeAsyncOracleNotifySource:
+    """Fake asynchronous Oracle notification source capturing published events."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    async def publish(self, channel: str, payload: str) -> None:
+        self.published.append((channel, payload))
+
+
+def test_sync_oracle_queue_store_lifecycle() -> None:
+    """Verify SyncOracleQueueStore protocol conformance, :param binds, claims, fencing, and DLQ."""
+    drv = _FakeSyncOracleDriver()
+    notify = _FakeSyncOracleNotifySource()
+    store = SyncOracleQueueStore(cast("Any", drv), notification_source=cast("Any", notify))
+    assert isinstance(store, SyncQueueStore)
+
+    store.ensure_schema()
+    assert any("CREATE TABLE vertebra_queue_jobs" in call[0] for call in drv.executed)
+
+    entry = QueueEntry(
+        job_id="ora-job-1",
+        queue="critical",
+        task_name="tasks.billing",
+        payload=b'{"amount": 100}',
+        headers={"x-correlation": "corr-1"},
+    )
+    assigned = store.enqueue(entry)
+    assert assigned == "ora-job-1"
+    assert notify.published == [("critical", "wakeup:ora-job-1")]
+
+    drv.select_rows = [
+        {
+            "JOB_ID": "ora-job-1",
+            "QUEUE": "critical",
+            "TASK_NAME": "tasks.billing",
+            "PAYLOAD": b'{"amount": 100}',
+            "ATTEMPT": 1,
+            "MAX_ATTEMPTS": 3,
+            "STATUS": "ready",
+            "LEASE_UNTIL_MS": 1000,
+            "SCHEDULED_AT_MS": None,
+            "HEADERS": '{"x-correlation": "corr-1"}',
+        }
+    ]
+    claimed = store.claim(["critical"], worker_id="ora-w1", lease_seconds=30.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == "ora-job-1"
+    assert claimed[0].headers == {"x-correlation": "corr-1"}
+    assert any("FOR UPDATE SKIP LOCKED" in call[0] for call in drv.executed)
+
+    assert store.ack("ora-job-1", attempt=1) is True
+    assert store.heartbeat(["ora-job-1"], worker_id="ora-w1", lease_seconds=15.0) == 1
+
+    drv.select_rows = [
+        {
+            "JOB_ID": "ora-job-1",
+            "QUEUE": "critical",
+            "TASK_NAME": "tasks.billing",
+            "PAYLOAD": b'{"amount": 100}',
+            "ATTEMPT": 1,
+            "MAX_ATTEMPTS": 3,
+            "STATUS": "claimed",
+            "LEASE_UNTIL_MS": 1000,
+            "SCHEDULED_AT_MS": None,
+            "HEADERS": "{}",
+        }
+    ]
+    assert store.nack("ora-job-1", attempt=1, error="network failure", retry_delay_s=10.0) is True
+
+    drv.select_rows = [
+        {
+            "JOB_ID": "ora-job-1",
+            "QUEUE": "critical",
+            "TASK_NAME": "tasks.billing",
+            "PAYLOAD": b'{"amount": 100}',
+            "ATTEMPT": 3,
+            "MAX_ATTEMPTS": 3,
+            "STATUS": "claimed",
+            "LEASE_UNTIL_MS": 1000,
+            "SCHEDULED_AT_MS": None,
+            "HEADERS": "{}",
+        }
+    ]
+    assert store.nack("ora-job-1", attempt=3, error="fatal error") is True
+
+    assert store.reserve_unique_key("ora-key-1", ttl_seconds=60.0) is True
+    store.release_unique_key("ora-key-1")
+    assert store.acquire_lease("ora-lease-1", owner_id="ora-w1", ttl_seconds=60.0) is True
+    store.release_lease("ora-lease-1", owner_id="ora-w1")
+
+
+@pytest.mark.anyio
+async def test_async_oracle_queue_store_lifecycle() -> None:
+    """Verify AsyncOracleQueueStore protocol conformance, :param binds, claims, fencing, and DLQ."""
+    drv = _FakeAsyncOracleDriver()
+    notify = _FakeAsyncOracleNotifySource()
+    store = AsyncOracleQueueStore(cast("Any", drv), notification_source=cast("Any", notify))
+    assert isinstance(store, AsyncQueueStore)
+
+    await store.ensure_schema()
+    assert any("CREATE TABLE vertebra_queue_jobs" in call[0] for call in drv.executed)
+
+    entry = QueueEntry(
+        job_id="ora-async-1",
+        queue="analytics",
+        task_name="tasks.aggregate",
+        payload=b'{"count": 50}',
+        headers={"tenant": "acme"},
+    )
+    assigned = await store.enqueue(entry)
+    assert assigned == "ora-async-1"
+    assert notify.published == [("analytics", "wakeup:ora-async-1")]
+
+    drv.select_rows = [
+        {
+            "JOB_ID": "ora-async-1",
+            "QUEUE": "analytics",
+            "TASK_NAME": "tasks.aggregate",
+            "PAYLOAD": b'{"count": 50}',
+            "ATTEMPT": 1,
+            "MAX_ATTEMPTS": 3,
+            "STATUS": "ready",
+            "LEASE_UNTIL_MS": 2000,
+            "SCHEDULED_AT_MS": None,
+            "HEADERS": '{"tenant": "acme"}',
+        }
+    ]
+    claimed = await store.claim(["analytics"], worker_id="async-w1", lease_seconds=20.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == "ora-async-1"
+    assert any("FOR UPDATE SKIP LOCKED" in call[0] for call in drv.executed)
+
+    assert await store.ack("ora-async-1", attempt=1) is True
+    assert await store.heartbeat(["ora-async-1"], worker_id="async-w1", lease_seconds=20.0) == 1
+    assert await store.reserve_unique_key("ora-async-key", ttl_seconds=30.0) is True
+    await store.release_unique_key("ora-async-key")
+    assert await store.acquire_lease("ora-async-lease", owner_id="async-w1", ttl_seconds=30.0) is True
+    await store.release_lease("ora-async-lease", owner_id="async-w1")

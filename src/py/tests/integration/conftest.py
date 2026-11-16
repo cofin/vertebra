@@ -18,7 +18,7 @@ from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.valkey import SyncValkeyDriver, ValkeyConfig
-from vertebra.extensions.sqlspec import OracleAsyncConfig, PostgreSQLAsyncConfig
+from vertebra.extensions.sqlspec import OracleAsyncConfig, PostgresAsyncConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.text import validate_identifier
@@ -464,9 +464,9 @@ def vtb_valkey_driver(vtb_valkey_config: ValkeyConfig) -> SyncValkeyDriver:
 
 
 @pytest.fixture
-def vtb_sqlspec_postgres_config(vtb_postgres_config: PostgreSQLConfig) -> PostgreSQLAsyncConfig:
-    """Return a SQLSpec PostgreSQLAsyncConfig wired to the pytest-databases PostgresService container."""
-    return PostgreSQLAsyncConfig(vtb_postgres_config)
+def vtb_sqlspec_postgres_config(vtb_postgres_config: PostgreSQLConfig) -> PostgresAsyncConfig:
+    """Return a SQLSpec PostgresAsyncConfig wired to the pytest-databases PostgresService container."""
+    return PostgresAsyncConfig(vtb_postgres_config)
 
 
 @pytest.fixture

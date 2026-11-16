@@ -9,16 +9,23 @@ import random
 import time
 import urllib.parse
 import uuid
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
 
 import msgspec
 
+from vertebra.db.driver.capabilities import QueueEntry
+from vertebra.framework.di import inspect_callable_bindings
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import UnsupportedBackendError
 from vertebra.utils.module_loader import import_string
+from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from vertebra.framework.di import Container
+    from vertebra.framework.queues.scheduler import CronScheduler
 
 __all__ = (
     "CronLease",
@@ -26,11 +33,13 @@ __all__ = (
     "DeadLetterEntry",
     "MemoryQueueBackend",
     "QueueBackend",
+    "QueueBackendSettings",
     "QueueConfig",
     "QueueService",
     "TaskDef",
     "TaskEnvelope",
     "TaskLane",
+    "TaskResultRecord",
     "TaskRetryPolicy",
     "task",
 )
@@ -79,7 +88,7 @@ class TaskDef(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     timeout_seconds: float = 300.0
 
 
-class TaskEnvelope(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class TaskEnvelope(msgspec.Struct, frozen=True, kw_only=True, array_like=True):
     """Wire-serializable background task execution envelope."""
 
     task_id: str
@@ -96,7 +105,7 @@ class TaskEnvelope(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_li
     receipt_handle: str | None = None
 
 
-class DeadLetterEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True, array_like=True):
+class DeadLetterEntry(msgspec.Struct, frozen=True, kw_only=True, array_like=True):
     """Dead-letter queue payload capturing exhausted task envelopes and error metadata."""
 
     dlq_id: str
@@ -104,6 +113,66 @@ class DeadLetterEntry(msgspec.Struct, frozen=True, gc=False, kw_only=True, array
     error_type: str
     error_message: str
     failed_at: float
+
+
+class TaskResultRecord(msgspec.Struct, frozen=True, kw_only=True):
+    """Durable record of a completed or failed background task execution."""
+
+    task_id: str
+    status: str
+    result: Any = None
+    error: str | None = None
+    completed_at: float = 0.0
+
+
+class QueueBackendSettings(msgspec.Struct, frozen=True):
+    """Declarative configuration settings for QueueService backend initialization."""
+
+    kind: Literal[
+        "postgres",
+        "postgresql",
+        "oracle",
+        "redis",
+        "valkey",
+        "spanner",
+        "spanner+googlesql",
+        "spangres",
+        "spanner+spangres",
+        "shm",
+        "memory",
+    ] = "shm"
+    """Queue backend identifier."""
+
+    dsn: str | None = None
+    """Optional connection URI overriding the default scheme."""
+
+    visibility_timeout_seconds: float = 30.0
+    """Visibility lease duration in seconds for claimed jobs."""
+
+    poll_interval_seconds: float = 1.0
+    """Fallback polling interval in seconds when no wakeup push channel exists."""
+
+    consumer_name: str = "vertebra-worker"
+    """Worker consumer identifier recorded on claimed jobs."""
+
+    driver: Any = None
+    """Optional pre-constructed asynchronous database driver."""
+
+    sync_driver: Any = None
+    """Optional pre-constructed synchronous database driver."""
+
+    store: Any = None
+    """Optional pre-constructed AsyncQueueStore."""
+
+    sync_store: Any = None
+    """Optional pre-constructed SyncQueueStore."""
+
+    @property
+    def backend_url(self) -> str:
+        """Return the equivalent connection URL string."""
+        if self.dsn:
+            return self.dsn
+        return f"{self.kind}://"
 
 
 class CronLease(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -228,8 +297,8 @@ class MemoryQueueBackend:
         self._dlq: dict[str, DeadLetterEntry] = {}
         self._leases: dict[str, CronLease] = {}
 
-    async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
-        """Enqueue an envelope into scheduled storage or active lane deque."""
+    def enqueue_sync(self, envelope: TaskEnvelope) -> TaskEnvelope:
+        """Synchronously enqueue an envelope into scheduled storage or active lane deque."""
         if envelope.idempotency_key:
             if envelope.idempotency_key in self._idempotency_keys:
                 return envelope
@@ -244,6 +313,10 @@ class MemoryQueueBackend:
         lane = envelope.lane if envelope.lane in self._lanes else self._config.default_lane
         self._lanes[lane].append(envelope)
         return envelope
+
+    async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
+        """Enqueue an envelope into scheduled storage or active lane deque."""
+        return self.enqueue_sync(envelope)
 
     async def dequeue(
         self,
@@ -474,21 +547,25 @@ class MemoryQueueBackend:
 class QueueService:
     """Multi-lane background task queue service supporting pluggable distributed backends."""
 
-    __slots__ = ("_backend", "_config", "_tasks")
+    __slots__ = ("_backend", "_config", "_container", "_scheduler", "_tasks")
 
     def __init__(
         self,
-        config: QueueConfig | None = None,
+        config: QueueConfig | QueueBackendSettings | None = None,
         *,
         backend: QueueBackend | None = None,
+        container: Container | None = None,
+        scheduler: CronScheduler | None = None,
     ) -> None:
-        self._config = config or QueueConfig()
+        self._config: QueueConfig | QueueBackendSettings = config or QueueBackendSettings()
         self._tasks: dict[str, TaskDef] = {}
         self._backend: QueueBackend = backend or self._build_backend(self._config)
+        self._container = container
+        self._scheduler = scheduler
 
     @property
-    def config(self) -> QueueConfig:
-        """Return the active QueueConfig."""
+    def config(self) -> QueueConfig | QueueBackendSettings:
+        """Return the active QueueConfig or QueueBackendSettings."""
         return self._config
 
     @property
@@ -501,10 +578,75 @@ class QueueService:
         """Return registered task definitions keyed by name."""
         return dict(self._tasks)
 
+    @property
+    def container(self) -> Container | None:
+        """Return the bound Container if configured."""
+        return self._container
+
+    @property
+    def scheduler(self) -> CronScheduler | None:
+        """Return the bound CronScheduler if configured."""
+        return self._scheduler
+
     def register(self, task_def: TaskDef) -> TaskDef:
         """Register a TaskDef with the queue service."""
         self._tasks[task_def.name] = task_def
         return task_def
+
+    def enqueue_sync(
+        self,
+        task_name: str,
+        *args: Any,
+        lane: TaskLane | None = None,
+        delay_seconds: float | None = None,
+        scheduled_at: float | None = None,
+        idempotency_key: str | None = None,
+        **kwargs: Any,
+    ) -> TaskEnvelope:
+        """Synchronously enqueue a task by name with optional scheduling, lane override, and idempotency key."""
+        if task_name not in self._tasks:
+            msg = f"Task {task_name!r} is not registered"
+            raise KeyError(msg)
+        tdef = self._tasks[task_name]
+        now = time.time()
+        computed_sched = scheduled_at or (now + delay_seconds if delay_seconds and delay_seconds > 0 else None)
+        active_trace = TraceContext.current()
+        envelope = TaskEnvelope(
+            task_id=uuid.uuid4().hex,
+            task_name=task_name,
+            lane=lane or tdef.lane,
+            args=args,
+            kwargs=kwargs,
+            attempt=1,
+            max_retries=tdef.retry_policy.max_retries,
+            enqueued_at=now,
+            scheduled_at=computed_sched,
+            idempotency_key=idempotency_key,
+            traceparent=active_trace.format() if active_trace else None,
+        )
+        sync_fn = getattr(self._backend, "enqueue_sync", None)
+        if callable(sync_fn):
+            return cast("TaskEnvelope", sync_fn(envelope))
+        store = getattr(self._backend, "sync_store", None) or getattr(self._backend, "store", None)
+        if store is not None and hasattr(store, "enqueue") and callable(store.enqueue):
+            sched_ms = int(envelope.scheduled_at * 1000) if envelope.scheduled_at is not None else None
+            headers_dict: dict[str, str] = {}
+            if envelope.idempotency_key:
+                headers_dict["idempotency_key"] = envelope.idempotency_key
+            entry = QueueEntry(
+                job_id=envelope.task_id,
+                queue=envelope.lane,
+                task_name=envelope.task_name,
+                payload=encode_json_bytes(envelope),
+                attempt=envelope.attempt,
+                max_attempts=envelope.max_retries,
+                scheduled_at_ms=sched_ms,
+                headers=headers_dict,
+            )
+            store.enqueue(entry)
+            return envelope
+        msg = f"Queue backend {type(self._backend).__name__} does not support synchronous enqueue"
+        raise UnsupportedBackendError(msg)
 
     async def enqueue(
         self,
@@ -549,13 +691,48 @@ class QueueService:
         """Enqueue a task to be executed after delay_seconds elapses."""
         return await self.enqueue(task_name, *args, delay_seconds=delay_seconds, **kwargs)
 
-    async def process_envelope(self, envelope: TaskEnvelope) -> Any:
+    async def process_envelope(
+        self,
+        envelope: TaskEnvelope,
+        *,
+        container: Container | None = None,
+    ) -> Any:
         """Execute callable bound to envelope, settling with ack or nack upon completion."""
         tdef = self._tasks[envelope.task_name]
+        eff_container = container if container is not None else self._container
         try:
-            result = tdef.fn(*envelope.args, **envelope.kwargs)
-            if inspect.isawaitable(result):
-                result = await result
+            if eff_container is not None:
+                async with eff_container.scope(
+                    extra_context={"envelope": envelope, "task_id": envelope.task_id}
+                ) as scope:
+                    bindings = inspect_callable_bindings(tdef.fn)
+                    resolved_kwargs = dict(envelope.kwargs)
+                    num_pos = len(envelope.args)
+                    for idx, binding in enumerate(bindings):
+                        if idx < num_pos:
+                            continue
+                        if binding.name in resolved_kwargs:
+                            continue
+                        dep_key = eff_container.graph.resolve_param_key(binding)
+                        if dep_key is None:
+                            if binding.name in eff_container.singletons:
+                                dep_key = binding.name
+                            elif binding.annotation is not None and inspect.isclass(binding.annotation):
+                                for s_key, s_val in eff_container.singletons.items():
+                                    if isinstance(s_val, binding.annotation):
+                                        dep_key = s_key
+                                        break
+                        if dep_key is not None and (
+                            dep_key in eff_container.graph.providers or dep_key in eff_container.singletons
+                        ):
+                            resolved_kwargs[binding.name] = await scope.resolve(dep_key)
+                    result = tdef.fn(*envelope.args, **resolved_kwargs)
+                    if inspect.isawaitable(result):
+                        result = await result
+            else:
+                result = tdef.fn(*envelope.args, **envelope.kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
             await self._backend.ack(envelope)
             return result
         except Exception as exc:
@@ -621,38 +798,58 @@ class QueueService:
         day_of_week: int = 0,
     ) -> list[Any]:
         """Enqueue and execute all registered cron tasks matching the specified timestamp components."""
-        enqueued = 0
-        for tdef in self._tasks.values():
-            if tdef.cron is not None and _cron_matches(
-                tdef.cron.expression,
-                minute=minute,
-                hour=hour,
-                day_of_month=day_of_month,
-                month=month,
-                day_of_week=day_of_week,
-            ):
-                await self.enqueue(tdef.name)
-                enqueued += 1
-        if enqueued == 0:
+        scheduler_cls = import_string("vertebra.framework.queues.scheduler.CronScheduler")
+        sched = self._scheduler or scheduler_cls(self)
+        target_dt = datetime(2026, month, day_of_month, hour, minute, 0, tzinfo=UTC)
+        count = await sched.tick(now=target_dt)
+        if count == 0:
             return []
-        return await self.drain_once(batch_size=enqueued)
+        return await self.drain_once(batch_size=count)
 
     async def close(self) -> None:
         """Close underlying backend resources."""
         await self._backend.close()
 
     @staticmethod
-    def _build_backend(config: QueueConfig) -> QueueBackend:
-        """Construct matching QueueBackend based on URL scheme."""
+    def _build_backend(config: QueueConfig | QueueBackendSettings) -> QueueBackend:
+        """Construct matching QueueBackend based on QueueBackendSettings or QueueConfig."""
+        if isinstance(config, QueueBackendSettings):
+            kind = config.kind.lower()
+            if kind == "shm":
+                shm_cls = import_string("vertebra.framework.queues.backends.SHMQueueBackend")
+                return cast("QueueBackend", shm_cls(config=config))
+            if kind == "memory":
+                return MemoryQueueBackend(QueueConfig(backend_url="memory://"))
+            if kind in ("redis",):
+                backend_cls = import_string("vertebra.framework.queues.redis.RedisQueueBackend")
+                return cast("QueueBackend", backend_cls(config))
+            if kind in ("valkey",):
+                backend_cls = import_string("vertebra.framework.queues.valkey.ValkeyQueueBackend")
+                return cast("QueueBackend", backend_cls(config))
+            if kind in ("postgres", "postgresql"):
+                backend_cls = import_string("vertebra.framework.queues.postgres.PostgreSQLQueueBackend")
+                return cast("QueueBackend", backend_cls(config))
+            if kind in ("oracle",):
+                backend_cls = import_string("vertebra.framework.queues.oracle.OracleQueueBackend")
+                return cast("QueueBackend", backend_cls(config))
+            if kind in ("spanner", "spanner+googlesql", "spangres", "spanner+spangres"):
+                backend_cls = import_string("vertebra.framework.queues.spanner.SpannerQueueBackend")
+                return cast("QueueBackend", backend_cls(config))
+            msg = f"Unsupported queue backend kind: {kind!r}"
+            raise UnsupportedBackendError(msg)
+
         parsed = urllib.parse.urlparse(config.backend_url)
         scheme = parsed.scheme.lower()
         if scheme in ("", "memory"):
             return MemoryQueueBackend(config)
+        if scheme in ("shm",):
+            shm_cls = import_string("vertebra.framework.queues.backends.SHMQueueBackend")
+            return cast("QueueBackend", shm_cls(config=config))
         if scheme in ("redis", "rediss"):
             backend_cls = import_string("vertebra.framework.queues.redis.RedisQueueBackend")
             return cast("QueueBackend", backend_cls(config))
         if scheme in ("valkey", "valkeys"):
-            backend_cls = import_string("vertebra.framework.queues.redis.ValkeyQueueBackend")
+            backend_cls = import_string("vertebra.framework.queues.valkey.ValkeyQueueBackend")
             return cast("QueueBackend", backend_cls(config))
         if scheme in ("postgresql", "postgres"):
             backend_cls = import_string("vertebra.framework.queues.postgres.PostgreSQLQueueBackend")
@@ -667,38 +864,31 @@ class QueueService:
         raise UnsupportedBackendError(msg)
 
 
-def _cron_matches_field(field_spec: str, value: int) -> bool:
-    """Check whether a single cron field expression matches an integer value."""
-    if field_spec == "*":
-        return True
-    if field_spec.startswith("*/"):
-        step = int(field_spec[2:])
-        return step > 0 and value % step == 0
-    for part in field_spec.split(","):
-        if "-" in part:
-            low_s, high_s = part.split("-", 1)
-            if int(low_s) <= value <= int(high_s):
-                return True
-        elif int(part) == value:
-            return True
-    return False
-
-
-def _cron_matches(
-    expression: str,
+@overload
+def task(
+    fn: Callable[..., Any],
+    /,
     *,
-    minute: int = 0,
-    hour: int = 0,
-    day_of_month: int = 1,
-    month: int = 1,
-    day_of_week: int = 0,
-) -> bool:
-    """Evaluate a 5-field cron expression against explicit time fields."""
-    fields = expression.strip().split()
-    if len(fields) != 5:
-        return False
-    values = (minute, hour, day_of_month, month, day_of_week)
-    return all(_cron_matches_field(spec, val) for spec, val in zip(fields, values, strict=True))
+    name: str | None = None,
+    lane: TaskLane = "io",
+    retry_policy: TaskRetryPolicy | None = None,
+    retry: TaskRetryPolicy | None = None,
+    cron: CronSchedule | None = None,
+    timeout_seconds: float = 300.0,
+) -> TaskDef: ...
+
+
+@overload
+def task(
+    fn: None = None,
+    *,
+    name: str | None = None,
+    lane: TaskLane = "io",
+    retry_policy: TaskRetryPolicy | None = None,
+    retry: TaskRetryPolicy | None = None,
+    cron: CronSchedule | None = None,
+    timeout_seconds: float = 300.0,
+) -> Callable[[Callable[..., Any]], TaskDef]: ...
 
 
 def task(
@@ -710,7 +900,7 @@ def task(
     retry: TaskRetryPolicy | None = None,
     cron: CronSchedule | None = None,
     timeout_seconds: float = 300.0,
-) -> Any:
+) -> TaskDef | Callable[[Callable[..., Any]], TaskDef]:
     """Decorator registering a callable as a TaskDef."""
     effective_retry = retry_policy or retry or TaskRetryPolicy()
 

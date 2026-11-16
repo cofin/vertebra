@@ -277,12 +277,16 @@ def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("VERTEBRA_LOOP", raising=False)
     monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
 
-    assert LoopBackend.AUTO == "auto"
-    assert LoopBackend.UVLOOP == "uvloop"
-    assert LoopBackend.WINLOOP == "winloop"
-    assert LoopBackend.RLOOP == "rloop"
-    assert LoopBackend.ZUVLOOP == "zuvloop"
-    assert LoopBackend.ASYNCIO == "asyncio"
+    expected_backends: list[tuple[str, str]] = [
+        (LoopBackend.AUTO, "auto"),
+        (LoopBackend.UVLOOP, "uvloop"),
+        (LoopBackend.WINLOOP, "winloop"),
+        (LoopBackend.RLOOP, "rloop"),
+        (LoopBackend.ZUVLOOP, "zuvloop"),
+        (LoopBackend.ASYNCIO, "asyncio"),
+    ]
+    for actual, expected in expected_backends:
+        assert actual == expected
 
     assert resolve_loop_backend("asyncio") == LoopBackend.ASYNCIO
     assert resolve_loop_backend("uvloop", quarantined_modules=frozenset({"uvloop==0.21.0"})) == LoopBackend.ASYNCIO

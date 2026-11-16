@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db.driver import AsyncDatabaseDriver, DataError
@@ -14,7 +14,16 @@ from vertebra.utils.text import validate_identifier
 if TYPE_CHECKING:
     from vertebra.db.adapters.spanner.driver import AsyncSpannerDriver, SyncSpannerDriver
 
-__all__ = ("SpannerEmbeddingPushdown",)
+__all__ = ("SpannerEmbeddingPushdown", "SpannerSelectPort")
+
+
+class SpannerSelectPort(Protocol):
+    """Structural synchronous SQL selection port accepted by ``SpannerEmbeddingPushdown``."""
+
+    def select(self, sql: str, parameters: Any = None, /) -> Sequence[Any]:
+        """Execute ``sql`` and return row records."""
+        ...
+
 
 _DISTANCE_FUNCTIONS: dict[bool, dict[str, str]] = {
     True: {
@@ -48,7 +57,7 @@ class SpannerEmbeddingPushdown:
 
     def __init__(
         self,
-        driver: AsyncSpannerDriver | SyncSpannerDriver,
+        driver: AsyncSpannerDriver | SyncSpannerDriver | SpannerSelectPort,
         model: str = "gemini-embedding-001",
         *,
         model_endpoint: str | None = None,
@@ -69,7 +78,7 @@ class SpannerEmbeddingPushdown:
         self._num_leaves_to_search = num_leaves_to_search
 
     @property
-    def driver(self) -> AsyncSpannerDriver | SyncSpannerDriver:
+    def driver(self) -> AsyncSpannerDriver | SyncSpannerDriver | SpannerSelectPort:
         """Return the database driver."""
         return self._driver
 

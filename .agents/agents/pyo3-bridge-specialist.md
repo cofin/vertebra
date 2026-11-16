@@ -1,6 +1,6 @@
 ---
 name: pyo3-bridge-specialist
-description: Implements and remediates PyO3 native extensions, GIL detachment, free-threaded 3.14t/3.15t concurrency, and FFI view lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, and vertebra-postgres.
+description: Implements and remediates PyO3 native extensions, GIL detachment, free-threaded 3.14t/3.15t concurrency, and FFI view lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, vertebra-postgres, vertebra-sqlite, vertebra-redis, and vertebra-valkey.
 model: inherit
 mainAgent: false
 subagent: true

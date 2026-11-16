@@ -112,7 +112,7 @@ def test_worker_and_dispatch_split_ownership() -> None:
 def test_call_handler_async_without_loop_raises() -> None:
     """Calling an async handler via _call_handler without a loop raises RuntimeError."""
 
-    async def my_async() -> dict:
+    async def my_async() -> dict[str, bool]:
         return {"ok": True}
 
     with pytest.raises(RuntimeError, match="without an event loop"):
@@ -122,7 +122,7 @@ def test_call_handler_async_without_loop_raises() -> None:
 def test_partition_batch_sync_native_grouped() -> None:
     """Sync native handlers go to the sync_native group."""
 
-    def sync_handler() -> dict:
+    def sync_handler() -> dict[str, bool]:
         return {"ok": True}
 
     handlers = {1: sync_handler}
@@ -141,7 +141,7 @@ def test_partition_batch_sync_native_grouped() -> None:
 def test_partition_batch_async_native_grouped() -> None:
     """Async native handlers go to the async_native group."""
 
-    async def async_handler() -> dict:
+    async def async_handler() -> dict[str, bool]:
         return {"ok": True}
 
     handlers = {2: async_handler}
@@ -156,7 +156,7 @@ def test_partition_batch_async_native_grouped() -> None:
 
 def test_partition_batch_mount_grouped_by_prefix() -> None:
     """Unregistered handler_id matching a mount prefix goes to mounts."""
-    mount_runners = [("/api", lambda reqs: [], "asgi")]
+    mount_runners: list[tuple[str, Any, str]] = [("/api", lambda reqs: [], "asgi")]
     batch = [
         MockRequest(handler_id=99, request_id=1, path="/api/users"),
         MockRequest(handler_id=99, request_id=2, path="/api/items"),
@@ -238,7 +238,7 @@ def test_resolve_handler_args_unknown_param_receives_request() -> None:
 
 
 def test_dispatch_batch_sync_handlers_produce_responses() -> None:
-    def h1() -> dict:
+    def h1() -> dict[str, int]:
         return {"n": 1}
 
     def h2() -> str:
@@ -397,7 +397,7 @@ def test_dispatch_batch_asgi_mount_receives_batch() -> None:
             self.status = status
             self.body = body
 
-    def mock_asgi_runner(reqs: list) -> list:
+    def mock_asgi_runner(reqs: list[Any]) -> list[MockAsgiMount]:
         batches_seen.append(len(reqs))
         return [MockAsgiMount(200, f"asgi-{r.request_id}".encode()) for r in reqs]
 
@@ -511,7 +511,7 @@ def test_dispatch_batch_async_mode_sync_handlers_submit_immediately() -> None:
     """In async_mode, sync handlers submit via submit callback immediately."""
     submitted: list[MockResponse] = []
 
-    def sync_h() -> dict:
+    def sync_h() -> dict[str, bool]:
         return {"ok": True}
 
     handlers = {1: sync_h}

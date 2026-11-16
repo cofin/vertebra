@@ -25,7 +25,7 @@ sources:
     resource: src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend
     title: Caller-supplied queue executor and vertebra._postgres dependency guard
   - id: pg-sqlspec-py
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncConfig
+    resource: src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py::PostgresSyncConfig
     title: PostgreSQL SQLSpec adapter configs and ParameterStyle.NUMERIC driver
   - id: pg-arrow-py
     resource: src/py/vertebra/db/arrow.py::ArrowCursor
@@ -39,7 +39,7 @@ sources:
 - External pooler rules (`PgBouncer`, `PgCat`, `pgdog`): `PoolerCapabilities::resolve` sets `effective_capacity = 0` unconditionally under `PoolerMode::Statement`, disables named prepared statement caching under `Transaction`/`Auto` unless `protocol_level_pooler_cache=True` (when `advertised_max_prepared` is `None`), and `ReplicationSupervisor` rejects `PoolerMode` `transaction`, `statement`, or `auto` before dialing (`LISTEN/NOTIFY`, migrations, and logical replication require a session-mode `direct_dsn` / `derive_direct_config()`) [^pg-config-py] [^pg-supervisor].
 - `pgoutput` v1 replication does not implicitly create or drop PostgreSQL replication slots or publications (`ReplicationSupervisor` / `PostgresChangeSource` fail closed on identity mismatch, WAL gap, or CAS conflict; pending published commits cap at `1024`, queues `1..=1024` / `8 MiB`) [^pg-supervisor] [^pg-change-stream].
 - `ArrowCursor.buffer_view()` exports zero-copy `VTBARROW` IPC memory with no optional Arrow packages, whereas `to_arrow_table()` / `load_from_arrow` stream conversion and `to_polars()` require `[arrow]` (`pyarrow>=18.0.0`) or `[polars]` (`polars>=1.0.0`); direct Rust C Data Interface `FFI_ArrowArrayStream` export is tracked in GitHub issue `#128` [^pg-arrow-py].
-- `PostgreSQLSyncConfig` and `PostgreSQLAsyncConfig` declare concrete `connection_type` and `driver_type` attributes for native `ParameterStyle.NUMERIC` execution; upstream `sqlspec` `DatabaseConfigProtocol` structural typing alignment is tracked in GitHub issue `#131` [^pg-sqlspec-py].
+- `PostgresSyncConfig` and `PostgresAsyncConfig` (`vertebra.extensions.sqlspec.adapters.postgres`) declare concrete `connection_type`, `driver_type`, and `*_store_class` attributes (`adapter_name = "vertebra_postgres"`) for native `ParameterStyle.NUMERIC` execution [^pg-sqlspec-py].
 <!-- truth: end -->
 
 ## Operational Boundaries
@@ -52,5 +52,5 @@ sources:
 [^pg-supervisor]: `src/rs/vertebra-postgres/src/replication/supervisor.rs::ReplicationSupervisor` — Multi-generation verified reconnect supervisor and pooler/identity checks.
 [^pg-change-stream]: `src/py/vertebra/db/adapters/postgres/change_stream.py::PostgresChangeSource` — Durable CAS checkpoint-before-ack change stream coordinator.
 [^pg-queue-py]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — Caller-supplied queue executor and `vertebra._postgres` dependency guard.
-[^pg-sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters.py::PostgreSQLSyncConfig` — PostgreSQL SQLSpec adapter configs and `ParameterStyle.NUMERIC` driver.
+[^pg-sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py::PostgresSyncConfig` — PostgreSQL SQLSpec adapter configs and `ParameterStyle.NUMERIC` driver.
 [^pg-arrow-py]: `src/py/vertebra/db/arrow.py::ArrowCursor` — Zero-copy `VTBARROW` cursor and optional `pyarrow`/`polars` conversion.

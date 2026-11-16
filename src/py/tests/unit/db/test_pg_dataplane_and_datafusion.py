@@ -31,10 +31,13 @@ from vertebra.db.adapters.datafusion import (
 )
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgresEmbeddingPushdown, SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.adapters.postgres.notify import (
+    AsyncPostgresNotificationSource,
+    PostgresNotifyConfig,
+)
 from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryResult
-from vertebra.db.driver import DataError, NotificationSource, NotSupportedError
-from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
+from vertebra.db.driver import AsyncNotificationSource, DataError, NotSupportedError
+from vertebra.extensions.sqlspec.adapters.postgres import PostgresSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
@@ -82,7 +85,7 @@ def test_tenant_predicate_rejects_invalid_table_alias(bad: str) -> None:
 
 def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     """Verify ChangeFeed >7500-byte spill hydration, replay_since, bounded eviction, and logical emit SQL."""
-    sql, params = PostgresNotificationSource.build_emit_message_sql("orders", '{"id":1}')
+    sql, params = AsyncPostgresNotificationSource.build_emit_message_sql("orders", '{"id":1}')
     assert "pg_logical_emit_message" in sql
     assert params == (True, "orders", b'{"id":1}')
 
@@ -151,11 +154,11 @@ def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.parametrize("payload", ['{"id":1}', b'{"id":1}'])
 def test_postgres_notify_sql_builders(payload: str | bytes, transactional: bool) -> None:
     """PostgreSQL SQL builders retain payloads as bound values."""
-    assert PostgresNotificationSource.build_emit_message_sql("orders", payload, transactional=transactional) == (
+    assert AsyncPostgresNotificationSource.build_emit_message_sql("orders", payload, transactional=transactional) == (
         "SELECT pg_logical_emit_message($1, $2, $3)",
         (transactional, "orders", b'{"id":1}'),
     )
-    assert PostgresNotificationSource.build_notify_sql("orders", "'quoted'") == (
+    assert AsyncPostgresNotificationSource.build_notify_sql("orders", "'quoted'") == (
         "SELECT pg_notify($1, $2)",
         ("orders", "'quoted'"),
     )
@@ -193,8 +196,8 @@ async def test_postgres_notify_publish(
     if driver_type is SyncPostgreSQLDriver:
         driver.execute.side_effect = _record_sync_thread
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16)) if with_feed else None
-    source = PostgresNotificationSource(driver, change_feed=feed)
-    assert isinstance(source, NotificationSource)
+    source = AsyncPostgresNotificationSource(driver, change_feed=feed)
+    assert isinstance(source, AsyncNotificationSource)
     assert source.change_feed is feed
     assert source.subscribed_channels == []
     await source.publish("orders", payload)
@@ -223,7 +226,7 @@ async def test_postgres_notify_publish(
 async def test_postgres_notify_rejects_invalid_channels(action: str, channel: str) -> None:
     """Every notification entry point rejects invalid or >63-UTF-8-byte channels before driver I/O."""
     driver = MagicMock(spec=SyncPostgreSQLDriver)
-    source = PostgresNotificationSource(driver)
+    source = AsyncPostgresNotificationSource(driver)
     with pytest.raises(ValueError, match="channel"):
         if action == "publish":
             await source.publish(channel, "data")
@@ -243,7 +246,8 @@ async def test_postgres_notify_listen_native_and_unsupported_stream(with_stream_
             async def _publish_notification(self, channel: str, payload: str) -> None:
                 _ = (channel, payload)
 
-        source = PostgresNotificationSource(_NoListenerDriver())
+        no_listener: Any = _NoListenerDriver()
+        source = AsyncPostgresNotificationSource(no_listener)
         with pytest.raises(NotSupportedError, match="Live PostgreSQL LISTEN streaming requires"):
             await anext(source.listen())
         return
@@ -253,10 +257,14 @@ async def test_postgres_notify_listen_native_and_unsupported_stream(with_stream_
         pool=FakeSyncPostgresPool(cluster),
         client_factory=FakeDirectClientFactory(cluster),
     )
-    source = PostgresNotificationSource(driver)
+    source = AsyncPostgresNotificationSource(driver)
     await source.subscribe(["orders"])
     stream = source.listen()
-    next_task = asyncio.create_task(anext(stream))
+
+    async def _next_event() -> Any:
+        return await anext(stream)
+
+    next_task = asyncio.create_task(_next_event())
     while not cluster.listeners:
         await asyncio.sleep(0)
     cluster.publish_notification("orders", "hello-native", pid=42)
@@ -275,7 +283,7 @@ def test_postgres_sync_rls_predicate_binds_with_native_dollar_pool() -> None:
         client_factory=FakeDirectClientFactory(cluster),
     )
     try:
-        adapter = PostgreSQLSyncDriver(driver)
+        adapter = PostgresSyncDriver(driver)
         assert adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1")) == "tenant_id = $1"
         sql, parameters, _ = cluster.recorded_queries[0]
         assert sql.casefold() == "select set_config($1, $2, $3)"
@@ -295,10 +303,10 @@ def test_postgres_sync_rls_predicate_propagates_session_setter_failure() -> None
         raise failure
 
     _ = orig_execute_sql
-    cluster.execute_sql = _failing_execute
+    cluster.__dict__["execute_sql"] = _failing_execute
     driver = SyncPostgreSQLDriver(pool=FakeSyncPostgresPool(cluster))
     try:
-        adapter = PostgreSQLSyncDriver(driver)
+        adapter = PostgresSyncDriver(driver)
         with pytest.raises(RuntimeError) as raised:
             adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1"))
         assert raised.value is failure
@@ -318,7 +326,7 @@ async def test_postgres_sync_notify_binds_with_native_dollar_pool() -> None:
         client_factory=FakeDirectClientFactory(cluster),
     )
     try:
-        await PostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
+        await AsyncPostgresNotificationSource(driver).publish("orders", "quote ' and % payload")
         assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
             ("SELECT pg_notify($1, $2)", ("orders", "quote ' and % payload"))
         ]

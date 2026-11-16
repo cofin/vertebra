@@ -554,6 +554,8 @@ async def test_duckdb_secret_escaping_core_write_detection_notfound_and_pipeline
         sync_driver.execute("CREATE TABLE typed_rows (id INTEGER, label VARCHAR, payload VARCHAR)")
         sync_driver.execute("INSERT INTO typed_rows VALUES (?, ?, ?)", (1, "alpha", (10, 20)))
 
+        assert sync_driver._client is not None
+        assert async_driver._client is not None
         with pytest.raises(NotFoundError):
             sync_driver._client.fetch_one("SELECT id FROM typed_rows WHERE id = 999")
         with pytest.raises(NotFoundError):
@@ -844,7 +846,8 @@ def test_duckdb_unclosed_comment_and_sync_property_guards() -> None:
     sync_drv = SyncDuckDBDriver(DuckDBConfig(database=":memory:"))
     try:
         assert isinstance(sync_drv.executed_bootstrap_statements, tuple)
+        mutable_view: Any = sync_drv
         with pytest.raises(AttributeError):
-            sync_drv.executed_bootstrap_statements = ()
+            mutable_view.executed_bootstrap_statements = ()
     finally:
         sync_drv.close()

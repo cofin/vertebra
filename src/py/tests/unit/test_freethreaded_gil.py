@@ -26,6 +26,26 @@ _GIL_EXEMPT_MODULES: tuple[str, ...] = (
     "vertebra._postgres",
     "vertebra._spanner",
     "vertebra._duckdb",
+    "vertebra._sqlite",
+    "vertebra._redis",
+    "vertebra._valkey",
+)
+_VALKEY_CLASSES: tuple[str, ...] = (
+    "SyncValkeyClient",
+    "AsyncValkeyClient",
+    "SyncValkeyPipeline",
+    "AsyncValkeyPipeline",
+    "SyncValkeyListener",
+    "AsyncValkeyListener",
+    "ValkeyClientConfig",
+)
+_REDIS_CLASSES: tuple[str, ...] = (
+    "SyncRedisClient",
+    "AsyncRedisClient",
+    "SyncRedisPipeline",
+    "AsyncRedisPipeline",
+    "SyncRedisListener",
+    "AsyncRedisListener",
 )
 _POSTGRES_CLASSES: tuple[str, ...] = (
     "SyncPostgresClient",
@@ -40,6 +60,7 @@ _POSTGRES_CLASSES: tuple[str, ...] = (
     "SyncPostgresCopyIn",
     "AsyncPostgresCopyOut",
     "AsyncPostgresCopyIn",
+    "SyncPostgresListener",
     "AsyncPostgresListener",
     "AsyncPostgresReplication",
 )
@@ -52,6 +73,7 @@ _ORACLE_CLASSES: tuple[str, ...] = (
     "OracleQueryResult",
     "OraclePipelineOutcome",
     "OracleNotification",
+    "SyncOracleListener",
     "AsyncOracleListener",
 )
 _IMMUTABLE_PYCLASSES: tuple[tuple[str, str], ...] = (
@@ -85,6 +107,9 @@ _IMMUTABLE_PYCLASSES: tuple[tuple[str, str], ...] = (
     *(("vertebra._postgres", cls_name) for cls_name in _POSTGRES_CLASSES),
     *(("vertebra._spanner", cls_name) for cls_name in ("SyncSpannerClient", "AsyncSpannerClient")),
     *(("vertebra._duckdb", cls_name) for cls_name in ("SyncDuckDBClient", "AsyncDuckDBClient")),
+    *(("vertebra._sqlite", cls_name) for cls_name in ("SyncSQLiteClient", "AsyncSQLiteClient")),
+    *(("vertebra._redis", cls_name) for cls_name in _REDIS_CLASSES),
+    *(("vertebra._valkey", cls_name) for cls_name in _VALKEY_CLASSES),
 )
 
 
@@ -124,6 +149,28 @@ def test_oracle_native_module_exports_classes(export_name: str) -> None:
     assert oracle_mod.ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False
     cls = getattr(oracle_mod, export_name, None)
     assert isinstance(cls, type), f"Missing native Oracle type {export_name}"
+
+
+@pytest.mark.parametrize("export_name", _REDIS_CLASSES)
+def test_redis_native_module_exports_classes(export_name: str) -> None:
+    """Verify vertebra._redis declares GIL_USED = False and exports each native class."""
+    redis_mod = pytest.importorskip("vertebra._redis")
+    assert redis_mod.GIL_USED is False
+    assert isinstance(redis_mod.FREE_THREADED, bool)
+    assert isinstance(redis_mod.__version__, str) and redis_mod.__version__
+    cls = getattr(redis_mod, export_name, None)
+    assert isinstance(cls, type), f"Missing native Redis type {export_name}"
+
+
+@pytest.mark.parametrize("export_name", _VALKEY_CLASSES)
+def test_valkey_native_module_exports_classes(export_name: str) -> None:
+    """Verify vertebra._valkey declares GIL_USED = False and exports each native class."""
+    valkey_mod = pytest.importorskip("vertebra._valkey")
+    assert valkey_mod.GIL_USED is False
+    assert isinstance(valkey_mod.FREE_THREADED, bool)
+    assert isinstance(valkey_mod.__version__, str) and valkey_mod.__version__
+    cls = getattr(valkey_mod, export_name, None)
+    assert isinstance(cls, type), f"Missing native Valkey type {export_name}"
 
 
 def test_oracle_native_clients_concurrent_construction() -> None:

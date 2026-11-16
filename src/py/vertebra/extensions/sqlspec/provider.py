@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import mmap
+import contextlib
 import os
 import sqlite3
-import tempfile
 import threading
-import uuid
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import msgspec
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
+from vertebra.db.arrow import ArrowCursor
 from vertebra.db.driver import CommonDriverMixin
 from vertebra.extensions.broker import (
     AsyncBrokerLeaseSource,
@@ -23,7 +22,7 @@ from vertebra.extensions.broker import (
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
-from vertebra.typing import ImproperConfigurationError, VertebraError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, VertebraError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import (
     decode_json,
@@ -35,11 +34,10 @@ from vertebra.utils.sync_tools import SyncPool
 from vertebra.utils.type_guards import is_coroutine_callable, is_msgspec_struct
 
 __all__ = (
+    "ArrowCursor",
     "AsyncBrokerLeaseSource",
     "BrokerRpcRequest",
     "BrokerRpcResponse",
-    "SharedArrowBuffer",
-    "SharedArrowTable",
     "SQLSpecAsyncProvider",
     "SQLSpecSyncProvider",
     "SyncBrokerLeaseSource",
@@ -81,260 +79,130 @@ class BrokerRpcResponse(msgspec.Struct, frozen=True):
     error_message: str = ""
 
 
-class SharedArrowTable:
-    """Zero-copy mmap-backed Arrow-compatible table when PyArrow is not installed in the environment."""
+def _coerce_dict_rows(
+    data: Any,
+    columns: Sequence[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Coerce tabular objects or sequences into normalized (dict_rows, column_names)."""
+    if isinstance(data, ArrowCursor):
+        py_rows = data.to_pylist()
+        cols = list(data._columns) if data._columns else list(columns or ())
+        if not cols and py_rows:
+            cols = list(py_rows[0].keys())
+        return py_rows, cols
+    if hasattr(data, "to_pylist") and callable(data.to_pylist):
+        py_rows = list(data.to_pylist())
+        raw_cols = getattr(data, "column_names", getattr(data, "columns", columns))
+        cols = [str(c) for c in raw_cols] if isinstance(raw_cols, (list, tuple)) else []
+        if not cols and py_rows and isinstance(py_rows[0], dict):
+            cols = list(py_rows[0].keys())
+        return [dict(r) for r in py_rows], cols
+    for arrow_attr in ("to_arrow_table", "to_pyarrow", "to_arrow"):
+        arrow_fn = getattr(data, arrow_attr, None)
+        if callable(arrow_fn):
+            converted = arrow_fn()
+            if converted is not data:
+                return _coerce_dict_rows(converted, columns=columns)
+    items = data if isinstance(data, list) else list(data)
+    if not items:
+        return [], list(columns) if columns else []
+    first = items[0]
+    if isinstance(first, dict):
+        dict_rows = [dict(r) for r in items]
+        cols = list(columns) if columns else list(dict_rows[0].keys())
+        return dict_rows, cols
+    if is_msgspec_struct(first):
+        struct_rows = [msgspec.structs.asdict(item) for item in items]
+        cols = list(columns) if columns else list(struct_rows[0].keys())
+        return struct_rows, cols
+    if isinstance(first, (tuple, list)):
+        cols = list(columns) if columns else [f"c{idx}" for idx in range(len(first))]
+        return [dict(zip(cols, row, strict=False)) for row in items], cols
+    return [{"value": item} for item in items], list(columns) if columns else ["value"]
 
-    __slots__ = ("_column_names", "_mm", "_rows")
 
-    def __init__(
-        self,
-        rows: list[dict[str, Any]],
-        column_names: list[str],
-        *,
-        mm: mmap.mmap | None = None,
-    ) -> None:
-        """Initialize SharedArrowTable holding rows, column names, and the underlying mmap view."""
-        self._rows = rows
-        self._column_names = column_names
-        self._mm = mm
-
-    @property
-    def num_rows(self) -> int:
-        """Return the number of rows in the table."""
-        return len(self._rows)
-
-    @property
-    def column_names(self) -> list[str]:
-        """Return the ordered column names of the table."""
-        return list(self._column_names)
-
-    def __len__(self) -> int:
-        """Return the number of rows in the table."""
-        return len(self._rows)
-
-    def to_pylist(self) -> list[dict[str, Any]]:
-        """Convert the table into a list of row dictionaries."""
-        return [dict(r) for r in self._rows]
-
-    def to_pydict(self) -> dict[str, list[Any]]:
-        """Convert the table into a dictionary of column lists."""
-        return {col: [r.get(col) for r in self._rows] for col in self._column_names}
+def _coerce_pyarrow_table(pa: Any, data: Any, columns: Sequence[str] | None = None) -> Any:
+    """Coerce an Arrow object or row collection into a pyarrow.Table."""
+    if hasattr(data, "schema") and hasattr(data, "num_rows"):
+        if isinstance(data, pa.RecordBatch):
+            return pa.Table.from_batches([data])
+        return data
+    for arrow_attr in ("to_arrow", "to_arrow_table", "to_pyarrow"):
+        arrow_fn = getattr(data, arrow_attr, None)
+        if callable(arrow_fn):
+            converted = arrow_fn()
+            if converted is data:
+                continue
+            if hasattr(converted, "schema") and hasattr(converted, "num_rows"):
+                if isinstance(converted, pa.RecordBatch):
+                    return pa.Table.from_batches([converted])
+                return converted
+            return _coerce_pyarrow_table(pa, converted, columns=columns)
+    dict_rows, cols = _coerce_dict_rows(data, columns=columns)
+    if not dict_rows:
+        if cols:
+            return pa.Table.from_pydict({col: [] for col in cols})
+        return pa.table({})
+    return pa.Table.from_pylist(dict_rows)
 
 
-class SharedArrowBuffer:
-    """Named POSIX shared-memory manager for zero-copy PyArrow IPC stream buffers."""
+def _write_vtbarrow_cursor(
+    data: Any,
+    *,
+    columns: Sequence[str] | None = None,
+) -> ArrowCursor:
+    """Write a PyArrow table or row sequence into a VTBARROW POSIX SHM ArrowCursor."""
+    native_mod = import_optional("vertebra._vertebra")
+    native_arrow_cls = getattr(native_mod, "ArrowCursor", None) if native_mod is not None else None
+    if native_arrow_cls is None or not hasattr(native_arrow_cls, "write_ipc_to_shm"):
+        raise MissingDependencyError("vertebra._vertebra.ArrowCursor", install_package="vertebra-core")
+    pa = import_optional("pyarrow")
+    if pa is not None:
+        table = _coerce_pyarrow_table(pa, data, columns=columns)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        ipc_bytes = sink.getvalue().to_pybytes()
+        shm_name = ArrowCursor._next_shm_segment_name()
+        row_count = int(table.num_rows)
+        native_cur = native_arrow_cls.write_ipc_to_shm(shm_name, ipc_bytes, row_count)
+        return ArrowCursor(
+            native_cur,
+            columns=tuple(str(c) for c in table.column_names),
+            used_shm=True,
+            row_count=row_count,
+        )
+    dict_rows, cols = _coerce_dict_rows(data, columns=columns)
+    json_bytes = encode_json_bytes(dict_rows)
+    shm_name = ArrowCursor._next_shm_segment_name()
+    native_cur = native_arrow_cls.write_ipc_to_shm(shm_name, json_bytes, len(dict_rows))
+    return ArrowCursor(
+        native_cur,
+        columns=tuple(cols),
+        used_shm=True,
+        row_count=len(dict_rows),
+    )
 
-    __slots__ = ("_shm_dir",)
 
-    _DEFAULT_SHM_DIR: ClassVar[Path] = Path("/dev/shm") if Path("/dev/shm").is_dir() else Path(tempfile.gettempdir())
-
-    def __init__(self, shm_dir: Path | str | None = None) -> None:
-        """Initialize SharedArrowBuffer with an optional backing directory."""
-        self._shm_dir = Path(shm_dir) if shm_dir is not None else self._DEFAULT_SHM_DIR
-
-    @property
-    def shm_dir(self) -> Path:
-        """Return the directory hosting shared-memory Arrow IPC files."""
-        return self._shm_dir
-
-    @classmethod
-    def write_table(
-        cls,
-        table: Any,
-        *,
-        columns: Sequence[str] | None = None,
-        shm_dir: Path | None = None,
-    ) -> tuple[str, int]:
-        """Serialize a PyArrow Table or row sequence into a named shared-memory IPC stream."""
-        pa = import_optional("pyarrow")
-        if pa is not None:
-            arrow_table = cls._coerce_arrow_table(pa, table, columns=columns)
-            sink = pa.BufferOutputStream()
-            with pa.ipc.new_stream(sink, arrow_table.schema) as writer:
-                writer.write_table(arrow_table)
-            ipc_buf = sink.getvalue()
-            payload = memoryview(ipc_buf)
-        else:
-            fallback_rows, fallback_cols = cls._coerce_fallback_rows(table, columns=columns)
-            raw_bytes = encode_msgpack_bytes({"columns": fallback_cols, "rows": fallback_rows})
-            payload = memoryview(raw_bytes)
-
-        byte_len = len(payload)
-        shm_name = f"vtb-arrow-{uuid.uuid4().hex}"
-        shm_path = cls._resolve_shm_path(shm_name, shm_dir=shm_dir)
-        alloc_len = max(1, byte_len)
-        fd = os.open(shm_path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o600)
-        try:
-            os.ftruncate(fd, alloc_len)
-            with mmap.mmap(fd, alloc_len, access=mmap.ACCESS_WRITE) as mm:
-                if byte_len > 0:
-                    mm[:byte_len] = payload
-        finally:
-            os.close(fd)
-        return shm_name, byte_len
-
-    @classmethod
-    def read_table(
-        cls,
-        shm_name: str,
-        byte_len: int,
-        *,
-        shm_dir: Path | None = None,
-    ) -> Any:
-        """Read a PyArrow Table zero-copy from a named shared-memory IPC stream."""
-        pa = import_optional("pyarrow")
-        shm_path = cls._resolve_shm_path(shm_name, shm_dir=shm_dir)
-        if not shm_path.exists():
-            msg = f"Shared Arrow buffer {shm_name!r} does not exist at {shm_path}"
-            raise FileNotFoundError(msg)
-        if byte_len <= 0:
-            return pa.table({}) if pa is not None else SharedArrowTable([], [])
-
-        fd = os.open(shm_path, os.O_RDONLY)
-        try:
-            mm = mmap.mmap(fd, byte_len, access=mmap.ACCESS_READ)
-        finally:
-            os.close(fd)
-
-        if pa is not None:
-            pa_buf = pa.py_buffer(mm)
-            with pa.ipc.open_stream(pa_buf) as reader:
-                return reader.read_all()
-
-        decoded = decode_msgpack(memoryview(mm))
-        cols = [str(c) for c in decoded.get("columns", [])] if isinstance(decoded, dict) else []
-        rows = [dict(r) for r in decoded.get("rows", [])] if isinstance(decoded, dict) else []
-        return SharedArrowTable(rows, cols, mm=mm)
-
-    @classmethod
-    def unlink(cls, shm_name: str, *, shm_dir: Path | None = None) -> bool:
-        """Unlink a named shared-memory Arrow IPC buffer and return True if removed."""
-        if not shm_name:
-            return False
-        shm_path = cls._resolve_shm_path(shm_name, shm_dir=shm_dir)
-        try:
+def _unlink_arrow_shm(shm_name: str, cursor: ArrowCursor | None = None) -> bool:
+    """Release an active VTBARROW ArrowCursor and ensure its POSIX SHM segment is unlinked."""
+    if not shm_name:
+        return False
+    released = False
+    if cursor is not None:
+        with contextlib.suppress(Exception):
+            released = bool(cursor.release())
+    native_mod = import_optional("vertebra._vertebra")
+    native_cls = getattr(native_mod, "ArrowCursor", None) if native_mod is not None else None
+    shm_path = Path("/dev/shm") / shm_name.lstrip("/")
+    if native_cls is not None and shm_path.exists():
+        with contextlib.suppress(Exception):
+            released = bool(native_cls(shm_name, 0).release()) or released
+    if shm_path.exists():
+        with contextlib.suppress(OSError):
             shm_path.unlink()
-            return True
-        except FileNotFoundError:
-            return False
-
-    @classmethod
-    def exists(cls, shm_name: str, *, shm_dir: Path | None = None) -> bool:
-        """Return True when the named shared-memory Arrow IPC buffer exists on disk."""
-        if not shm_name:
-            return False
-        return cls._resolve_shm_path(shm_name, shm_dir=shm_dir).exists()
-
-    @classmethod
-    def coerce_table(
-        cls,
-        table: Any,
-        *,
-        columns: Sequence[str] | None = None,
-    ) -> Any:
-        """Coerce a PyArrow Table, RecordBatch, or row sequence into an Arrow table."""
-        pa = import_optional("pyarrow")
-        if pa is not None:
-            return cls._coerce_arrow_table(pa, table, columns=columns)
-        rows, cols = cls._coerce_fallback_rows(table, columns=columns)
-        return SharedArrowTable(rows, cols)
-
-    @classmethod
-    def _resolve_shm_path(cls, shm_name: str, shm_dir: Path | None = None) -> Path:
-        """Resolve the filesystem path for a shared-memory segment name."""
-        clean_name = Path(shm_name).name
-        if not clean_name or clean_name in {".", ".."}:
-            raise ImproperConfigurationError(f"Invalid shared memory segment name: {shm_name!r}")
-        base = shm_dir if shm_dir is not None else cls._DEFAULT_SHM_DIR
-        return base / clean_name
-
-    @classmethod
-    def _coerce_fallback_rows(
-        cls,
-        table: Any,
-        *,
-        columns: Sequence[str] | None = None,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Coerce a table or row sequence into normalized (dict_rows, column_names)."""
-        if isinstance(table, SharedArrowTable):
-            return table.to_pylist(), table.column_names
-        if hasattr(table, "to_pylist") and callable(table.to_pylist):
-            py_rows = list(table.to_pylist())
-            raw_cols = getattr(table, "column_names", getattr(table, "columns", columns))
-            cols = [str(c) for c in raw_cols] if isinstance(raw_cols, (list, tuple)) else []
-            if not cols and py_rows and isinstance(py_rows[0], dict):
-                cols = list(py_rows[0].keys())
-            return [dict(r) for r in py_rows], cols
-        for arrow_attr in ("to_arrow_table", "to_pyarrow", "to_arrow"):
-            arrow_fn = getattr(table, arrow_attr, None)
-            if callable(arrow_fn):
-                converted = arrow_fn()
-                if converted is not table:
-                    return cls._coerce_fallback_rows(converted, columns=columns)
-        if isinstance(table, list):
-            if not table:
-                return [], list(columns) if columns else []
-            first = table[0]
-            if isinstance(first, dict):
-                dict_rows = [dict(r) for r in table]
-                cols = list(columns) if columns else list(dict_rows[0].keys())
-                return dict_rows, cols
-            if is_msgspec_struct(first):
-                struct_rows = [msgspec.structs.asdict(item) for item in table]
-                cols = list(columns) if columns else list(struct_rows[0].keys())
-                return struct_rows, cols
-            if isinstance(first, (tuple, list)):
-                cols = list(columns) if columns else [f"c{idx}" for idx in range(len(first))]
-                mapped = [dict(zip(cols, row, strict=False)) for row in table]
-                return mapped, cols
-            return [{"value": item} for item in table], list(columns) if columns else ["value"]
-        items = list(table)
-        return cls._coerce_fallback_rows(items, columns=columns)
-
-    @classmethod
-    def _coerce_arrow_table(
-        cls,
-        pa: Any,
-        table: Any,
-        columns: Sequence[str] | None = None,
-    ) -> Any:
-        """Coerce a PyArrow Table, RecordBatch, or row sequence into a pyarrow.Table."""
-        if hasattr(table, "schema") and hasattr(table, "num_rows"):
-            if isinstance(table, pa.RecordBatch):
-                return pa.Table.from_batches([table])
-            return table
-        for arrow_attr in ("to_arrow", "to_arrow_table", "to_pyarrow"):
-            arrow_fn = getattr(table, arrow_attr, None)
-            if callable(arrow_fn):
-                converted = arrow_fn()
-                if converted is table:
-                    continue
-                if hasattr(converted, "schema") and hasattr(converted, "num_rows"):
-                    if isinstance(converted, pa.RecordBatch):
-                        return pa.Table.from_batches([converted])
-                    return converted
-                return cls._coerce_arrow_table(pa, converted, columns=columns)
-        if hasattr(table, "to_pylist") and callable(table.to_pylist):
-            return cls._coerce_arrow_table(pa, table.to_pylist(), columns=columns)
-        if isinstance(table, list):
-            if not table:
-                if columns:
-                    return pa.Table.from_pydict({col: [] for col in columns})
-                return pa.table({})
-            first = table[0]
-            if isinstance(first, dict):
-                return pa.Table.from_pylist(table)
-            if is_msgspec_struct(first):
-                return pa.Table.from_pylist([msgspec.structs.asdict(item) for item in table])
-            if isinstance(first, (tuple, list)):
-                col_names = list(columns) if columns else [f"c{idx}" for idx in range(len(first))]
-                col_dict = {
-                    col_names[idx]: [row[idx] if idx < len(row) else None for row in table]
-                    for idx in range(len(col_names))
-                }
-                return pa.Table.from_pydict(col_dict)
-            return pa.Table.from_pydict({"value": table})
-        return pa.Table.from_pylist(list(table))
+            released = True
+    return released
 
 
 class _BaseSQLSpecProvider:
@@ -343,6 +211,7 @@ class _BaseSQLSpecProvider:
     __slots__ = (
         "_active_arrow_buffers",
         "_broker_leases",
+        "_lease_arrow_buffers",
         "_leased_contexts",
         "_leased_sessions",
         "_lock",
@@ -374,7 +243,8 @@ class _BaseSQLSpecProvider:
         self._leased_contexts: dict[tuple[int, int], Any] = {}
         self._broker_leases: dict[tuple[int, int], Any] = {}
         self._tx_states: dict[tuple[int, int], bool] = {}
-        self._active_arrow_buffers: set[str] = set()
+        self._active_arrow_buffers: dict[str, ArrowCursor] = {}
+        self._lease_arrow_buffers: dict[tuple[int, int], set[str]] = {}
         self._next_generation: int = 1
         self._lock = threading.RLock()
 
@@ -448,9 +318,8 @@ class _BaseSQLSpecProvider:
         try:
             if op == "arrow_release":
                 if request.arrow_shm_name:
-                    SharedArrowBuffer.unlink(request.arrow_shm_name)
+                    self._release_arrow_buffer(request.arrow_shm_name, key=key)
                 with self._lock:
-                    self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -629,9 +498,8 @@ class _BaseSQLSpecProvider:
         try:
             if op == "arrow_release":
                 if request.arrow_shm_name:
-                    await SyncPool.default().submit_async(SharedArrowBuffer.unlink, request.arrow_shm_name)
+                    await SyncPool.default().submit_async(self._release_arrow_buffer, request.arrow_shm_name, key)
                 with self._lock:
-                    self._active_arrow_buffers.discard(request.arrow_shm_name)
                     in_tx = self._tx_states.get(key, request.in_tx)
                 return BrokerRpcResponse(
                     request_id=request.request_id,
@@ -835,23 +703,25 @@ class _BaseSQLSpecProvider:
         """Release all leased sessions and unlink any remaining shared-memory Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
-            arrow_names = list(self._active_arrow_buffers)
+            arrow_items = list(self._active_arrow_buffers.items())
             self._active_arrow_buffers.clear()
+            self._lease_arrow_buffers.clear()
         for key in keys:
             self._release_session_sync(key, in_tx=self._tx_states.get(key, False))
-        for name in arrow_names:
-            SharedArrowBuffer.unlink(name)
+        for name, cursor in arrow_items:
+            _unlink_arrow_shm(name, cursor)
 
     async def _close_async(self) -> None:
         """Asynchronously release all leased sessions and unlink remaining Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
-            arrow_names = list(self._active_arrow_buffers)
+            arrow_items = list(self._active_arrow_buffers.items())
             self._active_arrow_buffers.clear()
+            self._lease_arrow_buffers.clear()
         for key in keys:
             await self._release_session_async(key, in_tx=self._tx_state_for(key, False))
-        for name in arrow_names:
-            await SyncPool.default().submit_async(SharedArrowBuffer.unlink, name)
+        for name, cursor in arrow_items:
+            await SyncPool.default().submit_async(_unlink_arrow_shm, name, cursor)
 
     def _resolve_upstream(self, pool_name: str) -> Any:
         """Resolve the upstream config, driver, or factory for pool_name."""
@@ -1028,8 +898,50 @@ class _BaseSQLSpecProvider:
         if callable(quarantine_fn):
             await self._invoke_async_or_offload(quarantine_fn, lease_arg)
 
+    def _release_arrow_buffer(self, shm_name: str, key: tuple[int, int] | None = None) -> None:
+        """Release and unlink an active VTBARROW SHM cursor tracked by this provider."""
+        if not shm_name:
+            return
+        with self._lock:
+            cursor = self._active_arrow_buffers.pop(shm_name, None)
+            if key is not None:
+                lease_names = self._lease_arrow_buffers.get(key)
+                if lease_names is not None:
+                    lease_names.discard(shm_name)
+                    if not lease_names:
+                        self._lease_arrow_buffers.pop(key, None)
+            else:
+                empty_keys: list[tuple[int, int]] = []
+                for lease_key, lease_names in self._lease_arrow_buffers.items():
+                    lease_names.discard(shm_name)
+                    if not lease_names:
+                        empty_keys.append(lease_key)
+                for empty_key in empty_keys:
+                    self._lease_arrow_buffers.pop(empty_key, None)
+        _unlink_arrow_shm(shm_name, cursor)
+
+    def _pop_lease_arrow_items(self, key: tuple[int, int]) -> list[tuple[str, ArrowCursor | None]]:
+        """Detach and return all VTBARROW SHM buffers associated with a lease key."""
+        with self._lock:
+            names = self._lease_arrow_buffers.pop(key, None)
+            if not names:
+                return []
+            return [(name, self._active_arrow_buffers.pop(name, None)) for name in names]
+
+    def _release_lease_arrow_buffers_sync(self, key: tuple[int, int]) -> None:
+        """Synchronously release and unlink every VTBARROW SHM segment tied to a lease."""
+        for shm_name, cursor in self._pop_lease_arrow_items(key):
+            _unlink_arrow_shm(shm_name, cursor)
+
+    async def _release_lease_arrow_buffers_async(self, key: tuple[int, int]) -> None:
+        """Asynchronously release and unlink every VTBARROW SHM segment tied to a lease."""
+        items = self._pop_lease_arrow_items(key)
+        for shm_name, cursor in items:
+            await SyncPool.default().submit_async(_unlink_arrow_shm, shm_name, cursor)
+
     def _release_session_sync(self, key: tuple[int, int], in_tx: bool) -> None:
         """Release a pinned session synchronously, quarantining on rollback or context-exit error."""
+        self._release_lease_arrow_buffers_sync(key)
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
@@ -1070,6 +982,7 @@ class _BaseSQLSpecProvider:
 
     async def _release_session_async(self, key: tuple[int, int], in_tx: bool) -> None:
         """Release a pinned session asynchronously, quarantining on rollback or context-exit error."""
+        await self._release_lease_arrow_buffers_async(key)
         with self._lock:
             session = self._leased_sessions.pop(key, None)
             ctx_mgr = self._leased_contexts.pop(key, None)
@@ -1419,18 +1332,18 @@ class _BaseSQLSpecProvider:
         request: BrokerRpcRequest,
         key: tuple[int, int],
     ) -> BrokerRpcResponse:
-        """Execute select_to_arrow synchronously and spill the result table into SharedArrowBuffer."""
+        """Execute select_to_arrow synchronously and spill the result table into a VTBARROW ArrowCursor."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
             raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
-            shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow)
+            shm_name, byte_len, columns, rowcount = self._spill_arrow_object(raw_arrow, key=key)
         else:
             raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), request.sql, request.params)
             rows, columns, _ = self._extract_result_sync(raw_res)
-            shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
-            with self._lock:
-                self._active_arrow_buffers.add(shm_name)
-            rowcount = len(rows)
+            cursor = _write_vtbarrow_cursor(rows, columns=columns)
+            shm_name, byte_len, tracked_cols, rowcount = self._track_arrow_cursor(cursor, key=key)
+            if not columns:
+                columns = tracked_cols
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
@@ -1450,24 +1363,22 @@ class _BaseSQLSpecProvider:
         request: BrokerRpcRequest,
         key: tuple[int, int],
     ) -> BrokerRpcResponse:
-        """Execute select_to_arrow asynchronously and spill the result table into SharedArrowBuffer."""
+        """Execute select_to_arrow asynchronously and spill the result table into a VTBARROW ArrowCursor."""
         arrow_fn = getattr(session, "select_to_arrow", None)
         if callable(arrow_fn):
             raw_arrow = self._dispatch_sql(session, arrow_fn, request.sql, request.params)
             if isinstance(raw_arrow, Awaitable):
                 raw_arrow = await raw_arrow
             shm_name, byte_len, columns, rowcount = await SyncPool.default().submit_async(
-                self._spill_arrow_object, raw_arrow
+                self._spill_arrow_object, raw_arrow, key
             )
         else:
             raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), request.sql, request.params)
             rows, columns, _ = await self._extract_result_async(raw_res)
-            shm_name, byte_len = await SyncPool.default().submit_async(
-                SharedArrowBuffer.write_table, rows, columns=columns
-            )
-            with self._lock:
-                self._active_arrow_buffers.add(shm_name)
-            rowcount = len(rows)
+            cursor = await SyncPool.default().submit_async(_write_vtbarrow_cursor, rows, columns=columns)
+            shm_name, byte_len, tracked_cols, rowcount = self._track_arrow_cursor(cursor, key=key)
+            if not columns:
+                columns = tracked_cols
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
@@ -1481,13 +1392,28 @@ class _BaseSQLSpecProvider:
             arrow_byte_len=byte_len,
         )
 
-    def _spill_arrow_object(self, raw_arrow: Any) -> tuple[str, int, list[str], int]:
-        """Write an Arrow Table or row collection into SharedArrowBuffer and return metadata."""
-        table = SharedArrowBuffer.coerce_table(raw_arrow)
-        shm_name, byte_len = SharedArrowBuffer.write_table(table)
+    def _track_arrow_cursor(
+        self,
+        cursor: ArrowCursor,
+        key: tuple[int, int] | None = None,
+    ) -> tuple[str, int, list[str], int]:
+        """Record an active VTBARROW SHM cursor scoped to an optional lease key."""
+        shm_name = cursor.shm_name
+        cols = list(cursor._columns)
         with self._lock:
-            self._active_arrow_buffers.add(shm_name)
-        return shm_name, byte_len, list(table.column_names), int(table.num_rows)
+            self._active_arrow_buffers[shm_name] = cursor
+            if key is not None:
+                self._lease_arrow_buffers.setdefault(key, set()).add(shm_name)
+        return shm_name, int(cursor.byte_len), cols, int(cursor.row_count)
+
+    def _spill_arrow_object(
+        self,
+        raw_arrow: Any,
+        key: tuple[int, int] | None = None,
+    ) -> tuple[str, int, list[str], int]:
+        """Write an Arrow Table or row collection into a VTBARROW ArrowCursor and return metadata."""
+        cursor = _write_vtbarrow_cursor(raw_arrow)
+        return self._track_arrow_cursor(cursor, key=key)
 
     def _should_spill_select(self, rows: list[dict[str, Any] | list[Any]]) -> bool:
         """Return True when result rows exceed row-count or byte thresholds for SHM Arrow spill."""
@@ -1505,18 +1431,18 @@ class _BaseSQLSpecProvider:
         in_tx: bool,
         columns: list[str],
         row_count: int,
-        shm_name: str,
-        byte_len: int,
+        cursor: ArrowCursor,
+        key: tuple[int, int] | None = None,
     ) -> BrokerRpcResponse:
-        """Record an active SHM segment and return its Arrow SHM BrokerRpcResponse."""
-        with self._lock:
-            self._active_arrow_buffers.add(shm_name)
+        """Record an active VTBARROW SHM cursor and return its Arrow SHM BrokerRpcResponse."""
+        shm_name, byte_len, tracked_cols, _ = self._track_arrow_cursor(cursor, key=key)
+        resolved_cols = list(columns) if columns else tracked_cols
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
             slot_idx=request.slot_idx,
             generation=request.generation,
-            columns=columns,
+            columns=resolved_cols,
             rowcount=row_count,
             in_tx=in_tx,
             is_arrow_shm=True,
@@ -1531,12 +1457,12 @@ class _BaseSQLSpecProvider:
         rows: list[dict[str, Any] | list[Any]],
         columns: list[str],
     ) -> BrokerRpcResponse:
-        """Construct a BrokerRpcResponse for select, spilling to SharedArrowBuffer when thresholds are met."""
+        """Construct a BrokerRpcResponse for select, spilling to a VTBARROW ArrowCursor when thresholds are met."""
         in_tx = self._tx_state_for(key, request.in_tx)
         row_count = len(rows)
         if rows and self._should_spill_select(rows):
-            shm_name, byte_len = SharedArrowBuffer.write_table(rows, columns=columns)
-            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
+            cursor = _write_vtbarrow_cursor(rows, columns=columns)
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, cursor, key=key)
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,
@@ -1555,14 +1481,12 @@ class _BaseSQLSpecProvider:
         rows: list[dict[str, Any] | list[Any]],
         columns: list[str],
     ) -> BrokerRpcResponse:
-        """Construct a select BrokerRpcResponse inline when small, offloading only SHM Arrow spills."""
+        """Construct a select BrokerRpcResponse inline when small, offloading only VTBARROW Arrow spills."""
         in_tx = self._tx_state_for(key, request.in_tx)
         row_count = len(rows)
         if rows and self._should_spill_select(rows):
-            shm_name, byte_len = await SyncPool.default().submit_async(
-                SharedArrowBuffer.write_table, rows, columns=columns
-            )
-            return self._build_spilled_select_response(request, in_tx, columns, row_count, shm_name, byte_len)
+            cursor = await SyncPool.default().submit_async(_write_vtbarrow_cursor, rows, columns=columns)
+            return self._build_spilled_select_response(request, in_tx, columns, row_count, cursor, key=key)
         return BrokerRpcResponse(
             request_id=request.request_id,
             ok=True,

@@ -1,6 +1,6 @@
 # Vertebra — Agent Instructions
 
-Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
+Vertebra is a Python web framework and server powered by a Rust runtime (`vertebra-core`, `vertebra-http`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-sqlite`, `vertebra-redis`, `vertebra-valkey`) and a TypeScript SDK (`@vertebra/client`), supporting Python 3.12–3.15 and free-threaded 3.14t/3.15t.
 
 ## Flow Operational Rule
 
@@ -33,19 +33,22 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 ```bash
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
 make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, bun install/build, make dev
-make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres)
+make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres, _sqlite, _redis, _valkey)
 make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,http3,compression,gcp), and run Mypy + stubtest + review-check
 make lint-all    # Read-only CI lint, type-check, Clippy (--features tls,http3,compression,gcp), stubtest, and review-check gate across TS, Python, and Rust
 make review-check # Validate review capability manifests, skills, agents, and privacy constraints
 make review-route # Route changed files to owning review areas and shards (BASE=origin/main)
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,http3,compression,gcp) + non-http3 fail-loud check
 make py-test     # Build debug extensions (make dev), verify mypy.stubtest across every installed extension, and run the Python pytest suite
+make sqlite-test # Run vertebra-sqlite Rust tests, stubtest, and Python unit/conformance suites (make sqlite-wheel-check verifies wheel payload isolation)
 make duckdb-test # Run vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel payload isolation)
 make mysql-test  # Run vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test  # Run vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
 make oracle-test # Run vertebra-oracle Rust unit tests, _oracle stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test # Run vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check verifies wheel and sdist isolation)
-make db-conformance # Run live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>] required)
+make redis-test  # Run vertebra-redis Rust unit tests, stubtest, and Python Redis suites (make redis-wheel-check verifies wheel isolation)
+make valkey-test # Run vertebra-valkey Rust unit tests, stubtest, and Python Valkey suites (make valkey-wheel-check verifies wheel isolation)
+make db-conformance # Run live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle|redis|sqlite|valkey> [VERSION=<v>] required)
 make postgres-bench-check # Run Criterion postgres_native test mode, script lint/mypy, and comparator unit suite
 make ts-test     # Run the TypeScript Vitest suite with isolated localstorage
 make test        # Run all Rust, Python, and TypeScript test suites

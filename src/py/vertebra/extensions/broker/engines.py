@@ -19,6 +19,7 @@ class BrokerEngineDiscovery:
         "vertebra._oracle",
         "vertebra._mssql",
         "vertebra._duckdb",
+        "vertebra._sqlite",
     )
 
     @classmethod

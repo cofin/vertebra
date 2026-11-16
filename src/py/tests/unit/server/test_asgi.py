@@ -2,9 +2,10 @@
 
 import asyncio
 import threading
+from collections.abc import Awaitable
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -197,7 +198,7 @@ def test_build_scope_native_vertebra_request() -> None:
 def test_asgi_receive_returns_body_then_blocks_until_disconnect() -> None:
     recv = AsgiReceive(b"hello")
 
-    async def _run() -> tuple[dict, dict]:
+    async def _run() -> tuple[dict[str, Any], dict[str, Any]]:
         msg1 = await recv()
         disconnect_event = asyncio.Event()
         recv._disconnect_event = disconnect_event
@@ -221,7 +222,7 @@ def test_asgi_receive_waits_for_disconnect_event() -> None:
     ev = asyncio.Event()
     recv = AsgiReceive(b"data", disconnect_event=ev)
 
-    async def _run() -> dict:
+    async def _run() -> dict[str, Any]:
         await recv()
 
         async def _trigger() -> None:
@@ -336,7 +337,7 @@ def test_asgi_send_chunk_callback_invoked() -> None:
 
 
 def test_asgi_runner_simple_200_response() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await receive()
         await send(
             {
@@ -355,7 +356,7 @@ def test_asgi_runner_simple_200_response() -> None:
 
 
 def test_asgi_runner_app_exception_before_start_returns_500() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         raise ValueError("boom")
 
     runner = AsgiRunner(app)
@@ -366,7 +367,7 @@ def test_asgi_runner_app_exception_before_start_returns_500() -> None:
 
 
 def test_asgi_runner_app_exception_after_start_returns_500() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
         raise RuntimeError("mid-flight crash")
 
@@ -379,7 +380,7 @@ def test_asgi_runner_app_exception_after_start_returns_500() -> None:
 def test_asgi_runner_run_batch_concurrent() -> None:
     order: list[int] = []
 
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         path = scope["path"]
         idx = int(path.lstrip("/"))
         if idx == 0:
@@ -398,7 +399,7 @@ def test_asgi_runner_run_batch_concurrent() -> None:
 
 
 def test_asgi_runner_sync_batch_execution() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await receive()
         await send({"type": "http.response.start", "status": 201, "headers": []})
         await send({"type": "http.response.body", "body": b"created"})
@@ -415,7 +416,7 @@ def test_asgi_runner_sync_batch_execution() -> None:
 
 
 def test_asgi_runner_empty_batch_returns_empty() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     runner = AsgiRunner(app)
@@ -426,7 +427,7 @@ def test_asgi_runner_empty_batch_returns_empty() -> None:
 def test_asgi_runner_custom_loop_not_closed_by_runner() -> None:
     loop = asyncio.new_event_loop()
 
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"hi"})
 
@@ -444,7 +445,7 @@ def test_asgi_runner_Works_Inside_Running_Loop() -> None:
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
 
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"threaded"})
 
@@ -531,9 +532,9 @@ def test_asgi_runner_mount_prefix_propagated_to_scope() -> None:
 
 def test_asgi_runner_handle_path_convenience() -> None:
     """AsgiRunner.handle_path constructs a request from path and runs the app."""
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         msg = await receive()
         seen.append({"path": scope["path"], "method": scope["method"], "body": msg["body"]})
         await send(
@@ -741,7 +742,9 @@ async def test_asgi_scope_and_protocol_body_bytes_and_raw_response() -> None:
 
     proto = AsgiProtocol(b"proto-body", request_id=99)
     assert proto.body_bytes() == b"proto-body"
-    await proto.send_raw_response(201, [(b"content-type", b"application/json")], b'{"ok":true}')
+    await cast(
+        "Awaitable[None]", proto.send_raw_response(201, [(b"content-type", b"application/json")], b'{"ok":true}')
+    )
     assert proto.started is True
     assert proto.complete is True
     resp = proto.take_response()
@@ -750,14 +753,14 @@ async def test_asgi_scope_and_protocol_body_bytes_and_raw_response() -> None:
     assert (b"content-type", b"application/json") in resp.headers
 
     proto2 = AsgiProtocol(b"", request_id=100)
-    await proto2({"type": "http.response.start", "status": 204, "headers": []})
-    await proto2({"type": "http.response.body", "body": b""})
+    await cast("Awaitable[None]", proto2({"type": "http.response.start", "status": 204, "headers": []}))
+    await cast("Awaitable[None]", proto2({"type": "http.response.body", "body": b""}))
     assert proto2.take_response().status == 204
 
     send = AsgiSend(request_id=77)
     raw_pair = (b"x-fast", b"1")
     backing = bytearray(b"fast-zero-copy-body")
-    await send.send_raw_response(202, [raw_pair], memoryview(backing))
+    await cast("Awaitable[None]", send.send_raw_response(202, [raw_pair], memoryview(backing)))
     assert send.started is True
     assert send.complete is True
     assert send.raw_headers == [raw_pair]

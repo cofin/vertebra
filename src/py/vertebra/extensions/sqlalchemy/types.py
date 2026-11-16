@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.1 custom types (Vector and BinaryJSON) and ORM query optimization descriptors."""
+"""SQLAlchemy 2.1 custom vector, spatial, and JSON types and query descriptors."""
 
 from __future__ import annotations
 
@@ -20,11 +20,18 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.type_api import TypeEngine
 
 __all__ = (
+    "BigQueryGeography",
     "BinaryJSON",
     "DeleteUsingClause",
+    "HalfVector",
     "InsertSentinelSpec",
+    "MsgspecJSON",
+    "OracleVector",
     "ParameterizedSQL",
+    "PgVector",
     "SelectInLoadSpec",
+    "SpannerVector",
+    "SparseVector",
     "Vector",
     "VectorDistanceExpr",
     "VectorDistanceMetric",
@@ -138,7 +145,7 @@ class VectorDistanceExpr:
 
 
 class Vector(UserDefinedType[Any]):
-    """Dense vector column type supporting PostgreSQL (pgvector), Oracle 26ai, MySQL 9.0, SQLite, MSSQL, and DuckDB."""
+    """Dense vector column type supporting PostgreSQL, Oracle 23ai, MySQL 9.0, SQLite, MSSQL, and DuckDB."""
 
     cache_ok: bool = True
     __slots__ = ("binary_format", "column_name", "dimensions", "precision")
@@ -182,7 +189,6 @@ class Vector(UserDefinedType[Any]):
         base = lowered.split("+", 1)[0]
         if base == "spangres":
             return f"VECTOR({self.dimensions})" if self.dimensions is not None else "VECTOR"
-
         if base == "bigquery":
             return "ARRAY<FLOAT64>"
         if base == "spanner":
@@ -315,7 +321,7 @@ class Vector(UserDefinedType[Any]):
         param_name: str = "query_vec",
         num_leaves_to_search: int | None = None,
     ) -> VectorDistanceExpr:
-        """Build an approximate cosine distance expression (`APPROX_COSINE_DISTANCE` on Spanner ScaNN)."""
+        """Build an approximate cosine distance expression."""
         return VectorDistanceExpr(
             self.column_name,
             query_vector,
@@ -326,12 +332,560 @@ class Vector(UserDefinedType[Any]):
         )
 
     def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 / Euclidean distance expression for this vector column."""
+        """Build an L2 distance expression for this vector column."""
         return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
 
     def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an inner-product / dot-product expression for this vector column."""
+        """Build an inner-product distance expression for this vector column."""
         return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a maximum inner-product expression for this vector column."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class PgVector(UserDefinedType[Any]):
+    """PostgreSQL pgvector dense vector column type."""
+
+    cache_ok: bool = True
+    __slots__ = ("column_name", "dimensions")
+
+    def __init__(
+        self,
+        dimensions: int | None = None,
+        *,
+        dim: int | None = None,
+        column_name: str = "embedding",
+    ) -> None:
+        """Initialize PostgreSQL pgvector column type with dimensions and column name."""
+        self.dimensions = dim if dim is not None else dimensions
+        self.column_name = column_name
+
+    @property
+    def dim(self) -> int | None:
+        """Return dimensions."""
+        return self.dimensions
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render VECTOR DDL specification."""
+        _ = (dialect_name, kw)
+        if self.dimensions is not None:
+            return f"VECTOR({self.dimensions})"
+        return "VECTOR"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor converting sequence of floats to pgvector string."""
+        _ = dialect
+
+        def _process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return "[" + ",".join(str(float(x)) for x in value.to_list()) + "]"
+            if isinstance(value, (list, tuple)):
+                return "[" + ",".join(str(float(x)) for x in value) + "]"
+            if isinstance(value, str):
+                return value
+            return "[" + ",".join(str(float(x)) for x in value) + "]"
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor converting pgvector result to list of floats."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return value.to_list()
+            if isinstance(value, (list, tuple)):
+                return [float(x) for x in value]
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                raw = bytes(value)
+                if len(raw) >= 4:
+                    dim_count, unused = struct.unpack(">HH", raw[:4])
+                    if unused == 0 and len(raw) == 4 + dim_count * 4:
+                        return _vertebra.decode_pgvector_f32(raw)
+                count = len(raw) // 4
+                return list(struct.unpack(f"<{count}f", raw))
+            if isinstance(value, str):
+                trimmed = value.strip().lstrip("[").rstrip("]")
+                if not trimmed:
+                    return []
+                try:
+                    decoded = decode_json(f"[{trimmed}]")
+                    if isinstance(decoded, list):
+                        return [float(x) for x in decoded]
+                except Exception:
+                    pass
+                return [float(item) for item in trimmed.split(",") if item.strip()]
+            return [float(x) for x in value]
+
+        return _process
+
+    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a cosine distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
+
+    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an L2 Euclidean distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a maximum inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class HalfVector(UserDefinedType[Any]):
+    """PostgreSQL pgvector 16-bit halfvec column type."""
+
+    cache_ok: bool = True
+    __slots__ = ("column_name", "dimensions")
+
+    def __init__(
+        self,
+        dimensions: int | None = None,
+        *,
+        dim: int | None = None,
+        column_name: str = "embedding",
+    ) -> None:
+        """Initialize halfvec column type with dimensions and column name."""
+        self.dimensions = dim if dim is not None else dimensions
+        self.column_name = column_name
+
+    @property
+    def dim(self) -> int | None:
+        """Return dimensions."""
+        return self.dimensions
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render HALFVEC DDL specification."""
+        _ = (dialect_name, kw)
+        if self.dimensions is not None:
+            return f"HALFVEC({self.dimensions})"
+        return "HALFVEC"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor converting sequence of floats to halfvec string."""
+        _ = dialect
+
+        def _process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return "[" + ",".join(str(float(x)) for x in value.to_list()) + "]"
+            if isinstance(value, (list, tuple)):
+                return "[" + ",".join(str(float(x)) for x in value) + "]"
+            if isinstance(value, str):
+                return value
+            return "[" + ",".join(str(float(x)) for x in value) + "]"
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor converting halfvec result to list of floats."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return value.to_list()
+            if isinstance(value, (list, tuple)):
+                return [float(x) for x in value]
+            if isinstance(value, str):
+                trimmed = value.strip().lstrip("[").rstrip("]")
+                if not trimmed:
+                    return []
+                try:
+                    decoded = decode_json(f"[{trimmed}]")
+                    if isinstance(decoded, list):
+                        return [float(x) for x in decoded]
+                except Exception:
+                    pass
+                return [float(item) for item in trimmed.split(",") if item.strip()]
+            return [float(x) for x in value]
+
+        return _process
+
+    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a cosine distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
+
+    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an L2 Euclidean distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a maximum inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class SparseVector(UserDefinedType[Any]):
+    """PostgreSQL pgvector sparsevec column type."""
+
+    cache_ok: bool = True
+    __slots__ = ("column_name", "dimensions")
+
+    def __init__(
+        self,
+        dimensions: int | None = None,
+        *,
+        dim: int | None = None,
+        column_name: str = "embedding",
+    ) -> None:
+        """Initialize sparsevec column type with dimensions and column name."""
+        self.dimensions = dim if dim is not None else dimensions
+        self.column_name = column_name
+
+    @property
+    def dim(self) -> int | None:
+        """Return dimensions."""
+        return self.dimensions
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render SPARSEVEC DDL specification."""
+        _ = (dialect_name, kw)
+        if self.dimensions is not None:
+            return f"SPARSEVEC({self.dimensions})"
+        return "SPARSEVEC"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor for sparse vectors."""
+        _ = dialect
+
+        def _process(value: Any) -> Any:
+            if value is None or isinstance(value, str):
+                return value
+            return str(value)
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor for sparse vectors."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> Any:
+            return value
+
+        return _process
+
+    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a cosine distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
+
+    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an L2 Euclidean distance expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a maximum inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an inner-product expression."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class OracleVector(UserDefinedType[Any]):
+    """Oracle 23ai native VECTOR column type."""
+
+    cache_ok: bool = True
+    __slots__ = ("binary_format", "column_name", "dimensions", "precision")
+
+    def __init__(
+        self,
+        dimensions: int | None = None,
+        *,
+        precision: VectorStorageFormat = "float32",
+        column_name: str = "embedding",
+        dim: int | None = None,
+        binary_format: bool = False,
+    ) -> None:
+        """Initialize Oracle VECTOR column type with dimensions, precision format, and column name."""
+        self.dimensions = dim if dim is not None else dimensions
+        self.precision = precision
+        self.column_name = column_name
+        self.binary_format = binary_format
+
+    @property
+    def dim(self) -> int | None:
+        """Return dimensions."""
+        return self.dimensions
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render Oracle VECTOR DDL specification."""
+        _ = (dialect_name, kw)
+        ora_fmt = self.precision.upper()
+        if self.dimensions is None:
+            return f"VECTOR(*, {ora_fmt})"
+        return f"VECTOR({self.dimensions}, {ora_fmt})"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor converting floats to array.array or binary bytes."""
+        _ = dialect
+        typecode = "d" if self.precision == "float64" else "f"
+
+        def _process(value: Any) -> Any:
+            if value is None:
+                return None
+            if self.binary_format:
+                if isinstance(value, _vertebra.VectorView):
+                    return value.to_oracle_bytes()
+                return _vertebra.encode_oracle_vector_f32(value)
+            if isinstance(value, array.array):
+                return value
+            if isinstance(value, _vertebra.VectorView):
+                return array.array(typecode, value.to_list())
+            if isinstance(value, (list, tuple)):
+                return array.array(typecode, [float(x) for x in value])
+            return value
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor converting Oracle vector bytes/arrays to list of floats."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return value.to_list()
+            if isinstance(value, array.array):
+                return list(value)
+            if isinstance(value, (list, tuple)):
+                return [float(x) for x in value]
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                raw = bytes(value)
+                if len(raw) >= 8 and raw[0] == 0xDB:
+                    return _vertebra.decode_oracle_vector_f32(raw)
+                count = len(raw) // 4
+                return list(struct.unpack(f"<{count}f", raw))
+            return [float(x) for x in value]
+
+        return _process
+
+    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a cosine distance expression for Oracle 23ai."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
+
+    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an L2 distance expression for Oracle 23ai."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a dot-product expression for Oracle 23ai."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a dot-product expression for Oracle 23ai."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class SpannerVector(UserDefinedType[Any]):
+    """Google Cloud Spanner ARRAY<FLOAT32> vector column type."""
+
+    cache_ok: bool = True
+    __slots__ = ("column_name", "dimensions", "precision")
+
+    def __init__(
+        self,
+        dimensions: int | None = None,
+        *,
+        precision: VectorStorageFormat = "float32",
+        column_name: str = "embedding",
+        dim: int | None = None,
+    ) -> None:
+        """Initialize Cloud Spanner vector column type with length, precision, and column name."""
+        self.dimensions = dim if dim is not None else dimensions
+        self.precision = precision
+        self.column_name = column_name
+
+    @property
+    def dim(self) -> int | None:
+        """Return dimensions."""
+        return self.dimensions
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render Spanner ARRAY DDL specification."""
+        _ = (dialect_name, kw)
+        elem_type = "FLOAT64" if self.precision == "float64" else "FLOAT32"
+        if self.dimensions is not None:
+            return f"ARRAY<{elem_type}>(vector_length=>{self.dimensions})"
+        return f"ARRAY<{elem_type}>"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor converting float sequence to list."""
+        _ = dialect
+
+        def _process(value: Any) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return [float(x) for x in value.to_list()]
+            return [float(x) for x in value]
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor converting Spanner result to list of floats."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> list[float] | None:
+            if value is None:
+                return None
+            if isinstance(value, _vertebra.VectorView):
+                return value.to_list()
+            return [float(x) for x in value]
+
+        return _process
+
+    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a cosine distance expression for Cloud Spanner."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
+
+    def approx_cosine_distance(
+        self,
+        query_vector: Sequence[float],
+        *,
+        param_name: str = "query_vec",
+        num_leaves_to_search: int | None = None,
+    ) -> VectorDistanceExpr:
+        """Build an approximate cosine distance expression for Cloud Spanner ScaNN."""
+        return VectorDistanceExpr(
+            self.column_name,
+            query_vector,
+            metric="cosine",
+            param_name=param_name,
+            approximate=True,
+            num_leaves_to_search=num_leaves_to_search,
+        )
+
+    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build an L2 Euclidean distance expression for Cloud Spanner."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
+
+    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a dot-product expression for Cloud Spanner."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
+        """Build a dot-product expression for Cloud Spanner."""
+        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
+
+
+class BigQueryGeography(UserDefinedType[Any]):
+    """Google BigQuery GEOGRAPHY column type for spatial data."""
+
+    cache_ok: bool = True
+    __slots__ = ()
+
+    def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
+        """Render GEOGRAPHY DDL specification."""
+        _ = (dialect_name, kw)
+        return "GEOGRAPHY"
+
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return bind processor converting spatial payload to WKT string."""
+        _ = dialect
+
+        def _process(value: Any) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value).decode("utf-8")
+            return str(value)
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return result processor converting GEOGRAPHY to WKT string."""
+        _ = (dialect, coltype)
+
+        def _process(value: Any) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value).decode("utf-8")
+            return str(value)
+
+        return _process
+
+
+class MsgspecJSON(TypeDecorator[Any]):
+    """Cross-database JSON/JSONB column type serialized through centralized msgspec encode/decode."""
+
+    impl = JSON
+    cache_ok: bool = True
+    __slots__ = ()
+
+    def load_dialect_impl(self, dialect: Dialect | Any) -> TypeEngine[Any]:
+        """Select the dialect-native JSON type implementation."""
+        name = getattr(dialect, "name", "").lower()
+        if name in ("postgresql", "cockroachdb", "spangres"):
+            return dialect.type_descriptor(JSONB())
+        if name == "mssql":
+            return dialect.type_descriptor(NVARCHAR(None))
+        return dialect.type_descriptor(JSON())
+
+    def process_bind_param(self, value: Any, dialect: Dialect | Any) -> Any:
+        """Encode Python structures to JSON strings using encode_json."""
+        _ = dialect
+        if value is None or isinstance(value, (bytes, str)):
+            return value
+        return encode_json(value)
+
+    def process_result_value(self, value: Any, dialect: Dialect | Any) -> Any:
+        """Decode database JSON payloads into Python objects using decode_json."""
+        _ = dialect
+        if value is None or isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, memoryview):
+            raw = bytes(value)
+            if raw.startswith(b"\x01"):
+                raw = raw[1:]
+            return decode_json(raw)
+        if isinstance(value, (bytes, bytearray)):
+            raw_b = bytes(value)
+            if raw_b.startswith(b"\x01"):
+                raw_b = raw_b[1:]
+            return decode_json(raw_b)
+        if isinstance(value, str):
+            return decode_json(value)
+        return value
+
+    def get_col_spec(self, dialect_name: str = "postgresql", **kw: Any) -> str:
+        """Render the DDL column type specification for dialect inspection."""
+        target = dialect_name
+        if not target and "dialect" in kw:
+            target = getattr(kw["dialect"], "name", "")
+        lowered = target.lower() if target else "postgresql"
+        base = lowered.split("+", 1)[0]
+        if base in ("postgres", "postgresql", "spangres", "sqlite"):
+            return "JSONB"
+        if base == "mssql":
+            return "NVARCHAR(MAX)"
+        return "JSON"
+
+
+class BinaryJSON(MsgspecJSON):
+    """Compatibility subclass for legacy BinaryJSON references."""
+
+    __slots__ = ()
 
 
 @compiles(Vector, "bigquery")
@@ -393,60 +947,47 @@ def _compile_vector_mssql(element: Vector, compiler: Any, **kw: Any) -> str:
     return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
 
 
-class BinaryJSON(TypeDecorator[Any]):
-    """Cross-database JSON/JSONB column type (JSONB on PostgreSQL/CockroachDB, JSON on others, NVARCHAR on MSSQL)."""
+@compiles(PgVector, "postgresql")
+@compiles(PgVector, "spangres")
+def _compile_pgvector(element: PgVector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
 
-    impl = JSON
-    cache_ok: bool = True
-    __slots__ = ()
 
-    def load_dialect_impl(self, dialect: Dialect | Any) -> TypeEngine[Any]:
-        """Select the dialect-native JSON type implementation."""
-        name = getattr(dialect, "name", "").lower()
-        if name in ("postgresql", "cockroachdb", "spangres"):
-            return dialect.type_descriptor(JSONB())
-        if name == "mssql":
-            return dialect.type_descriptor(NVARCHAR(None))
-        return dialect.type_descriptor(JSON())
+@compiles(HalfVector, "postgresql")
+def _compile_halfvector(element: HalfVector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    return f"HALFVEC({element.dimensions})" if element.dimensions is not None else "HALFVEC"
 
-    def process_bind_param(self, value: Any, dialect: Dialect | Any) -> Any:
-        """Encode Python structures to JSON strings or bytes."""
-        _ = dialect
-        if value is None or isinstance(value, (bytes, str)):
-            return value
-        return encode_json(value)
 
-    def process_result_value(self, value: Any, dialect: Dialect | Any) -> Any:
-        """Decode database JSON payloads into Python objects."""
-        _ = dialect
-        if value is None or isinstance(value, (dict, list)):
-            return value
-        if isinstance(value, memoryview):
-            raw = bytes(value)
-            if raw.startswith(b"\x01"):
-                raw = raw[1:]
-            return decode_json(raw)
-        if isinstance(value, (bytes, bytearray)):
-            raw_b = bytes(value)
-            if raw_b.startswith(b"\x01"):
-                raw_b = raw_b[1:]
-            return decode_json(raw_b)
-        if isinstance(value, str):
-            return decode_json(value)
-        return value
+@compiles(SparseVector, "postgresql")
+def _compile_sparsevector(element: SparseVector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    return f"SPARSEVEC({element.dimensions})" if element.dimensions is not None else "SPARSEVEC"
 
-    def get_col_spec(self, dialect_name: str = "postgresql", **kw: Any) -> str:
-        """Render the DDL column type specification for dialect-compatibility inspection."""
-        target = dialect_name
-        if not target and "dialect" in kw:
-            target = getattr(kw["dialect"], "name", "")
-        lowered = target.lower() if target else "postgresql"
-        base = lowered.split("+", 1)[0]
-        if base in ("postgres", "postgresql", "spangres", "sqlite"):
-            return "JSONB"
-        if base == "mssql":
-            return "NVARCHAR(MAX)"
-        return "JSON"
+
+@compiles(OracleVector, "oracle")
+def _compile_oracle_vector(element: OracleVector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    ora_fmt = element.precision.upper()
+    if element.dimensions is None:
+        return f"VECTOR(*, {ora_fmt})"
+    return f"VECTOR({element.dimensions}, {ora_fmt})"
+
+
+@compiles(SpannerVector, "spanner")
+def _compile_spanner_vector(element: SpannerVector, compiler: Any, **kw: Any) -> str:
+    _ = (compiler, kw)
+    elem_type = "FLOAT64" if element.precision == "float64" else "FLOAT32"
+    if element.dimensions is not None:
+        return f"ARRAY<{elem_type}>(vector_length=>{element.dimensions})"
+    return f"ARRAY<{elem_type}>"
+
+
+@compiles(BigQueryGeography, "bigquery")
+def _compile_bq_geography(element: BigQueryGeography, compiler: Any, **kw: Any) -> str:
+    _ = (element, compiler, kw)
+    return "GEOGRAPHY"
 
 
 class SelectInLoadSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):

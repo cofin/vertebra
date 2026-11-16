@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "vertebra-sqlite"
+version = "0.3.0"
+description = "Native Rust SQLite client extension for Vertebra."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.maturin]
+python-source = "../../py"
+module-name = "vertebra._sqlite"
+features = ["extension-module"]
+exclude = [
+    "**/py/vertebra/**/*.py",
+    "**/py/vertebra/**/*.so",
+    "**/py/vertebra/py.typed",
+    "**/py/vertebra/_bigquery.pyi",
+    "**/py/vertebra/_bundler.pyi",
+    "**/py/vertebra/_duckdb.pyi",
+    "**/py/vertebra/_mssql.pyi",
+    "**/py/vertebra/_mysql.pyi",
+    "**/py/vertebra/_oracle.pyi",
+    "**/py/vertebra/_postgres.pyi",
+    "**/py/vertebra/_redis.pyi",
+    "**/py/vertebra/_spanner.pyi",
+    "**/py/vertebra/_storage.pyi",
+    "**/py/vertebra/_valkey.pyi",
+    "**/py/vertebra/_vertebra.pyi",
+]

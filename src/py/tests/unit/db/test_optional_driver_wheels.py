@@ -48,11 +48,15 @@ SIBLING_WHEEL_MANIFESTS: tuple[tuple[str, str, str], ...] = (
     ("vertebra-duckdb", "src/rs/vertebra-duckdb/pyproject.toml", "_duckdb.pyi"),
     ("vertebra-mssql", "src/rs/vertebra-mssql/pyproject.toml", "_mssql.pyi"),
     ("vertebra-mysql", "src/rs/vertebra-mysql/pyproject.toml", "_mysql.pyi"),
+    ("vertebra-oracle", "src/rs/vertebra-oracle/pyproject.toml", "_oracle.pyi"),
     ("vertebra-postgres", "src/rs/vertebra-postgres/pyproject.toml", "_postgres.pyi"),
+    ("vertebra-sqlite", "src/rs/vertebra-sqlite/pyproject.toml", "_sqlite.pyi"),
     ("vertebra-bigquery", "src/rs/vertebra-bigquery/pyproject.toml", "_bigquery.pyi"),
     ("vertebra-spanner", "src/rs/vertebra-spanner/pyproject.toml", "_spanner.pyi"),
     ("vertebra-storage", "src/rs/vertebra-storage/pyproject.toml", "_storage.pyi"),
     ("vertebra-bundler", "src/rs/vertebra-bundler/pyproject.toml", "_bundler.pyi"),
+    ("vertebra-redis", "src/rs/vertebra-redis/pyproject.toml", "_redis.pyi"),
+    ("vertebra-valkey", "src/rs/vertebra-valkey/pyproject.toml", "_valkey.pyi"),
 )
 
 
@@ -109,6 +113,7 @@ def test_vertebra_duckdb_wheel_pyproject_includes_only_duckdb_stub() -> None:
         "vertebra-mssql",
         "vertebra-mysql",
         "vertebra-spanner",
+        "vertebra-sqlite",
         "vertebra-storage",
     ],
 )
@@ -118,6 +123,28 @@ def test_sibling_extension_wheels_exclude_duckdb_stub(sibling_crate: str) -> Non
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     excludes = data["tool"]["maturin"]["exclude"]
     assert "**/py/vertebra/_duckdb.pyi" in excludes
+
+
+@pytest.mark.parametrize(
+    "sibling_crate",
+    [
+        "vertebra-bigquery",
+        "vertebra-bundler",
+        "vertebra-duckdb",
+        "vertebra-mssql",
+        "vertebra-mysql",
+        "vertebra-oracle",
+        "vertebra-postgres",
+        "vertebra-spanner",
+        "vertebra-storage",
+    ],
+)
+def test_sibling_extension_wheels_exclude_sqlite_stub(sibling_crate: str) -> None:
+    """All sibling optional wheels exclude `**/py/vertebra/_sqlite.pyi` from their wheel payload."""
+    pyproject_path = _REPO_ROOT / "src/rs" / sibling_crate / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    excludes = data["tool"]["maturin"]["exclude"]
+    assert "**/py/vertebra/_sqlite.pyi" in excludes
 
 
 @pytest.mark.parametrize(
@@ -166,6 +193,9 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
         "_mysql.pyi",
         "_oracle.pyi",
         "_postgres.pyi",
+        "_redis.pyi",
+        "_sqlite.pyi",
+        "_valkey.pyi",
         "_bigquery.pyi",
         "_spanner.pyi",
         "_storage.pyi",
@@ -176,13 +206,15 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
     assert stub_file.is_file()
 
 
-@pytest.mark.parametrize("extra_name", ["mysql", "mssql"])
+@pytest.mark.parametrize("extra_name", ["mysql", "mssql", "redis", "sqlite", "valkey"])
 def test_root_pyproject_declares_optional_driver_extra(extra_name: str) -> None:
     """Root `pyproject.toml` maps each optional SQL driver extra to its matching workspace crate."""
     root_toml = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     pkg_name = f"vertebra-{extra_name}"
+    version = root_toml["project"]["version"]
     optional_deps = root_toml["project"]["optional-dependencies"]
     assert any(dep.startswith(pkg_name) for dep in optional_deps[extra_name])
+    assert optional_deps[extra_name] == [f"{pkg_name}=={version}"]
     assert "all" not in optional_deps
     uv_sources = root_toml["tool"]["uv"]["sources"]
     assert uv_sources[pkg_name] == {"path": f"src/rs/{pkg_name}", "editable": True}

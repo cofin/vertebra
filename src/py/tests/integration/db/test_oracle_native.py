@@ -21,7 +21,7 @@ from vertebra.db.adapters.oracle.driver import (
     SyncOraclePool,
 )
 from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
-from vertebra.db.adapters.oracle.notify import OracleNotificationSource, OracleNotifyConfig
+from vertebra.db.adapters.oracle.notify import AsyncOracleNotificationSource, OracleNotifyConfig
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS
 from vertebra.db.driver import NotFoundError, QueryCancelledError
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope
@@ -425,7 +425,7 @@ async def test_oracle_26ai_aq_raw_binary_notification_and_clean_close(
         await driver.execute(cleanup_plsql)
         await driver.execute(setup_plsql)
         notify_cfg = OracleNotifyConfig(wait_timeout_seconds=30, poll_timeout=0.5)
-        source = OracleNotificationSource(driver, notify_cfg)
+        source = AsyncOracleNotificationSource(driver, notify_cfg)
         try:
             msg_id = await source.publish_aq(qname, binary_payload)
             assert len(msg_id) == 32
@@ -490,7 +490,7 @@ async def test_oracle_26ai_aq_wait_timeout_seconds_idle_liveness_and_delivery(
         await driver.execute(cleanup_plsql)
         await driver.execute(setup_plsql)
         notify_cfg = OracleNotifyConfig(wait_timeout_seconds=2, poll_timeout=0.5)
-        source = OracleNotificationSource(driver, notify_cfg)
+        source = AsyncOracleNotificationSource(driver, notify_cfg)
         try:
             stream = source.listen_aq(qname)
             try:

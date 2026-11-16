@@ -3,10 +3,10 @@
 import asyncio
 import inspect
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import pytest
@@ -14,18 +14,18 @@ import pytest
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.extensions.litestar.channels import (
     ChannelsBackend,
-    swap_channels_backend,
+    create_channels_plugin,
 )
 from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledRoute,
     FastPath,
     ScopeState,
-    _is_empty_sentinel,
     compile_fastpath_routes,
     dispatch_handler_direct,
     preseed_scope_body,
 )
+from vertebra.extensions.litestar.offload import _is_empty_sentinel
 from vertebra.extensions.litestar.plugin import VertebraPlugin
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import (
@@ -92,20 +92,23 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
         and store_mod is not None
     ):
 
-        class _TestServerSentEvent(resp_mod.ServerSentEvent):
-            """Litestar ServerSentEvent wrapper preserving x-vertebra-sse-ping-interval header."""
+        def _sse_init(self: Any, content: Any, *args: Any, ping_interval: int | None = None, **kwargs: Any) -> None:
+            hdrs = dict(kwargs.pop("headers", None) or {})
+            if ping_interval is not None:
+                hdrs["x-vertebra-sse-ping-interval"] = str(ping_interval)
+            resp_mod.ServerSentEvent.__init__(self, content, *args, headers=hdrs, **kwargs)
+            self._ping_interval = ping_interval
 
-            def __init__(self, content: Any, *args: Any, ping_interval: int | None = None, **kwargs: Any) -> None:
-                hdrs = dict(kwargs.pop("headers", None) or {})
-                if ping_interval is not None:
-                    hdrs["x-vertebra-sse-ping-interval"] = str(ping_interval)
-                super().__init__(content, *args, headers=hdrs, **kwargs)
-                self._ping_interval = ping_interval
+        def _sse_setattr(self: Any, name: str, value: Any) -> None:
+            resp_mod.ServerSentEvent.__setattr__(self, name, value)
+            if name == "_ping_interval" and value is not None and hasattr(self, "headers"):
+                self.headers["x-vertebra-sse-ping-interval"] = str(value)
 
-            def __setattr__(self, name: str, value: Any) -> None:
-                super().__setattr__(name, value)
-                if name == "_ping_interval" and value is not None and hasattr(self, "headers"):
-                    self.headers["x-vertebra-sse-ping-interval"] = str(value)
+        test_sse_cls = type(
+            "_TestServerSentEvent",
+            (resp_mod.ServerSentEvent,),
+            {"__init__": _sse_init, "__setattr__": _sse_setattr},
+        )
 
         return {
             "Litestar": litestar_mod.Litestar,
@@ -128,7 +131,7 @@ def _load_litestar_fastpath_test_primitives() -> dict[str, Any]:
             "MsgspecDTO": dto_mod.MsgspecDTO,
             "NotAuthorizedException": exc_mod.NotAuthorizedException,
             "File": resp_mod.File,
-            "ServerSentEvent": _TestServerSentEvent,
+            "ServerSentEvent": test_sse_cls,
             "MemoryStore": store_mod.MemoryStore,
         }
 
@@ -407,8 +410,14 @@ if TYPE_CHECKING:
     from litestar.dto import MsgspecDTO
     from litestar.exceptions import NotAuthorizedException
     from litestar.params import FromPath, FromQuery, JSONBody
-    from litestar.response import File, ServerSentEvent
+    from litestar.response import File
+    from litestar.response import ServerSentEvent as _LitestarServerSentEvent
     from litestar.stores.memory import MemoryStore as LitestarMemoryStore
+
+    class ServerSentEvent(_LitestarServerSentEvent):
+        _ping_interval: int | None
+
+        def __init__(self, content: Any, *args: Any, ping_interval: int | None = None, **kwargs: Any) -> None: ...
 else:
     Litestar = _PRIMS["Litestar"]
     Request = _PRIMS["Request"]
@@ -697,7 +706,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
     def get_cached() -> dict[str, str]:
         return {"cached": "yes"}
 
-    channels_plugin = ChannelsPlugin(backend=MemoryChannelsBackend(history=10), channels=["alerts"])
+    channels_plugin = create_channels_plugin(history=10, channels=["alerts"])
     cache_config = ResponseCacheConfig(store="response_cache")
     app = Litestar(
         route_handlers=[get_cached],
@@ -706,7 +715,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         stores={"response_cache": LitestarMemoryStore()},
     )
 
-    swapped_channels = swap_channels_backend(app)
+    swapped_channels = channels_plugin._backend
     assert isinstance(swapped_channels, ChannelsBackend)
     await swapped_channels.on_startup()
     await swapped_channels.subscribe(["alerts"])
@@ -818,7 +827,7 @@ async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_ski
     status_get, headers_get, body_get = get_res
     assert status_get == 200
     assert (b"content-type", b"application/json") in [(k.lower(), v) for k, v in headers_get]
-    assert decode_json(body_get) == {"id": 42, "limit": 15}
+    assert decode_json(bytes(body_get)) == {"id": 42, "limit": 15}
 
     post_scope = AsgiScope.from_parts(
         method="POST",
@@ -830,7 +839,7 @@ async def test_fastpath_bypass_dispatches_eligible_sync_and_async_routes_and_ski
     assert post_res is not None
     status_post, _headers_post, body_post = post_res
     assert status_post == 201
-    assert decode_json(body_post) == {"sku": "X1", "qty": 7}
+    assert decode_json(bytes(body_post)) == {"sku": "X1", "qty": 7}
 
     guarded_scope = AsgiScope.from_parts(method="GET", path="/guarded")
     assert await bypass.dispatch(guarded_scope, forbidden_receive, noop_send) is None
@@ -949,7 +958,7 @@ async def test_fastpath_http_exception_serialization_disqualifiers_query_and_upl
     deny_status, deny_headers, deny_body = deny_res
     assert deny_status == 401
     assert (b"x-auth-error", b"expired") in [(k.lower(), v) for k, v in deny_headers]
-    assert decode_json(deny_body)["detail"] == "token expired"
+    assert decode_json(bytes(deny_body))["detail"] == "token expired"
 
     text_scope = AsgiScope.from_parts(method="GET", path="/plain-text", query_string="tag=first&tag=second")
     text_res = await bypass.dispatch(text_scope, noop_receive, noop_send)
@@ -1036,13 +1045,13 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     def v2_decoders_route() -> dict[str, str]:
         return {"ok": "decoders"}
 
-    v2_decoders_route.resolve_type_decoders = lambda: [(lambda x: isinstance(x, str), str)]
+    monkeypatch.setattr(v2_decoders_route, "resolve_type_decoders", lambda: [(lambda x: isinstance(x, str), str)])
 
     @get("/v2-layered-resp-cls", sync_to_thread=False)
     def v2_resp_cls_route() -> dict[str, str]:
         return {"ok": "resp_cls"}
 
-    resp_cls_router = Router(path="/", response_class=_CustomResponse, route_handlers=[v2_resp_cls_route])
+    resp_cls_router = Router(path="/", response_class=cast("Any", _CustomResponse), route_handlers=[v2_resp_cls_route])
 
     v2_app = Litestar(route_handlers=[after_req_router, v2_decoders_route, resp_cls_router])
     v2_bypass = FastPath.from_app(v2_app)
@@ -1134,7 +1143,7 @@ async def test_v2_ownership_layers_hooks_metadata_and_unoffloaded_middleware_dis
     conn_state.body = memoryview(b'{"sku":"MV1","quantity":2}')
     mv_res = await mv_bypass.dispatch(mv_scope, noop_receive, noop_send)
     assert mv_res is not None
-    assert decode_json(mv_res[2]) == {"sku": "MV1", "quantity": 2}
+    assert decode_json(bytes(mv_res[2])) == {"sku": "MV1", "quantity": 2}
 
 
 @pytest.mark.anyio
@@ -1169,7 +1178,7 @@ async def test_litestar_fastpath_wrap_asgi_uses_send_raw_response_and_mount_pref
             body: bytes,
         ) -> None:
             raw_calls.append((status, headers, body))
-            await proto.send_raw_response(status, headers, body)
+            await cast("Awaitable[None]", proto.send_raw_response(status, headers, body))
 
     await wrapped(scope, proto.receive, _RawSendTracker())
     assert len(raw_calls) == 1

@@ -14,8 +14,6 @@
 //!   attributes, and 26ai `VECTOR` (`FLOAT32`, `FLOAT64`, `INT8`, `BINARY`) and `OSON` codecs (`oracle`).
 //! - SQL Server single-pass `@P1` placeholder rewriter (`mssql`).
 //! - DuckDB 2.0-safe `SET` bootstrap statements and `ShmRegion` Arrow IPC frame re-exports (`duckdb`).
-//! - Redis 7.2+/8.0+ and Valkey 8.0+/9.0+ RESP3 wire framing, recursive parser, `invalidate`
-//!   push frame extractor, Sentinel master discovery, and Cluster CRC16-XMODEM slot routing (`resp3`).
 //! - Shared credential and TLS wiring for the official Google Cloud Rust clients (`gcp`).
 
 pub mod arrow_shm;
@@ -30,7 +28,6 @@ pub mod oracle;
 pub mod postgres;
 #[cfg(feature = "pyo3")]
 pub mod py_async;
-pub mod resp3;
 pub mod sqlite;
 
 pub use arrow_shm::{
@@ -73,10 +70,5 @@ pub use oracle::{
 pub use postgres::{
     PGCOPY_SIGNATURE, PoolerMode, compute_worker_pool_budget, decode_pgcopy_binary_rows,
     encode_pg_jsonb, encode_pgcopy_binary_rows, strip_pg_jsonb_header,
-};
-pub use resp3::{
-    ClusterRedirect, RedirectKind, Resp3Frame, crc16_xmodem, encode_hello3_handshake,
-    encode_resp_command, encode_sentinel_get_master_cmd, extract_invalidation_keys,
-    parse_cluster_redirect, parse_resp3_frame, redis_hash_slot,
 };
 pub use sqlite::SqliteConfig;

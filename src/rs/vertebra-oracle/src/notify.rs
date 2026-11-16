@@ -212,12 +212,14 @@ impl ListenerSharedState {
                     self.dropped_count
                         .store(guard.ring.dropped_count(), Ordering::Release);
                 }
+                self.wake_cvar.notify_all();
                 return;
             }
         }
         guard.ring.push(frame);
         self.dropped_count
             .store(guard.ring.dropped_count(), Ordering::Release);
+        self.wake_cvar.notify_all();
     }
 
     pub(crate) fn record_fatal_error(&self, err: OracleError) {
@@ -226,6 +228,7 @@ impl ListenerSharedState {
         while let Some(tx) = guard.waiters.pop_front() {
             let _ = tx.send(Err(err.clone()));
         }
+        self.wake_cvar.notify_all();
     }
 
     fn mark_closed(&self) -> bool {
@@ -688,6 +691,202 @@ impl Drop for AsyncOracleListener {
         if let Some(handle) = handle_opt {
             let _ = handle.join();
         }
+    }
+}
+
+/// Dedicated AQ / TxEventQ synchronous listener owning an isolated worker thread and bounded ring buffer.
+#[pyclass(
+    name = "SyncOracleListener",
+    module = "vertebra._oracle",
+    frozen,
+    immutable_type
+)]
+pub struct SyncOracleListener {
+    queue_name: String,
+    consumer_name: Option<String>,
+    state: Arc<ListenerSharedState>,
+    break_handle: Arc<OracleBreakHandle>,
+    join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl SyncOracleListener {
+    /// Spawn a new [`SyncOracleListener`] on a dedicated `"vtb-ora-aq-sync"` thread.
+    pub fn spawn(
+        config: Arc<NativeOracleConfig>,
+        queue_name: String,
+        consumer_name: Option<String>,
+        wait_timeout_seconds: u32,
+        max_buffered: usize,
+    ) -> Result<Self, OracleError> {
+        validate_aq_identifier(&queue_name, "queue_name")?;
+        if let Some(ref consumer) = consumer_name {
+            validate_aq_identifier(consumer, "consumer_name")?;
+        }
+        if max_buffered == 0 {
+            return Err(OracleError::Config(
+                "SyncOracleListener max_buffered must be >= 1".to_owned(),
+            ));
+        }
+
+        let normalized_queue = queue_name.to_ascii_uppercase();
+        let state = Arc::new(ListenerSharedState::new(max_buffered));
+        let break_handle = Arc::new(OracleBreakHandle::new());
+
+        let state_clone = Arc::clone(&state);
+        let break_clone = Arc::clone(&break_handle);
+        let q_clone = normalized_queue.clone();
+        let c_clone = consumer_name.clone();
+
+        let join_handle = thread::Builder::new()
+            .name("vtb-ora-aq-sync".to_owned())
+            .spawn(move || {
+                run_live_aq_worker(
+                    config,
+                    q_clone,
+                    c_clone,
+                    wait_timeout_seconds,
+                    state_clone,
+                    break_clone,
+                );
+            })
+            .map_err(|e| {
+                OracleError::Interface(format!("failed to spawn Oracle AQ listener thread: {e}"))
+            })?;
+
+        Ok(Self {
+            queue_name: normalized_queue,
+            consumer_name,
+            state,
+            break_handle,
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
+        })
+    }
+}
+
+#[pymethods]
+impl SyncOracleListener {
+    #[getter]
+    pub fn queue_name(&self) -> &str {
+        &self.queue_name
+    }
+
+    #[getter]
+    pub fn consumer_name(&self) -> Option<&str> {
+        self.consumer_name.as_deref()
+    }
+
+    #[getter]
+    pub fn is_closed(&self) -> bool {
+        self.state.is_closed()
+    }
+
+    #[getter]
+    pub fn dropped_count(&self) -> usize {
+        self.state.dropped_count()
+    }
+
+    #[pyo3(signature = (timeout=None))]
+    pub fn next_notification(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+    ) -> PyResult<Option<OracleNotification>> {
+        if let Some(t) = timeout
+            && (!t.is_finite() || t < 0.0)
+        {
+            return Err(OracleError::Config(
+                "next_notification timeout must be a finite non-negative number".to_owned(),
+            )
+            .to_py_err(py));
+        }
+
+        let state = Arc::clone(&self.state);
+        let timeout_dur = timeout.map(Duration::from_secs_f64);
+
+        let res = py.detach(|| {
+            let start = Instant::now();
+            let mut guard = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(err) = guard.fatal_error.take() {
+                    return Err(err);
+                }
+                if let Some(frame) = guard.ring.pop() {
+                    return Ok(Some(frame));
+                }
+                if state.is_closed() {
+                    return Ok(None);
+                }
+                match timeout_dur {
+                    Some(dur) => {
+                        let elapsed = start.elapsed();
+                        if elapsed >= dur {
+                            return Ok(None);
+                        }
+                        let remaining = dur - elapsed;
+                        let (new_guard, timeout_res) = state
+                            .wake_cvar
+                            .wait_timeout(guard, remaining)
+                            .unwrap_or_else(|e| e.into_inner());
+                        guard = new_guard;
+                        if timeout_res.timed_out()
+                            && guard.ring.is_empty()
+                            && guard.fatal_error.is_none()
+                        {
+                            return Ok(None);
+                        }
+                    }
+                    None => {
+                        guard = state
+                            .wake_cvar
+                            .wait(guard)
+                            .unwrap_or_else(|e| e.into_inner());
+                    }
+                }
+            }
+        });
+
+        res.map_err(|e| e.to_py_err(py))
+    }
+
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let newly_closed = self.state.mark_closed();
+        self.break_handle.break_execution();
+        if newly_closed {
+            let handle_opt = {
+                let mut guard = self.join_handle.lock().unwrap_or_else(|e| e.into_inner());
+                guard.take()
+            };
+            if let Some(handle) = handle_opt {
+                let _ = py.detach(|| handle.join());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (exc_type=None, exc_val=None, exc_tb=None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.close(py)?;
+        Ok(false)
+    }
+}
+
+impl Drop for SyncOracleListener {
+    fn drop(&mut self) {
+        self.state.mark_closed();
+        self.break_handle.break_execution();
+        let mut guard = self.join_handle.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.take();
     }
 }
 

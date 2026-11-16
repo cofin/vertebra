@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, Self
 
 import msgspec
 
+from vertebra._vertebra import (
+    ArrowCursor as _RustArrowCursor,
+)
 from vertebra._vertebra import (
     LeaseBroker,
     NotFoundError,
@@ -34,10 +37,66 @@ from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import quote_dialect_identifier, validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._bigquery import AsyncBigQueryClient
     from vertebra.storage import AsyncObjectStore, SyncObjectStore
 
-__all__ = ("AsyncBigQueryDriver",)
+__all__ = (
+    "AsyncBigQueryClientProtocol",
+    "AsyncBigQueryDriver",
+)
+
+
+class AsyncBigQueryClientProtocol(Protocol):
+    """Structural protocol for asynchronous BigQuery wire clients and test doubles."""
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Execute a GoogleSQL query asynchronously."""
+        ...
+
+    def dry_run(
+        self,
+        sql: str,
+        params_json: str | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Validate ``sql`` asynchronously via ``jobs.insert(dryRun=True)``."""
+        ...
+
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> Awaitable[_RustArrowCursor]:
+        """Stream a BigQuery table asynchronously into a zero-copy ``ArrowCursor``."""
+        ...
+
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> Awaitable[dict[str, Any]]:
+        """Append an Arrow IPC stream asynchronously via the Storage Write API."""
+        ...
+
+    def close(self) -> Any:
+        """Close the client handle."""
+        ...
 
 
 class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
@@ -62,7 +121,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         broker: LeaseBroker | None = None,
         statement_cache: _RustStatementCache | None = None,
         propagator: SqlTracePropagator | None = None,
-        client: AsyncBigQueryClient | None = None,
+        client: AsyncBigQueryClientProtocol | None = None,
         **overrides: Any,
     ) -> None:
         if isinstance(config, str):
@@ -84,7 +143,7 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
         )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
-        self._client: AsyncBigQueryClient | None = client
+        self._client: AsyncBigQueryClientProtocol | None = client
         self._session_id: str | None = None
         self._in_transaction: bool = False
         self._last_query_metadata: dict[str, Any] = {}
@@ -504,9 +563,11 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
             expires_in_secs=expires_in_secs,
         )
 
-    def _ensure_client(self) -> AsyncBigQueryClient:
+    def _ensure_client(self) -> AsyncBigQueryClientProtocol:
         if self._client is None:
-            self._client = BigQueryCore.create_async_rust_client(self.config)
+            created: AsyncBigQueryClientProtocol = BigQueryCore.create_async_rust_client(self.config)
+            self._client = created
+            return created
         return self._client
 
     def _prepare_sql_and_params(

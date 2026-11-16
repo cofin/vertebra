@@ -31,7 +31,7 @@ use crate::client::{
 };
 use crate::config::{NativeOracleConfig, RawOracleOptions};
 use crate::errors::OracleError;
-use crate::notify::{AsyncOracleListener, OracleNotification};
+use crate::notify::{AsyncOracleListener, OracleNotification, SyncOracleListener};
 use crate::pool::{AsyncOraclePool, OraclePoolCore, OraclePoolOptions, SyncOraclePool};
 use crate::types::{OracleCellValue, OracleColumn, OracleQueryResult};
 
@@ -418,6 +418,7 @@ pub fn _oracle(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OraclePipelineOutcome>()?;
     m.add_class::<OracleNotification>()?;
     m.add_class::<AsyncOracleListener>()?;
+    m.add_class::<SyncOracleListener>()?;
     m.add_class::<SyncOracleClient>()?;
     m.add_class::<AsyncOracleClient>()?;
     m.add_class::<SyncOraclePool>()?;

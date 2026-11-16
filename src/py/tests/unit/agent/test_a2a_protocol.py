@@ -221,6 +221,7 @@ async def test_a2a_agent_card_auto_interfaces_and_dynamic_request_url() -> None:
     )
     assert status == 200
     assert "Vary" in headers
+    assert isinstance(body, bytes)
     payload = decode_json(body)
     assert payload["name"] == "OrderSupportAgent"
     assert payload["supportedInterfaces"] == [
@@ -238,6 +239,7 @@ async def test_a2a_agent_card_auto_interfaces_and_dynamic_request_url() -> None:
         b"",
     )
     assert status_fwd == 200
+    assert isinstance(body_fwd, bytes)
     payload_fwd = decode_json(body_fwd)
     assert payload_fwd["supportedInterfaces"][0]["url"] == "https://mesh.internal.example:8443/a2a"
 
@@ -631,6 +633,7 @@ async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
 
     status, _, body = await handler.handle_request("GET", "/.well-known/agent-card.json", {}, b"")
     assert status == 200
+    assert isinstance(body, bytes)
     card_doc = decode_json(body)
     skill_ids = [s["id"] for s in card_doc["skills"]]
     assert "a2a_visible_tool" in skill_ids

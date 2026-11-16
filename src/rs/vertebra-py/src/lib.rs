@@ -33,7 +33,8 @@ pub use asgi::{
 pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
 pub use broker::{
     BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry, BrokerStats, LeaseBroker,
-    LeaseGrant, PartitionStats, ReclaimedLease, StatementCache, StatementCacheStats, StatementPlan,
+    LeaseGrant, PartitionStats, ReclaimedLease, ShmCache, ShmCacheStats, StatementCache,
+    StatementCacheStats, StatementPlan,
 };
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{
@@ -112,6 +113,8 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<broker::StatementPlan>()?;
     m.add_class::<broker::StatementCacheStats>()?;
     m.add_class::<broker::StatementCache>()?;
+    m.add_class::<broker::ShmCacheStats>()?;
+    m.add_class::<broker::ShmCache>()?;
     m.add_function(wrap_pyfunction!(broker::stable_hash64, m)?)?;
     m.add_class::<agent::SchemaDigestCache>()?;
 

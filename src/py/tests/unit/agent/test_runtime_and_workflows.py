@@ -40,7 +40,6 @@ from vertebra.agent import (
     DynamicWorkflow,
     MemorySessionStore,
     ModelDelta,
-    ModelProvider,
     ObjectStoreSessionStore,
     PermissionDeniedError,
     SessionNotFoundError,
@@ -54,9 +53,9 @@ from vertebra.agent import (
     WorkflowLiveState,
     build_tools,
 )
+from vertebra.agent.mcp import MCPConfig
 from vertebra.agent.mcp.controllers import SkillController
-from vertebra.agent.mcp.service import MCPConfig
-from vertebra.agent.runtime import ConfirmationCapacityError
+from vertebra.agent.runtime import ConfirmationCapacityError, ModelProvider
 from vertebra.db.driver import DatabaseError
 from vertebra.framework._app import App
 from vertebra.framework.live import LiveStateRoom
@@ -435,7 +434,7 @@ async def test_dynamic_workflow_waves_and_cycle_refusal() -> None:
 
     async def step_clean(ctx: WorkflowContext) -> int:
         execution_order.append("clean")
-        val = ctx.get("raw_data")
+        val = int(ctx.get("raw_data"))
         cleaned = val * 2
         ctx.set("cleaned_data", cleaned)
         return cleaned
@@ -716,8 +715,8 @@ async def test_agent_plugin_dual_host_mounting() -> None:
     class SampleSkill(SkillController):
         """Discovered SkillController registering domain skills."""
 
-        def get_tools(self) -> Sequence[Tool]:
-            return (Tool(name="skill_action", description="Action tool", fn=lambda: "done"),)
+        def get_tools(self) -> list[Tool]:
+            return [Tool(name="skill_action", description="Action tool", fn=lambda: "done")]
 
     dummy_config = DummyLitestarAppConfig()
     dummy_config.route_handlers.append(SampleSkill)

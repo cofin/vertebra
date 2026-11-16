@@ -1,6 +1,6 @@
 ---
 name: pyo3-bridge-reviewer
-description: Reviews PyO3 native extensions, GIL release discipline, free-threaded 3.14t/3.15t safety, and FFI buffer lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, and vertebra-postgres.
+description: Reviews PyO3 native extensions, GIL release discipline, free-threaded 3.14t/3.15t safety, and FFI buffer lifetimes across vertebra-py, vertebra-bundler, vertebra-storage, vertebra-mysql, vertebra-bigquery, vertebra-mssql, vertebra-spanner, vertebra-duckdb, vertebra-oracle, vertebra-postgres, vertebra-sqlite, vertebra-redis, and vertebra-valkey.
 model: inherit
 readonly: true
 mainAgent: false

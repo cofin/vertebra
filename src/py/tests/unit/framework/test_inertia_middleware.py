@@ -1,5 +1,7 @@
 """Tests for the Inertia.js v3 protocol middleware."""
 
+from typing import Any
+
 import pytest
 
 from vertebra.framework.inertia import (
@@ -15,7 +17,7 @@ from vertebra.framework.inertia import (
     SyncInertiaMiddleware,
     inertia,
 )
-from vertebra.framework.ssr import SSRConfig, SSRResult
+from vertebra.framework.ssr import AsyncSSRClient, SSRConfig, SSRResult, SyncSSRClient
 from vertebra.utils.serializers import decode_json
 
 
@@ -35,24 +37,35 @@ def _make_request(
     return _TestRequest(method=method, path=path, headers=headers)
 
 
-def _make_mock_ssr_client(*, fail: bool = False) -> object:
+class _MockSSRClient:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.last_page: dict[str, Any] | None = None
+
+    def render(self, page: dict[str, Any]) -> SSRResult:
+        self.last_page = page
+        if self.fail:
+            raise ConnectionError("SSR server down")
+        return SSRResult(
+            head=["<title>SSR Page</title>"],
+            body='<div id="app">SSR Content</div>',
+        )
+
+    def invalidate(self, paths: list[str] | None = None) -> None:
+        _ = paths
+
+    def stop(self) -> None:
+        return None
+
+    @staticmethod
+    def from_config(config: SSRConfig) -> SyncSSRClient | None:
+        _ = config
+        return None
+
+
+def _make_mock_ssr_client(*, fail: bool = False) -> _MockSSRClient:
     """Build a fake SSR client for testing."""
-
-    class _MockSSRClient:
-        def __init__(self) -> None:
-            self.fail = fail
-            self.last_page: dict | None = None
-
-        def render(self, page: dict) -> SSRResult:
-            self.last_page = page
-            if self.fail:
-                raise ConnectionError("SSR server down")
-            return SSRResult(
-                head=["<title>SSR Page</title>"],
-                body='<div id="app">SSR Content</div>',
-            )
-
-    return _MockSSRClient()
+    return _MockSSRClient(fail=fail)
 
 
 def test_inertia_config_defaults() -> None:
@@ -583,9 +596,9 @@ async def test_async_inertia_middleware_process() -> None:
     class _AsyncMockSSRClient:
         def __init__(self, *, fail: bool = False) -> None:
             self.fail = fail
-            self.last_page: dict | None = None
+            self.last_page: dict[str, Any] | None = None
 
-        async def render(self, page: dict) -> SSRResult:
+        async def render(self, page: dict[str, Any]) -> SSRResult:
             self.last_page = page
             if self.fail:
                 raise ConnectionError("Async SSR server down")
@@ -598,6 +611,11 @@ async def test_async_inertia_middleware_process() -> None:
             _ = paths
 
         def stop(self) -> None:
+            return None
+
+        @staticmethod
+        def from_config(config: SSRConfig) -> AsyncSSRClient | None:
+            _ = config
             return None
 
     client = _AsyncMockSSRClient()

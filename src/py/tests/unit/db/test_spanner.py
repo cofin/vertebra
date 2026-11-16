@@ -51,17 +51,174 @@ from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError, Verteb
 from vertebra.utils.serializers import decode_json, encode_json
 
 
+class FakeSyncReadWriteTransaction:
+    """Test-only interactive `ReadWrite` transaction double backed by `FakeSpannerClient`."""
+
+    __slots__ = (
+        "_client",
+        "_closed",
+        "_max_commit_delay_ms",
+        "_transaction_id",
+    )
+
+    def __init__(
+        self,
+        client: FakeSpannerClient,
+        transaction_id: bytes,
+        *,
+        max_commit_delay_ms: int | None = None,
+    ) -> None:
+        self._client = client
+        self._transaction_id = transaction_id
+        self._max_commit_delay_ms = max_commit_delay_ms
+        self._closed = False
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the synthetic transaction identifier bytes."""
+        return self._transaction_id
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a query inside this active transaction double."""
+        _ = request_tag
+        if self._closed:
+            msg = "Transaction is already closed"
+            raise RuntimeError(msg)
+        with self._client._lock:
+            return self._client._query_unlocked(sql, params_json)
+
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        """Execute a DML statement inside this active transaction without auto-committing."""
+        _ = request_tag
+        if self._closed:
+            msg = "Transaction is already closed"
+            raise RuntimeError(msg)
+        with self._client._lock:
+            return self._client._execute_dml_unlocked(sql, params_json, commit=False)
+
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements inside this active transaction without auto-committing."""
+        _ = request_tag
+        if self._closed:
+            msg = "Transaction is already closed"
+            raise RuntimeError(msg)
+        decoded = decode_json(statements_json) if statements_json else []
+        counts: list[int] = []
+        with self._client._lock:
+            for item in decoded:
+                stmt_sql = str(item.get("sql", ""))
+                stmt_params = item.get("params")
+                params_str = encode_json(stmt_params) if stmt_params is not None else None
+                counts.append(self._client._execute_dml_unlocked(stmt_sql, params_str, commit=False))
+        return counts
+
+    def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+        """Commit buffered DML and optional mutations atomically against the backing SQLite connection."""
+        if self._closed:
+            msg = "Transaction is already closed"
+            raise RuntimeError(msg)
+        with self._client._lock:
+            if self._max_commit_delay_ms is not None:
+                self._client.last_max_commit_delay_ms = self._max_commit_delay_ms
+            count = 0
+            if mutations_json:
+                count = self._client._apply_mutations_unlocked(mutations_json)
+            self._client._conn.commit()
+            self._closed = True
+            return {
+                "commit_timestamp_micros": int(_time.time() * 1_000_000),
+                "mutation_count": count,
+                "retry_count": 0,
+            }
+
+    def rollback(self) -> None:
+        """Roll back any uncommitted DML inside the backing SQLite connection."""
+        if self._closed:
+            return
+        with self._client._lock:
+            self._client._conn.rollback()
+            self._client.tx_rollbacks.append(self._transaction_id)
+            self._closed = True
+
+
 class FakeSpannerClient:
     """Test-only in-memory Spanner wire client double for unit testing `SyncSpannerDriver` and `AsyncSpannerDriver`."""
 
-    __slots__ = ("_conn", "_lock", "ddl_history", "last_max_commit_delay_ms")
+    __slots__ = (
+        "_conn",
+        "_lock",
+        "_tx_counter",
+        "begin_tx_calls",
+        "ddl_history",
+        "last_max_commit_delay_ms",
+        "tx_rollbacks",
+    )
 
     def __init__(self) -> None:
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._tx_counter = 0
+        self.begin_tx_calls: list[dict[str, Any]] = []
         self.ddl_history: list[str] = []
         self.last_max_commit_delay_ms: int | None = None
+        self.tx_rollbacks: list[bytes] = []
+
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> FakeSyncReadWriteTransaction:
+        """Open an interactive read-write transaction handle against the test double."""
+        with self._lock:
+            self._tx_counter += 1
+            tx_id = f"fake-tx-{self._tx_counter}".encode()
+            self.begin_tx_calls.append(
+                {
+                    "transaction_id": tx_id,
+                    "transaction_tag": transaction_tag,
+                    "previous_transaction_id": previous_transaction_id,
+                    "exclude_txn_from_change_streams": exclude_txn_from_change_streams,
+                    "max_commit_delay_ms": max_commit_delay_ms,
+                }
+            )
+            return FakeSyncReadWriteTransaction(
+                self,
+                tx_id,
+                max_commit_delay_ms=max_commit_delay_ms,
+            )
+
+    def _query_unlocked(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
+        info_schema = self._try_information_schema(sql, params_json)
+        if info_schema is not None:
+            return info_schema
+        adapted, args = self._adapt_sql(sql, params_json)
+        cur = self._conn.execute(adapted, args)
+        col_names = [str(d[0]) for d in (cur.description or ())]
+        raw_rows = [[self._decode_cell(v) for v in row] for row in cur.fetchall()]
+        return {
+            "columns": col_names,
+            "rows": raw_rows,
+            "row_count_exact": None,
+            "row_count_lower_bound": None,
+            "read_timestamp_micros": int(_time.time() * 1_000_000),
+        }
 
     def query(
         self,
@@ -73,20 +230,14 @@ class FakeSpannerClient:
         """Execute a synchronous query against the test double."""
         _ = (staleness_mode, staleness_ms)
         with self._lock:
-            info_schema = self._try_information_schema(sql, params_json)
-            if info_schema is not None:
-                return info_schema
-            adapted, args = self._adapt_sql(sql, params_json)
-            cur = self._conn.execute(adapted, args)
-            col_names = [str(d[0]) for d in (cur.description or ())]
-            raw_rows = [[self._decode_cell(v) for v in row] for row in cur.fetchall()]
-            return {
-                "columns": col_names,
-                "rows": raw_rows,
-                "row_count_exact": None,
-                "row_count_lower_bound": None,
-                "read_timestamp_micros": int(_time.time() * 1_000_000),
-            }
+            return self._query_unlocked(sql, params_json)
+
+    def _execute_dml_unlocked(self, sql: str, params_json: str | None = None, *, commit: bool = True) -> int:
+        adapted, args = self._adapt_sql(sql, params_json)
+        cur = self._conn.execute(adapted, args)
+        if commit:
+            self._conn.commit()
+        return max(0, int(cur.rowcount or 0))
 
     def execute_dml(
         self,
@@ -98,10 +249,7 @@ class FakeSpannerClient:
         """Execute a DML statement against the test double."""
         _ = (request_tag, transaction_tag)
         with self._lock:
-            adapted, args = self._adapt_sql(sql, params_json)
-            cur = self._conn.execute(adapted, args)
-            self._conn.commit()
-            return max(0, int(cur.rowcount or 0))
+            return self._execute_dml_unlocked(sql, params_json, commit=True)
 
     def execute_batch_dml(
         self,
@@ -118,7 +266,8 @@ class FakeSpannerClient:
                 stmt_sql = str(item.get("sql", ""))
                 stmt_params = item.get("params")
                 params_str = encode_json(stmt_params) if stmt_params is not None else None
-                counts.append(self.execute_dml(stmt_sql, params_str))
+                counts.append(self._execute_dml_unlocked(stmt_sql, params_str, commit=False))
+            self._conn.commit()
         return counts
 
     def execute_partitioned_dml(
@@ -131,6 +280,58 @@ class FakeSpannerClient:
         _ = exclude_txn_from_change_streams
         return self.execute_dml(sql, params_json)
 
+    def _apply_mutations_unlocked(self, mutations_json: str) -> int:
+        decoded = decode_json(mutations_json) if mutations_json else []
+        count = 0
+        for item in decoded:
+            op = str(item.get("op", "insert_or_update")).lower()
+            table = str(item.get("table", ""))
+            cols = [str(c) for c in item.get("columns", ())]
+            vals = item.get("values", ())
+            keys = item.get("keys", ())
+            all_rows = bool(item.get("all_rows", False))
+
+            if op == "delete":
+                if all_rows:
+                    self._conn.execute(f"DELETE FROM {table}")
+                elif keys:
+                    pk_cols = self._primary_key_columns(table)
+                    for key_tuple in keys:
+                        key_seq = list(key_tuple) if isinstance(key_tuple, list) else [key_tuple]
+                        where_clause = " AND ".join(f"{pk} = ?" for pk in pk_cols[: len(key_seq)])
+                        self._conn.execute(f"DELETE FROM {table} WHERE {where_clause}", key_seq)
+                count += 1
+                continue
+
+            if not cols or not vals:
+                continue
+            placeholders = ", ".join("?" for _ in cols)
+            col_list = ", ".join(cols)
+            if op == "insert":
+                sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+                for row in vals:
+                    self._conn.execute(sql, [self._coerce_cell(v) for v in row])
+                    count += 1
+            elif op in {"insert_or_update", "replace"}:
+                sql = f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})"
+                for row in vals:
+                    self._conn.execute(sql, [self._coerce_cell(v) for v in row])
+                    count += 1
+            elif op == "update":
+                pk_cols = self._primary_key_columns(table)
+                non_pk = [c for c in cols if c not in pk_cols] or cols[1:]
+                pk_set = [c for c in cols if c in pk_cols] or cols[:1]
+                set_clause = ", ".join(f"{c} = ?" for c in non_pk)
+                where_clause = " AND ".join(f"{c} = ?" for c in pk_set)
+                col_idx = {c: idx for idx, c in enumerate(cols)}
+                for row in vals:
+                    params = [self._coerce_cell(row[col_idx[c]]) for c in non_pk] + [
+                        self._coerce_cell(row[col_idx[c]]) for c in pk_set
+                    ]
+                    self._conn.execute(f"UPDATE {table} SET {set_clause} WHERE {where_clause}", params)
+                    count += 1
+        return count
+
     def apply_mutations(
         self,
         mutations_json: str,
@@ -141,56 +342,8 @@ class FakeSpannerClient:
         """Apply mutations against the test double."""
         _ = (transaction_tag, exclude_txn_from_change_streams)
         self.last_max_commit_delay_ms = max_commit_delay_ms
-        decoded = decode_json(mutations_json) if mutations_json else []
         with self._lock:
-            count = 0
-            for item in decoded:
-                op = str(item.get("op", "insert_or_update")).lower()
-                table = str(item.get("table", ""))
-                cols = [str(c) for c in item.get("columns", ())]
-                vals = item.get("values", ())
-                keys = item.get("keys", ())
-                all_rows = bool(item.get("all_rows", False))
-
-                if op == "delete":
-                    if all_rows:
-                        self._conn.execute(f"DELETE FROM {table}")
-                    elif keys:
-                        pk_cols = self._primary_key_columns(table)
-                        for key_tuple in keys:
-                            key_seq = list(key_tuple) if isinstance(key_tuple, list) else [key_tuple]
-                            where_clause = " AND ".join(f"{pk} = ?" for pk in pk_cols[: len(key_seq)])
-                            self._conn.execute(f"DELETE FROM {table} WHERE {where_clause}", key_seq)
-                    count += 1
-                    continue
-
-                if not cols or not vals:
-                    continue
-                placeholders = ", ".join("?" for _ in cols)
-                col_list = ", ".join(cols)
-                if op == "insert":
-                    sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
-                    for row in vals:
-                        self._conn.execute(sql, [self._coerce_cell(v) for v in row])
-                        count += 1
-                elif op in {"insert_or_update", "replace"}:
-                    sql = f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})"
-                    for row in vals:
-                        self._conn.execute(sql, [self._coerce_cell(v) for v in row])
-                        count += 1
-                elif op == "update":
-                    pk_cols = self._primary_key_columns(table)
-                    non_pk = [c for c in cols if c not in pk_cols] or cols[1:]
-                    pk_set = [c for c in cols if c in pk_cols] or cols[:1]
-                    set_clause = ", ".join(f"{c} = ?" for c in non_pk)
-                    where_clause = " AND ".join(f"{c} = ?" for c in pk_set)
-                    col_idx = {c: idx for idx, c in enumerate(cols)}
-                    for row in vals:
-                        params = [self._coerce_cell(row[col_idx[c]]) for c in non_pk] + [
-                            self._coerce_cell(row[col_idx[c]]) for c in pk_set
-                        ]
-                        self._conn.execute(f"UPDATE {table} SET {set_clause} WHERE {where_clause}", params)
-                        count += 1
+            count = self._apply_mutations_unlocked(mutations_json)
             self._conn.commit()
             return {
                 "commit_timestamp_micros": int(_time.time() * 1_000_000),
@@ -322,11 +475,11 @@ class FakeSpannerClient:
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
                 )
                 target_tables = [str(r[0]) for r in tbl_cur.fetchall()]
-            rows = []
+            col_rows: list[list[Any]] = []
             for tname in target_tables:
                 cur = self._conn.execute(f"PRAGMA table_info({tname})")
                 for idx, r in enumerate(cur.fetchall(), start=1):
-                    rows.append(
+                    col_rows.append(
                         [
                             tname,
                             str(r["name"]),
@@ -347,12 +500,12 @@ class FakeSpannerClient:
                     "is_generated",
                     "generation_expression",
                 ],
-                "rows": rows,
+                "rows": col_rows,
             }
 
         if "INFORMATION_SCHEMA.INDEXES" in upper:
             table_name = str(params_map.get("table_name") or params_map.get("p2") or params_map.get("p1") or "")
-            rows = []
+            rows_idx: list[list[Any]] = []
             for stmt in self.ddl_history:
                 m = re.search(
                     r"CREATE\s+(UNIQUE\s+)?(NULL_FILTERED\s+)?(VECTOR\s+|SEARCH\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)",
@@ -362,7 +515,7 @@ class FakeSpannerClient:
                 if m and m.group(5).lower() == table_name.lower():
                     idx_type_prefix = (m.group(3) or "").strip().upper()
                     idx_type = f"{idx_type_prefix} INDEX".strip() if idx_type_prefix else "INDEX"
-                    rows.append(
+                    rows_idx.append(
                         [table_name, m.group(4), idx_type, None, bool(m.group(1)), bool(m.group(2)), "READ_WRITE"]
                     )
             return {
@@ -375,7 +528,7 @@ class FakeSpannerClient:
                     "is_null_filtered",
                     "index_state",
                 ],
-                "rows": rows,
+                "rows": rows_idx,
             }
 
         if "INFORMATION_SCHEMA.TABLE_CONSTRAINTS" in upper:
@@ -451,6 +604,11 @@ class FakeSpannerClient:
             return 1 if val else 0
         return val
 
+    def close(self) -> None:
+        """Close the backing in-memory SQLite connection."""
+        with self._lock:
+            self._conn.close()
+
     @staticmethod
     def _decode_cell(val: Any) -> Any:
         if isinstance(val, str) and len(val) >= 2 and val[0] == "[" and val[-1] == "]":
@@ -509,6 +667,54 @@ class FakeSpannerClient:
         return s.strip()
 
 
+class FakeAsyncReadWriteTransaction:
+    """Test-only async interactive `ReadWrite` transaction double wrapping `FakeSyncReadWriteTransaction`."""
+
+    __slots__ = ("_sync_tx",)
+
+    def __init__(self, sync_tx: FakeSyncReadWriteTransaction) -> None:
+        self._sync_tx = sync_tx
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the synthetic transaction identifier bytes."""
+        return self._sync_tx.transaction_id
+
+    async def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a query asynchronously inside this active transaction double."""
+        return self._sync_tx.query(sql, params_json, request_tag)
+
+    async def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        """Execute a DML statement asynchronously inside this active transaction double."""
+        return self._sync_tx.execute_dml(sql, params_json, request_tag)
+
+    async def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements asynchronously inside this active transaction double."""
+        return self._sync_tx.execute_batch_dml(statements_json, request_tag)
+
+    async def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+        """Commit buffered DML and optional mutations asynchronously."""
+        return self._sync_tx.commit(mutations_json)
+
+    async def rollback(self) -> None:
+        """Roll back any uncommitted DML asynchronously."""
+        self._sync_tx.rollback()
+
+
 class FakeAsyncSpannerClient:
     """Test-only in-memory Spanner wire client double for unit testing `AsyncSpannerDriver`."""
 
@@ -521,6 +727,23 @@ class FakeAsyncSpannerClient:
     def ddl_history(self) -> list[str]:
         """Return the DDL statement history from the backing sync client."""
         return self._sync_client.ddl_history
+
+    async def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> FakeAsyncReadWriteTransaction:
+        """Open an interactive async read-write transaction handle against the backing client."""
+        return FakeAsyncReadWriteTransaction(
+            self._sync_client.begin_read_write_transaction(
+                transaction_tag=transaction_tag,
+                previous_transaction_id=previous_transaction_id,
+                exclude_txn_from_change_streams=exclude_txn_from_change_streams,
+                max_commit_delay_ms=max_commit_delay_ms,
+            )
+        )
 
     async def query(
         self,
@@ -606,6 +829,10 @@ class FakeAsyncSpannerClient:
             staleness_ms,
         )
 
+    async def close(self) -> None:
+        """Close the backing synchronous test double."""
+        self._sync_client.close()
+
 
 def _replace_named_pg(
     match: re.Match[str],
@@ -668,6 +895,7 @@ def test_spanner_config_from_dsn_variants() -> None:
     reg = DatabaseRegistry()
     reg.register("spanner_main", cfg_gsql)
     fp = reg.pool_fingerprint(cfg_gsql)
+    assert fp is not None
     assert fp[0] == "spanner"
     assert len(fp) == 5
 
@@ -782,7 +1010,7 @@ def test_sync_spanner_driver_crud_transactions_and_mutations() -> None:
     )
     batch_results = driver.batch_write(
         [
-            MutationGroup([Mutation.insert_or_update("singers", ("singer_id", "name", "active"), [(5, "Eve", 1)])]),
+            MutationGroup((Mutation.insert_or_update("singers", ("singer_id", "name", "active"), [(5, "Eve", 1)]),)),
         ]
     )
     assert len(batch_results) == 1
@@ -958,8 +1186,9 @@ def test_spanner_embedder_builders_reject_invalid_identifiers() -> None:
         embedder.build_vector_search_sql("docs; DROP TABLE docs")
     with pytest.raises(ValueError, match="embedding_column"):
         embedder.build_vector_search_sql("docs", embedding_column="embedding) --")
+    bad_dist: Any = "MANHATTAN"
     with pytest.raises(ValueError, match="distance_type"):
-        embedder.build_vector_search_sql("docs", distance_type="MANHATTAN")
+        embedder.build_vector_search_sql("docs", distance_type=bad_dist)
 
 
 @pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-predict", "ai-generate"])
@@ -1066,29 +1295,102 @@ def test_run_in_transaction_retries_only_aborted(error_factory: Callable[[], Exc
 
 
 @pytest.mark.anyio
-async def test_spanner_commit_rejects_mixed_buffered_dml_and_mutations_atomically() -> None:
-    """Verify SyncSpannerDriver.commit and AsyncSpannerDriver.commit reject mixed DML and mutations before issuing RPCs."""
+@pytest.mark.parametrize("use_context_manager", [False, True])
+async def test_spanner_interactive_rw_transaction_commits_mixed_dml_and_mutations_and_rolls_back(
+    use_context_manager: bool,
+) -> None:
+    """Verify sync and async drivers support interactive mixed DML and mutations with atomic commit and rollback."""
     sync_client = FakeSpannerClient()
     sync_client.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
     sync_driver = SyncSpannerDriver(SpannerConfig(), client=sync_client)
-    sync_driver.begin()
-    sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 1, "name": "dml_row"})
-    sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(2, "mut_row")])])
-    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+
+    if use_context_manager:
+        with sync_driver.transaction(transaction_tag="rw-cm") as tx_drv:
+            assert tx_drv is sync_driver
+            assert isinstance(sync_driver.transaction_id, bytes)
+            tx_drv.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 1, "name": "dml_row"})
+            rows_in_tx = tx_drv.select("SELECT id, name FROM items WHERE id = @id FOR UPDATE", {"id": 1})
+            assert len(rows_in_tx) == 1
+            tx_drv.apply_mutations([Mutation.insert("items", ("id", "name"), [(2, "mut_row")])])
+        assert sync_driver.active_transaction is None
+        with pytest.raises(RuntimeError, match="rolled_back"), sync_driver.transaction():
+            sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 3, "name": "abort_dml"})
+            sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(4, "abort_mut")])])
+            raise RuntimeError("rolled_back")
+    else:
+        sync_driver.begin(transaction_tag="rw-manual")
+        assert isinstance(sync_driver.transaction_id, bytes)
+        sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 1, "name": "dml_row"})
+        rows_in_tx = sync_driver.select("SELECT id, name FROM items WHERE id = @id", {"id": 1})
+        assert len(rows_in_tx) == 1
+        sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(2, "mut_row")])])
         sync_driver.commit()
-    assert sync_driver.select("SELECT id, name FROM items") == []
+        sync_driver.begin()
+        sync_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 3, "name": "abort_dml"})
+        sync_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(4, "abort_mut")])])
+        sync_driver.rollback()
+
+    sync_rows = sync_driver.select("SELECT id, name FROM items ORDER BY id")
+    assert [(r["id"], r["name"]) for r in sync_rows] == [(1, "dml_row"), (2, "mut_row")]
+    assert len(sync_client.tx_rollbacks) == 1
     sync_driver.close()
 
     async_backing = FakeSpannerClient()
     async_backing.update_ddl(["CREATE TABLE items (id INT64 NOT NULL, name STRING(64) NOT NULL) PRIMARY KEY (id)"])
     async_driver = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(async_backing))
-    await async_driver.begin()
-    await async_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 10, "name": "dml_row"})
-    await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(20, "mut_row")])])
-    with pytest.raises(NotSupportedError, match="Cannot mix SQL DML and key-value mutations"):
+
+    if use_context_manager:
+        async with async_driver.transaction(transaction_tag="rw-async-cm") as tx_drv:
+            assert tx_drv is async_driver
+            assert isinstance(async_driver.transaction_id, bytes)
+            await tx_drv.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 10, "name": "dml_row"})
+            rows_in_tx = await tx_drv.select("SELECT id, name FROM items WHERE id = @id FOR UPDATE", {"id": 10})
+            assert len(rows_in_tx) == 1
+            await tx_drv.apply_mutations([Mutation.insert("items", ("id", "name"), [(20, "mut_row")])])
+        assert async_driver.active_transaction is None
+        with pytest.raises(RuntimeError, match="rolled_back"):
+            async with async_driver.transaction():
+                await async_driver.execute(
+                    "INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 30, "name": "abort_dml"}
+                )
+                await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(40, "abort_mut")])])
+                raise RuntimeError("rolled_back")
+    else:
+        await async_driver.begin(transaction_tag="rw-async-manual")
+        assert isinstance(async_driver.transaction_id, bytes)
+        await async_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 10, "name": "dml_row"})
+        rows_in_tx = await async_driver.select("SELECT id, name FROM items WHERE id = @id", {"id": 10})
+        assert len(rows_in_tx) == 1
+        await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(20, "mut_row")])])
         await async_driver.commit()
-    assert await async_driver.select("SELECT id, name FROM items") == []
+        await async_driver.begin()
+        await async_driver.execute("INSERT INTO items (id, name) VALUES (@id, @name)", {"id": 30, "name": "abort_dml"})
+        await async_driver.apply_mutations([Mutation.insert("items", ("id", "name"), [(40, "abort_mut")])])
+        await async_driver.rollback()
+
+    async_rows = await async_driver.select("SELECT id, name FROM items ORDER BY id")
+    assert [(r["id"], r["name"]) for r in async_rows] == [(10, "dml_row"), (20, "mut_row")]
+    assert len(async_backing.tx_rollbacks) == 1
     await async_driver.close()
+
+
+@pytest.mark.parametrize("use_context_manager", [False, True])
+def test_spanner_interactive_tx_rejects_ddl_and_nesting(use_context_manager: bool) -> None:
+    """Verify interactive transactions reject DDL statements and nested transactions."""
+    client = FakeSpannerClient()
+    driver = SyncSpannerDriver(SpannerConfig(), client=client)
+    if use_context_manager:
+        with driver.transaction():
+            with pytest.raises(NotSupportedError, match="DDL statements"):
+                driver.execute("CREATE TABLE t (id INT64) PRIMARY KEY (id)")
+            with pytest.raises(NotSupportedError, match="Nested"):
+                driver.begin()
+    else:
+        driver.begin()
+        with pytest.raises(NotSupportedError, match="Nested"):
+            driver.begin()
+        driver.rollback()
+    driver.close()
 
 
 @pytest.mark.anyio
@@ -1435,31 +1737,93 @@ def test_spanner_mutation_gc_collects_cyclic_payloads() -> None:
     assert ref() is None
 
 
+@pytest.mark.parametrize(
+    ("retry_delay_ms", "expected_min_s", "expected_max_s"),
+    [(25, 0.025, 0.025), (None, 0.01, 0.015)],
+)
+def test_sync_spanner_run_in_transaction_abort_backoff_and_previous_tx_id(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_delay_ms: int | None,
+    expected_min_s: float,
+    expected_max_s: float,
+) -> None:
+    """Verify SyncSpannerDriver honors server retry_delay_ms, bounded jittered fallback, and previous_transaction_id."""
+    sleep_delays: list[float] = []
+    monkeypatch.setattr(_time, "sleep", sleep_delays.append)
+
+    fake_client = FakeSpannerClient()
+    fake_client.update_ddl(["CREATE TABLE items (id INT64 NOT NULL) PRIMARY KEY (id)"])
+    driver = SyncSpannerDriver(SpannerConfig(project_id="p", instance_id="i", database_id="d"), client=fake_client)
+    seen_tx_ids: list[bytes] = []
+
+    def _op(tx: SyncSpannerTransaction) -> str:
+        seen_tx_ids.append(tx.transaction_id)
+        if len(seen_tx_ids) == 1:
+            tx.execute("INSERT INTO items (id) VALUES (@id)", {"id": 1})
+            exc = SpannerAbortedError("aborted")
+            exc.retry_delay_ms = retry_delay_ms
+            raise exc
+        tx.execute("INSERT INTO items (id) VALUES (@id)", {"id": 2})
+        return "committed"
+
+    result = driver.run_in_transaction(_op, max_attempts=3, transaction_tag="retry-sync")
+    assert result == "committed"
+    assert len(seen_tx_ids) == 2
+    assert len(sleep_delays) == 1
+    assert expected_min_s <= sleep_delays[0] <= expected_max_s
+    assert fake_client.begin_tx_calls[0]["previous_transaction_id"] is None
+    assert fake_client.begin_tx_calls[1]["previous_transaction_id"] == seen_tx_ids[0]
+    assert fake_client.tx_rollbacks == [seen_tx_ids[0]]
+    assert driver.select("SELECT id FROM items ORDER BY id") == [{"id": 2}]
+    driver.close()
+
+
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("retry_delay_ms", "expected_min_s", "expected_max_s"),
+    [(35, 0.035, 0.035), (None, 0.01, 0.015)],
+)
 async def test_async_spanner_run_in_transaction_sleeps_on_abort(
     monkeypatch: pytest.MonkeyPatch,
+    retry_delay_ms: int | None,
+    expected_min_s: float,
+    expected_max_s: float,
 ) -> None:
-    """Verify AsyncSpannerDriver.run_in_transaction awaits exponential backoff between aborts."""
+    """Verify AsyncSpannerDriver honors server retry_delay_ms, bounded jittered fallback, and previous_transaction_id."""
     sleep_delays: list[float] = []
 
     async def _fake_sleep(delay: float) -> None:
         sleep_delays.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
-    driver = AsyncSpannerDriver(SpannerConfig(project_id="test-proj", instance_id="inst", database_id="db"))
-    attempts = 0
+    fake_backing = FakeSpannerClient()
+    fake_backing.update_ddl(["CREATE TABLE items (id INT64 NOT NULL) PRIMARY KEY (id)"])
+    driver = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="inst", database_id="db"),
+        client=FakeAsyncSpannerClient(fake_backing),
+    )
+    seen_tx_ids: list[bytes] = []
 
-    async def _op(_tx: Any) -> str:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise SpannerAbortedError("aborted")
+    async def _op(tx: Any) -> str:
+        seen_tx_ids.append(tx.transaction_id)
+        if len(seen_tx_ids) == 1:
+            await tx.execute("INSERT INTO items (id) VALUES (@id)", {"id": 11})
+            exc = SpannerAbortedError("aborted")
+            exc.retry_delay_ms = retry_delay_ms
+            raise exc
+        await tx.execute("INSERT INTO items (id) VALUES (@id)", {"id": 22})
         return "committed"
 
-    result = await driver.run_in_transaction(_op, max_attempts=3)
+    result = await driver.run_in_transaction(_op, max_attempts=3, transaction_tag="retry-async")
     assert result == "committed"
-    assert attempts == 2
-    assert sleep_delays == [0.01]
+    assert len(seen_tx_ids) == 2
+    assert len(sleep_delays) == 1
+    assert expected_min_s <= sleep_delays[0] <= expected_max_s
+    assert fake_backing.begin_tx_calls[0]["previous_transaction_id"] is None
+    assert fake_backing.begin_tx_calls[1]["previous_transaction_id"] == seen_tx_ids[0]
+    assert fake_backing.tx_rollbacks == [seen_tx_ids[0]]
+    assert await driver.select("SELECT id FROM items ORDER BY id") == [{"id": 22}]
+    await driver.close()
 
 
 def test_spanner_encode_batch_dml_json() -> None:

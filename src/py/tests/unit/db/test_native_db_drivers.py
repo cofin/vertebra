@@ -18,6 +18,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
@@ -63,7 +64,7 @@ from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLD
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
+from vertebra.db.adapters.postgres.notify import AsyncPostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
@@ -80,16 +81,18 @@ from vertebra.db.dbapi import AsyncDBAPIConnection, NotSupportedError, SyncDBAPI
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
+    AsyncNotificationSource,
     AsyncPipeline,
     AsyncPipelineCapable,
-    ClaimedJob,
+    AsyncQueueStore,
     EmbeddingPushdown,
     NotificationEvent,
-    NotificationSource,
-    QueueStore,
+    QueueEntry,
     SyncChangeSource,
+    SyncNotificationSource,
     SyncPipeline,
     SyncPipelineCapable,
+    SyncQueueStore,
 )
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
@@ -217,11 +220,11 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "AsyncDatabaseDriver",
         "AsyncPipeline",
         "AsyncPipelineCapable",
+        "AsyncQueueStore",
         "BaseDatabaseConfig",
         "CDCConfig",
         "ChangeEvent",
         "ChangeFeed",
-        "ClaimedJob",
         "CloudSQLConfig",
         "CloudSQLInstanceURI",
         "CommonDriverMixin",
@@ -236,12 +239,13 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "NotFoundError",
         "NotSupportedError",
         "NotificationEvent",
-        "NotificationSource",
+        "AsyncNotificationSource",
+        "SyncNotificationSource",
         "OperationalError",
         "PoolExhaustedError",
         "ProgrammingError",
         "QueryCancelledError",
-        "QueueStore",
+        "QueueEntry",
         "SerializationFailure",
         "SyncAlloyDBDialer",
         "SyncChangeSource",
@@ -249,6 +253,7 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "SyncDatabaseDriver",
         "SyncPipeline",
         "SyncPipelineCapable",
+        "SyncQueueStore",
         "TenantPredicate",
         "TenantScopeConfig",
         "ThreadOffloadAsyncDatabaseDriver",
@@ -488,11 +493,11 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         SyncPostgreSQLDriver().execute_tuples("SELECT 1")
     with pytest.raises((MissingDependencyError, Exception)):
         SyncMySQLDriver().execute_tuples("SELECT 1")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).get("k")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncValkeyDriver(ValkeyConfig(url="valkey://127.0.0.1:1/0")).set("k", "v")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).publish("chan", b"msg")
 
 
@@ -684,7 +689,7 @@ async def test_channel_bus_shared_feed_publish_and_notification_hydration() -> N
 
     driver = Driver()
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16))
-    source = PostgresNotificationSource(cast(Any, driver), change_feed=feed)
+    source = AsyncPostgresNotificationSource(cast(Any, driver), change_feed=feed)
     bus = ChannelBus(notification_source=source, change_feed=feed, history=4)
     payload = b"\x00\xff" * 5000
     await bus.on_startup()
@@ -764,7 +769,9 @@ async def test_channel_bus_spanner_source_delivers_once_per_output_channel(
         await bus.pump_change_source(channel=channel)
         assert len(client.calls) == 1
         assert "READ_orders_stream" in client.calls[0][0]
-        assert decode_json(client.calls[0][1])["start_ts"] == "2026-11-02T00:00:00Z"
+        raw_params = client.calls[0][1]
+        assert raw_params is not None
+        assert decode_json(raw_params)["start_ts"] == "2026-11-02T00:00:00Z"
         event = feed.replay_since(0)[0]
         output = encode_json_bytes(event)
         expected_original = shared_feed or channel in (None, "orders")
@@ -1316,14 +1323,84 @@ class _ContractBigQueryClient:
         return result
 
 
+class _ContractSpannerRwTx:
+    """In-memory SQLite-backed read-write transaction handle for `_ContractSpannerClient`."""
+
+    __slots__ = ("_async_mode", "_client", "_closed", "_tx_id")
+
+    def __init__(self, client: _ContractSpannerClient, tx_id: bytes, *, async_mode: bool = False) -> None:
+        self._client = client
+        self._tx_id = tx_id
+        self._async_mode = async_mode
+        self._closed = False
+        if not self._client._conn.in_transaction:
+            self._client._conn.execute("BEGIN")
+
+    @property
+    def transaction_id(self) -> bytes:
+        return self._tx_id
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def query(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        return self._client.query(sql, params_json)
+
+    def execute_dml(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        adapted, bound = self._client._adapt_sql(sql, params_json)
+        cur = self._client._conn.execute(adapted, bound)
+        return self._client._wrap(max(0, int(cur.rowcount or 0)))
+
+    def execute_batch_dml(self, statements_json: str, request_tag: str | None = None) -> Any:
+        _ = request_tag
+        decoded = decode_json(statements_json) if statements_json else []
+        counts: list[int] = []
+        for entry in decoded:
+            stmt_sql = str(entry.get("sql", ""))
+            stmt_params = entry.get("params")
+            params_str = encode_json({"values": stmt_params}) if isinstance(stmt_params, dict) else None
+            adapted, bound = self._client._adapt_sql(stmt_sql, params_str)
+            cur = self._client._conn.execute(adapted, bound)
+            counts.append(max(0, int(cur.rowcount or 0)))
+        return self._client._wrap(counts)
+
+    def commit(self, mutations_json: str | None = None) -> Any:
+        count = self._client._apply_mutations_in_tx(mutations_json) if mutations_json else 0
+        self._client._conn.commit()
+        self._closed = True
+        return self._client._wrap({"commit_timestamp_micros": 1_700_000_000_000_000, "mutation_count": count})
+
+    def rollback(self) -> Any:
+        if not self._closed:
+            self._client._conn.rollback()
+            self._closed = True
+        return self._client._wrap(None)
+
+
 class _ContractSpannerClient:
     """In-memory SQLite-backed Spanner client double supporting sync and async wire calls."""
 
-    __slots__ = ("_async_mode", "_conn")
+    __slots__ = ("_async_mode", "_conn", "_tx_seq")
 
     def __init__(self, conn: sqlite3.Connection, *, async_mode: bool = False) -> None:
         self._conn = conn
         self._async_mode = async_mode
+        self._tx_seq = 0
+
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> Any:
+        _ = (transaction_tag, previous_transaction_id, exclude_txn_from_change_streams, max_commit_delay_ms)
+        self._tx_seq += 1
+        handle = _ContractSpannerRwTx(self, f"contract-tx-{self._tx_seq}".encode(), async_mode=self._async_mode)
+        return self._wrap(handle)
 
     @staticmethod
     def _adapt_sql(sql: str, params_json: str | None) -> tuple[str, Any]:
@@ -1374,7 +1451,7 @@ class _ContractSpannerClient:
         self._conn.commit()
         return self._wrap(counts)
 
-    def apply_mutations(self, mutations_json: str, *_extra: Any) -> Any:
+    def _apply_mutations_in_tx(self, mutations_json: str | None) -> int:
         decoded = decode_json(mutations_json) if mutations_json else []
         count = 0
         for item in decoded:
@@ -1386,8 +1463,15 @@ class _ContractSpannerClient:
             for row in vals:
                 self._conn.execute(f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})", list(row))
                 count += 1
+        return count
+
+    def apply_mutations(self, mutations_json: str, *_extra: Any) -> Any:
+        count = self._apply_mutations_in_tx(mutations_json)
         self._conn.commit()
         return self._wrap({"commit_timestamp_micros": 1_700_000_000_000_000, "mutation_count": count})
+
+    def close(self) -> Any:
+        return self._wrap(None)
 
     def update_ddl(self, statements: Sequence[str]) -> Any:
         for stmt in statements:
@@ -1552,10 +1636,10 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
     if engine == "bigquery":
         config = BigQueryConfig(project_id="test-proj", dataset_id="test_ds")
         sync_driver: Any = SyncBigQueryDriver(
-            config, client=cast("Any", _ContractBigQueryClient(raw_sync)), broker=object()
+            config, client=cast("Any", _ContractBigQueryClient(raw_sync)), broker=None
         )
         async_driver: Any = AsyncBigQueryDriver(
-            config, client=cast("Any", _ContractBigQueryClient(raw_async, async_mode=True)), broker=object()
+            config, client=cast("Any", _ContractBigQueryClient(raw_async, async_mode=True)), broker=None
         )
         url = "bigquery://test-proj/test_ds"
         dialect_name = "BigQuery"
@@ -1568,18 +1652,18 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
             use_shm_cache=False,
         )
         sync_driver = SyncSpannerDriver(
-            spanner_config, client=cast("Any", _ContractSpannerClient(raw_sync)), broker=object()
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_sync)), broker=None
         )
         async_driver = AsyncSpannerDriver(
-            spanner_config, client=cast("Any", _ContractSpannerClient(raw_async, async_mode=True)), broker=object()
+            spanner_config, client=cast("Any", _ContractSpannerClient(raw_async, async_mode=True)), broker=None
         )
         url = f"{engine}://projects/test-proj/instances/test-inst/databases/test-db"
         dialect_name = "Spangres" if engine == "spangres" else "Spanner"
-    sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=object(), share_pool=False)
-    async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=object(), share_pool=False)
+    sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=None, share_pool=False)
+    async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=None, share_pool=False)
     try:
         getattr(dialects, f"Sync{dialect_name}Dialect")().do_begin(sync_conn)
-        adapted = AsyncAdapt_dbapi_connection(SQLAlchemyAsyncDBAPI(), async_conn)
+        adapted = AsyncAdapt_dbapi_connection(SQLAlchemyAsyncDBAPI(), cast("Any", async_conn))
         await greenlet_spawn(getattr(dialects, f"Async{dialect_name}Dialect")().do_begin, adapted)
         sync_cursor = sync_conn.cursor()
         async_cursor = async_conn.cursor()
@@ -1638,6 +1722,7 @@ def _make_contract_driver_pair(engine: str) -> tuple[Any, Any, str, Any, str, An
         async_dd = AsyncDuckDBDriver(DuckDBConfig(database=":memory:"))
         sync_dd.execute(ddl)
         sync_dd.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
+        assert async_dd._client is not None
         sync_for_async = async_dd._client.to_sync()
         sync_for_async.execute(ddl)
         sync_for_async.execute("INSERT INTO contract_items (id, name, note) VALUES (?, ?, ?)", [1, "seed", None])
@@ -1922,19 +2007,25 @@ async def test_spanner_snapshots_and_transactions_not_found_and_buffered_mutatio
             with pytest.raises(NotFoundError):
                 await async_snap.query_one(by_id_sql, by_id_params(999))
 
-        sync_tx = SyncSpannerTransaction(sync_drv)
-        assert sync_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
-        with pytest.raises(NotFoundError):
-            sync_tx.select_one(by_id_sql, by_id_params(999))
-        with pytest.raises(NotFoundError):
-            sync_tx.query_one(by_id_sql, by_id_params(999))
+        def _check_sync_tx(sync_tx: SyncSpannerTransaction) -> None:
+            assert isinstance(sync_tx, SyncSpannerTransaction)
+            assert sync_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                sync_tx.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                sync_tx.query_one(by_id_sql, by_id_params(999))
 
-        async_tx = AsyncSpannerTransaction(async_drv)
-        assert await async_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
-        with pytest.raises(NotFoundError):
-            await async_tx.select_one(by_id_sql, by_id_params(999))
-        with pytest.raises(NotFoundError):
-            await async_tx.query_one(by_id_sql, by_id_params(999))
+        sync_drv.run_in_transaction(_check_sync_tx)
+
+        async def _check_async_tx(async_tx: AsyncSpannerTransaction) -> None:
+            assert isinstance(async_tx, AsyncSpannerTransaction)
+            assert await async_tx.select_one_or_none(by_id_sql, by_id_params(999)) is None
+            with pytest.raises(NotFoundError):
+                await async_tx.select_one(by_id_sql, by_id_params(999))
+            with pytest.raises(NotFoundError):
+                await async_tx.query_one(by_id_sql, by_id_params(999))
+
+        await async_drv.run_in_transaction(_check_async_tx)
 
         with sync_drv.transaction():
             sync_drv.apply_mutations(
@@ -1966,16 +2057,18 @@ def test_zero_type_ignore_override_annotations_in_db_drivers() -> None:
 
 _CAPABILITY_EXPORT_NAMES: tuple[str, ...] = (
     "AsyncChangeSource",
+    "AsyncNotificationSource",
     "AsyncPipeline",
     "AsyncPipelineCapable",
-    "ClaimedJob",
+    "AsyncQueueStore",
     "EmbeddingPushdown",
     "NotificationEvent",
-    "NotificationSource",
-    "QueueStore",
+    "QueueEntry",
     "SyncChangeSource",
+    "SyncNotificationSource",
     "SyncPipeline",
     "SyncPipelineCapable",
+    "SyncQueueStore",
 )
 
 
@@ -2042,13 +2135,17 @@ class _ConformingAsyncPipelineDriver:
 
 
 class _ConformingNotificationSource:
-    """Minimal conforming stand-in for `NotificationSource`."""
+    """Minimal conforming stand-in for `AsyncNotificationSource`."""
 
     __slots__ = ("_events", "_subscribed")
 
     def __init__(self) -> None:
         self._subscribed: set[str] = set()
         self._events: list[NotificationEvent] = []
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        return list(self._subscribed)
 
     async def publish(self, channel: str, payload: bytes | str) -> None:
         raw = payload.encode("utf-8") if isinstance(payload, str) else payload
@@ -2065,6 +2162,62 @@ class _ConformingNotificationSource:
         for event in tuple(self._events):
             yield event
 
+    async def aclose(self) -> None:
+        pass
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        pass
+
+
+class _ConformingSyncNotificationSource:
+    """Minimal conforming stand-in for `SyncNotificationSource`."""
+
+    __slots__ = ("_events", "_subscribed")
+
+    def __init__(self) -> None:
+        self._subscribed: set[str] = set()
+        self._events: list[NotificationEvent] = []
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        return list(self._subscribed)
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+        if channel in self._subscribed:
+            self._events.append(NotificationEvent(channel=channel, payload=raw, sender_id="sync-standin"))
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.update(channels)
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.difference_update(channels)
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        yield from tuple(self._events)
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        pass
+
 
 class _ConformingSyncChangeSource:
     """Minimal conforming stand-in for `SyncChangeSource`."""
@@ -2080,109 +2233,243 @@ class _ConformingAsyncChangeSource:
         yield ChangeEvent(event_id=2, channel="orders", operation="UPDATE", payload={"id": 1})
 
 
-class _ConformingQueueStore:
-    """Minimal conforming stand-in for `QueueStore`."""
+class _ConformingSyncQueueStore:
+    """Minimal conforming stand-in for `SyncQueueStore`."""
 
-    __slots__ = ("_jobs", "_ready")
+    __slots__ = ("_jobs", "_leases", "_ready", "_unique_keys")
 
     def __init__(self) -> None:
         self._ready = False
-        self._jobs: dict[str, ClaimedJob] = {}
+        self._jobs: dict[str, QueueEntry] = {}
+        self._leases: dict[str, tuple[str, float]] = {}
+        self._unique_keys: set[str] = set()
 
-    async def ensure_schema(self) -> None:
+    def ensure_schema(self) -> None:
         self._ready = True
 
-    async def enqueue(
-        self,
-        queue: str,
-        task_name: str,
-        payload: bytes,
-        *,
-        job_id: str | None = None,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-        headers: Mapping[str, str] | None = None,
-    ) -> str:
-        _ = scheduled_at_ms
-        jid = job_id or f"job-{len(self._jobs) + 1}"
-        self._jobs[jid] = ClaimedJob(
+    def enqueue(self, entry: QueueEntry) -> str:
+        jid = entry.job_id or f"job-{len(self._jobs) + 1}"
+        stored = QueueEntry(
             job_id=jid,
-            queue=queue,
-            task_name=task_name,
-            payload=payload,
-            attempt=1,
-            max_attempts=max_attempts,
-            lease_until_ms=0,
-            headers=dict(headers) if headers is not None else {},
+            queue=entry.queue,
+            task_name=entry.task_name,
+            payload=entry.payload,
+            attempt=entry.attempt,
+            max_attempts=entry.max_attempts,
+            lease_until_ms=entry.lease_until_ms,
+            scheduled_at_ms=entry.scheduled_at_ms,
+            headers=dict(entry.headers),
         )
+        self._jobs[jid] = stored
         return jid
 
-    async def enqueue_many(
-        self,
-        queue: str,
-        items: Sequence[tuple[str, bytes]],
-        *,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-    ) -> list[str]:
-        ids: list[str] = []
-        for task_name, payload in items:
-            ids.append(
-                await self.enqueue(
-                    queue,
-                    task_name,
-                    payload,
-                    scheduled_at_ms=scheduled_at_ms,
-                    max_attempts=max_attempts,
-                )
-            )
-        return ids
+    def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        return [self.enqueue(e) for e in entries]
 
-    async def claim(
+    def claim(
         self,
-        queue: str,
+        queues: Sequence[str],
         *,
         limit: int = 1,
-        lease_ms: int = 30_000,
-        worker_id: str = "",
-    ) -> list[ClaimedJob]:
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
         _ = worker_id
-        claimed: list[ClaimedJob] = []
+        claimed: list[QueueEntry] = []
         for jid, job in list(self._jobs.items()):
-            if job.queue == queue and len(claimed) < limit:
-                leased = ClaimedJob(
+            if job.queue in queues and len(claimed) < limit:
+                leased = QueueEntry(
                     job_id=job.job_id,
                     queue=job.queue,
                     task_name=job.task_name,
                     payload=job.payload,
                     attempt=job.attempt,
                     max_attempts=job.max_attempts,
-                    lease_until_ms=lease_ms,
+                    lease_until_ms=int(lease_seconds * 1000),
                     headers=dict(job.headers),
                 )
                 self._jobs[jid] = leased
                 claimed.append(leased)
         return claimed
 
-    async def heartbeat(self, job_id: str, attempt: int, *, extend_ms: int = 30_000) -> bool:
-        _ = extend_ms
-        job = self._jobs.get(job_id)
-        return job is not None and job.attempt == attempt
-
-    async def complete(self, job_id: str, attempt: int) -> bool:
+    def ack(self, job_id: str, *, attempt: int) -> bool:
         job = self._jobs.get(job_id)
         if job is None or job.attempt != attempt:
             return False
         self._jobs.pop(job_id, None)
         return True
 
-    async def fail(self, job_id: str, attempt: int, *, error: str, retry_delay_ms: int | None = None) -> None:
-        _ = (attempt, error, retry_delay_ms)
+    def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        _ = (attempt, error, retry_delay_s)
         self._jobs.pop(job_id, None)
+        return True
 
-    async def promote_scheduled(self, queue: str | None = None, *, now_ms: int | None = None, limit: int = 100) -> int:
-        _ = (queue, now_ms, limit)
+    def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        _ = (worker_id, lease_seconds)
+        return sum(1 for jid in job_ids if jid in self._jobs)
+
+    def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        _ = lease_seconds
         return 0
+
+    def promote_scheduled(self, *, limit: int = 100) -> int:
+        _ = limit
+        return 0
+
+    def cancel(self, job_id: str) -> bool:
+        return self._jobs.pop(job_id, None) is not None
+
+    def get_entry(self, job_id: str) -> QueueEntry | None:
+        return self._jobs.get(job_id)
+
+    def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        _ = status
+        return [j for j in self._jobs.values() if j.queue == queue][:limit]
+
+    def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        _ = queues
+        return None
+
+    def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        _ = ttl_seconds
+        if key in self._unique_keys:
+            return False
+        self._unique_keys.add(key)
+        return True
+
+    def release_unique_key(self, key: str) -> bool:
+        if key in self._unique_keys:
+            self._unique_keys.remove(key)
+            return True
+        return False
+
+    def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        now = time.time()
+        existing = self._leases.get(lease_key)
+        if existing is None or existing[1] <= now or existing[0] == owner_id:
+            self._leases[lease_key] = (owner_id, now + ttl_seconds)
+            return True
+        return False
+
+    def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        existing = self._leases.get(lease_key)
+        if existing is not None and existing[0] == owner_id:
+            del self._leases[lease_key]
+            return True
+        return False
+
+    def close(self) -> None:
+        self._jobs.clear()
+        self._leases.clear()
+        self._unique_keys.clear()
+
+
+class _ConformingAsyncQueueStore:
+    """Minimal conforming stand-in for `AsyncQueueStore`."""
+
+    __slots__ = ("_sync",)
+
+    def __init__(self) -> None:
+        self._sync = _ConformingSyncQueueStore()
+
+    async def ensure_schema(self) -> None:
+        self._sync.ensure_schema()
+
+    async def enqueue(self, entry: QueueEntry) -> str:
+        return self._sync.enqueue(entry)
+
+    async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        return self._sync.enqueue_many(entries)
+
+    async def claim(
+        self,
+        queues: Sequence[str],
+        *,
+        limit: int = 1,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
+        return self._sync.claim(queues, limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
+
+    async def ack(self, job_id: str, *, attempt: int) -> bool:
+        return self._sync.ack(job_id, attempt=attempt)
+
+    async def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        return self._sync.nack(job_id, attempt=attempt, error=error, retry_delay_s=retry_delay_s)
+
+    async def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        return self._sync.heartbeat(job_ids, worker_id=worker_id, lease_seconds=lease_seconds)
+
+    async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        return self._sync.reap_stale(lease_seconds=lease_seconds)
+
+    async def promote_scheduled(self, *, limit: int = 100) -> int:
+        return self._sync.promote_scheduled(limit=limit)
+
+    async def cancel(self, job_id: str) -> bool:
+        return self._sync.cancel(job_id)
+
+    async def get_entry(self, job_id: str) -> QueueEntry | None:
+        return self._sync.get_entry(job_id)
+
+    async def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        return self._sync.list_entries(queue, status=status, limit=limit)
+
+    async def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        return self._sync.next_due_delay(queues)
+
+    async def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        return self._sync.reserve_unique_key(key, ttl_seconds=ttl_seconds)
+
+    async def release_unique_key(self, key: str) -> bool:
+        return self._sync.release_unique_key(key)
+
+    async def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        return self._sync.acquire_lease(lease_key, owner_id=owner_id, ttl_seconds=ttl_seconds)
+
+    async def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        return self._sync.release_lease(lease_key, owner_id=owner_id)
+
+    async def aclose(self) -> None:
+        self._sync.close()
 
 
 class _ConformingEmbeddingPushdown:
@@ -2250,7 +2537,7 @@ class _ConformingEmbeddingPushdown:
             "metadata",
         ),
         (
-            ClaimedJob,
+            QueueEntry,
             {
                 "job_id": "job-101",
                 "queue": "emails",
@@ -2284,28 +2571,30 @@ def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
     mutate_val: Any,
     dict_attr: str,
 ) -> None:
-    """Verify NotificationEvent and ClaimedJob are frozen, GC-untracked, isolated on defaults, and round-trip."""
+    """Verify NotificationEvent and QueueEntry are frozen, isolated on defaults, and round-trip."""
     first = record_cls(**default_kwargs)
     second = record_cls(**default_kwargs)
     populated = record_cls(**full_kwargs)
 
-    assert not gc.is_tracked(first)
-    assert not gc.is_tracked(populated)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(first)
+        assert not gc.is_tracked(populated)
+        assert first.sender_id is None
     assert getattr(first, dict_attr) == {}
     assert getattr(first, dict_attr) is not getattr(second, dict_attr)
-    if record_cls is NotificationEvent:
-        assert first.sender_id is None
 
     with pytest.raises(AttributeError):
         setattr(populated, mutate_attr, mutate_val)
 
     json_roundtrip = decode_json(encode_json_bytes(populated), type=record_cls)
     assert json_roundtrip == populated
-    assert not gc.is_tracked(json_roundtrip)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(json_roundtrip)
 
     msgpack_roundtrip = decode_msgpack(encode_msgpack_bytes(populated), type=record_cls)
     assert msgpack_roundtrip == populated
-    assert not gc.is_tracked(msgpack_roundtrip)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(msgpack_roundtrip)
 
 
 @pytest.mark.parametrize(
@@ -2315,10 +2604,12 @@ def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
         (_ConformingAsyncPipeline, AsyncPipeline),
         (_ConformingSyncPipelineDriver, SyncPipelineCapable),
         (_ConformingAsyncPipelineDriver, AsyncPipelineCapable),
-        (_ConformingNotificationSource, NotificationSource),
+        (_ConformingNotificationSource, AsyncNotificationSource),
+        (_ConformingSyncNotificationSource, SyncNotificationSource),
         (_ConformingSyncChangeSource, SyncChangeSource),
         (_ConformingAsyncChangeSource, AsyncChangeSource),
-        (_ConformingQueueStore, QueueStore),
+        (_ConformingSyncQueueStore, SyncQueueStore),
+        (_ConformingAsyncQueueStore, AsyncQueueStore),
         (_ConformingEmbeddingPushdown, EmbeddingPushdown),
     ],
 )
@@ -2334,14 +2625,42 @@ def test_capability_protocols_runtime_isinstance_and_sqlite_negative_checks(
     sqlite_sync = SyncSQLiteDriver(SQLiteConfig(database=":memory:"))
     sqlite_async = AsyncSQLiteDriver(SQLiteConfig(database=":memory:"))
     try:
-        assert isinstance(sqlite_sync, SyncPipelineCapable) is False
-        assert isinstance(sqlite_sync, AsyncPipelineCapable) is False
-        assert isinstance(sqlite_sync, expected_protocol) is False
-        assert isinstance(sqlite_async, SyncPipelineCapable) is False
-        assert isinstance(sqlite_async, AsyncPipelineCapable) is False
-        assert isinstance(sqlite_async, expected_protocol) is False
+        assert isinstance(sqlite_sync, SyncPipelineCapable) is True
+        assert isinstance(sqlite_async, AsyncPipelineCapable) is True
+        sync_pipe = sqlite_sync.pipeline()
+        async_pipe = sqlite_async.pipeline()
+        assert isinstance(sync_pipe, SyncPipeline) is True
+        assert isinstance(sync_pipe, AsyncPipeline) is False
+        assert isinstance(async_pipe, AsyncPipeline) is True
+        assert isinstance(async_pipe, SyncPipeline) is False
+        if expected_protocol not in (SyncPipelineCapable, AsyncPipelineCapable):
+            assert isinstance(sqlite_sync, expected_protocol) is False
+            assert isinstance(sqlite_async, expected_protocol) is False
     finally:
         sqlite_sync.close()
+
+
+def test_notification_source_legacy_symbol_cleanly_removed() -> None:
+    """Verify legacy NotificationSource symbol raises AttributeError or ImportError."""
+    import vertebra.db as db_mod
+    import vertebra.db.driver as driver_mod
+
+    assert not hasattr(driver_mod, "NotificationSource")
+    assert not hasattr(db_mod, "NotificationSource")
+
+
+def test_queue_store_and_claimed_job_legacy_symbols_cleanly_removed() -> None:
+    """Verify legacy QueueStore and ClaimedJob symbols raise AttributeError or ImportError."""
+    import vertebra.db as db_mod
+    import vertebra.db.driver as driver_mod
+    import vertebra.db.driver.capabilities as cap_mod
+
+    assert not hasattr(driver_mod, "QueueStore")
+    assert not hasattr(db_mod, "QueueStore")
+    assert not hasattr(cap_mod, "QueueStore")
+    assert not hasattr(driver_mod, "ClaimedJob")
+    assert not hasattr(db_mod, "ClaimedJob")
+    assert not hasattr(cap_mod, "ClaimedJob")
 
 
 @pytest.mark.anyio
@@ -2349,10 +2668,12 @@ async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -
     """Verify static structural typing and end-to-end execution across all capability protocols."""
     sync_capable: SyncPipelineCapable = _ConformingSyncPipelineDriver()
     async_capable: AsyncPipelineCapable = _ConformingAsyncPipelineDriver()
-    notif_source: NotificationSource = _ConformingNotificationSource()
+    async_notif_source: AsyncNotificationSource = _ConformingNotificationSource()
+    sync_notif_source: SyncNotificationSource = _ConformingSyncNotificationSource()
     sync_cdc: SyncChangeSource = _ConformingSyncChangeSource()
     async_cdc: AsyncChangeSource = _ConformingAsyncChangeSource()
-    queue_store: QueueStore = _ConformingQueueStore()
+    sync_queue_store: SyncQueueStore = _ConformingSyncQueueStore()
+    async_queue_store: AsyncQueueStore = _ConformingAsyncQueueStore()
     pushdown: EmbeddingPushdown = _ConformingEmbeddingPushdown()
 
     raw_sync_pipe = sync_capable.pipeline()
@@ -2371,27 +2692,50 @@ async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -
         async_pipe.select("SELECT 2")
         assert len(await async_pipe.results()) == 2
 
-    await notif_source.subscribe(["events"])
-    await notif_source.publish("events", "hello")
-    received = [evt async for evt in notif_source.listen()]
+    await async_notif_source.subscribe(["events"])
+    await async_notif_source.publish("events", "hello")
+    received = [evt async for evt in async_notif_source.listen()]
     assert received == [NotificationEvent(channel="events", payload=b"hello", sender_id="standin")]
-    await notif_source.unsubscribe(["events"])
+    await async_notif_source.unsubscribe(["events"])
+
+    sync_notif_source.subscribe(["events"])
+    sync_notif_source.publish("events", "hello-sync")
+    sync_received = list(sync_notif_source.listen())
+    assert sync_received == [NotificationEvent(channel="events", payload=b"hello-sync", sender_id="sync-standin")]
+    sync_notif_source.unsubscribe(["events"])
 
     sync_events = list(sync_cdc.stream())
     assert len(sync_events) == 1 and sync_events[0].operation == "INSERT"
     async_events = [evt async for evt in async_cdc.stream()]
     assert len(async_events) == 1 and async_events[0].operation == "UPDATE"
 
-    await queue_store.ensure_schema()
-    jid = await queue_store.enqueue("default", "work", b"body", headers={"k": "v"})
-    bulk_ids = await queue_store.enqueue_many("default", [("work2", b"b2")])
-    assert len(bulk_ids) == 1
-    claimed = await queue_store.claim("default", limit=2, lease_ms=15_000, worker_id="w1")
-    assert len(claimed) == 2 and claimed[0].job_id == jid
-    assert await queue_store.heartbeat(jid, 1, extend_ms=30_000) is True
-    assert await queue_store.complete(jid, 1) is True
-    await queue_store.fail(bulk_ids[0], 1, error="boom", retry_delay_ms=500)
-    assert await queue_store.promote_scheduled("default", now_ms=1_000, limit=10) == 0
+    sync_queue_store.ensure_schema()
+    s_jid = sync_queue_store.enqueue(
+        QueueEntry(job_id="", queue="default", task_name="work", payload=b"body", headers={"k": "v"})
+    )
+    s_bulk_ids = sync_queue_store.enqueue_many(
+        [QueueEntry(job_id="", queue="default", task_name="work2", payload=b"b2")]
+    )
+    assert len(s_bulk_ids) == 1
+    s_claimed = sync_queue_store.claim(["default"], limit=2, lease_seconds=15.0, worker_id="w1")
+    assert len(s_claimed) == 2 and s_claimed[0].job_id == s_jid
+    assert sync_queue_store.heartbeat([s_jid], worker_id="w1", lease_seconds=30.0) == 1
+    assert sync_queue_store.ack(s_jid, attempt=1) is True
+    assert sync_queue_store.nack(s_bulk_ids[0], attempt=1, error="boom", retry_delay_s=0.5) is True
+
+    await async_queue_store.ensure_schema()
+    a_jid = await async_queue_store.enqueue(
+        QueueEntry(job_id="", queue="default", task_name="work", payload=b"body", headers={"k": "v"})
+    )
+    a_bulk_ids = await async_queue_store.enqueue_many(
+        [QueueEntry(job_id="", queue="default", task_name="work2", payload=b"b2")]
+    )
+    assert len(a_bulk_ids) == 1
+    a_claimed = await async_queue_store.claim(["default"], limit=2, lease_seconds=15.0, worker_id="w1")
+    assert len(a_claimed) == 2 and a_claimed[0].job_id == a_jid
+    assert await async_queue_store.heartbeat([a_jid], worker_id="w1", lease_seconds=30.0) == 1
+    assert await async_queue_store.ack(a_jid, attempt=1) is True
+    assert await async_queue_store.nack(a_bulk_ids[0], attempt=1, error="boom", retry_delay_s=0.5) is True
 
     batch_vec = await pushdown.embed_documents(["doc-a", "doc-b"], dimensions=4)
     assert batch_vec.count == 2 and batch_vec.dimensions == 4
@@ -2600,7 +2944,7 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
         assert isinstance(m2, SyncSQLiteDriver)
         assert m1 is not m2
         m1.execute("CREATE TABLE iso_check (id INTEGER PRIMARY KEY)")
-        with pytest.raises(OperationalError):
+        with pytest.raises((OperationalError, ProgrammingError)):
             m2.select("SELECT id FROM iso_check")
 
         am1 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)
@@ -3044,3 +3388,40 @@ def test_engine_purity_rejects_engine_sql_construction(sql: str) -> None:
 def test_engine_purity_rejects_relative_adapter_import() -> None:
     """Relative imports cannot bypass the same generic-database boundary."""
     assert _engine_purity_violations("from .adapters.postgres.config import PostgreSQLConfig")
+
+
+@pytest.mark.parametrize(
+    ("query", "params", "expected_rows", "expected_cols"),
+    [
+        ("SELECT id, label FROM items ORDER BY id", None, [{"id": 1, "label": "alpha"}], ["id", "label"]),
+        ("SELECT id, label FROM items WHERE id = ?", (999,), [], ["id", "label"]),
+        (
+            "INSERT INTO items (label) VALUES (?) RETURNING id, label",
+            ("beta",),
+            [{"id": 2, "label": "beta"}],
+            ["id", "label"],
+        ),
+        ("UPDATE items SET label = ? WHERE id = ? RETURNING id, label", ("gamma", 999), [], ["id", "label"]),
+    ],
+)
+@pytest.mark.anyio
+async def test_driver_query_with_columns_preserves_zero_row_columns(
+    query: str,
+    params: tuple[Any, ...] | None,
+    expected_rows: list[dict[str, Any]],
+    expected_cols: list[str],
+) -> None:
+    """Both sync and async drivers preserve ordered column names on empty and populated results."""
+    with SyncSQLiteDriver(SQLiteConfig(path=":memory:")) as sync_driver:
+        sync_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
+        sync_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
+        rows, cols = sync_driver.query_with_columns(query, params)
+        assert rows == expected_rows
+        assert cols == expected_cols
+
+    async with AsyncSQLiteDriver(SQLiteConfig(path=":memory:")) as async_driver:
+        await async_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
+        await async_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
+        rows_async, cols_async = await async_driver.query_with_columns(query, params)
+        assert rows_async == expected_rows
+        assert cols_async == expected_cols

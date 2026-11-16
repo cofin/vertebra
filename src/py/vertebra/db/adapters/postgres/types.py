@@ -647,6 +647,8 @@ type PostgresValue = (
     | float
     | str
     | bytes
+    | bytearray
+    | memoryview
     | Decimal
     | UUID
     | date

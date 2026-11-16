@@ -33,9 +33,18 @@ if TYPE_CHECKING:
         SyncOraclePool,
     )
     from vertebra.db.adapters.oracle.embeddings import OracleEmbeddingPushdown
+    from vertebra.db.adapters.oracle.notify import (
+        AsyncOracleNotificationSource,
+        OracleNotifyConfig,
+        SyncOracleNotificationSource,
+    )
     from vertebra.db.adapters.oracle.pipeline import (
         AsyncOraclePipeline,
         SyncOraclePipeline,
+    )
+    from vertebra.db.adapters.oracle.queue import (
+        AsyncOracleQueueStore,
+        SyncOracleQueueStore,
     )
     from vertebra.db.arrow import ArrowCursor
 
@@ -51,18 +60,24 @@ __all__ = (
     "OSON_MAGIC",
     "ArrowCursor",
     "AsyncOracleDriver",
+    "AsyncOracleNotificationSource",
     "AsyncOraclePipeline",
     "AsyncOraclePool",
+    "AsyncOracleQueueStore",
     "OracleConfig",
     "OracleConnectDescriptor",
     "OracleCore",
     "OracleDriverFeatures",
+    "OracleEmbeddingPushdown",
+    "OracleNotifyConfig",
     "OracleSessionAttrs",
     "OracleTopologyConfig",
     "OracleWallet",
     "SyncOracleDriver",
+    "SyncOracleNotificationSource",
     "SyncOraclePipeline",
     "SyncOraclePool",
+    "SyncOracleQueueStore",
     "parse_tnsnames_ora",
     "resolve_tns_alias",
 )
@@ -72,7 +87,9 @@ __lazy_modules__ = [
     "vertebra.db.adapters.oracle.config",
     "vertebra.db.adapters.oracle.core",
     "vertebra.db.adapters.oracle.driver",
+    "vertebra.db.adapters.oracle.notify",
     "vertebra.db.adapters.oracle.pipeline",
+    "vertebra.db.adapters.oracle.queue",
     "vertebra.db.arrow",
 ]
 
@@ -88,18 +105,23 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "OSON_MAGIC": ("vertebra.db.adapters.oracle.core", "OSON_MAGIC"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncOracleDriver": ("vertebra.db.adapters.oracle.driver", "AsyncOracleDriver"),
+    "AsyncOracleNotificationSource": ("vertebra.db.adapters.oracle.notify", "AsyncOracleNotificationSource"),
     "AsyncOraclePipeline": ("vertebra.db.adapters.oracle.pipeline", "AsyncOraclePipeline"),
     "AsyncOraclePool": ("vertebra.db.adapters.oracle.driver", "AsyncOraclePool"),
+    "AsyncOracleQueueStore": ("vertebra.db.adapters.oracle.queue", "AsyncOracleQueueStore"),
     "OracleConfig": ("vertebra.db.adapters.oracle.config", "OracleConfig"),
     "OracleConnectDescriptor": ("vertebra.db.adapters.oracle.config", "OracleConnectDescriptor"),
     "OracleCore": ("vertebra.db.adapters.oracle.core", "OracleCore"),
     "OracleDriverFeatures": ("vertebra.db.adapters.oracle.config", "OracleDriverFeatures"),
+    "OracleNotifyConfig": ("vertebra.db.adapters.oracle.notify", "OracleNotifyConfig"),
     "OracleSessionAttrs": ("vertebra.db.adapters.oracle.config", "OracleSessionAttrs"),
     "OracleTopologyConfig": ("vertebra.db.adapters.oracle.config", "OracleTopologyConfig"),
     "OracleWallet": ("vertebra.db.adapters.oracle.config", "OracleWallet"),
     "SyncOracleDriver": ("vertebra.db.adapters.oracle.driver", "SyncOracleDriver"),
+    "SyncOracleNotificationSource": ("vertebra.db.adapters.oracle.notify", "SyncOracleNotificationSource"),
     "SyncOraclePipeline": ("vertebra.db.adapters.oracle.pipeline", "SyncOraclePipeline"),
     "SyncOraclePool": ("vertebra.db.adapters.oracle.driver", "SyncOraclePool"),
+    "SyncOracleQueueStore": ("vertebra.db.adapters.oracle.queue", "SyncOracleQueueStore"),
     "parse_tnsnames_ora": ("vertebra.db.adapters.oracle.config", "parse_tnsnames_ora"),
     "resolve_tns_alias": ("vertebra.db.adapters.oracle.config", "resolve_tns_alias"),
 }

@@ -6,6 +6,7 @@ import ast
 import asyncio
 import importlib
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ import vertebra.extensions.fastapi as fastapi_ext
 import vertebra.extensions.flask as flask_ext
 import vertebra.extensions.litestar as litestar_ext
 import vertebra.extensions.starlette as starlette_ext
-from tests.unit.db.test_spanner import FakeSpannerClient
+from tests.unit.db.test_spanner import FakeAsyncReadWriteTransaction, FakeSpannerClient
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.core import PermissionDeniedError, Tool
@@ -47,9 +48,6 @@ from vertebra.extensions.alchemy import (
     normalize_alchemy_url,
 )
 from vertebra.extensions.broker.transport import AsyncSHMBrokerTransport, BrokerConfig, SyncSHMBrokerTransport
-from vertebra.extensions.django.db.backends.bigquery.base import (
-    DatabaseWrapper as BigQueryDjangoDatabaseWrapper,
-)
 from vertebra.extensions.django.db.backends.spanner.base import (
     DatabaseWrapper as SpannerDjangoDatabaseWrapper,
 )
@@ -116,7 +114,7 @@ from vertebra.server._fastpath import (
 )
 from vertebra.server._fastpath_core import DirectPlan
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
-from vertebra.typing import ToolPolicyError, ToolProvider
+from vertebra.typing import MissingDependencyError, ToolPolicyError, ToolProvider
 
 
 @pytest.mark.anyio
@@ -300,27 +298,28 @@ async def test_fastpath_zero_copy_arrow_cursor_and_streaming_storage() -> None:
     assert bytes(dj_resp.body) == b"PAR1-binary-data"
 
 
-def test_django_backends_and_shared_provider_fingerprinting() -> None:
+def test_django_backends_and_shared_provider_fingerprinting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify Django BigQuery and Spanner DatabaseWrappers and multi-framework provider sharing."""
     registry = DatabaseRegistry(broker=DatabaseRegistry.default_broker())
 
-    bq_wrapper = BigQueryDjangoDatabaseWrapper(
-        {
-            "NAME": "analytics_ds",
-            "PROJECT": "analytics-proj",
-            "LOCATION": "US",
-            "MAXIMUM_BYTES_BILLED": 50_000_000,
-        }
-    )
-    assert bq_wrapper.vendor == "bigquery"
-    assert bq_wrapper.display_name == "BigQuery (Vertebra)"
-    assert bq_wrapper.driver_scheme == "bigquery"
-    bq_drv = bq_wrapper.native_driver
-    assert isinstance(bq_drv, SyncBigQueryDriver)
-    assert bq_drv.config.project_id == "analytics-proj"
-    assert bq_drv.config.dataset_id == "analytics_ds"
-    assert bq_drv.config.maximum_bytes_billed == 50_000_000
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vertebra.extensions.django.db.backends.bigquery")
 
+    with pytest.raises(MissingDependencyError) as exc_info:
+        SpannerDjangoDatabaseWrapper(
+            {
+                "PROJECT": "core-proj",
+                "INSTANCE": "prod-inst",
+                "NAME": "ledger-db",
+                "DIALECT": "POSTGRESQL",
+            }
+        )
+    assert "django-spanner" in str(exc_info.value)
+
+    monkeypatch.setattr(
+        "vertebra.extensions.django.db.backends.spanner.base.ensure_module",
+        lambda *args, **kwargs: None,
+    )
     spanner_wrapper = SpannerDjangoDatabaseWrapper(
         {
             "PROJECT": "core-proj",
@@ -332,12 +331,15 @@ def test_django_backends_and_shared_provider_fingerprinting() -> None:
     assert spanner_wrapper.vendor == "spanner"
     assert spanner_wrapper.display_name == "Cloud Spanner (Vertebra)"
     assert spanner_wrapper.driver_scheme == "spanner"
-    sp_drv = spanner_wrapper.native_driver
-    assert isinstance(sp_drv, SyncSpannerDriver)
-    assert sp_drv.config.project_id == "core-proj"
-    assert sp_drv.config.instance_id == "prod-inst"
-    assert sp_drv.config.database_id == "ledger-db"
-    assert sp_drv.config.dialect == "spangres"
+    assert spanner_wrapper.Database.paramstyle == "named"
+    conn_params = spanner_wrapper.get_connection_params()
+    cfg = conn_params["config"]
+    assert cfg.project_id == "core-proj"
+    assert cfg.instance_id == "prod-inst"
+    assert cfg.database_id == "ledger-db"
+    assert cfg.dialect == "spangres"
+    conn = spanner_wrapper.get_new_connection(conn_params)
+    assert isinstance(conn.driver, SyncSpannerDriver)
 
     bq_cfg = BigQueryConfig(
         project_id="analytics-proj",
@@ -373,14 +375,24 @@ def test_legacy_gcp_provider_helpers_removed(ext_mod: Any) -> None:
     assert not hasattr(ext_mod, "provide_spanner_driver")
 
 
+class _ClosableFakeSpannerClient(FakeSpannerClient):
+    """FakeSpannerClient implementing SyncSpannerClientProtocol.close."""
+
+    __slots__ = ()
+
+    def close(self) -> None:
+        return None
+
+
 class _BigQueryToolClient:
     """BigQuery wire port recording requests made by the real adapter."""
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, int]] = []
 
-    def dry_run(self, sql: str, parameters: Any = None) -> dict[str, Any]:
+    def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
         """Return wire-format cost statistics without executing a job."""
+        _ = params_json
         self.requests.append(("dry_run", sql, threading.get_ident()))
         processed = 5_000 if "LARGE_SCAN" in sql else 256
         return {
@@ -390,8 +402,31 @@ class _BigQueryToolClient:
             "schema": [{"name": "val", "type": "INT64"}],
         }
 
-    def query(self, sql: str, parameters: Any = None, *options: Any) -> dict[str, Any]:
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return tabular wire data or a DML affected-row count."""
+        _ = (
+            params_json,
+            session_id,
+            create_session,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+        )
         self.requests.append(("query", sql, threading.get_ident()))
         if "FAIL_QUERY" in sql:
             raise RuntimeError("BigQuery query failed")
@@ -404,6 +439,34 @@ class _BigQueryToolClient:
             return {"num_dml_affected_rows": 3}
         return {"columns": ["val"], "rows": [[1]], "total_rows": 1}
 
+    def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> RustArrowCursor:
+        """Unsupported stub satisfying SyncBigQueryClientProtocol."""
+        _ = (project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression)
+        raise NotImplementedError
+
+    def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]:
+        """Unsupported stub satisfying SyncBigQueryClientProtocol."""
+        _ = (parent_table, arrow_ipc_bytes, mode)
+        raise NotImplementedError
+
+    def close(self) -> None:
+        """Close the wire double."""
+        return None
+
 
 class _AsyncBigQueryToolClient:
     """Async BigQuery wire port sharing the same request contract."""
@@ -411,16 +474,67 @@ class _AsyncBigQueryToolClient:
     def __init__(self, client: _BigQueryToolClient) -> None:
         self.client = client
 
-    async def dry_run(self, sql: str, parameters: Any = None) -> dict[str, Any]:
+    async def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
         """Return async dry-run wire statistics."""
-        return self.client.dry_run(sql, parameters)
+        return self.client.dry_run(sql, params_json)
 
-    async def query(self, sql: str, parameters: Any = None, *options: Any) -> dict[str, Any]:
+    async def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        session_id: str | None = None,
+        create_session: bool = False,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return async query wire data."""
-        return self.client.query(sql, parameters, *options)
+        return self.client.query(
+            sql,
+            params_json,
+            session_id,
+            create_session,
+            destination_table,
+            write_disposition,
+            maximum_bytes_billed,
+            job_timeout_ms,
+            priority,
+            labels,
+        )
+
+    async def read_table_arrow(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+        selected_fields: Sequence[str] | None = None,
+        row_restriction: str | None = None,
+        max_streams: int = 4,
+        compression: str = "LZ4_FRAME",
+    ) -> RustArrowCursor:
+        """Unsupported stub satisfying AsyncBigQueryClientProtocol."""
+        return self.client.read_table_arrow(
+            project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression
+        )
+
+    async def append_arrow(
+        self,
+        parent_table: str,
+        arrow_ipc_bytes: bytes,
+        mode: str = "_default",
+    ) -> dict[str, Any]:
+        """Unsupported stub satisfying AsyncBigQueryClientProtocol."""
+        return self.client.append_arrow(parent_table, arrow_ipc_bytes, mode)
+
+    def close(self) -> None:
+        """Close the async wire double."""
+        self.client.close()
 
 
-class _SpannerToolClient(FakeSpannerClient):
+class _SpannerToolClient(_ClosableFakeSpannerClient):
     """Spanner wire port recording read-only snapshot bounds and queries."""
 
     def __init__(self) -> None:
@@ -457,9 +571,89 @@ class _AsyncSpannerToolClient:
         """Execute confirmed DML."""
         return self.client.execute_dml(sql, params_json, request_tag, transaction_tag)
 
-    async def update_ddl(self, statements: Any) -> str:
+    async def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> list[int]:
+        """Execute batch DML."""
+        return self.client.execute_batch_dml(statements_json, request_tag, transaction_tag)
+
+    async def execute_partitioned_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> int:
+        """Execute Partitioned DML."""
+        return self.client.execute_partitioned_dml(sql, params_json, exclude_txn_from_change_streams)
+
+    async def apply_mutations(
+        self,
+        mutations_json: str,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Apply mutations."""
+        return self.client.apply_mutations(
+            mutations_json,
+            transaction_tag,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        )
+
+    async def batch_write(
+        self,
+        mutation_groups_json: str,
+        exclude_txn_from_change_streams: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Commit mutation groups."""
+        return self.client.batch_write(mutation_groups_json, exclude_txn_from_change_streams)
+
+    async def update_ddl(self, statements: Sequence[str]) -> str:
         """Apply confirmed DDL."""
         return self.client.update_ddl(statements)
+
+    async def partitioned_query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        max_partitions: int = 4,
+        data_boost_enabled: bool = False,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a partitioned query."""
+        return self.client.partitioned_query(
+            sql,
+            params_json,
+            max_partitions,
+            data_boost_enabled,
+            staleness_mode,
+            staleness_ms,
+        )
+
+    async def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> FakeAsyncReadWriteTransaction:
+        """Open an async interactive transaction."""
+        sync_tx = self.client.begin_read_write_transaction(
+            transaction_tag,
+            previous_transaction_id,
+            exclude_txn_from_change_streams,
+            max_commit_delay_ms,
+        )
+        return FakeAsyncReadWriteTransaction(sync_tx)
+
+    def close(self) -> None:
+        """Close the async wire double."""
+        self.client.close()
 
 
 @pytest.mark.anyio
@@ -482,7 +676,7 @@ async def test_governed_mcp_and_a2a_gcp_database_tools() -> None:
             database_id="orders-db",
             endpoint="http://localhost:9010",
         ),
-        client=FakeSpannerClient(),
+        client=_ClosableFakeSpannerClient(),
     )
     spanner_driver.update_ddl(["CREATE TABLE orders (id INT64 NOT NULL, status STRING(32)) PRIMARY KEY (id)"])
     tools = build_tools(BigQueryToolProvider(bq_driver, maximum_bytes_billed=1_000), confirmation_gate=gate)
@@ -562,7 +756,7 @@ def gcp_database_tools() -> dict[str, Any]:
             database_id="orders-db",
             endpoint="http://localhost:9010",
         ),
-        client=FakeSpannerClient(),
+        client=_ClosableFakeSpannerClient(),
     )
     return build_tools(BigQueryToolProvider(bq_driver, maximum_bytes_billed=1_000)) | build_tools(
         SpannerToolProvider(spanner_driver)
@@ -806,7 +1000,7 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     )
     assert interleave_sql == ", INTERLEAVE IN PARENT Singers ON DELETE CASCADE"
 
-    assert SyncSpangresDialect.paramstyle == "pyformat"
+    assert SyncSpangresDialect.paramstyle == "numeric_dollar"
     assert AsyncSpangresDialect.is_async is True
 
     vec32 = Vector(dimensions=768, precision="float32", column_name="embedding")
@@ -877,12 +1071,12 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
             database_id="music-db",
             endpoint="http://localhost:9010",
         ),
-        client=FakeSpannerClient(),
+        client=_ClosableFakeSpannerClient(),
     )
     lro_result = sp_alembic.flush_ddl_batch_sync(sp_driver)
     assert isinstance(lro_result, str)
     assert lro_result
-    assert sp_alembic.buffered_ddl == ()
+    assert not sp_alembic.buffered_ddl
 
     assert normalize_alchemy_url("bigquery://proj/dataset", is_async=True) == "bigquery+vtb_async://proj/dataset"
     assert normalize_alchemy_url("bigquery://proj/dataset", is_async=False) == "bigquery+vtb://proj/dataset"
@@ -988,13 +1182,22 @@ async def test_agent_tools_resolve_registry_at_invocation(
 
     monkeypatch.setattr(bigquery_native, "AsyncBigQueryClient", make_bq_client)
     monkeypatch.setattr(spanner_native, "AsyncSpannerClient", make_sp_client)
-    config = (
-        BigQueryConfig(project_id="analytics-proj", dataset_id="warehouse")
-        if engine == "bigquery"
-        else SpannerConfig(project_id="core-proj", instance_id="prod-inst", database_id="orders-db")
-    )
-    provider_type = BigQueryToolProvider if engine == "bigquery" else SpannerToolProvider
-    provider = provider_type(config="analytics" if target_kind == "alias" else config, registry=registry)
+    config: BigQueryConfig | SpannerConfig
+    provider: ToolProvider
+    if engine == "bigquery":
+        bq_cfg = BigQueryConfig(project_id="analytics-proj", dataset_id="warehouse")
+        config = bq_cfg
+        provider = BigQueryToolProvider(
+            config="analytics" if target_kind == "alias" else bq_cfg,
+            registry=registry,
+        )
+    else:
+        sp_cfg = SpannerConfig(project_id="core-proj", instance_id="prod-inst", database_id="orders-db")
+        config = sp_cfg
+        provider = SpannerToolProvider(
+            config="analytics" if target_kind == "alias" else sp_cfg,
+            registry=registry,
+        )
     assert isinstance(provider, ToolProvider)
     assert provider.operations()
     tools = build_tools(provider)
@@ -1249,7 +1452,31 @@ async def test_native_provider_preserves_driver_exception_identity(
             super().__init__()
             self.failure = failure
 
-        def query(self, sql: str, parameters: Any = None, *options: Any) -> dict[str, Any]:
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            session_id: str | None = None,
+            create_session: bool = False,
+            destination_table: str | None = None,
+            write_disposition: str | None = None,
+            maximum_bytes_billed: int | None = None,
+            job_timeout_ms: int | None = None,
+            priority: str | None = None,
+            labels: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            _ = (
+                sql,
+                params_json,
+                session_id,
+                create_session,
+                destination_table,
+                write_disposition,
+                maximum_bytes_billed,
+                job_timeout_ms,
+                priority,
+                labels,
+            )
             raise self.failure
 
     failure = failure_factory()

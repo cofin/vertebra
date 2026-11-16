@@ -17,7 +17,7 @@ generated:
 verified:
   - by: agent:flow-completion
     at: "2026-11-14T21:38:00Z"
-    commit: 8a836024
+    commit: c526639f
   - by: agent:flow-executor
     at: "2026-11-13T05:25:00Z"
     commit: 93d7fb1f
@@ -58,6 +58,9 @@ sources:
   - id: src-vertebra-spanner-src-client-rs
     resource: src/rs/vertebra-spanner/src/client.rs
     title: Multiplexed Spanner gRPC client and REST DatabaseAdmin DDL LROs
+  - id: src-vertebra-spanner-src-rw-tx-rs
+    resource: src/rs/vertebra-spanner/src/rw_tx.rs
+    title: Stateful interactive SpannerReadWriteTx session handle
   - id: src-vertebra-spanner-src-errors-rs
     resource: src/rs/vertebra-spanner/src/errors.rs
     title: PyOnceLock SpannerError and SpannerAbortedError exception bridge
@@ -87,7 +90,10 @@ sources:
     title: Mutation, MutationGroup, and StalenessBound structs
   - id: src-db-spanner-transactions-py
     resource: src/py/vertebra/db/adapters/spanner/transactions.py
-    title: Sync/AsyncSpannerSnapshot and Sync/AsyncSpannerTransaction contexts
+    title: Sync/AsyncSpannerSnapshot and interactive Sync/AsyncSpannerTransaction contexts
+  - id: src-db-spanner-queue-py
+    resource: src/py/vertebra/db/adapters/spanner/queue.py
+    title: SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres
   - id: src-db-spanner-tools-py
     resource: src/py/vertebra/db/adapters/spanner/tools.py
     title: SpannerToolProvider operations and staleness snapshot policies
@@ -100,7 +106,7 @@ sources:
 
 <!-- truth: start -->
 - **Standalone `gil_used = false` Optional Wheels (`vertebra-bigquery`, `vertebra-spanner`, `vertebra-db/src/gcp.rs`)**: `vertebra-bigquery` (`vertebra._bigquery`, `[bigquery]`, `google-cloud-bigquery =0.19.0`) and `vertebra-spanner` (`vertebra._spanner`, `[spanner]`, `google-cloud-spanner =0.34.8-preview`) compile as optional PyO3 wheels over `vertebra_db::gcp` (`feature = "gcp"`), keeping `vertebra-py` and default `vertebra-db` free of `google-cloud-*` and `tonic`.
-- **5-Module Crate Decomposition (`{lib,client,errors,arrow_ipc,codec}.rs`)**: Both `vertebra-bigquery` and `vertebra-spanner` split PyO3 bindings (`lib.rs`), gRPC/REST transport (`client.rs`), lazy `PyOnceLock` exception resolution (`errors.rs`), unregistered `VTBARROW` / IPC framing (`arrow_ipc.rs`), and SQL/mutation codecs (`codec.rs`).
+- **Crate Decomposition (`{lib,client,errors,arrow_ipc,codec}.rs` + `rw_tx.rs`)**: Both `vertebra-bigquery` and `vertebra-spanner` split PyO3 bindings (`lib.rs`), gRPC/REST transport (`client.rs`), lazy `PyOnceLock` exception resolution (`errors.rs`), unregistered `VTBARROW` / IPC framing (`arrow_ipc.rs`), and SQL/mutation codecs (`codec.rs`), with `vertebra-spanner/src/rw_tx.rs` providing stateful interactive `ReadWrite` transactions (`SyncSpannerReadWriteTransaction` / `AsyncSpannerReadWriteTransaction`).
 - **Zero-Copy `ArrowAppendPlan` Framing (`vertebra-bigquery/src/arrow_ipc.rs`)**: `ArrowAppendPlan::build` / `ArrowAppendPlan::build_bytes(stream: Bytes, mode: BigQueryWriteMode)` slices schema and record-batch frames zero-copy via `Bytes::slice`, rejects dictionary batches (`header_type == 2`) and frames exceeding `MAX_APPEND_ROWS_CHUNK_BYTES` (`9 MiB`), and validates response counts and stream offsets in `verify_responses`.
 - **5-Argument Async Drainer & Cross-`.so` `ShmCapsule` (`vertebra-db/src/py_async.rs`)**: `spawn_rust_db_task_with_attr(py, fut, map_ok, map_err, attr_name)` isolates `_vertebra_bigquery_completion_drainer` and `_vertebra_spanner_completion_drainer` on the active `asyncio` loop, while `construct_py_arrow_cursor` transfers unregistered `Arc<ShmRegion>` segments across `.so` boundaries via `c"vertebra.ShmCapsule"`.
 - **Shared Multicloud `ObjectStoreStaging` (`src/py/vertebra/db/_staging.py`)**: `ObjectStoreStaging` validates targets (`validate_staging_target`, `validate_gcs_uri`, rejecting implicit `memory://` URIs) and streams `ArrowCursor` exports/loads (`write_cursor_sync`/`write_cursor_async`, `read_cursor_sync`/`read_cursor_async`) across `SyncObjectStore`, `AsyncObjectStore`, and `ObjectStoreBackend` (`parquet`, `arrow-ipc`, `csv`, `jsonl`).
@@ -128,12 +134,13 @@ sources:
 
 ## `vertebra-spanner` Submodules & Wire Pipeline (`vertebra._spanner`)
 
-[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py] keeping `gc=True` on `Mutation`/`MutationGroup` and validating `Mutation.coerce` ops, [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py` with `0.01 * attempt` `SpannerAbortedError` async retry backoff) wraps the five-module `vertebra-spanner` crate across GoogleSQL and Spangres dialects:
+[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with dialect-aware `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py], [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], [`queue.py`](../../../../../src/py/vertebra/db/adapters/spanner/queue.py)[^src-db-spanner-queue-py] implementing `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` via atomic `SELECT ... FOR UPDATE` -> `UPDATE ... THEN RETURN *` / `RETURNING *` inside `run_in_transaction`, and `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py`) wraps `vertebra-spanner` across GoogleSQL and Spangres dialects:
 
 | Module | Key Types & Responsibilities |
 |---|---|
-| [`lib.rs`](../../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs] | `#[pymodule(gil_used = false)]` `vertebra._spanner` exposing `SyncSpannerClient` and `AsyncSpannerClient` (`query`, `execute_dml`, `execute_batch_dml`, `execute_partitioned_dml`, `apply_mutations`, `batch_write`, `update_ddl`, `partitioned_query`, `close`) for streaming SQL, DML, mutations, `PartitionQuery` Data Boost Arrow reads, and DDL updates. |
-| [`client.rs`](../../../../../src/rs/vertebra-spanner/src/client.rs)[^src-vertebra-spanner-src-client-rs] | Multiplexed sessions (`CreateSession`), `ExecuteStreamingSql`, `ExecuteBatchDml`, inline-`BeginTransaction` `Commit` with `MultiplexedSessionPrecommitToken` tracking, `BatchWrite` (`MAX_MUTATION_CELLS_PER_BATCH = 80_000`), `PartitionQuery` (`SpannerCore.is_partitioned_query_fallback_error` on `code in {3, 7, 9, 12, 14}`), `run_in_transaction` retrying `SpannerAbortedError`, REST `DatabaseAdmin` `update_database_ddl` (`admin_endpoint`, `DEFAULT_DDL_TIMEOUT = 600s`), and `ca_pem` Omni TLS for non-`*.googleapis.com` HTTPS endpoints. |
+| [`lib.rs`](../../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs] | `#[pymodule(gil_used = false)]` `vertebra._spanner` exposing `SyncSpannerClient`, `AsyncSpannerClient`, `SyncSpannerReadWriteTransaction`, and `AsyncSpannerReadWriteTransaction` (`begin_read_write_transaction`, `query`, `execute_dml`, `execute_batch_dml`, `commit`, `rollback`, `transaction_id`). |
+| [`rw_tx.rs`](../../../../../src/rs/vertebra-spanner/src/rw_tx.rs)[^src-vertebra-spanner-src-rw-tx-rs] | `SpannerReadWriteTx` managing `BeginTransaction` (`multiplexed_session_previous_transaction_id`, `transaction_tag`), `TransactionSelector::Id` + monotonic 1-based `seqno`, leader routing, highest-`seq_num` `MultiplexedSessionPrecommitToken` tracking, `Commit` (`MultiplexedSessionRetry` replay), and `Rollback`. `driver.run_in_transaction(fn)` retries `SpannerAbortedError` honoring server `retry_delay_ms` and `previous_transaction_id`, while `with driver.transaction():` / `async with driver.transaction():` runs a single-attempt interactive scope. |
+| [`client.rs`](../../../../../src/rs/vertebra-spanner/src/client.rs)[^src-vertebra-spanner-src-client-rs] | Multiplexed sessions (`CreateSession`), `ExecuteStreamingSql`, `ExecuteBatchDml`, inline-`BeginTransaction` single-shot `Commit`, `BatchWrite` (`MAX_MUTATION_CELLS_PER_BATCH = 80_000`), `PartitionQuery` (`SpannerCore.is_partitioned_query_fallback_error` on `code in {3, 7, 9, 12, 14}`), REST `DatabaseAdmin` `update_database_ddl` (`admin_endpoint`, `DEFAULT_DDL_TIMEOUT = 600s`), and `ca_pem` Omni TLS for non-`*.googleapis.com` HTTPS endpoints. |
 | [`arrow_ipc.rs`](../../../../../src/rs/vertebra-spanner/src/arrow_ipc.rs)[^src-vertebra-spanner-src-arrow-ipc-rs] | Allocates `/vtb-sp-*` `ShmArrowStreamWriter` segments (`DEFAULT_SPANNER_ARROW_SHM_CAPACITY = 64 KiB`) and finalizes unregistered `VTBARROW` `ShmRegion` cursors. |
 | [`codec.rs`](../../../../../src/rs/vertebra-spanner/src/codec.rs)[^src-vertebra-spanner-src-codec-rs] | `SpannerDialect` (`GoogleSql`, `Spangres`), `SpannerMutation` / `SpannerMutationGroup`, `SpannerStaleness` timestamp bounds, and char-aware `rewrite_spangres_placeholders`. |
 | [`errors.rs`](../../../../../src/rs/vertebra-spanner/src/errors.rs)[^src-vertebra-spanner-src-errors-rs] | `PyOnceLock` lookup of `GoogleCloudAuthError`, `SpannerError`, and `SpannerAbortedError` (`code == 10` -> `sqlstate = "40001"`, `is_transient = True`). |
@@ -154,6 +161,7 @@ sources:
 [^src-vertebra-bigquery-src-codec-rs]: `src/rs/vertebra-bigquery/src/codec.rs` — BigQueryWriteMode, GoogleSQL parameters, and REST error checks.
 [^src-vertebra-spanner-src-lib-rs]: `src/rs/vertebra-spanner/src/lib.rs` — gil_used = false PyO3 vertebra._spanner extension entrypoint.
 [^src-vertebra-spanner-src-client-rs]: `src/rs/vertebra-spanner/src/client.rs` — Multiplexed Spanner gRPC client and REST DatabaseAdmin DDL LROs.
+[^src-vertebra-spanner-src-rw-tx-rs]: `src/rs/vertebra-spanner/src/rw_tx.rs` — Stateful interactive SpannerReadWriteTx session handle.
 [^src-vertebra-spanner-src-errors-rs]: `src/rs/vertebra-spanner/src/errors.rs` — PyOnceLock SpannerError and SpannerAbortedError exception bridge.
 [^src-vertebra-spanner-src-arrow-ipc-rs]: `src/rs/vertebra-spanner/src/arrow_ipc.rs` — Unregistered /vtb-sp-* VTBARROW cursor writer.
 [^src-vertebra-spanner-src-codec-rs]: `src/rs/vertebra-spanner/src/codec.rs` — SpannerDialect, mutations, staleness bounds, and Spangres placeholders.
@@ -163,6 +171,7 @@ sources:
 [^src-db-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — BigQueryToolProvider operations and billing-cap enforcement.
 [^src-db-spanner-init-py]: `src/py/vertebra/db/adapters/spanner/__init__.py` — SpannerConfig, SpannerCore, and Sync/AsyncSpannerDriver exports.
 [^src-db-spanner-mutations-py]: `src/py/vertebra/db/adapters/spanner/mutations.py` — Mutation, MutationGroup, and StalenessBound structs.
-[^src-db-spanner-transactions-py]: `src/py/vertebra/db/adapters/spanner/transactions.py` — Sync/AsyncSpannerSnapshot and Sync/AsyncSpannerTransaction contexts.
+[^src-db-spanner-transactions-py]: `src/py/vertebra/db/adapters/spanner/transactions.py` — Sync/AsyncSpannerSnapshot and interactive Sync/AsyncSpannerTransaction contexts.
+[^src-db-spanner-queue-py]: `src/py/vertebra/db/adapters/spanner/queue.py` — SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres.
 [^src-db-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — SpannerToolProvider operations and staleness snapshot policies.
 [^src-typing-public-py]: `src/py/vertebra/typing.py` — Neutral ToolProvider protocol and ToolPolicyError exception.

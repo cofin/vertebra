@@ -1,0 +1,267 @@
+"""DuckDB synchronous and asynchronous SQLSpec driver adapters over `vertebra._duckdb`."""
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from sqlspec.core import SQL, ParameterStyle, StatementConfig
+from sqlspec.driver import ExecutionResult, validate_savepoint_name
+
+from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
+from vertebra.extensions.sqlspec.adapters.duckdb.core import (
+    build_duckdb_copy_sql,
+    default_statement_config,
+    description_has_arrow_divergent_types,
+    duckdb_copy_filename_follows_query,
+    map_duckdb_exception,
+    normalize_duckdb_many_parameters,
+    normalize_duckdb_parameters,
+    order_duckdb_copy_parameters,
+)
+from vertebra.extensions.sqlspec.adapters.duckdb.data_dictionary import (
+    DuckDBAsyncDataDictionary,
+    DuckDBSyncDataDictionary,
+)
+
+__all__ = ("DuckDBAsyncDriver", "DuckDBSyncDriver")
+
+
+class DuckDBSyncDriver(BaseSyncDriver):
+    """Synchronous DuckDB SQLSpec driver backed by Vertebra `SyncDuckDBDriver`."""
+
+    dialect: str = "duckdb"
+    _execution_parameter_style = ParameterStyle.QMARK
+
+    def __init__(
+        self,
+        connection: Any,
+        statement_config: StatementConfig | None = None,
+        driver_features: dict[str, Any] | None = None,
+        observability: Any = None,
+        *,
+        shared_pool: bool = False,
+    ) -> None:
+        """Initialize the synchronous DuckDB driver adapter preserving native Python `fetchall()` fidelity."""
+        super().__init__(
+            connection,
+            statement_config=statement_config,
+            driver_features=driver_features,
+            observability=observability,
+            shared_pool=shared_pool,
+        )
+        self._data_dictionary: DuckDBSyncDataDictionary | None = None
+
+    @property
+    def data_dictionary(self) -> DuckDBSyncDataDictionary:
+        """Return lazily instantiated synchronous DuckDB data dictionary."""
+        if self._data_dictionary is None:
+            self._data_dictionary = DuckDBSyncDataDictionary()
+        return self._data_dictionary
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build default DuckDB `StatementConfig` supporting `?` and `$1` placeholders."""
+        return default_statement_config()
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_duckdb_exception(exc)
+
+    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
+        _ = (sql, statement)
+        return sql, normalize_duckdb_parameters(params)
+
+    def create_savepoint(self, name: str) -> None:
+        """Create a DuckDB transactional savepoint."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "savepoint", None)
+        if callable(fn):
+            fn(valid)
+            return
+        self.connection.execute(f"SAVEPOINT {valid}")
+
+    def release_savepoint(self, name: str) -> None:
+        """Release a DuckDB transactional savepoint."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "release_savepoint", None)
+        if callable(fn):
+            fn(valid)
+            return
+        self.connection.execute(f"RELEASE SAVEPOINT {valid}")
+
+    def rollback_to_savepoint(self, name: str) -> None:
+        """Roll back to a DuckDB transactional savepoint."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "rollback_to_savepoint", None)
+        if callable(fn):
+            fn(valid)
+            return
+        self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
+
+    def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Execute a parameterized batch write against DuckDB using normalized tuples."""
+        sql, prepared = self._compile_for_native(statement)
+        bound_sets = normalize_duckdb_many_parameters(prepared)
+        if not bound_sets:
+            return self.create_execution_result(cursor, rowcount_override=0)
+        affected = int(cursor.execute_many(sql, bound_sets))
+        return self.create_execution_result(cursor, rowcount_override=affected)
+
+    def prepare_copy_to_query(
+        self,
+        statement: Any,
+        *parameters: Any,
+        destination: str,
+        file_format: str = "parquet",
+        filename_follows_query: bool | None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Compile `statement` into DuckDB `COPY (<query>) TO ?` with DuckDB 2.0+ lexical bind ordering."""
+        cfg = statement_config or self.statement_config
+        prepared = self.prepare_statement(statement, parameters, statement_config=cfg, kwargs=kwargs)
+        compiled_sql, compiled_params = self._compile_for_native(prepared)
+        copy_sql = build_duckdb_copy_sql(compiled_sql, file_format)
+        if copy_sql is None:
+            msg = f"Cannot wrap DuckDB COPY statement for format={file_format!r}: {compiled_sql!r}"
+            raise ValueError(msg)
+        seq_params: Sequence[Any]
+        if compiled_params is None:
+            seq_params = ()
+        elif isinstance(compiled_params, Mapping):
+            seq_params = tuple(compiled_params.values())
+        elif isinstance(compiled_params, Sequence) and not isinstance(compiled_params, (str, bytes)):
+            seq_params = compiled_params
+        else:
+            seq_params = (compiled_params,)
+        ordered = order_duckdb_copy_parameters(
+            seq_params,
+            destination,
+            filename_follows_query=(
+                duckdb_copy_filename_follows_query() if filename_follows_query is None else filename_follows_query
+            ),
+        )
+        return copy_sql, ordered
+
+    def should_bypass_arrow_materialization(self, description: Sequence[Any] | None) -> bool:
+        """Return True when DuckDB's Arrow export diverges from native Python `fetchall()` fidelity."""
+        return description_has_arrow_divergent_types(description)
+
+
+class DuckDBAsyncDriver(BaseAsyncDriver):
+    """Asynchronous DuckDB SQLSpec driver backed by Vertebra `AsyncDuckDBDriver`."""
+
+    dialect: str = "duckdb"
+    _execution_parameter_style = ParameterStyle.QMARK
+
+    def __init__(
+        self,
+        connection: Any,
+        statement_config: StatementConfig | None = None,
+        driver_features: dict[str, Any] | None = None,
+        observability: Any = None,
+        *,
+        shared_pool: bool = False,
+    ) -> None:
+        """Initialize the asynchronous DuckDB driver adapter preserving native Python `fetchall()` fidelity."""
+        super().__init__(
+            connection,
+            statement_config=statement_config,
+            driver_features=driver_features,
+            observability=observability,
+            shared_pool=shared_pool,
+        )
+        self._data_dictionary: DuckDBAsyncDataDictionary | None = None
+
+    @property
+    def data_dictionary(self) -> DuckDBAsyncDataDictionary:
+        """Return lazily instantiated asynchronous DuckDB data dictionary."""
+        if self._data_dictionary is None:
+            self._data_dictionary = DuckDBAsyncDataDictionary()
+        return self._data_dictionary
+
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build default DuckDB `StatementConfig` supporting `?` and `$1` placeholders."""
+        return default_statement_config()
+
+    def _map_exception(self, exc: BaseException) -> Exception | None:
+        return map_duckdb_exception(exc)
+
+    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
+        _ = (sql, statement)
+        return sql, normalize_duckdb_parameters(params)
+
+    async def create_savepoint(self, name: str) -> None:
+        """Create a DuckDB transactional savepoint asynchronously."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "savepoint", None)
+        if callable(fn):
+            await fn(valid)
+            return
+        await self.connection.execute(f"SAVEPOINT {valid}")
+
+    async def release_savepoint(self, name: str) -> None:
+        """Release a DuckDB transactional savepoint asynchronously."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "release_savepoint", None)
+        if callable(fn):
+            await fn(valid)
+            return
+        await self.connection.execute(f"RELEASE SAVEPOINT {valid}")
+
+    async def rollback_to_savepoint(self, name: str) -> None:
+        """Roll back to a DuckDB transactional savepoint asynchronously."""
+        valid = validate_savepoint_name(name)
+        fn = getattr(self.connection, "rollback_to_savepoint", None)
+        if callable(fn):
+            await fn(valid)
+            return
+        await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
+
+    async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Execute a parameterized batch write asynchronously against DuckDB using normalized tuples."""
+        sql, prepared = self._compile_for_native(statement)
+        bound_sets = normalize_duckdb_many_parameters(prepared)
+        if not bound_sets:
+            return self.create_execution_result(cursor, rowcount_override=0)
+        affected = int(await cursor.execute_many(sql, bound_sets))
+        return self.create_execution_result(cursor, rowcount_override=affected)
+
+    def prepare_copy_to_query(
+        self,
+        statement: Any,
+        *parameters: Any,
+        destination: str,
+        file_format: str = "parquet",
+        filename_follows_query: bool | None = None,
+        statement_config: StatementConfig | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Compile `statement` into DuckDB `COPY (<query>) TO ?` with DuckDB 2.0+ lexical bind ordering."""
+        cfg = statement_config or self.statement_config
+        prepared = self.prepare_statement(statement, parameters, statement_config=cfg, kwargs=kwargs)
+        compiled_sql, compiled_params = self._compile_for_native(prepared)
+        copy_sql = build_duckdb_copy_sql(compiled_sql, file_format)
+        if copy_sql is None:
+            msg = f"Cannot wrap DuckDB COPY statement for format={file_format!r}: {compiled_sql!r}"
+            raise ValueError(msg)
+        seq_params: Sequence[Any]
+        if compiled_params is None:
+            seq_params = ()
+        elif isinstance(compiled_params, Mapping):
+            seq_params = tuple(compiled_params.values())
+        elif isinstance(compiled_params, Sequence) and not isinstance(compiled_params, (str, bytes)):
+            seq_params = compiled_params
+        else:
+            seq_params = (compiled_params,)
+        ordered = order_duckdb_copy_parameters(
+            seq_params,
+            destination,
+            filename_follows_query=(
+                duckdb_copy_filename_follows_query() if filename_follows_query is None else filename_follows_query
+            ),
+        )
+        return copy_sql, ordered
+
+    def should_bypass_arrow_materialization(self, description: Sequence[Any] | None) -> bool:
+        """Return True when DuckDB's Arrow export diverges from native Python `fetchall()` fidelity."""
+        return description_has_arrow_divergent_types(description)

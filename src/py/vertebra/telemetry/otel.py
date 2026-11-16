@@ -65,7 +65,8 @@ class TraceContext(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_ha
     @staticmethod
     def current() -> TraceContext | None:
         """Return the active TraceContext from the current execution context."""
-        return _ACTIVE_TRACE_CTX.get()
+        val = _ACTIVE_TRACE_CTX.get()
+        return val if isinstance(val, TraceContext) else None
 
     @staticmethod
     def set_current(ctx: TraceContext | None) -> Token[TraceContext | None]:

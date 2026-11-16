@@ -247,7 +247,7 @@ def test_python_build_info_detects_315_tail_call_jit_freethreaded_and_frame_poin
 
     monkeypatch.setattr(mod, "_query_sysconfig", lambda _exe: dict(synthetic_vars))
     monkeypatch.setattr(mod, "_query_version", lambda _exe: "3.15.0rc3")
-    monkeypatch.setattr(mod.sys, "_jit", fake_jit, raising=False)
+    monkeypatch.setattr("tools.pgo.python_pgo.sys._jit", fake_jit, raising=False)
     info = mod.detect_python_build()
     assert info.version == "3.15.0rc3"
     assert info.is_pgo is True
@@ -324,7 +324,7 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
         assert cwd is not None
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr("tools.pgo.rust_pgo.subprocess.run", fake_run)
     build_instrumented_extensions(cfg)
     assert len(recorded_cmds) == extension_count
     assert "-m" not in recorded_cmds[0][0]
@@ -377,7 +377,7 @@ def test_build_optimized_falls_back_when_profdata_invalid(
         executed.append((list(cmd), env))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr("tools.pgo.rust_pgo.subprocess.run", fake_run)
     monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "target-dir"))
     cfg = RustPGOConfig(profile_dir=tmp_path / "raw", llvm_profdata_bin="llvm-profdata")
 
@@ -436,7 +436,7 @@ def test_two_phase_pgo_pipeline_and_cli_orchestration(
                 out_file.write_bytes(b"MERGED_LLVM_PROFDATA")
         return subprocess.CompletedProcess(cmd, 0, stdout="Total functions: 12\n", stderr="")
 
-    monkeypatch.setattr(tools_rust_pgo.subprocess, "run", fake_run)
+    monkeypatch.setattr("tools.pgo.rust_pgo.subprocess.run", fake_run)
 
     observed_profile_env: list[str] = []
 
@@ -644,8 +644,11 @@ def test_pyproject_sqlalchemy_dialect_entry_points_resolve(engine: str, suffix: 
         ("mysql", "vertebra._mysql"),
         ("oracle", "vertebra._oracle"),
         ("postgres", "vertebra._postgres"),
+        ("redis", "vertebra._redis"),
         ("spanner", "vertebra._spanner"),
+        ("sqlite", "vertebra._sqlite"),
         ("storage", "vertebra._storage"),
+        ("valkey", "vertebra._valkey"),
     ],
 )
 def test_optional_extension_pyproject_isolation_and_bundler_extra(
@@ -674,8 +677,11 @@ def test_optional_extension_pyproject_isolation_and_bundler_extra(
             "mysql",
             "oracle",
             "postgres",
+            "redis",
             "spanner",
+            "sqlite",
             "storage",
+            "valkey",
             "vertebra",
         )
         if other != pkg_slug
@@ -1181,15 +1187,14 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
 
     static_py = tmp_path / "static-python"
     shared_py = tmp_path / "uv-shared-python"
-    monkeypatch.setattr(build_server_binary_mod.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr("tools.scripts.build_server_binary.shutil.which", lambda _name: "/usr/bin/uv")
     monkeypatch.setattr(
         build_server_binary_mod,
         "_probe_python_shared_info",
         lambda exe: (Path(exe) == shared_py, "/opt/py/lib", "libpython3.12.so.1.0"),
     )
     monkeypatch.setattr(
-        build_server_binary_mod.subprocess,
-        "run",
+        "tools.scripts.build_server_binary.subprocess.run",
         lambda cmd, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=f"{shared_py}\n" if cmd[:3] == ["/usr/bin/uv", "python", "find"] else "",
@@ -1198,7 +1203,7 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
     )
     assert builder.select_build_python(static_py) == shared_py
 
-    monkeypatch.setattr(build_server_binary_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("tools.scripts.build_server_binary.shutil.which", lambda _name: None)
     with pytest.raises(SystemExit, match="statically linked"):
         builder.select_build_python(static_py)
 
@@ -1216,7 +1221,7 @@ def test_server_binary_builder_targets_python_fallback_macos_and_repair(
         recorded_cargo["PYO3_PYTHON"] = env["PYO3_PYTHON"]
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(build_server_binary_mod.subprocess, "run", fake_cargo_run)
+    monkeypatch.setattr("tools.scripts.build_server_binary.subprocess.run", fake_cargo_run)
     staged = builder.build(build_python=shared_py)
     assert staged == tmp_path / "src" / "py" / "vertebra" / "bin" / "vertebra-server"
     assert staged.read_bytes() == b"ELF-SERVER"
@@ -1248,8 +1253,7 @@ def test_probe_python_shared_info_handles_standalone_and_static_builds(
         (libdir / ldlibrary).write_bytes(b"ELF")
     payload = {"enable_shared": enable_shared, "libdir": str(libdir), "ldlibrary": ldlibrary}
     monkeypatch.setattr(
-        build_server_binary_mod.subprocess,
-        "run",
+        "tools.scripts.build_server_binary.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
     )
     is_shared, probed_libdir, probed_ldlibrary = build_server_binary_mod._probe_python_shared_info(
@@ -1418,7 +1422,7 @@ def test_smoke_vtb_run_scenarios_wheel_inspection_and_early_exit(
             _ = timeout
             return "boot output", "missing shared libpython"
 
-    monkeypatch.setattr(smoke_vtb_run_mod.subprocess, "Popen", lambda *_a, **_kw: _ExitedProc())
+    monkeypatch.setattr("tools.scripts.smoke_vtb_run.subprocess.Popen", lambda *_a, **_kw: _ExitedProc())
     scenario = SmokeScenario(name="embedded_unary", args=("run", "smoke_app:app"), request_path="/health")
     with pytest.raises(RuntimeError, match="missing shared libpython"):
         smoke.run_scenario(scenario)

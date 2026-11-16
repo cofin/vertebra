@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vertebra._vertebra import (
     AsyncGcpTokenCache,
+    GcpTokenSnapshot,
     SyncGcpTokenCache,
     VectorBatchView,
     VectorView,
@@ -22,7 +23,27 @@ from vertebra.utils.text import validate_identifier
 if TYPE_CHECKING:
     from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
 
-__all__ = ("OracleEmbeddingPushdown",)
+__all__ = ("OracleEmbeddingPushdown", "OracleSelectPort", "OracleTokenCachePort")
+
+
+class OracleSelectPort(Protocol):
+    """Structural synchronous SQL port accepted by ``OracleEmbeddingPushdown``."""
+
+    def select(self, sql: str, parameters: dict[str, Any], /) -> Sequence[Any]:
+        """Execute ``sql`` and return row records."""
+        ...
+
+    def execute(self, sql: str, parameters: dict[str, Any], /) -> Any:
+        """Execute ``sql`` without returning rows."""
+        ...
+
+
+class OracleTokenCachePort(Protocol):
+    """Structural OAuth token cache port accepted by ``OracleEmbeddingPushdown``."""
+
+    def get_token(self) -> GcpTokenSnapshot | Awaitable[GcpTokenSnapshot]:
+        """Return a fresh OAuth access token snapshot."""
+        ...
 
 
 class OracleEmbeddingPushdown:
@@ -32,7 +53,7 @@ class OracleEmbeddingPushdown:
 
     def __init__(
         self,
-        driver: AsyncOracleDriver | SyncOracleDriver,
+        driver: AsyncOracleDriver | SyncOracleDriver | AsyncDatabaseDriver[Any] | OracleSelectPort,
         model: str = "gemini-embedding-001",
         *,
         dimensions: int = 768,
@@ -42,7 +63,7 @@ class OracleEmbeddingPushdown:
         location: str = "us-central1",
         credential_name: str = "VERTEX_CRED",
         endpoint_url: str | None = None,
-        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
+        token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | OracleTokenCachePort | None = None,
         normalize: bool = True,
     ) -> None:
         """Initialize the Oracle 26ai SQL pushdown embedder with `:predict` and 128-byte URL guards."""
@@ -77,7 +98,7 @@ class OracleEmbeddingPushdown:
             self._endpoint_url = endpoint_url or ""
 
     @property
-    def driver(self) -> AsyncOracleDriver | SyncOracleDriver:
+    def driver(self) -> AsyncOracleDriver | SyncOracleDriver | AsyncDatabaseDriver[Any] | OracleSelectPort:
         """Return the database driver."""
         return self._driver
 

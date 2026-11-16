@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
+from vertebra.db.registry import SCHEME_REGISTRY
 from vertebra.extensions.alchemy.cache import (
     AsyncCacheManager,
     CacheConfig,
@@ -54,18 +55,29 @@ __all__ = (
 
 
 def normalize_alchemy_url(connection_string: str, *, is_async: bool = True) -> str:
-    """Normalize shorthand `bigquery://`, `spanner://`, and `spangres://` URLs to `+vtb` dialects."""
+    """Normalize shorthand URLs across registered database configs into canonical `+vtb` / `+vtb_async` dialect URLs."""
     if "://" not in connection_string:
         return connection_string
     scheme, rest = connection_string.split("://", 1)
+    if "+" in scheme:
+        return connection_string
     lowered = scheme.lower()
     driver_suffix = "+vtb_async" if is_async else "+vtb"
-    if lowered in ("bigquery", "bq"):
-        return f"bigquery{driver_suffix}://{rest}"
-    if lowered == "spanner":
-        return f"spanner{driver_suffix}://{rest}"
-    if lowered == "spangres":
-        return f"spangres{driver_suffix}://{rest}"
+    cfg_cls = SCHEME_REGISTRY.get(lowered)
+    if cfg_cls is not None:
+        target_engine = "spangres" if lowered == "spangres" else cfg_cls.url_schemes[0]
+        if target_engine in (
+            "postgresql",
+            "mysql",
+            "sqlite",
+            "oracle",
+            "mssql",
+            "duckdb",
+            "bigquery",
+            "spanner",
+            "spangres",
+        ):
+            return f"{target_engine}{driver_suffix}://{rest}"
     return connection_string
 
 

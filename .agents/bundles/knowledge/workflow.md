@@ -13,15 +13,15 @@ generated:
   by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-16T06:35:00Z"
+    commit: d4ffd666
+  - by: agent:flow-archive
+    at: "2026-11-16T04:10:00Z"
+    commit: a13ed018
   - by: agent:flow-archive
     at: "2026-11-14T22:49:00Z"
-    commit: f277a29b
-  - by: agent:flow-executor
-    at: "2026-11-14T22:27:00Z"
-    commit: afa74da5
-  - by: agent:flow-setup
-    at: "2026-11-14T18:43:00Z"
-    commit: 1b191388
+    commit: ff9f78cb
 sources:
   - id: src-makefile
     resource: Makefile
@@ -45,7 +45,7 @@ sources:
 <!-- truth: start -->
 - Specifications (`specs/<flow_id>/spec.md`), chapter specs (`chapters/<ch_id>/spec.md`), and task worksheets (`tasks/<id>-<slug>.md`) are the sole authority for Flow state and commits.
 - Batch edits across the active chapter (`1..4` tasks) in a single warm pass so shared files are edited once, then validate once with the **Fast Chapter Gate** (`< 60s`: `make lint-all` + targeted unit test file or `cargo test -p <crate>`); reserve **Full Release Gate** runs (`make check`, `> 60s` or Docker-backed suites) for `/flow:finish` or CI.
-- Rebuild PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`) via `make dev` (or `uv run --no-sync maturin develop --uv -m src/rs/<crate>/Cargo.toml`) after any Rust edit before running `pytest` or `stubtest`.
+- Rebuild PyO3 extensions (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`, `_sqlite`, `_redis`, `_valkey`) via `make dev` (or `uv run --no-sync maturin develop --uv -m src/rs/<crate>/Cargo.toml`) after any Rust edit before running `pytest` or `stubtest`.
 - Test through confirmed public seams in existing canonical module test files; never mock the System Under Test, write tautological assertions, or create standalone `test_*remediation*.py` / `test_*audit*.py` files.
 - In linked `git worktree` checkouts, reuse the symlinked `.venv` via `uv run --no-sync` without running `make install`; edit worktree `.agents/` directly when `ignore_policy` is `shared` (or the primary checkout's `.agents/` when `local-only`).
 - Subdirectory `index.md` files and `log.md` never carry YAML frontmatter, Markdown bodies never use standalone `---` horizontal rules, chapters/tasks are never marked `deferred` without `deferred_by: "user"`, Git tags are never created or mutated, and all changes land on dedicated branches with signed conventional commits (`commit.gpgsign=true`).
@@ -59,14 +59,14 @@ sources:
 # 1. Bootstrap & Native PyO3 Extension Rebuild (primary checkout; symlinked in linked worktrees)
 make setup-env                                                        # Configure public registries where needed; no-op elsewhere
 make install                                                          # destroy + clean + setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, ts-install/build, dev
-make dev                                                              # cargo build non-extension crates + maturin develop across _vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres
+make dev                                                              # cargo build non-extension crates + maturin develop across _vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres, _sqlite, _redis, _valkey
 make upgrade                                                          # uv lock --upgrade + uv sync, cargo update, bun update, pre-commit autoupdate
 make clean                                                            # Remove Python/Rust/TS build artifacts and caches (keeps .venv)
 make release bump=patch                                               # Synchronize versions across manifests via bump-my-version
 
 # 2. Fast Chapter Gate (< 60s — run once per chapter batch) & Focused Suites
-make lint-all                                                         # Read-only CI lint, Ruff, Mypy, stubtest, rustfmt --check, Clippy (--features tls,http3,compression,gcp), review-check
-make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy + stubtest + review-check
+make lint-all                                                         # Read-only CI lint, Ruff, Mypy (src/py/vertebra + src/py/tests/{unit,integration} + tools + docs/examples), stubtest, rustfmt --check, Clippy, review-check
+make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy (including tests & benchmarks) + stubtest + review-check
 make review-check                                                     # Validate review capability manifests, skills, agents, OKF bundles, and privacy constraints
 make review-route                                                     # Route changed files to owning review areas and shards (BASE=origin/main)
 uv run --no-sync pytest src/py/tests/unit/server/test_runner.py -q    # Targeted Python unit test file
@@ -74,12 +74,15 @@ cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core         # Targeted
 make ts-test                                                          # Vitest suite with isolated --localstorage-file
 
 # 3. Scoped Engine & Documentation Gates
+make sqlite-test     # vertebra-sqlite Rust tests, stubtest, and Python unit/conformance suites (make sqlite-wheel-check verifies wheel isolation)
 make duckdb-test     # vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel isolation)
 make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
 make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
 make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
-make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle> [VERSION=<v>] required; zero-skip ConformanceGate)
+make redis-test      # vertebra-redis Rust tests, stubtest, and Python Redis suites (make redis-wheel-check verifies wheel isolation)
+make valkey-test     # vertebra-valkey Rust tests, stubtest, and Python Valkey suites (make valkey-wheel-check verifies wheel isolation)
+make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle|redis|sqlite|valkey> [VERSION=<v>] required; zero-skip ConformanceGate)
 make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
 make docs-check      # make docs + live zensical serve HTTP 200 check (make docs-serve, make docs-clean, make docs-rust)
@@ -96,8 +99,8 @@ make bench                                                            # make bui
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed extras with `uv run --no-sync` when verifying an existing `.venv` or linked `git worktree`. After any `.rs` edit in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, or `vertebra-postgres`, rebuild the touched extension (or run `make dev`) before `pytest` or `mypy.stubtest`.
-2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files.
+1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed extras with `uv run --no-sync` when verifying an existing `.venv` or linked `git worktree`. After any `.rs` edit in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-sqlite`, `vertebra-redis`, or `vertebra-valkey`, rebuild the touched extension (or run `make dev`) before `pytest` or `mypy.stubtest`.
+2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` (`make core-wheel-check`) while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files (`make {sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey}-wheel-check`).
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
 5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.1.0; python_version < '3.14'` strictly inside `[dependency-groups].bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).

@@ -339,6 +339,7 @@ def test_bigquery_config_dsn_and_registry() -> None:
     dsn = "bigquery://analytics-proj/events_ds?rest_endpoint=http://127.0.0.1:9050"
     reg.register("bq", dsn)
     fp = DatabaseRegistry.pool_fingerprint(dsn)
+    assert fp is not None
     assert fp[0] == "bigquery"
     assert fp[1] == "analytics-proj"
     assert fp[2] == "events_ds"
@@ -579,9 +580,10 @@ class _StubBigQuerySelectDriver:
 
 def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
     """BigQuery SQL builders validate model, table, column, and distance values."""
+    stub_port = _StubBigQuerySelectDriver([])
     with pytest.raises(ValueError, match="model_endpoint"):
-        BigQueryEmbeddingPushdown(object(), model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
-    embedder = BigQueryEmbeddingPushdown(object(), model="analytics-proj.analytics.text_embedding_model")
+        BigQueryEmbeddingPushdown(stub_port, model="analytics.model`; DROP TABLE x; --").build_generate_embedding_sql()
+    embedder = BigQueryEmbeddingPushdown(stub_port, model="analytics-proj.analytics.text_embedding_model")
     assert "MODEL `analytics-proj.analytics.text_embedding_model`" in embedder.build_generate_embedding_sql()
     search_sql = embedder.build_vector_search_sql("my-proj.analytics.docs-v1")
     assert "TABLE `my-proj`.`analytics`.`docs-v1`, " in search_sql
@@ -591,15 +593,16 @@ def test_bigquery_embedder_builders_reject_invalid_identifiers() -> None:
         embedder.build_vector_search_sql("my-proj.bad-dataset.docs")
     with pytest.raises(ValueError, match="embedding_column"):
         embedder.build_vector_search_sql("analytics.docs", embedding_column="emb' OR '1")
+    bad_dist: Any = "MANHATTAN"
     with pytest.raises(ValueError, match="distance_type"):
-        embedder.build_vector_search_sql("analytics.docs", distance_type="MANHATTAN")
+        embedder.build_vector_search_sql("analytics.docs", distance_type=bad_dist)
 
 
 @pytest.mark.parametrize("use_ai_function", [False, True], ids=["ml-generate", "ai-generate"])
 def test_bigquery_embedder_generate_sql_orders_rows_by_input_index(use_ai_function: bool) -> None:
     """The generated SQL carries the input offset through the model and orders the output by it."""
     sql = BigQueryEmbeddingPushdown(
-        object(), model="analytics.text_embedding_model", use_ai_function=use_ai_function
+        _StubBigQuerySelectDriver([]), model="analytics.text_embedding_model", use_ai_function=use_ai_function
     ).build_generate_embedding_sql()
     assert sql.startswith("SELECT ") and ", idx FROM " in sql
     assert "(SELECT content, idx FROM UNNEST(@texts) AS content WITH OFFSET AS idx)" in sql
@@ -728,7 +731,7 @@ async def test_bigquery_tool_provider_enforces_native_request_billing_caps(
         rest_endpoint=f"http://{server.host_port}",
         maximum_bytes_billed=700,
     )
-    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    driver: Any = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
     try:
         if asynchronous:
             await driver.select("SELECT id, name, score FROM metrics", maximum_bytes_billed=300)
@@ -783,7 +786,7 @@ async def test_bigquery_tool_provider_rejects_non_positive_caller_caps(
     config = BigQueryConfig(
         project_id="test-proj", rest_endpoint=f"http://{server.host_port}", maximum_bytes_billed=700
     )
-    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    driver: Any = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
     try:
         tool = build_tools(BigQueryToolProvider(driver, maximum_bytes_billed=500, enforce_dry_run_limit=False))[
             "bigquery_query"
@@ -814,7 +817,7 @@ async def test_bigquery_tool_provider_rejects_non_positive_configured_caps(
         rest_endpoint=f"http://{server.host_port}",
         maximum_bytes_billed=native_cap,
     )
-    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    driver: Any = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
     try:
         tool = build_tools(
             BigQueryToolProvider(driver, maximum_bytes_billed=provider_cap, enforce_dry_run_limit=False)
@@ -898,7 +901,7 @@ async def test_bigquery_load_from_arrow_validates_identifiers_before_io(
     """load_from_arrow validates table and column identifiers before touching the wire client."""
     server = _MockBigQueryRestServer()
     config = BigQueryConfig(project_id="test-proj", dataset_id="analytics", rest_endpoint=f"http://{server.host_port}")
-    driver = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
+    driver: Any = AsyncBigQueryDriver(config) if asynchronous else SyncBigQueryDriver(config)
     try:
         with pytest.raises(ValueError):
             if asynchronous:
@@ -1219,22 +1222,34 @@ def test_bigquery_select_one_forwards_maximum_bytes_billed() -> None:
         def query(
             self,
             sql: str,
-            params_json: str | None,
-            session_id: str | None,
-            create_session: bool,
-            destination_table: str | None,
-            write_disposition: str | None,
-            maximum_bytes_billed: int | None,
-            job_timeout_ms: int,
-            priority: str,
-            labels: dict[str, str] | None,
+            params_json: str | None = None,
+            session_id: str | None = None,
+            create_session: bool = False,
+            destination_table: str | None = None,
+            write_disposition: str | None = None,
+            maximum_bytes_billed: int | None = None,
+            job_timeout_ms: int | None = None,
+            priority: str | None = None,
+            labels: dict[str, str] | None = None,
         ) -> dict[str, Any]:
+            _ = (
+                sql,
+                params_json,
+                session_id,
+                create_session,
+                destination_table,
+                write_disposition,
+                job_timeout_ms,
+                priority,
+                labels,
+            )
             captured_caps.append(maximum_bytes_billed)
             return {"columns": ["id"], "rows": [[1]], "total_rows": 1}
 
     cfg = BigQueryConfig(project_id="test-proj", maximum_bytes_billed=10_000)
     driver = SyncBigQueryDriver(cfg)
-    driver._client = _RecordingBqClient()
+    rec_client: Any = _RecordingBqClient()
+    driver._client = rec_client
     row = driver.select_one("SELECT 1 AS id", maximum_bytes_billed=0)
     assert row == {"id": 1}
     row_opt = driver.select_one_or_none("SELECT 1 AS id", maximum_bytes_billed=250)

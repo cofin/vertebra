@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-import sqlite3
-from typing import TYPE_CHECKING, Any, Final
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, Final, Self, cast
 
+import vertebra._vertebra as _native
 from vertebra._vertebra import classify_sql_statement
+from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.db.registry import DatabaseRegistry
 
 if TYPE_CHECKING:
@@ -82,13 +84,54 @@ class NotSupportedError(DatabaseError):
 Binary = bytes
 
 
+def _translate_native_error(exc: Exception) -> Exception:
+    """Map a native vertebra._vertebra exception to its corresponding PEP 249 dbapi.*Error."""
+    if isinstance(exc, (Error, Warning)):
+        return exc
+    target_cls: type[Error]
+    if isinstance(exc, _native.IntegrityError):
+        target_cls = IntegrityError
+    elif isinstance(exc, _native.OperationalError):
+        target_cls = OperationalError
+    elif isinstance(exc, _native.ProgrammingError):
+        target_cls = ProgrammingError
+    elif isinstance(exc, _native.DataError):
+        target_cls = DataError
+    elif isinstance(exc, _native.NotSupportedError):
+        target_cls = NotSupportedError
+    elif isinstance(exc, _native.InterfaceError):
+        target_cls = InterfaceError
+    elif isinstance(exc, _native.InternalError):
+        target_cls = InternalError
+    elif isinstance(exc, _native.DatabaseError):
+        target_cls = DatabaseError
+    else:
+        return exc
+    new_exc = target_cls(str(exc))
+    for attr in ("sqlstate", "code", "is_transient"):
+        if hasattr(exc, attr):
+            setattr(new_exc, attr, getattr(exc, attr))
+    return new_exc
+
+
+@contextlib.contextmanager
+def _translate_errors() -> Iterator[None]:
+    """Context manager catching native driver DatabaseError exceptions and re-raising PEP 249 errors."""
+    try:
+        yield
+    except (Error, Warning):
+        raise
+    except _native.DatabaseError as exc:
+        raise _translate_native_error(exc) from exc
+
+
 def is_insert_sql(operation: str) -> bool:
-    """Return True when the leading SQL verb in ``operation`` is INSERT."""
+    """Return True when the leading SQL verb in operation is INSERT."""
     return classify_sql_statement(operation)[1]
 
 
 def is_read_only_sql(operation: str) -> bool:
-    """Return True when the leading SQL verb is read-only query/introspection."""
+    """Return True when the leading SQL verb is read-only query or introspection."""
     return classify_sql_statement(operation)[2]
 
 
@@ -112,7 +155,7 @@ def coerce_dbapi_rows_and_desc(
 
 
 def is_row_returning_sql(operation: str) -> bool:
-    """Return True when ``operation`` starts with a query keyword or has a standalone ``RETURNING`` clause."""
+    """Return True when operation starts with a query keyword or has a standalone RETURNING clause."""
     return classify_sql_statement(operation)[0]
 
 
@@ -147,28 +190,23 @@ class SyncDBAPICursor:
         """Execute a SQL statement and buffer plain-tuple rows."""
         self._require_open()
         self.lastrowid = None
-        if self._raw_cursor is not None:
-            self._raw_cursor.execute(operation, parameters)
-            self.description = getattr(self._raw_cursor, "description", None)
-            self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
-            raw_rowid = getattr(self._raw_cursor, "lastrowid", None)
-            self.lastrowid = int(raw_rowid) if is_insert_sql(operation) and raw_rowid is not None else None
-            return self
+        with _translate_errors():
+            if not is_row_returning_sql(operation):
+                affected, captured_rowid = self._conn.execute_dml_with_lastrowid(operation, parameters)
+                self._rows = []
+                self.description = None
+                self._pos = 0
+                self.rowcount = affected
+                self.lastrowid = (
+                    captured_rowid if captured_rowid is not None else self._resolve_driver_lastrowid(operation)
+                )
+                return self
 
-        if not is_row_returning_sql(operation):
-            affected, captured_rowid = self._conn.execute_dml_with_lastrowid(operation, parameters)
-            self._rows = []
-            self.description = None
+            self._rows, self.description = self._conn.execute_with_description(operation, parameters)
             self._pos = 0
-            self.rowcount = affected
-            self.lastrowid = captured_rowid if captured_rowid is not None else self._resolve_driver_lastrowid(operation)
+            self.rowcount = len(self._rows)
+            self.lastrowid = self._resolve_driver_lastrowid(operation)
             return self
-
-        self._rows, self.description = self._conn.execute_with_description(operation, parameters)
-        self._pos = 0
-        self.rowcount = len(self._rows)
-        self.lastrowid = self._resolve_driver_lastrowid(operation)
-        return self
 
     def executemany(
         self,
@@ -178,41 +216,32 @@ class SyncDBAPICursor:
         """Execute a parameterized SQL statement across a sequence of parameter sets."""
         self._require_open()
         self.lastrowid = None
-        if self._raw_cursor is not None:
-            self._raw_cursor.executemany(operation, seq_of_parameters)
-            self.description = getattr(self._raw_cursor, "description", None)
-            self.rowcount = getattr(self._raw_cursor, "rowcount", -1)
-            self.lastrowid = getattr(self._raw_cursor, "lastrowid", None)
-            return self
+        with _translate_errors():
+            if not is_row_returning_sql(operation):
+                affected = self._conn.execute_many_dml(operation, seq_of_parameters)
+                self._rows = []
+                self.description = None
+                self._pos = 0
+                self.rowcount = affected
+                return self
 
-        if not is_row_returning_sql(operation):
-            affected = self._conn.execute_many_dml(operation, seq_of_parameters)
-            self._rows = []
-            self.description = None
+            total = 0
+            last_rows: list[tuple[Any, ...]] = []
+            last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
+            for params in seq_of_parameters:
+                rows, desc = self._conn.execute_with_description(operation, params)
+                total += len(rows)
+                last_rows = rows
+                last_desc = desc
+            self._rows = last_rows
+            self.description = last_desc
             self._pos = 0
-            self.rowcount = affected
+            self.rowcount = total
             return self
-
-        total = 0
-        last_rows: list[tuple[Any, ...]] = []
-        last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
-        for params in seq_of_parameters:
-            rows, desc = self._conn.execute_with_description(operation, params)
-            total += len(rows)
-            last_rows = rows
-            last_desc = desc
-        self._rows = last_rows
-        self.description = last_desc
-        self._pos = 0
-        self.rowcount = total
-        return self
 
     def fetchone(self) -> tuple[Any, ...] | None:
         """Fetch the next plain-tuple row or None."""
         self._require_open()
-        if self._raw_cursor is not None:
-            row = self._raw_cursor.fetchone()
-            return tuple(row) if row is not None and not isinstance(row, tuple) else row
         if self._pos >= len(self._rows):
             return None
         row = self._rows[self._pos]
@@ -220,11 +249,8 @@ class SyncDBAPICursor:
         return row
 
     def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
-        """Fetch up to ``size`` plain-tuple rows."""
+        """Fetch up to size plain-tuple rows."""
         self._require_open()
-        if self._raw_cursor is not None:
-            rows = self._raw_cursor.fetchmany(size if size is not None else self.arraysize)
-            return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
         batch_size = self.arraysize if size is None else size
         batch = self._rows[self._pos : self._pos + batch_size]
         self._pos += len(batch)
@@ -233,9 +259,6 @@ class SyncDBAPICursor:
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Fetch all remaining plain-tuple rows."""
         self._require_open()
-        if self._raw_cursor is not None:
-            rows = self._raw_cursor.fetchall()
-            return [tuple(r) if not isinstance(r, tuple) else r for r in rows]
         rest = self._rows[self._pos :]
         self._pos = len(self._rows)
         return rest
@@ -253,11 +276,29 @@ class SyncDBAPICursor:
     def close(self) -> None:
         """Close the cursor."""
         if not self._closed:
-            if self._raw_cursor is not None and hasattr(self._raw_cursor, "close"):
-                self._raw_cursor.close()
             self._rows = []
             self._pos = 0
             self._closed = True
+
+    def __enter__(self) -> Self:
+        """Enter cursor context."""
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit cursor context and close cursor."""
+        self.close()
+
+    def __iter__(self) -> SyncDBAPICursor:
+        """Return cursor iterator."""
+        return self
+
+    def __next__(self) -> tuple[Any, ...]:
+        """Fetch next row in iteration."""
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
 
     def _require_open(self) -> None:
         if self._closed:
@@ -278,52 +319,57 @@ class SyncDBAPICursor:
         if callable(last_rowid_fn):
             val = last_rowid_fn()
             return int(val) if val is not None else None
-        if _config_dialect(self._conn.config) == "sqlite":
-            raw_conn = getattr(driver, "raw_connection", None)
-            if raw_conn is not None:
-                driver_lock = getattr(driver, "_lock", None)
-                ctx = driver_lock if driver_lock is not None else contextlib.nullcontext()
-                with ctx, contextlib.closing(raw_conn.cursor()) as cur:
-                    cur.execute("SELECT last_insert_rowid()")
-                    row = cur.fetchone()
-                return int(row[0]) if row and row[0] is not None else None
         return None
 
 
 class SyncDBAPIConnection:
-    """Standalone synchronous PEP 249 connection backed by Vertebra native drivers or sqlite3."""
+    """Standalone synchronous PEP 249 connection backed by Vertebra native drivers."""
 
     __slots__ = (
+        "_aggregates",
         "_autocommit",
         "_broker",
+        "_collations",
         "_config",
         "_driver",
+        "_functions",
         "_in_transaction",
         "_owns_driver",
         "_share_pool",
-        "_sqlite_conn",
         "_url",
         "closed",
     )
 
     def __init__(
         self,
-        url: str = "sqlite+vtb:///:memory:",
+        url: str | None = None,
         *,
         driver: Any = None,
         broker: Any = None,
         share_pool: bool = True,
         lease_managed: bool = False,
-        database: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize PEP 249 connection with URL or database parameters."""
+        """Initialize PEP 249 connection with a non-empty database URL."""
         _ = kwargs
 
-        resolved_url = url
-        if database is not None and (url == "sqlite+vtb:///:memory:" or not url):
-            resolved_url = f"sqlite+vtb:///{database}"
-        self._url = resolved_url
+        if url is None and driver is None:
+            exc = ValueError("Unsupported database URL scheme: ''")
+            raise InterfaceError(f"Cannot parse Vertebra database URL: {exc}") from exc
+
+        self._url: str = ""
+        self._config = url if isinstance(url, BaseDatabaseConfig) else None
+        if isinstance(url, BaseDatabaseConfig):
+            resolved_url = getattr(url, "dsn", getattr(url, "url", ""))
+            if not resolved_url:
+                dialect = getattr(url, "dialect", "sqlite")
+                path_val = getattr(url, "path", "")
+                resolved_url = f"{dialect}:///{path_val}" if path_val else f"{dialect}://"
+            self._url = str(resolved_url)
+        else:
+            resolved_url = str(url) if url is not None else getattr(driver, "url", getattr(driver, "dsn", ""))
+            self._url = str(resolved_url)
+
         self._share_pool = bool(share_pool)
         self._broker = (
             broker
@@ -332,50 +378,35 @@ class SyncDBAPIConnection:
         )
         self._in_transaction = False
         self.closed: bool = False
+        self._functions: dict[str, Any] = {}
+        self._aggregates: dict[str, Any] = {}
+        self._collations: dict[str, Any] = {}
 
-        self._config: Any = None
         driver_broker = None if lease_managed else self._broker
-        try:
-            self._config = (
-                DatabaseRegistry.parse_url(resolved_url, broker=driver_broker)
-                if driver_broker is not None
-                else DatabaseRegistry.parse_url(resolved_url)
-            )
-        except ValueError as exc:
-            msg = f"Cannot parse Vertebra database URL: {exc}"
-            raise InterfaceError(msg) from exc
+        if self._config is None and (resolved_url or driver is None):
+            try:
+                self._config = (
+                    DatabaseRegistry.parse_url(resolved_url, broker=driver_broker)
+                    if driver_broker is not None
+                    else DatabaseRegistry.parse_url(resolved_url)
+                )
+            except ValueError as exc:
+                msg = f"Cannot parse Vertebra database URL: {exc}"
+                raise InterfaceError(msg) from exc
 
-        dialect_name = _config_dialect(self._config)
-        self._autocommit = dialect_name in _AUTOCOMMIT_ONLY_DIALECTS
+        self._autocommit = bool(getattr(self._config, "requires_statement_autocommit", False))
         self._driver = driver
         self._owns_driver = driver is not None
-        self._sqlite_conn: sqlite3.Connection | None = None
 
         if self._driver is None:
             has_shared_key = self._config is not None and self._config.pool_key() is not None
             has_custom_broker = broker is not None and broker is not DatabaseRegistry._DEFAULT_BROKER
-            if (
-                dialect_name == "sqlite"
-                and not lease_managed
-                and self._broker is None
-                and (not has_shared_key or not self._share_pool)
-            ):
-                db_target = str(getattr(self._config, "database", None) or ":memory:")
-                if db_target.startswith("sqlite+"):
-                    db_target = db_target.split(":///", 1)[-1] if ":///" in db_target else ":memory:"
-                self._sqlite_conn = sqlite3.connect(
-                    db_target,
-                    check_same_thread=False,
-                    autocommit=False,
-                    uri=db_target.startswith("file:"),
-                )
-                self._owns_driver = True
-            elif self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
-                self._driver = DatabaseRegistry.default().get_shared_sync_driver(self._config)
+            if self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
+                self._driver = DatabaseRegistry.default().get_shared_sync_driver(cast("Any", self._config))
                 self._owns_driver = False
             else:
                 target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
-                self._driver = self._config.build_sync_driver(target_registry)
+                self._driver = cast("Any", self._config).build_sync_driver(target_registry)
                 self._owns_driver = True
 
     @property
@@ -406,21 +437,56 @@ class SyncDBAPIConnection:
     @autocommit.setter
     def autocommit(self, value: bool) -> None:
         """Set autocommit, rejecting transactional DBAPI mode for autocommit-only backends."""
-        if not value and _config_dialect(self._config) in _AUTOCOMMIT_ONLY_DIALECTS:
-            msg = "BigQuery, Spanner, and Spangres DBAPI connections require autocommit; use the native driver transaction API"
+        if not value and getattr(self._config, "requires_statement_autocommit", False):
+            config_name = type(self._config).__name__ if self._config is not None else "Backend"
+            msg = f"{config_name} DBAPI connections require autocommit; use the native driver transaction API"
             raise NotSupportedError(msg)
         if value and self._in_transaction:
             self.commit()
         self._autocommit = value
-        if self._sqlite_conn is not None:
-            self._sqlite_conn.autocommit = value
 
     def cursor(self) -> SyncDBAPICursor:
         """Create a new plain-tuple DBAPI cursor."""
         self._require_open()
-        if self._sqlite_conn is not None:
-            return SyncDBAPICursor(self, raw_cursor=self._sqlite_conn.cursor())
         return SyncDBAPICursor(self)
+
+    def execute(
+        self,
+        operation: str,
+        parameters: Sequence[Any] | dict[str, Any] = (),
+    ) -> SyncDBAPICursor:
+        """Create a cursor and execute a statement."""
+        cur = self.cursor()
+        cur.execute(operation, parameters)
+        return cur
+
+    def create_function(
+        self,
+        name: str,
+        narg: int,
+        func: Any,
+        *,
+        deterministic: bool = False,
+    ) -> None:
+        """Register a custom scalar function on the connection."""
+        self._functions[name] = (narg, func, deterministic)
+        raw = getattr(self._driver, "_client", None) or getattr(self._driver, "raw_connection", None)
+        if raw is not None and hasattr(raw, "create_function"):
+            raw.create_function(name, narg, func, deterministic=deterministic)
+
+    def create_aggregate(self, name: str, narg: int, aggregate_class: Any) -> None:
+        """Register a custom aggregate function on the connection."""
+        self._aggregates[name] = (narg, aggregate_class)
+        raw = getattr(self._driver, "_client", None) or getattr(self._driver, "raw_connection", None)
+        if raw is not None and hasattr(raw, "create_aggregate"):
+            raw.create_aggregate(name, narg, aggregate_class)
+
+    def create_collation(self, name: str, callable: Any) -> None:
+        """Register a custom collation on the connection."""
+        self._collations[name] = callable
+        raw = getattr(self._driver, "_client", None) or getattr(self._driver, "raw_connection", None)
+        if raw is not None and hasattr(raw, "create_collation"):
+            raw.create_collation(name, callable)
 
     def execute_with_description(
         self,
@@ -429,35 +495,29 @@ class SyncDBAPIConnection:
     ) -> tuple[list[tuple[Any, ...]], tuple[tuple[str, Any, None, None, None, None, None], ...] | None]:
         """Execute a query returning rows and column descriptions."""
         self._require_open()
-        if self._sqlite_conn is not None:
-            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
-                cur.execute(sql, parameters)
-                rows = [tuple(r) for r in cur.fetchall()]
-                desc = cur.description
-            return rows, desc
-
         self.begin()
-        rows = []
+        rows: list[tuple[Any, ...]] = []
         desc = None
         if self._driver is not None:
             should_autocommit = self._autocommit and (self._in_transaction or not is_read_only_sql(sql))
-            if hasattr(self._driver, "execute_with_description"):
-                raw_res = self._driver.execute_with_description(sql, parameters)
-                rows, desc = coerce_dbapi_rows_and_desc(raw_res)
-            elif hasattr(self._driver, "execute_tuples"):
-                rows = self._driver.execute_tuples(sql, parameters)
-                desc = (
-                    tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(rows[0])))
-                    if rows
-                    else None
-                )
-            elif hasattr(self._driver, "select"):
-                select_params = parameters if parameters else None
-                dict_rows = self._driver.select(sql, select_params)
-                if dict_rows:
-                    keys = tuple(dict_rows[0].keys())
-                    desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
-                    rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
+            with _translate_errors():
+                if hasattr(self._driver, "execute_with_description"):
+                    raw_res = self._driver.execute_with_description(sql, parameters)
+                    rows, desc = coerce_dbapi_rows_and_desc(raw_res)
+                elif hasattr(self._driver, "execute_tuples"):
+                    rows = self._driver.execute_tuples(sql, parameters)
+                    desc = (
+                        tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(rows[0])))
+                        if rows
+                        else None
+                    )
+                elif hasattr(self._driver, "select"):
+                    select_params = parameters if parameters else None
+                    dict_rows = self._driver.select(sql, select_params)
+                    if dict_rows:
+                        keys = tuple(dict_rows[0].keys())
+                        desc = tuple((str(k), None, None, None, None, None, None) for k in keys)
+                        rows = [tuple(r.get(k) for k in keys) for r in dict_rows]
             if should_autocommit:
                 self.commit()
         return rows, desc
@@ -476,27 +536,23 @@ class SyncDBAPIConnection:
         sql: str,
         parameters: Sequence[Any] | dict[str, Any] = (),
     ) -> tuple[int, int | None]:
-        """Execute a non-row-returning SQL statement and return ``(rowcount, lastrowid)``."""
+        """Execute a non-row-returning SQL statement and return (rowcount, lastrowid)."""
         self._require_open()
-        if self._sqlite_conn is not None:
-            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
-                cur.execute(sql, parameters)
-                rowid = int(cur.lastrowid) if is_insert_sql(sql) and cur.lastrowid is not None else None
-                return cur.rowcount, rowid
         self.begin()
         if self._driver is not None:
-            if hasattr(self._driver, "execute_dml"):
-                affected, rowid = self._driver.execute_dml(sql, parameters)
-                if self._autocommit:
-                    self.commit()
-                return int(affected), rowid
-            if hasattr(self._driver, "execute"):
-                affected = int(self._driver.execute(sql, parameters))
-                if self._autocommit:
-                    self.commit()
-                return affected, None
-            rows, _ = self.execute_with_description(sql, parameters)
-            return len(rows), None
+            with _translate_errors():
+                if hasattr(self._driver, "execute_dml"):
+                    affected, rowid = self._driver.execute_dml(sql, parameters)
+                    if self._autocommit:
+                        self.commit()
+                    return int(affected), rowid
+                if hasattr(self._driver, "execute"):
+                    affected = int(self._driver.execute(sql, parameters))
+                    if self._autocommit:
+                        self.commit()
+                    return affected, None
+                rows, _ = self.execute_with_description(sql, parameters)
+                return len(rows), None
         return -1, None
 
     def execute_many_dml(
@@ -508,20 +564,17 @@ class SyncDBAPIConnection:
         self._require_open()
         if not seq_of_parameters:
             return 0
-        if self._sqlite_conn is not None:
-            with contextlib.closing(self._sqlite_conn.cursor()) as cur:
-                cur.executemany(sql, seq_of_parameters)
-                return cur.rowcount
         self.begin()
         if self._driver is not None:
-            if hasattr(self._driver, "execute_many"):
-                affected = int(self._driver.execute_many(sql, seq_of_parameters))
-                if self._autocommit:
-                    self.commit()
-                return affected
-            if hasattr(self._driver, "execute"):
-                return sum(self.execute_dml(sql, params) for params in seq_of_parameters)
-            return sum(len(self.execute_with_description(sql, params)[0]) for params in seq_of_parameters)
+            with _translate_errors():
+                if hasattr(self._driver, "execute_many"):
+                    affected = int(self._driver.execute_many(sql, seq_of_parameters))
+                    if self._autocommit:
+                        self.commit()
+                    return affected
+                if hasattr(self._driver, "execute"):
+                    return sum(self.execute_dml(sql, params) for params in seq_of_parameters)
+                return sum(len(self.execute_with_description(sql, params)[0]) for params in seq_of_parameters)
         return -1
 
     def execute_raw_tuples(
@@ -536,20 +589,20 @@ class SyncDBAPIConnection:
     def begin(self) -> None:
         """Begin a native transaction when implicit commit is disabled."""
         self._require_open()
-        if self._autocommit or self._in_transaction or self._sqlite_conn is not None:
+        if self._autocommit or self._in_transaction:
             return
         if self._driver is not None and hasattr(self._driver, "begin"):
-            self._driver.begin()
-            self._in_transaction = True
+            with _translate_errors():
+                self._driver.begin()
+                self._in_transaction = True
 
     def commit(self) -> None:
         """Commit the active transaction."""
         self._require_open()
         try:
-            if self._sqlite_conn is not None:
-                self._sqlite_conn.commit()
-            elif self._driver is not None and hasattr(self._driver, "commit"):
-                self._driver.commit()
+            if self._driver is not None and hasattr(self._driver, "commit"):
+                with _translate_errors():
+                    self._driver.commit()
         finally:
             self._in_transaction = False
 
@@ -557,10 +610,9 @@ class SyncDBAPIConnection:
         """Roll back the active transaction."""
         self._require_open()
         try:
-            if self._sqlite_conn is not None:
-                self._sqlite_conn.rollback()
-            elif self._driver is not None and hasattr(self._driver, "rollback"):
-                self._driver.rollback()
+            if self._driver is not None and hasattr(self._driver, "rollback"):
+                with _translate_errors():
+                    self._driver.rollback()
         finally:
             self._in_transaction = False
 
@@ -575,12 +627,22 @@ class SyncDBAPIConnection:
                         self.rollback()
             finally:
                 self._in_transaction = False
-                if self._sqlite_conn is not None:
-                    self._sqlite_conn.close()
-                    self._sqlite_conn = None
-                elif self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
-                    self._driver.close()
+                if self._owns_driver and self._driver is not None and hasattr(self._driver, "close"):
+                    with _translate_errors():
+                        self._driver.close()
                 self.closed = True
+
+    def __enter__(self) -> Self:
+        """Enter connection context."""
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit connection context, committing or rolling back transaction."""
+        if exc_type is not None:
+            self.rollback()
+        else:
+            self.commit()
 
     def _require_open(self) -> None:
         if self.closed:
@@ -606,29 +668,30 @@ class SyncDBAPIModule:
     NotSupportedError = NotSupportedError
     Binary = Binary
 
-    sqlite_version: str = sqlite3.sqlite_version
-    sqlite_version_info: tuple[int, ...] = sqlite3.sqlite_version_info
+    sqlite_version: str = "3.45.0"
+    sqlite_version_info: tuple[int, ...] = (3, 45, 0)
 
     def __init__(self, *, paramstyle: str = "qmark") -> None:
         """Initialize PEP 249 DBAPI module with target parameter style."""
         self.paramstyle = paramstyle
 
     def connect(self, *args: Any, **kwargs: Any) -> SyncDBAPIConnection:
-        """Open a synchronous PEP 249 connection."""
-        url_arg = "sqlite+vtb:///:memory:"
+        """Open a synchronous PEP 249 connection with a required URL."""
+        url_arg: str | None = None
         if args and isinstance(args[0], str):
             url_arg = args[0]
         elif "url" in kwargs:
             url_arg = kwargs.pop("url")
+        if (not url_arg or not url_arg.strip()) and "driver" not in kwargs:
+            raise InterfaceError("A non-empty database connection URL is required.")
         return SyncDBAPIConnection(url_arg, **kwargs)
 
 
-def connect(url: str = "sqlite+vtb:///:memory:", **kwargs: Any) -> SyncDBAPIConnection:
+def connect(url: str | None = None, **kwargs: Any) -> SyncDBAPIConnection:
     """Open a standalone synchronous PEP 249 DB-API connection."""
+    if (not url or not str(url).strip()) and "driver" not in kwargs:
+        raise InterfaceError("A non-empty database connection URL is required.")
     return SyncDBAPIConnection(url, **kwargs)
-
-
-_AUTOCOMMIT_ONLY_DIALECTS: frozenset[str] = frozenset({"bigquery", "googlesql", "spangres", "spanner"})
 
 
 def _config_dialect(config: Any) -> str:

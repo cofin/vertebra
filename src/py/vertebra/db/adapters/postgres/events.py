@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from vertebra._postgres import AsyncPostgresListener, AsyncPostgresReplication
+    from vertebra._postgres import AsyncPostgresListener, AsyncPostgresReplication, SyncPostgresListener
     from vertebra.db.adapters.postgres.change_stream import PostgresChangeConfig
     from vertebra.db.adapters.postgres.config import PostgreSQLConfig
     from vertebra.db.adapters.postgres.types import PostgresReplicationIdentity
@@ -17,6 +17,7 @@ __all__ = (
     "EventSessionRegistry",
     "PostgresNotificationDriver",
     "PostgresReplicationDriver",
+    "SyncPostgresNotificationDriver",
 )
 
 
@@ -40,6 +41,30 @@ class PostgresNotificationDriver(Protocol):
 
     async def _publish_notification(self, channel: str, payload: str) -> None:
         """Publish a parameterized PostgreSQL pg_notify payload on channel."""
+        ...
+
+
+@runtime_checkable
+class SyncPostgresNotificationDriver(Protocol):
+    """Structural protocol for synchronous PostgreSQL drivers supporting notification publish and listen."""
+
+    @property
+    def config(self) -> PostgreSQLConfig:
+        """Return the active PostgreSQL driver configuration."""
+        ...
+
+    def _open_sync_notification_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> SyncPostgresListener:
+        """Open a dedicated non-pooled direct/session PostgreSQL notification listener synchronously."""
+        ...
+
+    def _publish_notification_sync(self, channel: str, payload: str) -> None:
+        """Publish a parameterized PostgreSQL pg_notify payload on channel synchronously."""
         ...
 
 

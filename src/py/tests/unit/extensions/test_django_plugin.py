@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import io
 import subprocess
 import sys
@@ -11,20 +12,25 @@ import time
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
+from typing import TYPE_CHECKING, Any, ClassVar, cast, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
+import django
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
+from django.conf import settings
+from django.core.cache.backends.base import DEFAULT_TIMEOUT
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
 from django.core.files.uploadedfile import UploadedFile
+from django.core.management import call_command
 from django.db.migrations.writer import MigrationWriter
 from django.db.models import FileField
 from django.db.models.fields.files import FieldFile
+from django.tasks import TaskResultStatus, task, task_backends
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -45,11 +51,11 @@ from vertebra.extensions.django import (
     MsgspecView,
     OpenAPIConfig,
     ORMBridge,
-    QueuesBackend,
     RouteCompiler,
     SecurityBridge,
     SwaggerDocsConfig,
     SyncStorageRegistry,
+    TaskBackend,
     TemplateBridge,
     VertebraAppConfig,
     VertebraConfig,
@@ -60,8 +66,6 @@ from vertebra.extensions.django import (
     mcp_tool,
     vertebra_view,
 )
-from vertebra.extensions.django.db.backends.duckdb import DatabaseWrapper as DuckDBDatabaseWrapper
-from vertebra.extensions.django.db.backends.mssql import DatabaseWrapper as MSSQLDatabaseWrapper
 from vertebra.extensions.django.db.backends.mysql import DatabaseWrapper as MySQLDatabaseWrapper
 from vertebra.extensions.django.db.backends.oracle import DatabaseWrapper as OracleDatabaseWrapper
 from vertebra.extensions.django.db.backends.postgresql import (
@@ -72,7 +76,8 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 )
 from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
-from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
+from vertebra.extensions.sqlspec.adapters import PostgresSyncConfig, SQLiteSyncConfig
+from vertebra.framework.di import Container
 from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (
     AsyncObjectStore,
@@ -88,8 +93,12 @@ from vertebra.utils.serializers import decode_json
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    _UploadedFileBase = UploadedFile[bytes]
+else:
+    _UploadedFileBase = UploadedFile
 
-class _ChunkRecordingUpload(UploadedFile):
+
+class _ChunkRecordingUpload(_UploadedFileBase):
     """Uploaded file with a tiny chunk size that records every chunk handed to storage."""
 
     DEFAULT_CHUNK_SIZE = 4
@@ -189,15 +198,17 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     assert re_route == "/items/{item_id}/"
     assert re_converters == (("item_id", "int"),)
 
-    @vertebra_view(methods=("POST",), status_code=201)
     @mcp_tool(name="create_django_order", description="Create an order in Django")
     def create_order_view(request: Request, order_id: int, body: OrderInput) -> dict[str, Any]:
         assert request.method == "POST"
         return {"id": order_id, "sku": body.sku, "qty": body.qty}
 
-    @vertebra_view(methods=("POST",))
+    vertebra_view(create_order_view, methods=("POST",), status_code=201)
+
     def create_pydantic_view(body: PydanticOrderInput) -> PydanticOrderInput:
         return PydanticOrderInput(sku=body.sku.upper(), qty=body.qty + 2)
+
+    vertebra_view(create_pydantic_view, methods=("POST",))
 
     class DetailView(MsgspecView):
         def get(self, request: Request, item_id: int) -> OrderRecord:
@@ -249,7 +260,7 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     )
 
     app_cfg = VertebraAppConfig()
-    assert app_cfg.ready() is None
+    app_cfg.ready()
 
     post_req = Request.from_parts(
         method="POST",
@@ -368,9 +379,16 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
     assert direct_settings["PORT"] == 5432
     assert direct_settings["OPTIONS"]["pooler_mode"] == "session"
 
-    with pg_wrapper.schema_editor() as editor:
-        assert editor["pooler_mode"] == "session"
-        assert editor["settings"]["PORT"] == 5432
+    with pg_wrapper.schema_editor(atomic=False) as editor:
+        assert isinstance(editor, pg_wrapper.SchemaEditorClass)
+        assert pg_wrapper.settings_dict["HOST"] == "10.0.0.6"
+        assert pg_wrapper.settings_dict["PORT"] == 5432
+        assert pg_wrapper.pooler_config.pooler_mode == "session"
+        assert pg_wrapper.pooler_config.pgbouncer is False
+    assert pg_wrapper.settings_dict["HOST"] == "10.0.0.5"
+    assert pg_wrapper.settings_dict["PORT"] == 6432
+    assert pg_wrapper.pooler_config.pooler_mode == "transaction"
+    assert pg_wrapper.pooler_config.pgbouncer is True
 
     lease_id = pg_wrapper.acquire_lease()
     assert lease_id >= 0
@@ -397,15 +415,82 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
     assert oracle_wrapper.engine == "oracle"
     assert oracle_wrapper.wallet_zip == b"PK\x03\x04"
 
-    mssql_wrapper = MSSQLDatabaseWrapper({"NAME": "analytics"})
-    assert mssql_wrapper.engine == "mssql"
 
-    duckdb_wrapper = DuckDBDatabaseWrapper({"NAME": ":memory:"})
-    assert duckdb_wrapper.engine == "duckdb"
-    arrow_out = duckdb_wrapper.select_to_arrow("SELECT 1", rows=records)
-    assert arrow_out.num_rows == 2
-    schema_out = duckdb_wrapper.select_to_schema("SELECT 1", schema_type=OrderRecord, rows=records)
-    assert len(schema_out) == 2
+@pytest.mark.parametrize("backend", ["bigquery", "duckdb", "mssql"])
+def test_unsupported_django_backends_raise_error(backend: str) -> None:
+    """Deleted unsupported Django database backends fail on import and raise ImproperConfigurationError in plugin."""
+    with pytest.raises(ModuleNotFoundError):
+        import_module(f"vertebra.extensions.django.db.backends.{backend}")
+
+    with pytest.raises(ImproperConfigurationError, match="is unsupported by Vertebra"):
+        VertebraPlugin(
+            settings={"DATABASES": {"default": {"ENGINE": f"vertebra.extensions.django.db.backends.{backend}"}}}
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scheme", ["shm", "memory", "file"])
+async def test_django_cache_backend_sync_and_async_matrix(scheme: str, tmp_path: Path) -> None:
+    """CacheBackend executes full sync and async operations across multiple backends with L1 SHM."""
+    if scheme == "file":
+        location = f"file://{tmp_path / 'cache'}"
+    elif scheme == "shm":
+        location = f"shm://dj_test_{time.time_ns()}"
+    else:
+        location = "memory://"
+    params = {"TIMEOUT": 60, "OPTIONS": {"L1_LOCATION": f"shm://dj_l1_{time.time_ns()}"}}
+    cache = CacheBackend(location, params)
+    try:
+        cache.set("k_sync", "v_sync")
+        assert cache.get("k_sync") == "v_sync"
+        assert cache.has_key("k_sync") is True
+        assert cache.add("k_sync", "v_dup") is False
+        assert cache.add("k_sync2", "v_add") is True
+        assert cache.get_many(["k_sync", "k_sync2"]) == {"k_sync": "v_sync", "k_sync2": "v_add"}
+        cache.set_many({"k_m1": "v1", "k_m2": "v2"})
+        assert cache.get("k_m1") == "v1"
+        assert cache.touch("k_sync", timeout=120) is True
+        cache.delete_many(["k_m1", "k_m2"])
+        assert cache.get("k_m1") is None
+        assert cache.delete("k_sync2") is True
+        assert cache.delete("k_missing") is False
+
+        await cache.aset("k_async", "v_async")
+        assert await cache.aget("k_async") == "v_async"
+        assert await cache.ahas_key("k_async") is True
+        assert await cache.aadd("k_async", "v_dup") is False
+        assert await cache.aadd("k_async2", "v_add") is True
+        assert await cache.aget_many(["k_async", "k_async2"]) == {"k_async": "v_async", "k_async2": "v_add"}
+        await cache.aset_many({"k_am1": "av1", "k_am2": "av2"})
+        assert await cache.aget("k_am1") == "av1"
+        assert await cache.atouch("k_async", timeout=120) is True
+        await cache.adelete_many(["k_am1", "k_am2"])
+        assert await cache.aget("k_am1") is None
+        assert await cache.adelete("k_async2") is True
+
+        with pytest.raises(ValueError, match="Key 'num_sync' not found"):
+            cache.incr("num_sync", delta=10)
+        with pytest.raises(ValueError, match="Key 'num_sync' not found"):
+            cache.decr("num_sync", delta=3)
+        with pytest.raises(ValueError, match="Key 'num_async' not found"):
+            await cache.aincr("num_async", delta=20)
+        with pytest.raises(ValueError, match="Key 'num_async' not found"):
+            await cache.adecr("num_async", delta=5)
+
+        cache.set("num_sync", 0)
+        await cache.aset("num_async", 0)
+        assert cache.incr("num_sync", delta=10) == 10
+        assert cache.decr("num_sync", delta=3) == 7
+        assert await cache.aincr("num_async", delta=20) == 20
+        assert await cache.adecr("num_async", delta=5) == 15
+
+        cache.clear()
+        assert cache.get("k_sync") is None
+        await cache.aclear()
+        assert await cache.aget("k_async") is None
+    finally:
+        cache.close()
+        await cache.aclose()
 
 
 @pytest.mark.anyio
@@ -420,6 +505,9 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
         "user:1": {"name": "Alice"},
         "user:2": {"name": "Bob"},
     }
+    with pytest.raises(ValueError, match="Key 'counter' not found"):
+        await cache.aincr("counter", delta=5)
+    await cache.aset("counter", 0)
     assert await cache.aincr("counter", delta=5) == 5
     assert await cache.adecr("counter", delta=2) == 3
 
@@ -458,7 +546,7 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     msg = await layer.receive(ch)
     assert msg == {"type": "order.updated", "id": 10}
 
-    queues = QueuesBackend()
+    queues = TaskBackend()
 
     @queues.task("sum_pair")
     def sum_pair(x: int, y: int) -> int:
@@ -497,7 +585,6 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
 async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_send_raw_response() -> None:
     """Verify Django FastPath supports async def views, caches stateless MsgspecView, and uses send_raw_response."""
 
-    @vertebra_view(methods=("POST",), status_code=201)
     async def create_async_order_view(
         request: Request,
         order_id: int,
@@ -506,6 +593,8 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
         assert request.method == "POST"
         await asyncio.sleep(0)
         return OrderRecord(id=order_id, sku=body.sku, qty=body.qty)
+
+    vertebra_view(create_async_order_view, methods=("POST",), status_code=201)
 
     class CachedAsyncItemView(MsgspecView):
         init_count: ClassVar[int] = 0
@@ -539,7 +628,7 @@ async def test_django_fastpath_async_views_cached_msgspec_view_wrap_asgi_and_sen
     compiler = RouteCompiler(urlpatterns=urlpatterns)
     fastpath = FastPath.from_app(SimpleNamespace(urlpatterns=urlpatterns))
     wrapped_wsgi = fastpath.wrap_wsgi()
-    assert wrapped_wsgi.__vertebra_fastpath__ is fastpath
+    assert getattr(wrapped_wsgi, "__vertebra_fastpath__", None) is fastpath
     assert not hasattr(wrapped_wsgi, "_vertebra_fastpath")
     assert len(compiler.entries) == len(fastpath.routes)
 
@@ -615,7 +704,7 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
         },
         alias="default",
     )
-    sqlspec_pg = PostgreSQLSyncConfig(
+    sqlspec_pg = PostgresSyncConfig(
         dsn="postgresql://postgres@10.0.0.5:6432/appdb",
         pgbouncer=True,
         pooler_mode="transaction",
@@ -661,12 +750,13 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
 
     observed_loops: list[tuple[int, int]] = []
 
-    @vertebra_view(methods=("POST",), status_code=200)
     @mcp_tool(name="django_probe_loop", description="Probe active event loop in Django")
     async def django_probe_loop(seq: int) -> dict[str, int]:
         loop = asyncio.get_running_loop()
         observed_loops.append((id(loop), threading.get_ident()))
         return {"seq": seq}
+
+    vertebra_view(django_probe_loop, methods=("POST",), status_code=200)
 
     urlpatterns: list[Any] = [
         _MockURLPattern(
@@ -746,7 +836,7 @@ def test_django_storage_deconstructs_and_requires_configuration(tmp_path: Path) 
         DjangoStorage()
     storage = DjangoStorage(LocalConfig(root=tmp_path), base_url="/media/")
     assert isinstance(storage, Storage)
-    path, args, kwargs = storage.deconstruct()
+    path, args, kwargs = cast("Any", storage).deconstruct()
     module, _, name = path.rpartition(".")
     restored = getattr(import_module(module), name)(*args, **kwargs)
     saved = restored.save("readme.txt", ContentFile(b"hello"))
@@ -776,7 +866,11 @@ async def test_django_storage_reopens_through_native_store(
     config = MemoryConfig(namespace="field-reopen") if backend == "memory" else LocalConfig(root=tmp_path / "objects")
     storage = DjangoStorage(config, location="uploads")
     storage.save(name, b"native payload")
-    handle = FieldFile(None, FileField(storage=storage), name) if consumer == "field" else await storage.aopen(name)
+    handle = (
+        FieldFile(cast("Any", None), FileField(storage=storage), name)
+        if consumer == "field"
+        else await storage.aopen(name)
+    )
     handle.open("rb")
     assert handle.read() == b"native payload"
     handle.close()
@@ -799,7 +893,8 @@ def test_django_storage_migration_writer_round_trips_configuration(tmp_path: Pat
     exec("\n".join(sorted(imports)), namespace)
     restored = eval(expression, namespace)
     assert isinstance(restored, Storage)
-    _, args, kwargs = restored.deconstruct()
+    assert isinstance(restored, DjangoStorage)
+    _, args, kwargs = cast("Any", restored).deconstruct()
     assert args == (config,)
     assert kwargs == {"location": "uploads", "base_url": "/media/", "file_overwrite": True, "expires_in": 71}
     assert restored.store.options == storage.store.options
@@ -946,7 +1041,9 @@ def test_django_storage_naming_files_and_metadata(tmp_path: Path) -> None:
     assert storage.path("root.txt") == str(tmp_path / "uploads" / "root.txt")
     modified = storage.get_modified_time("root.txt")
     assert modified.tzinfo is not None
-    assert modified.utcoffset().total_seconds() == 0
+    offset = modified.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     with pytest.raises(NotImplementedError):
         storage.get_created_time("root.txt")
     with pytest.raises(NotImplementedError):
@@ -1070,3 +1167,162 @@ else:
 def test_django_compiled_route_inherits_compiled_route_base() -> None:
     """Django CompiledRoute subclasses CompiledRouteBase."""
     assert issubclass(DjangoCompiledRoute, CompiledRouteBase)
+
+
+if not settings.configured:
+    settings.configure(
+        INSTALLED_APPS=[
+            "vertebra.extensions.django",
+        ],
+        TASKS={
+            "default": {
+                "BACKEND": "vertebra.extensions.django.tasks.TaskBackend",
+            }
+        },
+    )
+    django.setup()
+
+
+class MultiplierService:
+    def calc(self, x: int, y: int) -> int:
+        return x * y
+
+
+@task
+def compute_sum_task(a: int, b: int) -> int:
+    return a + b
+
+
+@task
+async def async_mult_task(a: int, b: int, service: MultiplierService | None = None) -> int:
+    assert service is not None
+    return service.calc(a, b)
+
+
+def test_django_tasks_backend_and_worker_command() -> None:
+    """Verify Django 6.0+ TaskBackend and vertebra_worker management command."""
+    res = compute_sum_task.enqueue(15, 25)
+    assert res.status == TaskResultStatus.READY
+
+    call_command("vertebra_worker", "--once")
+
+    updated = compute_sum_task.get_result(res.id)
+    assert updated.status == TaskResultStatus.SUCCESSFUL
+    assert updated.return_value == 40
+
+    container = Container(singletons={"service": MultiplierService()})
+    cast(TaskBackend, task_backends["default"])._container = container
+
+    res_async = asyncio.run(async_mult_task.aenqueue(6, 7))
+    assert res_async.status == TaskResultStatus.READY
+
+    call_command("vertebra_worker", "--once")
+
+    updated_async = async_mult_task.get_result(res_async.id)
+    assert updated_async.status == TaskResultStatus.SUCCESSFUL
+    assert cast(Any, updated_async.return_value) == 42
+
+
+@pytest.mark.anyio
+async def test_django_cache_relative_ttl_and_zero_timeout_semantics() -> None:
+    """CacheBackend passes relative TTL durations rather than epoch timestamps and honors <=0/None timeouts."""
+    cache = CacheBackend("memory://", {"TIMEOUT": 60, "KEY_PREFIX": "ttltest"})
+    recorded_ttls: list[float | None] = []
+    orig_sync_backend = cache._sync_backend
+
+    class _ProxySyncBackend:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def set(self, key: str, value: Any, expiration_time: float | None = None) -> None:
+            recorded_ttls.append(expiration_time)
+            self._inner.set(key, value, expiration_time=expiration_time)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    cast(Any, cache)._sync_backend = _ProxySyncBackend(orig_sync_backend)
+    try:
+        cache.set("default_ttl", "v1", timeout=DEFAULT_TIMEOUT)
+        cache.set("explicit_ttl", "v2", timeout=30)
+        cache.set("delta_ttl", "v3", timeout=dt.timedelta(seconds=45))
+        cache.set("forever_ttl", "v4", timeout=None)
+
+        assert recorded_ttls == [60.0, 30.0, 45.0, -1.0]
+        assert cache.get("forever_ttl") == "v4"
+
+        cache.set("default_ttl", "expired", timeout=0)
+        assert cache.get("default_ttl") is None
+
+        cache.set("explicit_ttl", "expired", timeout=-5)
+        assert cache.get("explicit_ttl") is None
+
+        assert cache.add("forever_ttl", "dup", timeout=0) is False
+        assert cache.get("forever_ttl") == "v4"
+        assert cache.add("never_stored", "skip", timeout=0) is True
+        assert cache.get("never_stored") is None
+
+        assert cache.touch("forever_ttl", timeout=0) is True
+        assert cache.get("forever_ttl") is None
+        assert cache.touch("forever_ttl", timeout=0) is False
+
+        cache.set_many({"m1": 1, "m2": 2}, timeout=30)
+        assert cache.get("m1") == 1
+        cache.set_many({"m1": 10, "m2": 20}, timeout=0)
+        assert cache.get("m1") is None
+        assert cache.get("m2") is None
+
+        await cache.aset("async_forever", "av", timeout=None)
+        assert await cache.aget("async_forever") == "av"
+        assert await cache.aadd("async_forever", "dup", timeout=0) is False
+        assert await cache.aadd("async_skip", "skip", timeout=-1) is True
+        assert await cache.aget("async_skip") is None
+        assert await cache.atouch("async_forever", timeout=0) is True
+        assert await cache.aget("async_forever") is None
+        assert await cache.atouch("async_forever", timeout=0) is False
+    finally:
+        cache.close()
+        await cache.aclose()
+
+
+def test_django_database_wrapper_cursor_select_to_arrow_and_schema(tmp_path: Path) -> None:
+    """select_to_arrow and select_to_schema execute SQL via self.cursor() when rows is None."""
+    sqlite_wrapper = SQLiteDatabaseWrapper({"NAME": str(tmp_path / "django_select_cursor.db")})
+    try:
+        with sqlite_wrapper.cursor() as cur:
+            cur.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT NOT NULL, qty INTEGER NOT NULL)")
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [1, "A-100", 10])
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [2, "B-200", 5])
+            cur.execute("INSERT INTO orders (id, sku, qty) VALUES (?, ?, ?)", [3, "C-300", 1])
+
+        arrow_tbl = sqlite_wrapper.select_to_arrow(
+            "SELECT id, sku, qty FROM orders WHERE qty >= ? ORDER BY id",
+            [5],
+        )
+        assert isinstance(arrow_tbl, pa.Table)
+        assert arrow_tbl.num_rows == 2
+        assert arrow_tbl.column_names == ["id", "sku", "qty"]
+        assert arrow_tbl.to_pylist() == [
+            {"id": 1, "sku": "A-100", "qty": 10},
+            {"id": 2, "sku": "B-200", "qty": 5},
+        ]
+
+        empty_tbl = sqlite_wrapper.select_to_arrow(
+            "SELECT id, sku, qty FROM orders WHERE qty > ?",
+            [999],
+        )
+        assert isinstance(empty_tbl, pa.Table)
+        assert empty_tbl.num_rows == 0
+        assert empty_tbl.column_names == ["id", "sku", "qty"]
+
+        structs = sqlite_wrapper.select_to_schema(
+            "SELECT id, sku, qty FROM orders WHERE qty >= ? ORDER BY id",
+            [5],
+            schema_type=OrderRecord,
+        )
+        assert structs == [
+            OrderRecord(id=1, sku="A-100", qty=10),
+            OrderRecord(id=2, sku="B-200", qty=5),
+        ]
+    finally:
+        sqlite_wrapper.close()

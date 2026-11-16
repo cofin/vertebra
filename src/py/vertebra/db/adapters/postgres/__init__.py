@@ -36,7 +36,11 @@ if TYPE_CHECKING:
         PostgresNotificationDriver,
         PostgresReplicationDriver,
     )
-    from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+    from vertebra.db.adapters.postgres.notify import (
+        AsyncPostgresNotificationSource,
+        PostgresNotifyConfig,
+        SyncPostgresNotificationSource,
+    )
     from vertebra.db.adapters.postgres.options import (
         ParsedPostgresDsn,
         PostgresClientOptions,
@@ -53,6 +57,10 @@ if TYPE_CHECKING:
         PreparePostgresQuery,
         SyncPipelineClientProtocol,
         SyncPostgresPipeline,
+    )
+    from vertebra.db.adapters.postgres.queue import (
+        AsyncPostgresQueueStore,
+        SyncPostgresQueueStore,
     )
     from vertebra.db.adapters.postgres.types import (
         PG_UNCHANGED_TOAST,
@@ -92,7 +100,9 @@ __all__ = (
     "PG_UNCHANGED_TOAST",
     "ArrowCursor",
     "AsyncPipelineClientProtocol",
+    "AsyncPostgresNotificationSource",
     "AsyncPostgresPipeline",
+    "AsyncPostgresQueueStore",
     "AsyncPostgreSQLDriver",
     "CompiledPostgresBinds",
     "EventSessionRegistry",
@@ -120,7 +130,6 @@ __all__ = (
     "PostgresErrorInfo",
     "PostgresJsonValue",
     "PostgresNotificationDriver",
-    "PostgresNotificationSource",
     "PostgresNotifyConfig",
     "PostgresPipelineOperation",
     "PostgresPipelineOutcome",
@@ -136,7 +145,9 @@ __all__ = (
     "PostgresValue",
     "PreparePostgresQuery",
     "SyncPipelineClientProtocol",
+    "SyncPostgresNotificationSource",
     "SyncPostgresPipeline",
+    "SyncPostgresQueueStore",
     "SyncPostgreSQLDriver",
     "TemporalKind",
     "TemporalSpecial",
@@ -163,6 +174,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.postgres.notify",
     "vertebra.db.adapters.postgres.options",
     "vertebra.db.adapters.postgres.pipeline",
+    "vertebra.db.adapters.postgres.queue",
     "vertebra.db.adapters.postgres.types",
     "vertebra.db.arrow",
 ]
@@ -171,7 +183,12 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ARROW_SHM_THRESHOLD_ROWS": ("vertebra.db.arrow", "ARROW_SHM_THRESHOLD_ROWS"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncPipelineClientProtocol": ("vertebra.db.adapters.postgres.pipeline", "AsyncPipelineClientProtocol"),
+    "AsyncPostgresNotificationSource": (
+        "vertebra.db.adapters.postgres.notify",
+        "AsyncPostgresNotificationSource",
+    ),
     "AsyncPostgresPipeline": ("vertebra.db.adapters.postgres.pipeline", "AsyncPostgresPipeline"),
+    "AsyncPostgresQueueStore": ("vertebra.db.adapters.postgres.queue", "AsyncPostgresQueueStore"),
     "AsyncPostgreSQLDriver": ("vertebra.db.adapters.postgres._async", "AsyncPostgreSQLDriver"),
     "CompiledPostgresBinds": ("vertebra.db.adapters.postgres.binds", "CompiledPostgresBinds"),
     "EventSessionRegistry": ("vertebra.db.adapters.postgres.events", "EventSessionRegistry"),
@@ -205,7 +222,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgresErrorInfo": ("vertebra.db.adapters.postgres.types", "PostgresErrorInfo"),
     "PostgresJsonValue": ("vertebra.db.adapters.postgres.types", "PostgresJsonValue"),
     "PostgresNotificationDriver": ("vertebra.db.adapters.postgres.events", "PostgresNotificationDriver"),
-    "PostgresNotificationSource": ("vertebra.db.adapters.postgres.notify", "PostgresNotificationSource"),
     "PostgresNotifyConfig": ("vertebra.db.adapters.postgres.notify", "PostgresNotifyConfig"),
     "PostgresPipelineOperation": ("vertebra.db.adapters.postgres.types", "PostgresPipelineOperation"),
     "PostgresPipelineOutcome": ("vertebra.db.adapters.postgres.types", "PostgresPipelineOutcome"),
@@ -221,7 +237,12 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgresValue": ("vertebra.db.adapters.postgres.types", "PostgresValue"),
     "PreparePostgresQuery": ("vertebra.db.adapters.postgres.pipeline", "PreparePostgresQuery"),
     "SyncPipelineClientProtocol": ("vertebra.db.adapters.postgres.pipeline", "SyncPipelineClientProtocol"),
+    "SyncPostgresNotificationSource": (
+        "vertebra.db.adapters.postgres.notify",
+        "SyncPostgresNotificationSource",
+    ),
     "SyncPostgresPipeline": ("vertebra.db.adapters.postgres.pipeline", "SyncPostgresPipeline"),
+    "SyncPostgresQueueStore": ("vertebra.db.adapters.postgres.queue", "SyncPostgresQueueStore"),
     "SyncPostgreSQLDriver": ("vertebra.db.adapters.postgres._sync", "SyncPostgreSQLDriver"),
     "TemporalKind": ("vertebra.db.adapters.postgres.types", "TemporalKind"),
     "TemporalSpecial": ("vertebra.db.adapters.postgres.types", "TemporalSpecial"),

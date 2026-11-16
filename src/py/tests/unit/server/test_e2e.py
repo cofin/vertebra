@@ -88,7 +88,7 @@ def test_asgi_response_request_id_explicit_request_id() -> None:
 
 @pytest.mark.anyio
 async def test_asgi_response_request_id_runner_propagates_request_id() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
@@ -99,7 +99,7 @@ async def test_asgi_response_request_id_runner_propagates_request_id() -> None:
 
 @pytest.mark.anyio
 async def test_asgi_response_request_id_runner_propagates_request_id_on_failure() -> None:
-    async def bad_app(scope: dict, receive: Any, send: Any) -> None:
+    async def bad_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         raise ValueError("boom")
 
     runner = AsgiRunner(bad_app)
@@ -109,14 +109,14 @@ async def test_asgi_response_request_id_runner_propagates_request_id_on_failure(
 
 
 def test_protocol_detection_detect_wsgi() -> None:
-    def wsgi_app(environ: dict, start_response: Any) -> list:
+    def wsgi_app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
         return []
 
     assert detect_interface(wsgi_app) == "wsgi"
 
 
 def test_protocol_detection_detect_asgi() -> None:
-    async def asgi_app(scope: dict, receive: Any, send: Any) -> None:
+    async def asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     assert detect_interface(asgi_app) == "asgi"
@@ -124,7 +124,7 @@ def test_protocol_detection_detect_asgi() -> None:
 
 def test_protocol_detection_detect_class_wsgi() -> None:
     class WsgiApp:
-        def __call__(self, environ: dict, start_response: Any) -> list:
+        def __call__(self, environ: dict[str, Any], start_response: Any) -> list[bytes]:
             return []
 
     assert detect_interface(WsgiApp()) == "wsgi"
@@ -132,13 +132,15 @@ def test_protocol_detection_detect_class_wsgi() -> None:
 
 def test_protocol_detection_detect_class_asgi() -> None:
     class AsgiApp:
-        async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
             pass
 
     assert detect_interface(AsgiApp()) == "asgi"
 
 
-def _mount_dispatch_dispatch_single(req: Any, handlers: dict, mount_runners: list, vr_cls: type) -> Any:
+def _mount_dispatch_dispatch_single(
+    req: Any, handlers: dict[int, Any], mount_runners: list[Any], vr_cls: type[Any]
+) -> Any:
     """Helper: dispatch a single request through the batch API."""
     loop = asyncio.new_event_loop()
     try:
@@ -174,7 +176,7 @@ def test_mount_dispatch_dispatch_wsgi_mount() -> None:
 
 def test_mount_dispatch_dispatch_asgi_mount() -> None:
     class FakeAsgiRunner:
-        def __call__(self, requests: list) -> list:
+        def __call__(self, requests: list[Any]) -> list[AsgiResponse]:
             return [AsgiResponse(status=200, headers=[], body=b"asgi", request_id=0)]
 
     req = MockRequest(handler_id=999, path="/api/items", request_id=30)
@@ -208,7 +210,7 @@ def test_mount_dispatch_native_handler_takes_priority() -> None:
 
 
 def test_build_mount_adapters_auto_detection_wsgi() -> None:
-    def wsgi_app(environ: dict, start_response: Any) -> list:
+    def wsgi_app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
         return []
 
     result = _build_mount_adapters([("/wsgi", wsgi_app, "auto")])
@@ -216,7 +218,7 @@ def test_build_mount_adapters_auto_detection_wsgi() -> None:
 
 
 def test_build_mount_adapters_auto_detection_asgi() -> None:
-    async def asgi_app(scope: dict, receive: Any, send: Any) -> None:
+    async def asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     result = _build_mount_adapters([("/asgi", asgi_app, "auto")])
@@ -229,7 +231,7 @@ def test_build_mount_adapters_explicit_protocol_preserved() -> None:
 
 
 def test_asgi_event_loop_sharing_shared_loop_passed_to_runner() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     loop = asyncio.new_event_loop()
@@ -242,7 +244,7 @@ def test_asgi_event_loop_sharing_shared_loop_passed_to_runner() -> None:
 
 
 def test_asgi_event_loop_sharing_runner_creates_own_loop_by_default() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     runner = AsgiRunner(app)
@@ -251,7 +253,7 @@ def test_asgi_event_loop_sharing_runner_creates_own_loop_by_default() -> None:
 
 
 def test_asgi_event_loop_sharing_close_only_closes_owned_loop() -> None:
-    async def app(scope: dict, receive: Any, send: Any) -> None:
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         pass
 
     loop = asyncio.new_event_loop()

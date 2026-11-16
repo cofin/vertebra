@@ -70,8 +70,8 @@ sources:
   resource: src/py/vertebra/extensions/alchemy/__init__.py
   title: Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py)
 - id: src-extensions-sqlalchemy-dialects-py
-  resource: src/py/vertebra/extensions/sqlalchemy/dialects.py
-  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py)
+  resource: src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py
+  title: Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py)
 ---
 
 # ADR-002: Shared-Memory Database Broker and Arrow IPC Data Plane

@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import collections
+import contextlib
+import inspect
 import sys
 import time
 import types
 import uuid
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import msgspec
 import pytest
 
+import vertebra.framework.channels as channels_mod
+import vertebra.framework.queues.redis as redis_queue_mod
+import vertebra.framework.queues.valkey as valkey_queue_mod
+from vertebra.db.adapters.oracle.queue import AsyncOracleQueueStore, SyncOracleQueueStore
 from vertebra.db.adapters.postgres import PostgreSQLConfig
+from vertebra.db.adapters.postgres.queue import AsyncPostgresQueueStore, SyncPostgresQueueStore
+from vertebra.db.driver import AsyncNotificationSource, AsyncQueueStore, NotificationEvent, QueueEntry
+from vertebra.extensions.django.management.commands.vertebra_worker import (
+    Command as DjangoVertebraWorkerCommand,
+)
+from vertebra.extensions.django.tasks import TaskBackend as DjangoTaskBackend
+from vertebra.extensions.litestar.queues.backend import StoreQueueBackend, StoreQueueBackendConfig
+from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
+from vertebra.framework.di import Container, Provide
 from vertebra.framework.queues import (
     CronSchedule,
     MemoryQueueBackend,
@@ -22,16 +39,26 @@ from vertebra.framework.queues import (
     OracleQueueExecutor,
     PostgreSQLQueueBackend,
     PostgreSQLQueueExecutor,
+    QueueBackendSettings,
     QueueConfig,
     QueueService,
     RedisQueueBackend,
-    RedisStreamClient,
     TaskEnvelope,
     TaskRetryPolicy,
     ValkeyQueueBackend,
+    ValkeyStreamClient,
     task,
 )
+from vertebra.framework.queues.backends import (
+    ValkeyQueueBackend as BackendsValkeyQueueBackend,
+)
 from vertebra.framework.queues.scheduler import CronScheduler
+from vertebra.framework.queues.valkey import (
+    ValkeyQueueBackend as DirectValkeyQueueBackend,
+)
+from vertebra.framework.queues.valkey import (
+    ValkeyStreamClient as DirectValkeyStreamClient,
+)
 from vertebra.server.lanes import LaneConfig, WorkerRunner
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanExporter, TraceContext
@@ -40,22 +67,20 @@ from vertebra.typing import (
     MissingDependencyError,
     reset_dependency_cache,
 )
-from vertebra.utils.serializers import decode_json
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 class _FakeOracleQueueExecutor:
     """In-memory transactional SQL simulation of Oracle FOR UPDATE SKIP LOCKED semantics."""
 
-    __slots__ = ("_dlq", "_jobs", "_leases", "_lock")
+    __slots__ = ("_dlq", "_jobs", "_leases", "_lock", "commit_count")
 
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._dlq: dict[str, dict[str, Any]] = {}
         self._leases: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        self.commit_count = 0
 
     async def execute(self, query: str, *params: Any) -> int:
         """Execute mock DML query."""
@@ -105,6 +130,13 @@ class _FakeOracleQueueExecutor:
                     return 1
                 return 0
 
+            if "DELETE FROM VERTEBRA_QUEUE_DLQ" in q:
+                dlq_id = params[0]
+                if dlq_id in self._dlq:
+                    del self._dlq[dlq_id]
+                    return 1
+                return 0
+
             if "INSERT INTO VERTEBRA_QUEUE_DLQ" in q:
                 dlq_id, task_id, task_name, lane, payload, error_type, error_msg, failed_at = params
                 self._dlq[dlq_id] = {
@@ -133,6 +165,20 @@ class _FakeOracleQueueExecutor:
                 return promoted
 
             if "UPDATE VERTEBRA_QUEUE_JOBS" in q:
+                if "CONSUMER_NAME" in q:
+                    status, attempt, locked, cname, handle, task_id = params
+                    if task_id in self._jobs:
+                        self._jobs[task_id].update(
+                            {
+                                "status": status,
+                                "attempt": attempt,
+                                "locked_until": locked,
+                                "consumer_name": cname,
+                                "receipt_handle": handle,
+                            }
+                        )
+                        return 1
+                    return 0
                 status, attempt, sched, locked, handle, task_id = params
                 if task_id in self._jobs:
                     self._jobs[task_id].update(
@@ -147,6 +193,20 @@ class _FakeOracleQueueExecutor:
                     return 1
                 return 0
 
+            if "MERGE INTO VERTEBRA_QUEUE_LEASES" in q:
+                lease_key, owner_id, expires_at, last_slot, check_now = params
+                existing = self._leases.get(lease_key)
+                if existing is None or existing["expires_at"] <= check_now or existing["owner_id"] == owner_id:
+                    new_slot = last_slot or (existing.get("last_slot") if existing else None)
+                    self._leases[lease_key] = {
+                        "lease_key": lease_key,
+                        "owner_id": owner_id,
+                        "expires_at": expires_at,
+                        "last_slot": new_slot,
+                    }
+                    return 1
+                return 0
+
             return 0
 
     async def fetch_all(self, query: str, *params: Any) -> list[dict[str, Any]]:
@@ -154,8 +214,9 @@ class _FakeOracleQueueExecutor:
         async with self._lock:
             q = query.strip().upper()
             if "FOR UPDATE SKIP LOCKED" in q:
-                lanes, now_ts, limit, locked_until, consumer_name, receipt_handle = params
-                target_lanes = set(lanes)
+                *lane_binds, now_ts, limit = params
+                assert all(isinstance(item, str) for item in lane_binds)
+                target_lanes = set(lane_binds)
                 matched: list[dict[str, Any]] = []
                 sorted_jobs = sorted(
                     self._jobs.values(),
@@ -172,13 +233,6 @@ class _FakeOracleQueueExecutor:
                     is_ready_pending = status == "pending" and (sched is None or sched <= now_ts)
                     is_expired_running = status == "running" and locked is not None and locked <= now_ts
                     if is_ready_pending or is_expired_running:
-                        job_handle = receipt_handle or uuid.uuid4().hex
-                        job["status"] = "running"
-                        job["locked_until"] = locked_until
-                        job["consumer_name"] = consumer_name
-                        job["receipt_handle"] = job_handle
-                        if is_expired_running:
-                            job["attempt"] = int(job.get("attempt", 1)) + 1
                         matched.append(dict(job))
                 return matched
 
@@ -192,19 +246,11 @@ class _FakeOracleQueueExecutor:
         """Fetch single matching row."""
         async with self._lock:
             q = query.strip().upper()
-            if "MERGE INTO VERTEBRA_QUEUE_LEASES" in q:
-                lease_key, owner_id, expires_at, last_slot, check_now = params
-                existing = self._leases.get(lease_key)
-                if existing is None or existing["expires_at"] <= check_now or existing["owner_id"] == owner_id:
-                    new_slot = last_slot or (existing.get("last_slot") if existing else None)
-                    record = {
-                        "lease_key": lease_key,
-                        "owner_id": owner_id,
-                        "expires_at": expires_at,
-                        "last_slot": new_slot,
-                    }
-                    self._leases[lease_key] = record
-                    return dict(record)
+            assert "MERGE INTO" not in q
+            if "FROM VERTEBRA_QUEUE_LEASES WHERE LEASE_KEY" in q:
+                lease_key = params[0]
+                if lease_key in self._leases:
+                    return dict(self._leases[lease_key])
                 return None
 
             if "SELECT * FROM VERTEBRA_QUEUE_DLQ WHERE DLQ_ID" in q:
@@ -217,7 +263,7 @@ class _FakeOracleQueueExecutor:
 
     async def commit(self) -> None:
         """Commit active mock transaction."""
-        return None
+        self.commit_count += 1
 
     async def close(self) -> None:
         """Clear state."""
@@ -582,15 +628,25 @@ class FakeRedisStreamClient:
             promoted = 0
             for raw_json, _ in eligible:
                 raw_bytes = raw_json.encode("utf-8") if isinstance(raw_json, str) else raw_json
-                env = msgspec.convert(decode_json(raw_bytes), type=TaskEnvelope)
-                lane = env.lane
+                decoded = decode_json(raw_bytes)
+                if isinstance(decoded, dict):
+                    lane = decoded.get("lane")
+                    task_name = str(decoded.get("task_name") or "")
+                elif isinstance(decoded, list) and len(decoded) >= 3:
+                    lane = decoded[2]
+                    task_name = str(decoded[1] or "")
+                else:
+                    lane = None
+                    task_name = ""
+                if not lane:
+                    continue
                 stream_key = f"{prefix}:lane:{lane}"
                 await self.xadd(
                     stream_key,
                     {
                         "payload": raw_json,
                         "lane": lane,
-                        "task_name": env.task_name,
+                        "task_name": task_name,
                     },
                 )
                 zset.pop(raw_json, None)
@@ -906,7 +962,6 @@ async def test_queue_backends_retry_backoff_and_dlq_replay(backend_url: str) -> 
     qsvc = QueueService(config, backend=backend)
     attempts_recorded: list[int] = []
 
-    @task(lane="io", retry_policy=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.01))
     async def failing_operation(x: int) -> int:
         attempts_recorded.append(len(attempts_recorded) + 1)
         if len(attempts_recorded) <= 2:
@@ -914,7 +969,9 @@ async def test_queue_backends_retry_backoff_and_dlq_replay(backend_url: str) -> 
             raise RuntimeError(msg)
         return x * 2
 
-    qsvc.register(failing_operation)
+    qsvc.register(
+        task(lane="io", retry_policy=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.01))(failing_operation)
+    )
     await qsvc.enqueue("failing_operation", 42)
 
     claimed1 = (await backend.dequeue(["io"], batch_size=1))[0]
@@ -984,11 +1041,12 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     backend = MemoryQueueBackend()
     qsvc = QueueService(backend=backend)
 
-    @task(lane="io", cron=CronSchedule(expression="* * * * *", timezone="America/New_York"))
     def minutely_heartbeat() -> str:
         return "heartbeat"
 
-    qsvc.register(minutely_heartbeat)
+    qsvc.register(
+        task(lane="io", cron=CronSchedule(expression="* * * * *", timezone="America/New_York"))(minutely_heartbeat)
+    )
 
     sched1 = CronScheduler(qsvc, node_id="node-1", lease_ttl_seconds=0.1)
     sched2 = CronScheduler(qsvc, node_id="node-2", lease_ttl_seconds=0.1)
@@ -999,11 +1057,11 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     res2 = await sched2.tick(now=t0)
     res3 = await sched3.tick(now=t0)
 
-    total_t0 = len(res1) + len(res2) + len(res3)
+    total_t0 = res1 + res2 + res3
     assert total_t0 == 1
-    assert len(res1) == 1
-    assert len(res2) == 0
-    assert len(res3) == 0
+    assert res1 == 1
+    assert res2 == 0
+    assert res3 == 0
 
     await asyncio.sleep(0.12)
 
@@ -1011,10 +1069,10 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     res_failover_2 = await sched2.tick(now=t1)
     res_failover_3 = await sched3.tick(now=t1)
 
-    total_t1 = len(res_failover_2) + len(res_failover_3)
+    total_t1 = res_failover_2 + res_failover_3
     assert total_t1 == 1
-    assert len(res_failover_2) == 1
-    assert len(res_failover_3) == 0
+    assert res_failover_2 == 1
+    assert res_failover_3 == 0
 
     claimed = await backend.dequeue(["io"], batch_size=10)
     assert len(claimed) == 2
@@ -1033,13 +1091,12 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
 
     completed_jobs: list[str] = []
 
-    @task(lane="cpu")
     async def slow_cpu_job() -> str:
         await asyncio.sleep(0.04)
         completed_jobs.append("cpu_done")
         return "cpu_done"
 
-    qsvc.register(slow_cpu_job)
+    qsvc.register(task(lane="cpu")(slow_cpu_job))
 
     root_trace = TraceContext.generate(sampled=True)
     token = TraceContext.set_current(root_trace)
@@ -1047,7 +1104,8 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
         env = await qsvc.enqueue("slow_cpu_job")
         assert env.task_name == "slow_cpu_job"
     finally:
-        TraceContext.set_current(token.old_value if hasattr(token, "old_value") else None)
+        old_ctx = getattr(token, "old_value", None)
+        TraceContext.set_current(old_ctx if isinstance(old_ctx, TraceContext) else None)
 
     runner = WorkerRunner(
         [LaneConfig(queue_name="cpu", concurrency=2, drain_timeout_s=2.0, lane_kind="cpu")],
@@ -1084,18 +1142,18 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
 async def test_oracle_queue_backend_requires_oracledb_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OracleQueueBackend raises MissingDependencyError when oracledb is absent and ImproperConfigurationError without executor."""
-    monkeypatch.setitem(sys.modules, "oracledb", None)
-    reset_dependency_cache("oracledb")
+    """OracleQueueBackend raises MissingDependencyError when vertebra._oracle is absent and ImproperConfigurationError without executor."""
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
     try:
         with pytest.raises(MissingDependencyError) as exc_info:
             OracleQueueBackend(QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1"))
-        assert exc_info.value.package == "oracledb"
-        assert exc_info.value.install_package == "oracledb"
+        assert exc_info.value.package == "vertebra-core[oracle]"
+        assert exc_info.value.install_package == "vertebra-core[oracle]"
 
         with pytest.raises(MissingDependencyError) as svc_exc:
             QueueService(QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1"))
-        assert svc_exc.value.package == "oracledb"
+        assert svc_exc.value.package == "vertebra-core[oracle]"
 
         fake = _FakeOracleQueueExecutor()
         assert isinstance(fake, OracleQueueExecutor)
@@ -1103,21 +1161,20 @@ async def test_oracle_queue_backend_requires_oracledb_and_executor(
         backend = OracleQueueBackend(cfg, executor=fake)
         service = QueueService(cfg, backend=backend)
 
-        @task(name="oracle_ping", lane="io")
         def oracle_ping(val: int) -> int:
             return val + 1
 
-        service.register(oracle_ping)
+        service.register(task(name="oracle_ping", lane="io")(oracle_ping))
         await service.enqueue("oracle_ping", 41)
         assert await service.drain_once(("io",)) == [42]
         await service.close()
 
-        monkeypatch.setitem(sys.modules, "oracledb", types.ModuleType("oracledb"))
-        reset_dependency_cache("oracledb")
-        with pytest.raises(ImproperConfigurationError, match="requires an OracleQueueExecutor"):
+        monkeypatch.setitem(sys.modules, "vertebra._oracle", types.ModuleType("vertebra._oracle"))
+        reset_dependency_cache("vertebra._oracle")
+        with pytest.raises(ImproperConfigurationError, match="is unsupported"):
             OracleQueueBackend(QueueConfig())
     finally:
-        reset_dependency_cache("oracledb")
+        reset_dependency_cache("vertebra._oracle")
 
 
 @pytest.mark.anyio
@@ -1148,19 +1205,18 @@ async def test_postgres_queue_backend_requires_native_postgres_and_executor(
         assert backend.direct_dsn == "postgresql://primary:5432/db"
         service = QueueService(qcfg, backend=backend)
 
-        @task(name="pg_ping", lane="io")
         def pg_ping(val: int) -> int:
             return val * 2
 
-        service.register(pg_ping)
+        service.register(task(name="pg_ping", lane="io")(pg_ping))
         await service.enqueue("pg_ping", 21)
         assert await service.drain_once(("io",)) == [42]
         await service.close()
 
         monkeypatch.setitem(sys.modules, "vertebra._postgres", types.ModuleType("vertebra._postgres"))
         reset_dependency_cache("vertebra._postgres")
-        with pytest.raises(ImproperConfigurationError, match="requires a PostgreSQLQueueExecutor"):
-            PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
+        with pytest.raises(ImproperConfigurationError, match="do not support memory:// DSNs"):
+            PostgreSQLQueueBackend(QueueConfig())
     finally:
         reset_dependency_cache("vertebra._postgres")
 
@@ -1168,46 +1224,890 @@ async def test_postgres_queue_backend_requires_native_postgres_and_executor(
 def test_redis_queue_backend_requires_redis_and_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RedisQueueBackend and ValkeyQueueBackend require redis.asyncio and a hosted URL unless client is injected."""
-    monkeypatch.setitem(sys.modules, "redis.asyncio", None)
-    reset_dependency_cache("redis.asyncio")
+    """RedisQueueBackend requires vertebra._redis and a valid URL, while ValkeyQueueBackend requires vertebra._valkey."""
+    monkeypatch.setitem(sys.modules, "vertebra._redis", None)
+    reset_dependency_cache("vertebra._redis")
     try:
         with pytest.raises(MissingDependencyError) as exc_info:
             RedisQueueBackend(QueueConfig(backend_url="redis://localhost:6379/0"))
-        assert exc_info.value.package == "redis"
-        assert exc_info.value.install_package == "redis"
-        assert exc_info.value.hint == "Install it with: uv add redis"
+        assert exc_info.value.package == "vertebra-core[redis]"
+        assert exc_info.value.install_package == "vertebra-core[redis]"
+    finally:
+        monkeypatch.delitem(sys.modules, "vertebra._redis", raising=False)
+        reset_dependency_cache("vertebra._redis")
 
+    monkeypatch.setitem(sys.modules, "vertebra._valkey", None)
+    reset_dependency_cache("vertebra._valkey")
+    try:
         with pytest.raises(MissingDependencyError) as svc_exc:
             QueueService(QueueConfig(backend_url="valkey://localhost:6379/0"))
-        assert svc_exc.value.package == "redis"
+        assert svc_exc.value.package == "vertebra-core[valkey]"
 
         fake = FakeRedisStreamClient()
-        assert isinstance(fake, RedisStreamClient)
+        assert isinstance(fake, ValkeyStreamClient)
         injected = ValkeyQueueBackend(client=fake)
         assert injected.client is fake
-
-        captured: list[str] = []
-        live = FakeRedisStreamClient()
-
-        def _from_url(url: str) -> FakeRedisStreamClient:
-            captured.append(url)
-            return live
-
-        stub = types.ModuleType("redis.asyncio")
-        monkeypatch.setattr(stub, "from_url", _from_url, raising=False)
-        monkeypatch.setitem(sys.modules, "redis.asyncio", stub)
-        reset_dependency_cache("redis.asyncio")
-
-        backend = RedisQueueBackend(QueueConfig(backend_url="redis://cache.internal:6380/2"))
-        assert backend.client is live
-        assert captured == ["redis://cache.internal:6380/2"]
-
-        with pytest.raises(ImproperConfigurationError, match="has no host"):
-            RedisQueueBackend(QueueConfig(backend_url="redis:///0"))
-        assert captured == ["redis://cache.internal:6380/2"]
-
-        with pytest.raises(ImproperConfigurationError, match="has no host"):
-            ValkeyQueueBackend()
     finally:
-        reset_dependency_cache("redis.asyncio")
+        monkeypatch.delitem(sys.modules, "vertebra._valkey", raising=False)
+        reset_dependency_cache("vertebra._valkey")
+
+    with pytest.raises(ImproperConfigurationError, match="has no host"):
+        ValkeyQueueBackend(QueueConfig(backend_url="valkey:///0"))
+
+    fake = FakeRedisStreamClient()
+    injected_redis = RedisQueueBackend(client=fake)
+    assert injected_redis.client is fake
+
+    with pytest.raises(ImproperConfigurationError, match="has no host"):
+        RedisQueueBackend(QueueConfig(backend_url="redis:///0"))
+
+
+@pytest.mark.parametrize(
+    ("url", "valid", "expected_err"),
+    [
+        ("redis://127.0.0.1:6379/0", True, None),
+        ("rediss://127.0.0.1:6380/0", True, None),
+        ("unix:///tmp/redis.sock", True, None),
+        ("memory://", False, "does not support memory://"),
+        ("valkey://localhost:6379/0", False, "valkey:// URLs are not supported by RedisQueueBackend"),
+        ("valkeys://localhost:6380/0", False, "valkey:// URLs are not supported by RedisQueueBackend"),
+    ],
+)
+def test_redis_queue_backend_url_schemes(url: str, valid: bool, expected_err: str | None) -> None:
+    """RedisQueueBackend accepts redis://, rediss://, and unix:// while rejecting memory:// and valkey://."""
+    if valid:
+        backend = RedisQueueBackend(QueueConfig(backend_url=url), client=FakeRedisStreamClient())
+        assert backend is not None
+    else:
+        with pytest.raises(ImproperConfigurationError, match=expected_err or ""):
+            RedisQueueBackend(QueueConfig(backend_url=url))
+
+
+@pytest.mark.parametrize(
+    ("url", "valid", "expected_err"),
+    [
+        ("valkey://127.0.0.1:6379/0", True, None),
+        ("valkeys://127.0.0.1:6380/0", True, None),
+        ("unix:///tmp/valkey.sock", True, None),
+        ("memory://", False, "does not support memory://"),
+        ("redis://localhost:6379/0", False, "redis:// URLs are not supported by ValkeyQueueBackend"),
+        ("rediss://localhost:6380/0", False, "redis:// URLs are not supported by ValkeyQueueBackend"),
+    ],
+)
+def test_valkey_queue_backend_url_schemes(url: str, valid: bool, expected_err: str | None) -> None:
+    """ValkeyQueueBackend accepts valkey://, valkeys://, and unix:// while rejecting memory:// and redis://."""
+    if valid:
+        backend = ValkeyQueueBackend(QueueConfig(backend_url=url), client=FakeRedisStreamClient())
+        assert backend is not None
+    else:
+        with pytest.raises(ImproperConfigurationError, match=expected_err or ""):
+            ValkeyQueueBackend(QueueConfig(backend_url=url))
+
+
+def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ValkeyQueueBackend and ValkeyStreamClient are isolated from framework.queues.redis."""
+    assert ValkeyQueueBackend is DirectValkeyQueueBackend
+    assert BackendsValkeyQueueBackend is DirectValkeyQueueBackend
+    assert ValkeyStreamClient is DirectValkeyStreamClient
+
+    source = inspect.getsource(valkey_queue_mod)
+    assert "vertebra.framework.queues.redis" not in source
+    assert "from .redis" not in source
+    assert "redis.asyncio" not in source
+
+    fake = FakeRedisStreamClient()
+    assert isinstance(fake, DirectValkeyStreamClient)
+
+    monkeypatch.setattr(DirectValkeyQueueBackend, "_build_client", staticmethod(lambda cfg: fake))
+    backend = QueueService._build_backend(QueueConfig(backend_url="valkey://localhost:6379/0", stream_prefix="test"))
+    assert isinstance(backend, DirectValkeyQueueBackend)
+    assert backend.client is fake
+
+
+@pytest.mark.anyio
+async def test_worker_runner_scoped_di_and_cron_scheduler_register() -> None:
+    """Verify WorkerRunner per-task Container.scope() DI, generator teardown, and CronScheduler.register."""
+    cleaned_up: list[str] = []
+
+    async def get_db_session() -> AsyncIterator[dict[str, str]]:
+        session = {"id": "session-1"}
+        try:
+            yield session
+        finally:
+            cleaned_up.append("session-closed")
+
+    container = Container()
+    container.graph.register("db_session", Provide(dependency=get_db_session, scope="request"))
+    container.graph.compile()
+
+    backend = MemoryQueueBackend()
+    qsvc = QueueService(backend=backend)
+
+    invoked_with: list[dict[str, str]] = []
+
+    async def task_with_di(db_session: dict[str, str]) -> str:
+        invoked_with.append(db_session)
+        return "done"
+
+    qsvc.register(task(lane="io")(task_with_di))
+    await qsvc.enqueue("task_with_di")
+
+    runner = WorkerRunner(
+        [LaneConfig(queue_name="io", concurrency=2, lane_kind="io")],
+        queue_service=qsvc,
+        container=container,
+    )
+
+    processed = await runner.process_once()
+    assert processed == 1
+    assert len(invoked_with) == 1
+    assert invoked_with[0] == {"id": "session-1"}
+    assert cleaned_up == ["session-closed"]
+
+    sched = CronScheduler(qsvc, node_id="sched-test", lease_ttl_seconds=10.0)
+    sched.register("daily_sync", "0 0 * * *", "task_with_di")
+
+    t_midnight = datetime(2026, 5, 1, 0, 0, 0, tzinfo=UTC)
+    count = await sched.tick(now=t_midnight)
+    assert count == 1
+
+    t_other = datetime(2026, 5, 1, 0, 1, 0, tzinfo=UTC)
+    count_other = await sched.tick(now=t_other)
+    assert count_other == 0
+
+    await backend.close()
+
+
+class _StatefulAsyncQueueStore(AsyncQueueStore):
+    """In-memory AsyncQueueStore implementing fenced attempts, reap_stale, claim_job, and pop_dead_letter."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, tuple[QueueEntry, str, str | None]] = {}
+        self._unique_keys: set[str] = set()
+        self._leases: dict[str, tuple[str, float]] = {}
+        self.reap_calls = 0
+
+    async def ensure_schema(self) -> None:
+        return None
+
+    async def enqueue(self, entry: QueueEntry) -> str:
+        jid = entry.job_id or uuid.uuid4().hex
+        if jid in self._rows:
+            msg = f"Duplicate job_id {jid!r}"
+            raise ValueError(msg)
+        ikey = entry.headers.get("idempotency_key")
+        if ikey:
+            if ikey in self._unique_keys:
+                return jid
+            self._unique_keys.add(ikey)
+        stored = msgspec.structs.replace(entry, job_id=jid)
+        self._rows[jid] = (stored, "ready", None)
+        return jid
+
+    async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        return [await self.enqueue(e) for e in entries]
+
+    async def claim(
+        self,
+        queues: Sequence[str],
+        *,
+        limit: int = 1,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
+        now_ms = int(time.time() * 1000)
+        lease_ms = now_ms + int(lease_seconds * 1000)
+        claimed: list[QueueEntry] = []
+        for jid, (entry, status, _owner) in list(self._rows.items()):
+            if len(claimed) >= limit:
+                break
+            if entry.queue not in queues:
+                continue
+            due_ready = status == "ready" and (entry.scheduled_at_ms is None or entry.scheduled_at_ms <= now_ms)
+            expired_claim = (
+                status == "claimed" and entry.lease_until_ms <= now_ms and entry.attempt < entry.max_attempts
+            )
+            if due_ready or expired_claim:
+                next_attempt = entry.attempt + 1 if status == "claimed" else entry.attempt
+                updated = msgspec.structs.replace(entry, attempt=next_attempt, lease_until_ms=lease_ms)
+                self._rows[jid] = (updated, "claimed", worker_id)
+                claimed.append(updated)
+        return claimed
+
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None:
+        item = self._rows.get(job_id)
+        if item is None:
+            return None
+        entry, status, _owner = item
+        now_ms = int(time.time() * 1000)
+        due_ready = status == "ready" and (entry.scheduled_at_ms is None or entry.scheduled_at_ms <= now_ms)
+        expired_claim = status == "claimed" and entry.lease_until_ms <= now_ms and entry.attempt < entry.max_attempts
+        if not (due_ready or expired_claim):
+            return None
+        next_attempt = entry.attempt + 1 if status == "claimed" else entry.attempt
+        if expected_attempt is not None and next_attempt != expected_attempt:
+            return None
+        updated = msgspec.structs.replace(
+            entry,
+            attempt=next_attempt,
+            lease_until_ms=now_ms + int(lease_seconds * 1000),
+        )
+        self._rows[job_id] = (updated, "claimed", worker_id)
+        return updated
+
+    async def ack(self, job_id: str, *, attempt: int) -> bool:
+        item = self._rows.get(job_id)
+        if item is None:
+            return False
+        entry, status, _owner = item
+        if status != "claimed" or entry.attempt != attempt:
+            return False
+        updated = msgspec.structs.replace(entry, lease_until_ms=0)
+        self._rows[job_id] = (updated, "completed", None)
+        return True
+
+    async def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        _ = error
+        item = self._rows.get(job_id)
+        if item is None:
+            return False
+        entry, status, _owner = item
+        if status != "claimed" or entry.attempt != attempt:
+            return False
+        if retry_delay_s is None or entry.attempt >= entry.max_attempts:
+            updated = msgspec.structs.replace(entry, lease_until_ms=0)
+            self._rows[job_id] = (updated, "dead_letter", None)
+            return True
+        now_ms = int(time.time() * 1000)
+        sched_ms = now_ms + int(retry_delay_s * 1000) if retry_delay_s > 0 else None
+        updated = msgspec.structs.replace(
+            entry,
+            attempt=entry.attempt + 1,
+            lease_until_ms=0,
+            scheduled_at_ms=sched_ms,
+        )
+        self._rows[job_id] = (updated, "ready", None)
+        return True
+
+    async def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        now_ms = int(time.time() * 1000)
+        new_lease = now_ms + int(lease_seconds * 1000)
+        touched = 0
+        for jid in job_ids:
+            item = self._rows.get(jid)
+            if item is not None and item[1] == "claimed" and item[2] == worker_id:
+                self._rows[jid] = (msgspec.structs.replace(item[0], lease_until_ms=new_lease), "claimed", worker_id)
+                touched += 1
+        return touched
+
+    async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        _ = lease_seconds
+        self.reap_calls += 1
+        now_ms = int(time.time() * 1000)
+        reaped = 0
+        for jid, (entry, status, _owner) in list(self._rows.items()):
+            if status == "claimed" and entry.lease_until_ms <= now_ms:
+                if entry.attempt >= entry.max_attempts:
+                    self._rows[jid] = (msgspec.structs.replace(entry, lease_until_ms=0), "dead_letter", None)
+                else:
+                    self._rows[jid] = (
+                        msgspec.structs.replace(entry, attempt=entry.attempt + 1, lease_until_ms=0),
+                        "ready",
+                        None,
+                    )
+                reaped += 1
+        return reaped
+
+    async def promote_scheduled(self, *, limit: int = 100) -> int:
+        now_ms = int(time.time() * 1000)
+        promoted = 0
+        for jid, (entry, status, owner) in list(self._rows.items()):
+            if promoted >= limit:
+                break
+            if status == "ready" and entry.scheduled_at_ms is not None and entry.scheduled_at_ms <= now_ms:
+                self._rows[jid] = (msgspec.structs.replace(entry, scheduled_at_ms=None), status, owner)
+                promoted += 1
+        return promoted
+
+    async def cancel(self, job_id: str) -> bool:
+        item = self._rows.get(job_id)
+        if item is None or item[1] not in ("ready", "claimed"):
+            return False
+        self._rows[job_id] = (msgspec.structs.replace(item[0], lease_until_ms=0), "cancelled", None)
+        return True
+
+    async def get_entry(self, job_id: str) -> QueueEntry | None:
+        item = self._rows.get(job_id)
+        return item[0] if item is not None else None
+
+    async def get_entry_status(self, job_id: str) -> str | None:
+        item = self._rows.get(job_id)
+        return item[1] if item is not None else None
+
+    async def pop_dead_letter(self, job_id: str) -> QueueEntry | None:
+        item = self._rows.get(job_id)
+        if item is None or item[1] != "dead_letter":
+            return None
+        del self._rows[job_id]
+        return item[0]
+
+    async def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        matched = [
+            entry
+            for entry, row_status, _owner in self._rows.values()
+            if entry.queue == queue and (status is None or row_status == status)
+        ]
+        return matched[:limit]
+
+    async def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        now_ms = int(time.time() * 1000)
+        scheds = [
+            entry.scheduled_at_ms
+            for entry, status, _owner in self._rows.values()
+            if status == "ready"
+            and entry.queue in queues
+            and entry.scheduled_at_ms is not None
+            and entry.scheduled_at_ms > now_ms
+        ]
+        if not scheds:
+            return None
+        return max(0.0, (min(scheds) - now_ms) / 1000.0)
+
+    async def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        _ = ttl_seconds
+        if key in self._unique_keys:
+            return False
+        self._unique_keys.add(key)
+        return True
+
+    async def release_unique_key(self, key: str) -> bool:
+        if key in self._unique_keys:
+            self._unique_keys.remove(key)
+            return True
+        return False
+
+    async def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        now = time.time()
+        existing = self._leases.get(lease_key)
+        if existing is None or existing[1] <= now or existing[0] == owner_id:
+            self._leases[lease_key] = (owner_id, now + ttl_seconds)
+            return True
+        return False
+
+    async def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        existing = self._leases.get(lease_key)
+        if existing is not None and existing[0] == owner_id:
+            del self._leases[lease_key]
+            return True
+        return False
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _InMemoryAsyncNotificationSource(AsyncNotificationSource):
+    """In-memory AsyncNotificationSource for wakeup and channel tests."""
+
+    def __init__(self) -> None:
+        self.subscribed: set[str] = set()
+        self._queues: set[asyncio.Queue[NotificationEvent]] = set()
+
+    async def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        evt = NotificationEvent(channel=channel, payload=raw, sender_id=None, metadata={})
+        for q in tuple(self._queues):
+            q.put_nowait(evt)
+
+    async def subscribe(self, channels: Sequence[str]) -> None:
+        self.subscribed.update(channels)
+
+    async def unsubscribe(self, channels: Sequence[str]) -> None:
+        for ch in channels:
+            self.subscribed.discard(ch)
+
+    async def listen(self) -> AsyncIterator[NotificationEvent]:
+        q: asyncio.Queue[NotificationEvent] = asyncio.Queue()
+        self._queues.add(q)
+        try:
+            while True:
+                evt = await q.get()
+                if not self.subscribed or evt.channel in self.subscribed:
+                    yield evt
+        finally:
+            self._queues.discard(q)
+
+
+@pytest.mark.anyio
+async def test_redis_and_valkey_lua_promote_array_like_envelope_and_nack() -> None:
+    """Redis and Valkey promotion Lua scripts extract array_like TaskEnvelope fields and nack has no dead tail."""
+    env = TaskEnvelope(
+        task_id="arr-1",
+        task_name="dispatch_webhook",
+        lane="agent",
+        scheduled_at=10.0,
+        max_retries=3,
+    )
+    raw = encode_json_bytes(env)
+    decoded = decode_json(raw)
+    assert isinstance(decoded, list)
+    assert decoded[1] == "dispatch_webhook"
+    assert decoded[2] == "agent"
+
+    for lua_src in (redis_queue_mod._PROMOTE_SCHEDULED_LUA, valkey_queue_mod._PROMOTE_SCHEDULED_LUA):
+        assert "data.lane or data[3]" in lua_src
+        assert "data.task_name or data[2]" in lua_src
+        assert "if ok and data and lane then" in lua_src
+
+    nack_src = inspect.getsource(RedisQueueBackend.nack)
+    tree = ast.parse(inspect.cleandoc(nack_src))
+    func_node = tree.body[0]
+    assert isinstance(func_node, ast.AsyncFunctionDef)
+    assert isinstance(func_node.body[-1], ast.Return)
+    assert sum(1 for stmt in func_node.body if isinstance(stmt, ast.Return)) == 1
+
+    client = FakeRedisStreamClient()
+    backend = RedisQueueBackend(QueueConfig(backend_url="redis://127.0.0.1:6379/0"), client=client)
+    await backend.enqueue(msgspec.structs.replace(env, scheduled_at=None))
+    claimed = await backend.dequeue(["agent"], batch_size=1)
+    assert len(claimed) == 1
+    dlq_res = await backend.nack(claimed[0], error="retry me", delay_seconds=5.0)
+    assert dlq_res is None
+    assert len(client._zsets["vtb:queue:scheduled"]) == 1
+    promoted = await backend.promote_scheduled(now=time.time() + 10.0)
+    assert promoted == 1
+    reclaimed = await backend.dequeue(["agent"], batch_size=1)
+    assert len(reclaimed) == 1
+    assert reclaimed[0].attempt == 2
+    await backend.close()
+
+
+@pytest.mark.anyio
+async def test_oracle_executor_multilane_binds_update_commit_and_merge_lease() -> None:
+    """OracleQueueBackend executor mode expands multi-lane binds, persists running state, and avoids fetch_one on MERGE."""
+    fake = _FakeOracleQueueExecutor()
+    backend = OracleQueueBackend(
+        QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1", consumer_name="ora-worker-1"),
+        executor=fake,
+    )
+    await backend.enqueue(TaskEnvelope(task_id="ora-cpu", task_name="c", lane="cpu"))
+    await backend.enqueue(TaskEnvelope(task_id="ora-agent", task_name="a", lane="agent"))
+
+    commits_before = fake.commit_count
+    claimed = await backend.dequeue(["cpu", "agent"], batch_size=5)
+    assert [c.task_id for c in claimed] == ["ora-cpu", "ora-agent"]
+    assert fake._jobs["ora-cpu"]["status"] == "running"
+    assert fake._jobs["ora-cpu"]["consumer_name"] == "ora-worker-1"
+    assert fake._jobs["ora-cpu"]["receipt_handle"] is not None
+    assert fake.commit_count > commits_before
+
+    lease1 = await backend.acquire_lease("cron:hourly", "leader-a", 30.0, slot="2026-11-16T08:00")
+    assert lease1 is not None
+    assert lease1.owner_id == "leader-a"
+    assert lease1.last_slot == "2026-11-16T08:00"
+
+    competing = await backend.acquire_lease("cron:hourly", "leader-b", 30.0, slot="2026-11-16T08:00")
+    assert competing is None
+
+    renewed = await backend.renew_lease("cron:hourly", "leader-a", 30.0, slot="2026-11-16T09:00")
+    assert renewed is not None
+    assert renewed.last_slot == "2026-11-16T09:00"
+    await backend.close()
+
+
+@pytest.mark.anyio
+async def test_oracle_and_postgres_queue_stores_reap_fencing_settings_and_dlq_replay() -> None:
+    """Oracle and Postgres queue stores validate table_name, fence zombie workers in reap_stale, and replay DLQ cleanly."""
+    dummy_drv: Any = object()
+    with pytest.raises(ValueError, match="table_name"):
+        SyncOracleQueueStore(dummy_drv, table_name="bad;table")
+    with pytest.raises(ValueError, match="table_name"):
+        AsyncOracleQueueStore(dummy_drv, table_name="bad;table")
+    with pytest.raises(ValueError, match="table_name"):
+        SyncPostgresQueueStore(dummy_drv, table_name="bad;table")
+    with pytest.raises(ValueError, match="table_name"):
+        AsyncPostgresQueueStore(dummy_drv, table_name="bad;table")
+
+    executed_oracle_sql: list[str] = []
+
+    class _RecordingOracleDriver:
+        def execute(self, sql: str, _params: Any = None) -> int:
+            executed_oracle_sql.append(sql)
+            return 1
+
+        @contextlib.contextmanager
+        def transaction(self) -> Any:
+            yield
+
+        def select_one_or_none(self, sql: str, _params: Any = None) -> dict[str, Any] | None:
+            executed_oracle_sql.append(sql)
+            return {
+                "job_id": "ora-dlq-1",
+                "queue": "io",
+                "task_name": "sync_task",
+                "payload": b"{}",
+                "attempt": 2,
+                "max_attempts": 2,
+                "lease_until_ms": 0,
+                "scheduled_at_ms": None,
+                "headers": None,
+            }
+
+    ora_drv_any: Any = _RecordingOracleDriver()
+    ora_sync_sql_store = SyncOracleQueueStore(ora_drv_any, table_name="custom_ora_jobs")
+    assert ora_sync_sql_store.reap_stale() == 1
+    assert "attempt >= max_attempts THEN 'dead_letter'" in executed_oracle_sql[0]
+    assert "ELSE attempt + 1" in executed_oracle_sql[0]
+    popped_ora = ora_sync_sql_store.pop_dead_letter("ora-dlq-1")
+    assert popped_ora is not None
+    assert popped_ora.job_id == "ora-dlq-1"
+    assert any("DELETE FROM custom_ora_jobs" in s for s in executed_oracle_sql)
+
+    store = _StatefulAsyncQueueStore()
+    await store.enqueue(
+        QueueEntry(
+            job_id="zombie-job",
+            queue="io",
+            task_name="work",
+            payload=b"{}",
+            attempt=1,
+            max_attempts=2,
+        )
+    )
+    first_claim = await store.claim(["io"], limit=1, worker_id="worker-zombie", lease_seconds=0.0)
+    assert len(first_claim) == 1
+    assert first_claim[0].attempt == 1
+
+    assert await store.reap_stale() == 1
+    assert await store.ack("zombie-job", attempt=1) is False
+    assert await store.nack("zombie-job", attempt=1, error="late crash") is False
+
+    second_claim = await store.claim(["io"], limit=1, worker_id="worker-healthy", lease_seconds=0.0)
+    assert len(second_claim) == 1
+    assert second_claim[0].attempt == 2
+
+    assert await store.reap_stale() == 1
+    assert await store.get_entry_status("zombie-job") == "dead_letter"
+    assert await store.claim(["io"], limit=1, worker_id="worker-3", lease_seconds=30.0) == []
+
+    pg_store = _StatefulAsyncQueueStore()
+    pg_sync_marker: Any = object()
+    pg_backend = PostgreSQLQueueBackend(
+        QueueBackendSettings(kind="postgres", store=pg_store, sync_store=pg_sync_marker)
+    )
+    resolved_pg_store: Any = pg_backend.store
+    assert resolved_pg_store is pg_store
+    assert pg_backend.sync_store is pg_sync_marker
+
+    ora_store = _StatefulAsyncQueueStore()
+    ora_sync_marker: Any = object()
+    ora_backend = OracleQueueBackend(QueueBackendSettings(kind="oracle", store=ora_store, sync_store=ora_sync_marker))
+    resolved_ora_store: Any = ora_backend.store
+    assert resolved_ora_store is ora_store
+    assert ora_backend.sync_store is ora_sync_marker
+
+    for native_backend, backing_store in ((pg_backend, pg_store), (ora_backend, ora_store)):
+        await backing_store.reserve_unique_key("dedup-key-1", ttl_seconds=60.0)
+        await backing_store.release_unique_key("dedup-key-1")
+        env = TaskEnvelope(
+            task_id="dlq-replay-task",
+            task_name="sync_invoice",
+            lane="io",
+            max_retries=1,
+            idempotency_key="dedup-key-1",
+        )
+        await native_backend.enqueue(env)
+        claimed_batch = await native_backend.dequeue(["io"], batch_size=1)
+        assert len(claimed_batch) == 1
+        dlq_item = await native_backend.nack(claimed_batch[0], error="boom", send_to_dlq=True)
+        assert dlq_item is not None
+        dlq_listed = await native_backend.list_dlq()
+        assert len(dlq_listed) == 1
+        assert dlq_listed[0].dlq_id == "dlq-replay-task"
+
+        replayed_env = await native_backend.replay_dlq(dlq_listed[0].dlq_id)
+        assert replayed_env is not None
+        assert replayed_env.attempt == 1
+        reclaimed_after_replay = await native_backend.dequeue(["io"], batch_size=1)
+        assert len(reclaimed_after_replay) == 1
+        assert reclaimed_after_replay[0].task_id == "dlq-replay-task"
+        await native_backend.ack(reclaimed_after_replay[0])
+
+
+@pytest.mark.anyio
+async def test_litestar_store_and_shm_queue_backend_configs_and_fenced_lifecycle() -> None:
+    """StoreQueueBackendConfig and SHMQueueBackendConfig are frozen and StoreQueueBackend enforces retry fencing."""
+    store = _StatefulAsyncQueueStore()
+    notif = _InMemoryAsyncNotificationSource()
+    store_cfg = StoreQueueBackendConfig(store=store, notification_source=notif)
+    shm_cfg = SHMQueueBackendConfig()
+
+    store_cfg_any: Any = store_cfg
+    shm_cfg_any: Any = shm_cfg
+    with pytest.raises(AttributeError):
+        store_cfg_any.terminal_ttl = timedelta(seconds=10)
+    with pytest.raises(AttributeError):
+        shm_cfg_any.max_concurrency = 99
+
+    backend: StoreQueueBackend = store_cfg.create_backend()
+    rec1 = await backend.enqueue("compute_report", args=(7,), max_retries=2)
+    claimed1 = await backend.claim_task(rec1.id)
+    assert claimed1 is not None
+    assert claimed1.status == "running"
+    assert claimed1.retry_count == 0
+    assert await backend.claim_task(rec1.id) is None
+
+    failed_retry = await backend.fail_task(rec1.id, "transient", retry=True, expected_retry_count=0)
+    assert failed_retry is not None
+    assert failed_retry.retry_count == 1
+    assert failed_retry.status == "pending"
+
+    claimed2 = await backend.claim_next()
+    assert claimed2 is not None
+    assert claimed2.id == rec1.id
+    assert claimed2.retry_count == 1
+    assert claimed2.status == "running"
+
+    running_ext = await backend.list_running_external()
+    assert [r.id for r in running_ext] == [rec1.id]
+    assert running_ext[0].status == "running"
+
+    completed1 = await backend.complete_task(rec1.id, expected_retry_count=claimed2.retry_count)
+    assert completed1 is not None
+    assert completed1.status == "completed"
+
+    rec_fatal = await backend.enqueue("fatal_job", max_retries=3)
+    claimed_fatal = await backend.claim_task(rec_fatal.id)
+    assert claimed_fatal is not None
+    failed_fatal = await backend.fail_task(rec_fatal.id, "unrecoverable", retry=False)
+    assert failed_fatal is not None
+    assert failed_fatal.status == "failed"
+
+    rec_pending = await backend.enqueue("pending_job")
+    rec_sched = await backend.enqueue("sched_job", scheduled_at=datetime.now(UTC) + timedelta(minutes=10))
+    rec_cancel = await backend.enqueue("cancel_job")
+    assert await backend.cancel_task(rec_cancel.id) is True
+
+    stats = await backend.get_statistics(queue="default")
+    assert stats.pending == 1
+    assert stats.scheduled == 1
+    assert stats.running == 0
+    assert stats.completed == 1
+    assert stats.failed == 1
+    assert stats.cancelled == 1
+    _ = (rec_pending, rec_sched)
+
+    assert await backend.wait_for_wakeups(timeout=0.02) is False
+
+    async def _emit_wakeup() -> None:
+        await asyncio.sleep(0.01)
+        await notif.publish("vertebra_queue_wakeup", "default")
+
+    emitter = asyncio.create_task(_emit_wakeup())
+    assert await backend.wait_for_wakeups(timeout=1.0) is True
+    await emitter
+    await backend.close()
+
+
+def test_create_channels_backend_postgres_and_oracle_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_channels_backend passes dsn=url to PostgreSQLConfig and OracleConfig with canonical driver names."""
+    recorded: list[tuple[str, Any, Any]] = []
+
+    class _FakePgConfig:
+        def __init__(self, *, dsn: str = "", **kwargs: Any) -> None:
+            self.dsn = dsn
+            self.kwargs = kwargs
+
+    class _FakeOraConfig:
+        def __init__(self, *, dsn: str = "", **kwargs: Any) -> None:
+            self.dsn = dsn
+            self.kwargs = kwargs
+
+    class _FakePgMod:
+        PostgreSQLConfig = _FakePgConfig
+        AsyncPostgreSQLDriver = staticmethod(lambda cfg: ("pg_async_drv", cfg))
+        SyncPostgreSQLDriver = staticmethod(lambda cfg: ("pg_sync_drv", cfg))
+        AsyncPostgresNotificationSource = staticmethod(lambda drv: ("pg_async_src", drv))
+        SyncPostgresNotificationSource = staticmethod(lambda drv: ("pg_sync_src", drv))
+
+    class _FakeOraMod:
+        OracleConfig = _FakeOraConfig
+        AsyncOracleDriver = staticmethod(lambda cfg: ("ora_async_drv", cfg))
+        SyncOracleDriver = staticmethod(lambda cfg: ("ora_sync_drv", cfg))
+        AsyncOracleNotificationSource = staticmethod(lambda drv: ("ora_async_src", drv))
+        SyncOracleNotificationSource = staticmethod(lambda drv: ("ora_sync_src", drv))
+
+    def _fake_import_optional(name: str) -> Any:
+        if name == "vertebra.db.adapters.postgres":
+            return _FakePgMod
+        if name == "vertebra.db.adapters.oracle":
+            return _FakeOraMod
+        return None
+
+    monkeypatch.setattr(channels_mod, "import_optional", _fake_import_optional)
+
+    pg_bus = channels_mod.create_channels_backend("postgresql", url="postgresql://localhost:5432/vtb")
+    pg_async_src: Any = pg_bus.notification_source
+    pg_sync_src: Any = pg_bus.sync_notification_source
+    recorded.append(("pg", pg_async_src, pg_sync_src))
+    assert pg_async_src[0] == "pg_async_src"
+    assert pg_async_src[1][0] == "pg_async_drv"
+    assert pg_async_src[1][1].dsn == "postgresql://localhost:5432/vtb"
+    assert pg_sync_src[1][0] == "pg_sync_drv"
+
+    ora_bus = channels_mod.create_channels_backend("oracle", url="oracle://localhost:1521/FREEPDB1")
+    ora_async_src: Any = ora_bus.notification_source
+    ora_sync_src: Any = ora_bus.sync_notification_source
+    recorded.append(("ora", ora_async_src, ora_sync_src))
+    assert ora_async_src[0] == "ora_async_src"
+    assert ora_async_src[1][0] == "ora_async_drv"
+    assert ora_async_src[1][1].dsn == "oracle://localhost:1521/FREEPDB1"
+    assert ora_sync_src[1][0] == "ora_sync_drv"
+    assert len(recorded) == 2
+
+
+@pytest.mark.anyio
+async def test_worker_runner_concurrent_batch_lane_alignment_and_periodic_reap() -> None:
+    """WorkerRunner dispatches claimed tasks concurrently up to concurrency, aligns queue_name/lane metrics, and reaps periodically."""
+    store = _StatefulAsyncQueueStore()
+    pg_backend = PostgreSQLQueueBackend(QueueBackendSettings(kind="postgres", store=store))
+    qsvc = QueueService(backend=pg_backend)
+
+    active_count = 0
+    all_started = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def barrier_task(idx: int) -> int:
+        nonlocal active_count
+        active_count += 1
+        if active_count == 3:
+            all_started.set()
+        await release_gate.wait()
+        return idx
+
+    qsvc.register(task(name="barrier_task", lane="io")(barrier_task))
+    for i in range(3):
+        await qsvc.enqueue("barrier_task", i)
+
+    runner = WorkerRunner(
+        [LaneConfig(queue_name="default", concurrency=3, drain_timeout_s=2.0, lane_kind="io")],
+        queue_service=qsvc,
+        reap_interval_seconds=60.0,
+    )
+
+    batch_task = asyncio.create_task(runner.process_once())
+    await asyncio.wait_for(all_started.wait(), timeout=1.0)
+    assert runner.metrics["default"].in_flight == 3
+    assert len(runner._in_flight) == 3
+
+    stop_task = asyncio.create_task(runner.stop())
+    await asyncio.sleep(0.01)
+    assert not stop_task.done()
+    release_gate.set()
+
+    await stop_task
+    processed = await batch_task
+    assert processed == 3
+    assert runner.metrics["default"].in_flight == 0
+    assert runner.metrics["default"].processed_total == 3
+    assert store.reap_calls == 1
+    await pg_backend.close()
+
+
+@pytest.mark.anyio
+async def test_django_task_backend_list_arg_queues_filter_and_bad_import_dlq() -> None:
+    """Django TaskBackend preserves list/tuple user args and vertebra_worker honors --queues and DLQs unimportable tasks."""
+    backend = DjangoTaskBackend(
+        alias="vtb_django_test",
+        params={"QUEUES": ["default", "cpu", "agent"], "OPTIONS": {"BACKEND_URL": "memory://"}},
+    )
+
+    @backend.task("join_items")
+    def join_items(items: list[str] | tuple[str, ...]) -> str:
+        return ",".join(items)
+
+    res_list = backend.enqueue(join_items, ["alpha", "beta", "gamma"])
+    assert res_list.args == [["alpha", "beta", "gamma"]]
+    assert await backend.arun_next() == "alpha,beta,gamma"
+
+    res_tuple = await backend.aenqueue(join_items, ("x", "y"))
+    assert len(res_tuple.args) == 1
+    assert list(res_tuple.args[0]) == ["x", "y"]
+    assert await backend.arun_next() == "x,y"
+
+    await backend.queue_service.backend.enqueue(
+        TaskEnvelope(
+            task_id="bad-import-1",
+            task_name="nonexistent_django_module_xyz.missing_callable",
+            lane="io",
+            max_retries=3,
+        )
+    )
+    cmd = DjangoVertebraWorkerCommand()
+    await cmd._run_async(
+        backend=backend,
+        queues=["default"],
+        explicit_queues=True,
+        concurrency=1,
+        once=True,
+        burst=False,
+        container=Container(),
+    )
+    dlq_entries = await backend.queue_service.backend.list_dlq()
+    assert len(dlq_entries) == 1
+    assert dlq_entries[0].envelope.task_id == "bad-import-1"
+
+    executed_lanes: list[str] = []
+
+    def cpu_only_task() -> str:
+        executed_lanes.append("cpu")
+        return "cpu"
+
+    def agent_only_task() -> str:
+        executed_lanes.append("agent")
+        return "agent"
+
+    backend.queue_service.register(task(name="cpu_only_task", lane="cpu")(cpu_only_task))
+    backend.queue_service.register(task(name="agent_only_task", lane="agent")(agent_only_task))
+    await backend.queue_service.enqueue("cpu_only_task", lane="cpu")
+    await backend.queue_service.enqueue("agent_only_task", lane="agent")
+
+    await cmd._run_async(
+        backend=backend,
+        queues=["cpu"],
+        explicit_queues=True,
+        concurrency=1,
+        once=False,
+        burst=True,
+        container=Container(),
+    )
+    assert executed_lanes == ["cpu"]
+    remaining_agent = await backend.queue_service.backend.dequeue(["agent"], batch_size=5)
+    assert len(remaining_agent) == 1
+    assert remaining_agent[0].task_name == "agent_only_task"
+    await backend.queue_service.close()

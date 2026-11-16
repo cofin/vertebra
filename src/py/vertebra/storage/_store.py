@@ -11,7 +11,18 @@ import shutil
 import tempfile
 import time
 import warnings
-from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Buffer,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Self
 from urllib.parse import unquote, urlparse
@@ -41,6 +52,7 @@ __all__ = (
     "AsyncObjectStore",
     "AsyncReadableFile",
     "AsyncWritableFile",
+    "ArtifactReference",
     "AzureConfig",
     "GCSConfig",
     "GcpIdTokenSnapshot",
@@ -546,7 +558,7 @@ class MemoryConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 type StorageConfig = LocalConfig | S3Config | GCSConfig | AzureConfig | OCIConfig | R2Config | HTTPConfig | MemoryConfig
 
 
-class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ObjectMeta(msgspec.Struct, frozen=True, kw_only=True):
     """Metadata describing an object stored in ObjectStore."""
 
     path: str
@@ -571,8 +583,25 @@ class ObjectMeta(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional lowercase hexadecimal MD5 content digest receipt."""
 
 
-class PutResult(ObjectMeta, frozen=True, gc=False, kw_only=True):
+class PutResult(ObjectMeta, frozen=True, kw_only=True):
     """Result metadata returned from a write operation, carrying sha256/crc32c/md5 receipts when requested."""
+
+
+class ArtifactReference(msgspec.Struct, frozen=True):
+    """Immutable reference describing a persisted storage artifact and its version metadata."""
+
+    uri: str
+    """Normalized URI identifying the stored artifact."""
+    version: int
+    """Monotonic version number of the stored artifact."""
+    content_type: str | None = None
+    """Optional MIME content type of the stored artifact."""
+    size: int | None = None
+    """Optional payload size in bytes."""
+    updated: datetime | None = None
+    """Optional UTC timestamp recording when this version was stored."""
+    signed_url: str | None = None
+    """Optional time-bounded presigned URL for reading the artifact."""
 
 
 class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -2059,7 +2088,7 @@ class SyncObjectStore(_BaseObjectStore):
 
     def iter_arrow_batches(
         self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
-    ) -> Iterator[Any]:
+    ) -> Generator[Any, None, None]:
         """Yield Arrow IPC RecordBatch objects through native streaming reads.
 
         ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
@@ -2073,7 +2102,7 @@ class SyncObjectStore(_BaseObjectStore):
         batch_size: int = 65536,
         columns: Sequence[str] | None = None,
         options: Mapping[str, Any] | None = None,
-    ) -> Iterator[Any]:
+    ) -> Generator[Any, None, None]:
         """Yield projected Parquet batches through bounded native range reads.
 
         ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``
@@ -2629,7 +2658,7 @@ class AsyncObjectStore(_BaseObjectStore):
 
     def iter_arrow_batches(
         self, key: str, *, batch_size: int = 65536, options: Mapping[str, Any] | None = None
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield Arrow IPC RecordBatch objects through native asynchronous streaming reads.
 
         ``options`` keys such as ``use_threads`` build ``pyarrow.ipc.IpcReadOptions``.
@@ -2643,7 +2672,7 @@ class AsyncObjectStore(_BaseObjectStore):
         batch_size: int = 65536,
         columns: Sequence[str] | None = None,
         options: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield projected Parquet batches through bounded native range reads.
 
         ``options`` is forwarded to ``pyarrow.parquet.ParquetFile``, except ``row_groups``

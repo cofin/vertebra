@@ -6,15 +6,23 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from vertebra.framework.channels import create_channels_backend
 from vertebra.server._channels import ChannelBus
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
 
+    from vertebra.db.driver import (
+        AsyncChangeSource,
+        AsyncNotificationSource,
+        SyncNotificationSource,
+    )
+
 __all__ = (
     "ChannelsBackend",
-    "swap_channels_backend",
+    "create_channels_plugin",
 )
 
 
@@ -49,34 +57,74 @@ class ChannelsBackend(ChannelBus):
                 self._unregister_stream_queue(queue)
 
 
-def swap_channels_backend(
-    app: Any,
-    backend: ChannelsBackend | ChannelBus | None = None,
-) -> ChannelsBackend | ChannelBus | None:
-    """Transparently replace MemoryChannelsBackend on a Litestar app's ChannelsPlugin."""
-    plugins = getattr(app, "plugins", None)
-    if plugins is None:
-        return None
-    plugin_list = getattr(plugins, "plugins", plugins)
-    for plugin in plugin_list:
-        is_channels_plugin = (_ChannelsPluginCls is not None and isinstance(plugin, _ChannelsPluginCls)) or type(
-            plugin
-        ).__name__ == "ChannelsPlugin"
-        if is_channels_plugin:
-            current_backend = getattr(plugin, "_backend", None)
-            is_memory_backend = (
-                _MemoryChannelsBackendCls is not None and isinstance(current_backend, _MemoryChannelsBackendCls)
-            ) or type(current_backend).__name__ == "MemoryChannelsBackend"
-            if is_memory_backend or backend is not None:
-                history = int(
-                    getattr(current_backend, "_max_history_length", 0) or getattr(current_backend, "history", 0) or 0
-                )
-                replacement = backend if backend is not None else ChannelsBackend(history=history)
-                plugin._backend = replacement
-                return replacement
-            if isinstance(current_backend, (ChannelsBackend, ChannelBus)):
-                return current_backend
-    return None
+def create_channels_plugin(
+    backend: str | ChannelsBackend | ChannelBus | None = "memory",
+    *,
+    channels: Iterable[str] | None = None,
+    arbitrary_channels_allowed: bool = True,
+    history: int = 0,
+    notification_source: AsyncNotificationSource | None = None,
+    sync_notification_source: SyncNotificationSource | None = None,
+    change_source: AsyncChangeSource | None = None,
+    change_feed: Any = None,
+    node_id: str | None = None,
+    url: str | None = None,
+    maxsize: int = 256,
+    create_ws_route_handlers: bool = False,
+    ws_handler_base_path: str = "/",
+    **kwargs: Any,
+) -> Any:
+    """Create a Litestar ChannelsPlugin backed by Vertebra ChannelsBackend across 5 notification transports."""
+    ch_mod = import_optional("litestar.channels")
+    if ch_mod is None:
+        msg = "litestar.channels is required to create ChannelsPlugin"
+        raise ImproperConfigurationError(msg)
+    plugin_cls = ch_mod.ChannelsPlugin
+
+    if isinstance(backend, ChannelsBackend):
+        resolved_backend = backend
+    elif isinstance(backend, ChannelBus):
+        resolved_backend = ChannelsBackend(
+            backend=backend,
+            history=history,
+            notification_source=notification_source,
+            sync_notification_source=sync_notification_source,
+            change_source=change_source,
+            change_feed=change_feed,
+            node_id=node_id,
+            maxsize=maxsize,
+        )
+    else:
+        resolved = create_channels_backend(
+            backend=backend,
+            url=url,
+            history=history,
+            notification_source=notification_source,
+            sync_notification_source=sync_notification_source,
+            change_source=change_source,
+            change_feed=change_feed,
+            node_id=node_id,
+            maxsize=maxsize,
+            **kwargs,
+        )
+        resolved_backend = ChannelsBackend(
+            backend=resolved,
+            history=history,
+            notification_source=resolved.notification_source,
+            sync_notification_source=resolved.sync_notification_source,
+            change_source=resolved.change_source,
+            change_feed=resolved.change_feed,
+            node_id=resolved.node_id,
+            maxsize=maxsize,
+        )
+
+    return plugin_cls(
+        backend=resolved_backend,
+        channels=channels,
+        arbitrary_channels_allowed=arbitrary_channels_allowed,
+        create_ws_route_handlers=create_ws_route_handlers,
+        ws_handler_base_path=ws_handler_base_path,
+    )
 
 
 def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:

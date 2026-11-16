@@ -8,8 +8,9 @@ import vertebra.typing
 from vertebra import utils
 
 
-def test_utils_package_is_thin():
+def test_utils_package_is_thin() -> None:
     """Verify vertebra.utils is a thin package with no re-exports."""
+    assert utils.__doc__ is not None
     assert "explicitly" in utils.__doc__
     public_names = [
         n for n in dir(utils) if not n.startswith("_") and not isinstance(getattr(utils, n), types.ModuleType)
@@ -17,7 +18,7 @@ def test_utils_package_is_thin():
     assert public_names == [], f"utils.__init__ should not re-export: {public_names}"
 
 
-def test_framework_lazy_import_does_not_load_submodules():
+def test_framework_lazy_import_does_not_load_submodules() -> None:
     """Verify importing vertebra.framework does not eagerly import submodules or heavy extensions."""
     code = (
         "import sys, time\n"
@@ -36,7 +37,7 @@ def test_framework_lazy_import_does_not_load_submodules():
     assert res.returncode == 0, f"Subprocess failed:\n{res.stderr}\n{res.stdout}"
 
 
-def test_lazy_exports_cache_and_dir():
+def test_lazy_exports_cache_and_dir() -> None:
     """Verify __dir__ contains __all__ symbols and attribute access caches into __dict__."""
     for mod in (vertebra, vertebra.typing, vertebra.framework):
         mod_dir = dir(mod)
@@ -52,7 +53,7 @@ def test_lazy_exports_cache_and_dir():
     assert vertebra.typing.__dict__["Struct"] is struct_cls
 
 
-def test_framework_channels_and_stores_do_not_import_litestar_extension():
+def test_framework_channels_and_stores_do_not_import_litestar_extension() -> None:
     """Verify framework.channels and framework.stores do not depend on vertebra.extensions.litestar."""
     code = (
         "import sys\n"

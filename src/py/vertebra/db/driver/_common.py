@@ -55,6 +55,20 @@ class BaseDatabaseConfig(FrozenBaseStruct, frozen=True, gc=False):
     driver_module: ClassVar[str] = ""
     sync_driver_name: ClassVar[str] = ""
     async_driver_name: ClassVar[str] = ""
+    requires_statement_autocommit: ClassVar[bool] = False
+
+    @property
+    def effective_direct_dsn(self) -> str:
+        """Return the effective direct connection DSN or URL for migrations and pooler bypass."""
+        if hasattr(self, "direct_dsn") and self.direct_dsn:
+            return str(self.direct_dsn)
+        if hasattr(self, "dsn") and self.dsn:
+            return str(self.dsn)
+        if hasattr(self, "database") and self.database:
+            return str(self.database)
+        if hasattr(self, "path") and self.path:
+            return str(self.path)
+        return ""
 
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:

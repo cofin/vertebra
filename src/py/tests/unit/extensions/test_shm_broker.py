@@ -588,8 +588,10 @@ def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None
         otel_recorder=recorder,
         name="telemetry_pool",
     )
-    lease = plugin.transport.acquire(worker_id=91001, bind_key="telemetry_pool")
-    reclaimed = plugin.transport.reclaim_worker_leases(91001)
+    transport = plugin.transport
+    assert isinstance(transport, SyncSHMBrokerTransport)
+    lease = transport.acquire(worker_id=91001, bind_key="telemetry_pool")
+    reclaimed = transport.reclaim_worker_leases(91001)
     assert len(reclaimed) == 1
     assert reclaimed[0].slot_index == lease.slot_index
 
@@ -600,7 +602,7 @@ def test_broker_plugin_snapshot_metrics_and_zpages_quarantine_counters() -> None
     assert mid_sample.total_reclaimed == 1
     assert mid_sample.total_disposed == 0
 
-    plugin.transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+    transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
     end_sample = plugin.snapshot_metrics()
     assert end_sample.quarantined == 0
     assert end_sample.total_quarantined == 1
@@ -700,9 +702,11 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
         otel_recorder=recorder,
         name="crash_pool",
     )
+    transport = plugin.transport
+    assert isinstance(transport, SyncSHMBrokerTransport)
     proc: Any = None
     try:
-        plugin.transport.register_partition("crash_pool", pool_size=2, max_overflow=0)
+        transport.register_partition("crash_pool", pool_size=2, max_overflow=0)
         ctx = mp.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=False)
         proc = ctx.Process(
@@ -723,14 +727,14 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
 
         os.kill(dead_pid, signal.SIGKILL)
         proc.join(timeout=5)
-        reclaimed = plugin.transport.reclaim_worker_leases(dead_pid)
+        reclaimed = transport.reclaim_worker_leases(dead_pid)
         assert len(reclaimed) == 1
         assert reclaimed[0].slot_index == slot_idx
         assert reclaimed[0].generation == gen + 1
-        assert reclaimed[0].pool_id == plugin.transport.metrics().pools["crash_pool"].pool_id
+        assert reclaimed[0].pool_id == transport.metrics().pools["crash_pool"].pool_id
 
         mid_sample = plugin.snapshot_metrics()
-        mid_pool = plugin.transport.metrics().pools["crash_pool"]
+        mid_pool = transport.metrics().pools["crash_pool"]
         assert mid_sample.active_leases == 0
         assert mid_sample.quarantined == 1
         assert mid_sample.total_reclaimed == 1
@@ -740,7 +744,7 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
         assert mid_pool.total_reclaimed == 1
         assert mid_pool.total_acquired == 1
 
-        plugin.transport.dispose_quarantined(slot_idx, reclaimed[0].generation)
+        transport.dispose_quarantined(slot_idx, reclaimed[0].generation)
         end_sample = plugin.snapshot_metrics()
         end_pool = plugin.transport.metrics().pools["crash_pool"]
         assert end_sample.active_leases == 0

@@ -8,10 +8,123 @@ import socketserver
 import threading
 import time
 from collections.abc import Iterator, Sequence
+from typing import Any
 
 import pytest
 
-from vertebra.db.adapters.redis.core import Resp3Parser
+
+class WireParseError(ValueError):
+    """Wire frame parsing error with optional consumed offset."""
+
+    def __init__(self, message: str, *, next_offset: int = 0) -> None:
+        super().__init__(message)
+        self.next_offset = next_offset
+
+
+def _find_crlf(buf: memoryview, start: int) -> int:
+    """Locate the next CRLF delimiter."""
+    total = len(buf)
+    pos = start
+    while pos + 1 < total:
+        if buf[pos] == 13 and buf[pos + 1] == 10:
+            return pos
+        pos += 1
+    msg = "Incomplete frame delimiter"
+    raise ValueError(msg)
+
+
+def _parse_wire_frame_view(buf: memoryview, offset: int) -> tuple[Any, int]:
+    """Parse a single RESP wire frame from a memoryview."""
+    total_len = len(buf)
+    if offset >= total_len:
+        msg = "Unexpected end of wire buffer"
+        raise ValueError(msg)
+    marker = buf[offset]
+    pos = offset + 1
+    if marker == 43:
+        idx = _find_crlf(buf, pos)
+        return bytes(buf[pos:idx]).decode("utf-8"), idx + 2
+    if marker == 45:
+        idx = _find_crlf(buf, pos)
+        err_msg = bytes(buf[pos:idx]).decode("utf-8")
+        raise WireParseError(err_msg, next_offset=idx + 2)
+    if marker == 58:
+        idx = _find_crlf(buf, pos)
+        return int(bytes(buf[pos:idx]).decode("ascii")), idx + 2
+    if marker == 44:
+        idx = _find_crlf(buf, pos)
+        val_str = bytes(buf[pos:idx]).decode("ascii").lower()
+        if val_str == "inf":
+            f_val = float("inf")
+        elif val_str == "-inf":
+            f_val = float("-inf")
+        elif val_str == "nan":
+            f_val = float("nan")
+        else:
+            f_val = float(val_str)
+        return f_val, idx + 2
+    if marker == 35:
+        idx = _find_crlf(buf, pos)
+        return buf[pos] == 116, idx + 2
+    if marker == 95:
+        idx = _find_crlf(buf, pos)
+        return None, idx + 2
+    if marker == 36:
+        idx = _find_crlf(buf, pos)
+        length = int(bytes(buf[pos:idx]).decode("ascii"))
+        if length == -1:
+            return None, idx + 2
+        val_start = idx + 2
+        val_end = val_start + length
+        if val_end + 2 > total_len:
+            msg = "Incomplete bulk string frame"
+            raise ValueError(msg)
+        return bytes(buf[val_start:val_end]), val_end + 2
+    if marker == 42:
+        idx = _find_crlf(buf, pos)
+        count = int(bytes(buf[pos:idx]).decode("ascii"))
+        if count == -1:
+            return None, idx + 2
+        curr = idx + 2
+        items: list[Any] = []
+        for _ in range(count):
+            item, curr = _parse_wire_frame_view(buf, curr)
+            items.append(item)
+        return items, curr
+    if marker == 37:
+        idx = _find_crlf(buf, pos)
+        pairs = int(bytes(buf[pos:idx]).decode("ascii"))
+        curr = idx + 2
+        dict_items: dict[Any, Any] = {}
+        for _ in range(pairs):
+            k, curr = _parse_wire_frame_view(buf, curr)
+            v, curr = _parse_wire_frame_view(buf, curr)
+            dict_items[k] = v
+        return dict_items, curr
+    if marker == 62:
+        idx = _find_crlf(buf, pos)
+        count = int(bytes(buf[pos:idx]).decode("ascii"))
+        curr = idx + 2
+        push_items: list[Any] = []
+        for _ in range(count):
+            item, curr = _parse_wire_frame_view(buf, curr)
+            push_items.append(item)
+        return ("push", push_items), curr
+    idx = _find_crlf(buf, offset)
+    line = bytes(buf[offset:idx])
+    parts = [p for p in line.split(b" ") if p]
+    return parts, idx + 2
+
+
+def _parse_wire_frame(data: bytes | bytearray | memoryview, offset: int = 0) -> tuple[Any, int]:
+    """Parse a single RESP wire frame from data at offset, returning (value, next_offset)."""
+    if isinstance(data, memoryview):
+        return _parse_wire_frame_view(data, offset)
+    buf = memoryview(data)
+    try:
+        return _parse_wire_frame_view(buf, offset)
+    finally:
+        buf.release()
 
 
 class Resp3FakeServer:
@@ -23,6 +136,8 @@ class Resp3FakeServer:
         self._sockets: set[socket.socket] = set()
         self._values: dict[bytes, bytes] = {}
         self._expiries: dict[bytes, float] = {}
+        self._hashes: dict[bytes, dict[bytes, bytes]] = {}
+        self._field_expiries: dict[tuple[bytes, bytes], float] = {}
         self._scripts: dict[str, str] = {}
         self._subscriptions: dict[socket.socket, set[tuple[str, bytes]]] = {}
         self._commands: list[list[bytes]] = []
@@ -75,6 +190,23 @@ class Resp3FakeServer:
         if exp is not None and time.monotonic() >= exp:
             self._values.pop(key, None)
             self._expiries.pop(key, None)
+        if key in self._hashes:
+            fields = list(self._hashes[key])
+            for f in fields:
+                f_exp = self._field_expiries.get((key, f))
+                if f_exp is not None and time.monotonic() >= f_exp:
+                    self._hashes[key].pop(f, None)
+                    self._field_expiries.pop((key, f), None)
+            if not self._hashes[key]:
+                self._hashes.pop(key, None)
+
+    def _extract_hash_fields(self, args: list[bytes], start_idx: int) -> list[bytes]:
+        """Extract hash field names, skipping conditions and FIELDS count if present."""
+        for idx in range(start_idx, len(args)):
+            token = args[idx].decode("ascii", errors="replace").upper()
+            if token == "FIELDS":
+                return args[idx + 2 :]
+        return args[start_idx:]
 
     def _dispatch(self, conn: socket.socket, args: list[bytes]) -> bytes:
         """Execute a parsed RESP3 command under the server lock and return wire reply bytes."""
@@ -122,6 +254,127 @@ class Resp3FakeServer:
                 if exp is None:
                     return _encode(-1)
                 return _encode(max(1, int((exp - time.monotonic()) * 1000)))
+            case "HSET":
+                key = args[1]
+                h = self._hashes.setdefault(key, {})
+                added = 0
+                idx = 2
+                while idx + 1 < len(args):
+                    f, v = args[idx], args[idx + 1]
+                    if f not in h:
+                        added += 1
+                    h[f] = v
+                    idx += 2
+                return _encode(added)
+            case "HGET":
+                key, field = args[1], args[2]
+                self._purge_expired(key)
+                return _encode(self._hashes.get(key, {}).get(field))
+            case "HGETALL":
+                key = args[1]
+                self._purge_expired(key)
+                return _encode(dict(self._hashes.get(key, {})))
+            case "HDEL":
+                key = args[1]
+                removed = 0
+                h = self._hashes.get(key, {})
+                for f in args[2:]:
+                    self._field_expiries.pop((key, f), None)
+                    if h.pop(f, None) is not None:
+                        removed += 1
+                return _encode(removed)
+            case "HEXPIRE":
+                key = args[1]
+                ttl = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res: list[int] = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + ttl
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HPEXPIRE":
+                key = args[1]
+                ttl_ms = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + ttl_ms / 1000.0
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HEXPIREAT":
+                key = args[1]
+                unix_sec = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + max(0.0, unix_sec - time.time())
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HPEXPIREAT":
+                key = args[1]
+                unix_ms = int(args[2])
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 3):
+                    if f in h:
+                        self._field_expiries[(key, f)] = time.monotonic() + max(0.0, unix_ms / 1000.0 - time.time())
+                        res.append(1)
+                    else:
+                        res.append(-2)
+                return _encode(res)
+            case "HTTL":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        res.append(max(1, int(self._field_expiries[(key, f)] - time.monotonic())))
+                    else:
+                        res.append(-1)
+                return _encode(res)
+            case "HPTTL":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        res.append(max(1, int((self._field_expiries[(key, f)] - time.monotonic()) * 1000)))
+                    else:
+                        res.append(-1)
+                return _encode(res)
+            case "HPERSIST":
+                key = args[1]
+                self._purge_expired(key)
+                h = self._hashes.get(key, {})
+                res = []
+                for f in self._extract_hash_fields(args, 2):
+                    if f not in h:
+                        res.append(-2)
+                    elif (key, f) in self._field_expiries:
+                        self._field_expiries.pop((key, f), None)
+                        res.append(1)
+                    else:
+                        res.append(-1)
+                return _encode(res)
             case "SCAN":
                 pattern: str | None = None
                 idx = 2
@@ -138,6 +391,8 @@ class Resp3FakeServer:
             case "FLUSHDB":
                 self._values.clear()
                 self._expiries.clear()
+                self._hashes.clear()
+                self._field_expiries.clear()
                 return _encode("OK")
             case "EVALSHA":
                 sha = args[1].decode("ascii")
@@ -160,6 +415,16 @@ class Resp3FakeServer:
                 for key in keys:
                     self._purge_expired(key)
                 return _encode(_script_result(script, keys, script_args, self._values))
+            case "SCRIPT":
+                subcmd = args[1].decode("ascii", errors="replace").upper() if len(args) > 1 else ""
+                if subcmd == "LOAD":
+                    script_bytes = args[2] if len(args) > 2 else b""
+                    sha = hashlib.sha1(script_bytes).hexdigest()
+                    self._scripts[sha] = script_bytes.decode("utf-8", errors="replace")
+                    return _encode(sha)
+                if subcmd == "EXISTS":
+                    return _encode([1 if a.decode("ascii", errors="replace") in self._scripts else 0 for a in args[2:]])
+                return _encode("OK")
             case "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE":
                 ack_tag = cmd.lower().encode("ascii")
                 sub_kind = {"SUBSCRIBE": "message", "PSUBSCRIBE": "pmessage", "SSUBSCRIBE": "smessage"}[cmd]
@@ -243,7 +508,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 buf.extend(chunk)
                 while buf:
                     try:
-                        frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                        frame, next_offset = _parse_wire_frame(buf, 0)
                     except ValueError:
                         break
                     del buf[:next_offset]
@@ -274,6 +539,8 @@ def _encode(value: object) -> bytes:
         return b"_\r\n"
     if isinstance(value, _ErrorReply):
         return f"-{value}\r\n".encode()
+    if isinstance(value, bool):
+        return b"#t\r\n" if value else b"#f\r\n"
     if isinstance(value, int):
         return f":{value}\r\n".encode("ascii")
     if isinstance(value, str):
@@ -282,6 +549,8 @@ def _encode(value: object) -> bytes:
         return f"${len(value)}\r\n".encode("ascii") + value + b"\r\n"
     if isinstance(value, list):
         return f"*{len(value)}\r\n".encode("ascii") + b"".join(_encode(item) for item in value)
+    if isinstance(value, dict):
+        return f"%{len(value)}\r\n".encode("ascii") + b"".join(_encode(k) + _encode(v) for k, v in value.items())
     msg = f"Unsupported RESP3 reply type: {type(value)!r}"
     raise TypeError(msg)
 

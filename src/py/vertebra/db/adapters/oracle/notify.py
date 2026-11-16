@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator, Sequence
+import time
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Self
 
 from vertebra.db.cdc import ChangeEvent, ChangeFeed
 from vertebra.db.driver import (
     AsyncDatabaseDriver,
+    AsyncNotificationSource,
     InterfaceError,
     NotificationEvent,
-    NotificationSource,
     OperationalError,
     ProgrammingError,
+    SyncNotificationSource,
 )
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.serializers import decode_json, encode_json
@@ -24,8 +27,9 @@ if TYPE_CHECKING:
     from vertebra.db.adapters.oracle.driver import AsyncOracleDriver, SyncOracleDriver
 
 __all__ = (
-    "OracleNotificationSource",
+    "AsyncOracleNotificationSource",
     "OracleNotifyConfig",
+    "SyncOracleNotificationSource",
     "validate_oracle_channel_name",
 )
 
@@ -130,7 +134,7 @@ class OracleNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
         return all(ch.isascii() and (ch.isalnum() or ch in ("_", "$", "#")) for ch in value[1:])
 
 
-class OracleNotificationSource(NotificationSource):
+class AsyncOracleNotificationSource(AsyncNotificationSource):
     """Oracle 26ai TxEventQ / DBMS_AQ notification publisher and streaming listener."""
 
     __slots__ = (
@@ -165,6 +169,11 @@ class OracleNotificationSource(NotificationSource):
     def change_feed(self) -> ChangeFeed | None:
         """Return the optional ``ChangeFeed`` used to wrap and hydrate notification envelopes."""
         return self._change_feed
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        """Return an ordered snapshot of subscribed logical channels."""
+        return [logical_channel for logical_channel, _ in self._subscriptions.values()]
 
     async def publish(self, channel: str, payload: bytes | str) -> None:
         """Publish a payload or ``ChangeFeed`` envelope to ``channel`` via ``DBMS_AQ.ENQUEUE``."""
@@ -278,7 +287,7 @@ class OracleNotificationSource(NotificationSource):
 
                     if raw_frame is None:
                         continue
-                    yield self._frame_to_event(logical_channel, queue_name, raw_frame)
+                    yield self._frame_to_event(self._change_feed, logical_channel, queue_name, raw_frame)
         finally:
             await self._close_all_listeners()
 
@@ -298,6 +307,24 @@ class OracleNotificationSource(NotificationSource):
         """Stop active ``listen()`` loops and close all open ``AsyncOracleListener`` sessions immediately."""
         self._closed = True
         await self._close_all_listeners()
+
+    async def aclose(self) -> None:
+        """Stop active listen() loops and close all open AsyncOracleListener sessions immediately."""
+        await self.close()
+
+    async def __aenter__(self) -> Self:
+        """Enter an async context returning this AsyncOracleNotificationSource."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        """Close all active listeners on async context exit."""
+        _ = (exc_type, exc_val, exc_tb)
+        await self.aclose()
 
     async def _enqueue_raw(
         self,
@@ -383,8 +410,9 @@ class OracleNotificationSource(NotificationSource):
         vendor_code = getattr(exc, "vendor_code", None)
         return isinstance(vendor_code, int) and vendor_code in _TRANSIENT_ORA_CODES
 
+    @staticmethod
     def _frame_to_event(
-        self,
+        change_feed: ChangeFeed | None,
         logical_channel: str,
         queue_name: str,
         raw_frame: Any,
@@ -398,9 +426,9 @@ class OracleNotificationSource(NotificationSource):
             "msg_id": msg_id_str,
             "enqueued_at_epoch_ms": getattr(raw_frame, "enqueued_at_epoch_ms", None),
         }
-        if self._change_feed is not None:
+        if change_feed is not None:
             try:
-                evt: ChangeEvent = self._change_feed.hydrate_notification(raw_payload)
+                evt: ChangeEvent = change_feed.hydrate_notification(raw_payload)
                 metadata["change_event_id"] = evt.event_id
                 metadata["spilled"] = evt.spilled
                 data_b64 = evt.payload.get("data_b64")
@@ -418,3 +446,245 @@ class OracleNotificationSource(NotificationSource):
             sender_id=msg_id_str,
             metadata=metadata,
         )
+
+
+class SyncOracleNotificationSource(SyncNotificationSource):
+    """Oracle 26ai TxEventQ / DBMS_AQ synchronous notification publisher and streaming listener."""
+
+    __slots__ = (
+        "_active_listeners",
+        "_change_feed",
+        "_closed",
+        "_config",
+        "_driver",
+        "_subscriptions",
+    )
+
+    def __init__(
+        self,
+        driver: SyncOracleDriver,
+        config: OracleNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+    ) -> None:
+        self._driver = driver
+        self._config = config or OracleNotifyConfig()
+        self._change_feed = change_feed
+        self._subscriptions: dict[str, tuple[str, str | None]] = {}
+        self._active_listeners: dict[str, Any] = {}
+        self._closed: bool = False
+
+    @property
+    def config(self) -> OracleNotifyConfig:
+        """Return the OracleNotifyConfig governing this notification source."""
+        return self._config
+
+    @property
+    def change_feed(self) -> ChangeFeed | None:
+        """Return the optional ChangeFeed used to wrap and hydrate notification envelopes."""
+        return self._change_feed
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        """Return an ordered snapshot of subscribed logical channels."""
+        return [logical_channel for logical_channel, _ in self._subscriptions.values()]
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        """Publish a payload or ChangeFeed envelope to channel via DBMS_AQ.ENQUEUE."""
+        queue_name = validate_oracle_channel_name(channel, queue_prefix=self._config.queue_prefix)
+        cleaned_channel = channel.strip()
+        raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        if self._change_feed is not None:
+            wire_json, _ = self._change_feed.publish_event(
+                "PUBLISH",
+                {
+                    "channel": cleaned_channel,
+                    "queue_name": queue_name,
+                    "data_b64": base64.b64encode(raw_bytes).decode("ascii"),
+                },
+            )
+            wire_bytes = wire_json.encode("utf-8")
+        else:
+            wire_bytes = raw_bytes
+        self._enqueue_raw(
+            queue_name=queue_name,
+            payload=wire_bytes,
+            consumer_name=self._config.consumer_name,
+            correlation_id=cleaned_channel,
+        )
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        """Register one or more logical notification channels for subsequent listen() streams."""
+        for channel in channels:
+            queue_name = validate_oracle_channel_name(channel, queue_prefix=self._config.queue_prefix)
+            self._subscriptions[queue_name] = (channel.strip(), self._config.consumer_name)
+        self._closed = False
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        """Unsubscribe from one or more logical channels and close any active listener sessions."""
+        for channel in channels:
+            queue_name = validate_oracle_channel_name(channel, queue_prefix=self._config.queue_prefix)
+            self._subscriptions.pop(queue_name, None)
+            listener = self._active_listeners.pop(queue_name, None)
+            if listener is not None:
+                with suppress(Exception):
+                    listener.close()
+
+    def subscribe_aq(self, queue_name: str, *, consumer_name: str | None = None) -> None:
+        """Subscribe directly to an Oracle AQ / TxEventQ queue with an optional consumer name."""
+        resolved_queue = validate_oracle_channel_name(queue_name, queue_prefix=self._config.queue_prefix)
+        resolved_consumer = consumer_name if consumer_name is not None else self._config.consumer_name
+        if resolved_consumer is not None and not OracleNotifyConfig._is_valid_aq_identifier(resolved_consumer.strip()):
+            err = ProgrammingError(
+                f"Invalid Oracle AQ consumer_name {resolved_consumer!r}; expected ^[A-Za-z_][A-Za-z0-9_$#]{{0,127}}$"
+            )
+            err.sqlstate = "42602"
+            raise err
+        self._subscriptions[resolved_queue] = (
+            queue_name.strip(),
+            resolved_consumer.strip() if resolved_consumer is not None else None,
+        )
+        self._closed = False
+
+    def publish_aq(
+        self,
+        queue_name: str,
+        payload: bytes | str,
+        *,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Enqueue a raw payload directly to an Oracle AQ queue and return its hex/ASCII message ID."""
+        resolved_queue = validate_oracle_channel_name(queue_name, queue_prefix=self._config.queue_prefix)
+        raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        msg_id_bytes = self._enqueue_raw(
+            queue_name=resolved_queue,
+            payload=raw_bytes,
+            consumer_name=self._config.consumer_name,
+            correlation_id=correlation_id,
+        )
+        return msg_id_bytes.decode("ascii", errors="replace")
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        """Yield NotificationEvent items across all subscribed channels with exponential reconnect backoff."""
+        if not self._subscriptions:
+            err = ProgrammingError("At least one notification channel must be subscribed before calling listen()")
+            err.sqlstate = "42602"
+            raise err
+
+        self._closed = False
+        attempt = 0
+        try:
+            while not self._closed and self._subscriptions:
+                snapshot = list(self._subscriptions.items())
+                for queue_name, (logical_channel, consumer_name) in snapshot:
+                    if self._closed or queue_name not in self._subscriptions:
+                        continue
+                    try:
+                        listener = self._get_or_open_listener(queue_name, consumer_name)
+                        raw_frame = listener.next_notification(timeout=self._config.poll_timeout)
+                        attempt = 0
+                    except (OperationalError, InterfaceError) as exc:
+                        self._discard_listener(queue_name)
+                        if self._closed or not AsyncOracleNotificationSource._is_transient_disconnect(exc):
+                            raise
+                        attempt += 1
+                        if attempt > self._config.max_reconnect_attempts:
+                            raise
+                        delay = min(
+                            self._config.reconnect_max_delay,
+                            self._config.reconnect_initial_delay * (2 ** (attempt - 1)),
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    if raw_frame is None:
+                        continue
+                    yield AsyncOracleNotificationSource._frame_to_event(
+                        self._change_feed, logical_channel, queue_name, raw_frame
+                    )
+        finally:
+            self._close_all_listeners()
+
+    def listen_aq(
+        self,
+        queue_name: str | None = None,
+        *,
+        consumer_name: str | None = None,
+    ) -> Iterator[NotificationEvent]:
+        """Subscribe and stream NotificationEvent items synchronously from AQ / TxEventQ."""
+        if queue_name is not None:
+            self.subscribe_aq(queue_name, consumer_name=consumer_name)
+        yield from self.listen()
+
+    def close(self) -> None:
+        """Stop active listen() loops and close all open SyncOracleListener sessions immediately."""
+        self._closed = True
+        self._close_all_listeners()
+
+    def __enter__(self) -> Self:
+        """Enter a sync context returning this SyncOracleNotificationSource."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        """Close any active notification listener on context exit."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
+
+    def _enqueue_raw(
+        self,
+        *,
+        queue_name: str,
+        payload: bytes,
+        consumer_name: str | None,
+        correlation_id: str | None,
+    ) -> bytes:
+        sync_client = getattr(self._driver, "client", None)
+        if sync_client is not None and hasattr(sync_client, "enqueue_notification"):
+            res = sync_client.enqueue_notification(
+                queue_name=queue_name,
+                payload=payload,
+                consumer_name=consumer_name,
+                correlation_id=correlation_id,
+            )
+            return bytes(res)
+        msg_id_str = self._driver.publish_notification(
+            queue_name,
+            payload,
+            queue_prefix=self._config.queue_prefix,
+            consumer_name=consumer_name,
+            correlation_id=correlation_id,
+        )
+        return msg_id_str.encode("ascii")
+
+    def _get_or_open_listener(self, queue_name: str, consumer_name: str | None) -> Any:
+        existing = self._active_listeners.get(queue_name)
+        if existing is not None and not bool(getattr(existing, "is_closed", False)):
+            return existing
+        client = getattr(self._driver, "client", None)
+        if client is None or not hasattr(client, "open_listener"):
+            raise InterfaceError("Oracle driver client does not support open_listener()")
+        listener = client.open_listener(
+            queue_name=queue_name,
+            consumer_name=consumer_name,
+            wait_timeout_seconds=self._config.wait_timeout_seconds,
+        )
+        self._active_listeners[queue_name] = listener
+        return listener
+
+    def _discard_listener(self, queue_name: str) -> None:
+        listener = self._active_listeners.pop(queue_name, None)
+        if listener is not None:
+            with suppress(Exception):
+                listener.close()
+
+    def _close_all_listeners(self) -> None:
+        listeners = list(self._active_listeners.values())
+        self._active_listeners.clear()
+        for listener in listeners:
+            with suppress(Exception):
+                listener.close()

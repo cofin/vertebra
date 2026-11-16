@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import functools
 import inspect
 import time
@@ -47,6 +49,11 @@ class CacheBackend:
     def get(self, key: str, default: Any = None) -> Any:
         """Synchronously retrieve ``key`` from the cache."""
         full_key = self._prefixed(key)
+        if self._remote_client is not None and hasattr(self._remote_client, "get"):
+            raw_remote = self._call_remote_sync(self._remote_client.get, full_key)
+            if raw_remote is None:
+                return default
+            return decode_json(raw_remote if isinstance(raw_remote, bytes) else str(raw_remote).encode("utf-8"))
         entry = self._store.get(full_key)
         if entry is None:
             return default
@@ -59,7 +66,7 @@ class CacheBackend:
     async def aget(self, key: str, default: Any = None) -> Any:
         """Asynchronously retrieve ``key`` from the cache."""
         if self._remote_client is not None and hasattr(self._remote_client, "get"):
-            raw = await self._remote_client.get(self._prefixed(key))
+            raw = await self._call_remote_async(self._remote_client.get, self._prefixed(key))
             if raw is None:
                 return default
             return decode_json(raw if isinstance(raw, bytes) else str(raw).encode("utf-8"))
@@ -68,27 +75,50 @@ class CacheBackend:
     def set(self, key: str, value: Any, timeout: int | None = None) -> bool:
         """Synchronously store ``value`` under ``key``."""
         raw = encode_json_bytes(value)
-        self._store[self._prefixed(key)] = (raw, self._expiry(timeout))
+        full_key = self._prefixed(key)
+        effective = self._default_timeout if timeout is None else timeout
+        if self._remote_client is not None and hasattr(self._remote_client, "set"):
+            self._call_remote_sync(
+                self._remote_client.set,
+                full_key,
+                raw,
+                ex=effective if effective > 0 else None,
+            )
+        self._store[full_key] = (raw, self._expiry(timeout))
         return True
 
     async def aset(self, key: str, value: Any, timeout: int | None = None) -> bool:
         """Asynchronously store ``value`` under ``key``."""
         raw = encode_json_bytes(value)
+        full_key = self._prefixed(key)
         effective = self._default_timeout if timeout is None else timeout
         if self._remote_client is not None and hasattr(self._remote_client, "set"):
-            await self._remote_client.set(self._prefixed(key), raw, ex=effective if effective > 0 else None)
-        self._store[self._prefixed(key)] = (raw, self._expiry(timeout))
+            await self._call_remote_async(
+                self._remote_client.set,
+                full_key,
+                raw,
+                ex=effective if effective > 0 else None,
+            )
+        self._store[full_key] = (raw, self._expiry(timeout))
         return True
 
     def delete(self, key: str) -> bool:
         """Synchronously remove ``key`` from the cache."""
-        return self._store.pop(self._prefixed(key), None) is not None
+        full_key = self._prefixed(key)
+        remote_deleted = False
+        if self._remote_client is not None and hasattr(self._remote_client, "delete"):
+            remote_deleted = bool(self._call_remote_sync(self._remote_client.delete, full_key))
+        local_deleted = self._store.pop(full_key, None) is not None
+        return remote_deleted or local_deleted
 
     async def adelete(self, key: str) -> bool:
         """Asynchronously remove ``key`` from the cache."""
+        full_key = self._prefixed(key)
+        remote_deleted = False
         if self._remote_client is not None and hasattr(self._remote_client, "delete"):
-            await self._remote_client.delete(self._prefixed(key))
-        return self.delete(key)
+            remote_deleted = bool(await self._call_remote_async(self._remote_client.delete, full_key))
+        local_deleted = self._store.pop(full_key, None) is not None
+        return remote_deleted or local_deleted
 
     def get_many(self, *keys: str) -> list[Any]:
         """Synchronously retrieve multiple keys in order."""
@@ -123,11 +153,15 @@ class CacheBackend:
     def clear(self) -> bool:
         """Synchronously clear all cached entries."""
         self._store.clear()
+        if self._remote_client is not None:
+            self._clear_remote_sync()
         return True
 
     async def aclear(self) -> bool:
         """Asynchronously clear all cached entries."""
         self._store.clear()
+        if self._remote_client is not None:
+            await self._clear_remote_async()
         return True
 
     def cached(
@@ -166,6 +200,89 @@ class CacheBackend:
             return _sync_wrapper
 
         return _decorator
+
+    @staticmethod
+    def _call_remote_sync(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Invoke a sync or async remote client method synchronously."""
+        res = fn(*args, **kwargs)
+        if not inspect.isawaitable(res):
+            return res
+
+        async def _await_res() -> Any:
+            return await res
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_await_res())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _await_res()).result()
+
+    @staticmethod
+    async def _call_remote_async(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Invoke a sync or async remote client method asynchronously."""
+        res = fn(*args, **kwargs)
+        if inspect.isawaitable(res):
+            return await res
+        return res
+
+    def _clear_remote_sync(self) -> None:
+        """Clear remote keys matching key_prefix or flush remote store synchronously."""
+        rc = self._remote_client
+        if rc is None:
+            return
+        if self._key_prefix and hasattr(rc, "scan"):
+            cursor = 0
+            pattern = f"{self._key_prefix}*"
+            while True:
+                try:
+                    next_cursor, keys = self._call_remote_sync(rc.scan, cursor, match=pattern)
+                except TypeError:
+                    next_cursor, keys = self._call_remote_sync(rc.scan, cursor, match_pattern=pattern)
+                str_keys = [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys]
+                if str_keys:
+                    if hasattr(rc, "unlink"):
+                        self._call_remote_sync(rc.unlink, *str_keys)
+                    elif hasattr(rc, "delete"):
+                        for item_key in str_keys:
+                            self._call_remote_sync(rc.delete, item_key)
+                cursor = int(next_cursor)
+                if cursor == 0:
+                    break
+            return
+        if hasattr(rc, "clear"):
+            self._call_remote_sync(rc.clear)
+        elif hasattr(rc, "flushdb"):
+            self._call_remote_sync(rc.flushdb)
+
+    async def _clear_remote_async(self) -> None:
+        """Clear remote keys matching key_prefix or flush remote store asynchronously."""
+        rc = self._remote_client
+        if rc is None:
+            return
+        if self._key_prefix and hasattr(rc, "scan"):
+            cursor = 0
+            pattern = f"{self._key_prefix}*"
+            while True:
+                try:
+                    next_cursor, keys = await self._call_remote_async(rc.scan, cursor, match=pattern)
+                except TypeError:
+                    next_cursor, keys = await self._call_remote_async(rc.scan, cursor, match_pattern=pattern)
+                str_keys = [k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in keys]
+                if str_keys:
+                    if hasattr(rc, "unlink"):
+                        await self._call_remote_async(rc.unlink, *str_keys)
+                    elif hasattr(rc, "delete"):
+                        for item_key in str_keys:
+                            await self._call_remote_async(rc.delete, item_key)
+                cursor = int(next_cursor)
+                if cursor == 0:
+                    break
+            return
+        if hasattr(rc, "clear"):
+            await self._call_remote_async(rc.clear)
+        elif hasattr(rc, "flushdb"):
+            await self._call_remote_async(rc.flushdb)
 
 
 class FlaskCachingBackend(CacheBackend):

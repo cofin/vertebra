@@ -73,7 +73,7 @@ sources:
     resource: src/py/vertebra/agent/tools/__init__.py
     title: "Owned tool invocation snapshots and recursive type-sensitive approval"
   - id: src-stack-implementation
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    resource: src/py/vertebra/extensions/sqlspec/_driver.py
     title: "Prepared SQLSpec result metadata and native bind placeholders"
   - id: src-channel-implementation
     resource: src/py/vertebra/server/_channels.py
@@ -138,7 +138,7 @@ sources:
 ## 5. SQLSpec Binds, Owned Tool Snapshots & Channel Feed Identity
 
 - **Owned Tool Snapshots & Type-Sensitive Bind Approval**: [`build_tools`](../../../../src/py/vertebra/agent/tools/__init__.py)[^src-provider-bridge] materializes defaults, deep-copies bound arguments into independent invocation and ticket snapshots, maps `ToolPolicyError` only at the agent bridge, and compares converted scalar types as well as values recursively (`True == 1 == 1.0` maps to distinct `BOOL`/`INT64`/`FLOAT64` binds).
-- **Early Tenant Rejection, Prepared SQLSpec Results & Converter Evidence**: BigQuery and Spanner config/driver constructors reject non-null tenant enforcement at construction before base/broker setup. [`sqlspec/adapters.py`](../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-stack-implementation] uses the prepared statement's `returns_rows()`, `SQLResult`/`StackResult` factories, wrapper-owned placeholder styles, and `is_many=True` batch preparation rather than leading-keyword heuristics; treat `pytest.importorskip` converter skips as distinct from converter-enabled runs.
+- **Early Tenant Rejection, Prepared SQLSpec Results & Converter Evidence**: BigQuery and Spanner config/driver constructors reject non-null tenant enforcement at construction before base/broker setup. [`sqlspec/_driver.py`](../../../../src/py/vertebra/extensions/sqlspec/_driver.py)[^src-stack-implementation] uses the prepared statement's `returns_rows()`, `SQLResult`/`StackResult` factories, wrapper-owned placeholder styles, and `is_many=True` batch preparation rather than leading-keyword heuristics; treat `pytest.importorskip` converter skips as distinct from converter-enabled runs.
 - **Non-Null Shared-Feed Identity**: [`_channels.py`](../../../../src/py/vertebra/server/_channels.py)[^src-channel-implementation] suppresses duplicate local delivery only for non-null shared feed object identity (`None is None` never suppresses delivery).
 
 ## Cross-extension Arrow capsules and release
@@ -164,7 +164,7 @@ sources:
 [^src-tools-docs-generate-cli-docs-py]: `tools/docs/generate_cli_docs.py` — Doc-only native module stubbing in _make_stub_getattr.
 [^src-pyproject-toml]: `pyproject.toml` — Root maturin, coverage, and optional dependency configuration.
 [^src-provider-bridge]: `src/py/vertebra/agent/tools/__init__.py` — Owned tool invocation snapshots and recursive type-sensitive approval.
-[^src-stack-implementation]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Prepared SQLSpec result metadata and native bind placeholders.
+[^src-stack-implementation]: `src/py/vertebra/extensions/sqlspec/_driver.py` — Prepared SQLSpec result metadata and native bind placeholders.
 [^src-channel-implementation]: `src/py/vertebra/server/_channels.py` — Non-null shared-feed identity and independent output channels.
 [^src-db-arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs` — Unregistered Arrow SHM writers for cross-extension transfer.
 [^src-db-py-async]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension completion drainers and capsule destructors.

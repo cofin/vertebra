@@ -517,16 +517,16 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
     finally:
         conn.close()
 
-    assert SyncMySQLDialect.paramstyle == "format"
-    assert SyncMySQLDialect.use_insertmanyvalues is True
-    assert SyncMySQLDialect.insert_executemany_returning is False
-    assert SyncMySQLDialect.supports_native_jsonb is False
+    assert SyncMySQLDialect.paramstyle == "qmark"
+    assert SyncMySQLDialect.default_paramstyle == "qmark"
+    assert SyncMySQLDialect().insert_executemany_returning is False
+    assert SyncMySQLDialect.supports_statement_cache is True
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
     dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
     assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
-    assert SyncMySQLDialect.type_descriptor(vec) is vec
+    assert SyncMySQLDialect().type_descriptor(vec) is vec
     assert SyncMySQLClient is not None
     assert AsyncMySQLClient is not None
 

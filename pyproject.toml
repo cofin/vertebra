@@ -20,51 +20,57 @@ dependencies = [
 vtb = "vertebra.cli:cli"
 
 [project.entry-points."sqlalchemy.dialects"]
-"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncPostgreSQLDialect"
-"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncPostgreSQLDialect"
-"postgresql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncPostgreSQLDialect"
-"postgresql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncPostgreSQLDialect"
-"oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncOracleDialect"
-"oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncOracleDialect"
-"oracle.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncOracleDialect"
-"oracle.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncOracleDialect"
-"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncMySQLDialect"
-"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncMySQLDialect"
-"mysql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncMySQLDialect"
-"mysql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncMySQLDialect"
-"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncSQLiteDialect"
-"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncSQLiteDialect"
-"sqlite.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSQLiteDialect"
-"sqlite.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSQLiteDialect"
-"mssql.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncMSSQLDialect"
-"mssql.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncMSSQLDialect"
-"mssql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncMSSQLDialect"
-"mssql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncMSSQLDialect"
-"duckdb.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncDuckDBDialect"
-"duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncDuckDBDialect"
-"duckdb.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncDuckDBDialect"
-"duckdb.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncDuckDBDialect"
-"bigquery.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncBigQueryDialect"
-"bigquery.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncBigQueryDialect"
-"bigquery.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncBigQueryDialect"
-"bigquery.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncBigQueryDialect"
-"spanner.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncSpannerDialect"
-"spanner.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncSpannerDialect"
-"spanner.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSpannerDialect"
-"spanner.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSpannerDialect"
-"spangres.vertebra" = "vertebra.extensions.sqlalchemy.dialects:SyncSpangresDialect"
-"spangres.vtb" = "vertebra.extensions.sqlalchemy.dialects:SyncSpangresDialect"
-"spangres.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSpangresDialect"
-"spangres.vtb_async" = "vertebra.extensions.sqlalchemy.dialects:AsyncSpangresDialect"
+"postgresql.vertebra" = "vertebra.extensions.sqlalchemy.dialects.postgresql:SyncPostgreSQLDialect"
+"postgresql.vtb" = "vertebra.extensions.sqlalchemy.dialects.postgresql:SyncPostgreSQLDialect"
+"postgresql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.postgresql:AsyncPostgreSQLDialect"
+"postgresql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.postgresql:AsyncPostgreSQLDialect"
+"oracle.vertebra" = "vertebra.extensions.sqlalchemy.dialects.oracle:SyncOracleDialect"
+"oracle.vtb" = "vertebra.extensions.sqlalchemy.dialects.oracle:SyncOracleDialect"
+"oracle.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.oracle:AsyncOracleDialect"
+"oracle.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.oracle:AsyncOracleDialect"
+"mysql.vertebra" = "vertebra.extensions.sqlalchemy.dialects.mysql:SyncMySQLDialect"
+"mysql.vtb" = "vertebra.extensions.sqlalchemy.dialects.mysql:SyncMySQLDialect"
+"mysql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.mysql:AsyncMySQLDialect"
+"mysql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.mysql:AsyncMySQLDialect"
+"sqlite.vertebra" = "vertebra.extensions.sqlalchemy.dialects.sqlite:SyncSQLiteDialect"
+"sqlite.vtb" = "vertebra.extensions.sqlalchemy.dialects.sqlite:SyncSQLiteDialect"
+"sqlite.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.sqlite:AsyncSQLiteDialect"
+"sqlite.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.sqlite:AsyncSQLiteDialect"
+"mssql.vertebra" = "vertebra.extensions.sqlalchemy.dialects.mssql:SyncMSSQLDialect"
+"mssql.vtb" = "vertebra.extensions.sqlalchemy.dialects.mssql:SyncMSSQLDialect"
+"mssql.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.mssql:AsyncMSSQLDialect"
+"mssql.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.mssql:AsyncMSSQLDialect"
+"duckdb.vertebra" = "vertebra.extensions.sqlalchemy.dialects.duckdb:SyncDuckDBDialect"
+"duckdb.vtb" = "vertebra.extensions.sqlalchemy.dialects.duckdb:SyncDuckDBDialect"
+"duckdb.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.duckdb:AsyncDuckDBDialect"
+"duckdb.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.duckdb:AsyncDuckDBDialect"
+"bigquery.vertebra" = "vertebra.extensions.sqlalchemy.dialects.bigquery:SyncBigQueryDialect"
+"bigquery.vtb" = "vertebra.extensions.sqlalchemy.dialects.bigquery:SyncBigQueryDialect"
+"bigquery.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.bigquery:AsyncBigQueryDialect"
+"bigquery.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.bigquery:AsyncBigQueryDialect"
+"spanner.vertebra" = "vertebra.extensions.sqlalchemy.dialects.spanner:SyncSpannerDialect"
+"spanner.vtb" = "vertebra.extensions.sqlalchemy.dialects.spanner:SyncSpannerDialect"
+"spanner.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.spanner:AsyncSpannerDialect"
+"spanner.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.spanner:AsyncSpannerDialect"
+"spangres.vertebra" = "vertebra.extensions.sqlalchemy.dialects.spanner:SyncSpangresDialect"
+"spangres.vtb" = "vertebra.extensions.sqlalchemy.dialects.spanner:SyncSpangresDialect"
+"spangres.vertebra_async" = "vertebra.extensions.sqlalchemy.dialects.spanner:AsyncSpangresDialect"
+"spangres.vtb_async" = "vertebra.extensions.sqlalchemy.dialects.spanner:AsyncSpangresDialect"
 
 [project.optional-dependencies]
 sqlspec = [
-    "sqlspec>=0.69.0",
+    "sqlspec>=0.71.1",
+]
+adk = [
+    "google-adk>=1.0.0",
 ]
 alchemy = [
     "advanced-alchemy>=1.12.0",
     "sqlalchemy>=2.0.36",
     "alembic>=1.14.0",
+]
+dogpile = [
+    "dogpile.cache>=1.3.3",
 ]
 arrow = [
     "pyarrow>=18.0.0",
@@ -92,10 +98,20 @@ flask = [
     "flask>=3.0.0",
 ]
 django = [
-    "django>=5.1.0",
+    "django>=6.0",
+]
+django-spanner = [
+    "django-google-spanner",
+]
+sqlalchemy-duckdb = [
+    "duckdb-engine",
+]
+sqlalchemy-gcp = [
+    "sqlalchemy-bigquery",
+    "sqlalchemy-spanner",
 ]
 queues = [
-    "litestar-queues>=0.12.0",
+    "litestar-queues>=0.14.0",
 ]
 security = [
     "litestar-security>=0.6.0",
@@ -145,11 +161,20 @@ oracle = [
 postgres = [
     "vertebra-postgres==0.3.0",
 ]
+redis = [
+    "vertebra-redis==0.3.0",
+]
 spanner = [
     "vertebra-spanner==0.3.0",
 ]
+sqlite = [
+    "vertebra-sqlite==0.3.0",
+]
 storage = [
     "vertebra-storage==0.3.0",
+]
+valkey = [
+    "vertebra-valkey==0.3.0",
 ]
 uvloop = [
     "uvloop>=0.23.0; sys_platform != 'win32'",
@@ -186,7 +211,7 @@ test = [
     "pytest-databases>=0.20.0b1",
     "pytest-xdist>=3.6.1",
     "anyio",
-    "sqlspec>=0.69.0",
+    "sqlspec>=0.71.1",
     "advanced-alchemy>=1.12.0",
     "sqlalchemy>=2.0.36",
     "alembic>=1.14.0",
@@ -197,8 +222,9 @@ test = [
     "starlette>=0.40.0",
     "fastapi>=0.115.0",
     "flask>=3.0.0",
-    "django>=5.1.0",
-    "litestar-queues>=0.12.0",
+    "django>=6.0",
+    "dogpile.cache>=1.3.3",
+    "litestar-queues>=0.14.0",
     "litestar-security>=0.6.0",
     "litestar-autowire>=0.2.0",
     "litestar-email>=0.4.0",
@@ -242,8 +268,11 @@ vertebra-mssql = { path = "src/rs/vertebra-mssql", editable = true }
 vertebra-mysql = { path = "src/rs/vertebra-mysql", editable = true }
 vertebra-oracle = { path = "src/rs/vertebra-oracle", editable = true }
 vertebra-postgres = { path = "src/rs/vertebra-postgres", editable = true }
+vertebra-redis = { path = "src/rs/vertebra-redis", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
+vertebra-sqlite = { path = "src/rs/vertebra-sqlite", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
+vertebra-valkey = { path = "src/rs/vertebra-valkey", editable = true }
 
 [tool.maturin]
 python-source = "src/py"
@@ -270,8 +299,11 @@ exclude = [
     { path = "src/py/vertebra/_mysql.pyi", format = "wheel" },
     { path = "src/py/vertebra/_oracle.pyi", format = "wheel" },
     { path = "src/py/vertebra/_postgres.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_redis.pyi", format = "wheel" },
     { path = "src/py/vertebra/_spanner.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_sqlite.pyi", format = "wheel" },
     { path = "src/py/vertebra/_storage.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_valkey.pyi", format = "wheel" },
 ]
 
 [tool.ruff]
@@ -307,64 +339,54 @@ ignore_errors = true
 python_version = "3.12"
 strict = true
 mypy_path = ["src/py"]
-files = ["src/py/vertebra", "tools/scripts", "tools/pgo", "tools/docs", "tools/benchmarks", "docs/examples"]
+files = [
+    "src/py/vertebra",
+    "src/py/tests/unit",
+    "src/py/tests/integration",
+    "tools/scripts",
+    "tools/pgo",
+    "tools/docs",
+    "tools/benchmarks",
+    "docs/examples",
+]
 
 [[tool.mypy.overrides]]
 module = [
-    "pydantic.*",
-    "attrs",
     "numpy",
     "numpy.*",
     "pyarrow",
     "pyarrow.*",
     "polars",
     "polars.*",
-    "uvloop",
     "winloop",
     "rloop",
     "zuvloop",
-    "starlette",
-    "starlette.*",
-    "fastapi",
-    "fastapi.*",
-    "flask",
-    "flask.*",
-    "litestar",
-    "litestar.*",
-    "litestar_queues",
-    "litestar_queues.*",
-    "litestar_security",
-    "litestar_security.*",
-    "litestar_autowire",
-    "litestar_autowire.*",
-    "litestar_email",
-    "litestar_email.*",
-    "litestar_mcp",
-    "litestar_mcp.*",
-    "litestar_vite",
-    "litestar_vite.*",
-    "litestar_asyncapi",
-    "litestar_asyncapi.*",
-    "litestar_htmx",
-    "litestar_htmx.*",
-    "advanced_alchemy",
-    "advanced_alchemy.*",
-    "sqlalchemy",
-    "sqlalchemy.*",
-    "alembic",
-    "alembic.*",
-    "sqlspec",
-    "sqlspec.*",
-    "django",
-    "django.*",
-    "pytest_databases",
-    "pytest_databases.*",
     "concurrent.interpreters",
-    "duckdb",
+    "duckdb_engine",
+    "duckdb_engine.*",
+    "sqlalchemy_bigquery",
+    "sqlalchemy_bigquery.*",
+    "google.cloud.sqlalchemy_spanner",
+    "google.cloud.sqlalchemy_spanner.*",
+    "google.cloud.*",
+    "dogpile",
+    "dogpile.*",
+    "django_spanner",
+    "django_spanner.*",
     "spikard",
     "spikard.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "vertebra.extensions.sqlalchemy.dialects.spanner",
+    "vertebra.extensions.sqlalchemy.dialects.bigquery",
+    "vertebra.extensions.sqlalchemy.dialects.duckdb",
+    "vertebra.extensions.alchemy.cache",
+    "vertebra.extensions.django.db.backends.*",
+]
+disallow_subclassing_any = false
 
 [tool.bumpversion]
 allow_dirty = true
@@ -437,13 +459,28 @@ replace = 'vertebra-postgres=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+search = 'vertebra-redis=={current_version}'
+replace = 'vertebra-redis=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
 search = 'vertebra-spanner=={current_version}'
 replace = 'vertebra-spanner=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+search = 'vertebra-sqlite=={current_version}'
+replace = 'vertebra-sqlite=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
 search = 'vertebra-storage=={current_version}'
 replace = 'vertebra-storage=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'vertebra-valkey=={current_version}'
+replace = 'vertebra-valkey=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "src/py/vertebra/__init__.py"
@@ -491,12 +528,27 @@ search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
+filename = "src/rs/vertebra-redis/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
 filename = "src/rs/vertebra-spanner/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
+filename = "src/rs/vertebra-sqlite/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
 filename = "src/rs/vertebra-storage/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-valkey/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 

@@ -18,9 +18,10 @@ use google_cloud_spanner::result::ResultSet;
 use google_cloud_spanner::statement::Statement;
 use google_cloud_spanner::transaction::ReadWriteTransaction;
 use tokio::sync::OnceCell;
+use tonic::transport::Channel;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
-use vertebra_db::gcp::{install_rustls_ring_provider, official_credentials};
+use vertebra_db::gcp::{GcpErrorInfo, install_rustls_ring_provider, official_credentials};
 
 pub use crate::arrow_ipc::*;
 pub use crate::codec::{
@@ -35,6 +36,7 @@ use crate::codec::{
     commit_result, official_mutation_rows, official_mutation_rows_owned, official_type,
     official_value, official_value_owned, protobuf_value, spanner_type, timestamp_bound,
 };
+pub use crate::rw_tx::{SpannerBeginTransactionOptions, SpannerReadWriteTx};
 
 /// Default Cloud Spanner gRPC endpoint.
 pub const DEFAULT_SPANNER_ENDPOINT: &str = "https://spanner.googleapis.com";
@@ -136,6 +138,8 @@ pub enum SpannerError {
     Auth(String),
     #[error("Spanner client error: {0}")]
     Client(#[from] google_cloud_spanner::Error),
+    #[error("{}", .0.message)]
+    Gcp(GcpErrorInfo),
     #[error("Spanner protocol error: {0}")]
     Protocol(String),
     #[error("UpdateDatabaseDdl operation {operation} failed with code {code}: {message}")]
@@ -232,16 +236,29 @@ fn build_routing_header_value(database: &str) -> String {
 }
 
 /// Google Cloud Spanner v1 client.
+#[derive(Clone)]
 pub struct SpannerClient {
     config: SpannerClientConfig,
     effective_endpoint: String,
     routing_header_value: String,
     token_cache: Option<Arc<GcpTokenCache>>,
-    injected_spanner: Option<Spanner>,
-    injected_admin: Option<DatabaseAdmin>,
-    official: OnceCell<Spanner>,
-    database_client: OnceCell<DatabaseClient>,
-    admin_client: OnceCell<DatabaseAdmin>,
+    injected_spanner: Option<Arc<Spanner>>,
+    injected_admin: Option<Arc<DatabaseAdmin>>,
+    official: Arc<OnceCell<Spanner>>,
+    database_client: Arc<OnceCell<DatabaseClient>>,
+    admin_client: Arc<OnceCell<DatabaseAdmin>>,
+    pub(crate) grpc_channel: Arc<OnceCell<Channel>>,
+    pub(crate) mux_session: Arc<OnceCell<String>>,
+}
+
+impl std::fmt::Debug for SpannerClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpannerClient")
+            .field("database", &self.config.database)
+            .field("effective_endpoint", &self.effective_endpoint)
+            .field("pool_size", &self.config.pool_size)
+            .finish()
+    }
 }
 
 impl SpannerClient {
@@ -263,9 +280,11 @@ impl SpannerClient {
             token_cache,
             injected_spanner: None,
             injected_admin: None,
-            official: OnceCell::new(),
-            database_client: OnceCell::new(),
-            admin_client: OnceCell::new(),
+            official: Arc::new(OnceCell::new()),
+            database_client: Arc::new(OnceCell::new()),
+            admin_client: Arc::new(OnceCell::new()),
+            grpc_channel: Arc::new(OnceCell::new()),
+            mux_session: Arc::new(OnceCell::new()),
         })
     }
 
@@ -283,11 +302,13 @@ impl SpannerClient {
             effective_endpoint,
             routing_header_value,
             token_cache: None,
-            injected_spanner: Some(spanner),
-            injected_admin: admin,
-            official: OnceCell::new(),
-            database_client: OnceCell::new(),
-            admin_client: OnceCell::new(),
+            injected_spanner: Some(Arc::new(spanner)),
+            injected_admin: admin.map(Arc::new),
+            official: Arc::new(OnceCell::new()),
+            database_client: Arc::new(OnceCell::new()),
+            admin_client: Arc::new(OnceCell::new()),
+            grpc_channel: Arc::new(OnceCell::new()),
+            mux_session: Arc::new(OnceCell::new()),
         })
     }
 
@@ -295,6 +316,12 @@ impl SpannerClient {
     #[inline]
     pub fn config(&self) -> &SpannerClientConfig {
         &self.config
+    }
+
+    /// Optional shared OAuth2 token cache for GCP RPC metadata.
+    #[inline]
+    pub(crate) fn token_cache(&self) -> Option<&Arc<GcpTokenCache>> {
+        self.token_cache.as_ref()
     }
 
     /// Precomputed effective gRPC endpoint URL.
@@ -335,7 +362,7 @@ impl SpannerClient {
 
     async fn official_spanner(&self) -> Result<&Spanner, SpannerError> {
         if let Some(ref spanner) = self.injected_spanner {
-            return Ok(spanner);
+            return Ok(spanner.as_ref());
         }
         self.official
             .get_or_try_init(|| async {
@@ -374,7 +401,7 @@ impl SpannerClient {
 
     async fn database_admin(&self) -> Result<&DatabaseAdmin, SpannerError> {
         if let Some(ref admin) = self.injected_admin {
-            return Ok(admin);
+            return Ok(admin.as_ref());
         }
         self.admin_client
             .get_or_try_init(|| async {

@@ -46,7 +46,7 @@ class CacheStore:
         self._entries: dict[str, tuple[bytes, float | None]] = {}
         self._async_driver = async_driver
         self._sync_driver = sync_driver
-        if isinstance(async_driver, AsyncValkeyDriver):
+        if isinstance(async_driver, (AsyncValkeyDriver, AsyncRedisDriver)):
             async_driver.add_invalidation_listener(self._on_driver_invalidate)
 
     @classmethod
@@ -221,7 +221,8 @@ class CacheStore:
     def _on_driver_invalidate(self, keys: Any) -> None:
         """Evict local cache entries matching invalidated keys."""
         for key in keys:
-            self._entries.pop(key, None)
+            str_key = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            self._entries.pop(str_key, None)
 
 
 def attach_cache_store(app: Any, store: CacheStore | None = None) -> CacheStore:

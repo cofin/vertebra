@@ -192,11 +192,10 @@ async def test_queues_channels_stores_email_and_procedures() -> None:
     """Verify QueueService, ChannelsBackend, NamespacedStore, EmailService, and ProcedureRouter."""
     qsvc = QueueService()
 
-    @task(lane="cpu")
     async def compute_square(n: int) -> int:
         return n * n
 
-    qsvc.register(compute_square)
+    qsvc.register(task(lane="cpu")(compute_square))
     env = await qsvc.enqueue("compute_square", 9)
     assert env.lane == "cpu"
     assert await qsvc.drain_once() == [81]
@@ -399,7 +398,6 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
     qsvc = QueueService()
     attempts = 0
 
-    @task(retry=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.0))
     async def flaky_task() -> str:
         nonlocal attempts
         attempts += 1
@@ -408,20 +406,19 @@ async def test_queue_and_email_backend_validation_and_policies(monkeypatch: pyte
             raise RuntimeError(msg)
         return "success"
 
-    qsvc.register(flaky_task)
+    qsvc.register(task(retry=TaskRetryPolicy(max_retries=2, initial_backoff_seconds=0.0))(flaky_task))
     await qsvc.enqueue("flaky_task")
     assert await qsvc.run_next() == "success"
     assert attempts == 2
 
     cron_ran = False
 
-    @task(cron=CronSchedule(expression="15 10 * * *"))
     def daily_report() -> str:
         nonlocal cron_ran
         cron_ran = True
         return "report_done"
 
-    qsvc.register(daily_report)
+    qsvc.register(task(cron=CronSchedule(expression="15 10 * * *"))(daily_report))
     due_results = await qsvc.run_due_schedules(minute=15, hour=10)
     assert due_results == ["report_done"]
     assert cron_ran is True

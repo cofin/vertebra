@@ -1,45 +1,78 @@
-"""Unit tests for vertebra.extensions.sqlspec.spanner adapter, session modes, data dictionary, and zero-SDK stores."""
+"""Unit tests for vertebra.extensions.sqlspec.adapters.spanner, session modes, data dictionary, and stores."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import inspect
+import json
+import math
+import re
 import threading
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 import pytest
 from sqlspec import StatementStack
+from sqlspec.data_dictionary import get_data_dictionary_loader
+from sqlspec.exceptions import NotFoundError
 
 from tests.unit.db.test_spanner import FakeAsyncSpannerClient, FakeSpannerClient
-from vertebra.db import NotFoundError, NotSupportedError
+from vertebra.db import NotSupportedError
 from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, StalenessBound, SyncSpannerDriver
 from vertebra.db.rls import TenantPredicate
-from vertebra.extensions.sqlspec.adapters import (
+from vertebra.extensions.sqlspec._driver import (
     AsyncAdapterConfig,
     BaseAsyncDriver,
     BaseSyncDriver,
     SyncAdapterConfig,
 )
-from vertebra.extensions.sqlspec.spanner import (
+from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerAsyncADKArtifactStore,
     SpannerAsyncADKMemoryStore,
     SpannerAsyncADKStore,
     SpannerAsyncConfig,
-    SpannerAsyncEventQueueStore,
-    SpannerAsyncStore,
+    SpannerEventQueueStore,
+    SpannerLitestarStore,
     SpannerSyncADKArtifactStore,
     SpannerSyncADKMemoryStore,
     SpannerSyncADKStore,
     SpannerSyncConfig,
-    SpannerSyncEventQueueStore,
-    SpannerSyncStore,
 )
-from vertebra.extensions.sqlspec.spanner import (
+from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerAsyncDriver as SQLSpecAsyncSpannerDriver,
 )
-from vertebra.extensions.sqlspec.spanner import (
+from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerSyncDriver as SQLSpecSyncSpannerDriver,
 )
+from vertebra.extensions.sqlspec.adapters.spanner.core import (
+    farm_fingerprint_shard,
+    farmhash_fingerprint64,
+)
+from vertebra.extensions.sqlspec.adapters.spanner.driver import (
+    _execute_async_select,
+    _execute_sync_select,
+)
 from vertebra.typing import ImproperConfigurationError
+
+
+class _ClosableFakeSpannerClient(FakeSpannerClient):
+    """FakeSpannerClient implementing SyncSpannerClientProtocol.close."""
+
+    __slots__ = ()
+
+    def close(self) -> None:
+        return None
+
+
+class _ClosableFakeAsyncSpannerClient(FakeAsyncSpannerClient):
+    """FakeAsyncSpannerClient implementing AsyncSpannerClientProtocol.close."""
+
+    __slots__ = ()
+
+    async def close(self) -> None:
+        return None
 
 
 def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> None:
@@ -50,7 +83,7 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
             instance_id="test-inst",
             database_id="sqlspec-sync-db",
         ),
-        client=FakeSpannerClient(),
+        client=_ClosableFakeSpannerClient(),
     )
     config = SpannerSyncConfig(
         project_id="test-proj",
@@ -122,43 +155,118 @@ def test_spanner_sync_config_sessions_connection_shim_and_data_dictionary() -> N
             {"uid": "u1", "oid": "o2", "total": 250},
         )
         stack_out = rw_session.execute_stack(
-            [
-                "SELECT user_id, order_id, total FROM child_orders",
-                "SELECT COUNT(*) AS cnt FROM child_orders",
-            ]
+            StatementStack()
+            .push_execute("SELECT user_id, order_id, total FROM child_orders")
+            .push_execute("SELECT COUNT(*) AS cnt FROM child_orders")
         )
-        assert len(stack_out[0]) == 2
-        assert {row["order_id"] for row in stack_out[0]} == {"o1", "o2"}
-        assert stack_out[1] == [{"cnt": 2}]
+        row_data = stack_out[0].get_result().get_data()
+        assert len(row_data) == 2
+        assert {row["order_id"] for row in row_data} == {"o1", "o2"}
+        assert stack_out[1].get_result().get_data() == [{"cnt": 2}]
 
         dd = rw_session.data_dictionary
-        tables = dd.get_tables()
+        tables = dd.get_tables(rw_session)
         assert any(t["table_name"] == "parent_users" for t in tables)
-        interleaved = dd.get_interleaved_tables("parent_users")
+        interleaved = dd.get_interleaved_tables(rw_session, "parent_users")
         assert len(interleaved) == 1
         assert interleaved[0]["table_name"] == "child_orders"
         assert interleaved[0]["parent_table_name"] == "parent_users"
         assert interleaved[0]["on_delete_action"] == "CASCADE"
 
-        cols = dd.get_columns("child_orders")
+        cols = dd.get_columns(rw_session, "child_orders")
         assert any(c["column_name"] == "total" for c in cols)
-        idxs = dd.get_indexes("child_orders")
+        idxs = dd.get_indexes(rw_session, "child_orders")
         assert any(i["index_name"] == "idx_child_orders_total" for i in idxs)
 
-        export_res = rw_session.select_to_storage(
-            "SELECT user_id, order_id, total FROM child_orders ORDER BY order_id ASC",
-            "backups/orders.jsonl",
-            format="jsonl",
+        export_arrow = rw_session.select_to_arrow(
+            "SELECT user_id, order_id, total FROM child_orders ORDER BY order_id ASC"
         )
-        assert export_res["rows_exported"] == 2
+        backend = config.resolve_storage_backend()
+        assert backend is not None
+        backend.write_arrow_sync("backups/orders.parquet", export_arrow.data, file_format="parquet")
+        assert export_arrow.rows_affected == 2
 
     pg_cfg = SpannerSyncConfig(
         dsn="spangres://proj/inst/db?endpoint=http://127.0.0.1:9010",
     )
     pg_dd = pg_cfg.provide_driver().data_dictionary
-    pg_sql, _ = pg_dd.build_tables_sql()
-    assert "information_schema.tables" in pg_sql
+    assert pg_dd.dialect == "spangres"
+    pg_sql = get_data_dictionary_loader().get_domain_query_text("spanner", "tables", "by_schema", mode="postgresql")
+    assert pg_sql is not None
+    assert "information_schema.tables" in pg_sql.lower()
     shim.close()
+
+
+class _StoreFakeSpannerClient(_ClosableFakeSpannerClient):
+    """FakeSpannerClient extended with Spanner JSON, ScaNN, FTS, and MERGE shims for SQLite."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._conn.create_function("PARSE_JSON", 1, lambda val: val)
+        self._conn.create_function("APPROX_COSINE_DISTANCE", 2, self._cosine_distance)
+        self._conn.create_function("COSINE_DISTANCE", 2, self._cosine_distance)
+        self._conn.create_function("SEARCH", 2, self._fts_search)
+        self._conn.create_function("FARM_FINGERPRINT", 1, lambda val: abs(hash(str(val))))
+
+    @staticmethod
+    def _cosine_distance(lhs: Any, rhs: Any) -> float:
+        vec_a = json.loads(lhs) if isinstance(lhs, str) else list(lhs or ())
+        vec_b = json.loads(rhs) if isinstance(rhs, str) else list(rhs or ())
+        if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+            return 1.0
+        dot = sum(float(a) * float(b) for a, b in zip(vec_a, vec_b, strict=False))
+        norm_a = math.sqrt(sum(float(a) * float(a) for a in vec_a))
+        norm_b = math.sqrt(sum(float(b) * float(b) for b in vec_b))
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 1.0
+        return 1.0 - (dot / (norm_a * norm_b))
+
+    @staticmethod
+    def _fts_search(text: Any, query: Any) -> int:
+        haystack = str(text or "").lower()
+        tokens = [tok for tok in re.split(r"\s+", str(query or "").lower()) if tok]
+        return 1 if tokens and all(tok in haystack for tok in tokens) else 0
+
+    @staticmethod
+    def _coerce_cell(val: Any) -> Any:
+        if isinstance(val, dict):
+            typ = val.get("type")
+            if typ == "BYTES":
+                encoded = val.get("value") if "value" in val else val.get("base64")
+                if isinstance(encoded, str):
+                    return base64.b64decode(encoded)
+            if typ in {"TIMESTAMP", "DATE", "JSON", "JSONB", "PG_JSONB", "NUMERIC"} and "value" in val:
+                return val["value"]
+        return FakeSpannerClient._coerce_cell(val)
+
+    @staticmethod
+    def _translate_ddl(ddl: str) -> str:
+        cleaned = re.sub(
+            r"DEFAULT\s*\(MOD\(ABS\(FARM_FINGERPRINT\([^)]+\)\)\s*,\s*\d+\)\)",
+            "DEFAULT 0",
+            ddl,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+STORING\s*\([^)]+\)", "", cleaned, flags=re.IGNORECASE)
+        return FakeSpannerClient._translate_ddl(cleaned)
+
+    def _adapt_sql(self, sql: str, params_json: str | None) -> tuple[str, list[Any]]:
+        rewritten = re.sub(r",\s*options\s*=>\s*JSON\s*'[^']*'", "", sql, flags=re.IGNORECASE)
+        rewritten = re.sub(r"SEARCH\(\s*content_tokens\s*,", "SEARCH(content_text,", rewritten, flags=re.IGNORECASE)
+        upper_rewritten = rewritten.upper()
+        insert_marker = "WHEN NOT MATCHED THEN INSERT"
+        insert_idx = upper_rewritten.find(insert_marker)
+        if upper_rewritten.lstrip().startswith("MERGE") and insert_idx != -1:
+            table_match = re.search(r"MERGE\s+INTO\s+([A-Za-z0-9_]+)", rewritten, re.IGNORECASE)
+            rest = rewritten[insert_idx + len(insert_marker) :].strip()
+            vals_idx = rest.upper().find("VALUES")
+            if table_match and vals_idx != -1:
+                table = table_match.group(1)
+                cols_part = rest[:vals_idx].strip()
+                vals_part = re.sub(r"\bsource\.", "@", rest[vals_idx + len("VALUES") :].strip())
+                verb = "INSERT OR REPLACE" if "WHEN MATCHED THEN UPDATE" in upper_rewritten else "INSERT OR IGNORE"
+                rewritten = f"{verb} INTO {table} {cols_part} VALUES {vals_part}"
+        return super()._adapt_sql(rewritten, params_json)
 
 
 def test_spanner_sync_stores_adk_memory_artifact_kv_and_event_queue() -> None:
@@ -169,7 +277,7 @@ def test_spanner_sync_stores_adk_memory_artifact_kv_and_event_queue() -> None:
             instance_id="test-inst",
             database_id="stores-sync-db",
         ),
-        client=FakeSpannerClient(),
+        client=_StoreFakeSpannerClient(),
     )
     config = SpannerSyncConfig(
         project_id="test-proj",
@@ -177,6 +285,10 @@ def test_spanner_sync_stores_adk_memory_artifact_kv_and_event_queue() -> None:
         database_id="stores-sync-db",
         storage_backend="memory://",
         connection_instance=core_driver,
+        extension_config={
+            "events": {"cleanup_on_ack": False},
+            "adk": {"vector_dimensions": 4, "memory_use_fts": True},
+        },
     )
 
     adk_store = SpannerSyncADKStore(config)
@@ -185,104 +297,120 @@ def test_spanner_sync_stores_adk_memory_artifact_kv_and_event_queue() -> None:
     assert "ON DELETE CASCADE" in ddls[1]
     assert "ROW DELETION POLICY" in ddls[1]
     adk_store.create_tables()
-    created = adk_store.create_session(app_name="agent_app", user_id="user_1", state={"step": 1})
-    sid = created["session_id"]
-    adk_store.append_event(sid, author="user", content={"text": "hello"}, actions={"route": "plan"})
-    adk_store.update_session_state(sid, {"step": 2})
-    loaded_session = adk_store.get_session(sid)
+    created = adk_store.create_session("s-sync-1", "agent_app", "user_1", state={"step": 1})
+    sid = created["id"]
+    adk_store.append_event(
+        {
+            "id": "ev-1",
+            "app_name": "agent_app",
+            "user_id": "user_1",
+            "session_id": sid,
+            "invocation_id": "inv-1",
+            "timestamp": datetime.now(UTC),
+            "event_data": {"author": "user", "content": {"text": "hello"}, "actions": {"route": "plan"}},
+        }
+    )
+    adk_store.update_session_state("agent_app", "user_1", sid, {"step": 2})
+    loaded_session = adk_store.get_session("agent_app", "user_1", sid)
     assert loaded_session is not None
     assert loaded_session["state"] == {"step": 2}
-    assert len(loaded_session["events"]) == 1
+    assert len(adk_store.get_events("agent_app", "user_1", sid)) == 1
     assert len(adk_store.list_sessions(app_name="agent_app", user_id="user_1")) == 1
-    assert adk_store.delete_session(sid) is True
+    adk_store.delete_session("agent_app", "user_1", sid)
+    assert adk_store.get_session("agent_app", "user_1", sid) is None
 
-    mem_store = SpannerSyncADKMemoryStore(config, vector_dimensions=4)
-    mem_ddls = mem_store.ddl_statements()
-    assert any("ARRAY<FLOAT32>(vector_length=>4)" in s for s in mem_ddls)
-    assert any("tree_type = 'SCANN'" in s for s in mem_ddls)
-    assert any("TOKENIZE_FULLTEXT" in s for s in mem_ddls)
-    assert any("CREATE OR REPLACE PROPERTY GRAPH" in s for s in mem_ddls)
+    mem_store = SpannerSyncADKMemoryStore(config)
+    assert "ARRAY<FLOAT32>(vector_length=>4)" in "\n".join(mem_store._memory_table_ddl())
+    assert "tree_type = 'SCANN'" in mem_store.build_vector_index_sql("idx_vec")
+    assert "CREATE SEARCH INDEX" in mem_store.build_search_index_sql("idx_fts")
+    assert "CREATE OR REPLACE PROPERTY GRAPH" in mem_store.build_property_graph_sql("mem_g")
     mem_store.create_tables()
-    mem_store.store_memory(
-        memory_id="m1",
+    now = datetime.now(UTC)
+    mem_entries = [
+        {
+            "id": "m1",
+            "session_id": "s1",
+            "app_name": "agent_app",
+            "user_id": "user_1",
+            "scope": "user",
+            "event_id": "ev-m1",
+            "author": "user",
+            "timestamp": now,
+            "content_json": {"text": "Cloud Spanner supports TrueTime external consistency"},
+            "content_text": "Cloud Spanner supports TrueTime external consistency",
+            "metadata_json": {"topic": "spanner"},
+            "inserted_at": now,
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+        },
+        {
+            "id": "m2",
+            "session_id": "s1",
+            "app_name": "agent_app",
+            "user_id": "user_1",
+            "scope": "user",
+            "event_id": "ev-m2",
+            "author": "user",
+            "timestamp": now,
+            "content_json": {"text": "BigQuery executes columnar Arrow Storage Read streams"},
+            "content_text": "BigQuery executes columnar Arrow Storage Read streams",
+            "metadata_json": {"topic": "bigquery"},
+            "inserted_at": now,
+            "embedding": [0.0, 1.0, 0.0, 0.0],
+        },
+    ]
+    assert mem_store.insert_memory_entries(mem_entries) == 2
+
+    vec_hits = mem_store.search_entries("TrueTime", "agent_app", "user_1", embedding=[1.0, 0.0, 0.0, 0.0])
+    assert vec_hits[0]["id"] == "m1"
+    rrf_hits = mem_store.hybrid_rrf_search(
         app_name="agent_app",
         user_id="user_1",
-        content="Cloud Spanner supports TrueTime external consistency",
-        embedding=[1.0, 0.0, 0.0, 0.0],
-        entity_links=["spanner", "truetime"],
-    )
-    batch_saved = mem_store.store_memories_batch(
-        [
-            {
-                "memory_id": "m1",
-                "app_name": "agent_app",
-                "user_id": "user_1",
-                "content": "Cloud Spanner supports TrueTime external consistency",
-                "embedding": [1.0, 0.0, 0.0, 0.0],
-                "entity_links": ["spanner", "truetime"],
-            },
-            {
-                "memory_id": "m2",
-                "app_name": "agent_app",
-                "user_id": "user_1",
-                "content": "BigQuery executes columnar Arrow Storage Read streams",
-                "embedding": [0.0, 1.0, 0.0, 0.0],
-                "entity_links": ["bigquery", "arrow"],
-            },
-        ]
-    )
-    assert batch_saved[0]["deduplicated"] is True
-    assert batch_saved[1]["deduplicated"] is False
-
-    vec_hits = mem_store.search_memory("user_1", embedding=[1.0, 0.0, 0.0, 0.0], mode="vector")
-    assert vec_hits[0]["memory_id"] == "m1"
-    fts_hits = mem_store.search_memory("user_1", query="TrueTime consistency", mode="fts")
-    assert fts_hits[0]["memory_id"] == "m1"
-    rrf_hits = mem_store.search_memory(
-        "user_1",
         query="TrueTime",
         embedding=[1.0, 0.0, 0.0, 0.0],
-        mode="hybrid_rrf",
         rrf_k=60,
     )
-    assert rrf_hits[0]["memory_id"] == "m1"
-    assert rrf_hits[0]["rrf_score"] > 0
-    graph_hits = mem_store.search_memory("user_1", entity_id="truetime", mode="graph")
-    assert graph_hits[0]["memory_id"] == "m1"
+    assert rrf_hits[0]["id"] == "m1"
 
     art_store = SpannerSyncADKArtifactStore(config)
-    art_store.create_tables()
-    saved_art = art_store.save_artifact("s1", "report.pdf", b"%PDF-1.7-content", content_type="application/pdf")
-    assert saved_art["version"] == 1
-    loaded_art = art_store.get_artifact("s1", "report.pdf")
+    art_store.create_table()
+    saved_ref = art_store.save_artifact_object(
+        "agent_app",
+        "user_1",
+        "report.pdf",
+        b"%PDF-1.7-content",
+        session_id="s1",
+        mime_type="application/pdf",
+    )
+    assert saved_ref.size == 16
+    loaded_art = art_store.get_artifact("agent_app", "user_1", "report.pdf", session_id="s1")
     assert loaded_art is not None
-    assert loaded_art["data"] == b"%PDF-1.7-content"
-    assert loaded_art["object_ref"] is not None
-    assert len(art_store.list_artifacts("s1")) == 1
-    assert art_store.delete_artifact("s1", "report.pdf") is True
+    assert loaded_art["canonical_uri"] == saved_ref.uri
+    assert art_store.list_artifact_keys("agent_app", "user_1", session_id="s1") == ["report.pdf"]
+    art_store.delete_artifact("agent_app", "user_1", "report.pdf", session_id="s1")
+    assert art_store.get_artifact("agent_app", "user_1", "report.pdf", session_id="s1") is None
 
-    kv_store = SpannerSyncStore(config)
-    assert "ROW DELETION POLICY" in kv_store.ddl_statements()[0]
-    kv_store.create_tables()
-    kv_store.set("sess:abc", b"payload-bytes", expires_in=120)
-    assert kv_store.exists("sess:abc") is True
-    assert kv_store.get("sess:abc") == b"payload-bytes"
-    ttl_rem = kv_store.expires_in("sess:abc")
+    kv_store = SpannerLitestarStore(config)
+    assert "ROW DELETION POLICY" in kv_store.create_statements()[0]
+    asyncio.run(kv_store.create_table())
+    asyncio.run(kv_store.set("sess:abc", b"payload-bytes", expires_in=timedelta(seconds=120)))
+    assert asyncio.run(kv_store.exists("sess:abc")) is True
+    assert asyncio.run(kv_store.get("sess:abc")) == b"payload-bytes"
+    ttl_rem = asyncio.run(kv_store.expires_in("sess:abc"))
     assert ttl_rem is not None and ttl_rem > 0
-    assert kv_store.delete("sess:abc") is True
-    assert kv_store.get("sess:abc") is None
+    asyncio.run(kv_store.delete("sess:abc"))
+    assert asyncio.run(kv_store.get("sess:abc")) is None
 
-    eq_store = SpannerSyncEventQueueStore(config, cleanup_on_ack=False)
+    eq_store = SpannerEventQueueStore(config)
     eq_ddls = eq_store.ddl_statements()
     assert "ROW DELETION POLICY" in eq_ddls[0]
     assert "STORING" in eq_ddls[1]
-    eq_store.create_tables()
-    pub = eq_store.publish("orders", {"order_id": "o-100"})
-    pending = eq_store.consume("orders")
+    eq_store.create_tables_sync()
+    pub = eq_store.publish_sync("orders", {"order_id": "o-100"})
+    pending = eq_store.consume_sync("orders")
     assert len(pending) == 1
     assert pending[0]["event_id"] == pub["event_id"]
-    assert eq_store.ack(pub["event_id"]) is True
-    assert eq_store.consume("orders") == []
+    assert eq_store.ack_sync(pub["event_id"]) is True
+    assert eq_store.consume_sync("orders") == []
 
 
 @pytest.mark.anyio
@@ -294,7 +422,7 @@ async def test_spanner_async_config_and_async_stores() -> None:
             instance_id="test-inst",
             database_id="stores-async-db",
         ),
-        client=FakeSpannerClient(),
+        client=_StoreFakeSpannerClient(),
     )
     config = SpannerAsyncConfig(
         project_id="test-proj",
@@ -302,41 +430,68 @@ async def test_spanner_async_config_and_async_stores() -> None:
         database_id="stores-async-db",
         storage_backend="memory://",
         connection_instance=core_driver,
+        extension_config={"adk": {"vector_dimensions": 4}},
     )
-    async with config.provide_session(transaction=False) as ro_session:
+    async with config.provide_session(transaction=False) as autocommit_session:
+        assert autocommit_session.is_read_only is False
+    async with config.provide_session(transaction=False, read_only=True) as ro_session:
         assert ro_session.is_read_only is True
 
     adk = SpannerAsyncADKStore(config)
     await adk.create_tables()
-    s = await adk.create_session(app_name="app", user_id="u1", state={"ok": True})
-    await adk.append_event(s["session_id"], author="assistant", content={"reply": "done"})
-    fetched = await adk.get_session(s["session_id"])
-    assert fetched is not None and len(fetched["events"]) == 1
-
-    mem = SpannerAsyncADKMemoryStore(config, vector_dimensions=4)
-    await mem.create_tables()
-    await mem.store_memory(
-        app_name="app",
-        user_id="u1",
-        content="Spanner async vector search",
-        embedding=[0.5, 0.5, 0.0, 0.0],
+    s = await adk.create_session("s-async-1", "app", "u1", state={"ok": True})
+    await adk.append_event(
+        {
+            "id": "aev-1",
+            "app_name": "app",
+            "user_id": "u1",
+            "session_id": s["id"],
+            "invocation_id": "inv-1",
+            "timestamp": datetime.now(UTC),
+            "event_data": {"author": "assistant", "content": {"reply": "done"}},
+        }
     )
-    hits = await mem.search_memory("u1", query="Spanner", embedding=[0.5, 0.5, 0.0, 0.0], mode="hybrid_rrf")
+    events = await adk.get_events("app", "u1", s["id"])
+    assert len(events) == 1
+
+    mem = SpannerAsyncADKMemoryStore(config)
+    await mem.create_tables()
+    now = datetime.now(UTC)
+    await mem.insert_memory_entries(
+        [
+            {
+                "id": "am-1",
+                "session_id": s["id"],
+                "app_name": "app",
+                "user_id": "u1",
+                "scope": "user",
+                "event_id": "aev-1",
+                "author": "assistant",
+                "timestamp": now,
+                "content_json": {"text": "Spanner async vector search"},
+                "content_text": "Spanner async vector search",
+                "metadata_json": None,
+                "inserted_at": now,
+                "embedding": [0.5, 0.5, 0.0, 0.0],
+            }
+        ]
+    )
+    hits = await mem.hybrid_rrf_search(app_name="app", user_id="u1", query="Spanner", embedding=[0.5, 0.5, 0.0, 0.0])
     assert len(hits) == 1
 
     art = SpannerAsyncADKArtifactStore(config)
-    await art.create_tables()
-    await art.save_artifact(s["session_id"], "blob.bin", b"\x00\x01\x02")
-    got_art = await art.get_artifact(s["session_id"], "blob.bin")
-    assert got_art is not None and got_art["data"] == b"\x00\x01\x02"
+    await art.create_table()
+    ref = await art.save_artifact_object("app", "u1", "blob.bin", b"\x00\x01\x02", session_id=s["id"])
+    got_art = await art.get_artifact("app", "u1", "blob.bin", session_id=s["id"])
+    assert got_art is not None and got_art["canonical_uri"] == ref.uri
 
-    kv = SpannerAsyncStore(config)
-    await kv.create_tables()
-    await kv.set("k1", "v1", expires_in=60)
+    kv = SpannerLitestarStore(config)
+    await kv.create_table()
+    await kv.set("k1", "v1", expires_in=timedelta(seconds=60))
     assert await kv.get("k1") == b"v1"
     await kv.delete_all()
 
-    eq = SpannerAsyncEventQueueStore(config)
+    eq = SpannerEventQueueStore(config)
     await eq.create_tables()
     evt = await eq.publish("notifications", {"msg": "hi"})
     items = await eq.consume("notifications")
@@ -344,7 +499,7 @@ async def test_spanner_async_config_and_async_stores() -> None:
     assert await eq.ack(evt["event_id"]) is True
 
 
-class _ArrowOptionsSpannerClient(FakeSpannerClient):
+class _ArrowOptionsSpannerClient(_ClosableFakeSpannerClient):
     """External Spanner client port recording partition and staleness options."""
 
     def __init__(self) -> None:
@@ -388,12 +543,16 @@ def test_spanner_native_driver_stack_results_and_batch_dml(
         else "SELECT id FROM stack_items WHERE id = @id"
     )
     args = (1,) if dialect == "spangres" else ()
-    kwargs = {} if dialect == "spangres" else {"id": 1}
+    kwargs: dict[str, Any] = {} if dialect == "spangres" else {"id": 1}
+    kwargs_two: dict[str, Any] = {} if dialect == "spangres" else {"id": 2}
     try:
         core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
-        assert driver.execute_stack(
-            ["INSERT INTO stack_items (id) VALUES (1)", "INSERT INTO stack_items (id) VALUES (2)"]
-        ) == [1, 1]
+        dml_res = driver.execute_stack(
+            StatementStack()
+            .push_execute("INSERT INTO stack_items (id) VALUES (1)")
+            .push_execute("INSERT INTO stack_items (id) VALUES (2)")
+        )
+        assert [item.rows_affected for item in dml_res] == [1, 1]
         result = driver.execute_stack(
             StatementStack()
             .push_execute(select_sql, *args, **kwargs)
@@ -402,9 +561,7 @@ def test_spanner_native_driver_stack_results_and_batch_dml(
         assert result[0].get_result().get_data() == [{"id": 1}]
         assert result[1].get_result().get_data() == [{"n": 2}]
         single = driver.execute_stack(
-            StatementStack().push_execute(
-                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
-            )
+            StatementStack().push_execute(select_sql, *((2,) if dialect == "spangres" else ()), **kwargs_two)
         )
         assert single[0].get_result().get_data() == [{"id": 2}]
         bound = StalenessBound.exact_staleness(750)
@@ -432,7 +589,7 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
     client = _ArrowOptionsSpannerClient()
     core = AsyncSpannerDriver(
         SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="stack-async-db", dialect=dialect),
-        client=FakeAsyncSpannerClient(client),
+        client=_ClosableFakeAsyncSpannerClient(client),
     )
     driver = (
         SpannerAsyncConfig(core.config, connection_instance=core).create_driver()
@@ -445,12 +602,16 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
         else "SELECT id FROM stack_items WHERE id = @id"
     )
     args = (1,) if dialect == "spangres" else ()
-    kwargs = {} if dialect == "spangres" else {"id": 1}
+    kwargs: dict[str, Any] = {} if dialect == "spangres" else {"id": 1}
+    kwargs_two: dict[str, Any] = {} if dialect == "spangres" else {"id": 2}
     try:
         await core.update_ddl(["CREATE TABLE stack_items (id INT64 NOT NULL) PRIMARY KEY (id)"])
-        assert await driver.execute_stack(
-            ["INSERT INTO stack_items (id) VALUES (1)", "INSERT INTO stack_items (id) VALUES (2)"]
-        ) == [1, 1]
+        dml_res = await driver.execute_stack(
+            StatementStack()
+            .push_execute("INSERT INTO stack_items (id) VALUES (1)")
+            .push_execute("INSERT INTO stack_items (id) VALUES (2)")
+        )
+        assert [item.rows_affected for item in dml_res] == [1, 1]
         result = await driver.execute_stack(
             StatementStack()
             .push_execute(select_sql, *args, **kwargs)
@@ -459,9 +620,7 @@ async def test_spanner_async_native_driver_stack_results_and_batch_dml(
         assert result[0].get_result().get_data() == [{"id": 1}]
         assert result[1].get_result().get_data() == [{"n": 2}]
         single = await driver.execute_stack(
-            StatementStack().push_execute(
-                select_sql, *((2,) if dialect == "spangres" else ()), **({} if dialect == "spangres" else {"id": 2})
-            )
+            StatementStack().push_execute(select_sql, *((2,) if dialect == "spangres" else ()), **kwargs_two)
         )
         assert single[0].get_result().get_data() == [{"id": 2}]
         bound = StalenessBound.exact_staleness(750)
@@ -499,7 +658,7 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
     monkeypatch.setattr(SyncAdapterConfig, "__init__", forbidden)
     monkeypatch.setattr(AsyncAdapterConfig, "__init__", forbidden)
     predicate = TenantPredicate(table_alias="t", tenant_value="tenant")
-    constructors = {
+    constructors: dict[str, Callable[[], Any]] = {
         "sync-driver": lambda: SQLSpecSyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
         "async-driver": lambda: SQLSpecAsyncSpannerDriver(ForbiddenCore(), tenant_predicate=predicate),
         "sync-config": lambda: SpannerSyncConfig(tenant_predicate=predicate),
@@ -515,7 +674,7 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
         constructors[kind]()
 
 
-class _StalenessAndThreadTrackingSpannerClient(FakeSpannerClient):
+class _StalenessAndThreadTrackingSpannerClient(_StoreFakeSpannerClient):
     """External Spanner client port recording staleness bounds and caller thread identities."""
 
     def __init__(self) -> None:
@@ -554,15 +713,22 @@ class _StalenessAndThreadTrackingSpannerClient(FakeSpannerClient):
             transaction_tag=transaction_tag,
         )
 
-    def commit_mutations(
+    def apply_mutations(
         self,
         mutations_json: str,
-        max_commit_delay_ms: int = 0,
+        transaction_tag: str | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
     ) -> dict[str, Any]:
         self.call_threads.append(threading.get_ident())
-        return super().commit_mutations(mutations_json, max_commit_delay_ms=max_commit_delay_ms)
+        return super().apply_mutations(
+            mutations_json,
+            transaction_tag=transaction_tag,
+            exclude_txn_from_change_streams=exclude_txn_from_change_streams,
+            max_commit_delay_ms=max_commit_delay_ms,
+        )
 
-    def update_ddl(self, statements: list[str]) -> str:
+    def update_ddl(self, statements: Sequence[str]) -> str:
         self.call_threads.append(threading.get_ident())
         return super().update_ddl(statements)
 
@@ -591,7 +757,7 @@ async def test_spanner_sync_and_async_select_value_routes_through_active_snapsho
     async_raw = _StalenessAndThreadTrackingSpannerClient()
     async_core = AsyncSpannerDriver(
         SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="snap-val-async"),
-        client=FakeAsyncSpannerClient(async_raw),
+        client=_ClosableFakeAsyncSpannerClient(async_raw),
     )
     async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
     try:
@@ -612,7 +778,7 @@ async def test_spanner_sync_and_async_select_value_routes_through_active_snapsho
 
 @pytest.mark.anyio
 async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -> None:
-    """SpannerAsyncStore and SpannerAsyncADKStore offload synchronous driver operations onto worker threads."""
+    """SpannerLitestarStore and SpannerAsyncADKStore offload synchronous driver operations onto worker threads."""
     tracking_client = _StalenessAndThreadTrackingSpannerClient()
     sync_core = SyncSpannerDriver(
         SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="offload-async-db"),
@@ -626,10 +792,10 @@ async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -
     )
     loop_tid = threading.get_ident()
     try:
-        kv_store = SpannerAsyncStore(config)
+        kv_store = SpannerLitestarStore(config)
         tracking_client.call_threads.clear()
-        await kv_store.create_tables()
-        await kv_store.set("sess-1", b"val-1", expires_in=60)
+        await kv_store.create_table()
+        await kv_store.set("sess-1", b"val-1", expires_in=timedelta(seconds=60))
         assert await kv_store.get("sess-1") == b"val-1"
         assert tracking_client.call_threads
         assert set(tracking_client.call_threads).isdisjoint({loop_tid})
@@ -637,8 +803,8 @@ async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -
         adk_store = SpannerAsyncADKStore(config)
         tracking_client.call_threads.clear()
         await adk_store.create_tables()
-        created = await adk_store.create_session(app_name="demo", user_id="u1", state={"step": 1})
-        fetched = await adk_store.get_session(created["session_id"])
+        created = await adk_store.create_session("s-offload-1", "demo", "u1", state={"step": 1})
+        fetched = await adk_store.get_session("demo", "u1", created["id"])
         assert fetched is not None
         assert tracking_client.call_threads
         assert set(tracking_client.call_threads).isdisjoint({loop_tid})
@@ -649,9 +815,9 @@ async def test_spanner_async_stores_offload_sync_driver_calls_off_event_loop() -
 @pytest.mark.anyio
 async def test_sqlspec_spanner_batch_write_rejects_max_commit_delay_ms() -> None:
     """SQLSpec sync and async Spanner drivers reject max_commit_delay_ms on batch_write."""
-    sync_backing = FakeSpannerClient()
+    sync_backing = _ClosableFakeSpannerClient()
     sync_core = SyncSpannerDriver(SpannerConfig(), client=sync_backing)
-    async_core = AsyncSpannerDriver(SpannerConfig(), client=FakeAsyncSpannerClient(sync_backing))
+    async_core = AsyncSpannerDriver(SpannerConfig(), client=_ClosableFakeAsyncSpannerClient(sync_backing))
     sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core)
     async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core)
     try:
@@ -666,3 +832,164 @@ async def test_sqlspec_spanner_batch_write_rejects_max_commit_delay_ms() -> None
     finally:
         sync_core.close()
         await async_core.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_provide_session_rw_transactions_autocommit_and_snapshot_precedence() -> None:
+    """provide_session begins/commits/rolls back RW transactions, defaults transaction=False to autocommit, and prioritizes active_snapshot."""
+    fake_client = _ClosableFakeSpannerClient()
+    sync_core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="tx-lifecycle-db"),
+        client=fake_client,
+    )
+    async_core = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="tx-lifecycle-db"),
+        client=_ClosableFakeAsyncSpannerClient(fake_client),
+    )
+    sync_cfg = SpannerSyncConfig(sync_core.config, connection_instance=sync_core, share_pool=False)
+    async_cfg = SpannerAsyncConfig(async_core.config, connection_instance=async_core, share_pool=False)
+    try:
+        with sync_cfg.provide_session(transaction=False) as autocommit:
+            assert autocommit.is_read_only is False
+            assert autocommit.in_transaction is False
+            autocommit.execute("CREATE TABLE ledger (id STRING(64) NOT NULL, amount INT64 NOT NULL) PRIMARY KEY (id)")
+            autocommit.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-0", "amount": 10})
+
+        before_tx = len(fake_client.begin_tx_calls)
+        with sync_cfg.provide_session(transaction=True) as rw_sync:
+            assert rw_sync.in_transaction is True
+            rw_sync.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-1", "amount": 25})
+        assert len(fake_client.begin_tx_calls) == before_tx + 1
+        assert len(fake_client.tx_rollbacks) == 0
+
+        with pytest.raises(RuntimeError, match="abort sync tx"), sync_cfg.provide_session(transaction=True) as rw_fail:
+            rw_fail.execute("INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-bad", "amount": 99})
+            raise RuntimeError("abort sync tx")
+        assert len(fake_client.tx_rollbacks) == 1
+
+        with sync_cfg.provide_session(transaction=False, read_only=True) as ro_sync:
+            assert ro_sync.is_read_only is True
+            rows = ro_sync.select("SELECT id, amount FROM ledger ORDER BY id")
+            assert [r["id"] for r in rows] == ["row-0", "row-1"]
+
+        async with async_cfg.provide_session(transaction=True) as rw_async:
+            assert rw_async.in_transaction is True
+            await rw_async.execute(
+                "INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-2", "amount": 50}
+            )
+
+        with pytest.raises(RuntimeError, match="abort async tx"):
+            async with async_cfg.provide_session(transaction=True) as rw_async_fail:
+                await rw_async_fail.execute(
+                    "INSERT INTO ledger (id, amount) VALUES (@id, @amount)", {"id": "row-async-bad", "amount": 77}
+                )
+                raise RuntimeError("abort async tx")
+        assert len(fake_client.tx_rollbacks) == 2
+
+        async with async_cfg.provide_session(transaction=False, read_only=True) as ro_async:
+            assert ro_async.is_read_only is True
+            arows = await ro_async.select("SELECT id, amount FROM ledger ORDER BY id")
+            assert [r["id"] for r in arows] == ["row-0", "row-1", "row-2"]
+
+        cursor_called = False
+
+        class _CursorStub:
+            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                nonlocal cursor_called
+                _ = (sql, params)
+                cursor_called = True
+                return [(999,)], ["val"]
+
+        class _SyncSnapshotStub:
+            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                _ = (sql, params)
+                return [(42,)], ["snap_val"]
+
+        class _AsyncSnapshotStub:
+            async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
+                _ = (sql, params)
+                return [(84,)], ["async_snap_val"]
+
+        sync_rows, sync_cols = _execute_sync_select(
+            _CursorStub(), "SELECT 1", None, active_snapshot=_SyncSnapshotStub()
+        )
+        assert cursor_called is False
+        assert sync_rows == [{"snap_val": 42}]
+        assert sync_cols == ["snap_val"]
+
+        async_rows, async_cols = await _execute_async_select(
+            _CursorStub(), "SELECT 1", None, active_snapshot=_AsyncSnapshotStub()
+        )
+        assert cursor_called is False
+        assert async_rows == [{"async_snap_val": 84}]
+        assert async_cols == ["async_snap_val"]
+    finally:
+        sync_cfg.close()
+        await async_cfg.close()
+
+
+@pytest.mark.anyio
+async def test_spanner_farmhash_fingerprint_cached_core_close_and_adk_error_propagation() -> None:
+    """farmhash_fingerprint64 matches Google reference vectors, close() cleans cached cores, and ADK search propagates errors."""
+    assert farmhash_fingerprint64("") == -7286425919675154353
+    assert farmhash_fingerprint64("abc") == 2640714258260161385
+    assert farmhash_fingerprint64("alphabet") == -2427165924636348523
+    medium_key = "user-session-identifier-with-forty-bytes"
+    long_key = "x" * 96
+    assert farm_fingerprint_shard(medium_key, 16) == abs(farmhash_fingerprint64(medium_key)) % 16
+    assert farm_fingerprint_shard(long_key, 32) == abs(farmhash_fingerprint64(long_key)) % 32
+
+    class _ClosableCoreStub:
+        def __init__(self) -> None:
+            self.closed_count = 0
+
+        def close(self) -> None:
+            self.closed_count += 1
+
+    class _AsyncClosableCoreStub:
+        def __init__(self) -> None:
+            self.closed_count = 0
+
+        async def close(self) -> None:
+            self.closed_count += 1
+
+    sync_stub = _ClosableCoreStub()
+    sync_cfg = SpannerSyncConfig(project_id="p", instance_id="i", database_id="d", share_pool=False)
+    cast(Any, sync_cfg)._cached_core = sync_stub
+    sync_cfg.close()
+    assert sync_stub.closed_count == 1
+    assert sync_cfg._cached_core is None
+
+    async_stub = _AsyncClosableCoreStub()
+    sync_helper_stub = _ClosableCoreStub()
+    async_cfg = SpannerAsyncConfig(project_id="p", instance_id="i", database_id="d", share_pool=False)
+    cast(Any, async_cfg)._cached_core = async_stub
+    cast(Any, async_cfg)._cached_sync_core = sync_helper_stub
+    await async_cfg.close()
+    assert async_stub.closed_count == 1
+    assert sync_helper_stub.closed_count == 1
+    assert async_cfg._cached_core is None
+    assert async_cfg._cached_sync_core is None
+
+    class _BrokenSpannerClient(_ClosableFakeSpannerClient):
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            if "COSINE_DISTANCE" in sql or "SEARCH(" in sql:
+                raise RuntimeError("broken search index")
+            return super().query(sql, params_json, staleness_mode, staleness_ms)
+
+    broken_core = SyncSpannerDriver(SpannerConfig(), client=_BrokenSpannerClient())
+    broken_sync_cfg = SpannerSyncConfig(broken_core.config, connection_instance=broken_core, share_pool=False)
+    mem_store = SpannerSyncADKMemoryStore(broken_sync_cfg)
+    with pytest.raises(RuntimeError, match="broken search index"):
+        mem_store.search_entries("hello", "app", "u1", embedding=[0.1, 0.2])
+
+    broken_async_cfg = SpannerAsyncConfig(broken_core.config, connection_instance=broken_core, share_pool=False)
+    async_mem_store = SpannerAsyncADKMemoryStore(broken_async_cfg)
+    with pytest.raises(RuntimeError, match="broken search index"):
+        await async_mem_store.search_entries("hello", "app", "u1", embedding=[0.1, 0.2])

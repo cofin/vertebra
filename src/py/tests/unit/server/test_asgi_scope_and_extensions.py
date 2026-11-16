@@ -1,7 +1,7 @@
 """Unit tests for the Rust-backed AsgiScope and ASGI 3.0 wire extensions."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -106,7 +106,7 @@ async def test_zero_copy_send_response_extension() -> None:
 
     scope = AsgiScope.from_parts(method="GET", path="/blob")
     resp = ZeroCopySendResponse(payload, content_type=b"application/octet-stream")
-    await resp(scope, receive, send)
+    await resp(cast("Any", scope), receive, send)
 
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["status"] == 200
@@ -130,7 +130,7 @@ async def test_path_send_response_extension(tmp_path: Path) -> None:
 
     scope = AsgiScope.from_parts(method="GET", path="/static.txt")
     resp = PathSendResponse(sample, content_type=b"text/plain")
-    await resp(scope, receive, send)
+    await resp(cast("Any", scope), receive, send)
 
     assert sent[0]["type"] == "http.response.start"
     assert sent[1] == {"type": "http.response.pathsend", "path": str(sample)}
@@ -152,7 +152,7 @@ async def test_trailer_response_extension() -> None:
         b"streamed-body",
         trailers=[(b"grpc-status", b"0"), (b"x-checksum", b"deadbeef")],
     )
-    await resp(scope, receive, send)
+    await resp(cast("Any", scope), receive, send)
 
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["trailers"] is True

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
 
 if TYPE_CHECKING:
-    from vertebra.framework.queues.base import QueueService, TaskEnvelope
+    from vertebra.framework.queues.base import QueueService
 
 __all__ = (
     "CronExpression",
@@ -115,6 +117,15 @@ class CronExpression(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_
         )
 
 
+class _RegisteredSchedule(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Internal registration model for named cron schedules."""
+
+    name: str
+    cron_expr: str
+    task_name: str
+    kwargs: dict[str, Any]
+
+
 class CronScheduler:
     """Distributed lease-elected cron job scheduler dispatching due tasks into QueueService."""
 
@@ -125,6 +136,7 @@ class CronScheduler:
         "_lease_ttl",
         "_node_id",
         "_queue_service",
+        "_schedules",
     )
 
     def __init__(
@@ -140,16 +152,47 @@ class CronScheduler:
         self._lease_key = lease_key
         self._lease_ttl = lease_ttl_seconds
         self._last_dispatched_slot: str | None = None
+        self._schedules: dict[str, _RegisteredSchedule] = {}
 
     @property
     def node_id(self) -> str:
         """Return the unique scheduler node identifier."""
         return self._node_id
 
-    async def tick(self, now: datetime | None = None) -> list[TaskEnvelope]:
+    def register(
+        self,
+        name: str,
+        cron_expr: str,
+        task_name: str,
+        *,
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Register a named cron schedule dispatching task_name with kwargs."""
+        CronExpression.parse(cron_expr)
+        self._schedules[name] = _RegisteredSchedule(
+            name=name,
+            cron_expr=cron_expr,
+            task_name=task_name,
+            kwargs=dict(kwargs or {}),
+        )
+
+    async def tick(self, *, now: float | datetime | None = None) -> int:
         """Attempt lease-based slot election and enqueue tasks matching the current minute tick."""
-        current_dt = now or datetime.now(UTC)
+        if now is None:
+            current_dt = datetime.now(UTC)
+            now_epoch = current_dt.timestamp()
+        elif isinstance(now, (int, float)):
+            now_epoch = float(now)
+            current_dt = datetime.fromtimestamp(now_epoch, tz=UTC)
+        elif isinstance(now, datetime):
+            current_dt = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+            now_epoch = current_dt.timestamp()
+        else:
+            current_dt = datetime.now(UTC)
+            now_epoch = current_dt.timestamp()
+
         slot_key = current_dt.strftime("%Y-%m-%dT%H:%M")
+        slot_epoch = int(now_epoch // 60) * 60
 
         backend = self._queue_service.backend
         lease = await backend.acquire_lease(
@@ -159,24 +202,55 @@ class CronScheduler:
             slot=slot_key,
         )
         if lease is None:
-            return []
+            return 0
 
         if lease.last_slot == slot_key and self._last_dispatched_slot == slot_key:
-            return []
+            return 0
 
-        enqueued: list[TaskEnvelope] = []
+        store = getattr(backend, "store", None) or getattr(backend, "_store", None)
+        enqueued_count = 0
+
+        for sched in self._schedules.values():
+            expr = CronExpression.parse(sched.cron_expr)
+            if expr.matches(current_dt):
+                reserve_key = f"{sched.name}:{slot_epoch}"
+                if store is not None and hasattr(store, "reserve_unique_key") and callable(store.reserve_unique_key):
+                    res = store.reserve_unique_key(reserve_key, ttl_seconds=self._lease_ttl * 2)
+                    if inspect.isawaitable(res):
+                        reserved = await res
+                    else:
+                        reserved = bool(res)
+                    if not reserved:
+                        continue
+                idempotency_key = f"cron:{sched.name}:{slot_key}"
+                await self._queue_service.enqueue(
+                    sched.task_name,
+                    idempotency_key=idempotency_key,
+                    **sched.kwargs,
+                )
+                enqueued_count += 1
+
         for tdef in self._queue_service.registered_tasks.values():
             if tdef.cron is None:
                 continue
             expr = CronExpression.parse(tdef.cron.expression)
             if expr.matches(current_dt, tdef.cron.timezone):
+                reserve_key = f"{tdef.name}:{slot_epoch}"
+                if store is not None and hasattr(store, "reserve_unique_key") and callable(store.reserve_unique_key):
+                    res = store.reserve_unique_key(reserve_key, ttl_seconds=self._lease_ttl * 2)
+                    if inspect.isawaitable(res):
+                        reserved = await res
+                    else:
+                        reserved = bool(res)
+                    if not reserved:
+                        continue
                 idempotency_key = f"cron:{tdef.name}:{slot_key}"
-                env = await self._queue_service.enqueue(
+                await self._queue_service.enqueue(
                     tdef.name,
                     lane=tdef.lane,
                     idempotency_key=idempotency_key,
                 )
-                enqueued.append(env)
+                enqueued_count += 1
 
         self._last_dispatched_slot = slot_key
         await backend.renew_lease(
@@ -185,7 +259,7 @@ class CronScheduler:
             self._lease_ttl,
             slot=slot_key,
         )
-        return enqueued
+        return enqueued_count
 
     async def run(
         self,

@@ -74,6 +74,8 @@ __all__ = [
     "RustDbTaskAwaitable",
     "SchemaDigestCache",
     "SerializationFailure",
+    "ShmCache",
+    "ShmCacheStats",
     "SimilarityMatch",
     "SpannerAbortedError",
     "SpannerError",
@@ -99,7 +101,6 @@ __all__ = [
     "call_vectorcall",
     "classify_jsonrpc_frame",
     "clear_request_notification",
-    "crc16_xmodem",
     "decode_alloydb_metadata_response",
     "decode_gemini_embed_grpc_frame_to_batch",
     "decode_oracle_vector_binary",
@@ -120,7 +121,6 @@ __all__ = [
     "encode_gemini_embed_contents_grpc_frame",
     "encode_gemini_embed_grpc_frame",
     "encode_gemini_embed_grpc_response_frame",
-    "encode_hello3_handshake",
     "encode_oracle_vector_binary",
     "encode_oracle_vector_f32",
     "encode_oracle_vector_f64",
@@ -131,7 +131,6 @@ __all__ = [
     "encode_pgvector_bit",
     "encode_pgvector_f16",
     "encode_pgvector_f32",
-    "encode_resp_command",
     "encode_ttc_session_attrs",
     "format_gemma_prompt",
     "format_traceparent",
@@ -156,7 +155,6 @@ __all__ = [
     "orm_to_struct_vectorcall",
     "pack_grpc_lpm_frame",
     "parse_bytes",
-    "parse_cluster_redirect",
     "parse_duration",
     "parse_tnsnames_ora",
     "parse_traceparent",
@@ -167,7 +165,6 @@ __all__ = [
     "quote_bracket_identifier",
     "quote_dialect_identifier",
     "quote_identifier",
-    "redis_hash_slot",
     "resolve_tns_alias",
     "rewrite_mssql_placeholders",
     "run_wsgi_callable",
@@ -177,7 +174,6 @@ __all__ = [
     "snake_case",
     "splice_prefix_tokens",
     "split_qualified_identifier",
-    "sqlite_initialization_pragmas",
     "stable_hash64",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
@@ -1076,6 +1072,65 @@ class StatementCache:
     def capacity(self) -> int: ...
 
 @final
+class ShmCacheStats:
+    """Hit/miss, set, and eviction counters for a shared-memory ShmCache."""
+
+    capacity: int
+    """Total slot capacity of the cache."""
+    max_entries: int
+    """Configured maximum entries in the cache."""
+    capacity_bytes: int
+    """Total allocated capacity in bytes."""
+    hits: int
+    """Cumulative cache lookup hits."""
+    misses: int
+    """Cumulative cache lookup misses."""
+    sets: int
+    """Cumulative cache set operations."""
+    evictions: int
+    """Cumulative CLOCK-sweep cache evictions."""
+    expirations: int
+    """Cumulative expired slot hits."""
+
+@final
+class ShmCache:
+    """Cross-worker POSIX shared-memory key-value cache with optimistic seqlock reads and CLOCK eviction."""
+
+    def __new__(
+        cls,
+        name: str,
+        capacity_bytes: int = 1_048_576,
+        max_entries: int = 1024,
+    ) -> Self: ...
+    def get(self, key: str | bytes) -> bytes | None: ...
+    def set(
+        self,
+        key: str | bytes,
+        value: str | bytes,
+        ttl: float | None = None,
+    ) -> bool: ...
+    def delete(self, key: str | bytes) -> bool: ...
+    def add(
+        self,
+        key: str | bytes,
+        value: str | bytes,
+        ttl: float | None = None,
+    ) -> bool: ...
+    def incr(self, key: str | bytes, delta: int = 1) -> int: ...
+    def decr(self, key: str | bytes, delta: int = 1) -> int: ...
+    def touch(self, key: str | bytes, ttl: float | None = None) -> bool: ...
+    def has_key(self, key: str | bytes) -> bool: ...
+    def invalidate_prefix(self, prefix: str | bytes) -> int: ...
+    def clear(self) -> None: ...
+    def stats(self) -> ShmCacheStats: ...
+    def close(self) -> None: ...
+    def unlink(self) -> bool: ...
+    def attach_lease_table(self, broker: LeaseBroker) -> None: ...
+    def drain_invalidations(self, max_frames: int = 64) -> list[bytes]: ...
+    @property
+    def capacity(self) -> int: ...
+
+@final
 class BrokerEngineRegistry:
     @staticmethod
     def register(capsule: object) -> int: ...
@@ -1234,26 +1289,6 @@ def duckdb_bootstrap_statements(
     httpfs_connection_caching: bool = True,
     enable_http_metadata_cache: bool = True,
 ) -> list[str]: ...
-def sqlite_initialization_pragmas(
-    path: str = ":memory:",
-    wal_mode: bool = True,
-    synchronous: str = "NORMAL",
-    mmap_size: int = 268435456,
-    busy_timeout_ms: int = 5000,
-    max_readers: int = 16,
-    foreign_keys: bool = True,
-) -> list[str]: ...
-def encode_resp_command(args: list[bytes]) -> bytes: ...
-def encode_hello3_handshake(
-    client_name: str = "vertebra",
-    username: str | None = None,
-    password: str | None = None,
-    enable_tracking_bcast: bool = False,
-    prefixes: list[str] = ...,
-) -> bytes: ...
-def crc16_xmodem(data: bytes) -> int: ...
-def redis_hash_slot(key: bytes) -> int: ...
-def parse_cluster_redirect(err_msg: str) -> tuple[str, int, str, int] | None: ...
 
 @final
 class SimilarityMatch:

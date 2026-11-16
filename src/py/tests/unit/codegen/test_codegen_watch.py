@@ -5,6 +5,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from vertebra.build.codegen._watch import CodegenWatcher, HmrNotifier
 
 
@@ -16,7 +18,7 @@ class _DummyResponse:
         return None
 
 
-def test_hmr_notifier_posts_to_signal_endpoint(monkeypatch) -> None:
+def test_hmr_notifier_posts_to_signal_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """HmrNotifier.notify() should POST to the Rust signal endpoint."""
     calls: list[urllib.request.Request] = []
 
@@ -35,7 +37,7 @@ def test_hmr_notifier_posts_to_signal_endpoint(monkeypatch) -> None:
     assert calls[0].get_method() == "POST"
 
 
-def test_hmr_notifier_swallows_delivery_errors(monkeypatch) -> None:
+def test_hmr_notifier_swallows_delivery_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Notifier failures should be debug-logged, not raised to the caller."""
 
     def fake_urlopen(request: urllib.request.Request, *, timeout: float) -> _DummyResponse:

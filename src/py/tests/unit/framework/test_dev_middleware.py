@@ -31,7 +31,7 @@ def test_broadcast_hmr_event_to_empty_clients() -> None:
 
 def test_broadcast_hmr_event_delivers_to_queue() -> None:
     _ws_clients.clear()
-    q: asyncio.Queue[dict] = asyncio.Queue()
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     _ws_clients.add(q)
     try:
         broadcast_hmr_event({"type": "update", "path": "/a"})
@@ -44,8 +44,8 @@ def test_broadcast_hmr_event_delivers_to_queue() -> None:
 
 def test_broadcast_hmr_event_to_multiple_clients() -> None:
     _ws_clients.clear()
-    q1: asyncio.Queue[dict] = asyncio.Queue()
-    q2: asyncio.Queue[dict] = asyncio.Queue()
+    q1: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    q2: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     _ws_clients.add(q1)
     _ws_clients.add(q2)
     try:
@@ -58,7 +58,7 @@ def test_broadcast_hmr_event_to_multiple_clients() -> None:
 
 def test_broadcast_hmr_event_drops_on_full_queue() -> None:
     _ws_clients.clear()
-    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
     q.put_nowait({"type": "old"})
     _ws_clients.add(q)
     try:
@@ -70,7 +70,7 @@ def test_broadcast_hmr_event_drops_on_full_queue() -> None:
 
 def test_invalidate_and_broadcast_broadcasts_types_update(middleware: DevMiddleware) -> None:
     _ws_clients.clear()
-    q: asyncio.Queue[dict] = asyncio.Queue()
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     _ws_clients.add(q)
     try:
         middleware.type_bridge.invalidate()

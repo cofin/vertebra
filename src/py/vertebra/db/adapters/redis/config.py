@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 from vertebra.db.adapters.redis.core import (
     ClusterRedirect,
     PubSubMessage,
-    RedisCore,
 )
 from vertebra.db.driver._common import REDIS_DIALECT_TAG, BaseDatabaseConfig
 
@@ -144,19 +143,24 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             effective_user: str | None = self.username or parsed.username or "default"
         else:
             effective_user = self.username if self.username is not None else parsed.username
-        cmds = [
-            RedisCore.encode_hello3_handshake(
-                username=effective_user,
-                password=effective_password,
-                client_name=self.client_name,
-            )
-        ]
+        parts: list[str] = ["HELLO", "3"]
+        if effective_password is not None:
+            parts.extend(["AUTH", effective_user or "default", effective_password])
+        if self.client_name:
+            parts.extend(["SETNAME", self.client_name])
+        hello_cmd = f"*{len(parts)}\r\n".encode("ascii") + b"".join(
+            f"${len(p.encode('utf-8'))}\r\n{p}\r\n".encode("ascii") for p in parts
+        )
+        cmds = [hello_cmd]
         if self.effective_tracking_enabled:
-            tracking_cmd: list[bytes | str] = ["CLIENT", "TRACKING", "ON"]
+            track_parts = ["CLIENT", "TRACKING", "ON"]
             for prefix in self.client_tracking_prefixes:
-                tracking_cmd.extend(["PREFIX", prefix])
-            tracking_cmd.append("BCAST")
-            cmds.append(RedisCore.encode_resp_command(*tracking_cmd))
+                track_parts.extend(["PREFIX", prefix])
+            track_parts.append("BCAST")
+            track_cmd = f"*{len(track_parts)}\r\n".encode("ascii") + b"".join(
+                f"${len(p.encode('utf-8'))}\r\n{p}\r\n".encode("ascii") for p in track_parts
+            )
+            cmds.append(track_cmd)
         return cmds
 
     @classmethod

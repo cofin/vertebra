@@ -2,27 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from vertebra._vertebra import AlloyDBDialer, CloudSQLDialer, LeaseBroker, LeaseGrant
-from vertebra.db.adapters.bigquery import BigQueryConfig
-from vertebra.db.adapters.duckdb import DuckDBConfig
-from vertebra.db.adapters.mssql import MSSQLConfig
-from vertebra.db.adapters.mysql import MySQLConfig
-from vertebra.db.adapters.oracle import OracleConfig
-from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig
-from vertebra.db.adapters.spanner import SpannerConfig
-from vertebra.db.adapters.sqlite import SQLiteConfig
-from vertebra.db.registry import AnyDatabaseConfig, DatabaseRegistry
+from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.registry import DatabaseRegistry
 from vertebra.extensions.django.orm import rows_to_structs
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Sequence
 
 __all__ = (
     "BackendPoolerConfig",
@@ -45,6 +39,16 @@ class BackendPoolerConfig(msgspec.Struct, frozen=True, gc=False):
     enable_vector_handlers: bool = True
     max_connections: int = 32
 
+    def needs_direct_for_ddl(self) -> bool:
+        """Return True when DDL migrations require bypassing transaction/statement pooling."""
+        return bool(
+            self.pgbouncer
+            or self.pooler_mode in ("transaction", "statement")
+            or self.direct_dsn is not None
+            or self.direct_host is not None
+            or self.direct_port is not None
+        )
+
 
 class DatabaseWrapperMixin:
     """Mixin enhancing Django ``BaseDatabaseWrapper`` with SHM ``LeaseBroker``, Cloud Dialers, and PgBouncer."""
@@ -54,7 +58,18 @@ class DatabaseWrapperMixin:
     driver_scheme: str = "generic"
 
     def __init__(self, settings_dict: dict[str, Any], alias: str = "default") -> None:
-        self.settings_dict = dict(settings_dict)
+        normalized = dict(settings_dict)
+        normalized.setdefault("TIME_ZONE", None)
+        normalized.setdefault("AUTOCOMMIT", True)
+        normalized.setdefault("ATOMIC_REQUESTS", False)
+        normalized.setdefault("CONN_MAX_AGE", 0)
+        normalized.setdefault("CONN_HEALTH_CHECKS", False)
+        normalized.setdefault("OPTIONS", {})
+        normalized.setdefault("HOST", "")
+        normalized.setdefault("PORT", "")
+        normalized.setdefault("USER", "")
+        normalized.setdefault("PASSWORD", "")
+        self.settings_dict = normalized
         self.alias = alias
         options = dict(self.settings_dict.get("OPTIONS") or {})
         self.pooler_config = BackendPoolerConfig(
@@ -108,126 +123,6 @@ class DatabaseWrapperMixin:
             self._async_native_driver = registry.get_shared_driver(cfg)
         return self._async_native_driver
 
-    def _build_native_config(self) -> AnyDatabaseConfig:
-        host = str(self.settings_dict.get("HOST") or "localhost")
-        port = int(self.settings_dict.get("PORT") or self._default_port())
-        name = str(self.settings_dict.get("NAME") or "")
-        user = str(self.settings_dict.get("USER") or "")
-        password = str(self.settings_dict.get("PASSWORD") or "")
-        auth = f"{user}:{password}@" if (user and password) else (f"{user}@" if user else "")
-        if self.vendor == "postgresql":
-            db_name = name or "postgres"
-            dsn = f"postgresql://{auth}{host}:{port}/{db_name}"
-            return PostgreSQLConfig(
-                dsn=dsn,
-                direct_dsn=self.pooler_config.direct_dsn,
-                pooler_mode=cast("PoolerMode", self.pooler_config.pooler_mode),
-                pgbouncer=self.pooler_config.pgbouncer,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                alloydb_instance_uri=self.pooler_config.alloydb_instance_uri,
-                broker=self._broker,
-            )
-        if self.vendor == "mysql":
-            dsn = f"mysql://{auth}{host}:{port}/{name}"
-            return MySQLConfig(
-                dsn=dsn,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                broker=self._broker,
-            )
-        if self.vendor in {"sqlite", "sqlite3"}:
-            db_path = name or ":memory:"
-            return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
-        if self.vendor == "oracle":
-            svc = name or "FREEPDB1"
-            dsn = f"oracle://{auth}{host}:{port}/{svc}"
-            return OracleConfig(
-                dsn=dsn,
-                host=host,
-                port=port,
-                service_name=svc,
-                user=user or "system",
-                password=password,
-                wallet_zip=self.pooler_config.wallet_zip,
-                broker=self._broker,
-            )
-        if self.vendor == "mssql":
-            db_name = name or "master"
-            dsn = f"mssql://{auth}{host}:{port}/{db_name}"
-            return MSSQLConfig(
-                dsn=dsn,
-                host=host,
-                port=port,
-                database=db_name,
-                user=user or "sa",
-                password=password,
-                cloud_sql_instance=self.pooler_config.cloud_sql_instance,
-                broker=self._broker,
-            )
-        if self.vendor == "duckdb":
-            duck_path = name or ":memory:"
-            return DuckDBConfig(path=duck_path, database=duck_path, broker=self._broker)
-        if self.vendor == "bigquery":
-            options = dict(self.settings_dict.get("OPTIONS") or {})
-            dsn = str(options.get("dsn") or "")
-            if dsn:
-                return BigQueryConfig.from_dsn(dsn)
-            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or name or "test-project")
-            dataset_id = (
-                options.get("dataset_id")
-                or self.settings_dict.get("DATASET")
-                or (name if self.settings_dict.get("PROJECT") and name else None)
-            )
-            location = str(options.get("location") or self.settings_dict.get("LOCATION") or "US")
-            max_billed_raw = options.get("maximum_bytes_billed") or self.settings_dict.get("MAXIMUM_BYTES_BILLED")
-            max_billed = int(max_billed_raw) if max_billed_raw is not None else None
-            rest_endpoint = str(
-                options.get("rest_endpoint")
-                or (
-                    f"http://{host}:{port}"
-                    if host not in {"localhost", ""} and port
-                    else "https://bigquery.googleapis.com"
-                )
-            )
-            storage_endpoint = str(options.get("storage_endpoint") or "https://bigquerystorage.googleapis.com")
-            return BigQueryConfig(
-                project_id=project_id,
-                dataset_id=str(dataset_id) if dataset_id is not None else None,
-                location=location,
-                rest_endpoint=rest_endpoint,
-                storage_endpoint=storage_endpoint,
-                maximum_bytes_billed=max_billed,
-            )
-        if self.vendor == "spanner":
-            options = dict(self.settings_dict.get("OPTIONS") or {})
-            dsn = str(options.get("dsn") or "")
-            if dsn:
-                return SpannerConfig.from_dsn(dsn)
-            if name.startswith("projects/"):
-                return SpannerConfig.from_dsn(f"spanner://{name}")
-            project_id = str(options.get("project_id") or self.settings_dict.get("PROJECT") or "test-project")
-            instance_id = str(options.get("instance_id") or self.settings_dict.get("INSTANCE") or "test-instance")
-            db_name = name or str(options.get("database_id") or "test-db")
-            dialect_raw = str(options.get("dialect") or self.settings_dict.get("DIALECT") or "googlesql").lower()
-            database_role = options.get("database_role")
-            endpoint = str(
-                options.get("endpoint")
-                or (
-                    f"http://{host}:{port}"
-                    if host not in {"localhost", ""} and port
-                    else "https://spanner.googleapis.com"
-                )
-            )
-            return SpannerConfig(
-                project_id=project_id,
-                instance_id=instance_id,
-                database_id=db_name,
-                dialect="spangres" if dialect_raw in {"spangres", "postgresql", "pg"} else "googlesql",
-                database_role=str(database_role) if database_role is not None else None,
-                endpoint=endpoint,
-            )
-        db_path = name or ":memory:"
-        return SQLiteConfig(path=db_path, database=db_path, broker=self._broker)
-
     @property
     def engine(self) -> str:
         """Return the canonical Django backend engine identifier."""
@@ -248,6 +143,11 @@ class DatabaseWrapperMixin:
         """Return the configured ``CloudSQLDialer`` or ``AlloyDBDialer`` if enabled."""
         return self._cloud_dialer
 
+    @property
+    def disables_server_side_cursors(self) -> bool:
+        """Return True when transaction pooling is enabled so Django disables server-side cursors."""
+        return self.pooler_config.pgbouncer or self.pooler_config.pooler_mode == "transaction"
+
     def build_cloud_sql_dialer(self) -> CloudSQLDialer | None:
         """Return the ``CloudSQLDialer`` when ``cloud_sql_instance`` is configured."""
         if isinstance(self._cloud_dialer, CloudSQLDialer):
@@ -263,11 +163,6 @@ class DatabaseWrapperMixin:
         if self.pooler_config.alloydb_instance_uri:
             return AlloyDBDialer(self.pooler_config.alloydb_instance_uri)
         return None
-
-    @property
-    def disables_server_side_cursors(self) -> bool:
-        """Return True when transaction pooling is enabled so Django disables server-side cursors."""
-        return self.pooler_config.pgbouncer or self.pooler_config.pooler_mode == "transaction"
 
     def acquire_lease(self, timeout_ms: int = 5000) -> int:
         """Acquire a connection slot lease from the Rust ``LeaseBroker`` and return the slot index."""
@@ -317,16 +212,30 @@ class DatabaseWrapperMixin:
             opts["dsn"] = self.pooler_config.direct_dsn
         return derived
 
-    @contextmanager
-    def schema_editor(self, *args: Any, **kwargs: Any) -> Iterator[dict[str, Any]]:
-        """Switch to direct session-mode settings when running DDL / migrations."""
-        _ = (args, kwargs)
-        direct_settings = self.derive_direct_settings()
-        yield {
-            "pooler_mode": "session",
-            "settings": direct_settings,
-            **direct_settings,
-        }
+    def schema_editor(self, *args: Any, **kwargs: Any) -> Any:
+        """Delegate to Django's `BaseDatabaseWrapper.schema_editor`, routing DDL via direct session settings when pooled."""
+        super_schema_editor = getattr(super(), "schema_editor", None)
+        if not callable(super_schema_editor):
+            msg = f"{type(self).__name__} does not inherit a Django schema_editor() implementation"
+            raise ImproperConfigurationError(msg)
+        if not self.pooler_config.needs_direct_for_ddl():
+            return super_schema_editor(*args, **kwargs)
+        orig_settings = self.settings_dict
+        orig_pooler = self.pooler_config
+        self.settings_dict = self.derive_direct_settings()
+        self.pooler_config = msgspec.structs.replace(
+            self.pooler_config,
+            pooler_mode="session",
+            pgbouncer=False,
+        )
+        try:
+            editor = super_schema_editor(*args, **kwargs)
+        finally:
+            self.settings_dict = orig_settings
+            self.pooler_config = orig_pooler
+        editor.__class__ = _direct_schema_editor_class(type(editor))
+        editor._vtb_wrapper = self
+        return editor
 
     def select_to_arrow(
         self,
@@ -335,13 +244,20 @@ class DatabaseWrapperMixin:
         *,
         rows: Sequence[dict[str, Any]] | None = None,
     ) -> Any:
-        """Execute ``sql`` and return a ``pyarrow.Table``."""
-        _ = (sql, params)
+        """Execute `sql` via `self.cursor()` when `rows` is `None` and return a `pyarrow.Table`."""
         pa = import_optional("pyarrow")
         if pa is None:
             msg = "pyarrow is required for select_to_arrow()"
             raise RuntimeError(msg)
-        return pa.Table.from_pylist(list(rows or ()))
+        if rows is not None:
+            return pa.Table.from_pylist(list(rows))
+        tuple_rows, columns = self._execute_select_cursor(sql, params)
+        if not tuple_rows:
+            if columns:
+                return pa.table({col: [] for col in columns})
+            return pa.Table.from_pylist([])
+        dict_rows = [dict(zip(columns, row, strict=False)) for row in tuple_rows]
+        return pa.Table.from_pylist(dict_rows)
 
     def select_to_schema[T](
         self,
@@ -351,9 +267,39 @@ class DatabaseWrapperMixin:
         schema_type: type[T],
         rows: Sequence[dict[str, Any] | Sequence[Any]] | None = None,
     ) -> list[T]:
-        """Execute ``sql`` and hydrate rows directly into ``list[schema_type]``."""
-        _ = (sql, params)
-        return rows_to_structs(list(rows or ()), schema_type)
+        """Execute `sql` via `self.cursor()` when `rows` is `None` and hydrate rows into `list[schema_type]`."""
+        if rows is not None:
+            return rows_to_structs(list(rows), schema_type)
+        tuple_rows, columns = self._execute_select_cursor(sql, params)
+        return rows_to_structs(tuple_rows, schema_type, columns=columns or None)
+
+    def _build_native_config(self) -> BaseDatabaseConfig:
+        """Build native configuration from connection parameters."""
+        params = self.get_connection_params()
+        cfg = params.get("config")
+        if isinstance(cfg, BaseDatabaseConfig):
+            return cfg
+        msg = f"Database configuration not available for {self.vendor}"
+        raise ImproperConfigurationError(msg)
+
+    def _execute_select_cursor(
+        self,
+        sql: str,
+        params: Sequence[Any] | None = None,
+    ) -> tuple[list[tuple[Any, ...]], list[str]]:
+        """Execute `(sql, params)` through `self.cursor()` and return `(tuple_rows, column_names)`."""
+        cursor_fn = getattr(self, "cursor", None)
+        if not callable(cursor_fn):
+            msg = f"{type(self).__name__} does not expose cursor() for SQL execution"
+            raise ImproperConfigurationError(msg)
+        with cursor_fn() as cur:
+            if params is not None:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            cols = [str(col[0]) for col in (cur.description or ())]
+            fetched = [tuple(row) for row in cur.fetchall()]
+        return fetched, cols
 
     def _default_port(self) -> int:
         ports = {
@@ -365,3 +311,55 @@ class DatabaseWrapperMixin:
             "duckdb": 0,
         }
         return ports.get(self.vendor, 0)
+
+
+_DIRECT_SCHEMA_EDITOR_CLASSES: dict[type[Any], type[Any]] = {}
+
+
+def _direct_schema_editor_class(base_cls: type[Any]) -> type[Any]:
+    """Return a subclass of `base_cls` that temporarily activates direct DDL settings on enter/exit."""
+    cached = _DIRECT_SCHEMA_EDITOR_CLASSES.get(base_cls)
+    if cached is not None:
+        return cached
+
+    class _DirectDDLSchemaEditor(base_cls):
+        def __enter__(self) -> Any:
+            wrapper = getattr(self, "_vtb_wrapper", None)
+            if wrapper is not None:
+                direct_settings = wrapper.derive_direct_settings()
+                self._vtb_saved_state = (
+                    wrapper.settings_dict,
+                    wrapper.pooler_config,
+                    getattr(wrapper, "connection", None),
+                )
+                wrapper.settings_dict = direct_settings
+                wrapper.pooler_config = msgspec.structs.replace(
+                    wrapper.pooler_config,
+                    pooler_mode="session",
+                    pgbouncer=False,
+                )
+                if hasattr(wrapper, "connection"):
+                    wrapper.connection = None
+            return super().__enter__()
+
+        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+            wrapper = getattr(self, "_vtb_wrapper", None)
+            saved = getattr(self, "_vtb_saved_state", None)
+            try:
+                return super().__exit__(exc_type, exc_val, exc_tb)
+            finally:
+                if wrapper is not None and saved is not None:
+                    orig_settings, orig_pooler, orig_conn = saved
+                    temp_conn = getattr(wrapper, "connection", None)
+                    if temp_conn is not None and temp_conn is not orig_conn:
+                        with contextlib.suppress(Exception):
+                            temp_conn.close()
+                    wrapper.settings_dict = orig_settings
+                    wrapper.pooler_config = orig_pooler
+                    if hasattr(wrapper, "connection"):
+                        wrapper.connection = orig_conn
+
+    _DirectDDLSchemaEditor.__name__ = f"Direct{base_cls.__name__}"
+    _DirectDDLSchemaEditor.__qualname__ = f"Direct{base_cls.__qualname__}"
+    _DIRECT_SCHEMA_EDITOR_CLASSES[base_cls] = _DirectDDLSchemaEditor
+    return _DirectDDLSchemaEditor

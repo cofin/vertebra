@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from vertebra.framework.queues.backends import (
+    SHMQueueBackend,
+)
 from vertebra.framework.queues.base import (
     CronLease,
     CronSchedule,
     DeadLetterEntry,
     MemoryQueueBackend,
     QueueBackend,
+    QueueBackendSettings,
     QueueConfig,
     QueueService,
     TaskDef,
     TaskEnvelope,
     TaskLane,
+    TaskResultRecord,
     TaskRetryPolicy,
     task,
 )
@@ -27,7 +32,7 @@ from vertebra.framework.queues.postgres import (
 from vertebra.framework.queues.redis import (
     RedisQueueBackend,
     RedisStreamClient,
-    ValkeyQueueBackend,
+    SyncRedisStreamClient,
 )
 from vertebra.framework.queues.scheduler import (
     CronExpression,
@@ -36,6 +41,11 @@ from vertebra.framework.queues.scheduler import (
 from vertebra.framework.queues.spanner import (
     SpannerQueueBackend,
     SpannerQueueExecutor,
+)
+from vertebra.framework.queues.valkey import (
+    SyncValkeyStreamClient,
+    ValkeyQueueBackend,
+    ValkeyStreamClient,
 )
 from vertebra.server.lanes import (
     LaneConfig,
@@ -59,17 +69,23 @@ __all__ = (
     "PostgreSQLQueueBackend",
     "PostgreSQLQueueExecutor",
     "QueueBackend",
+    "QueueBackendSettings",
     "QueueConfig",
     "QueueService",
     "RedisQueueBackend",
     "RedisStreamClient",
+    "SHMQueueBackend",
     "SpannerQueueBackend",
     "SpannerQueueExecutor",
+    "SyncRedisStreamClient",
+    "SyncValkeyStreamClient",
     "TaskDef",
     "TaskEnvelope",
     "TaskLane",
+    "TaskResultRecord",
     "TaskRetryPolicy",
     "ValkeyQueueBackend",
+    "ValkeyStreamClient",
     "WorkerRunner",
     "parse_lanes",
     "run_oneshot",

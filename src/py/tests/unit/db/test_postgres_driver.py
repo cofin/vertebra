@@ -112,7 +112,7 @@ async def test_async_postgres_pool_failed_begin_evicts_connection() -> None:
                 async def broken_begin() -> None:
                     raise RuntimeError("begin failed")
 
-                client.begin = broken_begin
+                client.__dict__["begin"] = broken_begin
                 _ = orig_begin
             return client
 

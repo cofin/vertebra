@@ -4,28 +4,42 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import socket
+import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
+    AsyncRedisNotificationSource,
     ClusterRedirect,
     PubSubMessage,
     RedisConfig,
-    Resp3Parser,
+    RedisNotifyConfig,
     SyncRedisDriver,
+    SyncRedisNotificationSource,
     crc16_xmodem,
     hash_slot,
     parse_cluster_redirect,
 )
 from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
+    Resp3Parser,
     SyncValkeyDriver,
     ValkeyConfig,
 )
+from vertebra.db.adapters.valkey import (
+    PubSubMessage as ValkeyPubSubMessage,
+)
+from vertebra.db.cdc import ChangeFeed
+from vertebra.db.driver import AsyncNotificationSource, NotificationEvent, SyncNotificationSource
+from vertebra.server._channels import ChannelBus
+from vertebra.typing import MissingDependencyError
+from vertebra.utils.module_loader import reset_dependency_cache
 
 if TYPE_CHECKING:
     from tests.unit.conftest import Resp3FakeServer
@@ -74,57 +88,68 @@ def test_parse_cluster_redirect_moved_and_ask() -> None:
 
 
 def test_sync_socketpair_hello3_client_tracking_and_iam_refresh() -> None:
-    """SyncValkeyDriver over socket.socketpair() must send HELLO 3 with IAM token, CLIENT TRACKING, and refresh on reconnect."""
+    """SyncValkeyDriver must send HELLO 3 with IAM token, CLIENT TRACKING, and refresh on reconnect."""
     tokens = collections.deque(["mock-iam-token-1", "mock-iam-token-2"])
     received_commands: list[list[bytes]] = []
     active_server_socks: list[socket.socket] = []
 
-    def make_socketpair(_addr: tuple[str, int]) -> socket.socket:
-        client_sock, server_sock = socket.socketpair()
-        active_server_socks.append(server_sock)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    host, port = server.getsockname()
 
-        def server_loop() -> None:
-            buf = bytearray()
+    def server_accept_loop() -> None:
+        while True:
             try:
-                while True:
-                    chunk = server_sock.recv(4096)
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                    while buf:
-                        try:
-                            frame, next_offset = Resp3Parser.parse_frame(buf, 0)
-                        except ValueError:
-                            break
-                        del buf[:next_offset]
-                        if isinstance(frame, list) and frame:
-                            received_commands.append(
-                                [bytes(p) if isinstance(p, bytes) else str(p).encode() for p in frame]
-                            )
-                            cmd = frame[0].decode("ascii").upper()
-                            if cmd == "HELLO":
-                                server_sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
-                            elif cmd == "CLIENT":
-                                server_sock.sendall(b"+OK\r\n")
-                            elif cmd == "PING":
-                                server_sock.sendall(b"+PONG\r\n")
-                            else:
-                                server_sock.sendall(b"+OK\r\n")
-            finally:
-                server_sock.close()
+                conn, _ = server.accept()
+            except OSError:
+                break
+            active_server_socks.append(conn)
 
-        threading.Thread(target=server_loop, daemon=True).start()
-        return client_sock
+            def conn_handler(sock: socket.socket) -> None:
+                buf = bytearray()
+                try:
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        while buf:
+                            try:
+                                frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                            except ValueError:
+                                break
+                            del buf[:next_offset]
+                            if isinstance(frame, list) and frame:
+                                received_commands.append(
+                                    [bytes(p) if isinstance(p, bytes) else str(p).encode() for p in frame]
+                                )
+                                cmd = frame[0].decode("ascii").upper()
+                                if cmd == "HELLO":
+                                    sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
+                                elif cmd == "CLIENT":
+                                    sock.sendall(b"+OK\r\n")
+                                elif cmd == "PING":
+                                    sock.sendall(b"+PONG\r\n")
+                                else:
+                                    sock.sendall(b"+OK\r\n")
+                finally:
+                    sock.close()
+
+            threading.Thread(target=conn_handler, args=(conn,), daemon=True).start()
+
+    th = threading.Thread(target=server_accept_loop, daemon=True)
+    th.start()
 
     cfg = ValkeyConfig(
-        url="valkey://127.0.0.1:6379/0",
+        url=f"valkey://127.0.0.1:{port}/0",
         username="iam-user",
         iam_auth_enabled=True,
         token_provider=tokens.popleft,
         enable_client_tracking=True,
         client_tracking_prefixes=("user:", "order:"),
     )
-    driver = SyncValkeyDriver(cfg, socket_factory=make_socketpair)
+    driver = SyncValkeyDriver(cfg)
     try:
         pong = driver.execute_command("PING")
         assert pong == "PONG"
@@ -157,54 +182,72 @@ def test_sync_socketpair_hello3_client_tracking_and_iam_refresh() -> None:
         )
     finally:
         driver.close()
+        server.close()
         for s in active_server_socks:
-            s.close()
+            with contextlib.suppress(OSError):
+                s.close()
 
 
 def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
     """SyncValkeyDriver must enforce bounded OrderedDict LRU eviction and evict on live RESP3 invalidate push frames."""
-    client_sock, server_sock = socket.socketpair()
+    active_server_socks: list[socket.socket] = []
 
-    def server_worker() -> None:
-        buf = bytearray()
-        try:
-            while True:
-                chunk = server_sock.recv(4096)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                while buf:
-                    try:
-                        frame, next_offset = Resp3Parser.parse_frame(buf, 0)
-                    except ValueError:
-                        break
-                    del buf[:next_offset]
-                    if isinstance(frame, list) and frame:
-                        cmd = frame[0].decode("ascii").upper()
-                        if cmd == "HELLO":
-                            server_sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
-                        elif cmd in ("CLIENT", "SET"):
-                            server_sock.sendall(b"+OK\r\n")
-                        elif cmd == "GET":
-                            key = frame[1].decode("utf-8")
-                            val = f"fresh-{key}".encode()
-                            server_sock.sendall(f"${len(val)}\r\n".encode("ascii") + val + b"\r\n")
-                        elif cmd == "PING":
-                            server_sock.sendall(b">2\r\n$10\r\ninvalidate\r\n*1\r\n$6\r\nuser:1\r\n+PONG\r\n")
-                        elif cmd == "ECHO":
-                            server_sock.sendall(b">2\r\n$10\r\ninvalidate\r\n_\r\n$5\r\nflush\r\n")
-        finally:
-            server_sock.close()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    host, port = server.getsockname()
 
-    threading.Thread(target=server_worker, daemon=True).start()
+    def server_accept_loop() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                break
+            active_server_socks.append(conn)
+
+            def server_worker(sock: socket.socket) -> None:
+                buf = bytearray()
+                try:
+                    while True:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        while buf:
+                            try:
+                                frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                            except ValueError:
+                                break
+                            del buf[:next_offset]
+                            if isinstance(frame, list) and frame:
+                                cmd = frame[0].decode("ascii").upper()
+                                if cmd == "HELLO":
+                                    sock.sendall(b"%2\r\n+server\r\n+valkey\r\n+proto\r\n:3\r\n")
+                                elif cmd in ("CLIENT", "SET"):
+                                    sock.sendall(b"+OK\r\n")
+                                elif cmd == "GET":
+                                    key = frame[1].decode("utf-8")
+                                    val = f"fresh-{key}".encode()
+                                    sock.sendall(f"${len(val)}\r\n".encode("ascii") + val + b"\r\n")
+                                elif cmd == "PING":
+                                    sock.sendall(b">2\r\n$10\r\ninvalidate\r\n*1\r\n$6\r\nuser:1\r\n+PONG\r\n")
+                                elif cmd == "ECHO":
+                                    sock.sendall(b">2\r\n$10\r\ninvalidate\r\n_\r\n$5\r\nflush\r\n")
+                finally:
+                    sock.close()
+
+            threading.Thread(target=server_worker, args=(conn,), daemon=True).start()
+
+    th = threading.Thread(target=server_accept_loop, daemon=True)
+    th.start()
 
     broker = _RecordingBroker()
     cfg = ValkeyConfig(
-        url="valkey://127.0.0.1:6379/0",
+        url=f"valkey://127.0.0.1:{port}/0",
         client_cache_capacity=2,
         enable_client_tracking=True,
     )
-    driver = SyncValkeyDriver(cfg, broker=broker, socket_factory=lambda _addr: client_sock)
+    driver = SyncValkeyDriver(cfg, broker=broker)
     try:
         assert isinstance(driver._client_cache, collections.OrderedDict)
 
@@ -228,7 +271,10 @@ def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
         assert not driver.cached_keys
     finally:
         driver.close()
-        server_sock.close()
+        server.close()
+        for s in active_server_socks:
+            with contextlib.suppress(OSError):
+                s.close()
 
 
 @pytest.mark.anyio
@@ -336,9 +382,9 @@ async def test_async_cluster_moved_and_ask_redirection() -> None:
     node2_port = srv2.sockets[0].getsockname()[1]
     node3_port = srv3.sockets[0].getsockname()[1]
 
-    driver = AsyncRedisDriver(
-        RedisConfig(
-            url=f"redis://127.0.0.1:{node1_port}/0",
+    driver = AsyncValkeyDriver(
+        ValkeyConfig(
+            url=f"valkey://127.0.0.1:{node1_port}/0",
             cluster_enabled=True,
             cluster_nodes=(("127.0.0.1", node1_port),),
             max_redirections=3,
@@ -368,7 +414,10 @@ async def test_async_cluster_moved_and_ask_redirection() -> None:
 async def test_sentinel_master_discovery_and_failover() -> None:
     """SyncRedisDriver and AsyncRedisDriver must discover master address via SENTINEL get-master-addr-by-name."""
 
+    client_writers: list[asyncio.StreamWriter] = []
+
     async def handle_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        client_writers.append(writer)
         buf = bytearray()
         while True:
             chunk = await reader.read(4096)
@@ -396,6 +445,7 @@ async def test_sentinel_master_discovery_and_failover() -> None:
     master_port = master_srv.sockets[0].getsockname()[1]
 
     async def handle_sentinel(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        client_writers.append(writer)
         buf = bytearray()
         while True:
             chunk = await reader.read(4096)
@@ -410,7 +460,9 @@ async def test_sentinel_master_discovery_and_failover() -> None:
                 del buf[:next_offset]
                 if isinstance(frame, list) and frame:
                     cmd = frame[0].decode("ascii").upper()
-                    if cmd == "SENTINEL":
+                    if cmd == "HELLO":
+                        writer.write(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                    elif cmd == "SENTINEL":
                         port_b = str(master_port).encode("ascii")
                         writer.write(
                             b"*2\r\n$9\r\n127.0.0.1\r\n$"
@@ -439,6 +491,8 @@ async def test_sentinel_master_discovery_and_failover() -> None:
         assert await async_driver.get("status") == b"master-active"
     finally:
         await async_driver.close()
+        for w in client_writers:
+            w.close()
         sentinel_srv.close()
         master_srv.close()
         await sentinel_srv.wait_closed()
@@ -517,9 +571,9 @@ async def test_multiplexed_resp3_pubsub_and_broker_forwarding() -> None:
 
         drained = driver.drain_messages()
         assert drained == [
-            PubSubMessage(kind="message", channel="events", payload=b"hello", pattern=None),
-            PubSubMessage(kind="pmessage", channel="user:1000", payload=b"matched", pattern="user:*"),
-            PubSubMessage(kind="smessage", channel="shard:{42}", payload=b"shard-event", pattern=None),
+            ValkeyPubSubMessage(kind="message", channel="events", payload=b"hello", pattern=None),
+            ValkeyPubSubMessage(kind="pmessage", channel="user:1000", payload=b"matched", pattern="user:*"),
+            ValkeyPubSubMessage(kind="smessage", channel="shard:{42}", payload=b"shard-event", pattern=None),
         ]
         assert broker.published == [
             ("events", b"hello"),
@@ -549,7 +603,10 @@ def test_sync_multiplexed_pubsub_and_cluster_moved_ask(resp3_server: Resp3FakeSe
         driver.publish("beta:42", b"msg-b")
         driver.execute_command("SPUBLISH", "shard:1", b"msg-s")
 
-        msgs = driver.drain_messages()
+        msgs: list[PubSubMessage] = []
+        deadline = time.monotonic() + 2.0
+        while len(msgs) < 3 and time.monotonic() < deadline:
+            msgs.extend(driver.drain_messages())
         assert msgs == [
             PubSubMessage(kind="message", channel="alpha", payload=b"msg-a", pattern=None),
             PubSubMessage(kind="pmessage", channel="beta:42", payload=b"msg-b", pattern="beta:*"),
@@ -620,3 +677,121 @@ async def test_async_iam_token_provider_coroutine_refresh_on_reconnect() -> None
         await driver.close()
         server.close()
         await server.wait_closed()
+
+
+def test_redis_notification_source_contracts_and_missing_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SyncRedisNotificationSource and AsyncRedisNotificationSource satisfy capability protocols and check wheel dependencies."""
+    monkeypatch.setitem(sys.modules, "vertebra._redis", None)
+    reset_dependency_cache("vertebra._redis")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SyncRedisNotificationSource(client=None)
+        assert exc_info.value.package == "vertebra-core[redis]"
+
+        with pytest.raises(MissingDependencyError) as async_exc:
+            AsyncRedisNotificationSource(client=None)
+        assert async_exc.value.package == "vertebra-core[redis]"
+    finally:
+        reset_dependency_cache("vertebra._redis")
+
+
+def test_sync_redis_notification_source_loopback(resp3_server: Resp3FakeServer) -> None:
+    """SyncRedisNotificationSource streams live pub/sub messages, supports pattern/shard subscriptions, and hydrates envelopes."""
+    driver = SyncRedisDriver(RedisConfig(url=f"redis://127.0.0.1:{resp3_server.port}/0"))
+    feed = ChangeFeed()
+    source = driver.notification_source(
+        RedisNotifyConfig(channels=("orders",), timeout_ms=50),
+        change_feed=feed,
+    )
+    assert isinstance(source, SyncNotificationSource)
+    assert source.subscribed_channels == ["orders"]
+
+    source.psubscribe(["alerts:*"])
+    source.ssubscribe(["shard:1"])
+    assert source.subscribed_patterns == ["alerts:*"]
+    assert source.subscribed_shard_channels == ["shard:1"]
+
+    with pytest.raises(TypeError):
+        source.subscribe("bad_channel")
+
+    events: list[NotificationEvent] = []
+    ready = threading.Event()
+
+    def run_listener() -> None:
+        stream = source.listen()
+        ready.set()
+        for evt in stream:
+            events.append(evt)
+            if len(events) >= 3:
+                break
+
+    t = threading.Thread(target=run_listener, daemon=True)
+    t.start()
+
+    assert ready.wait(timeout=2.0)
+    deadline = time.monotonic() + 2.0
+    while getattr(source, "_listener", None) is None and time.monotonic() < deadline:
+        threading.Event().wait(0.005)
+    threading.Event().wait(0.02)
+    source.publish("orders", b"order-created-1")
+    source.publish("alerts:cpu", b"high-cpu")
+    source.spublish("shard:1", b"shard-msg")
+
+    t.join(timeout=3.0)
+    assert not t.is_alive()
+    assert len(events) == 3
+    assert events[0].channel == "orders"
+    assert events[0].payload == b"order-created-1"
+    assert events[0].metadata["kind"] == "message"
+    assert events[1].channel == "alerts:cpu"
+    assert events[1].payload == b"high-cpu"
+    assert events[1].metadata["kind"] == "pmessage"
+    assert events[1].metadata["pattern"] == "alerts:*"
+    assert events[2].channel == "shard:1"
+    assert events[2].payload == b"shard-msg"
+    assert events[2].metadata["kind"] == "smessage"
+    assert events[2].metadata["shard"] is True
+
+    source.close()
+    driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_redis_notification_source_loopback_and_channelbus(resp3_server: Resp3FakeServer) -> None:
+    """AsyncRedisNotificationSource streams live frames, hydrates envelopes, and bridges ChannelBus."""
+    driver = AsyncRedisDriver(RedisConfig(url=f"redis://127.0.0.1:{resp3_server.port}/0"))
+    source = driver.notification_source(
+        RedisNotifyConfig(channels=("events",), timeout_ms=50),
+    )
+    assert isinstance(source, AsyncNotificationSource)
+
+    events: list[NotificationEvent] = []
+
+    async def consume() -> None:
+        async for evt in source.listen():
+            events.append(evt)
+            if len(events) >= 2:
+                break
+
+    task = asyncio.create_task(consume())
+    deadline = time.monotonic() + 2.0
+    while getattr(source, "_listener", None) is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.005)
+    await asyncio.sleep(0.02)
+
+    await source.publish("events", b"msg-1")
+    await source.publish("events", b"b64:aGVsbG8=")
+
+    await asyncio.wait_for(task, timeout=3.0)
+    assert len(events) == 2
+    assert events[0].payload == b"msg-1"
+    assert events[1].payload == b"hello"
+
+    bus = ChannelBus(notification_source=source)
+    await bus.on_startup()
+    await bus.subscribe(["events"])
+    await bus.publish(b"from-bus", ["events"])
+    await bus.on_shutdown()
+
+    await source.aclose()
+    await driver.close()

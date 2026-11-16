@@ -1,5 +1,7 @@
 """Tests for routing decorators and path parameter extraction."""
 
+from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -30,7 +32,7 @@ _DECORATOR_CASES = [
     ids=[c[1] for c in _DECORATOR_CASES],
 )
 def test_decorators_attaches_metadata(
-    decorator: object,
+    decorator: Callable[[str], Callable[[Callable[[], None]], Callable[[], None]]],
     expected_method: str,
     path: str,
 ) -> None:
@@ -47,7 +49,7 @@ def test_decorators_attaches_metadata(
 def test_decorators_stacked_decorators_add_multiple_routes() -> None:
     @get("/things")
     @post("/things")
-    def things() -> list:
+    def things() -> list[Any]:
         return []
 
     routes = getattr(things, "__vertebra_routes__", [])
@@ -77,7 +79,7 @@ def test_router_prefix(prefix: str, expected_path: str) -> None:
     router = Router(prefix)
 
     @get("/users")
-    def list_users() -> list:
+    def list_users() -> list[Any]:
         return []
 
     router.register(list_users)

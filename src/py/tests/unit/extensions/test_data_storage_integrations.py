@@ -9,11 +9,11 @@ import subprocess
 import sys
 import threading
 from asyncio import CancelledError
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -32,9 +32,11 @@ from vertebra._vertebra import InterfaceError
 from vertebra.db.adapters.duckdb import DuckDBSecretConfig
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
+from vertebra.db.driver.capabilities import NotificationEvent
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.django import DjangoStorage
+from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteAsyncConfig, SQLiteEventQueueStore, SQLiteSyncConfig
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
@@ -133,7 +135,7 @@ async def test_sqlspec_arrow_async_io_stays_on_caller_loop(monkeypatch: pytest.M
     monkeypatch.setattr(SyncObjectStore, "put", reject_sync)
     monkeypatch.setattr(SyncObjectStore, "put_stream", reject_sync)
     assert (await backend.read_arrow_async("input.parquet")).equals(table)
-    assert await backend.write_arrow_async("output.parquet", table) is None
+    await backend.write_arrow_async("output.parquet", table)
     assert (await backend.read_arrow_async("output.parquet")).equals(table)
 
 
@@ -159,7 +161,10 @@ async def test_sqlspec_arrow_stream_demands_one_file_at_a_time(monkeypatch: pyte
 
     monkeypatch.setattr(SyncObjectStore, "get_range", observe_sync)
     monkeypatch.setattr(AsyncObjectStore, "get_range", observe_async)
-    stream = backend.stream_arrow_async("tables/*.parquet", batch_size=100, columns=["id"])
+    stream = cast(
+        "AsyncGenerator[Any, None]",
+        backend.stream_arrow_async("tables/*.parquet", batch_size=100, columns=["id"]),
+    )
     try:
         batch = await anext(stream)
         assert batch.to_pydict() == {"id": list(range(100))}
@@ -204,7 +209,10 @@ async def test_sqlspec_arrow_default_prefetch_preserves_rowgroup_demand() -> Non
                 allow_http=True,
             )
         )
-        stream = backend.stream_arrow_async("data", batch_size=100, columns=["id"])
+        stream = cast(
+            "AsyncGenerator[Any, None]",
+            backend.stream_arrow_async("data", batch_size=100, columns=["id"]),
+        )
         try:
             assert (await anext(stream)).to_pydict() == {"id": list(range(100))}
             footer_start = len(payload) - 65536
@@ -255,10 +263,10 @@ async def test_sqlspec_arrow_cursor_accepts_raw_ipc_buffers(
     payload = sink.getvalue().to_pybytes()
     source = memoryview(payload) if as_view else payload
     if asynchronous:
-        assert await backend.write_arrow_cursor_async("output.unknown", source, file_format=file_format) is None
+        await backend.write_arrow_cursor_async("output.unknown", source, file_format=file_format)
         actual = await backend.read_arrow_async("output.unknown", file_format=file_format)
     else:
-        assert backend.write_arrow_cursor_sync("output.unknown", source, file_format=file_format) is None
+        backend.write_arrow_cursor_sync("output.unknown", source, file_format=file_format)
         actual = backend.read_arrow_sync("output.unknown", file_format=file_format)
     assert actual.equals(table)
 
@@ -272,10 +280,10 @@ async def test_sqlspec_arrow_parquet_preserves_codec_defaults(asynchronous: bool
     table = pa.table({"id": range(250)})
     options = {"compression": compression} if compression is not None else {}
     if asynchronous:
-        assert await backend.write_arrow_async("data.parquet", table, row_group_size=100, **options) is None
+        await backend.write_arrow_async("data.parquet", table, row_group_size=100, **options)
         raw = await backend.read_bytes_async("data.parquet")
     else:
-        assert backend.write_arrow_sync("data.parquet", table, row_group_size=100, **options) is None
+        backend.write_arrow_sync("data.parquet", table, row_group_size=100, **options)
         raw = backend.read_bytes_sync("data.parquet")
     expected_sink = pa.BufferOutputStream()
     pq.write_table(table, expected_sink, row_group_size=100, **options)
@@ -304,12 +312,16 @@ async def test_sqlspec_parquet_default_row_groups(
             writer.write_table(table)
         source = sink.getvalue()
     if asynchronous:
-        write = backend.write_arrow_cursor_async if cursor_input else backend.write_arrow_async
-        assert await write("data.parquet", source, **options) is None
+        if cursor_input:
+            await backend.write_arrow_cursor_async("data.parquet", source, **options)
+        else:
+            await backend.write_arrow_async("data.parquet", source, **options)
         raw = await backend.read_bytes_async("data.parquet")
     else:
-        write = backend.write_arrow_cursor_sync if cursor_input else backend.write_arrow_sync
-        assert write("data.parquet", source, **options) is None
+        if cursor_input:
+            backend.write_arrow_cursor_sync("data.parquet", source, **options)
+        else:
+            backend.write_arrow_sync("data.parquet", source, **options)
         raw = backend.read_bytes_sync("data.parquet")
     expected_sink = pa.BufferOutputStream()
     pq.write_table(table, expected_sink, **options)
@@ -392,7 +404,7 @@ async def test_sqlspec_arrow_outer_stream_closes_native_source(
         closed.append(self)
 
     async def observe_stream(self: AsyncObjectStore, key: str, *, chunk_size: int | None = None) -> AsyncIterator[Any]:
-        source = get_stream(self, key, chunk_size=chunk_size)
+        source = cast("AsyncGenerator[Any, None]", get_stream(self, key, chunk_size=chunk_size))
         try:
             async for chunk in source:
                 yield chunk
@@ -414,7 +426,10 @@ async def test_sqlspec_arrow_outer_stream_closes_native_source(
             )
         )
         backend = SQLSpecObjectStoreBackend(store)
-        stream = backend.stream_arrow_async("data", file_format=file_format, batch_size=100)
+        stream = cast(
+            "AsyncGenerator[Any, None]",
+            backend.stream_arrow_async("data", file_format=file_format, batch_size=100),
+        )
         task: asyncio.Task[Any] | None = None
         try:
             if cancel_pending:
@@ -509,7 +524,7 @@ async def test_alchemy_file_upload_reads_bounded_chunks(tmp_path: Path, mode: st
     reads: list[int] = []
 
     class BoundedReader(BytesIO):
-        def read(self, size: int = -1) -> bytes:
+        def read(self, size: int | None = -1) -> bytes:
             assert size == 4
             reads.append(size)
             return super().read(size)
@@ -525,10 +540,8 @@ async def test_alchemy_file_upload_reads_bounded_chunks(tmp_path: Path, mode: st
     if mode == "sync":
         assert obj.save(reader, use_multipart=True, chunk_size=4) is obj
     else:
-        assert (
-            await obj.save_async(AsyncReader() if mode == "async-reader" else reader, use_multipart=True, chunk_size=4)
-            is obj
-        )
+        upload_src: Any = AsyncReader() if mode == "async-reader" else reader
+        assert await obj.save_async(upload_src, use_multipart=True, chunk_size=4) is obj
     assert reads == [4, 4, 4, 4, 4]
     assert obj.size == 13
     assert obj.etag is not None
@@ -806,7 +819,7 @@ async def test_sqlspec_rejects_async_namespace_traversal(operation: str) -> None
 
 
 @pytest.mark.parametrize("namespace", [{"base_path": "tenant/../other"}, {"prefix": "../other"}])
-def test_sqlspec_rejects_configured_namespace_traversal(namespace: dict[str, str]) -> None:
+def test_sqlspec_rejects_configured_namespace_traversal(namespace: dict[str, Any]) -> None:
     """Parent segments in configured namespaces fail at construction."""
     with pytest.raises(ValueError, match="traversal"):
         SQLSpecObjectStoreBackend(MemoryConfig(), **namespace)
@@ -1263,7 +1276,7 @@ async def test_alchemy_storage_backend_file_object_and_session_tracker_rollback(
             return b"awaitable-read-stream"
 
     stream_obj = FileObject(backend=backend, filename="users/42/stream.bin")
-    await backend.save_object_async(stream_obj, _AsyncReadable())
+    await backend.save_object_async(stream_obj, cast("Any", _AsyncReadable()))
     assert stream_obj.size == 21
     assert await backend.get_content_async("users/42/stream.bin") == b"awaitable-read-stream"
     assert backend.get_range("users/42/stream.bin", 0, 9) == b"awaitable"
@@ -1836,3 +1849,140 @@ async def test_django_storage_forwards_content_digests(asynchronous: bool, diges
             storage.save("verified.bin", tampered)
     assert type(exc_info.value) is IntegrityError
     assert bytes(store.get(saved_name)) == payload
+
+
+class _InMemorySyncNotifySource:
+    """In-memory SyncNotificationSource recording emitted notify frame sizes."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+        self.subscribed: list[str] = []
+        self._frames: list[NotificationEvent] = []
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        self.published.append((channel, raw))
+        self._frames.append(NotificationEvent(channel=channel, payload=raw))
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        self.subscribed.extend(channels)
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        for ch in channels:
+            if ch in self.subscribed:
+                self.subscribed.remove(ch)
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        while self._frames:
+            yield self._frames.pop(0)
+
+
+class _InMemoryAsyncNotifySource:
+    """In-memory AsyncNotificationSource recording emitted notify frame sizes."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+        self.subscribed: list[str] = []
+        self._frames: list[NotificationEvent] = []
+
+    async def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        self.published.append((channel, raw))
+        self._frames.append(NotificationEvent(channel=channel, payload=raw))
+
+    async def subscribe(self, channels: Sequence[str]) -> None:
+        self.subscribed.extend(channels)
+
+    async def unsubscribe(self, channels: Sequence[str]) -> None:
+        for ch in channels:
+            if ch in self.subscribed:
+                self.subscribed.remove(ch)
+
+    async def listen(self) -> AsyncIterator[NotificationEvent]:
+        while self._frames:
+            yield self._frames.pop(0)
+
+
+def test_changefeed_sync_checkpoint_restart_and_notify_spill(tmp_path: Path) -> None:
+    """Sync ChangeFeed backend persists checkpoints across restarts and spills >8000B notify frames."""
+    db_path = tmp_path / "sync_changefeed.db"
+    cfg = SQLiteSyncConfig(connection_config={"database": str(db_path)})
+    queue_store = SQLiteEventQueueStore(cfg)
+    notify = _InMemorySyncNotifySource()
+
+    backend = ChangeFeedSyncEventBackend(
+        queue_store=queue_store,
+        notify_source=notify,
+        checkpoint_key="worker-orders",
+    )
+    small_id = backend.publish("orders", {"id": 1}, {"source": "cdc"})
+    assert len(notify.published[0][1]) <= 7999
+    large_blob = "v" * 9200
+    large_id = backend.publish("orders", {"blob": large_blob}, {"oversized": True})
+    assert len(notify.published[1][1]) < 300
+
+    first_msg = backend.dequeue("orders", 0.0)
+    assert first_msg is not None
+    assert first_msg.event_id == small_id
+    assert first_msg.payload == {"id": 1}
+    backend.ack(first_msg.event_id)
+
+    second_msg = backend.dequeue("orders", 0.0)
+    assert second_msg is not None
+    assert second_msg.event_id == large_id
+    assert second_msg.payload == {"blob": large_blob}
+    assert second_msg.metadata == {"oversized": True}
+    backend.ack(second_msg.event_id)
+    backend.save_checkpoint("orders", "lsn:0/ABCDEF")
+    backend.shutdown()
+
+    restarted_cfg = SQLiteSyncConfig(connection_config={"database": str(db_path)})
+    restarted_backend = ChangeFeedSyncEventBackend(
+        queue_store=SQLiteEventQueueStore(restarted_cfg),
+        notify_source=_InMemorySyncNotifySource(),
+        checkpoint_key="worker-orders",
+    )
+    assert restarted_backend.load_checkpoint("orders") == "lsn:0/ABCDEF"
+
+
+@pytest.mark.anyio
+async def test_changefeed_async_checkpoint_restart_and_notify_spill(tmp_path: Path) -> None:
+    """Async ChangeFeed backend persists checkpoints across restarts and spills >8000B notify frames."""
+    db_path = tmp_path / "async_changefeed.db"
+    cfg = SQLiteAsyncConfig(connection_config={"database": str(db_path)})
+    queue_store = SQLiteEventQueueStore(cfg)
+    notify = _InMemoryAsyncNotifySource()
+
+    backend = ChangeFeedAsyncEventBackend(
+        queue_store=queue_store,
+        notify_source=notify,
+        checkpoint_key="worker-orders-async",
+    )
+    small_id = await backend.publish("orders", {"id": 1}, {"source": "cdc"})
+    assert len(notify.published[0][1]) <= 7999
+    large_blob = "a" * 9200
+    large_id = await backend.publish("orders", {"blob": large_blob}, {"oversized": True})
+    assert len(notify.published[1][1]) < 300
+
+    first_msg = await backend.dequeue("orders", 0.0)
+    assert first_msg is not None
+    assert first_msg.event_id == small_id
+    assert first_msg.payload == {"id": 1}
+    await backend.ack(first_msg.event_id)
+
+    second_msg = await backend.dequeue("orders", 0.0)
+    assert second_msg is not None
+    assert second_msg.event_id == large_id
+    assert second_msg.payload == {"blob": large_blob}
+    assert second_msg.metadata == {"oversized": True}
+    await backend.ack(second_msg.event_id)
+    assert await backend.load_checkpoint("orders") == large_id
+    await backend.shutdown()
+
+    restarted_cfg = SQLiteAsyncConfig(connection_config={"database": str(db_path)})
+    restarted_backend = ChangeFeedAsyncEventBackend(
+        queue_store=SQLiteEventQueueStore(restarted_cfg),
+        notify_source=_InMemoryAsyncNotifySource(),
+        checkpoint_key="worker-orders-async",
+    )
+    assert await restarted_backend.load_checkpoint("orders") == large_id

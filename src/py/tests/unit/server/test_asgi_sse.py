@@ -298,7 +298,12 @@ def test_stopped_inline_loop_and_suspended_native_async_stream_complete_fully() 
     """Verify drive_until_complete and inline_single_loop EventLoopPool finish async streams without hanging."""
     init_transport()
     frames: list[tuple[int, int, int, list[tuple[bytes, bytes]], bytes]] = []
-    _set_stream_sink(lambda rid, st, fl, hd, bd: frames.append((rid, st, fl, hd, bd)) or True)
+
+    def _sink(rid: int, st: int, fl: int, hd: list[tuple[bytes, bytes]], bd: bytes) -> bool:
+        frames.append((rid, st, fl, hd, bd))
+        return True
+
+    _set_stream_sink(_sink)
     pool = EventLoopPool(size=1, inline_single_loop=True)
     try:
 

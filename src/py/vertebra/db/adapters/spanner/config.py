@@ -55,6 +55,7 @@ class SpannerConfig(BaseDatabaseConfig, frozen=True, gc=False):
     driver_module: ClassVar[str] = "vertebra.db.adapters.spanner.driver"
     sync_driver_name: ClassVar[str] = "SyncSpannerDriver"
     async_driver_name: ClassVar[str] = "AsyncSpannerDriver"
+    requires_statement_autocommit: ClassVar[bool] = True
 
     project_id: str = ""
     """Google Cloud project identifier owning the Spanner instance."""

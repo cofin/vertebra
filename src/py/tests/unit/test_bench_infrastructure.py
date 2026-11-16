@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from tools.benchmarks import targets as bench_targets
 from tools.benchmarks.apps.asgi import app as asgi_app
 from tools.benchmarks.apps.vertebra_app import native_app
 from tools.benchmarks.apps.wsgi import app as wsgi_app
+from tools.benchmarks.runner import ServerRunner
 from tools.benchmarks.scenarios import (
     DEFAULT_SCENARIOS,
     FULL_SCENARIOS,
@@ -149,8 +151,8 @@ def test_ft_env_prefers_315t_before_314t(monkeypatch: pytest.MonkeyPatch) -> Non
         raise AssertionError(f"unexpected version probe: {version}")
 
     monkeypatch.delenv("FT_PYTHON", raising=False)
-    monkeypatch.setattr(bench_targets.shutil, "which", fake_which)
-    monkeypatch.setattr(bench_targets.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr("tools.benchmarks.targets.shutil.which", fake_which)
+    monkeypatch.setattr("tools.benchmarks.targets.subprocess.check_output", fake_check_output)
     env = bench_targets._ft_env()
     assert calls == ["3.15t"]
     assert "3.15t" in env["LD_LIBRARY_PATH"]
@@ -285,6 +287,8 @@ def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
     assert matrix_rows == [
         {"engine": "duckdb", "version": "", "python-version": "3.12"},
         {"engine": "duckdb", "version": "", "python-version": "3.14t"},
+        {"engine": "sqlite", "version": "", "python-version": "3.12"},
+        {"engine": "sqlite", "version": "", "python-version": "3.14t"},
         {"engine": "mysql", "version": "8.0", "python-version": "3.12"},
         {"engine": "mysql", "version": "8.4", "python-version": "3.12"},
         {"engine": "mysql", "version": "9.7", "python-version": "3.12"},
@@ -293,6 +297,10 @@ def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
         {"engine": "mariadb", "version": "11.8", "python-version": "3.12"},
         {"engine": "mssql", "version": "2022", "python-version": "3.12"},
         {"engine": "mssql", "version": "2025", "python-version": "3.12"},
+        {"engine": "redis", "version": "", "python-version": "3.12"},
+        {"engine": "redis", "version": "", "python-version": "3.14t"},
+        {"engine": "valkey", "version": "", "python-version": "3.12"},
+        {"engine": "valkey", "version": "", "python-version": "3.14t"},
     ]
     assert any(
         step.get("run") == "make db-conformance ENGINE=${{ matrix.engine }} VERSION=${{ matrix.version }}"
@@ -304,3 +312,22 @@ def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
     assert oracle_job["timeout-minutes"] == 45
     assert oracle_job["continue-on-error"] is True
     assert any(step.get("run") == "make db-conformance ENGINE=oracle VERSION=23ai" for step in oracle_job["steps"])
+
+
+def test_server_runner_exits_with_utf8_and_non_utf8_binary_stderr() -> None:
+    """Verify ServerRunner decodes mixed UTF-8 and invalid UTF-8 bytes on early child exit."""
+    cmd = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.buffer.write(b'fatal startup failure: \\xff\\xfe\\n'); sys.stderr.buffer.flush(); sys.exit(3)",
+    ]
+    runner = ServerRunner(cmd, host="127.0.0.1", port=59997)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            runner.start()
+        message = str(exc_info.value)
+        assert "Server process exited with code 3" in message
+        assert "fatal startup failure:" in message
+        assert "\ufffd" in message
+    finally:
+        runner.stop()

@@ -4,7 +4,7 @@ import io
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -269,7 +269,7 @@ def test_wsgi_adapter_file_wrapper_fast_path() -> None:
     def file_app(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
         start_response("200 OK", [("Content-Type", "application/octet-stream")])
         wrapper = environ["wsgi.file_wrapper"]
-        return wrapper(f, 16)
+        return cast("Iterable[bytes]", wrapper(f, 16))
 
     adapter = WsgiAdapter(file_app)
     resp = adapter.handle_request(MockRequest())
@@ -336,7 +336,7 @@ def test_wsgi_file_wrapper_uses_from_file_without_header_injection(tmp_path: Pat
         start_response("200 OK", [("Content-Type", "application/octet-stream")])
         fh = asset.open("rb")
         wrapper = environ.get("wsgi.file_wrapper", resolve_wsgi_file_wrapper)
-        return wrapper(fh, 4096)
+        return cast("Iterable[bytes]", wrapper(fh, 4096))
 
     adapter = WsgiAdapter(file_app)
     req = Request.from_parts("GET", "/download", request_id=42)
@@ -491,10 +491,13 @@ def test_wsgi_start_response_send_raw_response_in_batch() -> None:
         del environ
         has_raw = hasattr(start_response, "send_raw_response")
         seen_methods.append(has_raw)
-        return start_response.send_raw_response(
-            201,
-            [(b"content-type", b"application/json"), (b"x-wsgi-fast", b"1")],
-            b'{"wsgi":true}',
+        return cast(
+            "Iterable[bytes]",
+            start_response.send_raw_response(
+                201,
+                [(b"content-type", b"application/json"), (b"x-wsgi-fast", b"1")],
+                b'{"wsgi":true}',
+            ),
         )
 
     adapter = WsgiAdapter(raw_wsgi_app)

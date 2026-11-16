@@ -135,6 +135,13 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     statement: MySQLStatementConfig = msgspec.field(default_factory=MySQLStatementConfig)
     broker: Any = None
 
+    @property
+    def effective_direct_dsn(self) -> str:
+        """Return the direct migration DSN, converting plain mysql:// to mysql+vtb://."""
+        if self.dsn.startswith("mysql://"):
+            return "mysql+vtb://" + self.dsn[len("mysql://") :]
+        return self.dsn
+
     def __post_init__(self) -> None:
         """Validate MySQL connection parameters, port bounds, NUL bytes, and TLS settings."""
         for field_name, val in (

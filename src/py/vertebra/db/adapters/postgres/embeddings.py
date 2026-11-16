@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vertebra._vertebra import VectorBatchView, VectorView, decode_pgvector_f32
 from vertebra.db.driver import AsyncDatabaseDriver, DataError
@@ -14,7 +14,15 @@ from vertebra.utils.text import validate_identifier
 if TYPE_CHECKING:
     from vertebra.db.adapters.postgres.driver import AsyncPostgreSQLDriver, SyncPostgreSQLDriver
 
-__all__ = ("PostgresEmbeddingPushdown",)
+__all__ = ("PostgresEmbeddingPushdown", "PostgresSelectPort")
+
+
+class PostgresSelectPort(Protocol):
+    """Structural synchronous SQL selection port accepted by ``PostgresEmbeddingPushdown``."""
+
+    def select(self, sql: str, parameters: Any = None, /) -> Sequence[Any]:
+        """Execute ``sql`` and return row records."""
+        ...
 
 
 class PostgresEmbeddingPushdown:
@@ -22,7 +30,7 @@ class PostgresEmbeddingPushdown:
 
     def __init__(
         self,
-        driver: AsyncPostgreSQLDriver | SyncPostgreSQLDriver,
+        driver: AsyncPostgreSQLDriver | SyncPostgreSQLDriver | PostgresSelectPort,
         model: str = "gemini-embedding-001",
         *,
         dimensions: int = 768,
@@ -38,7 +46,7 @@ class PostgresEmbeddingPushdown:
         self._normalize = normalize
 
     @property
-    def driver(self) -> AsyncPostgreSQLDriver | SyncPostgreSQLDriver:
+    def driver(self) -> AsyncPostgreSQLDriver | SyncPostgreSQLDriver | PostgresSelectPort:
         """Return the database driver."""
         return self._driver
 

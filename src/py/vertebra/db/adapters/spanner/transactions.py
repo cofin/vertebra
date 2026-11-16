@@ -2,23 +2,87 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
 
-from vertebra._vertebra import NotFoundError
+from vertebra._vertebra import NotFoundError, NotSupportedError
+from vertebra.db.adapters.spanner.core import SpannerCore
 from vertebra.db.adapters.spanner.mutations import Mutation, StalenessBound
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
+from vertebra.utils.schema import to_value_type
+from vertebra.utils.serializers import encode_json
 
 if TYPE_CHECKING:
-    from vertebra.db.adapters.spanner._async import AsyncSpannerDriver
-    from vertebra.db.adapters.spanner._sync import SyncSpannerDriver
+    from vertebra.db.adapters.spanner._async import (
+        AsyncSpannerDriver,
+        AsyncSpannerReadWriteTxProtocol,
+    )
+    from vertebra.db.adapters.spanner._sync import (
+        SyncSpannerDriver,
+        SyncSpannerReadWriteTxProtocol,
+    )
 
 __all__ = (
     "AsyncSpannerSnapshot",
     "AsyncSpannerTransaction",
     "SyncSpannerSnapshot",
     "SyncSpannerTransaction",
+    "compute_abort_backoff_seconds",
 )
+
+
+def compute_abort_backoff_seconds(exc: BaseException, attempt: int) -> float:
+    """Return delay in seconds honoring server `retry_delay_ms` or bounded jittered exponential backoff."""
+    retry_delay_ms = getattr(exc, "retry_delay_ms", None)
+    if isinstance(retry_delay_ms, (int, float)) and retry_delay_ms >= 0:
+        return float(retry_delay_ms) / 1000.0
+    base: float = min(0.01 * float(2 ** max(0, attempt - 1)), 1.0)
+    jitter: float = random.uniform(0.0, base * 0.5)
+    return float(base + jitter)
+
+
+def _prepare_tx_dml(
+    driver: SyncSpannerDriver | AsyncSpannerDriver,
+    sql: str,
+    parameters: Mapping[str, Any] | Sequence[Any] | None,
+) -> tuple[str, str | None]:
+    stripped = sql.strip()
+    if SpannerCore.is_ddl_statement(stripped):
+        msg = "DDL statements cannot be executed inside a Spanner ReadWrite transaction"
+        raise NotSupportedError(msg)
+    rewritten_sql, params_json = driver._prepare_sql_and_params(stripped, parameters)
+    annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, driver._propagator)
+    return annotated_sql, params_json
+
+
+def _prepare_tx_query(
+    driver: SyncSpannerDriver | AsyncSpannerDriver,
+    sql: str,
+    parameters: Mapping[str, Any] | Sequence[Any] | None,
+) -> tuple[str, str | None]:
+    rewritten_sql, params_json = driver._prepare_sql_and_params(sql, parameters)
+    annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, driver._propagator)
+    return annotated_sql, params_json
+
+
+def _encode_tx_mutations(mutations: Sequence[Mutation]) -> str | None:
+    if not mutations:
+        return None
+    return encode_json([m.to_dict() for m in mutations])
+
+
+def _extract_scalar_value(raw: Mapping[str, Any], value_type: type[Any] | None) -> Any:
+    rows = raw.get("rows", ())
+    if not rows:
+        msg = "Spanner query returned no rows"
+        raise NotFoundError(msg)
+    if not rows[0]:
+        return None
+    val = rows[0][0]
+    if value_type is not None and val is not None:
+        return to_value_type(val, value_type)
+    return val
 
 
 class SyncSpannerSnapshot:
@@ -258,23 +322,44 @@ class AsyncSpannerSnapshot:
 
 
 class SyncSpannerTransaction:
-    """Transactional context passed to `SyncSpannerDriver.run_in_transaction(fn)`."""
+    """Interactive synchronous `ReadWrite` transaction bound to a pinned Spanner transaction ID."""
 
-    __slots__ = ("_driver", "_mutations", "_transaction_tag")
+    __slots__ = (
+        "_committed",
+        "_driver",
+        "_handle",
+        "_mutations",
+        "_rolled_back",
+        "_transaction_tag",
+    )
 
     def __init__(
         self,
         driver: SyncSpannerDriver,
+        handle: SyncSpannerReadWriteTxProtocol,
         *,
         transaction_tag: str | None = None,
     ) -> None:
         self._driver = driver
+        self._handle = handle
         self._transaction_tag = transaction_tag
         self._mutations: list[Mutation] = []
+        self._committed = False
+        self._rolled_back = False
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the server-assigned Cloud Spanner transaction identifier bytes."""
+        return bytes(self._handle.transaction_id)
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether this transaction has not been committed or rolled back."""
+        return not self._committed and not self._rolled_back
 
     @property
     def mutations(self) -> tuple[Mutation, ...]:
-        """Return mutations buffered for commit at the end of this transaction."""
+        """Return mutations buffered for atomic commit when this transaction completes."""
         return tuple(self._mutations)
 
     def execute(
@@ -284,13 +369,13 @@ class SyncSpannerTransaction:
         *,
         request_tag: str | None = None,
     ) -> int:
-        """Execute a DML statement inside this read-write transaction."""
-        return self._driver.execute(
-            sql,
-            parameters,
-            request_tag=request_tag,
-            transaction_tag=self._transaction_tag,
-        )
+        """Execute a DML statement inside this interactive read-write transaction."""
+        annotated_sql, params_json = _prepare_tx_dml(self._driver, sql, parameters)
+        lease = self._driver._acquire_pid_lease()
+        try:
+            return int(self._handle.execute_dml(annotated_sql, params_json, request_tag))
+        finally:
+            self._driver._release_pid_lease(lease)
 
     def execute_batch_dml(
         self,
@@ -298,12 +383,25 @@ class SyncSpannerTransaction:
         *,
         request_tag: str | None = None,
     ) -> list[int]:
-        """Execute a batch of DML statements inside this read-write transaction."""
-        return self._driver.execute_batch_dml(
-            statements,
-            request_tag=request_tag,
-            transaction_tag=self._transaction_tag,
-        )
+        """Execute a batch of DML statements inside this interactive read-write transaction."""
+        if not statements:
+            return []
+        batch_json = SpannerCore.encode_batch_dml_json(statements, dialect=self._driver.dialect)
+        lease = self._driver._acquire_pid_lease()
+        try:
+            return [int(c) for c in self._handle.execute_batch_dml(batch_json, request_tag)]
+        finally:
+            self._driver._release_pid_lease(lease)
+
+    def _query_raw(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        annotated_sql, params_json = _prepare_tx_query(self._driver, sql, parameters)
+        return dict(self._handle.query(annotated_sql, params_json, request_tag))
 
     def select(
         self,
@@ -311,9 +409,15 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> list[Any]:
-        """Execute a `SELECT` statement inside this read-write transaction."""
-        return self._driver.select(sql, parameters, schema_type=schema_type)
+        """Execute a `SELECT` statement inside this interactive read-write transaction."""
+        raw = self._query_raw(sql, parameters, request_tag=request_tag)
+        return SpannerCore.hydrate_query_rows(
+            raw.get("columns", ()),
+            raw.get("rows", ()),
+            schema_type=schema_type,
+        )
 
     def query(
         self,
@@ -321,9 +425,10 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> list[Any]:
-        """Execute a `SELECT` statement inside this read-write transaction."""
-        return self.select(sql, parameters, schema_type=schema_type)
+        """Execute a `SELECT` statement inside this interactive read-write transaction."""
+        return self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
 
     def select_one(
         self,
@@ -331,9 +436,14 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first row of `sql`, raising `NotFoundError` when empty."""
-        return self._driver.select_one(sql, parameters, schema_type=schema_type)
+        rows = self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
 
     def select_one_or_none(
         self,
@@ -341,9 +451,11 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any | None:
         """Return the first row of `sql` or `None` when empty."""
-        return self._driver.select_one_or_none(sql, parameters, schema_type=schema_type)
+        rows = self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
+        return rows[0] if rows else None
 
     def query_one(
         self,
@@ -351,9 +463,10 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first row of `sql`, raising `NotFoundError` when empty."""
-        return self.select_one(sql, parameters, schema_type=schema_type)
+        return self.select_one(sql, parameters, schema_type=schema_type, request_tag=request_tag)
 
     def select_value(
         self,
@@ -361,13 +474,19 @@ class SyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first scalar column of the first row of `sql`."""
-        return self._driver.select_value(sql, parameters, value_type=value_type)
+        raw = self._query_raw(sql, parameters, request_tag=request_tag)
+        return _extract_scalar_value(raw, value_type)
 
     def buffer_mutation(self, mutation: Mutation) -> None:
         """Buffer a `Mutation` to be applied when the transaction commits."""
         self._mutations.append(mutation)
+
+    def buffer_mutations(self, mutations: Sequence[Mutation]) -> None:
+        """Buffer multiple `Mutation` items to be applied when the transaction commits."""
+        self._mutations.extend(mutations)
 
     def insert(
         self,
@@ -424,25 +543,63 @@ class SyncSpannerTransaction:
         """Buffer a `delete` mutation on `table`."""
         self._mutations.append(Mutation.delete(table, keys, all_rows=all_rows))
 
+    def commit(self) -> dict[str, Any]:
+        """Commit this interactive transaction along with any buffered mutations."""
+        mutations_json = _encode_tx_mutations(self._mutations)
+        stats = dict(self._handle.commit(mutations_json))
+        self._committed = True
+        self._mutations.clear()
+        self._driver._last_commit_stats = dict(stats)
+        return stats
+
+    def rollback(self) -> None:
+        """Explicitly roll back this interactive transaction when still active."""
+        if self._committed or self._rolled_back:
+            return
+        self._rolled_back = True
+        self._mutations.clear()
+        self._handle.rollback()
+
 
 class AsyncSpannerTransaction:
-    """Asynchronous transactional context passed to `AsyncSpannerDriver.run_in_transaction(fn)`."""
+    """Interactive asynchronous `ReadWrite` transaction bound to a pinned Spanner transaction ID."""
 
-    __slots__ = ("_driver", "_mutations", "_transaction_tag")
+    __slots__ = (
+        "_committed",
+        "_driver",
+        "_handle",
+        "_mutations",
+        "_rolled_back",
+        "_transaction_tag",
+    )
 
     def __init__(
         self,
         driver: AsyncSpannerDriver,
+        handle: AsyncSpannerReadWriteTxProtocol,
         *,
         transaction_tag: str | None = None,
     ) -> None:
         self._driver = driver
+        self._handle = handle
         self._transaction_tag = transaction_tag
         self._mutations: list[Mutation] = []
+        self._committed = False
+        self._rolled_back = False
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the server-assigned Cloud Spanner transaction identifier bytes."""
+        return bytes(self._handle.transaction_id)
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether this transaction has not been committed or rolled back."""
+        return not self._committed and not self._rolled_back
 
     @property
     def mutations(self) -> tuple[Mutation, ...]:
-        """Return mutations buffered for commit at the end of this transaction."""
+        """Return mutations buffered for atomic commit when this transaction completes."""
         return tuple(self._mutations)
 
     async def execute(
@@ -452,13 +609,14 @@ class AsyncSpannerTransaction:
         *,
         request_tag: str | None = None,
     ) -> int:
-        """Execute a DML statement asynchronously inside this read-write transaction."""
-        return await self._driver.execute(
-            sql,
-            parameters,
-            request_tag=request_tag,
-            transaction_tag=self._transaction_tag,
-        )
+        """Execute a DML statement asynchronously inside this interactive read-write transaction."""
+        annotated_sql, params_json = _prepare_tx_dml(self._driver, sql, parameters)
+        lease = self._driver._acquire_pid_lease()
+        try:
+            res = await self._handle.execute_dml(annotated_sql, params_json, request_tag)
+            return int(res)
+        finally:
+            self._driver._release_pid_lease(lease)
 
     async def execute_batch_dml(
         self,
@@ -466,12 +624,26 @@ class AsyncSpannerTransaction:
         *,
         request_tag: str | None = None,
     ) -> list[int]:
-        """Execute a batch of DML statements asynchronously inside this read-write transaction."""
-        return await self._driver.execute_batch_dml(
-            statements,
-            request_tag=request_tag,
-            transaction_tag=self._transaction_tag,
-        )
+        """Execute a batch of DML statements asynchronously inside this interactive transaction."""
+        if not statements:
+            return []
+        batch_json = SpannerCore.encode_batch_dml_json(statements, dialect=self._driver.dialect)
+        lease = self._driver._acquire_pid_lease()
+        try:
+            res = await self._handle.execute_batch_dml(batch_json, request_tag)
+            return [int(c) for c in res]
+        finally:
+            self._driver._release_pid_lease(lease)
+
+    async def _query_raw(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        annotated_sql, params_json = _prepare_tx_query(self._driver, sql, parameters)
+        return dict(await self._handle.query(annotated_sql, params_json, request_tag))
 
     async def select(
         self,
@@ -479,9 +651,15 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> list[Any]:
-        """Execute a `SELECT` statement asynchronously inside this read-write transaction."""
-        return await self._driver.select(sql, parameters, schema_type=schema_type)
+        """Execute a `SELECT` statement asynchronously inside this interactive transaction."""
+        raw = await self._query_raw(sql, parameters, request_tag=request_tag)
+        return SpannerCore.hydrate_query_rows(
+            raw.get("columns", ()),
+            raw.get("rows", ()),
+            schema_type=schema_type,
+        )
 
     async def query(
         self,
@@ -489,9 +667,10 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> list[Any]:
-        """Execute a `SELECT` statement asynchronously inside this read-write transaction."""
-        return await self.select(sql, parameters, schema_type=schema_type)
+        """Execute a `SELECT` statement asynchronously inside this interactive transaction."""
+        return await self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
 
     async def select_one(
         self,
@@ -499,9 +678,14 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first row of `sql`, raising `NotFoundError` when empty."""
-        return await self._driver.select_one(sql, parameters, schema_type=schema_type)
+        rows = await self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
+        if not rows:
+            msg = "Spanner query returned no rows"
+            raise NotFoundError(msg)
+        return rows[0]
 
     async def select_one_or_none(
         self,
@@ -509,9 +693,11 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any | None:
         """Return the first row of `sql` or `None` when empty."""
-        return await self._driver.select_one_or_none(sql, parameters, schema_type=schema_type)
+        rows = await self.select(sql, parameters, schema_type=schema_type, request_tag=request_tag)
+        return rows[0] if rows else None
 
     async def query_one(
         self,
@@ -519,9 +705,10 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         schema_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first row of `sql`, raising `NotFoundError` when empty."""
-        return await self.select_one(sql, parameters, schema_type=schema_type)
+        return await self.select_one(sql, parameters, schema_type=schema_type, request_tag=request_tag)
 
     async def select_value(
         self,
@@ -529,13 +716,19 @@ class AsyncSpannerTransaction:
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         value_type: type[Any] | None = None,
+        request_tag: str | None = None,
     ) -> Any:
         """Return the first scalar column of the first row of `sql`."""
-        return await self._driver.select_value(sql, parameters, value_type=value_type)
+        raw = await self._query_raw(sql, parameters, request_tag=request_tag)
+        return _extract_scalar_value(raw, value_type)
 
     def buffer_mutation(self, mutation: Mutation) -> None:
         """Buffer a `Mutation` to be applied when the transaction commits."""
         self._mutations.append(mutation)
+
+    def buffer_mutations(self, mutations: Sequence[Mutation]) -> None:
+        """Buffer multiple `Mutation` items to be applied when the transaction commits."""
+        self._mutations.extend(mutations)
 
     def insert(
         self,
@@ -591,3 +784,20 @@ class AsyncSpannerTransaction:
     ) -> None:
         """Buffer a `delete` mutation on `table`."""
         self._mutations.append(Mutation.delete(table, keys, all_rows=all_rows))
+
+    async def commit(self) -> dict[str, Any]:
+        """Commit this interactive transaction asynchronously along with any buffered mutations."""
+        mutations_json = _encode_tx_mutations(self._mutations)
+        stats = dict(await self._handle.commit(mutations_json))
+        self._committed = True
+        self._mutations.clear()
+        self._driver._last_commit_stats = dict(stats)
+        return stats
+
+    async def rollback(self) -> None:
+        """Explicitly roll back this interactive transaction asynchronously when still active."""
+        if self._committed or self._rolled_back:
+            return
+        self._rolled_back = True
+        self._mutations.clear()
+        await self._handle.rollback()

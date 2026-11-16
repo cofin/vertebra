@@ -1,4 +1,4 @@
-"""Unit and loopback tests for native Postgres query, query_multi, and transaction facades (`ch14:t04`)."""
+"""Unit and loopback tests for native Postgres query, query_multi, and transaction facades."""
 
 from __future__ import annotations
 
@@ -6,18 +6,26 @@ import asyncio
 import socket
 import struct
 import threading
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
 from vertebra._postgres import AsyncPostgresClient, SyncPostgresClient
 from vertebra._vertebra import DataError, InterfaceError
+from vertebra.db.adapters.postgres import (
+    AsyncPostgresQueueStore,
+    SyncPostgresQueueStore,
+)
 from vertebra.db.adapters.postgres.types import (
     PgTemporal,
     PostgresPipelineOperation,
     PostgresQueryResult,
     _project_public_row,
 )
+from vertebra.db.dbapi._async import AsyncDBAPIConnection
+from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
 
 
 def _frame(tag: bytes, body: bytes) -> bytes:
@@ -346,3 +354,320 @@ def test_jiff_session_timezone_fold_resolution_and_wire_text_rebind_refusal() ->
     finally:
         client.close()
     bg.join(timeout=5.0)
+
+
+class _FakeSyncPostgresDriver:
+    """Synchronous PostgreSQL driver fake for queue store testing."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self.select_rows: list[dict[str, Any]] = []
+        self.affected_rows: int = 1
+
+    def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> int:
+        self.executed.append((sql, parameters))
+        return self.affected_rows
+
+    def select(self, sql: str, parameters: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        self.executed.append((sql, parameters))
+        return list(self.select_rows)
+
+    def select_one_or_none(self, sql: str, parameters: Sequence[Any] | None = None) -> dict[str, Any] | None:
+        self.executed.append((sql, parameters))
+        return self.select_rows[0] if self.select_rows else None
+
+    def in_transaction(self) -> bool:
+        return False
+
+
+class _FakeAsyncPostgresDriver:
+    """Asynchronous PostgreSQL driver fake for queue store testing."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self.select_rows: list[dict[str, Any]] = []
+        self.affected_rows: int = 1
+
+    async def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> int:
+        self.executed.append((sql, parameters))
+        return self.affected_rows
+
+    async def select(self, sql: str, parameters: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        self.executed.append((sql, parameters))
+        return list(self.select_rows)
+
+    async def select_one_or_none(self, sql: str, parameters: Sequence[Any] | None = None) -> dict[str, Any] | None:
+        self.executed.append((sql, parameters))
+        return self.select_rows[0] if self.select_rows else None
+
+    def in_transaction(self) -> bool:
+        return False
+
+
+class _FakeSyncPostgresNotifySource:
+    """Fake synchronous notification source capturing published channel/payload events."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    def publish(self, channel: str, payload: str) -> None:
+        self.published.append((channel, payload))
+
+
+class _FakeAsyncPostgresNotifySource:
+    """Fake asynchronous notification source capturing published channel/payload events."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    async def publish(self, channel: str, payload: str) -> None:
+        self.published.append((channel, payload))
+
+
+def test_sync_postgres_queue_store_lifecycle() -> None:
+    """Verify SyncPostgresQueueStore protocol conformance, queries, claims, fencing, and DLQ."""
+    drv = _FakeSyncPostgresDriver()
+    notify = _FakeSyncPostgresNotifySource()
+    store = SyncPostgresQueueStore(cast("Any", drv), notification_source=cast("Any", notify))
+    assert isinstance(store, SyncQueueStore)
+
+    store.ensure_schema()
+    assert any("CREATE TABLE IF NOT EXISTS vertebra_queue_jobs" in call[0] for call in drv.executed)
+
+    entry = QueueEntry(
+        job_id="job-1",
+        queue="default",
+        task_name="tasks.add",
+        payload=b'{"a": 1}',
+        headers={"x-trace": "trace-1"},
+    )
+    assigned = store.enqueue(entry)
+    assert assigned == "job-1"
+    assert notify.published == [("vtb:queue:default", "wakeup:job-1")]
+
+    drv.select_rows = [
+        {
+            "job_id": "job-1",
+            "queue": "default",
+            "task_name": "tasks.add",
+            "payload": b'{"a": 1}',
+            "attempt": 1,
+            "max_attempts": 3,
+            "lease_until_ms": 1000,
+            "scheduled_at_ms": None,
+            "headers": '{"x-trace": "trace-1"}',
+        }
+    ]
+    claimed = store.claim(["default"], worker_id="worker-1", lease_seconds=30.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == "job-1"
+    assert claimed[0].headers == {"x-trace": "trace-1"}
+    assert any("FOR UPDATE OF q SKIP LOCKED" in call[0] for call in drv.executed)
+
+    assert store.ack("job-1", attempt=1) is True
+    assert store.heartbeat(["job-1"], worker_id="worker-1", lease_seconds=15.0) == 1
+
+    drv.select_rows = [
+        {
+            "job_id": "job-1",
+            "queue": "default",
+            "task_name": "tasks.add",
+            "payload": b'{"a": 1}',
+            "attempt": 1,
+            "max_attempts": 3,
+            "lease_until_ms": 1000,
+            "scheduled_at_ms": None,
+            "headers": "{}",
+        }
+    ]
+    assert store.nack("job-1", attempt=1, error="timeout", retry_delay_s=5.0) is True
+
+    drv.select_rows = [
+        {
+            "job_id": "job-1",
+            "queue": "default",
+            "task_name": "tasks.add",
+            "payload": b'{"a": 1}',
+            "attempt": 3,
+            "max_attempts": 3,
+            "lease_until_ms": 1000,
+            "scheduled_at_ms": None,
+            "headers": "{}",
+        }
+    ]
+    assert store.nack("job-1", attempt=3, error="fatal") is True
+
+    assert store.reserve_unique_key("key-1", ttl_seconds=60.0) is True
+    store.release_unique_key("key-1")
+    assert store.acquire_lease("lease-1", owner_id="worker-1", ttl_seconds=60.0) is True
+    store.release_lease("lease-1", owner_id="worker-1")
+
+
+@pytest.mark.anyio
+async def test_async_postgres_queue_store_lifecycle() -> None:
+    """Verify AsyncPostgresQueueStore protocol conformance, queries, claims, fencing, and DLQ."""
+    drv = _FakeAsyncPostgresDriver()
+    notify = _FakeAsyncPostgresNotifySource()
+    store = AsyncPostgresQueueStore(cast("Any", drv), notification_source=cast("Any", notify))
+    assert isinstance(store, AsyncQueueStore)
+
+    await store.ensure_schema()
+    assert any("CREATE TABLE IF NOT EXISTS vertebra_queue_jobs" in call[0] for call in drv.executed)
+
+    entry = QueueEntry(
+        job_id="job-async-1",
+        queue="high",
+        task_name="tasks.multiply",
+        payload=b'{"x": 2}',
+        headers={"tenant": "corp"},
+    )
+    assigned = await store.enqueue(entry)
+    assert assigned == "job-async-1"
+    assert notify.published == [("vtb:queue:high", "wakeup:job-async-1")]
+
+    drv.select_rows = [
+        {
+            "job_id": "job-async-1",
+            "queue": "high",
+            "task_name": "tasks.multiply",
+            "payload": b'{"x": 2}',
+            "attempt": 1,
+            "max_attempts": 3,
+            "lease_until_ms": 2000,
+            "scheduled_at_ms": None,
+            "headers": '{"tenant": "corp"}',
+        }
+    ]
+    claimed = await store.claim(["high"], worker_id="worker-async", lease_seconds=10.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == "job-async-1"
+    assert any("FOR UPDATE OF q SKIP LOCKED" in call[0] for call in drv.executed)
+
+    assert await store.ack("job-async-1", attempt=1) is True
+    assert await store.heartbeat(["job-async-1"], worker_id="worker-async", lease_seconds=10.0) == 1
+    assert await store.reserve_unique_key("key-async", ttl_seconds=30.0) is True
+    await store.release_unique_key("key-async")
+    assert await store.acquire_lease("lease-async", owner_id="w1", ttl_seconds=30.0) is True
+    await store.release_lease("lease-async", owner_id="w1")
+
+
+@pytest.mark.anyio
+async def test_postgres_queue_store_table_validation_reap_stale_and_pop_dead_letter() -> None:
+    """Verify Postgres queue stores validate table_name, bump or dead-letter stale claims, and pop dead-letter rows."""
+    sync_drv = _FakeSyncPostgresDriver()
+    async_drv = _FakeAsyncPostgresDriver()
+
+    with pytest.raises(ValueError, match="table_name"):
+        SyncPostgresQueueStore(cast("Any", sync_drv), table_name="jobs; DROP TABLE users")
+    with pytest.raises(ValueError, match="table_name"):
+        AsyncPostgresQueueStore(cast("Any", async_drv), table_name="jobs; DROP TABLE users")
+
+    sync_store = SyncPostgresQueueStore(cast("Any", sync_drv), table_name="custom_queue_jobs")
+    async_store = AsyncPostgresQueueStore(cast("Any", async_drv), table_name="custom_queue_jobs")
+
+    assert sync_store.reap_stale() == 1
+    sync_reap_sql = sync_drv.executed[-1][0]
+    assert "CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END" in sync_reap_sql
+    assert "CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END" in sync_reap_sql
+
+    assert await async_store.reap_stale() == 1
+    async_reap_sql = async_drv.executed[-1][0]
+    assert "CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'ready' END" in async_reap_sql
+    assert "CASE WHEN attempt >= max_attempts THEN attempt ELSE attempt + 1 END" in async_reap_sql
+
+    async_drv.select_rows = [
+        {
+            "job_id": "dlq-1",
+            "queue": "io",
+            "task_name": "tasks.fail",
+            "payload": b'{"ok": false}',
+            "attempt": 3,
+            "max_attempts": 3,
+            "lease_until_ms": 0,
+            "scheduled_at_ms": None,
+            "headers": "{}",
+        }
+    ]
+    popped = await async_store.pop_dead_letter("dlq-1")
+    assert popped is not None
+    assert popped.job_id == "dlq-1"
+    assert "DELETE FROM custom_queue_jobs" in async_drv.executed[-1][0]
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_awaits_lastrowid_across_insert_branches() -> None:
+    """Verify AsyncDBAPICursor.execute awaits async last_insert_rowid across DML and RETURNING INSERT paths."""
+
+    class _DmlNoRowidDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute_dml(self, sql: str, params: Any) -> tuple[int, int | None]:
+            _ = (sql, params)
+            return 1, None
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 101
+
+    class _ExecuteOnlyDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute(self, sql: str, params: Any) -> int:
+            _ = (sql, params)
+            return 1
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 202
+
+    class _ReturningDescDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def execute_with_description(
+            self, sql: str, params: Any
+        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            _ = (sql, params)
+            return [(303,)], ("id",)
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 303
+
+    class _ReturningSelectDriver:
+        url = "postgresql://localhost:5432/appdb"
+
+        async def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            _ = (sql, params)
+            return [{"id": 404}]
+
+        async def last_insert_rowid(self) -> int:
+            await asyncio.sleep(0)
+            return 404
+
+    conn_dml = AsyncDBAPIConnection(driver=_DmlNoRowidDriver(), share_pool=False)
+    cur_dml = conn_dml.cursor()
+    await cur_dml.execute("INSERT INTO widgets (name) VALUES ($1)", ("a",))
+    assert cur_dml.lastrowid == 101
+    await conn_dml.close()
+
+    conn_exec = AsyncDBAPIConnection(driver=_ExecuteOnlyDriver(), share_pool=False)
+    cur_exec = conn_exec.cursor()
+    await cur_exec.execute("INSERT INTO widgets (name) VALUES ($1)", ("b",))
+    assert cur_exec.lastrowid == 202
+    await cur_exec.execute("UPDATE widgets SET name = $1", ("c",))
+    assert cur_exec.lastrowid is None
+    await conn_exec.close()
+
+    conn_ret = AsyncDBAPIConnection(driver=_ReturningDescDriver(), share_pool=False)
+    cur_ret = conn_ret.cursor()
+    await cur_ret.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("d",))
+    assert cur_ret.lastrowid == 303
+    assert await cur_ret.fetchone() == (303,)
+    await conn_ret.close()
+
+    conn_sel = AsyncDBAPIConnection(driver=_ReturningSelectDriver(), share_pool=False)
+    cur_sel = conn_sel.cursor()
+    await cur_sel.execute("INSERT INTO widgets (name) VALUES ($1) RETURNING id", ("e",))
+    assert cur_sel.lastrowid == 404
+    assert await cur_sel.fetchone() == (404,)
+    await conn_sel.close()

@@ -188,7 +188,6 @@ class ProxySyncConfig[SyncConfigT](_BaseProxyConfig, SyncDatabaseConfig[Any, Any
         **kwargs: Any,
     ) -> None:
         """Initialize ProxySyncConfig wrapping a synchronous database configuration."""
-        _inject_sqlspec_pool_defaults(config)
         self.config: SyncConfigT = config
         self.provider: SQLSpecSyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
@@ -290,7 +289,6 @@ class ProxyAsyncConfig[AsyncConfigT](_BaseProxyConfig, AsyncDatabaseConfig[Any, 
         **kwargs: Any,
     ) -> None:
         """Initialize ProxyAsyncConfig wrapping an asynchronous database configuration."""
-        _inject_sqlspec_pool_defaults(config)
         self.config: AsyncConfigT = config
         self.provider: SQLSpecAsyncProvider | None
         if isinstance(broker, _BaseSQLSpecProvider):
@@ -402,26 +400,5 @@ def create_sqlspec_plugin(
         else:
             all_configs.append(config)
     for cfg in all_configs:
-        _inject_sqlspec_pool_defaults(cfg)
         sqlspec_instance.add_config(cfg)
     return SQLSpecPlugin(sqlspec_instance, loader=loader)
-
-
-def _is_in_memory_dsn(dsn: str | None) -> bool:
-    """Return True when DSN targets an in-memory SQLite database."""
-    if not dsn:
-        return False
-    lowered = dsn.lower()
-    return ":memory:" in lowered or "mode=memory" in lowered
-
-
-def _inject_sqlspec_pool_defaults(config: Any) -> None:
-    """Inject production connection pool defaults for persistent databases."""
-    supports_pooling = bool(getattr(config, "supports_connection_pooling", True))
-    dsn = getattr(config, "dsn", None) or getattr(config, "connection_string", None)
-    if not supports_pooling or _is_in_memory_dsn(dsn):
-        return
-    pool_cfg = getattr(config, "pool_config", None)
-    if isinstance(pool_cfg, dict):
-        pool_cfg.setdefault("pool_pre_ping", True)
-        pool_cfg.setdefault("pool_recycle", 1800)

@@ -3,7 +3,7 @@
 import io
 import json
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -244,8 +244,8 @@ def test_vtb_mcp_serve_cli_discovers_app_and_rejects_name(monkeypatch: pytest.Mo
 
     mod_name = "vertebra_test_serve_mod"
     fake_mod = ModuleType(mod_name)
-    fake_mod.app = app
-    fake_mod.plain_app = App()
+    fake_mod.__dict__["app"] = app
+    fake_mod.__dict__["plain_app"] = App()
     monkeypatch.setitem(sys.modules, mod_name, fake_mod)
     monkeypatch.setattr("vertebra.cli.ai.run_stdio_server", fake_stdio_runner)
 
@@ -287,9 +287,9 @@ def test_vtb_mcp_serve_litestar_delegation(monkeypatch: pytest.MonkeyPatch) -> N
 
     mod_name = "vertebra_test_litestar_serve_mod"
     fake_mod = ModuleType(mod_name)
-    fake_mod.app = fake_litestar_app
+    fake_mod.__dict__["app"] = fake_litestar_app
     fake_lmcp_stdio = ModuleType("litestar_mcp.mcp.stdio")
-    fake_lmcp_stdio.run_stdio = fake_litestar_run_stdio
+    fake_lmcp_stdio.__dict__["run_stdio"] = fake_litestar_run_stdio
     monkeypatch.setitem(sys.modules, mod_name, fake_mod)
     monkeypatch.setattr(
         "vertebra.cli.ai.ensure_module",
@@ -429,7 +429,7 @@ def test_bridge_dual_mode_legacy_sse_reconnect_and_eof_delete(stop_status: int) 
             self,
             method: str,
             url: str,
-            headers: dict[str, str],
+            headers: Mapping[str, str],
             body: bytes,
             timeout_s: float,
         ) -> BridgeResponse:
@@ -528,12 +528,13 @@ def test_bridge_oidc_token_source_401_retry_and_exhaustion(double_401: bool) -> 
     class _AuthTransport:
         def request(
             self,
-            _method: str,
-            _url: str,
-            headers: dict[str, str],
-            _body: bytes,
-            _timeout_s: float,
+            method: str,
+            url: str,
+            headers: Mapping[str, str],
+            body: bytes,
+            timeout_s: float,
         ) -> BridgeResponse:
+            _ = (method, url, body, timeout_s)
             seen_tokens.append(headers.get("Authorization", ""))
             if len(seen_tokens) == 1 or double_401:
                 return BridgeResponse(status=401, headers={}, body=b"unauthorized")
@@ -543,7 +544,7 @@ def test_bridge_oidc_token_source_401_retry_and_exhaustion(double_401: bool) -> 
                 body=b'{"jsonrpc":"2.0","id":9,"result":{"ok":true}}',
             )
 
-    source = OidcTokenSource("https://service.run.app", cache=Any if False else _FakeIdCache())
+    source = OidcTokenSource("https://service.run.app", cache=_FakeIdCache())
     stdin_buf = io.StringIO('{"jsonrpc":"2.0","id":9,"method":"tools/list"}\n')
     stdout_buf = io.StringIO()
 

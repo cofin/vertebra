@@ -9,7 +9,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from advanced_alchemy.types.file_object import FileObject
@@ -165,9 +165,12 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
     finally:
         pool.shutdown()
 
+    def _triple(v: int) -> int:
+        return v * 3
+
     async def _run_sync_to_async() -> int:
-        wrapped = async_(lambda v: v * 3)
-        return await wrapped(7)
+        wrapped = async_(_triple)
+        return int(await wrapped(7))
 
     assert asyncio.run(_run_sync_to_async()) == 21
 
@@ -270,7 +273,7 @@ def test_asgi_runner_and_rsgi_adapter_spawn_batch_use_rust_drivers() -> None:
     loop = asyncio.new_event_loop()
     try:
         runner = AsgiRunner(fast_asgi, loop=loop, mount_prefix="/v1")
-        rsgi_adapter = RsgiAdapter(FastRsgi(), mount_prefix="/v1")
+        rsgi_adapter = RsgiAdapter(cast("Any", FastRsgi()), mount_prefix="/v1")
         reqs = [
             Request.from_parts("GET", "/v1/one", b"", request_id=951),
             Request.from_parts("GET", "/v1/two", b"", request_id=952),

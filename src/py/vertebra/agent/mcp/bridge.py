@@ -29,11 +29,29 @@ __all__ = [
     "BridgeResponse",
     "BridgeTokenSource",
     "BridgeTransport",
+    "IdTokenCachePort",
     "OidcTokenSource",
     "StaticTokenSource",
     "UrllibBridgeTransport",
     "run_stdio_http_bridge",
 ]
+
+
+class IdTokenCachePort(Protocol):
+    """Structural OIDC ID-token cache port accepted by ``OidcTokenSource``."""
+
+    def needs_refresh(self, audience: str, /) -> bool:
+        """Return whether the audience token requires refresh."""
+        ...
+
+    def invalidate(self, audience: str, failed_generation: int, /) -> Any:
+        """Invalidate a rejected audience token generation."""
+        ...
+
+    def get_token(self, audience: str, /) -> Awaitable[Any]:
+        """Fetch or reuse a cached OIDC ID-token snapshot."""
+        ...
+
 
 _MAX_SSE_RECONNECTS = 5
 _PRE_NEGOTIATION_HEADERLESS_METHODS = frozenset({"ping", "notifications/initialized"})
@@ -84,11 +102,11 @@ class OidcTokenSource:
         self,
         audience: str,
         *,
-        cache: AsyncGcpIdTokenCache | None = None,
+        cache: AsyncGcpIdTokenCache | IdTokenCachePort | None = None,
     ) -> None:
         """Initialize the OIDC token source and validate audience eagerly."""
         self.audience = audience
-        self.cache = cache if cache is not None else AsyncGcpIdTokenCache()
+        self.cache: AsyncGcpIdTokenCache | IdTokenCachePort = cache if cache is not None else AsyncGcpIdTokenCache()
         self.cache.needs_refresh(audience)
         self._last_generation: int | None = None
 

@@ -599,11 +599,10 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     assert supervisor_mod.is_packaged_server_binary(pkg_bin) is False
     monkeypatch.delenv("VERTEBRA_SERVER_BINARY", raising=False)
 
-    monkeypatch.setattr(supervisor_mod.sys, "platform", "linux")
-    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "pyhome"))
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.platform", "linux")
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.base_prefix", str(tmp_path / "pyhome"))
     monkeypatch.setattr(
-        supervisor_mod.sysconfig,
-        "get_config_var",
+        "vertebra.supervisor._supervisor.sysconfig.get_config_var",
         lambda key: {
             "LIBDIR": str(tmp_path / "pyhome" / "lib"),
             "LDLIBRARY": "libpython3.12.so.1.0",
@@ -618,10 +617,9 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     standalone_lib = tmp_path / "standalone-home" / "lib" / "libpython3.12.so"
     standalone_lib.parent.mkdir(parents=True)
     standalone_lib.write_bytes(b"ELF")
-    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "standalone-home"))
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.base_prefix", str(tmp_path / "standalone-home"))
     monkeypatch.setattr(
-        supervisor_mod.sysconfig,
-        "get_config_var",
+        "vertebra.supervisor._supervisor.sysconfig.get_config_var",
         lambda key: {
             "LIBDIR": str(standalone_lib.parent),
             "LDLIBRARY": "libpython3.12.so",
@@ -631,8 +629,7 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is True
 
     monkeypatch.setattr(
-        supervisor_mod.sysconfig,
-        "get_config_var",
+        "vertebra.supervisor._supervisor.sysconfig.get_config_var",
         lambda key: {
             "LIBDIR": str(tmp_path / "missing-home" / "lib"),
             "LDLIBRARY": "libpython3.12.so",
@@ -641,7 +638,7 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
     )
     assert supervisor_mod.EmbeddedPythonRuntime.detect().is_shared is False
 
-    monkeypatch.setattr(supervisor_mod.sys, "base_prefix", str(tmp_path / "pyhome"))
+    monkeypatch.setattr("vertebra.supervisor._supervisor.sys.base_prefix", str(tmp_path / "pyhome"))
 
     linux_env: dict[str, str] = {"LD_LIBRARY_PATH": "/existing/lib"}
     detected.apply(linux_env)
@@ -702,7 +699,7 @@ def test_embedded_python_runtime_detection_guard_and_env_apply(
             return 0
 
     monkeypatch.setattr(supervisor_mod.EmbeddedPythonRuntime, "detect", classmethod(lambda cls: detected))
-    monkeypatch.setattr(supervisor_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr("vertebra.supervisor._supervisor.subprocess.Popen", _FakePopen)
     exit_code = supervisor_mod.run_supervisor(server_cmd=[str(dev_bin)], env={"CUSTOM_VAR": "1"})
     assert exit_code == 0
     assert recorded_env["PYTHONHOME"] == str(tmp_path / "pyhome")

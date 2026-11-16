@@ -20,7 +20,9 @@ use vertebra_db::py_async::{
 use crate::config::{NativeOracleConfig, RawOracleOptions};
 use crate::dialer::{connect_oracledb, connect_oracledb_session};
 use crate::errors::OracleError;
-use crate::notify::{AsyncOracleListener, enqueue_notification_sync, validate_aq_identifier};
+use crate::notify::{
+    AsyncOracleListener, SyncOracleListener, enqueue_notification_sync, validate_aq_identifier,
+};
 use crate::types::{
     OracleCellValue, OracleColumn, OracleQueryResult, cell_to_oracledb_bind, decode_oracledb_row,
     extract_bind_value, normalize_named_bind_map, out_bind_type_placeholder,
@@ -2774,6 +2776,43 @@ impl SyncOracleClient {
             })
             .map_err(|e| e.to_py_err(py))?;
         Ok(PyBytes::new(py, &msg_id))
+    }
+
+    #[pyo3(signature = (
+        *,
+        queue_name,
+        consumer_name=None,
+        wait_timeout_seconds=5,
+        max_buffered=1024,
+    ))]
+    pub fn open_listener(
+        &self,
+        py: Python<'_>,
+        queue_name: String,
+        consumer_name: Option<String>,
+        wait_timeout_seconds: u32,
+        max_buffered: usize,
+    ) -> PyResult<SyncOracleListener> {
+        self.worker.ensure_open().map_err(|e| e.to_py_err(py))?;
+        validate_aq_identifier(&queue_name, "queue_name").map_err(|e| e.to_py_err(py))?;
+        if let Some(ref c) = consumer_name {
+            validate_aq_identifier(c, "consumer_name").map_err(|e| e.to_py_err(py))?;
+        }
+        if max_buffered == 0 {
+            return Err(OracleError::Config(
+                "SyncOracleListener max_buffered must be >= 1".to_owned(),
+            )
+            .to_py_err(py));
+        }
+        let cfg = self.worker.config_arc();
+        SyncOracleListener::spawn(
+            cfg,
+            queue_name,
+            consumer_name,
+            wait_timeout_seconds,
+            max_buffered,
+        )
+        .map_err(|e| e.to_py_err(py))
     }
 }
 

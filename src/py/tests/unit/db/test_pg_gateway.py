@@ -214,8 +214,9 @@ def test_cdc_engine_neutral_defaults() -> None:
 )
 def test_cdc_rejects_postgres_configuration(field: str) -> None:
     """Engine-specific options are excluded from CDCConfig's constructor."""
+    bad_kwargs: dict[str, Any] = {field: "legacy"}
     with pytest.raises(TypeError):
-        CDCConfig(**{field: "legacy"})
+        CDCConfig(**bad_kwargs)
 
 
 @pytest.mark.parametrize("limit", [0, -1])

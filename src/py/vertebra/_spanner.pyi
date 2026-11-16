@@ -11,9 +11,93 @@ __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncSpannerClient",
+    "AsyncSpannerReadWriteTransaction",
     "SyncSpannerClient",
+    "SyncSpannerReadWriteTransaction",
     "__version__",
 ]
+
+@final
+class SyncSpannerReadWriteTransaction:
+    """Stateful synchronous Cloud Spanner interactive ReadWrite transaction handle."""
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the server-assigned Cloud Spanner transaction identifier bytes."""
+        ...
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a SQL query inside this transaction and return result columns, schema, and rows."""
+        ...
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> int:
+        """Execute a DML statement inside this transaction and return the affected row count."""
+        ...
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> list[int]:
+        """Execute a batch of DML statements inside this transaction and return per-statement row counts."""
+        ...
+    def commit(
+        self,
+        mutations_json: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit this transaction with optional buffered mutations and return commit statistics."""
+        ...
+    def rollback(self) -> None:
+        """Explicitly roll back this transaction."""
+        ...
+
+@final
+class AsyncSpannerReadWriteTransaction:
+    """Stateful asynchronous Cloud Spanner interactive ReadWrite transaction handle."""
+
+    @property
+    def transaction_id(self) -> bytes:
+        """Return the server-assigned Cloud Spanner transaction identifier bytes."""
+        ...
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Execute a SQL query inside this transaction asynchronously."""
+        ...
+    def execute_dml(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        request_tag: str | None = None,
+    ) -> Awaitable[int]:
+        """Execute a DML statement inside this transaction asynchronously."""
+        ...
+    def execute_batch_dml(
+        self,
+        statements_json: str,
+        request_tag: str | None = None,
+    ) -> Awaitable[list[int]]:
+        """Execute a batch of DML statements inside this transaction asynchronously."""
+        ...
+    def commit(
+        self,
+        mutations_json: str | None = None,
+    ) -> Awaitable[dict[str, Any]]:
+        """Commit this transaction with optional buffered mutations asynchronously."""
+        ...
+    def rollback(self) -> Awaitable[None]:
+        """Explicitly roll back this transaction asynchronously."""
+        ...
 
 @final
 class SyncSpannerClient:
@@ -138,6 +222,15 @@ class SyncSpannerClient:
         staleness_ms: int = 0,
     ) -> dict[str, Any]:
         """Execute a parallel `PartitionQuery` read with optional Spanner Data Boost."""
+        ...
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> SyncSpannerReadWriteTransaction:
+        """Open a stateful synchronous interactive ReadWrite transaction handle."""
         ...
     def close(self) -> None:
         """Close the client handle."""
@@ -266,6 +359,15 @@ class AsyncSpannerClient:
         staleness_ms: int = 0,
     ) -> Awaitable[dict[str, Any]]:
         """Execute a parallel `PartitionQuery` read asynchronously with optional Data Boost."""
+        ...
+    def begin_read_write_transaction(
+        self,
+        transaction_tag: str | None = None,
+        previous_transaction_id: bytes | None = None,
+        exclude_txn_from_change_streams: bool = False,
+        max_commit_delay_ms: int | None = None,
+    ) -> Awaitable[AsyncSpannerReadWriteTransaction]:
+        """Open a stateful asynchronous interactive ReadWrite transaction handle."""
         ...
     def close(self) -> None:
         """Close the client handle."""
