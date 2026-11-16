@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T06:00:00Z] archive | spanner-queue-and-rw-transactions
+
+- Archived completed specification `spanner-queue-and-rw-transactions` (`t01`–`t04`, `4/4` tasks at `d8fb3c96`) into permanent OKF knowledge chapters (`gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email.md`), updated Master PRD `integration-remediation` (`t14`), final child flow `strict-typing-hygiene`, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/spanner-queue-and-rw-transactions/`.
+
+## [2026-11-16T05:59:30Z] finish | spanner-queue-and-rw-transactions
+
+- Completed `spanner-queue-and-rw-transactions` (`t01`–`t04`, `4/4` tasks) at `d8fb3c96`: built stateful `SpannerReadWriteTx` (`src/rs/vertebra-spanner/src/rw_tx.rs`) and `@final SyncSpannerReadWriteTransaction`/`AsyncSpannerReadWriteTransaction` (`vertebra._spanner`) managing `TransactionSelector::Id`, monotonic `seqno`, leader routing, highest-`seq_num` `MultiplexedSessionPrecommitToken`, `Commit` (`MultiplexedSessionRetry` replay), `Rollback`, and `SpannerAbortedError.retry_delay_ms`; bound `SyncSpannerTransaction`, `AsyncSpannerTransaction`, `run_in_transaction` (`SpannerAbortedError` retry with `previous_transaction_id`), and single-attempt `transaction()` to interactive handles; added dialect-aware Spangres parameter encoding in `SpannerCore` and implemented `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` (`vertebra.db.adapters.spanner.queue`) plus auto-wired `SpannerQueueBackend` with stateless `spn:{shard_id}:{task_id}:{attempt}` receipt tokens and conditional non-stealing `acquire_lease`; verified `29` Rust tests, `mypy.stubtest`, `mypy`, `ruff`, docstring scan, `review-check`, and `334` Python unit tests cleanly.
+
 ## [2026-11-16T05:33:00Z] archive | queues-tasks-and-channels
 
 - Archived completed specification `queues-tasks-and-channels` (`ch01`–`ch03`, `12/12` tasks at `1094ca5b`) into permanent OKF knowledge chapters (`distributed-queues-and-email.md`, `litestar.md`, `server-runtime-limitations.md`), updated Master PRD `integration-remediation` (`t13`), downstream specs (`spanner-queue-and-rw-transactions`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/queues-tasks-and-channels/`.

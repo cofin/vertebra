@@ -10,8 +10,7 @@ planning_degraded_reason: null
 has_chapters: false
 current_task: "strict-typing-hygiene:t01"
 parent_prd: integration-remediation
-depends_on_flows:
-  - spanner-queue-and-rw-transactions
+depends_on_flows: []
 plan_revision: 2
 plan_commit: 473e1f2e
 created_at: '2026-11-12T23:58:00Z'
