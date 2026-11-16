@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T06:50:00Z] archive | strict-typing-hygiene & integration-remediation
+
+- Archived completed specification `strict-typing-hygiene` (`t01`–`t04`, `4/4` tasks at `f34c45c0`) and completed Master PRD `integration-remediation` (`t01`–`t15`, `15/15` child flows complete across framework, ORM, SQLSpec, native caching, distributed queues, Spanner interactive ReadWrite transactions, MCP/WebMCP, HTTP/3, and strict typing) into permanent OKF chapters (`tech-stack.md`, `polyglot-test-matrix.md`, `workflow.md`), promoted `audit-findings_20261103.md` and `google-cloud-rust_20261103.md` into `.agents/bundles/research/`, contracted `.agents/bundles/specs/` to its lazy empty state, and synchronized `index.md` and `research/index.md`.
+
+## [2026-11-16T06:49:00Z] finish | strict-typing-hygiene
+
+- Completed `strict-typing-hygiene` (`t01`–`t04`, `4/4` tasks) at `f34c45c0`: pruned `40` redundant PEP 561 and `django-stubs` `ignore_missing_imports` overrides from `pyproject.toml`, replaced private `django.db.backends.sqlite3._functions` and mid-file Django `DatabaseWrapper` imports with `import_optional_attr` and `ensure_module`, added `ServerRunner` UTF-8/non-UTF-8 binary stderr and 16-row `test-db-conformance` regression coverage in `test_bench_infrastructure.py`, defined structural wire-client, SQL-pushdown, and token-cache `Protocol`s across Spanner, BigQuery, Postgres, Oracle, GCP auth, and MCP bridges, enrolled `src/py/tests/unit` and `src/py/tests/integration` (`756` total Python files) under `mypy` in `pyproject.toml` and `Makefile`, synchronized `docs/reference/` and OKF chapters (`tech-stack.md`, `polyglot-test-matrix.md`, `workflow.md`), and verified `mypy`, `mypy.stubtest` (13 modules), `ruff`, `make docs`, `review-check`, and `4,882` unit tests cleanly.
+
 ## [2026-11-16T06:00:00Z] archive | spanner-queue-and-rw-transactions
 
 - Archived completed specification `spanner-queue-and-rw-transactions` (`t01`–`t04`, `4/4` tasks at `d8fb3c96`) into permanent OKF knowledge chapters (`gcp-bigquery-and-spanner-drivers.md`, `distributed-queues-and-email.md`), updated Master PRD `integration-remediation` (`t14`), final child flow `strict-typing-hygiene`, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/spanner-queue-and-rw-transactions/`.

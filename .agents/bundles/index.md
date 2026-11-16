@@ -50,9 +50,6 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 ## 3. Specifications, Research & Activity Log
 
-- **[`specs/`](specs/index.md) (`main @ 473e1f2e`)** —
-  - **Master PRDs (`state: active`)**: [`integration-remediation`](specs/integration-remediation/spec.md)
-  - **Planned Executable Specifications (`state: planned`)**: [`strict-typing-hygiene`](specs/strict-typing-hygiene/spec.md)
-  - **Active Research**: [`audit-findings_20261103.md`](specs/integration-remediation/research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](specs/integration-remediation/research/google-cloud-rust_20261103.md)
-- **[`research/`](research/index.md)** — Standalone promoted technical research briefs: [`upstream-sqlspec-direct-arrow-write.md`](research/upstream-sqlspec-direct-arrow-write.md).
+- **`specs/`** — Lazy specification directory (`0` active specs; all `native-data-platform` and `integration-remediation` specifications are completed and archived into permanent OKF chapters above).
+- **[`research/`](research/index.md)** — Standalone promoted technical research briefs: [`upstream-sqlspec-direct-arrow-write.md`](research/upstream-sqlspec-direct-arrow-write.md), [`audit-findings_20261103.md`](research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](research/google-cloud-rust_20261103.md).
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

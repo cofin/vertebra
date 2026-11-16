@@ -7,14 +7,14 @@ status: stable
 state: promoted
 promoted_to: integration-remediation
 created_at: '2026-11-03T00:00:00Z'
-updated_at: '2026-11-12T23:45:00Z'
+updated_at: '2026-11-16T06:50:00Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
 verified:
-  - by: agent:flow-setup
-    at: '2026-11-12T23:45:00Z'
-    commit: 18baadcd
+  - by: agent:flow-archive
+    at: '2026-11-16T06:50:00Z'
+    commit: f34c45c0
 sources:
   - id: crate-spanner
     resource: https://crates.io/api/v1/crates/google-cloud-spanner

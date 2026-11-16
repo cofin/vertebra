@@ -7,20 +7,20 @@ status: stable
 state: promoted
 promoted_to: integration-remediation
 created_at: '2026-11-03T03:30:00Z'
-updated_at: '2026-11-12T23:45:00Z'
+updated_at: '2026-11-16T06:50:00Z'
 generated:
   by: flow-setup
   at: '2026-11-07T04:15:00Z'
 verified:
-  - by: agent:flow-setup
-    at: '2026-11-12T23:45:00Z'
-    commit: 18baadcd
+  - by: agent:flow-archive
+    at: '2026-11-16T06:50:00Z'
+    commit: f34c45c0
 sources:
   - id: db-registry
     resource: src/py/vertebra/db/registry.py
     title: Database driver registry and adapter boundary
   - id: sqlspec-adapters
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    resource: src/py/vertebra/extensions/sqlspec/adapters/__init__.py
     title: SQLSpec adapter drivers and store bindings
   - id: queue-base
     resource: src/py/vertebra/framework/queues/base.py
@@ -60,8 +60,8 @@ tags:
 # Audit Findings: `d3d5f8b..142cc49`
 
 <!-- truth: start -->
-- **Historical Baseline Snapshot (`main @ 142cc49`)**: Records the verified defects across `vertebra.db` [^db-registry], `extensions/sqlspec` [^sqlspec-adapters], `framework/queues` [^queue-base], `embeddings` [^embeddings-pkg], `utils` [^utils-pkg], `server` [^server-fastpath], Rust GCP clients [^rs-db-lib] [^rs-py-lib] [^rs-core-lib], and MCP/WebMCP [^mcp-pkg] [^ts-webmcp] that decomposed into `integration-remediation` Chapters 1–9 and `native-data-platform`.
-- **Current Resolution Status on `main @ 077a3fe9`**: Chapters 1 (`364c7cbe`), 2 (`984ce732`), 3 (`80ff8a65`), 7 (`077a3fe9`), 8 (`d2fa5072`), and 9 (`abd33ab6`) plus `db-layout-and-contract` (`21c99f95`) are merged on `main`; remaining driver, SQLSpec, queue, and SQLAlchemy/Django items track in their respective child specs.
+- **Historical Baseline Snapshot (`main @ 142cc49`)**: Records the verified defects across `vertebra.db` [^db-registry], `extensions/sqlspec` [^sqlspec-adapters], `framework/queues` [^queue-base], `embeddings` [^embeddings-pkg], `utils` [^utils-pkg], `server` [^server-fastpath], Rust GCP clients [^rs-db-lib] [^rs-py-lib] [^rs-core-lib], and MCP/WebMCP [^mcp-pkg] [^ts-webmcp] that decomposed into `integration-remediation` and `native-data-platform`.
+- **Resolution Status (`f34c45c0`)**: All child flows across `native-data-platform` (`15/15`) and `integration-remediation` (`15/15`) are implemented, verified, and archived into permanent OKF knowledge chapters.
 <!-- truth: end -->
 
 Baseline: `main @ 142cc49`. It contains PRs #64 (embeddings, GCP ADC), #65 (LoopBackend, C-API stepper, FastPath, shared native pools), #66 (BigQuery/Spanner drivers, SQLSpec/framework adapters, modular driver packages), #69 (dev welcome page), and #70 (Rust text/humanize/uuid primitives).
@@ -343,7 +343,7 @@ Field numbers were checked against the official protos. The tests mock the same 
 - **Stale docs.** The knowledge chapter `domains/agent/mcp-and-a2a-protocol-harness.md` describes `McpService`/`McpController`/SSE components that do not exist. `build/_import_map.py::_CLIENT_SUBPATHS` is a third copy of the package exports.
 
 [^db-registry]: `src/py/vertebra/db/registry.py` — Database driver registry and adapter boundary.
-[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec adapter drivers and store bindings.
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters/__init__.py` — SQLSpec adapter drivers and store bindings.
 [^queue-base]: `src/py/vertebra/framework/queues/base.py` — First-party QueueService and backend selection.
 [^embeddings-pkg]: `src/py/vertebra/embeddings/__init__.py` — Embeddings package exports and transports.
 [^mcp-pkg]: `src/py/vertebra/agent/mcp/__init__.py` — MCP 2026-07-28 protocol package.
