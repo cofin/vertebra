@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T05:33:00Z] archive | queues-tasks-and-channels
+
+- Archived completed specification `queues-tasks-and-channels` (`ch01`–`ch03`, `12/12` tasks at `1094ca5b`) into permanent OKF knowledge chapters (`distributed-queues-and-email.md`, `litestar.md`, `server-runtime-limitations.md`), updated Master PRD `integration-remediation` (`t13`), downstream specs (`spanner-queue-and-rw-transactions`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/queues-tasks-and-channels/`.
+
+## [2026-11-16T05:32:00Z] finish | queues-tasks-and-channels
+
+- Completed `queues-tasks-and-channels` (`ch01`–`ch03`, `12/12` tasks) at `1094ca5b`: added `@runtime_checkable SyncQueueStore` and `AsyncQueueStore` (`vertebra.db.driver.capabilities`), `QueueBackendSettings`, `SyncPostgresQueueStore`/`AsyncPostgresQueueStore` (`FOR UPDATE SKIP LOCKED`), `SyncOracleQueueStore`/`AsyncOracleQueueStore`, and standalone `ValkeyQueueBackend` (`vertebra._valkey`) and `RedisQueueBackend` (`vertebra._redis`); wired scoped Dishka DI and `CronScheduler.register` into `WorkerRunner`, `StoreQueueBackend` and `SHMQueueBackend` for `litestar-queues>=0.14.0`, and Django 6.0+ `VertebraTaskBackend` plus `vertebra_worker` management command; routed Litestar `ChannelsPlugin`, Starlette, FastAPI, Flask, and Django channel brokers through `SyncNotificationSource`/`AsyncNotificationSource` and cut `ValkeyStore`/`RedisStore` over to native clients; verified `551 passed, 0 failed` unit tests, `mypy`, `ruff`, docstring scan, and `review-check`.
+
 ## [2026-11-16T04:57:00Z] archive | sqlspec-adapter-parity
 
 - Archived completed specification `sqlspec-adapter-parity` (`ch01`–`ch04`, `15/15` tasks at `4fad78c5`) into permanent OKF knowledge and product chapters (`sqlspec-alchemy-and-dialects.md`, `database-driver-limitations.md`, `postgres-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `pyo3-and-python-runtime.md`, `product.md`, `product-guidelines.md`), updated Master PRD `integration-remediation` (`t12`), downstream specs (`queues-tasks-and-channels`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/sqlspec-adapter-parity/`.

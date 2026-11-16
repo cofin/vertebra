@@ -10,8 +10,7 @@ planning_degraded_reason: null
 has_chapters: false
 current_task: "spanner-queue-and-rw-transactions:t01"
 parent_prd: integration-remediation
-depends_on_flows:
-  - queues-tasks-and-channels
+depends_on_flows: []
 plan_revision: 1
 plan_commit: 473e1f2e
 created_at: '2026-11-12T23:58:00Z'
