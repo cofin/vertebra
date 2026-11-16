@@ -16,8 +16,7 @@ chapters:
 current_chapter: ch01-sqlspec-core-driver-and-artifact-ref
 current_task: sqlspec-adapter-parity:ch01:t01
 parent_prd: integration-remediation
-depends_on_flows:
-  - sqlalchemy-and-django-integration
+depends_on_flows: []
 plan_revision: 5
 plan_commit: 473e1f2e
 created_at: '2026-11-03T03:30:00Z'

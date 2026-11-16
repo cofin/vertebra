@@ -13,7 +13,6 @@ parent_prd: integration-remediation
 depends_on_flows:
   - queues-tasks-and-channels
   - sqlspec-adapter-parity
-  - sqlalchemy-and-django-integration
   - spanner-queue-and-rw-transactions
 plan_revision: 2
 plan_commit: 473e1f2e

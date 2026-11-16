@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T02:53:00Z] archive | sqlalchemy-and-django-integration
+
+- Archived completed specification `sqlalchemy-and-django-integration` (`ch01`–`ch03`, `12/12` tasks at `1f0716d1`) into permanent OKF knowledge chapters (`sqlspec-alchemy-and-dialects.md`, `litestar.md`, `database-driver-limitations.md`, `adr-002-two-tier-shm-database-and-arrow-data-plane.md`), updated Master PRD `integration-remediation` (`t11`), downstream specs (`sqlspec-adapter-parity`, `queues-tasks-and-channels`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/sqlalchemy-and-django-integration/`.
+
+## [2026-11-16T02:52:00Z] finish | sqlalchemy-and-django-integration
+
+- Completed `sqlalchemy-and-django-integration` (`ch01`–`ch03`, `12/12` tasks) at `1f0716d1`: hardened PEP 249 `SyncDBAPIModule`/`AsyncDBAPIModule` (`vertebra.db.dbapi`) with zero `sqlite3` imports and PEP 249 exception translation, split monolithic SQLAlchemy dialects and Alembic modules into `extensions/sqlalchemy/dialects/{postgresql,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}.py` (36 `+vertebra`/`+vtb` entry points) and `extensions/sqlalchemy/alembic/{impl,ops,hooks}.py`, implemented 64-byte cache-line-aligned seqlock `ShmCache` + `ShmCacheStats` in `vertebra-core`/`vertebra-py` (`vertebra._vertebra`), delivered Advanced Alchemy `SyncCacheBackend`/`AsyncCacheBackend` (`shm://` with SHM ring-buffer L1 invalidation, `memory://`, `valkey://`, `redis://`, `s3://`/`gs://`/`az://`/`r2://`/`oci://`/`file://` `VTBSTORE\x01`, `CacheConfig(region_factory=...)`, `AsyncCacheManager`, and optional `dogpile.cache` plugins), rebased Django 6.0+ `DatabaseWrapper` backends (`postgresql`, `sqlite3`, `mysql`, `oracle`, `spanner` via `django-google-spanner`) and `CacheBackend(BaseCache)` while removing unsupported `bigquery`/`duckdb`/`mssql` stubs, fixed dynamic `VTBARROW` computed-column type inference in `vertebra-sqlite`, and verified `527 passed, 0 failed` unit tests, `stubtest`, `mypy`, `ruff`, docstring scan, and `review-check`.
+
 ## [2026-11-16T02:25:00Z] archive | native-redis-driver
 
 - Archived completed specification `native-redis-driver` (`ch01`–`ch04`, `16/16` tasks at `58e8db93`) into permanent OKF knowledge chapters (`redis-limitations.md`, `database-drivers-and-dialers.md`, `distributed-queues-and-email.md`, `workflow.md`, `product.md`), updated Master PRD `native-data-platform` (`t14`), downstream specs, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-redis-driver/`.

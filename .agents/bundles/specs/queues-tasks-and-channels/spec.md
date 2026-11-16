@@ -17,7 +17,6 @@ current_task: queues-tasks-and-channels:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
   - native-valkey-driver
-  - sqlalchemy-and-django-integration
   - sqlspec-adapter-parity
 plan_revision: 5
 plan_commit: 473e1f2e
