@@ -15,9 +15,9 @@ research:
   - ../integration-remediation/research/audit-findings_20261103.md
 plan_revision: 13
 plan_commit: 473e1f2e
-state_revision: 10
-current_task: "native-data-platform:t13"
-last_verified_checkpoint: 473e1f2e
+state_revision: 11
+current_task: "native-data-platform:t14"
+last_verified_checkpoint: 49fb8150
 created_at: '2026-11-03T04:05:00Z'
 updated_at: '2026-11-15T23:10:00Z'
 generated:
@@ -124,7 +124,7 @@ Each child flow updates `docs/usage/{databases,analytics-and-cdc,storage,cloud-d
 
 | Requirement | Owning Child Flow(s) | Primary Surface | Verification Gate |
 | --- | --- | --- | --- |
-| `R1` Per-engine wheels & PostgreSQL/Redis/Valkey cutover | `native-postgres-driver` (`7116ba13`), [`native-sqlite-driver`](../native-sqlite-driver/spec.md), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-valkey-driver`](../native-valkey-driver/spec.md) | `src/rs/vertebra-{postgres,sqlite,redis,valkey}/**`, `src/py/vertebra/db/adapters/**` | `cargo test`, `mypy.stubtest`, `*-wheel-check`, `pytest` |
+| `R1` Per-engine wheels & PostgreSQL/Redis/Valkey cutover | `native-postgres-driver` (`7116ba13`), `native-sqlite-driver` (`49fb8150`, archived), [`native-redis-driver`](../native-redis-driver/spec.md), [`native-valkey-driver`](../native-valkey-driver/spec.md) | `src/rs/vertebra-{postgres,sqlite,redis,valkey}/**`, `src/py/vertebra/db/adapters/**` | `cargo test`, `mypy.stubtest`, `*-wheel-check`, `pytest` |
 | `R2` `SyncNotificationSource` / `AsyncNotificationSource` split | [`native-redis-driver`](../native-redis-driver/spec.md) (`ch03`), [`native-valkey-driver`](../native-valkey-driver/spec.md) (`ch03`) | `db/driver/capabilities.py`, `db/adapters/{postgres,oracle,redis,valkey}/notify.py` | Unit & wire notification suites |
 | `R3` Shared broker pools & `vertebra.db.dbapi` | `broker-pool-sharing` (`246d7d0e`, archived) | `src/rs/vertebra-{core,db,py}/**`, `src/py/vertebra/{db/dbapi,extensions/broker}/**` | Multi-process SHM pool & crash-reclamation tests |
 | `R4` Adapter module split & `DataFusionConfig` cleanup | `native-adapter-organization` (`c526639f`) | `src/py/vertebra/db/adapters/{bigquery,spanner,oracle,mysql,mssql,duckdb,datafusion}/**` | `pytest` + `mypy` + docstring leak gate |
@@ -144,13 +144,13 @@ Each child flow updates `docs/usage/{databases,analytics-and-cdc,storage,cloud-d
 - [x] [1b19138] t10 — `driver-conformance-ci` — DuckDB GCS bearer secret rotation (`SyncGcsBearerSecretProvider`/`AsyncGcsBearerSecretProvider`, `(HTTP 401)`/`(HTTP 403)` invalidation, startup `_client` cleanup), Oracle `wait_timeout_seconds` `SELECT 1 FROM DUAL` liveness, `ConformanceGate` + `ServiceVersionMatrix`, live DuckDB/MySQL/MariaDB/MSSQL/Oracle suites, `make db-conformance`, `bench`-only PyPI `duckdb` isolation, and CI conformance lanes
 - [x] [c526639] t11 — `native-adapter-organization` — BigQuery `object_tables.py`, Spanner `mutations.py`/`transactions.py`, Oracle/MySQL/MSSQL/DuckDB driver splits, and `DataFusionEngine` / `DataFusionConfig` (`pgwire_fdw` removal) cleanup (`t01`–`t04`)
 - [x] [246d7d0] t12 — `broker-pool-sharing` — Cross-`.so` `BrokerEngineCapsule`, SHM RPC + `VTBARROW` lease execution, `vertebra.db.dbapi`, SQLAlchemy `BrokerPool`, and crash reclamation ([#95](https://github.com/cofin/vertebra/issues/95), [#96](https://github.com/cofin/vertebra/issues/96), [#97](https://github.com/cofin/vertebra/issues/97), [#98](https://github.com/cofin/vertebra/issues/98); `ch01`–`ch04`, `16/16` tasks)
-- [ ] t13 — [`native-sqlite-driver`](../native-sqlite-driver/spec.md) — Standalone `vertebra-sqlite` (`rusqlite` bundled WAL multi-reader pool, `JSONB`, `VTBARROW`, delayed-commit pipelines, stdlib `sqlite3` removal; `ch01`–`ch03`, `12` tasks)
+- [x] [49fb815] t13 — `native-sqlite-driver` — Standalone `vertebra-sqlite` (`rusqlite` bundled WAL multi-reader pool, `JSONB`, `VTBARROW`, delayed-commit pipelines, stdlib `sqlite3` removal; `ch01`–`ch03`, `12/12` tasks)
 - [ ] t14 — [`native-redis-driver`](../native-redis-driver/spec.md) — Standalone `vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]`) RESP3 wheel for Redis `7.2+`/`8.0` (Cluster, Sentinel, client tracking, Google Cloud Memorystore IAM, Streams, Pub/Sub) plus hoisted `SyncNotificationSource`/`AsyncNotificationSource` split (`ch01`–`ch04`, `16` tasks)
 - [ ] t15 — [`native-valkey-driver`](../native-valkey-driver/spec.md) — Standalone `vertebra-valkey` (`vertebra._valkey`, `vertebra-core[valkey]`) RESP3 wheel for Valkey `8.0+`/`9.0` (`HEXPIRE`/`HPEXPIRE`/`HTTL`/`HPTTL`/`HPERSIST` field TTLs, `CLIENT CAPA redirect`, `CLIENT TRACKING`, `CLUSTER SHARDS`, Sentinel, Google Cloud Memorystore for Valkey IAM, Streams, Pub/Sub), fully decoupled `adapters/valkey/` and `queues/valkey.py` (zero `adapters/redis/` imports), and `vertebra_db::resp3` removal (`ch01`–`ch04`, `16` tasks)
 
 ## 6. Current State & Remaining Plan Snapshot
 
-- **Immediate Wave (Ready)**: `native-sqlite-driver` (`ch01`–`ch03`), then `native-redis-driver` (`ch01`–`ch04`), then `native-valkey-driver` (`ch01`–`ch04`), run serially because they share `pyproject.toml`, `src/rs/Cargo.toml`, sibling wheel manifests, and review manifests, unlocking downstream [integration-remediation](../integration-remediation/spec.md) flows (`native-postgres-driver`, `storage-integrity-and-streaming`, `driver-conformance-ci`, `native-adapter-organization`, and `broker-pool-sharing` archived).
+- **Immediate Wave (Ready)**: `native-redis-driver` (`ch01`–`ch04`) and `native-valkey-driver` (`ch01`–`ch04`), unlocking downstream [integration-remediation](../integration-remediation/spec.md) flows (`native-postgres-driver`, `storage-integrity-and-streaming`, `driver-conformance-ci`, `native-adapter-organization`, `broker-pool-sharing`, and `native-sqlite-driver` archived).
 
 [^core-broker]: `src/rs/vertebra-core/src/broker.rs` — Shared-memory ring broker pool admission and worker leases.
 [^arrow-shm]: `src/rs/vertebra-db/src/arrow_shm.rs::allocate_shm_region` — Named shared-memory allocator for `VTBARROW` IPC frames.

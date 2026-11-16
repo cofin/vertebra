@@ -16,8 +16,7 @@ chapters:
 current_chapter: ch01-wheel-scaffold-and-isolation
 current_task: native-redis-driver:ch01:t01
 parent_prd: native-data-platform
-depends_on_flows:
-  - native-sqlite-driver
+depends_on_flows: []
 plan_revision: 3
 plan_commit: 473e1f2e
 created_at: '2026-11-12T23:45:00Z'

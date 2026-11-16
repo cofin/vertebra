@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T01:00:00Z] archive | native-sqlite-driver
+
+- Archived completed specification `native-sqlite-driver` (`ch01`–`ch03`, `12/12` tasks at `49fb8150`) into permanent OKF knowledge chapters (`sqlite-limitations.md`, `database-drivers-and-dialers.md`, `workflow.md`), updated Master PRD `native-data-platform`, downstream specs, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-sqlite-driver/`.
+
+## [2026-11-16T00:59:30Z] finish | native-sqlite-driver
+
+- Completed `native-sqlite-driver` (`ch01`–`ch03`, `12/12` tasks) at `49fb8150`: built standalone `src/rs/vertebra-sqlite` (`vertebra._sqlite`, `vertebra-core[sqlite]`, `gil_used = false`) over bundled `rusqlite 0.41.1` (`SQLite 3.45+`), implemented 1-writer + `max_readers` WAL worker threads, SQLite `JSONB`, `InterruptHandle` `< 50ms` cancellation, online `backup_to`/`restore_from`, direct `VTBARROW` `ShmCapsule` `ArrowCursor` + `load_from_arrow`, and `broker_engine_capsule()` (`DIALECT_TAG_SQLITE = 3`), removed legacy `_vertebra.sqlite_initialization_pragmas`, added delayed-commit `SyncSQLitePipeline`/`AsyncSQLitePipeline` with nested savepoints, cut `SyncSQLiteDriver` and `AsyncSQLiteDriver` over to `vertebra._sqlite` with zero `import sqlite3`, and verified `16/16` Rust tests, `mypy.stubtest`, `mypy`, `ruff`, `review-check`, and `1783` Python tests cleanly.
+
 ## [2026-11-15T23:30:00Z] sync | active specs
 
 - Verified both Master PRDs and all eight executable specs (`native-sqlite-driver`, `native-redis-driver`, `native-valkey-driver`, `sqlalchemy-and-django-integration`, `sqlspec-adapter-parity`, `queues-tasks-and-channels`, `spanner-queue-and-rw-transactions`, `strict-typing-hygiene`) against `main @ 473e1f2e`, corrected baseline facts, source paths, and squash-commit anchors (`native-adapter-organization` `c526639f`, `storage-integrity-and-streaming` `14b70b07`), re-anchored `plan_commit` to `473e1f2e`, and ordered the remaining flows as one serial chain.
