@@ -15,11 +15,11 @@ import pytest
 
 from vertebra.db.adapters.postgres import (
     ARROW_SHM_THRESHOLD_ROWS,
+    AsyncPostgresNotificationSource,
     AsyncPostgreSQLDriver,
     PgBitString,
     PgVector,
     PostgresChangeConfig,
-    PostgresNotificationSource,
     PostgresNotifyConfig,
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
@@ -139,7 +139,7 @@ def test_live_pgvector_copy_and_arrow_roundtrip(
 
 
 async def _wait_for_listener_ready(
-    notify_source: PostgresNotificationSource,
+    notify_source: AsyncPostgresNotificationSource,
     listener_iter: AsyncIterator[NotificationEvent],
     channel: str,
     *,

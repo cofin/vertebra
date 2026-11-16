@@ -57,6 +57,10 @@ jobs:
             path: src/rs/vertebra-postgres
             module: vertebra._postgres
             exports: SyncPostgresClient AsyncPostgresClient SyncPostgresPool AsyncPostgresPool SyncPostgresPortal AsyncPostgresPortal SyncPostgresArrowStream AsyncPostgresArrowStream SyncPostgresCopyOut SyncPostgresCopyIn AsyncPostgresCopyOut AsyncPostgresCopyIn AsyncPostgresListener AsyncPostgresReplication
+          - name: redis
+            path: src/rs/vertebra-redis
+            module: vertebra._redis
+            exports: SyncRedisClient AsyncRedisClient SyncRedisPipeline AsyncRedisPipeline SyncRedisListener AsyncRedisListener
           - name: spanner
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
@@ -160,7 +164,7 @@ jobs:
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
-          for package in bigquery bundler duckdb mssql mysql oracle postgres spanner sqlite storage; do
+          for package in bigquery bundler duckdb mssql mysql oracle postgres redis spanner sqlite storage; do
             uv build "src/rs/vertebra-$package" --sdist --out-dir dist
           done
       - uses: actions/upload-artifact@v7
@@ -197,8 +201,8 @@ jobs:
           version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
           uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
           py_bin="$RUNNER_TEMP/wheel-smoke/${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}"
-          uv pip install --python "$py_bin" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-spanner vertebra-sqlite vertebra-storage
-          uv pip install --python "$py_bin" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,spanner,sqlite,storage]==$version"
+          uv pip install --python "$py_bin" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-redis vertebra-spanner vertebra-sqlite vertebra-storage
+          uv pip install --python "$py_bin" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,redis,spanner,sqlite,storage]==$version"
       - name: Smoke test wheel-installed vtb run
         shell: bash
         run: |
@@ -240,6 +244,14 @@ jobs:
                   "AsyncPostgresCopyIn",
                   "AsyncPostgresListener",
                   "AsyncPostgresReplication",
+              ),
+              "redis": (
+                  "SyncRedisClient",
+                  "AsyncRedisClient",
+                  "SyncRedisPipeline",
+                  "AsyncRedisPipeline",
+                  "SyncRedisListener",
+                  "AsyncRedisListener",
               ),
               "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
               "sqlite": ("SyncSQLiteClient", "AsyncSQLiteClient"),

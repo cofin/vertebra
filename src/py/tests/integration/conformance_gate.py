@@ -26,7 +26,9 @@ class ConformanceGate:
     POSTGRES_ZERO_SKIP_ENV: ClassVar[str] = "VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS"
     ENGINE_MARKER: ClassVar[str] = "driver_engine"
     LEGACY_MARKER: ClassVar[str] = "conformance"
-    SUPPORTED_ENGINES: ClassVar[frozenset[str]] = frozenset({"duckdb", "mariadb", "mssql", "mysql", "oracle", "sqlite"})
+    SUPPORTED_ENGINES: ClassVar[frozenset[str]] = frozenset(
+        {"duckdb", "mariadb", "mssql", "mysql", "oracle", "redis", "sqlite"}
+    )
 
     def __init__(self, engines: frozenset[str] = frozenset()) -> None:
         self._engines: frozenset[str] = frozenset(engines)

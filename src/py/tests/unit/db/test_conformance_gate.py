@@ -78,6 +78,11 @@ def _make_report(
             frozenset({"mysql", "mariadb", "mssql", "oracle", "sqlite"}),
         ),
         (
+            {"VERTEBRA_CONFORMANCE_ENGINES": "redis"},
+            True,
+            frozenset({"redis"}),
+        ),
+        (
             {
                 "VERTEBRA_CONFORMANCE_ENGINES": "postgres",
                 "VERTEBRA_CONFORMANCE_POSTGRES_REQUIRE_ZERO_SKIPS": "1",
@@ -119,7 +124,7 @@ def test_conformance_gate_from_environ_valid_inputs(
         ),
         (
             {"VERTEBRA_CONFORMANCE_ENGINES": "mysql, informix"},
-            r"Allowed engines: duckdb, mariadb, mssql, mysql, oracle, sqlite",
+            r"Allowed engines: duckdb, mariadb, mssql, mysql, oracle, redis, sqlite",
         ),
     ],
 )

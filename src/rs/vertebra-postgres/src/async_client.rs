@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use tokio::sync::Notify;
 use vertebra_db::py_async::{
-    RustDbTaskAwaitable, db_runtime_handle, spawn_rust_db_task_with_attr,
+    RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task_with_attr,
     spawn_rust_db_task_with_attr_and_cancel,
 };
 
@@ -1589,6 +1589,93 @@ impl PyAsyncPostgresListener {
     fn __repr__(&self) -> String {
         format!(
             "AsyncPostgresListener(closed={})",
+            self.listener.is_closed()
+        )
+    }
+}
+
+/// Dedicated non-pooled synchronous PostgreSQL `LISTEN`/`NOTIFY` handle
+/// (`vertebra._postgres.SyncPostgresListener`).
+#[pyclass(
+    name = "SyncPostgresListener",
+    module = "vertebra._postgres",
+    frozen,
+    immutable_type
+)]
+pub struct PySyncPostgresListener {
+    listener: Arc<PostgresListener>,
+}
+
+impl PySyncPostgresListener {
+    pub(crate) fn from_listener(listener: PostgresListener) -> Self {
+        Self {
+            listener: Arc::new(listener),
+        }
+    }
+}
+
+#[pymethods]
+impl PySyncPostgresListener {
+    #[getter]
+    pub fn closed(&self) -> bool {
+        self.listener.is_closed()
+    }
+
+    /// Block awaiting the next `(pid, channel, payload_bytes, reconnected_gap)` notification tuple or `None` after `close()`.
+    pub fn next(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let listener = Arc::clone(&self.listener);
+        let frame_opt = py
+            .detach(|| block_on_db(async move { listener.next().await }))
+            .map_err(|e| postgres_error_to_py(py, e))?;
+
+        match frame_opt {
+            Some(frame) => {
+                let tup = frame_to_py_tuple(py, &frame)?;
+                Ok(Some(tup))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn subscribe(&self, py: Python<'_>, channels: &Bound<'_, PyAny>) -> PyResult<()> {
+        let validated = extract_listener_channels(py, channels)?;
+        let listener = Arc::clone(&self.listener);
+        py.detach(|| block_on_db(async move { listener.subscribe(validated).await }))
+            .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    pub fn unsubscribe(&self, py: Python<'_>, channels: &Bound<'_, PyAny>) -> PyResult<()> {
+        let validated = extract_listener_channels(py, channels)?;
+        let listener = Arc::clone(&self.listener);
+        py.detach(|| block_on_db(async move { listener.unsubscribe(validated).await }))
+            .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    pub fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let listener = Arc::clone(&self.listener);
+        py.detach(|| block_on_db(async move { listener.close().await }))
+            .map_err(|e| postgres_error_to_py(py, e))
+    }
+
+    pub fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (exc_type = None, exc_val = None, exc_tb = None))]
+    pub fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        exc_val: Option<&Bound<'_, PyAny>>,
+        exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let _ = (exc_type, exc_val, exc_tb);
+        self.close(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SyncPostgresListener(closed={})",
             self.listener.is_closed()
         )
     }

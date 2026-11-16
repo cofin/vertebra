@@ -18,7 +18,7 @@ from vertebra.db.adapters.postgres.change_stream import (
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.events import EventSessionRegistry
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.adapters.postgres.notify import PostgresNotifyConfig, SyncPostgresNotificationSource
 from vertebra.db.adapters.postgres.options import build_native_client_options
 from vertebra.db.adapters.postgres.pipeline import SyncPostgresPipeline
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
@@ -30,7 +30,12 @@ from vertebra.typing import ImproperConfigurationError
 if TYPE_CHECKING:
     from collections.abc import Buffer
 
-    from vertebra._postgres import AsyncPostgresListener, AsyncPostgresReplication
+    from vertebra._postgres import (
+        AsyncPostgresListener,
+        AsyncPostgresReplication,
+        SyncPostgresClient,
+        SyncPostgresListener,
+    )
     from vertebra.db.adapters.postgres.types import (
         PostgresArrowResult,
         PostgresPipelineOperation,
@@ -617,12 +622,28 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         change_feed: ChangeFeed | None = None,
         queue_capacity: int = 1024,
         reconnect: bool = False,
-    ) -> PostgresNotificationSource:
-        """Create a ``PostgresNotificationSource`` backed by dedicated non-pooled listener connections."""
+    ) -> SyncPostgresNotificationSource:
+        """Create a SyncPostgresNotificationSource backed by dedicated non-pooled listener connections."""
         self._ensure_open()
         PostgreSQLCore.validate_direct_session_config(self.config, feature="LISTEN/NOTIFY")
-        return PostgresNotificationSource(
+        return SyncPostgresNotificationSource(
             self,
+            config,
+            change_feed=change_feed,
+            queue_capacity=queue_capacity,
+            reconnect=reconnect,
+        )
+
+    def notification_source(
+        self,
+        config: PostgresNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> SyncPostgresNotificationSource:
+        """Create a SyncPostgresNotificationSource backed by dedicated non-pooled listener connections."""
+        return self.listen_notifications(
             config,
             change_feed=change_feed,
             queue_capacity=queue_capacity,
@@ -770,6 +791,41 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             client = pg_mod.AsyncPostgresClient(**client_kwargs)
         await client.connect()
         return client
+
+    def _open_direct_sync_client(self, feature: str = "operation") -> SyncPostgresClient:
+        """Open a dedicated non-pooled direct sync client."""
+        self._ensure_open()
+        client_kwargs = PostgreSQLCore.build_direct_client_kwargs(self.config, feature=feature)
+        pg_mod = PostgreSQLCore.resolve_native_module()
+        client: SyncPostgresClient = pg_mod.SyncPostgresClient(**client_kwargs)
+        client.connect()
+        return client
+
+    def _open_sync_notification_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> SyncPostgresListener:
+        """Open a dedicated non-pooled listener synchronously and register it for cleanup."""
+        client = self._open_direct_sync_client(feature="LISTEN/NOTIFY")
+        try:
+            listener: SyncPostgresListener = client.open_sync_listener(
+                channels,
+                queue_capacity=queue_capacity,
+                reconnect=reconnect,
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                client.close()
+            raise
+        self._events.register(listener, client)
+        return listener
+
+    def _publish_notification_sync(self, channel: str, payload: str) -> None:
+        """Publish a parameterized PostgreSQL pg_notify message synchronously."""
+        self.execute("SELECT pg_notify($1, $2)", (channel, payload))
 
     async def _open_notification_listener(
         self,

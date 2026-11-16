@@ -27,7 +27,6 @@ from vertebra.framework.queues.postgres import (
 from vertebra.framework.queues.redis import (
     RedisQueueBackend,
     RedisStreamClient,
-    ValkeyQueueBackend,
 )
 from vertebra.framework.queues.scheduler import (
     CronExpression,
@@ -36,6 +35,10 @@ from vertebra.framework.queues.scheduler import (
 from vertebra.framework.queues.spanner import (
     SpannerQueueBackend,
     SpannerQueueExecutor,
+)
+from vertebra.framework.queues.valkey import (
+    ValkeyQueueBackend,
+    ValkeyStreamClient,
 )
 from vertebra.server.lanes import (
     LaneConfig,
@@ -70,6 +73,7 @@ __all__ = (
     "TaskLane",
     "TaskRetryPolicy",
     "ValkeyQueueBackend",
+    "ValkeyStreamClient",
     "WorkerRunner",
     "parse_lanes",
     "run_oneshot",

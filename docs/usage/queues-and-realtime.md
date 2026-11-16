@@ -10,20 +10,20 @@
 | --- | --- | --- | --- |
 | **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests | Nothing |
 | **PostgreSQL** | `postgresql://`, `postgres://` (`PostgreSQLQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups | `executor=` (`PostgreSQLQueueExecutor`); `vertebra-core[postgres]` |
-| **Redis** | `redis://`, `rediss://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling | `redis` package and a URL with a host, or `client=` (`RedisStreamClient`) |
-| **Valkey** | `ValkeyQueueBackend` | Same Streams + sorted-set mechanics under the `vtb:valkey:queue` prefix | `redis` package and a `redis://` / `rediss://` URL pointing at Valkey, or `client=` |
+| **Redis** | `redis://`, `rediss://`, `unix://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling | `vertebra-core[redis]` native driver, or `client=` (`RedisStreamClient`) |
+| **Valkey** | `valkey://`, `valkeys://`, `redis://`, `rediss://` (`ValkeyQueueBackend`) | Same Streams + sorted-set mechanics under the `vtb:valkey:queue` prefix | `redis` package and a URL pointing at Valkey, or `client=` (`ValkeyStreamClient`) |
 | **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables | `executor=` (`OracleQueueExecutor`); `oracledb` |
 | **Cloud Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | Hash-sharded keys + `FOR UPDATE` claims + dead-letter table | `executor=` (`SpannerQueueExecutor`); `vertebra-core[spanner]` |
 
 Backends that need an executor raise `MissingDependencyError` when their package is missing and `ImproperConfigurationError` when it is installed but no `executor=` is passed. Vertebra does not ship these executors, so build the backend and pass it in: `QueueService(config, backend=PostgreSQLQueueBackend(config, executor=executor))`.
 
-`RedisQueueBackend` and `ValkeyQueueBackend` raise `MissingDependencyError` without the `redis` package and `ImproperConfigurationError` when `backend_url` has no host (the default `memory://` included), unless `client=` is passed. `valkey://` and `valkeys://` URLs route to `ValkeyQueueBackend`, but the backend accepts only `redis://` and `rediss://` URLs with a host; point a `redis://` URL at the Valkey server or pass `client=`. Install the optional client package for your selected queue backend (`vertebra-core[postgres]`, `redis`, `oracledb`, or `vertebra-core[spanner]`):
+`RedisQueueBackend` raises `MissingDependencyError` without `vertebra-core[redis]` and `ImproperConfigurationError` when `backend_url` has no host or unsupported scheme, unless `client=` is passed. `ValkeyQueueBackend` raises `MissingDependencyError` without `redis` package and `ImproperConfigurationError` when `backend_url` has no host, unless `client=` is passed. Install the optional client package for your selected queue backend (`vertebra-core[postgres]`, `vertebra-core[redis]`, `oracledb`, or `vertebra-core[spanner]`):
 
 === "uv"
 
     ```bash
     uv add "vertebra-core[postgres]"
-    uv add redis
+    uv add "vertebra-core[redis]"
     uv add oracledb
     uv add "vertebra-core[spanner]"
     ```
@@ -32,7 +32,7 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     pip install "vertebra-core[postgres]"
-    pip install redis
+    pip install "vertebra-core[redis]"
     pip install oracledb
     pip install "vertebra-core[spanner]"
     ```
@@ -41,7 +41,7 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     pdm add "vertebra-core[postgres]"
-    pdm add redis
+    pdm add "vertebra-core[redis]"
     pdm add oracledb
     pdm add "vertebra-core[spanner]"
     ```
@@ -50,7 +50,7 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     poetry add "vertebra-core[postgres]"
-    poetry add redis
+    poetry add "vertebra-core[redis]"
     poetry add oracledb
     poetry add "vertebra-core[spanner]"
     ```

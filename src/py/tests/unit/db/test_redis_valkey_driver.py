@@ -14,12 +14,12 @@ from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
-    Resp3Error,
-    Resp3Parser,
     SyncRedisDriver,
 )
 from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
+    Resp3Error,
+    Resp3Parser,
     SyncValkeyDriver,
     ValkeyConfig,
 )
@@ -91,8 +91,8 @@ def test_resp3_wire_parser_decodes_push_and_raises_errors() -> None:
 
 
 def test_encode_hello3_handshake_parameters() -> None:
-    """SyncRedisDriver.encode_hello3_handshake must accept username, password, and client_name."""
-    raw = SyncRedisDriver.encode_hello3_handshake(
+    """SyncValkeyDriver.encode_hello3_handshake must accept username, password, and client_name."""
+    raw = SyncValkeyDriver.encode_hello3_handshake(
         username="alice",
         password="secret",
         client_name="test-client",
@@ -241,10 +241,7 @@ async def test_resp3_wire_loopback_server_execution_and_invalidation() -> None:
 
 
 def test_valkey_subclasses_redis_and_handles_invalidation_push(resp3_server: Resp3FakeServer) -> None:
-    """SyncValkeyDriver must inherit from SyncRedisDriver and evict keys on invalidation push frames."""
-    assert issubclass(SyncValkeyDriver, SyncRedisDriver)
-    assert issubclass(AsyncValkeyDriver, AsyncRedisDriver)
-
+    """SyncValkeyDriver must evict keys on invalidation push frames."""
     driver = SyncValkeyDriver(ValkeyConfig(url=resp3_server.valkey_url, enable_client_side_caching=True))
     driver.set("user:1", "alice")
     assert driver.get("user:1") == b"alice"

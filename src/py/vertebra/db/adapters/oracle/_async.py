@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
 from vertebra.db.adapters.oracle.notify import (
-    OracleNotificationSource,
+    AsyncOracleNotificationSource,
     OracleNotifyConfig,
     validate_oracle_channel_name,
 )
@@ -707,9 +707,9 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         config: OracleNotifyConfig | None = None,
         *,
         change_feed: ChangeFeed | None = None,
-    ) -> OracleNotificationSource:
-        """Construct an `OracleNotificationSource` bound to this asynchronous driver."""
-        return OracleNotificationSource(self, config, change_feed=change_feed)
+    ) -> AsyncOracleNotificationSource:
+        """Construct an `AsyncOracleNotificationSource` bound to this asynchronous driver."""
+        return AsyncOracleNotificationSource(self, config, change_feed=change_feed)
 
     async def publish_notification(
         self,
@@ -739,7 +739,7 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         config: OracleNotifyConfig | None = None,
     ) -> AsyncIterator[NotificationEvent]:
         """Subscribe to `channels` and yield `NotificationEvent` frames with automatic cleanup."""
-        source = OracleNotificationSource(self, config)
+        source = AsyncOracleNotificationSource(self, config)
         await source.subscribe(channels)
         try:
             async for event in source.listen():

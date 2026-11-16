@@ -38,8 +38,11 @@ from vertebra.db import (
 )
 from vertebra.db.adapters.postgres.config import PoolerMode, PostgreSQLConfig
 from vertebra.db.adapters.postgres.events import PostgresNotificationDriver
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
-from vertebra.db.driver import NotificationEvent, NotificationSource
+from vertebra.db.adapters.postgres.notify import (
+    AsyncPostgresNotificationSource,
+    PostgresNotifyConfig,
+)
+from vertebra.db.driver import AsyncNotificationSource, NotificationEvent
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import encode_json_bytes
 
@@ -69,7 +72,7 @@ class NativeNotificationDriverPort:
 
     @property
     def config(self) -> PostgreSQLConfig:
-        """Return the active PostgreSQLConfig inspected by PostgresNotificationSource."""
+        """Return the active PostgreSQLConfig inspected by AsyncPostgresNotificationSource."""
         return self._config
 
     @property
@@ -809,12 +812,12 @@ def test_notification_source_end_to_end_publish_subscribe_reuse_and_reconnect() 
             concrete_port = NativeNotificationDriverPort(cfg)
             port: PostgresNotificationDriver = concrete_port
             try:
-                async with PostgresNotificationSource(
+                async with AsyncPostgresNotificationSource(
                     port,
                     PostgresNotifyConfig(channel="default_events"),
                     reconnect=True,
                 ) as source:
-                    assert isinstance(source, NotificationSource)
+                    assert isinstance(source, AsyncNotificationSource)
                     assert source.subscribed_channels == []
                     assert source.change_feed is None
 
@@ -990,7 +993,7 @@ def test_notification_source_change_feed_spill_hydration_and_missing_spill_error
                 )
             )
             try:
-                async with PostgresNotificationSource(port, change_feed=feed) as source:
+                async with AsyncPostgresNotificationSource(port, change_feed=feed) as source:
                     assert source.change_feed is feed
                     await source.subscribe(["orders"])
 
@@ -1101,7 +1104,7 @@ def test_notification_source_pooler_mode_and_direct_dsn_validation(
             concrete_port = NativeNotificationDriverPort(cfg)
             port: PostgresNotificationDriver = concrete_port
             try:
-                async with PostgresNotificationSource(port) as source:
+                async with AsyncPostgresNotificationSource(port) as source:
                     await source.subscribe(["orders"])
                     if not expect_ok:
                         with pytest.raises(ImproperConfigurationError, match="LISTEN/NOTIFY"):
@@ -1139,7 +1142,7 @@ def test_notification_source_channel_bounds_are_atomic_without_io(bad_channel: s
     with pytest.raises(ValueError, match="channel"):
         PostgresNotifyConfig(channel=bad_channel)
     with pytest.raises(ValueError, match="channel"):
-        PostgresNotificationSource.build_notify_sql(bad_channel, "payload")
+        AsyncPostgresNotificationSource.build_notify_sql(bad_channel, "payload")
 
     max_channel = "a" * 63
     assert len(max_channel.encode("utf-8")) == 63
@@ -1155,7 +1158,7 @@ def test_notification_source_channel_bounds_are_atomic_without_io(bad_channel: s
             concrete_port = NativeNotificationDriverPort(cfg)
             port: PostgresNotificationDriver = concrete_port
             try:
-                async with PostgresNotificationSource(port) as source:
+                async with AsyncPostgresNotificationSource(port) as source:
                     assert source.subscribed_channels == []
 
                     with pytest.raises(ValueError, match="channel"):
@@ -1215,14 +1218,14 @@ def test_notification_source_rejects_invalid_constructor_options(
     reconnect: Any,
     expected_exc: type[BaseException],
 ) -> None:
-    """Validate non-bool positive queue_capacity and bool reconnect in PostgresNotificationSource.__init__."""
+    """Validate non-bool positive queue_capacity and bool reconnect in AsyncPostgresNotificationSource.__init__."""
     with _running_pg_server() as srv:
         cfg = PostgreSQLConfig(dsn=f"postgresql://postgres@127.0.0.1:{srv.port}/appdb")
         concrete_port = NativeNotificationDriverPort(cfg)
         port: PostgresNotificationDriver = concrete_port
         try:
             with pytest.raises(expected_exc, match="queue_capacity|reconnect"):
-                PostgresNotificationSource(
+                AsyncPostgresNotificationSource(
                     port,
                     queue_capacity=queue_capacity,
                     reconnect=reconnect,
@@ -1249,7 +1252,7 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
         check=False,
         capture_output=True,
         text=True,
-        env={"PYTHONPATH": os.environ.get("PYTHONPATH", src_py), "PATH": ""},
+        env={"PYTHONPATH": os.environ.get("PYTHONPATH", src_py), "PATH": os.environ.get("PATH", "")},
     )
     assert probe.returncode == 0, probe.stderr
 
@@ -1263,7 +1266,7 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
             concrete_port = NativeNotificationDriverPort(cfg)
             port: PostgresNotificationDriver = concrete_port
             try:
-                async with PostgresNotificationSource(port, queue_capacity=16) as source:
+                async with AsyncPostgresNotificationSource(port, queue_capacity=16) as source:
                     bad_source: Any = source
                     with pytest.raises(TypeError):
                         await bad_source.subscribe("orders")
@@ -1338,7 +1341,7 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
             concrete_port = NativeNotificationDriverPort(cfg)
             port: PostgresNotificationDriver = concrete_port
             try:
-                async with PostgresNotificationSource(port, queue_capacity=16) as source:
+                async with AsyncPostgresNotificationSource(port, queue_capacity=16) as source:
                     await source.subscribe(["a"])
                     stream = source.listen()
                     first_waiter = asyncio.create_task(_as_coro(anext(stream)))
@@ -1401,7 +1404,7 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
                             with contextlib.suppress(BaseException):
                                 await first_waiter
 
-                async with PostgresNotificationSource(port, queue_capacity=16) as reorder_source:
+                async with AsyncPostgresNotificationSource(port, queue_capacity=16) as reorder_source:
                     await reorder_source.subscribe(["x", "y"])
                     entered_startup.clear()
                     release_startup.clear()
@@ -1435,7 +1438,7 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
                             with contextlib.suppress(BaseException):
                                 await reorder_waiter
 
-                async with PostgresNotificationSource(port, queue_capacity=16) as same_set_source:
+                async with AsyncPostgresNotificationSource(port, queue_capacity=16) as same_set_source:
                     await same_set_source.subscribe(["m", "n"])
                     entered_startup.clear()
                     release_startup.clear()
@@ -1464,7 +1467,7 @@ def test_notification_source_startup_reconciliation_and_concurrent_subscriptions
                             with contextlib.suppress(BaseException):
                                 await same_set_waiter
 
-                closing_source = PostgresNotificationSource(port, queue_capacity=16)
+                closing_source = AsyncPostgresNotificationSource(port, queue_capacity=16)
                 await closing_source.subscribe(["m"])
                 entered_startup.clear()
                 release_startup.clear()

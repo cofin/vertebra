@@ -15,21 +15,22 @@ if TYPE_CHECKING:
 
 __all__ = (
     "AsyncChangeSource",
+    "AsyncNotificationSource",
     "AsyncPipeline",
     "AsyncPipelineCapable",
     "ClaimedJob",
     "EmbeddingPushdown",
     "NotificationEvent",
-    "NotificationSource",
     "QueueStore",
     "SyncChangeSource",
+    "SyncNotificationSource",
     "SyncPipeline",
     "SyncPipelineCapable",
 )
 
 
 class NotificationEvent(FrozenBaseStruct, frozen=True, gc=False):
-    """Pub/sub notification frame emitted by a ``NotificationSource``."""
+    """Pub/sub notification frame emitted by a ``SyncNotificationSource`` or ``AsyncNotificationSource``."""
 
     channel: str
     """Logical notification channel or topic name."""
@@ -141,7 +142,28 @@ class AsyncPipelineCapable(Protocol):
 
 
 @runtime_checkable
-class NotificationSource(Protocol):
+class SyncNotificationSource(Protocol):
+    """Capability protocol for synchronous database or cache pub/sub notification transports."""
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        """Publish a payload to the target notification channel."""
+        ...
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        """Subscribe to one or more notification channels."""
+        ...
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        """Unsubscribe from one or more notification channels."""
+        ...
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        """Yield incoming ``NotificationEvent`` frames across subscribed channels."""
+        ...
+
+
+@runtime_checkable
+class AsyncNotificationSource(Protocol):
     """Capability protocol for asynchronous database or cache pub/sub notification transports."""
 
     async def publish(self, channel: str, payload: bytes | str) -> None:

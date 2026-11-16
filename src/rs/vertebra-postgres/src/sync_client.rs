@@ -703,7 +703,8 @@ impl PySyncPostgresClient {
         m.add_class::<PySyncPostgresPortal>()?;
         m.add_class::<PySyncPostgresArrowStream>()?;
         m.add_class::<PySyncPostgresCopyOut>()?;
-        m.add_class::<PySyncPostgresCopyIn>()
+        m.add_class::<PySyncPostgresCopyIn>()?;
+        m.add_class::<crate::async_client::PySyncPostgresListener>()
     }
 }
 
@@ -1752,6 +1753,31 @@ impl PySyncPostgresClient {
             queue_capacity,
             reconnect,
         )
+    }
+
+    #[pyo3(signature = (channels, *, queue_capacity = 1024, reconnect = false))]
+    pub fn open_sync_listener(
+        &self,
+        py: Python<'_>,
+        channels: &Bound<'_, PyAny>,
+        #[pyo3(from_py_with = extract_queue_capacity)] queue_capacity: usize,
+        #[pyo3(from_py_with = extract_strict_bool)] reconnect: bool,
+    ) -> PyResult<crate::async_client::PySyncPostgresListener> {
+        let validated = extract_listener_channels(py, channels)?;
+        let cfg = self.session.config().clone();
+        let options = crate::notifications::ListenerOptions {
+            queue_capacity,
+            max_queue_bytes: crate::notifications::DEFAULT_NOTIFICATION_MAX_BYTES,
+            reconnect,
+        };
+        let listener = py
+            .detach(|| {
+                vertebra_db::py_async::block_on_db(async move {
+                    crate::notifications::PostgresListener::open(cfg, validated, options).await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        Ok(crate::async_client::PySyncPostgresListener::from_listener(listener))
     }
 
     /// Return `True` unless an authenticated session has reached `ReadyForQuery(Idle)` and has not been closed.

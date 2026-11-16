@@ -20,7 +20,7 @@ from vertebra.db.adapters.postgres.change_stream import (
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.events import EventSessionRegistry
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource, PostgresNotifyConfig
+from vertebra.db.adapters.postgres.notify import AsyncPostgresNotificationSource, PostgresNotifyConfig
 from vertebra.db.adapters.postgres.options import build_native_client_options
 from vertebra.db.adapters.postgres.pipeline import AsyncPostgresPipeline
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
@@ -645,12 +645,28 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         change_feed: ChangeFeed | None = None,
         queue_capacity: int = 1024,
         reconnect: bool = False,
-    ) -> PostgresNotificationSource:
-        """Create a ``PostgresNotificationSource`` backed by dedicated non-pooled listener connections."""
+    ) -> AsyncPostgresNotificationSource:
+        """Create an AsyncPostgresNotificationSource backed by dedicated non-pooled listener connections."""
         self._ensure_open()
         PostgreSQLCore.validate_direct_session_config(self.config, feature="LISTEN/NOTIFY")
-        return PostgresNotificationSource(
+        return AsyncPostgresNotificationSource(
             self,
+            config,
+            change_feed=change_feed,
+            queue_capacity=queue_capacity,
+            reconnect=reconnect,
+        )
+
+    def notification_source(
+        self,
+        config: PostgresNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> AsyncPostgresNotificationSource:
+        """Create an AsyncPostgresNotificationSource backed by dedicated non-pooled listener connections."""
+        return self.listen_notifications(
             config,
             change_feed=change_feed,
             queue_capacity=queue_capacity,

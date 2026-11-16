@@ -158,7 +158,7 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --exclude vertebra-redis)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
@@ -170,6 +170,7 @@ dev:                                                ## Install native extensions
 	@uv run maturin develop --uv -m src/rs/vertebra-oracle/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-postgres/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-sqlite/Cargo.toml
+	@uv run maturin develop --uv -m src/rs/vertebra-redis/Cargo.toml
 
 # =============================================================================
 # Build
@@ -177,7 +178,7 @@ dev:                                                ## Install native extensions
 .PHONY: build
 build: ts-build                                     ## Build optimized release binaries + native extension + TS client
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3)
+	@(cd src/rs && PYO3_PYTHON="$(PYO3_PYTHON)" cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --exclude vertebra-redis --release --features vertebra-http/python,vertebra-http/tls,vertebra-http/compression,vertebra-http/http3)
 	@uv run maturin develop --uv -r
 	@uv run maturin develop --uv -r -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-storage/Cargo.toml
@@ -189,6 +190,7 @@ build: ts-build                                     ## Build optimized release b
 	@uv run maturin develop --uv -r -m src/rs/vertebra-oracle/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-postgres/Cargo.toml
 	@uv run maturin develop --uv -r -m src/rs/vertebra-sqlite/Cargo.toml
+	@uv run maturin develop --uv -r -m src/rs/vertebra-redis/Cargo.toml
 	@uv build
 	@echo "${OK} Build complete"
 
@@ -218,14 +220,14 @@ rs-test:                                            ## Run Rust tests (all featu
 
 .PHONY: py-test
 py-test: dev                                        ## Run Python tests
-	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite
+	@uv run python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis
 	@uv run pytest src/py/tests -v
 	@echo "${OK} Python tests passed"
 
 .PHONY: db-conformance
-db-conformance:                                     ## Run live zero-skip conformance lane (ENGINE=duckdb|mysql|mariadb|mssql|oracle|sqlite [VERSION=<v>])
+db-conformance:                                     ## Run live zero-skip conformance lane (ENGINE=duckdb|mysql|mariadb|mssql|oracle|redis|sqlite [VERSION=<v>])
 ifeq ($(strip $(ENGINE)),)
-	@echo "ENGINE is required: duckdb, mysql, mariadb, mssql, oracle, sqlite" >&2; exit 2
+	@echo "ENGINE is required: duckdb, mysql, mariadb, mssql, oracle, redis, sqlite" >&2; exit 2
 else
 	@export VERTEBRA_CONFORMANCE_DOCKER=1 \
 		VERTEBRA_CONFORMANCE_ENGINES=$(strip $(ENGINE))$(if $(strip $(VERSION)), \
@@ -322,6 +324,22 @@ postgres-wheel-check:                               ## Build and verify standalo
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/verify_postgres_wheel.py
 	@echo "${OK} PostgreSQL wheel and sdist verified"
 
+.PHONY: redis-test
+redis-test:                                         ## Run vertebra-redis Rust unit tests, stubtest, and Python tests
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@cargo test --manifest-path src/rs/Cargo.toml -p vertebra-redis --locked
+	@PYTHONPATH="src/py:." uv run --no-sync python -m mypy.stubtest vertebra._redis
+	@uv run --no-sync pytest src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/unit/db/test_redis_valkey_driver.py src/py/tests/unit/db/test_redis_valkey_resp3.py src/py/tests/unit/framework/test_distributed_queues.py src/py/tests/integration/db/test_driver_conformance.py -k "redis and not docker" -v
+	@echo "${OK} Redis tests passed"
+
+.PHONY: redis-wheel-check
+redis-wheel-check:                                  ## Build vertebra-redis wheel and verify isolated archive layout
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	@rm -rf /tmp/vtb-wheels-redis && mkdir -p /tmp/vtb-wheels-redis
+	@uv run maturin build --manifest-path src/rs/vertebra-redis/Cargo.toml --out /tmp/vtb-wheels-redis
+	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-redis --wheel-glob "vertebra_redis-*.whl" --extension-prefix "vertebra/_redis" --forbid-python-files
+	@echo "${OK} vertebra-redis wheel layout verified"
+
 .PHONY: core-wheel-check
 core-wheel-check:                                   ## Build relocatable vertebra-server + vertebra-core wheel and smoke test vtb run
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
@@ -383,7 +401,7 @@ lint: ts-lint                                       ## Format and lint everythin
 	@(cd src/rs && cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
 	@echo "${INFO} Running type checks (Mypy)..."
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi
@@ -398,7 +416,7 @@ lint-all:                                           ## Check formatting, linting
 	@uv run ruff check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run ruff format --check src/py/vertebra src/py/tests tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
 	@uv run mypy src/py/vertebra tools/scripts tools/pgo tools/benchmarks $(wildcard tools/docs docs/examples)
-	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite") if importlib.util.find_spec(m) is not None))')"; \
+	@stub_mods="$$(uv run python -c 'import importlib.util; print(" ".join(m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis") if importlib.util.find_spec(m) is not None))')"; \
 	if [ -n "$$stub_mods" ]; then \
 		uv run python -m mypy.stubtest $$stub_mods; \
 	fi

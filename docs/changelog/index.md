@@ -16,6 +16,10 @@ All notable changes to Vertebra are documented on this page.
 - `SyncGcsBearerSecretProvider` and `AsyncGcsBearerSecretProvider` in `vertebra.storage` wrapping `SyncGcpTokenCache` and `AsyncGcpTokenCache` (`from_config`, `token_cache`, `generation`, `needs_refresh`, `invalidate`) for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` OAuth2 bearer-token rotation.
 - Shared-memory connection broker lifecycle hardening across Rust and Python: `ShmOwnerHeader` stale-owner reclamation, `LeaseState::Quarantined` / `LeaseQuarantinedError`, authenticated Unix domain socket `SCM_RIGHTS` attachment (`BrokerAttachServer`, `BrokerAttachClient`, `0700`/`0600` permission checks, `VERTEBRA_BROKER_SECRET`), `BrokerHost` (`vtb broker serve`, `vtb broker status`, `ShutdownReport`) crash `ROLLBACK` cleanup, and `BrokerEngineCapsule` ABI v1 (`BrokerEngineDiscovery`, `BrokerEngineRegistry`) across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, `vertebra._duckdb`, and `vertebra._sqlite`.
 - Standalone PEP 249 `vertebra.db.dbapi` (`SyncDBAPIConnection`, `AsyncDBAPIConnection`, `SyncDBAPIModule`, `AsyncDBAPIModule`, `is_row_returning_sql`), isolated `SQLAlchemyAsyncDBAPI` (`vertebra.extensions.sqlalchemy.async_adapter`), partitioned SQLAlchemy pooling (`BrokerPool`, `AsyncBrokerPool`, `broker_creator`), and `DbPoolMetricSample` quarantine counters (`quarantined`, `total_quarantined`, `total_disposed`).
+- Native standalone `vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]`) PyO3 extension module with RESP2/RESP3 wire protocol support, atomic/non-atomic pipeline batching, `CLIENT TRACKING` L1 cache invalidations, Sentinel primary discovery, and Cluster hash-slot routing.
+- `SyncRedisDriver` and `AsyncRedisDriver` (`vertebra.db.adapters.redis`) with connection pooling, transaction pipelines, and pub/sub notification sources (`SyncRedisNotificationSource`, `AsyncRedisNotificationSource`).
+- Cut `RedisQueueBackend` (`vertebra.framework.queues.redis`) over to `vertebra._redis` native Streams/ZSETs and extracted self-contained `ValkeyQueueBackend` (`vertebra.framework.queues.valkey`).
+- Split `NotificationSource` into `@runtime_checkable` `SyncNotificationSource` and `AsyncNotificationSource` across `capabilities.py`, `driver`, `adapters.postgres` (`SyncPostgresListener`, `SyncPostgresNotificationSource`), and `adapters.oracle` (`SyncOracleListener`, `SyncOracleNotificationSource`).
 
 ### Changed
 
@@ -27,7 +31,7 @@ All notable changes to Vertebra are documented on this page.
 ### Fixed
 
 - Fixed `SQLiteCore.initialization_pragmas` to validate pragma values directly without suppressed native call defects, removing legacy `sqlite_initialization_pragmas` binding from `vertebra-py` and `_vertebra.pyi`.
-- `OracleNotificationSource` executes an idle `SELECT 1 FROM DUAL` session liveness probe whenever an `OracleNotifyConfig.wait_timeout_seconds` poll cycle yields no queued messages so dropped connections trigger reconnect backoff immediately.
+- `SyncOracleNotificationSource` and `AsyncOracleNotificationSource` execute an idle `SELECT 1 FROM DUAL` session liveness probe whenever an `OracleNotifyConfig.wait_timeout_seconds` poll cycle yields no queued messages so dropped connections trigger reconnect backoff immediately.
 
 ### Removed
 

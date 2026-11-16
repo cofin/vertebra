@@ -194,6 +194,7 @@ paths = [
   "src/rs/vertebra-duckdb/**",
   "src/rs/vertebra-oracle/**",
   "src/rs/vertebra-sqlite/**",
+  "src/rs/vertebra-redis/**",
   "src/rs/vertebra-bundler/src/lib.rs",
   "src/rs/vertebra-storage/src/lib.rs",
   "src/py/vertebra/_vertebra.pyi",
@@ -206,7 +207,8 @@ paths = [
   "src/py/vertebra/_spanner.pyi",
   "src/py/vertebra/_duckdb.pyi",
   "src/py/vertebra/_oracle.pyi",
-  "src/py/vertebra/_sqlite.pyi"
+  "src/py/vertebra/_sqlite.pyi",
+  "src/py/vertebra/_redis.pyi"
 ]
 knowledge = [
   ".agents/bundles/knowledge/architecture/worker/pyo3-ffi-and-batch-dispatch.md",

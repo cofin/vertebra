@@ -5,11 +5,15 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
-from vertebra.db.adapters.oracle.notify import validate_oracle_channel_name
+from vertebra.db.adapters.oracle.notify import (
+    OracleNotifyConfig,
+    SyncOracleNotificationSource,
+    validate_oracle_channel_name,
+)
 from vertebra.db.adapters.oracle.pipeline import SyncOraclePipeline
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
@@ -17,9 +21,12 @@ from vertebra.db.arrow import (
     _hydrate_rows_with_schema,
     _table_to_rows_and_cols,
 )
-from vertebra.db.driver import InterfaceError, SyncDatabaseDriver
+from vertebra.db.driver import InterfaceError, NotificationEvent, SyncDatabaseDriver
 from vertebra.db.rls import TenantScopeConfig
 from vertebra.utils.text import validate_identifier
+
+if TYPE_CHECKING:
+    from vertebra.db.cdc import ChangeFeed
 
 __all__ = (
     "SyncOracleDriver",
@@ -704,6 +711,26 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                 correlation_id=correlation_id,
             )
             return bytes(msg_id_bytes).decode("ascii", errors="replace")
+
+    def notification_source(
+        self,
+        config: OracleNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+    ) -> SyncOracleNotificationSource:
+        """Construct a SyncOracleNotificationSource bound to this synchronous driver."""
+        return SyncOracleNotificationSource(self, config, change_feed=change_feed)
+
+    def listen_notifications(
+        self,
+        channels: Sequence[str],
+        *,
+        config: OracleNotifyConfig | None = None,
+    ) -> Iterator[NotificationEvent]:
+        """Subscribe to channels and yield NotificationEvent frames with automatic cleanup."""
+        source = SyncOracleNotificationSource(self, config)
+        source.subscribe(channels)
+        yield from source.listen()
 
     def _get_pinned_lease(self) -> Any | None:
         mapping = _SYNC_PINNED_TX.get()

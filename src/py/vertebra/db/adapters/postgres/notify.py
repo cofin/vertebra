@@ -5,27 +5,35 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from collections.abc import AsyncIterator, Awaitable, Buffer, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Buffer, Callable, Iterator, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Final, Self
 
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.driver import (
+    AsyncNotificationSource,
     DatabaseError,
     InterfaceError,
     NotificationEvent,
-    NotificationSource,
     NotSupportedError,
+    SyncNotificationSource,
 )
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._postgres import AsyncPostgresListener
-    from vertebra.db.adapters.postgres.events import PostgresNotificationDriver
+    from vertebra._postgres import AsyncPostgresListener, SyncPostgresListener
+    from vertebra.db.adapters.postgres.events import (
+        PostgresNotificationDriver,
+        SyncPostgresNotificationDriver,
+    )
     from vertebra.db.cdc import ChangeFeed
 
-__all__ = ("PostgresNotificationSource", "PostgresNotifyConfig")
+__all__ = (
+    "AsyncPostgresNotificationSource",
+    "PostgresNotifyConfig",
+    "SyncPostgresNotificationSource",
+)
 
 
 class PostgresNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
@@ -60,7 +68,7 @@ class PostgresNotifyConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True
         validate_identifier(self.publication_name, "publication_name", allow_dots=False)
 
 
-class PostgresNotificationSource(NotificationSource):
+class AsyncPostgresNotificationSource(AsyncNotificationSource):
     """Publish PostgreSQL notifications and stream live AsyncPostgresListener frames."""
 
     __slots__ = (
@@ -193,7 +201,7 @@ class PostgresNotificationSource(NotificationSource):
         await self._drain_pending_closes()
 
     async def __aenter__(self) -> Self:
-        """Enter an async context returning this PostgresNotificationSource."""
+        """Enter an async context returning this AsyncPostgresNotificationSource."""
         return self
 
     async def __aexit__(
@@ -315,7 +323,7 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
 
     __slots__ = ("_closed", "_generation", "_listener", "_source", "_started")
 
-    def __init__(self, source: PostgresNotificationSource) -> None:
+    def __init__(self, source: AsyncPostgresNotificationSource) -> None:
         """Bind a fresh unstarted stream handle to source without holding a reverse reference."""
         self._source = source
         self._listener: AsyncPostgresListener | None = None
@@ -334,7 +342,7 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
         if not self._started:
             if self._source._listening:
                 self._closed = True
-                msg = "PostgresNotificationSource.listen() is already active on this source"
+                msg = "AsyncPostgresNotificationSource.listen() is already active on this source"
                 raise InterfaceError(msg)
             self._source._validate_direct_session_config()
             open_listener = self._source._resolve_open_listener()
@@ -418,6 +426,259 @@ class _PostgresNotificationStream(AsyncIterator[NotificationEvent]):
                 self._source._listener = None
                 self._source._listening = False
         return listener
+
+
+class SyncPostgresNotificationSource(SyncNotificationSource):
+    """Publish PostgreSQL notifications and stream live SyncPostgresListener frames."""
+
+    __slots__ = (
+        "_change_feed",
+        "_config",
+        "_driver",
+        "_listener",
+        "_listening",
+        "_queue_capacity",
+        "_reconnect",
+        "_subscribed_channels",
+    )
+
+    def __init__(
+        self,
+        driver: SyncPostgresNotificationDriver,
+        config: PostgresNotifyConfig | None = None,
+        *,
+        change_feed: ChangeFeed | None = None,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> None:
+        """Initialize a synchronous protocol-typed PostgreSQL notification source."""
+        if isinstance(queue_capacity, bool) or not isinstance(queue_capacity, int):
+            msg = "queue_capacity must be an int, not bool"
+            raise TypeError(msg)
+        if queue_capacity < 1:
+            msg = f"queue_capacity must be >= 1 (got {queue_capacity})"
+            raise ValueError(msg)
+        if not isinstance(reconnect, bool):
+            msg = "reconnect must be a bool"
+            raise TypeError(msg)
+        self._driver = driver
+        self._config = config or PostgresNotifyConfig()
+        self._change_feed = change_feed
+        self._queue_capacity = queue_capacity
+        self._reconnect = reconnect
+        self._subscribed_channels: dict[str, None] = {}
+        self._listener: SyncPostgresListener | None = None
+        self._listening = False
+
+    @property
+    def change_feed(self) -> ChangeFeed | None:
+        """Return the optional feed used to wrap and hydrate notification payloads."""
+        return self._change_feed
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        """Return an ordered snapshot of explicitly subscribed PostgreSQL channel names."""
+        return list(self._subscribed_channels)
+
+    @staticmethod
+    def build_emit_message_sql(
+        prefix: str,
+        payload: bytes | str,
+        *,
+        transactional: bool = True,
+    ) -> tuple[str, tuple[bool, str, bytes]]:
+        """Build a logical replication message statement with bound payload bytes."""
+        return AsyncPostgresNotificationSource.build_emit_message_sql(prefix, payload, transactional=transactional)
+
+    @staticmethod
+    def build_notify_sql(channel: str, payload: str) -> tuple[str, tuple[str, str]]:
+        """Build a notification statement with a validated 1..63-byte channel and payload."""
+        return AsyncPostgresNotificationSource.build_notify_sql(channel, payload)
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        """Publish a raw, base64-prefixed binary, or ChangeFeed payload through the driver."""
+        validated = _validate_channel(channel)
+        if not isinstance(payload, (str, Buffer)):
+            msg = "payload must be str or bytes-like"
+            raise TypeError(msg)
+        if self._change_feed is not None:
+            raw_bytes = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+            wire_payload, _ = self._change_feed.publish_event(
+                "PUBLISH",
+                {"channel": validated, "data_b64": base64.b64encode(raw_bytes).decode("ascii")},
+            )
+        else:
+            wire_payload = (
+                payload if isinstance(payload, str) else "b64:" + base64.b64encode(bytes(payload)).decode("ascii")
+            )
+        self._driver._publish_notification_sync(validated, wire_payload)
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        """Atomically validate channels and synchronize both desired and active LISTEN state."""
+        validated = AsyncPostgresNotificationSource._validate_channel_sequence(channels)
+        if not validated:
+            return
+        self._subscribed_channels.update(dict.fromkeys(validated))
+        listener = self._listener
+        if listener is not None and not listener.closed:
+            listener.subscribe(validated)
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        """Atomically validate channels and synchronize both desired and active UNLISTEN state."""
+        validated = AsyncPostgresNotificationSource._validate_channel_sequence(channels)
+        if not validated:
+            return
+        for channel in validated:
+            self._subscribed_channels.pop(channel, None)
+        listener = self._listener
+        if listener is not None and not listener.closed:
+            listener.unsubscribe(validated)
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        """Return a single-consumer sync iterator streaming hydrated NotificationEvent frames."""
+        return _SyncPostgresNotificationStream(self)
+
+    def close(self) -> None:
+        """Idempotently close any active notification listener handle."""
+        self._listening = False
+        listener = self._listener
+        self._listener = None
+        if listener is not None:
+            listener.close()
+
+    def __enter__(self) -> Self:
+        """Enter a sync context returning this SyncPostgresNotificationSource."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        """Close any active notification listener on context exit without suppressing errors."""
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
+
+    def _validate_direct_session_config(self) -> None:
+        """Reject non-direct/session pooler modes lacking direct_dsn before listener dial."""
+        cfg = getattr(self._driver, "config", None)
+        if not isinstance(cfg, PostgreSQLConfig):
+            return
+        direct_cfg = cfg.derive_direct_config()
+        if direct_cfg.pooler_mode not in ("direct", "session") or direct_cfg.pgbouncer:
+            msg = (
+                "PostgreSQL LISTEN/NOTIFY requires a direct or session-mode connection "
+                f"(got pooler_mode={direct_cfg.pooler_mode!r}); configure direct_dsn for pooled deployments"
+            )
+            raise ImproperConfigurationError(msg)
+
+    def _resolve_open_listener(
+        self,
+    ) -> Callable[..., SyncPostgresListener]:
+        """Return the driver's sync listener opener or raise NotSupportedError."""
+        open_listener = getattr(self._driver, "_open_sync_notification_listener", None)
+        if not callable(open_listener):
+            msg = "Live PostgreSQL LISTEN streaming requires the native Rust PostgreSQL driver"
+            raise NotSupportedError(msg)
+        result: Callable[..., SyncPostgresListener] = open_listener
+        return result
+
+    def _hydrate_payload(self, raw_payload: bytes) -> bytes:
+        """Decode UTF-8 notification text and hydrate ChangeFeed or b64-prefixed binary payloads."""
+        text = raw_payload.decode("utf-8")
+        if self._change_feed is not None:
+            evt = self._change_feed.hydrate_notification(text)
+            return base64.b64decode(evt.payload["data_b64"])
+        if text.startswith("b64:"):
+            return base64.b64decode(text[4:])
+        return bytes(raw_payload)
+
+
+class _SyncPostgresNotificationStream(Iterator[NotificationEvent]):
+    """Synchronous notification iterator closing its native listener on exit."""
+
+    __slots__ = ("_closed", "_listener", "_source", "_started")
+
+    def __init__(self, source: SyncPostgresNotificationSource) -> None:
+        """Bind a fresh unstarted stream handle to source."""
+        self._source = source
+        self._listener: SyncPostgresListener | None = None
+        self._started = False
+        self._closed = False
+
+    def __iter__(self) -> Self:
+        """Return self as an Iterator of NotificationEvent items."""
+        return self
+
+    def __next__(self) -> NotificationEvent:
+        """Open the dedicated listener on first pull and yield the next NotificationEvent."""
+        if self._closed:
+            raise StopIteration
+        if not self._started:
+            if self._source._listening:
+                self._closed = True
+                msg = "SyncPostgresNotificationSource.listen() is already active on this source"
+                raise InterfaceError(msg)
+            self._source._validate_direct_session_config()
+            open_listener = self._source._resolve_open_listener()
+            self._started = True
+            self._source._listening = True
+            try:
+                initial_channels = tuple(self._source._subscribed_channels)
+                listener = open_listener(
+                    initial_channels,
+                    queue_capacity=self._source._queue_capacity,
+                    reconnect=self._source._reconnect,
+                )
+                self._listener = listener
+                self._source._listener = listener
+            except StopIteration:
+                raise
+            except BaseException:
+                self.close()
+                raise
+
+        active = self._listener
+        if active is None:
+            self.close()
+            raise StopIteration
+        try:
+            frame = active.next()
+            if frame is None:
+                self.close()
+                raise StopIteration
+            pid, channel, raw_payload, reconnected_gap = frame
+            hydrated = self._source._hydrate_payload(raw_payload)
+            return NotificationEvent(
+                channel=channel,
+                payload=hydrated,
+                sender_id=str(pid),
+                metadata={"reconnected": bool(reconnected_gap), "delivery": "at_most_once"},
+            )
+        except StopIteration:
+            raise
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Idempotently close the underlying native listener and release source ownership."""
+        if self._closed:
+            return
+        self._closed = True
+        listener = self._listener
+        self._listener = None
+        if self._started:
+            self._started = False
+            self._source._listener = None
+            self._source._listening = False
+        if listener is not None:
+            listener.close()
+
+    def __del__(self) -> None:
+        """Release source ownership and close listener when garbage collected."""
+        self.close()
 
 
 def _validate_channel(channel: str) -> str:

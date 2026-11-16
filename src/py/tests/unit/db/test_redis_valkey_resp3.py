@@ -5,27 +5,40 @@ from __future__ import annotations
 import asyncio
 import collections
 import socket
+import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
+    AsyncRedisNotificationSource,
     ClusterRedirect,
     PubSubMessage,
     RedisConfig,
-    Resp3Parser,
+    RedisNotifyConfig,
     SyncRedisDriver,
+    SyncRedisNotificationSource,
     crc16_xmodem,
     hash_slot,
     parse_cluster_redirect,
 )
 from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
+    Resp3Parser,
     SyncValkeyDriver,
     ValkeyConfig,
 )
+from vertebra.db.adapters.valkey import (
+    PubSubMessage as ValkeyPubSubMessage,
+)
+from vertebra.db.cdc import ChangeFeed
+from vertebra.db.driver import AsyncNotificationSource, NotificationEvent, SyncNotificationSource
+from vertebra.server._channels import ChannelBus
+from vertebra.typing import MissingDependencyError
+from vertebra.utils.module_loader import reset_dependency_cache
 
 if TYPE_CHECKING:
     from tests.unit.conftest import Resp3FakeServer
@@ -336,9 +349,9 @@ async def test_async_cluster_moved_and_ask_redirection() -> None:
     node2_port = srv2.sockets[0].getsockname()[1]
     node3_port = srv3.sockets[0].getsockname()[1]
 
-    driver = AsyncRedisDriver(
-        RedisConfig(
-            url=f"redis://127.0.0.1:{node1_port}/0",
+    driver = AsyncValkeyDriver(
+        ValkeyConfig(
+            url=f"valkey://127.0.0.1:{node1_port}/0",
             cluster_enabled=True,
             cluster_nodes=(("127.0.0.1", node1_port),),
             max_redirections=3,
@@ -368,7 +381,10 @@ async def test_async_cluster_moved_and_ask_redirection() -> None:
 async def test_sentinel_master_discovery_and_failover() -> None:
     """SyncRedisDriver and AsyncRedisDriver must discover master address via SENTINEL get-master-addr-by-name."""
 
+    client_writers: list[asyncio.StreamWriter] = []
+
     async def handle_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        client_writers.append(writer)
         buf = bytearray()
         while True:
             chunk = await reader.read(4096)
@@ -396,6 +412,7 @@ async def test_sentinel_master_discovery_and_failover() -> None:
     master_port = master_srv.sockets[0].getsockname()[1]
 
     async def handle_sentinel(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        client_writers.append(writer)
         buf = bytearray()
         while True:
             chunk = await reader.read(4096)
@@ -410,7 +427,9 @@ async def test_sentinel_master_discovery_and_failover() -> None:
                 del buf[:next_offset]
                 if isinstance(frame, list) and frame:
                     cmd = frame[0].decode("ascii").upper()
-                    if cmd == "SENTINEL":
+                    if cmd == "HELLO":
+                        writer.write(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                    elif cmd == "SENTINEL":
                         port_b = str(master_port).encode("ascii")
                         writer.write(
                             b"*2\r\n$9\r\n127.0.0.1\r\n$"
@@ -439,6 +458,8 @@ async def test_sentinel_master_discovery_and_failover() -> None:
         assert await async_driver.get("status") == b"master-active"
     finally:
         await async_driver.close()
+        for w in client_writers:
+            w.close()
         sentinel_srv.close()
         master_srv.close()
         await sentinel_srv.wait_closed()
@@ -517,9 +538,9 @@ async def test_multiplexed_resp3_pubsub_and_broker_forwarding() -> None:
 
         drained = driver.drain_messages()
         assert drained == [
-            PubSubMessage(kind="message", channel="events", payload=b"hello", pattern=None),
-            PubSubMessage(kind="pmessage", channel="user:1000", payload=b"matched", pattern="user:*"),
-            PubSubMessage(kind="smessage", channel="shard:{42}", payload=b"shard-event", pattern=None),
+            ValkeyPubSubMessage(kind="message", channel="events", payload=b"hello", pattern=None),
+            ValkeyPubSubMessage(kind="pmessage", channel="user:1000", payload=b"matched", pattern="user:*"),
+            ValkeyPubSubMessage(kind="smessage", channel="shard:{42}", payload=b"shard-event", pattern=None),
         ]
         assert broker.published == [
             ("events", b"hello"),
@@ -549,7 +570,10 @@ def test_sync_multiplexed_pubsub_and_cluster_moved_ask(resp3_server: Resp3FakeSe
         driver.publish("beta:42", b"msg-b")
         driver.execute_command("SPUBLISH", "shard:1", b"msg-s")
 
-        msgs = driver.drain_messages()
+        msgs: list[PubSubMessage] = []
+        deadline = time.monotonic() + 2.0
+        while len(msgs) < 3 and time.monotonic() < deadline:
+            msgs.extend(driver.drain_messages())
         assert msgs == [
             PubSubMessage(kind="message", channel="alpha", payload=b"msg-a", pattern=None),
             PubSubMessage(kind="pmessage", channel="beta:42", payload=b"msg-b", pattern="beta:*"),
@@ -620,3 +644,121 @@ async def test_async_iam_token_provider_coroutine_refresh_on_reconnect() -> None
         await driver.close()
         server.close()
         await server.wait_closed()
+
+
+def test_redis_notification_source_contracts_and_missing_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SyncRedisNotificationSource and AsyncRedisNotificationSource satisfy capability protocols and check wheel dependencies."""
+    monkeypatch.setitem(sys.modules, "vertebra._redis", None)
+    reset_dependency_cache("vertebra._redis")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SyncRedisNotificationSource(client=None)
+        assert exc_info.value.package == "vertebra-core[redis]"
+
+        with pytest.raises(MissingDependencyError) as async_exc:
+            AsyncRedisNotificationSource(client=None)
+        assert async_exc.value.package == "vertebra-core[redis]"
+    finally:
+        reset_dependency_cache("vertebra._redis")
+
+
+def test_sync_redis_notification_source_loopback(resp3_server: Resp3FakeServer) -> None:
+    """SyncRedisNotificationSource streams live pub/sub messages, supports pattern/shard subscriptions, and hydrates envelopes."""
+    driver = SyncRedisDriver(RedisConfig(url=f"redis://127.0.0.1:{resp3_server.port}/0"))
+    feed = ChangeFeed()
+    source = driver.notification_source(
+        RedisNotifyConfig(channels=("orders",), timeout_ms=50),
+        change_feed=feed,
+    )
+    assert isinstance(source, SyncNotificationSource)
+    assert source.subscribed_channels == ["orders"]
+
+    source.psubscribe(["alerts:*"])
+    source.ssubscribe(["shard:1"])
+    assert source.subscribed_patterns == ["alerts:*"]
+    assert source.subscribed_shard_channels == ["shard:1"]
+
+    with pytest.raises(TypeError):
+        source.subscribe("bad_channel")
+
+    events: list[NotificationEvent] = []
+    ready = threading.Event()
+
+    def run_listener() -> None:
+        stream = source.listen()
+        ready.set()
+        for evt in stream:
+            events.append(evt)
+            if len(events) >= 3:
+                break
+
+    t = threading.Thread(target=run_listener, daemon=True)
+    t.start()
+
+    assert ready.wait(timeout=2.0)
+    deadline = time.monotonic() + 2.0
+    while getattr(source, "_listener", None) is None and time.monotonic() < deadline:
+        threading.Event().wait(0.005)
+    threading.Event().wait(0.02)
+    source.publish("orders", b"order-created-1")
+    source.publish("alerts:cpu", b"high-cpu")
+    source.spublish("shard:1", b"shard-msg")
+
+    t.join(timeout=3.0)
+    assert not t.is_alive()
+    assert len(events) == 3
+    assert events[0].channel == "orders"
+    assert events[0].payload == b"order-created-1"
+    assert events[0].metadata["kind"] == "message"
+    assert events[1].channel == "alerts:cpu"
+    assert events[1].payload == b"high-cpu"
+    assert events[1].metadata["kind"] == "pmessage"
+    assert events[1].metadata["pattern"] == "alerts:*"
+    assert events[2].channel == "shard:1"
+    assert events[2].payload == b"shard-msg"
+    assert events[2].metadata["kind"] == "smessage"
+    assert events[2].metadata["shard"] is True
+
+    source.close()
+    driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_redis_notification_source_loopback_and_channelbus(resp3_server: Resp3FakeServer) -> None:
+    """AsyncRedisNotificationSource streams live frames, hydrates envelopes, and bridges ChannelBus."""
+    driver = AsyncRedisDriver(RedisConfig(url=f"redis://127.0.0.1:{resp3_server.port}/0"))
+    source = driver.notification_source(
+        RedisNotifyConfig(channels=("events",), timeout_ms=50),
+    )
+    assert isinstance(source, AsyncNotificationSource)
+
+    events: list[NotificationEvent] = []
+
+    async def consume() -> None:
+        async for evt in source.listen():
+            events.append(evt)
+            if len(events) >= 2:
+                break
+
+    task = asyncio.create_task(consume())
+    deadline = time.monotonic() + 2.0
+    while getattr(source, "_listener", None) is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.005)
+    await asyncio.sleep(0.02)
+
+    await source.publish("events", b"msg-1")
+    await source.publish("events", b"b64:aGVsbG8=")
+
+    await asyncio.wait_for(task, timeout=3.0)
+    assert len(events) == 2
+    assert events[0].payload == b"msg-1"
+    assert events[1].payload == b"hello"
+
+    bus = ChannelBus(notification_source=source)
+    await bus.on_startup()
+    await bus.subscribe(["events"])
+    await bus.publish(b"from-bus", ["events"])
+    await bus.on_shutdown()
+
+    await source.aclose()
+    await driver.close()

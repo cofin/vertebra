@@ -47,7 +47,7 @@ from vertebra.db.adapters.oracle.config import (
 )
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.adapters.oracle.notify import (
-    OracleNotificationSource,
+    AsyncOracleNotificationSource,
     OracleNotifyConfig,
     validate_oracle_channel_name,
 )
@@ -63,7 +63,11 @@ from vertebra.db.driver import (
     ProgrammingError,
     QueryCancelledError,
 )
-from vertebra.db.driver.capabilities import AsyncPipelineCapable, NotificationSource, SyncPipelineCapable
+from vertebra.db.driver.capabilities import (
+    AsyncNotificationSource,
+    AsyncPipelineCapable,
+    SyncPipelineCapable,
+)
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
 from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, OracleSyncDriver
 from vertebra.typing import ImproperConfigurationError
@@ -2647,13 +2651,13 @@ def test_validate_oracle_channel_name_rejects_invalid_identifiers(
 
 @pytest.mark.anyio
 async def test_oracle_notification_source_protocol_publish_subscribe_listen_and_change_feed() -> None:
-    """Verify NotificationSource protocol compliance, publish/subscribe/listen, and ChangeFeed envelopes."""
+    """Verify notification source protocol compliance, publish/subscribe/listen, and ChangeFeed envelopes."""
     async_stub = _StubAsyncOracleClient()
     async with AsyncOracleDriver(client=async_stub) as driver:
         source = driver.notification_source(
             OracleNotifyConfig(queue_prefix="VTB_AQ_", poll_timeout=0.05),
         )
-        assert isinstance(source, NotificationSource)
+        assert isinstance(source, AsyncNotificationSource)
 
         with pytest.raises(ProgrammingError) as exc_info:
             async for _ in source.listen():
@@ -2718,7 +2722,7 @@ async def test_oracle_notification_source_reconnect_backoff_and_cancellation_cle
         ]
     )
     async with AsyncOracleDriver(client=async_stub) as driver:
-        source = OracleNotificationSource(
+        source = AsyncOracleNotificationSource(
             driver,
             OracleNotifyConfig(
                 reconnect_initial_delay=0.25,

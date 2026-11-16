@@ -18,6 +18,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
@@ -63,7 +64,7 @@ from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLD
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
-from vertebra.db.adapters.postgres.notify import PostgresNotificationSource
+from vertebra.db.adapters.postgres.notify import AsyncPostgresNotificationSource
 from vertebra.db.adapters.redis import RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
@@ -80,14 +81,15 @@ from vertebra.db.dbapi import AsyncDBAPIConnection, NotSupportedError, SyncDBAPI
 from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
+    AsyncNotificationSource,
     AsyncPipeline,
     AsyncPipelineCapable,
     ClaimedJob,
     EmbeddingPushdown,
     NotificationEvent,
-    NotificationSource,
     QueueStore,
     SyncChangeSource,
+    SyncNotificationSource,
     SyncPipeline,
     SyncPipelineCapable,
 )
@@ -236,7 +238,8 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "NotFoundError",
         "NotSupportedError",
         "NotificationEvent",
-        "NotificationSource",
+        "AsyncNotificationSource",
+        "SyncNotificationSource",
         "OperationalError",
         "PoolExhaustedError",
         "ProgrammingError",
@@ -488,11 +491,11 @@ def test_postgres_pooler_modes_and_jsonb_strip() -> None:
         SyncPostgreSQLDriver().execute_tuples("SELECT 1")
     with pytest.raises((MissingDependencyError, Exception)):
         SyncMySQLDriver().execute_tuples("SELECT 1")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).get("k")
     with pytest.raises((MissingDependencyError, OSError)):
         SyncValkeyDriver(ValkeyConfig(url="valkey://127.0.0.1:1/0")).set("k", "v")
-    with pytest.raises((MissingDependencyError, OSError)):
+    with pytest.raises((MissingDependencyError, OSError, OperationalError)):
         SyncRedisDriver(RedisConfig(url="redis://127.0.0.1:1/0")).publish("chan", b"msg")
 
 
@@ -684,7 +687,7 @@ async def test_channel_bus_shared_feed_publish_and_notification_hydration() -> N
 
     driver = Driver()
     feed = ChangeFeed(CDCConfig(spill_threshold_bytes=16))
-    source = PostgresNotificationSource(cast(Any, driver), change_feed=feed)
+    source = AsyncPostgresNotificationSource(cast(Any, driver), change_feed=feed)
     bus = ChannelBus(notification_source=source, change_feed=feed, history=4)
     payload = b"\x00\xff" * 5000
     await bus.on_startup()
@@ -1971,7 +1974,8 @@ _CAPABILITY_EXPORT_NAMES: tuple[str, ...] = (
     "ClaimedJob",
     "EmbeddingPushdown",
     "NotificationEvent",
-    "NotificationSource",
+    "AsyncNotificationSource",
+    "SyncNotificationSource",
     "QueueStore",
     "SyncChangeSource",
     "SyncPipeline",
@@ -2042,13 +2046,17 @@ class _ConformingAsyncPipelineDriver:
 
 
 class _ConformingNotificationSource:
-    """Minimal conforming stand-in for `NotificationSource`."""
+    """Minimal conforming stand-in for `AsyncNotificationSource`."""
 
     __slots__ = ("_events", "_subscribed")
 
     def __init__(self) -> None:
         self._subscribed: set[str] = set()
         self._events: list[NotificationEvent] = []
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        return list(self._subscribed)
 
     async def publish(self, channel: str, payload: bytes | str) -> None:
         raw = payload.encode("utf-8") if isinstance(payload, str) else payload
@@ -2064,6 +2072,62 @@ class _ConformingNotificationSource:
     async def listen(self) -> AsyncIterator[NotificationEvent]:
         for event in tuple(self._events):
             yield event
+
+    async def aclose(self) -> None:
+        pass
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        pass
+
+
+class _ConformingSyncNotificationSource:
+    """Minimal conforming stand-in for `SyncNotificationSource`."""
+
+    __slots__ = ("_events", "_subscribed")
+
+    def __init__(self) -> None:
+        self._subscribed: set[str] = set()
+        self._events: list[NotificationEvent] = []
+
+    @property
+    def subscribed_channels(self) -> list[str]:
+        return list(self._subscribed)
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+        if channel in self._subscribed:
+            self._events.append(NotificationEvent(channel=channel, payload=raw, sender_id="sync-standin"))
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.update(channels)
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        self._subscribed.difference_update(channels)
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        yield from tuple(self._events)
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        pass
 
 
 class _ConformingSyncChangeSource:
@@ -2315,7 +2379,8 @@ def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
         (_ConformingAsyncPipeline, AsyncPipeline),
         (_ConformingSyncPipelineDriver, SyncPipelineCapable),
         (_ConformingAsyncPipelineDriver, AsyncPipelineCapable),
-        (_ConformingNotificationSource, NotificationSource),
+        (_ConformingNotificationSource, AsyncNotificationSource),
+        (_ConformingSyncNotificationSource, SyncNotificationSource),
         (_ConformingSyncChangeSource, SyncChangeSource),
         (_ConformingAsyncChangeSource, AsyncChangeSource),
         (_ConformingQueueStore, QueueStore),
@@ -2349,12 +2414,22 @@ def test_capability_protocols_runtime_isinstance_and_sqlite_negative_checks(
         sqlite_sync.close()
 
 
+def test_notification_source_legacy_symbol_cleanly_removed() -> None:
+    """Verify legacy NotificationSource symbol raises AttributeError or ImportError."""
+    import vertebra.db as db_mod
+    import vertebra.db.driver as driver_mod
+
+    assert not hasattr(driver_mod, "NotificationSource")
+    assert not hasattr(db_mod, "NotificationSource")
+
+
 @pytest.mark.anyio
 async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -> None:
     """Verify static structural typing and end-to-end execution across all capability protocols."""
     sync_capable: SyncPipelineCapable = _ConformingSyncPipelineDriver()
     async_capable: AsyncPipelineCapable = _ConformingAsyncPipelineDriver()
-    notif_source: NotificationSource = _ConformingNotificationSource()
+    async_notif_source: AsyncNotificationSource = _ConformingNotificationSource()
+    sync_notif_source: SyncNotificationSource = _ConformingSyncNotificationSource()
     sync_cdc: SyncChangeSource = _ConformingSyncChangeSource()
     async_cdc: AsyncChangeSource = _ConformingAsyncChangeSource()
     queue_store: QueueStore = _ConformingQueueStore()
@@ -2376,11 +2451,17 @@ async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -
         async_pipe.select("SELECT 2")
         assert len(await async_pipe.results()) == 2
 
-    await notif_source.subscribe(["events"])
-    await notif_source.publish("events", "hello")
-    received = [evt async for evt in notif_source.listen()]
+    await async_notif_source.subscribe(["events"])
+    await async_notif_source.publish("events", "hello")
+    received = [evt async for evt in async_notif_source.listen()]
     assert received == [NotificationEvent(channel="events", payload=b"hello", sender_id="standin")]
-    await notif_source.unsubscribe(["events"])
+    await async_notif_source.unsubscribe(["events"])
+
+    sync_notif_source.subscribe(["events"])
+    sync_notif_source.publish("events", "hello-sync")
+    sync_received = list(sync_notif_source.listen())
+    assert sync_received == [NotificationEvent(channel="events", payload=b"hello-sync", sender_id="sync-standin")]
+    sync_notif_source.unsubscribe(["events"])
 
     sync_events = list(sync_cdc.stream())
     assert len(sync_events) == 1 and sync_events[0].operation == "INSERT"

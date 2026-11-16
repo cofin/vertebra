@@ -368,11 +368,11 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
 
     engine: str
     """Cache adapter identifier (`redis` or `valkey`)."""
-    config_cls: type[RedisConfig]
+    config_cls: type[Any]
     """Configuration class (`RedisConfig` or `ValkeyConfig`)."""
-    sync_driver_cls: type[SyncRedisDriver]
+    sync_driver_cls: type[Any]
     """Synchronous RESP3 driver class."""
-    async_driver_cls: type[AsyncRedisDriver]
+    async_driver_cls: type[Any]
     """Asynchronous RESP3 driver class."""
     tcp_url: str
     """Canonical TCP URL used to verify URL parsing and shared pool keys."""
@@ -380,6 +380,8 @@ class CacheConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Environment variables holding a live server URL, checked in order."""
     container_fixture: str | None = None
     """Optional `pytest-databases` configuration fixture in `conftest.py` used when `VERTEBRA_CONFORMANCE_DOCKER=1`."""
+    native_extension_module: str | None = None
+    """Optional native PyO3 extension module required for live conformance."""
 
 
 class _StubDataFusionFrame:
@@ -633,6 +635,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         tcp_url="redis://127.0.0.1:6379/2",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_REDIS_DSN",),
         container_fixture="vtb_redis_config",
+        native_extension_module="vertebra._redis",
     ),
     CacheConformanceSpec(
         engine="valkey",
@@ -642,6 +645,7 @@ CACHE_ENGINE_SPECS: tuple[CacheConformanceSpec, ...] = (
         tcp_url="valkey://127.0.0.1:6379/2",
         env_dsn_vars=("VERTEBRA_CONFORMANCE_VALKEY_DSN",),
         container_fixture="vtb_valkey_config",
+        native_extension_module=None,
     ),
 )
 
@@ -1515,6 +1519,8 @@ def test_datafusion_table_registration_and_arrow_execution(input_kind: str) -> N
 @pytest.mark.parametrize("cache_spec", CACHE_ENGINE_SPECS, ids=[s.engine for s in CACHE_ENGINE_SPECS])
 async def test_cache_config_url_pool_key_and_provide_driver(cache_spec: CacheConformanceSpec) -> None:
     """`RedisConfig` and `ValkeyConfig` parse URLs, expose `pool_key`, and resolve drivers via `provide_driver`."""
+    if cache_spec.native_extension_module is not None and import_optional(cache_spec.native_extension_module) is None:
+        pytest.skip(f"{cache_spec.engine} conformance requires the {cache_spec.native_extension_module} native module")
     parsed = DatabaseRegistry.parse_url(cache_spec.tcp_url)
     assert isinstance(parsed, cache_spec.config_cls)
     assert parsed == cache_spec.config_cls.from_url(cache_spec.tcp_url)
@@ -1538,8 +1544,16 @@ async def test_cache_config_url_pool_key_and_provide_driver(cache_spec: CacheCon
 def _resolve_cache_config(
     cache_spec: CacheConformanceSpec,
     request: pytest.FixtureRequest,
-) -> RedisConfig:
+) -> BaseDatabaseConfig:
     """Resolve a live `RedisConfig` or `ValkeyConfig` from an env DSN or `pytest-databases` container, skipping otherwise."""
+    if cache_spec.native_extension_module is not None:
+        try:
+            ensure_module(cache_spec.native_extension_module)
+        except MissingDependencyError:
+            reason = f"{cache_spec.engine} conformance requires the {cache_spec.native_extension_module} native module"
+            if os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
+                pytest.fail(reason, pytrace=False)
+            pytest.skip(reason)
     selected_engines = _parse_conformance_env_filter(os.environ, "VERTEBRA_CONFORMANCE_ENGINES")
     if selected_engines and cache_spec.engine not in selected_engines:
         pytest.skip(f"{cache_spec.engine} conformance excluded by VERTEBRA_CONFORMANCE_ENGINES")
@@ -1547,12 +1561,12 @@ def _resolve_cache_config(
         value = os.environ.get(env_key, "").strip()
         if value:
             return cache_spec.config_cls.from_url(value)
-    if cache_spec.container_fixture is not None and os.environ.get("VERTEBRA_CONFORMANCE_DOCKER") == "1":
+    if cache_spec.container_fixture is not None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
         fixture_cfg = request.getfixturevalue(cache_spec.container_fixture)
         assert isinstance(fixture_cfg, cache_spec.config_cls)
         return fixture_cfg
     pytest.skip(
-        f"{cache_spec.engine} conformance requires {' or '.join(cache_spec.env_dsn_vars)} or VERTEBRA_CONFORMANCE_DOCKER=1"
+        f"{cache_spec.engine} conformance requires {' or '.join(cache_spec.env_dsn_vars)} or {_CONFORMANCE_DOCKER_ENV}=1"
     )
 
 
@@ -1784,6 +1798,21 @@ def test_mssql_driver_raises_missing_dependency_when_wheel_absent(
             AsyncMSSQLDriver()
     finally:
         reset_dependency_cache("vertebra._mssql")
+
+
+def test_redis_driver_raises_missing_dependency_when_wheel_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SyncRedisDriver and AsyncRedisDriver fail loud with MissingDependencyError when vertebra._redis is absent."""
+    monkeypatch.setitem(sys.modules, "vertebra._redis", None)
+    reset_dependency_cache("vertebra._redis")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[redis\]"):
+            SyncRedisDriver()
+        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[redis\]"):
+            AsyncRedisDriver()
+    finally:
+        reset_dependency_cache("vertebra._redis")
 
 
 def test_postgres_conformance_spec_and_version_matrix() -> None:

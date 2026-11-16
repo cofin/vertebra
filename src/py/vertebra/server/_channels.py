@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Iterable
 from typing import Self
 
 from vertebra.db.cdc import ChangeEvent, ChangeFeed
-from vertebra.db.driver import AsyncChangeSource, NotificationSource
+from vertebra.db.driver import AsyncChangeSource, AsyncNotificationSource
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = ("ChannelBus",)
@@ -35,7 +35,7 @@ class ChannelBus:
         backend: ChannelBus | None = None,
         *,
         history: int = 0,
-        notification_source: NotificationSource | None = None,
+        notification_source: AsyncNotificationSource | None = None,
         change_source: AsyncChangeSource | None = None,
         change_feed: ChangeFeed | None = None,
     ) -> None:
@@ -70,7 +70,7 @@ class ChannelBus:
         return tuple(sorted(self._subscribed_channels | self._history.keys()))
 
     @property
-    def notification_source(self) -> NotificationSource | None:
+    def notification_source(self) -> AsyncNotificationSource | None:
         """Return the attached notification capability."""
         return self._notification_source
 
@@ -147,7 +147,7 @@ class ChannelBus:
         items = list(self._history.get(channel, ()))
         return items[-limit:] if limit is not None and limit > 0 else items
 
-    async def pump_notifications(self, source: NotificationSource | None = None) -> None:
+    async def pump_notifications(self, source: AsyncNotificationSource | None = None) -> None:
         """Consume notification frames, hydrating feed envelopes and binary wrappers."""
         resolved = source if source is not None else self._notification_source
         if resolved is None:

@@ -1,6 +1,7 @@
 """Type stubs for the vertebra._oracle native extension module."""
 
 from collections.abc import Awaitable, Mapping, Sequence
+from types import TracebackType
 from typing import Any, final
 
 from vertebra.db.arrow import ArrowCursor
@@ -111,6 +112,26 @@ class AsyncOracleListener:
     def dropped_count(self) -> int: ...
     def next_notification(self, timeout: float | None = None) -> Awaitable[OracleNotification | None]: ...
     def close(self) -> Awaitable[None]: ...
+
+@final
+class SyncOracleListener:
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def consumer_name(self) -> str | None: ...
+    @property
+    def is_closed(self) -> bool: ...
+    @property
+    def dropped_count(self) -> int: ...
+    def next_notification(self, timeout: float | None = None) -> OracleNotification | None: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> SyncOracleListener: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool: ...
 
 @final
 class SyncOracleClient:
@@ -237,6 +258,14 @@ class SyncOracleClient:
         *,
         continue_on_error: bool = False,
     ) -> list[OraclePipelineOutcome]: ...
+    def open_listener(
+        self,
+        *,
+        queue_name: str,
+        consumer_name: str | None = None,
+        wait_timeout_seconds: int = 5,
+        max_buffered: int = 1024,
+    ) -> SyncOracleListener: ...
     def enqueue_notification(
         self,
         *,
@@ -596,6 +625,7 @@ __all__ = [
     "OraclePipelineOutcome",
     "OracleQueryResult",
     "SyncOracleClient",
+    "SyncOracleListener",
     "SyncOraclePool",
     "__version__",
     "broker_engine_capsule",

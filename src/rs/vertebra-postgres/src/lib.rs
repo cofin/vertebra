@@ -51,7 +51,7 @@ pub mod types;
 
 pub use crate::async_client::{
     PyAsyncPostgresArrowStream, PyAsyncPostgresCopyIn, PyAsyncPostgresCopyOut,
-    PyAsyncPostgresListener, PyAsyncPostgresPortal,
+    PyAsyncPostgresListener, PyAsyncPostgresPortal, PySyncPostgresListener,
 };
 pub use crate::replication::PyAsyncPostgresReplication;
 pub use crate::session::statements::{

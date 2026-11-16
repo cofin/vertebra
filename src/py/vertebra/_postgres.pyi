@@ -204,6 +204,16 @@ class SyncPostgresClient:
         """Open a dedicated non-pooled Direct/Session PostgreSQL LISTEN/NOTIFY session asynchronously."""
         ...
 
+    def open_sync_listener(
+        self,
+        channels: Sequence[str],
+        *,
+        queue_capacity: int = 1024,
+        reconnect: bool = False,
+    ) -> SyncPostgresListener:
+        """Open a dedicated non-pooled Direct/Session PostgreSQL LISTEN/NOTIFY session synchronously."""
+        ...
+
     @property
     def closed(self) -> bool:
         """Return True unless an authenticated session is currently active."""
@@ -899,6 +909,44 @@ class AsyncPostgresListener:
         ...
 
 @final
+class SyncPostgresListener:
+    """Dedicated non-pooled synchronous PostgreSQL LISTEN/NOTIFY listener handle."""
+
+    @property
+    def closed(self) -> bool:
+        """Return a read-only zero-I/O snapshot of whether the listener has permanently closed."""
+        ...
+
+    def next(self) -> tuple[int, str, bytes, bool] | None:
+        """Block awaiting next (pid, channel, payload_bytes, reconnected_gap) or None after close()."""
+        ...
+
+    def subscribe(self, channels: Sequence[str]) -> None:
+        """Issue LISTEN for channels and block until ReadyForQuery arrives."""
+        ...
+
+    def unsubscribe(self, channels: Sequence[str]) -> None:
+        """Issue UNLISTEN for channels and block until ReadyForQuery arrives."""
+        ...
+
+    def close(self) -> None:
+        """Idempotently close the listener and wake any pending next() with None."""
+        ...
+
+    def __enter__(self) -> SyncPostgresListener:
+        """Enter a sync with block resolving to this SyncPostgresListener."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        """Idempotently close the listener on sync context exit without suppressing exceptions."""
+        ...
+
+@final
 class AsyncPostgresReplication:
     """Dedicated non-pooled asynchronous PostgreSQL logical replication stream handle."""
 
@@ -955,6 +1003,7 @@ __all__ = [
     "SyncPostgresClient",
     "SyncPostgresCopyIn",
     "SyncPostgresCopyOut",
+    "SyncPostgresListener",
     "SyncPostgresPool",
     "SyncPostgresPortal",
     "__version__",

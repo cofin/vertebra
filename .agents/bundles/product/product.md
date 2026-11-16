@@ -23,12 +23,6 @@ verified:
   - by: agent:flow-sync
     at: "2026-11-09T21:46:00Z"
     commit: 14aa83b8
-  - by: agent:flow-executor
-    at: "2026-11-09T15:06:00Z"
-    commit: af1b3d30
-  - by: agent:docs-okf-specialist
-    at: "2026-11-09T02:24:00Z"
-    commit: 067fa901
 sources:
   - id: src-vertebra-mysql-lib-rs
     resource: src/rs/vertebra-mysql/src/lib.rs
@@ -51,6 +45,9 @@ sources:
   - id: src-vertebra-postgres-lib-rs
     resource: src/rs/vertebra-postgres/src/lib.rs
     title: "Rust PyO3 extension module (vertebra._postgres)"
+  - id: src-vertebra-redis-lib-rs
+    resource: src/rs/vertebra-redis/src/lib.rs
+    title: "Rust PyO3 extension module (vertebra._redis)"
   - id: src-tenant-rls-py
     resource: src/py/vertebra/db/rls.py
     title: "Engine-neutral tenant configuration and ANSI predicates"
@@ -124,7 +121,7 @@ Vertebra is one unified runtime for Python and TypeScript — backend, frontend,
 - **Runtime Topologies**: `vtb run --topology auto|embedded|shm [--jit/--no-jit]` selects one of the embedded, shared-memory, or free-threaded execution modes below.
 - **Embedded Topology** (default for single-worker or free-threaded Python; multi-worker `SO_REUSEPORT` on Unix when explicitly `--topology embedded` with `workers > 1`): the `vertebra-server` binary embeds Python through `append_to_inittab!(pymodule_init)` in [`main.rs`](../../../src/rs/vertebra-http/src/main.rs), hands zero-copy `InProcessRequest` batches to [`worker.py`](../../../src/py/vertebra/server/worker.py) (`run_worker`) through [`BatchBridge`](../../../src/rs/vertebra-core/src/bridge.rs) (`ResponseSink` direct completion), and supervises `W` symmetric `SO_REUSEPORT` worker processes sharing pre-initialized SHM broker FDs when `workers > 1`.
 - **Shared Memory Topology** (`--topology shm`, auto-selected on POSIX GIL Python when `--workers > 1`): Python worker subprocesses spawned by [`RingFactory`](../../../src/rs/vertebra-http/src/workers/factory.rs) read requests zero-copy from [`MpmcRing`](../../../src/rs/vertebra-core/src/channel.rs) and write responses to the small/medium/large/xlarge `SpscRing` tiers of [`TieredRingSet`](../../../src/rs/vertebra-core/src/transport/ring_pair.rs) using Dekker `SeqCst` `consumer_sleeping` wakeups (`ShmHeader` `ABI_VERSION = 3`). Container-aware [`RingPairConfig::for_environment`](../../../src/rs/vertebra-core/src/transport/ring_pair.rs) sizes primary rings (`46 MiB/worker` default, `12 MiB/worker` `compact` profile) via anonymous `memfd_create` on Linux and `shm_open` elsewhere, with automatic `/tmp/vtb-*` file-backed fallback for `VQOV`/`VROV` overflow payloads when `/dev/shm` is constrained.
-- **Free-threaded Python (`3.14t`, `3.15t`)**: `_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, and `_postgres` declare `#[pymodule(gil_used = false)]`, disable global-mutex PyO3 freelists under `Py_GIL_DISABLED`, freeze non-subclassed `#[pyclass]` types (`immutable_type`), and spawn multi-thread embedded Python worker pools; CI and `cibuildwheel` cover `3.12`–`3.15` and `3.14t`/`3.15t`.
+- **Free-threaded Python (`3.14t`, `3.15t`)**: `_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`, and `_redis` declare `#[pymodule(gil_used = false)]`, disable global-mutex PyO3 freelists under `Py_GIL_DISABLED`, freeze non-subclassed `#[pyclass]` types (`immutable_type`), and spawn multi-thread embedded Python worker pools; CI and `cibuildwheel` cover `3.12`–`3.15` and `3.14t`/`3.15t`.
 - **Native HTTP (`vertebra-http`)**: Hyper HTTP/1.1 (`max_buf_size(65536)`, `pipeline_flush(false)`) and HTTP/2, opt-in h2c detection, `rustls` TLS with ALPN and mTLS (`tls` feature), optional HTTP/3 over QUIC (`http3` feature), lock-free atomic [`BackpressureController`](../../../src/rs/vertebra-http/src/backpressure.rs), cached `HealthEndpoint`, offloaded CORS, response compression, static asset mounts, OpenAPI cache, and HMR WebSockets, plus gRPC framing (`application/grpc`, `+json`, `+msgpack`), an SSE hub, WebSocket mounts, a shared-memory pub/sub broker, access logs, multipart parsing, `.well-known` discovery (`/.well-known/mcp.json`, `/.well-known/agent-card.json`), and MCP JSON-RPC observability header extraction.
 - **Bundling & SSR (`vertebra-bundler`)**: Oxc TS/JSX transforms ([`Bundler`](../../../src/rs/vertebra-bundler/src/bundler.rs)), `rolldown-notify` `SourceWatcher` for HMR, and QuickJS SSR context pooling ([`SSRPool`](../../../src/rs/vertebra-bundler/src/ssr.rs)).
 - **Object Storage (`vertebra-storage`, `vertebra.storage`)**: the `_storage` extension (`SyncObjectStore`, `AsyncObjectStore`, `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `ObjectMeta`, `StorageBuffer`, `RustTaskAwaitable`) wraps `object_store` (S3, GCS, Azure, HTTP) plus a native OCI REST backend ([`oci.rs`](../../../src/rs/vertebra-storage/src/oci.rs)) and S3/GCS/Azure/OCI/HMAC presigning ([`signing.rs`](../../../src/rs/vertebra-storage/src/signing.rs)); GCS stores consume `SyncGcpTokenCache` / `AsyncGcpTokenCache` / `GcpTokenSnapshot` from `vertebra._vertebra` through a named C-ABI capsule. Python exposes [`SyncObjectStore`, `AsyncObjectStore`](../../../src/py/vertebra/storage/_store.py) with `LocalConfig`, `S3Config`, `GCSConfig`, `AzureConfig`, `OCIConfig`, `R2Config`, `HTTPConfig`, `MemoryConfig`, `SigningConfig`, `PutResult`, and `PreconditionError`; conditional writes, bulk `get_file` / `download_many` / `upload_many` / `staged_download`, `glob`, server-side GCS `compose`, read-ahead `SyncReadableFile` / `AsyncReadableFile`, multipart `SyncWritableFile` / `AsyncWritableFile`, Arrow/Parquet batch codecs, and `StreamingStorageResponse` HTTP Range delivery.
@@ -159,6 +156,7 @@ Tenant configuration is engine-neutral (`setting_name`, optional parameter cast,
 | Rust DuckDB Extension | [`src/rs/vertebra-duckdb/`](../../../src/rs/vertebra-duckdb/src/lib.rs)[^src-vertebra-duckdb-lib-rs] | PyO3 `vertebra._duckdb`: `SyncDuckDBClient`, `AsyncDuckDBClient`, bundled DuckDB 2.0 single-writer/multi-reader session pool, `arrow 60` -> `VTBARROW` SHM transport, `Appender` bulk load, savepoint isolation, `InterruptHandle` cancellation, and dynamic secret rotation |
 | Rust Oracle Extension | [`src/rs/vertebra-oracle/`](../../../src/rs/vertebra-oracle/src/lib.rs)[^src-vertebra-oracle-lib-rs] | PyO3 `vertebra._oracle`: `SyncOracleClient`, `AsyncOracleClient`, pure-Rust Thin TNS/TTC, Autonomous Database wallet mTLS, DRCP pools, 26ai `VECTOR`/`OSON`, `VTBARROW` SHM transport, and TxEventQ notifications |
 | Rust PostgreSQL Extension | [`src/rs/vertebra-postgres/`](../../../src/rs/vertebra-postgres/src/lib.rs)[^src-vertebra-postgres-lib-rs] | PyO3 `vertebra._postgres`: `SyncPostgresClient`, `AsyncPostgresClient`, SCRAM-SHA-256-PLUS, Cloud SQL / AlloyDB mTLS + IAM, single-`Sync` pipelines, binary `COPY`, `VTBARROW` SHM transport, `AsyncPostgresListener`, and `AsyncPostgresReplication` (`pgoutput` v1) |
+| Rust Redis Extension | [`src/rs/vertebra-redis/`](../../../src/rs/vertebra-redis/src/lib.rs)[^src-vertebra-redis-lib-rs] | PyO3 `vertebra._redis`: `SyncRedisClient`, `AsyncRedisClient`, RESP3, pipelines, `CLIENT TRACKING` L1 caching, Sentinel, Cluster routing, and Streams |
 | Rust Database & Wire Engine | [`src/rs/vertebra-db/`](../../../src/rs/vertebra-db/src/lib.rs) | `CloudSqlInstanceUri`, `AlloyDbClusterUri`, `PoolerMode`/`compute_worker_pool_budget`, `decode_pgcopy_binary_rows`/`encode_pgcopy_binary_rows`, `SqliteConfig`, `parse_tnsnames_ora`, `OracleConnectDescriptor`, `encode_oracle_vector_{f32,f64,i8,binary}`, `rewrite_mssql_placeholders`, `DuckdbConfig`, `parse_resp3_frame`, `crc16_xmodem`/`redis_hash_slot`, `ShmArrowFrameHeader`/`ShmArrowStreamWriter` |
 | TypeScript Client SDK | [`src/ts/vertebra-client/`](../../../src/ts/vertebra-client/src/index.ts)[^src-src-index-ts] | `@vertebra/client` multi-entry package and framework adapters |
 
@@ -177,6 +175,7 @@ Provenance sources: [^src-readme-md], [^src-pyproject-toml], [^src-wasm-init-py]
 [^src-vertebra-duckdb-lib-rs]: `src/rs/vertebra-duckdb/src/lib.rs` — Rust PyO3 extension module (vertebra._duckdb).
 [^src-vertebra-oracle-lib-rs]: `src/rs/vertebra-oracle/src/lib.rs` — Rust PyO3 extension module (vertebra._oracle).
 [^src-vertebra-postgres-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Rust PyO3 extension module (vertebra._postgres).
+[^src-vertebra-redis-lib-rs]: `src/rs/vertebra-redis/src/lib.rs` — Rust PyO3 extension module (vertebra._redis).
 [^src-tenant-rls-py]: `src/py/vertebra/db/rls.py` — Engine-neutral tenant configuration and ANSI predicates.
 [^src-tenant-sqlspec-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — Engine-owned session enforcement and unsupported-adapter refusal.
 [^src-bigquery-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — Adapter-owned BigQuery tool provider.
