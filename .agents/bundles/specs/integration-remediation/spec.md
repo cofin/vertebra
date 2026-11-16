@@ -14,9 +14,9 @@ research:
   - research/google-cloud-rust_20261103.md
 plan_revision: 12
 plan_commit: 473e1f2e
-state_revision: 9
-current_task: "integration-remediation:t12"
-last_verified_checkpoint: 1f0716d1
+state_revision: 10
+current_task: "integration-remediation:t13"
+last_verified_checkpoint: 4fad78c5
 created_at: '2026-11-03T03:30:00Z'
 updated_at: '2026-11-15T23:10:00Z'
 generated:
@@ -48,7 +48,7 @@ sources:
     resource: src/py/vertebra/server/_fastpath_core.py
     title: Shared FastPathProvider core across ASGI, WSGI, and native frameworks
   - id: sqlspec-adapters
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    resource: src/py/vertebra/extensions/sqlspec/adapters/__init__.py
     title: SQLSpec adapter configuration and driver bindings
   - id: sa-dbapi
     resource: src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection
@@ -79,7 +79,7 @@ sources:
 - **Architectural Layering**: `vertebra.db` owns drivers, configs, neutral `dbapi/`, and engine-local primitives (`vertebra/db/adapters/<engine>/`) with zero upward imports into `agent`, `framework`, `extensions`, `server`, or `embeddings` [^db-registry].
 - **Merged Foundation on `main @ 473e1f2e`**: Squash commits `364c7cbe` (`critical-correctness-fixes`), `984ce732` (`gcp-wire-protocol-correctness`), `abd33ab6` (`gcp-driver-resilience`), `80ff8a65` (`db-engine-primitives`), `d2fa5072` (`runtime-structure-and-throughput`), `077a3fe9` (`mcp-webmcp-core`), `18baadcd` ([PR #118](https://github.com/cofin/vertebra/pull/118)), `05d88d00` (`server-runtime-correctness`), `93d7fb1f` (`gcp-embeddings-and-identity`), `54a5103d` (`mcp-protocol-completeness`), `ff9f78cb` (`http3-and-http-hygiene`), and sibling-PRD commits `7116ba13` (`native-postgres-driver`), `c526639f` (`native-adapter-organization`), and `246d7d0e` (`broker-pool-sharing`) are live [^fastpath-core].
 - **Dual-Mode `Sync*` / `Async*` Contracts & Native Caching**: Every runtime, driver, store, cache, notification, and queue capability splits into leading `Sync<Noun>` and `Async<Noun>` contracts (`SyncCacheBackend` / `AsyncCacheBackend` over Rust `ShmCache` + SHM ring-buffer L1 invalidation, `vertebra._valkey`, `vertebra._redis`, `vertebra._storage` `VTBSTORE\x01`, and `memory://` in `sqlalchemy-and-django-integration`; `SyncNotificationSource` / `AsyncNotificationSource` in `native-redis-driver` and `native-valkey-driver`; `SyncQueueStore` / `AsyncQueueStore` in `queues-tasks-and-channels` and `spanner-queue-and-rw-transactions`) with zero aliases [^aa-cache] [^django-cache].
-- **Complete Planned Portfolio**: Archived `sqlalchemy-and-django-integration` (`1f0716d1`) alongside remaining child flows `sqlspec-adapter-parity` (`sqlspec>=0.71.1`, zero `_compat.py` monkeypatching), `queues-tasks-and-channels` (`litestar-queues>=0.14.0`), `spanner-queue-and-rw-transactions`, and `strict-typing-hygiene` ([#59](https://github.com/cofin/vertebra/issues/59)) execute behind archived `native-sqlite-driver` (`49fb8150`), `native-redis-driver` (`58e8db93`), and `native-valkey-driver` (`60ccf36f`) [^sqlspec-adapters] [^queue-spanner] [^http3-rs].
+- **Complete Planned Portfolio**: Archived `sqlalchemy-and-django-integration` (`1f0716d1`) and `sqlspec-adapter-parity` (`4fad78c5`) alongside remaining child flows `queues-tasks-and-channels` (`litestar-queues>=0.14.0`), `spanner-queue-and-rw-transactions`, and `strict-typing-hygiene` ([#59](https://github.com/cofin/vertebra/issues/59)) execute behind archived `native-sqlite-driver` (`49fb8150`), `native-redis-driver` (`58e8db93`), and `native-valkey-driver` (`60ccf36f`) [^sqlspec-adapters] [^queue-spanner] [^http3-rs].
 <!-- truth: end -->
 
 ## 1. Specification, Context & Provenance
@@ -123,7 +123,7 @@ Every child flow synchronizes its affected `docs/` pages (`zensical` build verif
 | --- | --- | --- | --- |
 | `R1` Downward `vertebra.db` layering & `dbapi/` | `db-engine-primitives` (`80ff8a65`), `sqlalchemy-and-django-integration` (`1f0716d1`) | `src/py/vertebra/db/**`, `extensions/sqlalchemy/**`, `extensions/django/**` | AST import & engine-purity gates + `pytest` |
 | `R2` `Sync*`/`Async*` capabilities, native caching & dialects | `sqlalchemy-and-django-integration` (`1f0716d1`), [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md) | `db/driver/capabilities.py`, `extensions/alchemy/cache.py`, `extensions/django/cache.py` | `make lint-all` + cache/dialect/Django unit suites |
-| `R3` SQLSpec `0.71.1+` parity & stores | [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md) | `src/py/vertebra/extensions/sqlspec/**` | SQLSpec driver, `DataDictionary`, ADK, events, Litestar tests |
+| `R3` SQLSpec `0.71.1+` parity & stores | `sqlspec-adapter-parity` (`4fad78c5`) | `src/py/vertebra/extensions/sqlspec/**` | SQLSpec driver, `DataDictionary`, ADK, events, Litestar tests |
 | `R4` Queues, Django tasks, Spanner RW tx & channels | [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md), [`spanner-queue-and-rw-transactions`](../spanner-queue-and-rw-transactions/spec.md) | `src/rs/vertebra-spanner/**`, `db/adapters/*/queue.py`, `framework/queues/**` | `cargo test -p vertebra-spanner` + queue/task/channel suites |
 | `R5` Runtime streaming, MCP, embeddings, HTTP/3 & typing | `server-runtime-correctness` (`05d88d00`), `gcp-embeddings-and-identity` (`93d7fb1f`), `mcp-protocol-completeness` (`54a5103d`), `http3-and-http-hygiene` (`ff9f78cb`), [`strict-typing-hygiene`](../strict-typing-hygiene/spec.md) | `src/rs/vertebra-http/**`, `src/py/vertebra/{server,agent,embeddings,build}/**`, `pyproject.toml` | `make rs-test`, `make py-test`, `make lint-all` |
 
@@ -140,7 +140,7 @@ Every child flow synchronizes its affected `docs/` pages (`zensical` build verif
 - [x] [54a5103] t09 — `mcp-protocol-completeness` — Single-pass guards, `Mcp-Param-*` validation, dual-mode version negotiation + sessions + `GET` SSE, resource subscriptions ([#112](https://github.com/cofin/vertebra/issues/112)), `SKILLS_EXTENSION` + SEP-1865 UI, Litestar `0.20+` parity, `IapIdentitySource`, `OidcTokenSource`, and incremental `vtb ai mcp serve|bridge` ([#109](https://github.com/cofin/vertebra/issues/109), [#110](https://github.com/cofin/vertebra/issues/110), [#111](https://github.com/cofin/vertebra/issues/111), [#114](https://github.com/cofin/vertebra/issues/114)) (`ch01`–`ch07`, `25/25` tasks)
 - [x] [ff9f78c] t10 — `http3-and-http-hygiene` — QUIC `http3.rs` server listener wiring, `Alt-Svc` gating, SSE/QUIC graceful drain, `McpStdioBridge` removal, and `--features http3` Make/CI/binary gates (`t01`–`t03`)
 - [x] [1f0716d] t11 — `sqlalchemy-and-django-integration` — `Sync<Engine>Dialect`/`Async<Engine>Dialect` over `vertebra.db.dbapi`, native `SyncCacheBackend`/`AsyncCacheBackend` (`shm://` Rust `ShmCache` + SHM ring-buffer L1 invalidation, `valkey://`, `redis://`, `s3://`/`gs://`/`az://`/`r2://`/`oci://`/`file://`, `memory://`) with Advanced Alchemy `1.12.0+` `CacheConfig(region_factory=...)` + `AsyncCacheManager` and optional `dogpile.cache` plugins, and native Django `6.0+` database and `CacheBackend(BaseCache)` backends (`ch01`–`ch03`, `12/12` tasks)
-- [ ] t12 — [`sqlspec-adapter-parity`](../sqlspec-adapter-parity/spec.md) — `sqlspec>=0.71.1` per-engine adapters, `DataDictionary` classes, and Litestar/events/Google ADK stores with zero `_compat.py` monkeypatching (`ch01`–`ch04`, `15` tasks)
+- [x] [4fad78c] t12 — `sqlspec-adapter-parity` — `sqlspec>=0.71.1` per-engine adapters, `DataDictionary` classes, and Litestar/events/Google ADK stores with zero `_compat.py` monkeypatching (`ch01`–`ch04`, `15/15` tasks)
 - [ ] t13 — [`queues-tasks-and-channels`](../queues-tasks-and-channels/spec.md) — `SyncQueueStore`/`AsyncQueueStore` (`SyncPostgresQueueStore`, `SyncOracleQueueStore`, async pairs), native Redis/Valkey queues, `litestar-queues>=0.14.0`, Django `TaskBackend`, and distributed channels (`ch01`–`ch03`, `12` tasks)
 - [ ] t14 — [`spanner-queue-and-rw-transactions`](../spanner-queue-and-rw-transactions/spec.md) — Interactive multi-statement Spanner `ReadWrite` transactions and `SyncSpannerQueueStore`/`AsyncSpannerQueueStore` across GoogleSQL and Spangres (`t01`–`t04`, `4` tasks)
 - [ ] t15 — [`strict-typing-hygiene`](../strict-typing-hygiene/spec.md) — Prune `40` redundant `ignore_missing_imports` patterns, add the `tools/benchmarks` `ServerRunner` regression test, and enable `mypy` across `src/py/tests` ([#59](https://github.com/cofin/vertebra/issues/59), `t01`–`t04`)
@@ -148,11 +148,11 @@ Every child flow synchronizes its affected `docs/` pages (`zensical` build verif
 ## 6. Current State & Remaining Plan Snapshot
 
 - **Immediate Wave**: `server-runtime-correctness` (`05d88d00`), `gcp-embeddings-and-identity` (`93d7fb1f`), `mcp-protocol-completeness` (`54a5103d`), and `http3-and-http-hygiene` (`ff9f78cb`) are archived (`10/15` child flows complete).
-- **Post-Driver/Broker Wave**: With sibling Master PRD `native-data-platform` (`15/15` child flows complete and archived through `native-valkey-driver` `60ccf36f`) and `sqlalchemy-and-django-integration` (`1f0716d1`) archived (`11/15` child flows complete), the remaining four child flows execute in order: `sqlspec-adapter-parity` -> `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions` -> `strict-typing-hygiene`.
+- **Post-Driver/Broker Wave**: With sibling Master PRD `native-data-platform` (`15/15` child flows complete and archived through `native-valkey-driver` `60ccf36f`), `sqlalchemy-and-django-integration` (`1f0716d1`), and `sqlspec-adapter-parity` (`4fad78c5`) archived (`12/15` child flows complete), the remaining three child flows execute in order: `queues-tasks-and-channels` -> `spanner-queue-and-rw-transactions` -> `strict-typing-hygiene`.
 
 [^db-registry]: `src/py/vertebra/db/registry.py::DatabaseRegistry` — Table-driven database driver and dialer registry.
 [^fastpath-core]: `src/py/vertebra/server/_fastpath_core.py` — Shared `FastPathProvider` core across ASGI, WSGI, and native frameworks.
-[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec adapter configuration and driver bindings.
+[^sqlspec-adapters]: `src/py/vertebra/extensions/sqlspec/adapters/__init__.py` — SQLSpec adapter configuration and driver bindings.
 [^sa-dbapi]: `src/py/vertebra/db/dbapi/_sync.py::SyncDBAPIConnection` — Standalone PEP 249 DB-API connection extracted by broker-pool-sharing pending hardening.
 [^aa-cache]: `src/py/vertebra/extensions/alchemy/cache.py` — Advanced Alchemy and SQLAlchemy caching module.
 [^django-cache]: `src/py/vertebra/extensions/django/cache.py::CacheBackend` — Django BaseCache backend targeted for SyncCacheBackend and AsyncCacheBackend.

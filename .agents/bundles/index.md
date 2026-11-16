@@ -52,7 +52,7 @@ Root index for **Vertebra** — the Rust-powered, full-stack Python & TypeScript
 
 - **[`specs/`](specs/index.md) (`main @ 473e1f2e`)** —
   - **Master PRDs (`state: active`)**: [`integration-remediation`](specs/integration-remediation/spec.md)
-  - **Planned Executable Specifications (`state: planned`)**: [`sqlspec-adapter-parity`](specs/sqlspec-adapter-parity/spec.md), [`queues-tasks-and-channels`](specs/queues-tasks-and-channels/spec.md), [`spanner-queue-and-rw-transactions`](specs/spanner-queue-and-rw-transactions/spec.md), and [`strict-typing-hygiene`](specs/strict-typing-hygiene/spec.md)
+  - **Planned Executable Specifications (`state: planned`)**: [`queues-tasks-and-channels`](specs/queues-tasks-and-channels/spec.md), [`spanner-queue-and-rw-transactions`](specs/spanner-queue-and-rw-transactions/spec.md), and [`strict-typing-hygiene`](specs/strict-typing-hygiene/spec.md)
   - **Active Research**: [`audit-findings_20261103.md`](specs/integration-remediation/research/audit-findings_20261103.md), [`google-cloud-rust_20261103.md`](specs/integration-remediation/research/google-cloud-rust_20261103.md)
 - **[`research/`](research/index.md)** — Standalone promoted technical research briefs: [`upstream-sqlspec-direct-arrow-write.md`](research/upstream-sqlspec-direct-arrow-write.md).
 - **[Bundle Activity Log](log.md)** — Chronological log of bundle initialization, syntheses, and archived flows.

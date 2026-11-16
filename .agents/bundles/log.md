@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T04:57:00Z] archive | sqlspec-adapter-parity
+
+- Archived completed specification `sqlspec-adapter-parity` (`ch01`–`ch04`, `15/15` tasks at `4fad78c5`) into permanent OKF knowledge and product chapters (`sqlspec-alchemy-and-dialects.md`, `database-driver-limitations.md`, `postgres-limitations.md`, `query-pipeline-cdc-and-tenancy.md`, `pyo3-and-python-runtime.md`, `product.md`, `product-guidelines.md`), updated Master PRD `integration-remediation` (`t12`), downstream specs (`queues-tasks-and-channels`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/sqlspec-adapter-parity/`.
+
+## [2026-11-16T04:56:30Z] finish | sqlspec-adapter-parity
+
+- Completed `sqlspec-adapter-parity` (`ch01`–`ch04`, `15/15` tasks) at `4fad78c5`: bumped `sqlspec>=0.71.1` and added `adk = ["google-adk>=1.0.0"]`, implemented `query_with_columns`, `ArtifactReference` (`vertebra.storage`), and template-method `BaseSyncDriver`/`BaseAsyncDriver` (`extensions/sqlspec/_driver.py`), replaced monolithic `{adapters,bigquery,spanner}.py` with 8 self-contained `extensions/sqlspec/adapters/{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}` packages (`adapter_name = "vertebra_<engine>"`, explicit `adk_session_store_class`/`adk_memory_store_class`/`events_store_class`/`litestar_store_class`, `<Engine>{Sync,Async}DataDictionary`, `<Engine>{Sync,Async}ADKStore`/`ADKMemoryStore`/`ADKArtifactStore`, `<Engine>EventQueueStore`, and `<Engine>LitestarStore` with zero `_compat.py` monkeypatching), upgraded `ObjectStoreBackend(ObjectStoreBase)` and `ChangeFeedSyncEventBackend`/`ChangeFeedAsyncEventBackend` checkpointing/spilling, and verified `1,326` SQLSpec/storage/driver unit tests, `mypy`, `ruff`, docstring scan, and `review-check`.
+
 ## [2026-11-16T04:22:00Z] archive | native-valkey-driver & native-data-platform
 
 - Archived completed specification `native-valkey-driver` (`ch01`–`ch04`, `16/16` tasks at `60ccf36f`) and completed Master PRD `native-data-platform` (`t01`–`t15`, `15/15` child flows complete across standalone PyO3 wheels for PostgreSQL, MySQL, Oracle 26ai, SQL Server, SQLite, DuckDB, BigQuery, Spanner, Redis, Valkey, Object Storage, and shared-memory `BrokerEngineCapsule` pools) into permanent OKF knowledge chapters (`valkey-limitations.md`, `database-drivers-and-dialers.md`, `distributed-queues-and-email.md`, `workflow.md`, `product.md`), updated Master PRD `integration-remediation`, `queues-tasks-and-channels`, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-valkey-driver/` and `.agents/bundles/specs/native-data-platform/`.

@@ -12,7 +12,6 @@ current_task: "strict-typing-hygiene:t01"
 parent_prd: integration-remediation
 depends_on_flows:
   - queues-tasks-and-channels
-  - sqlspec-adapter-parity
   - spanner-queue-and-rw-transactions
 plan_revision: 2
 plan_commit: 473e1f2e
