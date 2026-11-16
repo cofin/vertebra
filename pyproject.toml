@@ -148,6 +148,9 @@ postgres = [
 spanner = [
     "vertebra-spanner==0.3.0",
 ]
+sqlite = [
+    "vertebra-sqlite==0.3.0",
+]
 storage = [
     "vertebra-storage==0.3.0",
 ]
@@ -243,6 +246,7 @@ vertebra-mysql = { path = "src/rs/vertebra-mysql", editable = true }
 vertebra-oracle = { path = "src/rs/vertebra-oracle", editable = true }
 vertebra-postgres = { path = "src/rs/vertebra-postgres", editable = true }
 vertebra-spanner = { path = "src/rs/vertebra-spanner", editable = true }
+vertebra-sqlite = { path = "src/rs/vertebra-sqlite", editable = true }
 vertebra-storage = { path = "src/rs/vertebra-storage", editable = true }
 
 [tool.maturin]
@@ -271,6 +275,7 @@ exclude = [
     { path = "src/py/vertebra/_oracle.pyi", format = "wheel" },
     { path = "src/py/vertebra/_postgres.pyi", format = "wheel" },
     { path = "src/py/vertebra/_spanner.pyi", format = "wheel" },
+    { path = "src/py/vertebra/_sqlite.pyi", format = "wheel" },
     { path = "src/py/vertebra/_storage.pyi", format = "wheel" },
 ]
 
@@ -442,6 +447,11 @@ replace = 'vertebra-spanner=={new_version}'
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
+search = 'vertebra-sqlite=={current_version}'
+replace = 'vertebra-sqlite=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
 search = 'vertebra-storage=={current_version}'
 replace = 'vertebra-storage=={new_version}'
 
@@ -492,6 +502,11 @@ replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
 filename = "src/rs/vertebra-spanner/pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-sqlite/pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 

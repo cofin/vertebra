@@ -61,6 +61,10 @@ jobs:
             path: src/rs/vertebra-spanner
             module: vertebra._spanner
             exports: SyncSpannerClient AsyncSpannerClient
+          - name: sqlite
+            path: src/rs/vertebra-sqlite
+            module: vertebra._sqlite
+            exports: SyncSQLiteClient AsyncSQLiteClient
           - name: storage
             path: src/rs/vertebra-storage
             module: vertebra._storage
@@ -156,7 +160,7 @@ jobs:
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
-          for package in bigquery bundler duckdb mssql mysql oracle postgres spanner storage; do
+          for package in bigquery bundler duckdb mssql mysql oracle postgres spanner sqlite storage; do
             uv build "src/rs/vertebra-$package" --sdist --out-dir dist
           done
       - uses: actions/upload-artifact@v7
@@ -193,8 +197,8 @@ jobs:
           version=$(uv run --no-project --python 3.12 python -c "from pathlib import Path; print(next(Path('dist').glob('vertebra_core-*.whl')).name.split('-')[1])")
           uv venv --python 3.12 "$RUNNER_TEMP/wheel-smoke"
           py_bin="$RUNNER_TEMP/wheel-smoke/${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}"
-          uv pip install --python "$py_bin" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-spanner vertebra-storage
-          uv pip install --python "$py_bin" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,spanner,storage]==$version"
+          uv pip install --python "$py_bin" --no-index --no-deps --find-links "$GITHUB_WORKSPACE/dist" vertebra-core vertebra-bigquery vertebra-bundler vertebra-duckdb vertebra-mssql vertebra-mysql vertebra-oracle vertebra-postgres vertebra-spanner vertebra-sqlite vertebra-storage
+          uv pip install --python "$py_bin" --only-binary :all: --find-links "$GITHUB_WORKSPACE/dist" "vertebra-core[bigquery,bundler,duckdb,mssql,mysql,oracle,postgres,spanner,sqlite,storage]==$version"
       - name: Smoke test wheel-installed vtb run
         shell: bash
         run: |
@@ -238,6 +242,7 @@ jobs:
                   "AsyncPostgresReplication",
               ),
               "spanner": ("SyncSpannerClient", "AsyncSpannerClient"),
+              "sqlite": ("SyncSQLiteClient", "AsyncSQLiteClient"),
               "storage": ("SyncObjectStore", "AsyncObjectStore"),
           }.items():
               module = importlib.import_module(f"vertebra._{name}")

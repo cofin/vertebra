@@ -1,6 +1,6 @@
-# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`)
+# PyO3 Native Extension Stubs (`_vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, `_spanner`, `_sqlite`)
 
-Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 10 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
+Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files across all 11 native extensions (`_vertebra.pyi`, `_bundler.pyi`, `_storage.pyi`, `_bigquery.pyi`, `_duckdb.pyi`, `_mssql.pyi`, `_mysql.pyi`, `_oracle.pyi`, `_postgres.pyi`, `_spanner.pyi`, `_sqlite.pyi`) and compiled with `gil_used = false` for free-threaded Python `3.14t`/`3.15t`. Most applications interact with these primitives through the higher-level [`vertebra`](vertebra.md), [`vertebra.server`](server.md), [`vertebra.db`](db.md), and [`vertebra.storage`](storage.md) facades.
 
 | Native Module | Key Stub Classes | Backing Rust Crate |
 | --- | --- | --- |
@@ -14,6 +14,7 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
 | **`vertebra._oracle`** | `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `AsyncOracleListener` | `vertebra-oracle` (Oracle 26ai Thin TNS/TTC + Arrow SHM) |
 | **`vertebra._postgres`** | `SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresListener`, `AsyncPostgresReplication` | `vertebra-postgres` (PostgreSQL Protocol 3.0 + `PGCOPY` + `pgoutput` + `VTBARROW` SHM) |
 | **`vertebra._spanner`** | `SyncSpannerClient`, `AsyncSpannerClient` | `vertebra-spanner` (Cloud Spanner Data + DatabaseAdmin) |
+| **`vertebra._sqlite`** | `SyncSQLiteClient`, `AsyncSQLiteClient` | `vertebra-sqlite` (Bundled SQLite 3.45+ + `VTBARROW` SHM) |
 
 ## `vertebra._vertebra` — HTTP/IPC Transport, Request Batches & Protocol Drivers
 
@@ -155,9 +156,9 @@ Low-level Rust/PyO3 classes and functions declared in PEP 561 `.pyi` stub files 
       members: false
       show_signature: false
 
-## Native SQL Drivers (`_postgres`, `_oracle`, `_mysql`, `_mssql`)
+## Native SQL Drivers (`_postgres`, `_oracle`, `_mysql`, `_mssql`, `_sqlite`)
 
-Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED` module constants alongside its synchronous/asynchronous native clients (`Sync*`, `Async*`) and extension-specific pooling or replication types listed in the summary table above (`SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresReplication`, `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncMySQLClient`, `AsyncMySQLClient`, `SyncMSSQLClient`, `AsyncMSSQLClient`).
+Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED` module constants alongside its synchronous/asynchronous native clients (`Sync*`, `Async*`) and extension-specific pooling or replication types listed in the summary table above (`SyncPostgresClient`, `AsyncPostgresClient`, `SyncPostgresPool`, `AsyncPostgresPool`, `AsyncPostgresReplication`, `SyncOracleClient`, `AsyncOracleClient`, `SyncOraclePool`, `AsyncOraclePool`, `SyncMySQLClient`, `AsyncMySQLClient`, `SyncMSSQLClient`, `AsyncMSSQLClient`, `SyncSQLiteClient`, `AsyncSQLiteClient`).
 
 ::: vertebra._postgres.AsyncPostgresClient
     options:
@@ -184,6 +185,12 @@ Each companion database extension exposes `GIL_USED = False` and `FREE_THREADED`
       show_signature: false
 
 ::: vertebra._mssql.SyncMSSQLClient
+    options:
+      heading_level: 4
+      members: false
+      show_signature: false
+
+::: vertebra._sqlite.SyncSQLiteClient
     options:
       heading_level: 4
       members: false

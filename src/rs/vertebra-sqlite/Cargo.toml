@@ -1,0 +1,37 @@
+[package]
+name = "vertebra-sqlite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite 3.45+ native client and Arrow SHM bridge for Vertebra"
+
+[lib]
+name = "_sqlite"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+arrow-array = { version = "=60.1.0", default-features = false }
+arrow-buffer = { version = "=60.1.0", default-features = false }
+arrow-ipc = { version = "=60.1.0", default-features = false }
+arrow-schema = { version = "=60.1.0", default-features = false }
+parking_lot = "0.12"
+pyo3 = { workspace = true }
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "modern_sqlite", "hooks", "serialize", "blob", "column_decltype", "backup"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+vertebra-core = { path = "../vertebra-core" }
+vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+tempfile = "3"

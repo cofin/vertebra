@@ -14,6 +14,7 @@ members = [
     "vertebra-duckdb",
     "vertebra-oracle",
     "vertebra-postgres",
+    "vertebra-sqlite",
 ]
 
 [workspace.package]

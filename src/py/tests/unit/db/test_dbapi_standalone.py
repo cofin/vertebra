@@ -26,7 +26,12 @@ from vertebra.db.dbapi import (
     paramstyle,
     threadsafety,
 )
-from vertebra.db.driver import OperationalError as DriverOperationalError
+from vertebra.db.driver import (
+    OperationalError as DriverOperationalError,
+)
+from vertebra.db.driver import (
+    ProgrammingError as DriverProgrammingError,
+)
 from vertebra.db.registry import DatabaseRegistry
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
@@ -269,7 +274,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         cur_a.execute("CREATE TABLE iso_sync (v INTEGER)")
         cur_a.execute("INSERT INTO iso_sync VALUES (1)")
         cur_b = default_mem_sync_b.cursor()
-        with pytest.raises(DriverOperationalError):
+        with pytest.raises((DriverOperationalError, DriverProgrammingError)):
             cur_b.execute("SELECT v FROM iso_sync")
     finally:
         default_mem_sync_b.close()
@@ -287,7 +292,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         await cur_aa.execute("CREATE TABLE iso_async (v INTEGER)")
         await cur_aa.execute("INSERT INTO iso_async VALUES (1)")
         cur_ab = default_mem_async_b.cursor()
-        with pytest.raises(DriverOperationalError):
+        with pytest.raises((DriverOperationalError, DriverProgrammingError)):
             await cur_ab.execute("SELECT v FROM iso_async")
     finally:
         await default_mem_async_b.close()

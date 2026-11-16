@@ -2334,12 +2334,17 @@ def test_capability_protocols_runtime_isinstance_and_sqlite_negative_checks(
     sqlite_sync = SyncSQLiteDriver(SQLiteConfig(database=":memory:"))
     sqlite_async = AsyncSQLiteDriver(SQLiteConfig(database=":memory:"))
     try:
-        assert isinstance(sqlite_sync, SyncPipelineCapable) is False
-        assert isinstance(sqlite_sync, AsyncPipelineCapable) is False
-        assert isinstance(sqlite_sync, expected_protocol) is False
-        assert isinstance(sqlite_async, SyncPipelineCapable) is False
-        assert isinstance(sqlite_async, AsyncPipelineCapable) is False
-        assert isinstance(sqlite_async, expected_protocol) is False
+        assert isinstance(sqlite_sync, SyncPipelineCapable) is True
+        assert isinstance(sqlite_async, AsyncPipelineCapable) is True
+        sync_pipe = sqlite_sync.pipeline()
+        async_pipe = sqlite_async.pipeline()
+        assert isinstance(sync_pipe, SyncPipeline) is True
+        assert isinstance(sync_pipe, AsyncPipeline) is False
+        assert isinstance(async_pipe, AsyncPipeline) is True
+        assert isinstance(async_pipe, SyncPipeline) is False
+        if expected_protocol not in (SyncPipelineCapable, AsyncPipelineCapable):
+            assert isinstance(sqlite_sync, expected_protocol) is False
+            assert isinstance(sqlite_async, expected_protocol) is False
     finally:
         sqlite_sync.close()
 
@@ -2600,7 +2605,7 @@ async def test_pool_key_memory_isolation_and_provide_driver_resolution(
         assert isinstance(m2, SyncSQLiteDriver)
         assert m1 is not m2
         m1.execute("CREATE TABLE iso_check (id INTEGER PRIMARY KEY)")
-        with pytest.raises(OperationalError):
+        with pytest.raises((OperationalError, ProgrammingError)):
             m2.select("SELECT id FROM iso_check")
 
         am1 = provide_driver("sqlite:///:memory:", sync=False, registry=reg)

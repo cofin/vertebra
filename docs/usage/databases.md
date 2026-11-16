@@ -24,6 +24,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     uv add "vertebra-core[duckdb]"
     uv add "vertebra-core[oracle]"
     uv add "vertebra-core[spanner]"
+    uv add "vertebra-core[sqlite]"
     ```
 
 === "pip"
@@ -36,6 +37,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pip install "vertebra-core[duckdb]"
     pip install "vertebra-core[oracle]"
     pip install "vertebra-core[spanner]"
+    pip install "vertebra-core[sqlite]"
     ```
 
 === "pdm"
@@ -48,6 +50,7 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pdm add "vertebra-core[duckdb]"
     pdm add "vertebra-core[oracle]"
     pdm add "vertebra-core[spanner]"
+    pdm add "vertebra-core[sqlite]"
     ```
 
 === "poetry"
@@ -60,9 +63,10 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[duckdb]"
     poetry add "vertebra-core[oracle]"
     poetry add "vertebra-core[spanner]"
+    poetry add "vertebra-core[sqlite]"
     ```
 
-Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Cloud Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
+Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Cloud Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -98,7 +102,7 @@ db.close()
 `vertebra.db.dbapi` provides standalone PEP 249 synchronous and asynchronous connections (`SyncDBAPIConnection`, `SyncDBAPICursor`, `SyncDBAPIModule`, `AsyncDBAPIConnection`, `AsyncDBAPICursor`, `AsyncDBAPIModule`, `connect`, `is_row_returning_sql`, and standard PEP 249 exception types) backed by `vertebra.db` drivers without importing `sqlalchemy`, `vertebra.extensions`, or adapter subpackages eagerly:
 
 - **Statement Autocommit Databases**: Setting `autocommit=False` on `bigquery`, `spanner`, or `spangres` DB-API connections raises PEP 249 `NotSupportedError` because those backends manage transactions at statement or RPC boundaries.
-- **Native Broker Engine Capsules**: `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb` export C-ABI `BrokerEngineCapsule` (`broker_engine_capsule()`) hooks discovered by `BrokerEngineDiscovery`; `vertebra._bigquery` and `vertebra._spanner` use multiplexed HTTP/2 REST/gRPC channels and are excluded from in-process SHM broker capsule hosting.
+- **Native Broker Engine Capsules**: `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, `vertebra._duckdb`, and `vertebra._sqlite` export C-ABI `BrokerEngineCapsule` (`broker_engine_capsule()`) hooks discovered by `BrokerEngineDiscovery`; `vertebra._bigquery` and `vertebra._spanner` use multiplexed HTTP/2 REST/gRPC channels and are excluded from in-process SHM broker capsule hosting.
 
 ## SQLSpec & Litestar Integration
 
@@ -148,7 +152,7 @@ app = Litestar(
 | --- | --- | --- | --- | --- |
 | **PostgreSQL** | `PostgreSQLAsyncConfig`, `PostgreSQLSyncConfig` | `PostgreSQLConfig` | `SyncPostgreSQLDriver`, `AsyncPostgreSQLDriver` | Pure-Rust Protocol 3.0 (`vertebra._postgres`) with `$1..$N` binds, single-`Sync` `pipeline()`, binary `PGCOPY`, `pgvector`, `JSONB`, typed `Pg*` wrappers, `PostgresChangeSource`, `PostgresEmbeddingPushdown`, PgBouncer/PgCat/pgdog modes, direct `:5432` IAM OAuth2 or `:5433` AlloyDB / `:3307` Cloud SQL dialers |
 | **MySQL / MariaDB** | `MySQLAsyncConfig`, `MySQLSyncConfig` | `MySQLConfig` | `SyncMySQLDriver`, `AsyncMySQLDriver` | Pure-Rust `vertebra._mysql` binary prepared statements (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`), `SyncMySQLPipeline` / `AsyncMySQLPipeline`, `VTBARROW` `ArrowCursor`, out-of-band `KILL QUERY` cancellation, direct `:3306` IAM OAuth2 token or Cloud SQL `:3307` mTLS dialer |
-| **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, SHM single-writer/multi-reader leasing |
+| **SQLite / libSQL** | `SQLiteAsyncConfig`, `SQLiteSyncConfig` | `SQLiteConfig` | `SyncSQLiteDriver`, `AsyncSQLiteDriver` | Pure-Rust `vertebra-sqlite` (`vertebra._sqlite`), WAL mode, `mmap_size`, SQLite 3.45+ binary `JSONB`, delayed-commit `SyncSQLitePipeline` / `AsyncSQLitePipeline`, online `backup_to` / `restore_from`, and `VTBARROW` `ArrowCursor` streaming |
 | **Oracle 26ai** | `OracleAsyncConfig`, `OracleSyncConfig` | `OracleConfig` | `SyncOracleDriver`, `AsyncOracleDriver` | Pure-Rust Thin TNS/TTC (`vertebra._oracle`) with zero Instant Client dependency, `SyncOraclePool` / `AsyncOraclePool` + DRCP (`cclass`, `purity`, `connection_tag`), Autonomous Wallet mTLS & IAM token auth, 26ai `VECTOR` (`0xDB`) & `OSON` binary JSON, `VTBARROW` `ArrowCursor` (`select_to_arrow` / `load_from_arrow`), delayed-commit `pipeline()`, VPD tenancy, `OracleNotificationSource` |
 | **SQL Server** | `MSSQLAsyncConfig`, `MSSQLSyncConfig` | `MSSQLConfig` | `SyncMSSQLDriver`, `AsyncMSSQLDriver` | Pure-Rust TDS 7.4/8.0 (`vertebra._mssql`), `?` / `$1` to `@P1` `sp_executesql` RPC rewriter, `BulkLoad`, `ATTENTION` cancellation, `VTBARROW` `ArrowCursor`, `SyncMSSQLPipeline` / `AsyncMSSQLPipeline`, Cloud SQL `:3307` mTLS |
 | **DuckDB** | `DuckDBAsyncConfig`, `DuckDBSyncConfig` | `DuckDBConfig` | `SyncDuckDBDriver`, `AsyncDuckDBDriver` | Native `vertebra._duckdb` (`vertebra-core[duckdb]`), single-writer/multi-reader OLAP, savepoints, `SyncDuckDBPipeline` / `AsyncDuckDBPipeline`, `SyncGcsBearerSecretProvider` / `AsyncGcsBearerSecretProvider` `httpfs` secret rotation, zero-copy Arrow SHM + `Appender` |
@@ -318,6 +322,46 @@ async with AsyncOraclePool(
         await notifications.subscribe(["doc_events"])
         await notifications.publish("doc_events", b'{"doc_id": 1}')
         await notifications.close()
+```
+
+### SQLite Native Driver
+
+The native SQLite driver (`vertebra-core[sqlite]`, backed by `vertebra._sqlite`) runs on a pure-Rust worker engine bundling SQLite 3.45+ with `GIL_USED = False` compatibility on free-threaded Python:
+
+- **Single-Writer / Multi-Reader WAL Pool**: By default, SQLite databases run in WAL mode with a 1-writer thread plus `max_readers` read worker pool. Write transactions and `:memory:` databases are automatically pinned to the dedicated writer worker connection.
+- **Delayed-Commit Pipelines**: `SyncSQLitePipeline` and `AsyncSQLitePipeline` implement `SyncPipeline` and `AsyncPipeline` over `driver.pipeline()`, queueing operations and executing them in a single batch within an ambient transaction or nested `SAVEPOINT`.
+- **Online Backup and Restore**: `driver.backup_to(target_path)` and `driver.restore_from(source_path)` invoke SQLite's online backup API in stepped pages (`pages_per_step=256`) without blocking concurrent reader threads.
+- **Zero-Copy Arrow Streaming**: `driver.select_to_arrow()` streams query results directly into shared-memory `ArrowCursor` (`VTBARROW`) without intermediate Python object allocation.
+
+```python
+import msgspec
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig
+
+
+class UserRow(msgspec.Struct):
+    id: int
+    name: str
+
+
+config = SQLiteConfig(
+    path="app.db",
+    wal=True,
+    busy_timeout_ms=5000,
+    max_readers=4,
+)
+async with AsyncSQLiteDriver(config) as driver:
+    async with driver.pipeline() as pipe:
+        pipe.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        pipe.execute("INSERT INTO users (id, name) VALUES (?, ?)", (1, "Ada"))
+        pipe.select("SELECT id, name FROM users WHERE id = ?", (1,))
+        _, _, rows = await pipe.results()
+
+    user = await driver.select_one(
+        "SELECT id, name FROM users WHERE id = ?",
+        (1,),
+        schema_type=UserRow,
+    )
+    await driver.backup_to("backup.db")
 ```
 
 ### Typed `DatabaseError` Hierarchy & Google Cloud Exceptions

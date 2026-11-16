@@ -177,7 +177,6 @@ __all__ = [
     "snake_case",
     "splice_prefix_tokens",
     "split_qualified_identifier",
-    "sqlite_initialization_pragmas",
     "stable_hash64",
     "stream_file_chunks",
     "strip_pg_jsonb_header",
@@ -1233,15 +1232,6 @@ def duckdb_bootstrap_statements(
     parquet_metadata_cache: bool = True,
     httpfs_connection_caching: bool = True,
     enable_http_metadata_cache: bool = True,
-) -> list[str]: ...
-def sqlite_initialization_pragmas(
-    path: str = ":memory:",
-    wal_mode: bool = True,
-    synchronous: str = "NORMAL",
-    mmap_size: int = 268435456,
-    busy_timeout_ms: int = 5000,
-    max_readers: int = 16,
-    foreign_keys: bool = True,
 ) -> list[str]: ...
 def encode_resp_command(args: list[bytes]) -> bytes: ...
 def encode_hello3_handshake(

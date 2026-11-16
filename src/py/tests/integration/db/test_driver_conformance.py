@@ -420,6 +420,8 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         async_driver_cls=AsyncSQLiteDriver,
         sample_url="sqlite:////tmp/vtb_conformance_sample.sqlite3",
         placeholder_style="qmark",
+        supports_pipeline=True,
+        native_extension_module="vertebra._sqlite",
     ),
     EngineConformanceSpec(
         engine="postgres",

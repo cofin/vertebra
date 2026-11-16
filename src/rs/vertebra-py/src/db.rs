@@ -52,7 +52,6 @@ use vertebra_db::resp3::{
     encode_resp_command as rs_encode_resp_command,
     parse_cluster_redirect as rs_parse_cluster_redirect, redis_hash_slot as rs_redis_hash_slot,
 };
-use vertebra_db::sqlite::SqliteConfig;
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
 #[pyclass(name = "CloudSQLDialer", frozen, immutable_type, from_py_object)]
@@ -982,38 +981,6 @@ pub fn duckdb_bootstrap_statements(
     cfg.bootstrap_statements()
 }
 
-/// Generate SQLite 3.45+ initialization `PRAGMA` statements.
-#[pyfunction]
-#[pyo3(signature = (
-    path=":memory:",
-    wal_mode=true,
-    synchronous="NORMAL",
-    mmap_size=268_435_456,
-    busy_timeout_ms=5000,
-    max_readers=16,
-    foreign_keys=true
-))]
-pub fn sqlite_initialization_pragmas(
-    path: &str,
-    wal_mode: bool,
-    synchronous: &str,
-    mmap_size: u64,
-    busy_timeout_ms: u32,
-    max_readers: u16,
-    foreign_keys: bool,
-) -> Vec<String> {
-    let cfg = SqliteConfig {
-        path: path.to_string(),
-        wal_mode,
-        synchronous: synchronous.to_string(),
-        mmap_size,
-        busy_timeout_ms,
-        max_readers,
-        foreign_keys,
-    };
-    cfg.initialization_pragmas()
-}
-
 /// Encode a Redis or Valkey RESP3 bulk-string array command.
 #[pyfunction]
 pub fn encode_resp_command<'py>(
@@ -1115,7 +1082,6 @@ pub fn register_db_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_ttc_session_attrs, m)?)?;
     m.add_function(wrap_pyfunction!(rewrite_mssql_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(duckdb_bootstrap_statements, m)?)?;
-    m.add_function(wrap_pyfunction!(sqlite_initialization_pragmas, m)?)?;
     m.add_function(wrap_pyfunction!(encode_resp_command, m)?)?;
     m.add_function(wrap_pyfunction!(encode_hello3_handshake, m)?)?;
     m.add_function(wrap_pyfunction!(crc16_xmodem, m)?)?;

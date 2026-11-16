@@ -73,9 +73,9 @@ def _make_report(
         ({"VERTEBRA_CONFORMANCE_ENGINES": "   ,  "}, False, frozenset()),
         ({"VERTEBRA_CONFORMANCE_ENGINES": "duckdb"}, True, frozenset({"duckdb"})),
         (
-            {"VERTEBRA_CONFORMANCE_ENGINES": " MySQL , MariaDB , mssql , ORACLE "},
+            {"VERTEBRA_CONFORMANCE_ENGINES": " MySQL , MariaDB , mssql , ORACLE , sqlite "},
             True,
-            frozenset({"mysql", "mariadb", "mssql", "oracle"}),
+            frozenset({"mysql", "mariadb", "mssql", "oracle", "sqlite"}),
         ),
         (
             {
@@ -118,8 +118,8 @@ def test_conformance_gate_from_environ_valid_inputs(
             r"Unsupported VERTEBRA_CONFORMANCE_ENGINES value\(s\): cockroachdb",
         ),
         (
-            {"VERTEBRA_CONFORMANCE_ENGINES": "mysql, sqlite"},
-            r"Allowed engines: duckdb, mariadb, mssql, mysql, oracle",
+            {"VERTEBRA_CONFORMANCE_ENGINES": "mysql, informix"},
+            r"Allowed engines: duckdb, mariadb, mssql, mysql, oracle, sqlite",
         ),
     ],
 )

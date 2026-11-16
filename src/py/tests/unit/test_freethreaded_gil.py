@@ -26,6 +26,7 @@ _GIL_EXEMPT_MODULES: tuple[str, ...] = (
     "vertebra._postgres",
     "vertebra._spanner",
     "vertebra._duckdb",
+    "vertebra._sqlite",
 )
 _POSTGRES_CLASSES: tuple[str, ...] = (
     "SyncPostgresClient",
@@ -85,6 +86,7 @@ _IMMUTABLE_PYCLASSES: tuple[tuple[str, str], ...] = (
     *(("vertebra._postgres", cls_name) for cls_name in _POSTGRES_CLASSES),
     *(("vertebra._spanner", cls_name) for cls_name in ("SyncSpannerClient", "AsyncSpannerClient")),
     *(("vertebra._duckdb", cls_name) for cls_name in ("SyncDuckDBClient", "AsyncDuckDBClient")),
+    *(("vertebra._sqlite", cls_name) for cls_name in ("SyncSQLiteClient", "AsyncSQLiteClient")),
 )
 
 

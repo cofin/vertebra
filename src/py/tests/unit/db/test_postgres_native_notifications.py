@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import os
 import select
 import socket
 import struct
@@ -1248,7 +1249,7 @@ def test_notification_source_concurrent_listen_guard_and_lazy_extension_imports(
         check=False,
         capture_output=True,
         text=True,
-        env={"PYTHONPATH": src_py, "PATH": ""},
+        env={"PYTHONPATH": os.environ.get("PYTHONPATH", src_py), "PATH": ""},
     )
     assert probe.returncode == 0, probe.stderr
 
