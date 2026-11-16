@@ -14,8 +14,7 @@ chapters:
   - ch04-conformance-and-docs
 current_chapter: ch01-wheel-scaffold-and-isolation
 current_task: native-valkey-driver:ch01:t01
-depends_on_flows:
-  - native-redis-driver
+depends_on_flows: []
 plan_revision: 2
 plan_commit: 473e1f2e
 created_at: '2026-11-15T20:55:00Z'
@@ -48,8 +47,8 @@ sources:
     resource: .agents/bundles/specs/native-data-platform/spec.md
     title: Native Data Platform & First-Party Driver Parity Master PRD
   - id: redis-spec
-    resource: .agents/bundles/specs/native-redis-driver/spec.md
-    title: Native Redis Driver child flow specification
+    resource: .agents/bundles/knowledge/domains/data/redis-limitations.md
+    title: Archived Native Redis Driver operational boundaries and wheel baseline
   - id: valkey-drv
     resource: src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver
     title: SyncValkeyDriver and AsyncValkeyDriver
@@ -154,11 +153,11 @@ Chapter 04 (`t03` and `t04`) updates `docs/usage/databases.md`, `docs/usage/queu
 - **Fast Verification Gate (`< 60s`)**: `make valkey-test && make valkey-wheel-check && make review-check`
 
 [^prd-spec]: `.agents/bundles/specs/native-data-platform/spec.md` — Native Data Platform & First-Party Driver Parity Master PRD.
-[^redis-spec]: `.agents/bundles/specs/native-redis-driver/spec.md` — Native Redis Driver child flow specification.
+[^redis-spec]: `.agents/bundles/knowledge/domains/data/redis-limitations.md` — Archived Native Redis Driver operational boundaries and wheel baseline.
 [^valkey-drv]: `src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver` — SyncValkeyDriver and AsyncValkeyDriver.
 [^valkey-cfg]: `src/py/vertebra/db/adapters/valkey/config.py::ValkeyConfig` — ValkeyConfig with Google Cloud Memorystore IAM and tracking fields.
 [^valkey-core]: `src/py/vertebra/db/adapters/valkey/core.py::ValkeyCore` — ValkeyCore RESP3 command builder and cluster hash slot routing.
-[^queue-valkey]: `src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend` — Thin `ValkeyQueueBackend(RedisQueueBackend)` subclass moved to `queues/valkey.py` by `native-redis-driver`.
+[^queue-valkey]: `src/py/vertebra/framework/queues/valkey.py::ValkeyQueueBackend` — Standalone `ValkeyQueueBackend` extracted to `queues/valkey.py` by `native-redis-driver`.
 [^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs::parse_resp3_frame` — Legacy RESP3 parser, encoder, and CRC16-XMODEM hash slot implementation.
 [^resp3-bindings]: `src/rs/vertebra-py/src/db.rs::redis_hash_slot` — Legacy RESP3 PyO3 helper functions on vertebra._vertebra.
 [^gcp-token]: `src/rs/vertebra-core/src/gcp_auth.rs::GcpTokenCacheCapsule` — Shared Rust Google Cloud OAuth2 token cache and PyCapsule ABI.

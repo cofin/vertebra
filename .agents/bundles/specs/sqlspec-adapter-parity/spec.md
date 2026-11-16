@@ -17,7 +17,6 @@ current_chapter: ch01-sqlspec-core-driver-and-artifact-ref
 current_task: sqlspec-adapter-parity:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-  - native-redis-driver
   - sqlalchemy-and-django-integration
 plan_revision: 5
 plan_commit: 473e1f2e

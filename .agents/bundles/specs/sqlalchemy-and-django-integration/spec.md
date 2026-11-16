@@ -16,7 +16,6 @@ current_chapter: ch01-dbapi-foundation-and-relational-dialects
 current_task: sqlalchemy-and-django-integration:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-  - native-redis-driver
   - native-valkey-driver
 plan_revision: 6
 plan_commit: 473e1f2e

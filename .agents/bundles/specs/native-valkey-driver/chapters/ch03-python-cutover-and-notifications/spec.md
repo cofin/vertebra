@@ -41,8 +41,8 @@ sources:
     resource: src/py/vertebra/db/adapters/valkey/core.py::ValkeyCore
     title: ValkeyCore RESP3 command builder and hash slot helpers
   - id: driver-caps
-    resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
-    title: NotificationSource capability protocols
+    resource: src/py/vertebra/db/driver/capabilities.py::SyncNotificationSource
+    title: SyncNotificationSource and AsyncNotificationSource capability protocols
   - id: resp3-bindings
     resource: src/rs/vertebra-py/src/db.rs::redis_hash_slot
     title: Legacy RESP3 helper bindings on vertebra._vertebra
@@ -127,9 +127,9 @@ Public docs, `native-stubs.md`, `product.md`, and `valkey-limitations.md` are up
 [^valkey-drv]: `src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver` — SyncValkeyDriver and AsyncValkeyDriver.
 [^valkey-cfg]: `src/py/vertebra/db/adapters/valkey/config.py::ValkeyConfig` — ValkeyConfig.
 [^valkey-core]: `src/py/vertebra/db/adapters/valkey/core.py::ValkeyCore` — ValkeyCore RESP3 command builder and hash slot helpers.
-[^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::NotificationSource` — NotificationSource capability protocols.
+[^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::SyncNotificationSource` — `SyncNotificationSource` and `AsyncNotificationSource` capability protocols.
 [^resp3-bindings]: `src/rs/vertebra-py/src/db.rs::redis_hash_slot` — Legacy RESP3 helper bindings on vertebra._vertebra.
 [^vertebra-pyi]: `src/py/vertebra/_vertebra.pyi` — Core vertebra._vertebra stub declarations.
 [^resp3-rs]: `src/rs/vertebra-db/src/resp3/mod.rs` — Legacy RESP3 codec module in vertebra-db.
 [^db-lib]: `src/rs/vertebra-db/src/lib.rs` — vertebra-db crate root re-exporting resp3.
-[^queue-valkey]: `src/py/vertebra/framework/queues/redis.py::ValkeyQueueBackend` — Thin `ValkeyQueueBackend(RedisQueueBackend)` subclass moved to `queues/valkey.py` by `native-redis-driver`.
+[^queue-valkey]: `src/py/vertebra/framework/queues/valkey.py::ValkeyQueueBackend` — Standalone `ValkeyQueueBackend` extracted to `queues/valkey.py` by `native-redis-driver`.

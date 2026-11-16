@@ -31,8 +31,8 @@ tags:
   - notifications
 sources:
   - id: driver-caps
-    resource: src/py/vertebra/db/driver/capabilities.py::NotificationSource
-    title: NotificationSource capability protocols
+    resource: src/py/vertebra/db/driver/capabilities.py::SyncNotificationSource
+    title: SyncNotificationSource and AsyncNotificationSource capability protocols
   - id: valkey-drv
     resource: src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver
     title: SyncValkeyDriver and AsyncValkeyDriver
@@ -73,5 +73,5 @@ uv run --no-sync pytest src/py/tests/unit/db/test_redis_valkey_resp3.py -q && uv
 - [ ] `SyncValkeyNotificationSource` and `AsyncValkeyNotificationSource` pass unit, protocol, and type checks.
 - [ ] Zero regressions in the fast verification gate.
 
-[^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::NotificationSource` — NotificationSource capability protocols.
+[^driver-caps]: `src/py/vertebra/db/driver/capabilities.py::SyncNotificationSource` — `SyncNotificationSource` and `AsyncNotificationSource` capability protocols.
 [^valkey-drv]: `src/py/vertebra/db/adapters/valkey/driver.py::SyncValkeyDriver` — SyncValkeyDriver and AsyncValkeyDriver.

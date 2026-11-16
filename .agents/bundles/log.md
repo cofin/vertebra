@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T02:25:00Z] archive | native-redis-driver
+
+- Archived completed specification `native-redis-driver` (`ch01`–`ch04`, `16/16` tasks at `58e8db93`) into permanent OKF knowledge chapters (`redis-limitations.md`, `database-drivers-and-dialers.md`, `distributed-queues-and-email.md`, `workflow.md`, `product.md`), updated Master PRD `native-data-platform` (`t14`), downstream specs, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-redis-driver/`.
+
+## [2026-11-16T02:23:30Z] finish | native-redis-driver
+
+- Completed `native-redis-driver` (`ch01`–`ch04`, `16/16` tasks) at `58e8db93`: built standalone `src/rs/vertebra-redis` (`vertebra._redis`, `vertebra-core[redis]`, `gil_used = false`) with RESP2/RESP3 handshakes, atomic/non-atomic pipelines, `EVALSHA`/`EVAL` script execution, `CLIENT TRACKING` local cache invalidations, Sentinel primary discovery, Cluster `CRC16-XMODEM` slot routing, dedicated `SyncRedisListener`/`AsyncRedisListener` pub/sub sockets, and `XREADGROUP`/`XAUTOCLAIM` Streams, decoupled `adapters/valkey/` and `framework/queues/valkey.py`, cut `SyncRedisDriver`/`AsyncRedisDriver` and `RedisQueueBackend` over to `vertebra._redis`, split `NotificationSource` into `@runtime_checkable SyncNotificationSource` and `AsyncNotificationSource` across `capabilities.py`, `vertebra._postgres` (`SyncPostgresListener`), `vertebra._oracle` (`SyncOracleListener`), and `adapters/redis/notify.py`, added `redis` conformance gating, and verified `stubtest`, `mypy`, `ruff`, `review-check`, and `312` Python tests cleanly.
+
 ## [2026-11-16T01:00:00Z] archive | native-sqlite-driver
 
 - Archived completed specification `native-sqlite-driver` (`ch01`–`ch03`, `12/12` tasks at `49fb8150`) into permanent OKF knowledge chapters (`sqlite-limitations.md`, `database-drivers-and-dialers.md`, `workflow.md`), updated Master PRD `native-data-platform`, downstream specs, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-sqlite-driver/`.
