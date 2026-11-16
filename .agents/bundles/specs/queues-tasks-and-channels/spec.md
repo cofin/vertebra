@@ -16,7 +16,6 @@ current_chapter: ch01-queue-stores-and-first-party-backends
 current_task: queues-tasks-and-channels:ch01:t01
 parent_prd: integration-remediation
 depends_on_flows:
-  - native-valkey-driver
   - sqlspec-adapter-parity
 plan_revision: 5
 plan_commit: 473e1f2e

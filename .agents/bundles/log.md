@@ -1,5 +1,13 @@
 # Bundle Activity Log
 
+## [2026-11-16T04:22:00Z] archive | native-valkey-driver & native-data-platform
+
+- Archived completed specification `native-valkey-driver` (`ch01`–`ch04`, `16/16` tasks at `60ccf36f`) and completed Master PRD `native-data-platform` (`t01`–`t15`, `15/15` child flows complete across standalone PyO3 wheels for PostgreSQL, MySQL, Oracle 26ai, SQL Server, SQLite, DuckDB, BigQuery, Spanner, Redis, Valkey, Object Storage, and shared-memory `BrokerEngineCapsule` pools) into permanent OKF knowledge chapters (`valkey-limitations.md`, `database-drivers-and-dialers.md`, `distributed-queues-and-email.md`, `workflow.md`, `product.md`), updated Master PRD `integration-remediation`, `queues-tasks-and-channels`, and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/native-valkey-driver/` and `.agents/bundles/specs/native-data-platform/`.
+
+## [2026-11-16T04:21:30Z] finish | native-valkey-driver
+
+- Completed `native-valkey-driver` (`ch01`–`ch04`, `16/16` tasks) at `60ccf36f`: built standalone pure-Rust `src/rs/vertebra-valkey` (`vertebra._valkey`, `vertebra-core[valkey]`, `gil_used = false`) for Valkey `8.0+`/`9.0` with Valkey 9.0 hash-field expiration (`hexpire`, `hpexpire`, `httl`, `hpttl`, `hpersist`), `CLIENT CAPA redirect`, `CLIENT TRACKING` L1 write-through and push invalidations, `CLUSTER SHARDS` (`CLUSTER SLOTS` fallback) replica reads, Sentinel primary discovery, Google Cloud Memorystore for Valkey IAM token refresh, Streams (`XREADGROUP`/`XAUTOCLAIM`), and dedicated `SyncValkeyListener`/`AsyncValkeyListener` pub/sub sockets (`SUBSCRIBE`/`PSUBSCRIBE`/`SSUBSCRIBE`), cut `adapters/valkey/` (`SyncValkeyDriver`, `AsyncValkeyDriver`, `SyncValkeyNotificationSource`, `AsyncValkeyNotificationSource`) and `ValkeyQueueBackend` over to `vertebra._valkey` with zero `adapters/redis/` imports, removed legacy `vertebra_db::resp3` and `_vertebra` RESP3 helpers, added `valkey` conformance and wheel-isolation gates, and verified `93` Rust tests, `mypy.stubtest`, `mypy`, `ruff`, `review-check`, and `534` Python tests cleanly.
+
 ## [2026-11-16T02:53:00Z] archive | sqlalchemy-and-django-integration
 
 - Archived completed specification `sqlalchemy-and-django-integration` (`ch01`–`ch03`, `12/12` tasks at `1f0716d1`) into permanent OKF knowledge chapters (`sqlspec-alchemy-and-dialects.md`, `litestar.md`, `database-driver-limitations.md`, `adr-002-two-tier-shm-database-and-arrow-data-plane.md`), updated Master PRD `integration-remediation` (`t11`), downstream specs (`sqlspec-adapter-parity`, `queues-tasks-and-channels`, `strict-typing-hygiene`), and bundle indexes (`index.md`, `specs/index.md`), and removed `.agents/bundles/specs/sqlalchemy-and-django-integration/`.
