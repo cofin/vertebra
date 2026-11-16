@@ -32,9 +32,11 @@ from vertebra._vertebra import InterfaceError
 from vertebra.db.adapters.duckdb import DuckDBSecretConfig
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
+from vertebra.db.driver.capabilities import NotificationEvent
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.django import DjangoStorage
+from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteAsyncConfig, SQLiteEventQueueStore, SQLiteSyncConfig
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
@@ -1836,3 +1838,140 @@ async def test_django_storage_forwards_content_digests(asynchronous: bool, diges
             storage.save("verified.bin", tampered)
     assert type(exc_info.value) is IntegrityError
     assert bytes(store.get(saved_name)) == payload
+
+
+class _InMemorySyncNotifySource:
+    """In-memory SyncNotificationSource recording emitted notify frame sizes."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+        self.subscribed: list[str] = []
+        self._frames: list[NotificationEvent] = []
+
+    def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        self.published.append((channel, raw))
+        self._frames.append(NotificationEvent(channel=channel, payload=raw))
+
+    def subscribe(self, channels: list[str] | tuple[str, ...]) -> None:
+        self.subscribed.extend(channels)
+
+    def unsubscribe(self, channels: list[str] | tuple[str, ...]) -> None:
+        for ch in channels:
+            if ch in self.subscribed:
+                self.subscribed.remove(ch)
+
+    def listen(self) -> Iterator[NotificationEvent]:
+        while self._frames:
+            yield self._frames.pop(0)
+
+
+class _InMemoryAsyncNotifySource:
+    """In-memory AsyncNotificationSource recording emitted notify frame sizes."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+        self.subscribed: list[str] = []
+        self._frames: list[NotificationEvent] = []
+
+    async def publish(self, channel: str, payload: bytes | str) -> None:
+        raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+        self.published.append((channel, raw))
+        self._frames.append(NotificationEvent(channel=channel, payload=raw))
+
+    async def subscribe(self, channels: list[str] | tuple[str, ...]) -> None:
+        self.subscribed.extend(channels)
+
+    async def unsubscribe(self, channels: list[str] | tuple[str, ...]) -> None:
+        for ch in channels:
+            if ch in self.subscribed:
+                self.subscribed.remove(ch)
+
+    async def listen(self) -> AsyncIterator[NotificationEvent]:
+        while self._frames:
+            yield self._frames.pop(0)
+
+
+def test_changefeed_sync_checkpoint_restart_and_notify_spill(tmp_path: Path) -> None:
+    """Sync ChangeFeed backend persists checkpoints across restarts and spills >8000B notify frames."""
+    db_path = tmp_path / "sync_changefeed.db"
+    cfg = SQLiteSyncConfig(connection_config={"database": str(db_path)})
+    queue_store = SQLiteEventQueueStore(cfg)
+    notify = _InMemorySyncNotifySource()
+
+    backend = ChangeFeedSyncEventBackend(
+        queue_store=queue_store,
+        notify_source=notify,
+        checkpoint_key="worker-orders",
+    )
+    small_id = backend.publish("orders", {"id": 1}, {"source": "cdc"})
+    assert len(notify.published[0][1]) <= 7999
+    large_blob = "v" * 9200
+    large_id = backend.publish("orders", {"blob": large_blob}, {"oversized": True})
+    assert len(notify.published[1][1]) < 300
+
+    first_msg = backend.dequeue("orders", 0.0)
+    assert first_msg is not None
+    assert first_msg.event_id == small_id
+    assert first_msg.payload == {"id": 1}
+    backend.ack(first_msg.event_id)
+
+    second_msg = backend.dequeue("orders", 0.0)
+    assert second_msg is not None
+    assert second_msg.event_id == large_id
+    assert second_msg.payload == {"blob": large_blob}
+    assert second_msg.metadata == {"oversized": True}
+    backend.ack(second_msg.event_id)
+    backend.save_checkpoint("orders", "lsn:0/ABCDEF")
+    backend.shutdown()
+
+    restarted_cfg = SQLiteSyncConfig(connection_config={"database": str(db_path)})
+    restarted_backend = ChangeFeedSyncEventBackend(
+        queue_store=SQLiteEventQueueStore(restarted_cfg),
+        notify_source=_InMemorySyncNotifySource(),
+        checkpoint_key="worker-orders",
+    )
+    assert restarted_backend.load_checkpoint("orders") == "lsn:0/ABCDEF"
+
+
+@pytest.mark.anyio
+async def test_changefeed_async_checkpoint_restart_and_notify_spill(tmp_path: Path) -> None:
+    """Async ChangeFeed backend persists checkpoints across restarts and spills >8000B notify frames."""
+    db_path = tmp_path / "async_changefeed.db"
+    cfg = SQLiteAsyncConfig(connection_config={"database": str(db_path)})
+    queue_store = SQLiteEventQueueStore(cfg)
+    notify = _InMemoryAsyncNotifySource()
+
+    backend = ChangeFeedAsyncEventBackend(
+        queue_store=queue_store,
+        notify_source=notify,
+        checkpoint_key="worker-orders-async",
+    )
+    small_id = await backend.publish("orders", {"id": 1}, {"source": "cdc"})
+    assert len(notify.published[0][1]) <= 7999
+    large_blob = "a" * 9200
+    large_id = await backend.publish("orders", {"blob": large_blob}, {"oversized": True})
+    assert len(notify.published[1][1]) < 300
+
+    first_msg = await backend.dequeue("orders", 0.0)
+    assert first_msg is not None
+    assert first_msg.event_id == small_id
+    assert first_msg.payload == {"id": 1}
+    await backend.ack(first_msg.event_id)
+
+    second_msg = await backend.dequeue("orders", 0.0)
+    assert second_msg is not None
+    assert second_msg.event_id == large_id
+    assert second_msg.payload == {"blob": large_blob}
+    assert second_msg.metadata == {"oversized": True}
+    await backend.ack(second_msg.event_id)
+    assert await backend.load_checkpoint("orders") == large_id
+    await backend.shutdown()
+
+    restarted_cfg = SQLiteAsyncConfig(connection_config={"database": str(db_path)})
+    restarted_backend = ChangeFeedAsyncEventBackend(
+        queue_store=SQLiteEventQueueStore(restarted_cfg),
+        notify_source=_InMemoryAsyncNotifySource(),
+        checkpoint_key="worker-orders-async",
+    )
+    assert await restarted_backend.load_checkpoint("orders") == large_id

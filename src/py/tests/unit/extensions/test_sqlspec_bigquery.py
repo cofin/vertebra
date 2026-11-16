@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlspec import StatementStack
+from sqlspec.exceptions import NotFoundError as SQLSpecNotFoundError
+from sqlspec.exceptions import StackExecutionError
 
 from tests.unit.db.test_bigquery import _MockBigQueryRestServer
 from vertebra.db import ArrowCursor, NotFoundError, NotSupportedError
@@ -17,29 +21,27 @@ from vertebra.db.adapters.bigquery import (
 from vertebra.db.adapters.bigquery import BigQueryConfig, BigQueryDryRunResult, ObjectTableConfig
 from vertebra.db.adapters.bigquery import SyncBigQueryDriver as CoreSyncBigQueryDriver
 from vertebra.db.rls import TenantPredicate
-from vertebra.extensions.sqlspec import (
+from vertebra.extensions.sqlspec import ObjectStoreBackend
+from vertebra.extensions.sqlspec._driver import (
+    AsyncAdapterConfig,
+    BaseAsyncDriver,
+    BaseSyncDriver,
+    SyncAdapterConfig,
+)
+from vertebra.extensions.sqlspec.adapters.bigquery import (
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,
     BigQueryAsyncADKStore,
     BigQueryAsyncConfig,
     BigQueryAsyncDriver,
-    BigQueryAsyncEventQueueStore,
-    BigQueryAsyncStore,
     BigQueryConnectionShim,
+    BigQueryEventQueueStore,
+    BigQueryLitestarStore,
     BigQuerySyncADKArtifactStore,
     BigQuerySyncADKMemoryStore,
     BigQuerySyncADKStore,
     BigQuerySyncConfig,
     BigQuerySyncDriver,
-    BigQuerySyncEventQueueStore,
-    BigQuerySyncStore,
-    ObjectStoreBackend,
-)
-from vertebra.extensions.sqlspec.adapters import (
-    AsyncAdapterConfig,
-    BaseAsyncDriver,
-    BaseSyncDriver,
-    SyncAdapterConfig,
 )
 from vertebra.storage import SigningConfig, SyncObjectStore
 
@@ -92,18 +94,18 @@ class _InMemoryBigQueryEngine:
 
         if "VERTEBRA_ADK_SESSIONS" in upper:
             if upper.startswith("INSERT "):
-                sid = str(params["session_id"])
+                sid = str(params["id"])
                 self.sessions[sid] = dict(params)
                 return 1
             if upper.startswith("UPDATE "):
-                sid = str(params["session_id"])
+                sid = str(params["id"])
                 if sid in self.sessions:
-                    self.sessions[sid]["state_json"] = params["state_json"]
-                    self.sessions[sid]["updated_at"] = params["updated_at"]
+                    self.sessions[sid]["state"] = params["state"]
+                    self.sessions[sid]["update_time"] = params["update_time"]
                     return 1
                 return 0
             if upper.startswith("DELETE "):
-                sid = str(params.get("session_id", ""))
+                sid = str(params.get("id", ""))
                 self.sessions.pop(sid, None)
                 return 1
 
@@ -112,45 +114,46 @@ class _InMemoryBigQueryEngine:
                 self.events.append(dict(params))
                 return 1
             if upper.startswith("DELETE "):
-                sid = str(params.get("session_id", ""))
+                sid = str(params.get("id", params.get("session_id", "")))
                 self.events = [e for e in self.events if e.get("session_id") != sid]
                 return 1
 
-        if "VERTEBRA_ADK_MEMORIES" in upper and upper.startswith("INSERT "):
+        if "VERTEBRA_ADK_MEMORIES" in upper and (upper.startswith("INSERT ") or upper.startswith("MERGE ")):
+            self.memories = [m for m in self.memories if m.get("id") != params.get("id")]
             self.memories.append(dict(params))
             return 1
 
         if "VERTEBRA_ADK_ARTIFACTS" in upper:
-            if upper.startswith("INSERT "):
+            if upper.startswith("INSERT ") or upper.startswith("MERGE "):
                 self.artifacts.append(dict(params))
                 return 1
             if upper.startswith("DELETE "):
-                sid = str(params.get("session_id", ""))
-                key = str(params.get("artifact_key", ""))
-                ver = params.get("version")
+                sid = params.get("session_id")
+                fname = str(params.get("filename", ""))
                 self.artifacts = [
                     a
                     for a in self.artifacts
                     if not (
-                        a.get("session_id") == sid
-                        and a.get("artifact_key") == key
-                        and (ver is None or a.get("version") == ver)
+                        a.get("filename") == fname
+                        and a.get("app_name") == params.get("app_name")
+                        and a.get("user_id") == params.get("user_id")
+                        and (sid is None or a.get("session_id") == sid)
                     )
                 ]
                 return 1
 
         if "VERTEBRA_KV_STORE" in upper:
             if upper.startswith("MERGE "):
-                k = str(params["store_key"])
+                k = str(params["session_id"])
                 self.kv_store[k] = {
-                    "store_key": k,
-                    "value_bytes": params["value_bytes"],
+                    "session_id": k,
+                    "data": params["data"],
                     "expires_at": params.get("expires_at"),
                 }
                 return 1
             if upper.startswith("DELETE "):
-                if "STORE_KEY = @STORE_KEY" in upper:
-                    self.kv_store.pop(str(params.get("store_key", "")), None)
+                if "SESSION_ID = @SESSION_ID" in upper:
+                    self.kv_store.pop(str(params.get("session_id", "")), None)
                 elif "EXPIRES_AT <=" in upper:
                     now_str = str(params.get("now", ""))
                     self.kv_store = {
@@ -228,8 +231,8 @@ class _InMemoryBigQueryEngine:
             ]
 
         if "VERTEBRA_ADK_SESSIONS" in upper:
-            if "SESSION_ID = @SESSION_ID" in upper:
-                sid = str(params.get("session_id", ""))
+            if "WHERE ID = @ID" in upper:
+                sid = str(params.get("id", ""))
                 found = self.sessions.get(sid)
                 return [found] if found is not None else []
             uid = str(params.get("user_id", ""))
@@ -250,21 +253,33 @@ class _InMemoryBigQueryEngine:
             return [m for m in self.memories if m.get("user_id") == uid and (app is None or m.get("app_name") == app)]
 
         if "VERTEBRA_ADK_ARTIFACTS" in upper:
-            sid = str(params.get("session_id", ""))
-            key = params.get("artifact_key")
+            if "MAX(VERSION)" in upper or "COALESCE(MAX(" in upper:
+                fname = params.get("filename")
+                matched_vers = [
+                    int(a.get("version", 0))
+                    for a in self.artifacts
+                    if a.get("app_name") == params.get("app_name")
+                    and a.get("user_id") == params.get("user_id")
+                    and a.get("filename") == fname
+                ]
+                return [{"next_version": (max(matched_vers) + 1) if matched_vers else 1}]
+            sid = params.get("session_id")
+            fname = params.get("filename")
             ver = params.get("version")
             matched = [
                 a
                 for a in self.artifacts
-                if a.get("session_id") == sid
-                and (key is None or a.get("artifact_key") == key)
+                if a.get("app_name") == params.get("app_name")
+                and a.get("user_id") == params.get("user_id")
+                and (sid is None or a.get("session_id") == sid)
+                and (fname is None or a.get("filename") == fname)
                 and (ver is None or a.get("version") == ver)
             ]
             matched.sort(key=lambda r: int(r.get("version", 1)), reverse=True)
             return matched
 
         if "VERTEBRA_KV_STORE" in upper:
-            k = str(params.get("store_key", ""))
+            k = str(params.get("session_id", params.get("store_key", "")))
             entry = self.kv_store.get(k)
             return [entry] if entry is not None else []
 
@@ -289,6 +304,15 @@ class _SimulatedSyncCoreDriver:
         return self
 
     def close(self) -> None:
+        return None
+
+    def begin(self) -> None:
+        return None
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
         return None
 
     def execute(
@@ -444,6 +468,15 @@ class _SimulatedAsyncCoreDriver:
     async def close(self) -> None:
         return None
 
+    async def begin(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
     async def execute(
         self,
         sql: str,
@@ -547,26 +580,26 @@ def test_bigquery_sync_config_driver_data_dictionary_and_connection_shim() -> No
         storage_backend=storage,
         connection_instance=core_sync,
     )
-    driver = cfg.provide_driver()
+    driver = cfg.create_driver()
     assert isinstance(driver, BigQuerySyncDriver)
     assert driver.dialect == "bigquery"
 
-    tables = driver.data_dictionary.get_tables()
+    tables = driver.data_dictionary.get_tables(driver)
     assert len(tables) == 1
     assert tables[0]["table_name"] == "metrics"
 
-    columns = driver.data_dictionary.get_columns("metrics")
+    columns = driver.data_dictionary.get_columns(driver, "metrics")
     assert columns[0]["column_name"] == "id"
 
-    partitions = driver.data_dictionary.get_partitions("metrics")
+    partitions = driver.data_dictionary.get_partitions(driver, "metrics")
     assert partitions[0]["partition_id"] == "20261102"
 
     arrow_cur = driver.select_to_arrow("SELECT id, name, score FROM metrics")
-    assert arrow_cur.row_count == 2
+    assert arrow_cur.rows_affected == 2
     appended = driver.load_from_arrow("metrics", arrow_cur)
-    assert appended == 2
+    assert appended.telemetry["rows_processed"] == 2
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(SQLSpecNotFoundError):
         driver.select_one(
             "SELECT store_key FROM vertebra_kv_store WHERE store_key = @store_key", {"store_key": "missing"}
         )
@@ -578,28 +611,21 @@ def test_bigquery_sync_config_driver_data_dictionary_and_connection_shim() -> No
         is None
     )
 
-    exported = driver.select_to_storage(
-        "SELECT id, name, score FROM metrics",
-        "memory://bq-stage/exports/metrics.parquet",
-        format="parquet",
-    )
-    assert exported == 4
-    loaded = driver.load_from_storage(
-        "metrics",
-        "memory://bq-stage/exports/metrics.parquet",
-        format="parquet",
-    )
-    assert loaded == 4
+    arrow_export = driver.select_to_arrow("SELECT id, name, score FROM metrics")
+    storage.write_arrow_sync("exports/metrics.parquet", arrow_export.data, file_format="parquet")
+    exported_table = storage.read_arrow_sync("exports/metrics.parquet", file_format="parquet")
+    assert exported_table.num_rows == 4
+    loaded = driver.load_from_arrow("metrics", exported_table)
+    assert loaded.telemetry["rows_processed"] == 4
 
     dry = driver.dry_run("SELECT * FROM metrics")
     assert dry.cache_hit is True
     assert dry.estimated_cost_usd == 0.0
 
     stack_out = driver.execute_stack(
-        [
-            "CREATE TABLE IF NOT EXISTS t1 (id INT64)",
-            ("SELECT id, name FROM metrics", None),
-        ]
+        StatementStack()
+        .push_execute("CREATE TABLE IF NOT EXISTS t1 (id INT64)")
+        .push_execute("SELECT id, name FROM metrics")
     )
     assert len(stack_out) == 2
 
@@ -608,7 +634,7 @@ def test_bigquery_sync_config_driver_data_dictionary_and_connection_shim() -> No
     assert conn.project == "test-proj"
     assert conn.dataset_id == "app_ds"
     job = conn.query("SELECT id, name FROM metrics")
-    assert len(job.result()) == 4
+    assert len(job.result()) == 8
     assert job.job_id == "job-sim-1"
 
 
@@ -625,89 +651,139 @@ def test_bigquery_sync_adk_memory_artifact_litestar_and_event_stores() -> None:
         ),
     )
     backend = ObjectStoreBackend("memory://artifacts", store=store)
-    driver = BigQuerySyncDriver(core_sync, storage_backend=backend)
+    cfg = BigQuerySyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        storage_backend=backend,
+        connection_instance=core_sync,
+        extension_config={
+            "adk": {
+                "session_table": "vertebra_adk_sessions",
+                "events_table": "vertebra_adk_events",
+                "memory_table": "vertebra_adk_memories",
+                "artifact_table": "vertebra_adk_artifacts",
+            },
+            "litestar": {"session_table": "vertebra_kv_store"},
+            "events": {"queue_table": "vertebra_event_queue"},
+        },
+    )
 
-    adk_store = BigQuerySyncADKStore(driver)
+    adk_store = BigQuerySyncADKStore(cfg)
     adk_store.create_tables()
-    assert any("CLUSTER BY user_id, session_id" in ddl for ddl in engine.ddl_statements)
-    assert any("CLUSTER BY session_id, timestamp" in ddl for ddl in engine.ddl_statements)
+    assert any("CLUSTER BY app_name, user_id, id" in ddl for ddl in engine.ddl_statements)
+    assert any("CLUSTER BY app_name, user_id, session_id" in ddl for ddl in engine.ddl_statements)
 
-    sess = adk_store.create_session("s-1", "u-1", app_name="agent-app", state={"step": 1})
-    assert sess["session_id"] == "s-1"
+    sess = adk_store.create_session("s-1", "agent-app", "u-1", state={"step": 1})
+    assert sess["id"] == "s-1"
     assert sess["state"] == {"step": 1}
 
-    fetched_sess = adk_store.get_session("s-1", user_id="u-1")
+    fetched_sess = adk_store.get_session("agent-app", "u-1", "s-1")
     assert fetched_sess is not None
     assert fetched_sess["state"] == {"step": 1}
 
-    adk_store.update_session_state("s-1", {"step": 2, "ready": True})
-    updated_sess = adk_store.get_session("s-1")
+    adk_store.update_session_state("agent-app", "u-1", "s-1", {"step": 2, "ready": True})
+    updated_sess = adk_store.get_session("agent-app", "u-1", "s-1")
     assert updated_sess is not None
     assert updated_sess["state"] == {"step": 2, "ready": True}
 
-    assert len(adk_store.list_sessions("u-1", app_name="agent-app")) == 1
-    adk_store.append_event("s-1", "ev-1", "user", {"text": "hi"}, actions={"tool": "none"})
-    events = adk_store.get_events("s-1")
+    assert len(adk_store.list_sessions("agent-app", user_id="u-1")) == 1
+    adk_store.append_event(
+        {
+            "id": "ev-1",
+            "app_name": "agent-app",
+            "user_id": "u-1",
+            "session_id": "s-1",
+            "invocation_id": "inv-1",
+            "timestamp": datetime.now(UTC),
+            "event_data": {"author": "user", "content": {"text": "hi"}, "actions": {"tool": "none"}},
+        }
+    )
+    events = adk_store.get_events("agent-app", "u-1", "s-1")
     assert len(events) == 1
-    assert events[0]["content"] == {"text": "hi"}
-    adk_store.delete_session("s-1")
-    assert adk_store.get_session("s-1") is None
+    assert events[0]["event_data"]["content"] == {"text": "hi"}
+    adk_store.delete_session("agent-app", "u-1", "s-1")
+    assert adk_store.get_session("agent-app", "u-1", "s-1") is None
 
-    mem_store = BigQuerySyncADKMemoryStore(driver)
+    mem_store = BigQuerySyncADKMemoryStore(cfg)
     mem_store.create_tables()
-    mem_store.store_memory(
-        "m-1",
-        "u-1",
-        "Cloud Spanner supports multiplexed sessions",
-        embedding=[1.0, 0.0, 0.0],
-        metadata={"topic": "spanner"},
+    now = datetime.now(UTC)
+    assert (
+        mem_store.insert_memory_entries(
+            [
+                {
+                    "id": "m-1",
+                    "session_id": "s-1",
+                    "app_name": "agent-app",
+                    "user_id": "u-1",
+                    "scope": "user",
+                    "event_id": "ev-1",
+                    "author": "user",
+                    "timestamp": now,
+                    "content_json": {"text": "Cloud Spanner supports multiplexed sessions"},
+                    "content_text": "Cloud Spanner supports multiplexed sessions",
+                    "metadata_json": {"topic": "spanner"},
+                    "inserted_at": now,
+                    "embedding": [1.0, 0.0, 0.0],
+                },
+                {
+                    "id": "m-2",
+                    "session_id": "s-1",
+                    "app_name": "agent-app",
+                    "user_id": "u-1",
+                    "scope": "user",
+                    "event_id": "ev-2",
+                    "author": "user",
+                    "timestamp": now,
+                    "content_json": {"text": "BigQuery Storage Read API streams Arrow RecordBatches"},
+                    "content_text": "BigQuery Storage Read API streams Arrow RecordBatches",
+                    "metadata_json": {"topic": "bigquery"},
+                    "inserted_at": now,
+                    "embedding": [0.0, 1.0, 0.0],
+                },
+            ]
+        )
+        == 2
     )
-    mem_store.store_memory(
-        "m-2",
-        "u-1",
-        "BigQuery Storage Read API streams Arrow RecordBatches",
-        embedding=[0.0, 1.0, 0.0],
-        metadata={"topic": "bigquery"},
-    )
-    hits_vec = mem_store.search_memory("u-1", embedding=[0.95, 0.05, 0.0], top_k=1)
+    hits_vec = mem_store.search_entries("multiplexed", "agent-app", "u-1", limit=1, embedding=[0.95, 0.05, 0.0])
     assert len(hits_vec) == 1
-    assert hits_vec[0]["memory_id"] == "m-1"
+    assert hits_vec[0]["id"] == "m-1"
 
-    hits_kw = mem_store.search_memory("u-1", query="Arrow RecordBatches", top_k=1)
+    hits_kw = mem_store.search_entries("Arrow RecordBatches", "agent-app", "u-1", limit=1)
     assert len(hits_kw) == 1
-    assert hits_kw[0]["memory_id"] == "m-2"
+    assert hits_kw[0]["id"] == "m-2"
 
-    art_store = BigQuerySyncADKArtifactStore(driver, storage_backend=backend)
-    art_store.create_tables()
-    ref = art_store.save_artifact("s-1", "report.pdf", b"%PDF-1.7-payload", content_type="application/pdf")
+    art_store = BigQuerySyncADKArtifactStore(cfg, storage_backend=backend)
+    art_store.create_table()
+    ref = art_store.save_artifact_object(
+        "agent-app",
+        "u-1",
+        "report.pdf",
+        b"%PDF-1.7-payload",
+        session_id="s-1",
+        mime_type="application/pdf",
+    )
     assert ref.size == 16
-    assert ref.signed_url is not None
-    loaded_art = art_store.get_artifact("s-1", "report.pdf")
+    loaded_art = art_store.get_artifact("agent-app", "u-1", "report.pdf", session_id="s-1")
     assert loaded_art is not None
-    assert loaded_art[0] == b"%PDF-1.7-payload"
-    assert len(art_store.list_artifacts("s-1")) == 1
-    art_store.delete_artifact("s-1", "report.pdf")
-    assert art_store.get_artifact("s-1", "report.pdf") is None
+    assert loaded_art["canonical_uri"] == ref.uri
+    assert len(art_store.list_artifact_keys("agent-app", "u-1", session_id="s-1")) == 1
+    art_store.delete_artifact("agent-app", "u-1", "report.pdf", session_id="s-1")
+    assert art_store.get_artifact("agent-app", "u-1", "report.pdf", session_id="s-1") is None
 
-    kv_store = BigQuerySyncStore(driver)
-    kv_store.create_tables()
-    kv_store.set("sess-k1", b"payload-1", expires_in=300)
-    assert kv_store.exists("sess-k1") is True
-    assert kv_store.get("sess-k1") == b"payload-1"
-    ttl = kv_store.expires_in("sess-k1")
+    kv_store = BigQueryLitestarStore(cfg)
+    asyncio.run(kv_store.create_table())
+    asyncio.run(kv_store.set("sess-k1", b"payload-1", expires_in=timedelta(seconds=300)))
+    assert asyncio.run(kv_store.exists("sess-k1")) is True
+    assert asyncio.run(kv_store.get("sess-k1")) == b"payload-1"
+    ttl = asyncio.run(kv_store.expires_in("sess-k1"))
     assert ttl is not None and ttl > 0
-    kv_store.delete("sess-k1")
-    assert kv_store.get("sess-k1") is None
+    asyncio.run(kv_store.delete("sess-k1"))
+    assert asyncio.run(kv_store.get("sess-k1")) is None
 
-    eq_store = BigQuerySyncEventQueueStore(driver)
-    eq_store.create_tables()
-    eid = eq_store.publish("orders", {"order_id": 42})
-    pending = eq_store.consume("orders")
-    assert len(pending) == 1
-    assert pending[0]["event_id"] == eid
-    assert pending[0]["payload"] == {"order_id": 42}
-    eq_store.ack(eid)
-    assert eq_store.consume("orders") == []
+    eq_store = BigQueryEventQueueStore(cfg)
+    eq_ddls = eq_store.create_statements()
+    assert any("PARTITION BY DATE(available_at)" in ddl and "CLUSTER BY" in ddl for ddl in eq_ddls)
+    assert eq_store.drop_statements() == ["DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_event_queue`"]
 
 
 @pytest.mark.anyio
@@ -730,49 +806,89 @@ async def test_bigquery_async_config_driver_and_async_stores() -> None:
         dataset_id="app_ds",
         storage_backend=backend,
         connection_instance=core_async,
+        extension_config={
+            "adk": {
+                "session_table": "vertebra_adk_sessions",
+                "events_table": "vertebra_adk_events",
+                "memory_table": "vertebra_adk_memories",
+                "artifact_table": "vertebra_adk_artifacts",
+            },
+            "litestar": {"session_table": "vertebra_kv_store"},
+            "events": {"queue_table": "vertebra_event_queue"},
+        },
     )
     async with cfg.provide_session() as driver:
         assert isinstance(driver, BigQueryAsyncDriver)
-        tables = await driver.data_dictionary.get_tables()
+        tables = await driver.data_dictionary.get_tables(driver)
         assert tables[0]["table_name"] == "metrics"
 
-        adk = BigQueryAsyncADKStore(driver)
+        adk = BigQueryAsyncADKStore(cfg)
         await adk.create_tables()
-        await adk.create_session("as-1", "au-1", state={"ok": True})
-        sess = await adk.get_session("as-1")
+        await adk.create_session("as-1", "agent-app", "au-1", state={"ok": True})
+        sess = await adk.get_session("agent-app", "au-1", "as-1")
         assert sess is not None and sess["state"] == {"ok": True}
-        await adk.append_event("as-1", "aev-1", "assistant", {"reply": "done"})
-        assert len(await adk.get_events("as-1")) == 1
-        await adk.delete_session("as-1")
+        await adk.append_event(
+            {
+                "id": "aev-1",
+                "app_name": "agent-app",
+                "user_id": "au-1",
+                "session_id": "as-1",
+                "invocation_id": "ainv-1",
+                "timestamp": datetime.now(UTC),
+                "event_data": {"author": "assistant", "content": {"reply": "done"}},
+            }
+        )
+        assert len(await adk.get_events("agent-app", "au-1", "as-1")) == 1
+        await adk.delete_session("agent-app", "au-1", "as-1")
 
-        mem = BigQueryAsyncADKMemoryStore(driver)
+        mem = BigQueryAsyncADKMemoryStore(cfg)
         await mem.create_tables()
-        await mem.store_memory("am-1", "au-1", "Async Spanner multiplexed read-write", embedding=[0.5, 0.5])
-        results = await mem.search_memory("au-1", query="multiplexed")
+        now = datetime.now(UTC)
+        await mem.insert_memory_entries(
+            [
+                {
+                    "id": "am-1",
+                    "session_id": "as-1",
+                    "app_name": "agent-app",
+                    "user_id": "au-1",
+                    "scope": "user",
+                    "event_id": "aev-1",
+                    "author": "assistant",
+                    "timestamp": now,
+                    "content_json": {"text": "Async Spanner multiplexed read-write"},
+                    "content_text": "Async Spanner multiplexed read-write",
+                    "metadata_json": None,
+                    "inserted_at": now,
+                    "embedding": [0.5, 0.5],
+                }
+            ]
+        )
+        results = await mem.search_entries("multiplexed", "agent-app", "au-1")
         assert len(results) == 1
 
-        art = BigQueryAsyncADKArtifactStore(driver, storage_backend=backend)
-        await art.create_tables()
-        ref = await art.save_artifact("as-1", "chart.png", b"\x89PNG", content_type="image/png")
-        assert ref.signed_url is not None
-        got = await art.get_artifact("as-1", "chart.png")
-        assert got is not None and got[0] == b"\x89PNG"
-        await art.delete_artifact("as-1", "chart.png")
+        art = BigQueryAsyncADKArtifactStore(cfg, storage_backend=backend)
+        await art.create_table()
+        ref = await art.save_artifact_object(
+            "agent-app",
+            "au-1",
+            "chart.png",
+            b"\x89PNG",
+            session_id="as-1",
+            mime_type="image/png",
+        )
+        got = await art.get_artifact("agent-app", "au-1", "chart.png", session_id="as-1")
+        assert got is not None and got["canonical_uri"] == ref.uri
+        await art.delete_artifact("agent-app", "au-1", "chart.png", session_id="as-1")
 
-        kv = BigQueryAsyncStore(driver)
-        await kv.create_tables()
-        await kv.set("ak-1", "async-val", expires_in=120)
+        kv = BigQueryLitestarStore(cfg)
+        await kv.create_table()
+        await kv.set("ak-1", "async-val", expires_in=timedelta(seconds=120))
         assert await kv.get("ak-1") == b"async-val"
         await kv.delete_all()
         assert await kv.exists("ak-1") is False
 
-        eq = BigQueryAsyncEventQueueStore(driver)
-        await eq.create_tables()
-        eid = await eq.publish("jobs", {"task": "compact"})
-        items = await eq.consume("jobs")
-        assert len(items) == 1 and items[0]["event_id"] == eid
-        await eq.ack(eid)
-        assert await eq.consume("jobs") == []
+        eq = BigQueryEventQueueStore(cfg)
+        assert any("PARTITION BY DATE(available_at)" in ddl for ddl in eq.create_statements())
 
 
 @pytest.mark.parametrize("config_created", [False, True])
@@ -914,7 +1030,7 @@ def test_bigquery_arrow_stack_preserves_native_storage_options() -> None:
     core = CoreSyncBigQueryDriver(BigQueryConfig(project_id="test-proj", dataset_id="analytics"), client=client)
     driver = BigQuerySyncDriver(core)
     try:
-        with pytest.raises(RuntimeError, match="external Arrow read reached"):
+        with pytest.raises((RuntimeError, StackExecutionError), match="external Arrow read reached"):
             driver.execute_stack(
                 StatementStack().push_execute_arrow(
                     "metrics", selected_fields=["id"], row_restriction="id = 7", max_streams=1
@@ -936,7 +1052,7 @@ async def test_bigquery_async_arrow_stack_preserves_native_storage_options() -> 
     )
     driver = BigQueryAsyncDriver(core)
     try:
-        with pytest.raises(RuntimeError, match="external Arrow read reached"):
+        with pytest.raises((RuntimeError, StackExecutionError), match="external Arrow read reached"):
             await driver.execute_stack(
                 StatementStack().push_execute_arrow(
                     "metrics", selected_fields=["id"], row_restriction="id = 7", max_streams=1
@@ -971,8 +1087,9 @@ def test_configured_tenant_predicate_rejected_before_constructor_effects(
         "sync-config": lambda: BigQuerySyncConfig(tenant_predicate=predicate),
         "async-config": lambda: BigQueryAsyncConfig(tenant_predicate=predicate),
     }
-    for config_type in (BigQuerySyncConfig, BigQueryAsyncConfig):
-        monkeypatch.setattr(config_type, "resolve_bigquery_config", forbidden)
+    from vertebra.extensions.sqlspec.adapters.bigquery import config as bq_config_mod
+
+    monkeypatch.setattr(bq_config_mod, "_merge_connection_config", forbidden)
     for constructor_type in (BigQuerySyncDriver, BigQueryAsyncDriver, BigQuerySyncConfig, BigQueryAsyncConfig):
         monkeypatch.setattr(constructor_type, "__setattr__", forbidden)
     with pytest.raises(NotSupportedError):
@@ -999,7 +1116,7 @@ def test_bigquery_sync_driver_rejects_per_call_tenant_id(method_name: str) -> No
     calls = {
         "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
         "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
-        "execute_stack": lambda: driver.execute_stack(["SELECT 1"], tenant_id="tenant-a"),
+        "execute_stack": lambda: driver.execute_stack(StatementStack().push_execute("SELECT 1"), tenant_id="tenant-a"),
         "select": lambda: driver.select("SELECT 1", tenant_id="tenant-a"),
         "select_one": lambda: driver.select_one("SELECT 1", tenant_id="tenant-a"),
         "select_one_or_none": lambda: driver.select_one_or_none("SELECT 1", tenant_id="tenant-a"),
@@ -1032,7 +1149,7 @@ async def test_bigquery_async_driver_rejects_per_call_tenant_id(method_name: str
     calls = {
         "execute": lambda: driver.execute("SELECT 1", tenant_id="tenant-a"),
         "execute_many": lambda: driver.execute_many("INSERT INTO metrics VALUES (1)", [(1,)], tenant_id="tenant-a"),
-        "execute_stack": lambda: driver.execute_stack(["SELECT 1"], tenant_id="tenant-a"),
+        "execute_stack": lambda: driver.execute_stack(StatementStack().push_execute("SELECT 1"), tenant_id="tenant-a"),
         "select": lambda: driver.select("SELECT 1", tenant_id="tenant-a"),
         "select_one": lambda: driver.select_one("SELECT 1", tenant_id="tenant-a"),
         "select_one_or_none": lambda: driver.select_one_or_none("SELECT 1", tenant_id="tenant-a"),

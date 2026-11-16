@@ -119,6 +119,17 @@ class SyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]
         rows, cols = self.execute_with_description(sql, parameters, **kwargs)
         return self.hydrate_rows(rows, cols, schema_type)
 
+    def query_with_columns(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Execute a row-returning query and return hydrated row dicts alongside ordered column names."""
+        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
+        column_names = [str(col) for col in cols]
+        return self.hydrate_rows(rows, column_names, None), column_names
+
     def select_one(
         self,
         sql: str,

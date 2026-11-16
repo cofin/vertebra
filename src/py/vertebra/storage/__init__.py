@@ -2,6 +2,7 @@
 
 from vertebra.storage._secrets import AsyncGcsBearerSecretProvider, SyncGcsBearerSecretProvider
 from vertebra.storage._store import (
+    ArtifactReference,
     AsyncGcpIdTokenCache,
     AsyncGcpTokenCache,
     AsyncObjectStore,
@@ -32,6 +33,7 @@ from vertebra.storage._store import (
 from vertebra.storage._streaming import ByteRange, RangeNotSatisfiableError, StreamingStorageResponse, parse_byte_range
 
 __all__ = (
+    "ArtifactReference",
     "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
     "AsyncGcsBearerSecretProvider",

@@ -127,6 +127,17 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
         return self.hydrate_rows(rows, cols, schema_type)
 
+    async def query_with_columns(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Execute a row-returning query and return hydrated row dicts alongside ordered column names."""
+        rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
+        column_names = [str(col) for col in cols]
+        return self.hydrate_rows(rows, column_names, None), column_names
+
     async def select_one(
         self,
         sql: str,
@@ -315,6 +326,15 @@ class ThreadOffloadAsyncDatabaseDriver[
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute a query with column descriptions via the paired synchronous driver."""
         return await asyncio.to_thread(self._sync.execute_with_description, sql, parameters, **kwargs)
+
+    async def query_with_columns(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Execute a row-returning query with column names via the paired synchronous driver."""
+        return await asyncio.to_thread(self._sync.query_with_columns, sql, parameters, **kwargs)
 
     async def select(
         self,

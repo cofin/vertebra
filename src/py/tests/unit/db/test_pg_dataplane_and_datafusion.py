@@ -37,7 +37,7 @@ from vertebra.db.adapters.postgres.notify import (
 )
 from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryResult
 from vertebra.db.driver import AsyncNotificationSource, DataError, NotSupportedError
-from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncDriver
+from vertebra.extensions.sqlspec.adapters.postgres import PostgresSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.module_loader import import_optional
@@ -278,7 +278,7 @@ def test_postgres_sync_rls_predicate_binds_with_native_dollar_pool() -> None:
         client_factory=FakeDirectClientFactory(cluster),
     )
     try:
-        adapter = PostgreSQLSyncDriver(driver)
+        adapter = PostgresSyncDriver(driver)
         assert adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1")) == "tenant_id = $1"
         sql, parameters, _ = cluster.recorded_queries[0]
         assert sql.casefold() == "select set_config($1, $2, $3)"
@@ -301,7 +301,7 @@ def test_postgres_sync_rls_predicate_propagates_session_setter_failure() -> None
     cluster.execute_sql = _failing_execute
     driver = SyncPostgreSQLDriver(pool=FakeSyncPostgresPool(cluster))
     try:
-        adapter = PostgreSQLSyncDriver(driver)
+        adapter = PostgresSyncDriver(driver)
         with pytest.raises(RuntimeError) as raised:
             adapter.apply_tenant_predicate(TenantPredicate(tenant_value="tenant-1"))
         assert raised.value is failure

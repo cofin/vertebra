@@ -1,9 +1,10 @@
-"""Behavioral and unit tests for SQLSpecProvider, ProxySyncDriver, ProxyAsyncDriver, SharedArrowBuffer, and AlchemyPlugin SHM session brokering."""
+"""Behavioral and unit tests for SQLSpecProvider, ProxySyncDriver, ProxyAsyncDriver, VTBARROW ArrowCursor SHM, and AlchemyPlugin session brokering."""
 
 from __future__ import annotations
 
 import sqlite3
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,7 +25,6 @@ from vertebra.extensions.alchemy import (
 from vertebra.extensions.sqlspec.provider import (
     BrokerRpcRequest,
     BrokerRpcResponse,
-    SharedArrowBuffer,
     SQLSpecAsyncProvider,
     SQLSpecSyncProvider,
 )
@@ -247,9 +247,14 @@ async def test_proxy_async_driver_small_inline_results() -> None:
     assert metrics.total_released >= 1
 
 
+def _shm_exists(shm_name: str) -> bool:
+    """Return True when a POSIX shared-memory segment file is still present under /dev/shm."""
+    return (Path("/dev/shm") / shm_name.lstrip("/")).exists()
+
+
 @pytest.mark.anyio
 async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cleanup() -> None:
-    """Verify >= 256 row results and select_to_arrow spill to SharedArrowBuffer and always unlink."""
+    """Verify >= 256 row results and select_to_arrow spill to VTBARROW ArrowCursor and always unlink."""
     upstream = _SQLiteSyncUpstreamDriver()
     batch = [(idx, f"item-{idx}") for idx in range(1, 301)]
     upstream.execute_many("INSERT INTO items (id, name) VALUES (?, ?)", batch)
@@ -265,9 +270,9 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert sync_driver.last_response is not None
         assert sync_driver.last_response.is_arrow_shm is True
         spilled_shm_name = sync_driver.last_response.arrow_shm_name
-        assert spilled_shm_name.startswith("vtb-arrow-")
+        assert spilled_shm_name.lstrip("/").startswith("vtb-arrow-")
         assert sync_driver.last_response.arrow_byte_len > 0
-        assert not SharedArrowBuffer.exists(spilled_shm_name)
+        assert not _shm_exists(spilled_shm_name)
         assert len(provider.active_arrow_buffers) == 0
 
         arrow_result = sync_driver.select_to_arrow("SELECT id, name FROM items WHERE id <= 5 ORDER BY id")
@@ -283,7 +288,7 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert sync_driver.last_response is not None
         assert sync_driver.last_response.is_arrow_shm is True
         arrow_shm_name = sync_driver.last_response.arrow_shm_name
-        assert not SharedArrowBuffer.exists(arrow_shm_name)
+        assert not _shm_exists(arrow_shm_name)
         assert len(provider.active_arrow_buffers) == 0
 
         with pytest.raises(msgspec.ValidationError):
@@ -293,9 +298,33 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
             )
         assert sync_driver.last_response is not None
         failed_shm_name = sync_driver.last_response.arrow_shm_name
-        assert failed_shm_name.startswith("vtb-arrow-")
-        assert not SharedArrowBuffer.exists(failed_shm_name)
+        assert failed_shm_name.lstrip("/").startswith("vtb-arrow-")
+        assert not _shm_exists(failed_shm_name)
         assert len(provider.active_arrow_buffers) == 0
+
+    direct_resp = provider.handle_request(
+        BrokerRpcRequest(
+            request_id=700,
+            op="select_to_arrow",
+            slot_idx=5,
+            generation=5,
+            sql="SELECT id, name FROM items WHERE id <= 2 ORDER BY id",
+        )
+    )
+    assert direct_resp.is_arrow_shm is True
+    assert _shm_exists(direct_resp.arrow_shm_name)
+    assert (Path("/dev/shm") / direct_resp.arrow_shm_name.lstrip("/")).read_bytes()[:8] == b"VTBARROW"
+    provider.handle_request(
+        BrokerRpcRequest(
+            request_id=701,
+            op="release",
+            slot_idx=5,
+            generation=5,
+            in_tx=False,
+        )
+    )
+    assert not _shm_exists(direct_resp.arrow_shm_name)
+    assert len(provider.active_arrow_buffers) == 0
 
     async_upstream = _SQLiteAsyncUpstreamDriver(upstream)
     async_provider = SQLSpecAsyncProvider(async_upstream, broker=broker, arrow_threshold_rows=256)
@@ -310,7 +339,7 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
         assert async_result.get_data() is not None
         assert async_driver.last_response is not None
         assert async_driver.last_response.is_arrow_shm is True
-        assert not SharedArrowBuffer.exists(async_driver.last_response.arrow_shm_name)
+        assert not _shm_exists(async_driver.last_response.arrow_shm_name)
         assert len(async_provider.active_arrow_buffers) == 0
 
         with pytest.raises(msgspec.ValidationError):
@@ -319,7 +348,7 @@ async def test_large_result_sets_and_select_to_arrow_zero_copy_shm_spill_and_cle
                 schema_type=StrictPositiveRow,
             )
         assert async_driver.last_response is not None
-        assert not SharedArrowBuffer.exists(async_driver.last_response.arrow_shm_name)
+        assert not _shm_exists(async_driver.last_response.arrow_shm_name)
         assert len(async_provider.active_arrow_buffers) == 0
 
 

@@ -92,24 +92,64 @@ app = Litestar(
 )
 ```
 
-## SQLSpec Integration, Statement Stacks & SHM Proxy (`vertebra.extensions.sqlspec`)
+## SQLSpec 0.71.1+ Per-Engine Adapters, Stores & SHM Proxy (`vertebra.extensions.sqlspec`)
 
-Vertebra provides first-class support for `sqlspec` (`>=0.69.0`) across 8 database engines, native statement pipelining, and shared-memory connection pooling:
+Vertebra provides first-class support for `sqlspec>=0.71.1` across 8 per-engine adapter packages (`vertebra.extensions.sqlspec.adapters.{postgres,sqlite,mysql,oracle,mssql,duckdb,bigquery,spanner}`), native statement pipelining, shared-memory connection pooling, and Google ADK / Litestar / Events stores:
 
-- **Native Drivers**: Typed sync and async database configs across relational, analytical, and cloud-native engines (`PostgreSQLSyncConfig`, `PostgreSQLAsyncConfig`, `MySQLSyncConfig`, `MySQLAsyncConfig`, `SQLiteSyncConfig`, `SQLiteAsyncConfig`, `OracleSyncConfig`, `OracleAsyncConfig`, `MSSQLSyncConfig`, `MSSQLAsyncConfig`, `DuckDBSyncConfig`, `DuckDBAsyncConfig`, `BigQuerySyncConfig`, `BigQueryAsyncConfig`, `SpannerSyncConfig`, `SpannerAsyncConfig`).
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[sqlspec,adk]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[sqlspec,adk]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[sqlspec,adk]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[sqlspec,adk]"
+    ```
+
+```mermaid
+flowchart LR
+    App["Application / Litestar / ADK"]
+    Cfg["<Engine>SyncConfig / <Engine>AsyncConfig"]
+    Drv["BaseSyncDriver / BaseAsyncDriver"]
+    Stores["DataDictionary + ADK / Events / Litestar Stores"]
+    Obj["ObjectStoreBackend + ArtifactReference"]
+    App --> Cfg
+    Cfg --> Drv
+    Cfg --> Stores
+    Stores --> Obj
+```
+
+- **Per-Engine Adapters & `DataDictionary`**: Dedicated `vertebra.extensions.sqlspec.adapters.<engine>` packages (`adapter_name = "vertebra_<engine>"`) export `PostgresSyncConfig` / `PostgresAsyncConfig`, `MySQLSyncConfig` / `MySQLAsyncConfig`, `SQLiteSyncConfig` / `SQLiteAsyncConfig`, `OracleSyncConfig` / `OracleAsyncConfig`, `MSSQLSyncConfig` / `MSSQLAsyncConfig`, `DuckDBSyncConfig` / `DuckDBAsyncConfig`, `BigQuerySyncConfig` / `BigQueryAsyncConfig`, and `SpannerSyncConfig` / `SpannerAsyncConfig` (`SpangresSyncConfig` / `SpangresAsyncConfig`), each paired with `<Engine>SyncDataDictionary` and `<Engine>AsyncDataDictionary` (`get_version`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys`, `get_optimal_type`, `get_feature_flag`).
+- **Google ADK, Events & Litestar Stores (`*_store_class` Wiring)**: Every engine config binds explicit `adk_session_store_class`, `adk_memory_store_class`, `events_store_class`, and `litestar_store_class` attributes directly onto upstream `sqlspec>=0.71.1` store bases (`<Engine>{Sync,Async}ADKStore`, `<Engine>{Sync,Async}ADKMemoryStore`, `<Engine>{Sync,Async}ADKArtifactStore`, `<Engine>EventQueueStore`, `<Engine>LitestarStore`), offloading ADK binary artifacts through `vertebra.storage.ArtifactReference` (`canonical_uri`, `version`, `mime_type`, `size_bytes`, `etag`, `sha256_hex`) without storing raw blobs in database rows.
 - **Shared-Memory Proxy**: `ProxySyncConfig` and `ProxyAsyncConfig` (`ProxySyncDriver`, `ProxyAsyncDriver`) lease pooled connections over shared memory from the parent process so multi-worker deployments never multiply connection counts.
 - **Native Statement Pipelining**: SQLSpec `execute_stack` uses `SyncPipelineCapable` / `AsyncPipelineCapable` through `driver.pipeline()` for supported stacks and returns one ordered result per operation. Other stacks use sequential execution with transaction boundaries.
-- **Change Feed & CDC**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols over PostgreSQL logical replication (`pg_logical_emit_message`) with automatic Parquet spillover for payloads exceeding 7,500 bytes.
-- **Object Storage & Arrow Export**: `ObjectStoreBackend` integrates with `sqlspec.storage.storage_registry` and provides PyArrow IPC and Parquet dataset streaming.
+- **Change Feed & Durable Checkpointing**: `ChangeFeedSyncEventBackend` and `ChangeFeedAsyncEventBackend` implement `sqlspec.extensions.events` protocols with durable checkpoint persistence and automatic `EventQueueStore` / object-store spillover for payloads exceeding `8,000` bytes (`PostgresSyncEventsBackend` / `PostgresAsyncEventsBackend` over `LISTEN/NOTIFY` and `OracleSyncEventsBackend` / `OracleAsyncEventsBackend` over TxEventQ / `DBMS_AQ`).
+- **Object Storage & Arrow Streaming**: `ObjectStoreBackend(ObjectStoreBase)` integrates with `sqlspec.storage.storage_registry`, providing native async/sync `stream_arrow_*`, `copy_*`, `move_*`, and `sign_*` presigned URLs over `vertebra._storage`.
 
 ```python
 from vertebra.extensions.sqlspec import (
+    PostgresAsyncConfig,
     SQLiteSyncConfig,
     create_sqlspec_plugin,
 )
 
-config = SQLiteSyncConfig(path=":memory:")
-sqlspec_plugin = create_sqlspec_plugin(config)
+sqlite_cfg = SQLiteSyncConfig(path=":memory:")
+pg_cfg = PostgresAsyncConfig(dsn="postgresql://app_user:secret@localhost:5432/app")
+sqlspec_plugin = create_sqlspec_plugin(sqlite_cfg, pg_cfg)
 ```
 
 ## SQLAlchemy 2.0+, Advanced Alchemy 1.12+, Native Caching & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)

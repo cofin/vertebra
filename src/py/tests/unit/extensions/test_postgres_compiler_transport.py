@@ -15,13 +15,13 @@ from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresClus
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.rls import TenantPredicate
 from vertebra.extensions.sqlalchemy.dialects import AsyncPostgreSQLDialect, SyncPostgreSQLDialect
-from vertebra.extensions.sqlspec.adapters import (
-    PostgreSQLAsyncConfig,
-    PostgreSQLAsyncDriver,
-    PostgreSQLSyncConfig,
-    PostgreSQLSyncDriver,
-    _compile_postgres_numeric_transport,
+from vertebra.extensions.sqlspec.adapters.postgres import (
+    PostgresAsyncConfig,
+    PostgresAsyncDriver,
+    PostgresSyncConfig,
+    PostgresSyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.postgres.core import compile_postgres_numeric_transport
 
 
 def _seed_cluster() -> FakePostgresCluster:
@@ -34,10 +34,10 @@ def _seed_cluster() -> FakePostgresCluster:
 
 def test_postgres_sqlspec_execution_style_is_numeric() -> None:
     """Both sync and async PostgreSQL SQLSpec adapters default directly to NUMERIC ($N) binds."""
-    assert PostgreSQLSyncDriver._execution_parameter_style is ParameterStyle.NUMERIC
-    assert PostgreSQLAsyncDriver._execution_parameter_style is ParameterStyle.NUMERIC
-    sync_cfg = PostgreSQLSyncDriver._default_statement_config().parameter_config
-    async_cfg = PostgreSQLAsyncDriver._default_statement_config().parameter_config
+    assert PostgresSyncDriver._execution_parameter_style is ParameterStyle.NUMERIC
+    assert PostgresAsyncDriver._execution_parameter_style is ParameterStyle.NUMERIC
+    sync_cfg = PostgresSyncDriver._default_statement_config().parameter_config
+    async_cfg = PostgresAsyncDriver._default_statement_config().parameter_config
     assert sync_cfg.default_execution_parameter_style is ParameterStyle.NUMERIC
     assert async_cfg.default_execution_parameter_style is ParameterStyle.NUMERIC
 
@@ -53,13 +53,13 @@ def test_compile_postgres_numeric_transport_preserves_transformers_filters_and_u
         seen_transforms.append((type(expression).__name__, parameters))
         return expression, parameters
 
-    cfg = PostgreSQLSyncDriver._default_statement_config().replace(
+    cfg = PostgresSyncDriver._default_statement_config().replace(
         enable_parsing=True,
         statement_transformers=[transformer],
     )
-    adapter = PostgreSQLSyncDriver(native, statement_config=cfg)
+    adapter = PostgresSyncDriver(native, statement_config=cfg)
     try:
-        prepared, compiled_sql, bound = _compile_postgres_numeric_transport(
+        prepared, compiled_sql, bound = compile_postgres_numeric_transport(
             adapter,
             SQL("SELECT id, name FROM items WHERE id = ?", TypedParameter(7, int, "item_id"), statement_config=cfg),
             (LimitOffsetFilter(limit=10, offset=5),),
@@ -92,9 +92,9 @@ def test_postgres_sync_stack_and_rls_emit_numeric_dollar_binds() -> None:
         pool=FakeSyncPostgresPool(cluster),
     )
     try:
-        adapter = PostgreSQLSyncDriver(
+        adapter = PostgresSyncDriver(
             native,
-            statement_config=PostgreSQLSyncConfig(native.config).statement_config,
+            statement_config=PostgresSyncConfig(native.config).statement_config,
         )
         results = adapter.execute_stack(
             StatementStack()
@@ -128,9 +128,9 @@ async def test_postgres_async_stack_and_rls_emit_numeric_dollar_binds() -> None:
         pool=FakeAsyncPostgresPool(cluster),
     )
     try:
-        adapter = PostgreSQLAsyncDriver(
+        adapter = PostgresAsyncDriver(
             native,
-            statement_config=PostgreSQLAsyncConfig(native.config).statement_config,
+            statement_config=PostgresAsyncConfig(native.config).statement_config,
         )
         results = await adapter.execute_stack(
             StatementStack()
@@ -194,9 +194,9 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
 
     if asynchronous:
         native_async = AsyncPostgreSQLDriver(cfg, pool=FakeAsyncPostgresPool(cluster))
-        adapter_async = PostgreSQLAsyncDriver(
+        adapter_async = PostgresAsyncDriver(
             native_async,
-            statement_config=PostgreSQLAsyncConfig(cfg).statement_config,
+            statement_config=PostgresAsyncConfig(cfg).statement_config,
         )
         custom_cfg = adapter_async.statement_config.replace(
             enable_parsing=True,
@@ -211,7 +211,7 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
                 ],
                 statement_config=custom_cfg,
             )
-            assert inserted == 2
+            assert inserted.rows_affected == 2
             assert seen_transforms == ["Insert"]
             assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
                 ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (1, "alpha", None)),
@@ -227,7 +227,7 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
                 ],
                 NullFilter("deleted_at"),
             )
-            assert updated == 1
+            assert updated.rows_affected == 1
             assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
                 (
                     "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
@@ -270,9 +270,9 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
         return
 
     native_sync = SyncPostgreSQLDriver(cfg, pool=FakeSyncPostgresPool(cluster))
-    adapter_sync = PostgreSQLSyncDriver(
+    adapter_sync = PostgresSyncDriver(
         native_sync,
-        statement_config=PostgreSQLSyncConfig(cfg).statement_config,
+        statement_config=PostgresSyncConfig(cfg).statement_config,
     )
     custom_cfg = adapter_sync.statement_config.replace(
         enable_parsing=True,
@@ -287,7 +287,7 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
             ],
             statement_config=custom_cfg,
         )
-        assert inserted == 2
+        assert inserted.rows_affected == 2
         assert seen_transforms == ["Insert"]
         assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
             ("INSERT INTO items (id, name, deleted_at) VALUES ($1, $2, $3)", (1, "alpha", None)),
@@ -303,7 +303,7 @@ async def test_postgres_execute_many_and_stack_many_compile_numeric_filters_and_
             ],
             NullFilter("deleted_at"),
         )
-        assert updated == 1
+        assert updated.rows_affected == 1
         assert [(sql, params) for sql, params, _ in cluster.recorded_queries] == [
             (
                 "UPDATE items SET name = $1 WHERE id = $2 AND deleted_at IS NULL",
@@ -363,9 +363,9 @@ async def test_postgres_select_one_family_forwards_statement_config(
 
     if asynchronous:
         native_async = AsyncPostgreSQLDriver(cfg, pool=FakeAsyncPostgresPool(cluster))
-        adapter_async = PostgreSQLAsyncDriver(
+        adapter_async = PostgresAsyncDriver(
             native_async,
-            statement_config=PostgreSQLAsyncConfig(cfg).statement_config,
+            statement_config=PostgresAsyncConfig(cfg).statement_config,
         )
         override_cfg = adapter_async.statement_config.replace(
             enable_parsing=True,
@@ -387,9 +387,9 @@ async def test_postgres_select_one_family_forwards_statement_config(
         return
 
     native_sync = SyncPostgreSQLDriver(cfg, pool=FakeSyncPostgresPool(cluster))
-    adapter_sync = PostgreSQLSyncDriver(
+    adapter_sync = PostgresSyncDriver(
         native_sync,
-        statement_config=PostgreSQLSyncConfig(cfg).statement_config,
+        statement_config=PostgresSyncConfig(cfg).statement_config,
     )
     override_cfg = adapter_sync.statement_config.replace(
         enable_parsing=True,

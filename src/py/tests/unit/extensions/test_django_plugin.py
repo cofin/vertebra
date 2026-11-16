@@ -70,7 +70,7 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 )
 from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
-from vertebra.extensions.sqlspec.adapters import PostgreSQLSyncConfig, SQLiteSyncConfig
+from vertebra.extensions.sqlspec.adapters import PostgresSyncConfig, SQLiteSyncConfig
 from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (
     AsyncObjectStore,
@@ -669,7 +669,7 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
         },
         alias="default",
     )
-    sqlspec_pg = PostgreSQLSyncConfig(
+    sqlspec_pg = PostgresSyncConfig(
         dsn="postgresql://postgres@10.0.0.5:6432/appdb",
         pgbouncer=True,
         pooler_mode="transaction",

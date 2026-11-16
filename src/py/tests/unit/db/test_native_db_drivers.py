@@ -3130,3 +3130,35 @@ def test_engine_purity_rejects_engine_sql_construction(sql: str) -> None:
 def test_engine_purity_rejects_relative_adapter_import() -> None:
     """Relative imports cannot bypass the same generic-database boundary."""
     assert _engine_purity_violations("from .adapters.postgres.config import PostgreSQLConfig")
+
+
+@pytest.mark.parametrize(
+    ("query", "params", "expected_rows", "expected_cols"),
+    [
+        ("SELECT id, label FROM items ORDER BY id", None, [{"id": 1, "label": "alpha"}], ["id", "label"]),
+        ("SELECT id, label FROM items WHERE id = ?", (999,), [], ["id", "label"]),
+        ("INSERT INTO items (label) VALUES (?) RETURNING id, label", ("beta",), [{"id": 2, "label": "beta"}], ["id", "label"]),
+        ("UPDATE items SET label = ? WHERE id = ? RETURNING id, label", ("gamma", 999), [], ["id", "label"]),
+    ],
+)
+@pytest.mark.anyio
+async def test_driver_query_with_columns_preserves_zero_row_columns(
+    query: str,
+    params: tuple[Any, ...] | None,
+    expected_rows: list[dict[str, Any]],
+    expected_cols: list[str],
+) -> None:
+    """Both sync and async drivers preserve ordered column names on empty and populated results."""
+    with SyncSQLiteDriver(SQLiteConfig(path=":memory:")) as sync_driver:
+        sync_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
+        sync_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
+        rows, cols = sync_driver.query_with_columns(query, params)
+        assert rows == expected_rows
+        assert cols == expected_cols
+
+    async with AsyncSQLiteDriver(SQLiteConfig(path=":memory:")) as async_driver:
+        await async_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
+        await async_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
+        rows_async, cols_async = await async_driver.query_with_columns(query, params)
+        assert rows_async == expected_rows
+        assert cols_async == expected_cols

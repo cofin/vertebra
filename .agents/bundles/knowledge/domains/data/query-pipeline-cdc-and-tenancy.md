@@ -46,13 +46,13 @@ sources:
     resource: src/py/vertebra/extensions/apex/session.py
     title: "OracleSessionManager APEX VPD propagation and ECID piggyback"
   - id: src-extensions-sqlspec-bigquery-py
-    resource: src/py/vertebra/extensions/sqlspec/bigquery.py
+    resource: src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py
     title: "BigQuery SQLSpec native statement defaults and session execution"
   - id: src-extensions-sqlspec-spanner-py
-    resource: src/py/vertebra/extensions/sqlspec/spanner.py
+    resource: src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py
     title: "Spanner SQLSpec parser and native parameter defaults"
   - id: src-extensions-sqlspec-adapters-py
-    resource: src/py/vertebra/extensions/sqlspec/adapters.py
+    resource: src/py/vertebra/extensions/sqlspec/_driver.py
     title: "SQLSpec native pipeline dispatch and sequential stack execution"
   - id: src-db-duckdb-pipeline-py
     resource: src/py/vertebra/db/adapters/duckdb/pipeline.py
@@ -108,7 +108,7 @@ The native pipeline capability protocols and tenant scopes in [`vertebra.db`](..
 
 [`SyncPipelineCapable` / `AsyncPipelineCapable`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] expose `driver.pipeline()` as a sync or async context manager (`pipe.select(sql, params)`, `pipe.execute(sql, params)`, `pipe.results()`). On Oracle (`ORACLESQL_NATIVE_TTC_PIPELINE_SUPPORTED is False`), [`SyncOraclePipeline` and `AsyncOraclePipeline`](../../../../../src/py/vertebra/db/adapters/oracle/pipeline.py)[^src-oracle-pipeline-py] flush queued statements sequentially via `execute_pipeline_batch` (`OraclePipelineOutcome`) while holding an ambient transaction (or `SAVEPOINT _vtb_pipe_<n>` inside an outer transaction, using `ROLLBACK TO SAVEPOINT` with no `RELEASE SAVEPOINT`) open across `results()` and committing only on clean `__exit__`/`__aexit__` (`exc_type is None`); post-`results()` validation failures or unexecuted queued operations roll back automatically.
 
-[`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/adapters.py)[^src-extensions-sqlspec-adapters-py] dispatch multi-statement `execute` stacks with `continue_on_error=False` through `driver.pipeline()`, preserving prepared operation types (including `INSERT ... RETURNING`) in ordered `StackResult` entries. Driver-owned statement defaults preserve native bind styles without importing optional upstream SDKs (shared by direct driver construction and SQLSpec adapter configs while preserving explicit caller configurations): PostgreSQL sync and async both compile to `$1..$N` numeric binds (`ParameterStyle.NUMERIC`) over `vertebra._postgres`, MySQL uses positional pyformat, `OracleSyncDriver` and `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`, BigQuery owns `bigquery` named-`@` parameters, and Spanner selects `spanner` named-`@` (GoogleSQL) or `spangres` numeric parameters.[^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
+[`BaseSyncDriver.execute_stack` / `BaseAsyncDriver.execute_stack`](../../../../../src/py/vertebra/extensions/sqlspec/_driver.py)[^src-extensions-sqlspec-adapters-py] dispatch multi-statement `execute` stacks with `continue_on_error=False` through `driver.pipeline()`, preserving prepared operation types (including `INSERT ... RETURNING`) in ordered `StackResult` entries. Driver-owned statement defaults preserve native bind styles without importing optional upstream SDKs (shared by direct driver construction and SQLSpec adapter configs while preserving explicit caller configurations): PostgreSQL sync and async both compile to `$1..$N` numeric binds (`ParameterStyle.NUMERIC`) over `vertebra._postgres`, MySQL uses positional `?` (`ParameterStyle.QMARK`), `OracleSyncDriver` and `OracleAsyncDriver` set `_execution_parameter_style = ParameterStyle.NAMED_COLON`, BigQuery owns `bigquery` named-`@` parameters, and Spanner selects `spanner` named-`@` (GoogleSQL) or `spangres` numeric parameters (`dialect = "bigquery"` / `"postgres"` for `sqlglot` compatibility).[^src-extensions-sqlspec-bigquery-py][^src-extensions-sqlspec-spanner-py]
 
 Batch stack operations compile batched parameters through SQLSpec's `is_many` processing before native execution, applying statement-config overrides and filters. Arrow stack operations prepare keyword or prebound SQL parameters through the same statement pipeline, separate class-owned execution options (`selected_fields`, `row_restriction`, `max_streams` on BigQuery; `data_boost`, `max_partitions`, `staleness` on Spanner) from bind values without engine-name dispatch, and materialize native `ArrowCursor` results through `to_arrow_table()` into SQLSpec `ArrowResult` at the stack boundary.
 
@@ -173,7 +173,7 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 | `DataFusionConfig` | `BaseDatabaseConfig` subclass (`url_schemes = ("datafusion",)`, `from_url`, `pool_key`, `build_sync_driver`, `build_async_driver`) resolved polymorphically via [`DatabaseRegistry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py] and `provide_driver`. Validates `scheme == "datafusion"` (when present), `path in {"", "/"}`, `parse_qsl(..., keep_blank_values=True)`, `mode="in_process"`, `target_partitions >= 1`, and `memory_limit_mb >= 1`. |
 | [`DataFusionEngine`](../../../../../src/py/vertebra/db/adapters/datafusion/driver.py)[^src-db-datafusion-driver-py] | Accepts `(config: DataFusionConfig \| None = None, *, ctx: Any = None)`, registers relational and cloud `ArrowCursor` / PyArrow tables via `register_arrow_table(name, driver.select_to_arrow(...))` (zero vendor-specific registration wrappers), resolves `SessionContext` via `ensure_module("datafusion", package="datafusion")`, and propagates `MissingDependencyError` and `SessionContext.sql(...)` errors directly. |
 
-[^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/adapters.py` — SQLSpec native pipeline dispatch and sequential stack execution.
+[^src-extensions-sqlspec-adapters-py]: `src/py/vertebra/extensions/sqlspec/_driver.py` — SQLSpec native pipeline dispatch and sequential stack execution.
 [^src-db-duckdb-pipeline-py]: `src/py/vertebra/db/adapters/duckdb/pipeline.py` — Delayed-commit SyncDuckDBPipeline and AsyncDuckDBPipeline with savepoint nesting.
 [^src-db-cdc-py]: `src/py/vertebra/db/cdc.py` — Engine-neutral ChangeFeed and spill hydration.
 [^src-db-rls-py]: `src/py/vertebra/db/rls.py` — TenantScopeConfig, TenantPredicate, and reset-or-evict tenant scopes.
@@ -184,8 +184,8 @@ Store keys use `spill_prefix.rstrip("/")`: a non-empty normalized prefix yields 
 [^src-db-postgres-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py` — PostgreSQL notification transport and logical message builders.
 [^src-extensions-sqlspec-events-py]: `src/py/vertebra/extensions/sqlspec/events.py` — Engine-neutral SQLSpec change-feed event backends.
 [^src-db-spanner-change-stream-py]: `src/py/vertebra/db/adapters/spanner/change_stream.py` — Spanner readers, constructor-bound stream defaults, record parsing, and child-partition scheduling.
-[^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/bigquery.py` — BigQuery SQLSpec native statement defaults and session execution.
-[^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/spanner.py` — Spanner SQLSpec parser and native parameter defaults.
+[^src-extensions-sqlspec-bigquery-py]: `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py` — BigQuery SQLSpec native statement defaults and session execution.
+[^src-extensions-sqlspec-spanner-py]: `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py` — Spanner SQLSpec parser and native parameter defaults.
 [^src-postgres-tenant-core]: `src/py/vertebra/db/adapters/postgres/core.py` — PostgreSQL tenant and session SQL builders.
 [^src-oracle-tenant-core]: `src/py/vertebra/db/adapters/oracle/core.py` — Oracle VPD trusted-package and SET_IDENTIFIER context SQL builders.
 [^src-oracle-pipeline-py]: `src/py/vertebra/db/adapters/oracle/pipeline.py` — SyncOraclePipeline and AsyncOraclePipeline delayed-commit batching.

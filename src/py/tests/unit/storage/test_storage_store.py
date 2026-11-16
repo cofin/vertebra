@@ -26,6 +26,7 @@ import vertebra.storage as storage
 from vertebra._storage import StorageBuffer
 from vertebra.db.arrow import ArrowCursor
 from vertebra.storage import (
+    ArtifactReference,
     AsyncObjectStore,
     AsyncReadableFile,
     AsyncWritableFile,
@@ -3633,3 +3634,227 @@ async def test_write_batches_midstream_reader_failure_aborts_upload(asynchronous
             write_batches_sync(cast(SyncObjectStore, store), key, reader, file_format="parquet")
 
     assert bytes(await _resolve(store.get(key))) == sentinel
+
+
+def test_artifact_reference_and_metadata_gc_collection() -> None:
+    """ArtifactReference is frozen/SQL-free and ObjectMeta/PutResult participate in cycle GC."""
+    import datetime as dt
+    import weakref
+
+    assert ObjectMeta.__struct_config__.gc is True
+    assert PutResult.__struct_config__.gc is True
+
+    ref = ArtifactReference(
+        uri="memory://bucket/artifacts/output.json",
+        version=3,
+        content_type="application/json",
+        size=128,
+        updated=dt.datetime(2026, 11, 16, 0, 0, tzinfo=dt.UTC),
+        signed_url="https://example.invalid/signed",
+    )
+    assert ref.uri == "memory://bucket/artifacts/output.json"
+    assert ref.version == 3
+    with pytest.raises(AttributeError):
+        ref.version = 4
+
+    class _CycleTarget:
+        def __init__(self) -> None:
+            self.owner: Any = None
+
+    meta_target = _CycleTarget()
+    meta = ObjectMeta(path="a.bin", size=10, attributes={"target": meta_target})
+    meta_target.owner = meta
+    assert gc.is_tracked(meta) is True
+    meta_ref = weakref.ref(meta_target)
+    del meta, meta_target
+    gc.collect()
+    assert meta_ref() is None
+
+    put_target = _CycleTarget()
+    put = PutResult(path="b.bin", size=20, attributes={"target": put_target})
+    put_target.owner = put
+    assert gc.is_tracked(put) is True
+    put_ref = weakref.ref(put_target)
+    del put, put_target
+    gc.collect()
+    assert put_ref() is None
+
+
+def test_sqlspec_object_store_backend_validation_and_uri_resolution(tmp_path: Path) -> None:
+    """Verify ObjectStoreBackend configuration validation, base_path scoping, and traversal guards."""
+    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
+    from vertebra.typing import ImproperConfigurationError
+
+    with pytest.raises(ImproperConfigurationError, match="requires an explicit store"):
+        ObjectStoreBackend("")
+
+    prebuilt = SyncObjectStore(MemoryConfig())
+    with pytest.raises(ImproperConfigurationError, match="apply only when building"):
+        ObjectStoreBackend(
+            store=prebuilt,
+            signing=SigningConfig(provider="hmac", hmac_secret="secret"),
+        )
+
+    backend = ObjectStoreBackend(f"file://{tmp_path}", base_path="nested/sub/")
+    assert backend.protocol == "file"
+    assert backend.base_path == "nested/sub"
+    assert backend.resolve_uri("a/b.txt") == f"{tmp_path}/nested/sub/a/b.txt"
+
+    with pytest.raises(ValueError, match="Path traversal rejected"):
+        backend.resolve_uri("../escape.txt")
+
+
+@pytest.mark.parametrize("scheme", ["memory", "file"])
+def test_sqlspec_object_store_backend_sync_and_async_parity(scheme: str, tmp_path: Path) -> None:
+    """Verify sync and async ObjectStoreBackend CRUD, streaming, file open, and Arrow operations."""
+    import pyarrow as pa
+
+    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
+
+    uri = "memory://" if scheme == "memory" else f"file://{tmp_path}"
+    backend = ObjectStoreBackend(uri, base_path="root")
+
+    backend.write_bytes_sync("dir/hello.bin", b"hello-bytes")
+    assert backend.read_bytes_sync("dir/hello.bin") == b"hello-bytes"
+    backend.write_text_sync("dir/note.txt", "hello-text")
+    assert backend.read_text_sync("dir/note.txt") == "hello-text"
+    assert backend.exists_sync("dir/hello.bin") is True
+    assert backend.is_object_sync("dir/hello.bin") is True
+    assert backend.is_path_sync("dir") is True
+
+    meta = backend.get_metadata_sync("dir/hello.bin")
+    assert meta["size"] == 11
+    assert b"".join(backend.stream_read_sync("dir/hello.bin", chunk_size=4)) == b"hello-bytes"
+
+    backend.put_stream_sync("dir/stream.bin", iter([b"abc", b"defg"]))
+    assert b"".join(backend.get_stream_sync("dir/stream.bin", chunk_size=3)) == b"abcdefg"
+    with backend.open_sync("dir/stream.bin") as reader:
+        assert reader.read(4) == b"abcd"
+
+    backend.copy_sync("dir/hello.bin", "dir/copied.bin")
+    backend.move_sync("dir/copied.bin", "dir/moved.bin")
+    assert backend.exists_sync("dir/copied.bin") is False
+    assert backend.read_bytes_sync("dir/moved.bin") == b"hello-bytes"
+
+    listed = sorted(backend.list_objects_sync("dir/"))
+    assert "dir/moved.bin" in listed
+    assert "dir/note.txt" in backend.glob_sync("dir/*.txt")
+    page_items, cursor = backend.list_page_sync("dir/", limit=2)
+    assert len(page_items) <= 2
+    assert cursor is None or isinstance(cursor, str)
+
+    table = pa.table({"id": [1, 2, 3], "label": ["a", "b", "c"]})
+    backend.write_arrow_sync("arrow/data.parquet", table)
+    roundtrip_parquet = backend.read_arrow_sync("arrow/data.parquet")
+    assert roundtrip_parquet.num_rows == 3
+    assert roundtrip_parquet.column("label").to_pylist() == ["a", "b", "c"]
+
+    backend.write_arrow_sync("arrow/data.ipc", table, file_format="arrow")
+    roundtrip_ipc = backend.read_arrow_sync("arrow/data.ipc", file_format="arrow")
+    assert roundtrip_ipc.num_rows == 3
+
+    cursor_arrow = ArrowCursor.from_rows([{"id": 10, "val": "x"}, {"id": 20, "val": "y"}], threshold_rows=1)
+    backend.write_arrow_cursor_sync("arrow/cursor.parquet", cursor_arrow)
+    assert backend.read_arrow_sync("arrow/cursor.parquet").num_rows == 2
+
+    streamed_batches = list(backend.stream_arrow_sync("arrow/*.parquet"))
+    assert sum(batch.num_rows for batch in streamed_batches) == 5
+
+    response = backend.stream_response("dir/hello.bin", media_type="text/plain", filename="hello.bin")
+    assert isinstance(response, StreamingStorageResponse)
+    assert response.media_type == "text/plain"
+
+    backend.delete_sync("dir/moved.bin")
+    assert backend.exists_sync("dir/moved.bin") is False
+
+    async def _run_async() -> None:
+        await backend.write_bytes_async("async/a.bin", b"async-bytes")
+        assert await backend.read_bytes_async("async/a.bin") == b"async-bytes"
+        await backend.write_text_async("async/t.txt", "async-text")
+        assert await backend.read_text_async("async/t.txt") == "async-text"
+        assert await backend.exists_async("async/a.bin") is True
+        async_meta = await backend.get_metadata_async("async/a.bin")
+        assert async_meta["size"] == 11
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            yield b"p1-"
+            yield b"p2"
+
+        await backend.put_stream_async("async/s.bin", _chunks())
+        read_chunks = [chunk async for chunk in await backend.stream_read_async("async/s.bin", chunk_size=2)]
+        assert b"".join(read_chunks) == b"p1-p2"
+        stream_chunks = [chunk async for chunk in backend.get_stream_async("async/s.bin", chunk_size=3)]
+        assert b"".join(stream_chunks) == b"p1-p2"
+
+        async with backend.open_async("async/s.bin") as async_reader:
+            assert await async_reader.read() == b"p1-p2"
+
+        await backend.copy_async("async/a.bin", "async/c.bin")
+        await backend.move_async("async/c.bin", "async/m.bin")
+        assert await backend.exists_async("async/c.bin") is False
+        assert await backend.exists_async("async/m.bin") is True
+        async_listed = await backend.list_objects_async("async/")
+        assert "async/m.bin" in async_listed
+        assert "async/t.txt" in await backend.glob_async("async/*.txt")
+        page_keys, _ = await backend.list_page_async("async/", limit=10)
+        assert "async/t.txt" in page_keys
+
+        await backend.write_arrow_async("async/tbl.parquet", table)
+        async_tbl = await backend.read_arrow_async("async/tbl.parquet")
+        assert async_tbl.num_rows == 3
+        await backend.write_arrow_cursor_async(
+            "async/cursor.parquet", ArrowCursor.from_rows([{"k": 1}], threshold_rows=1)
+        )
+        assert (await backend.read_arrow_async("async/cursor.parquet")).num_rows == 1
+        arrow_batches = [batch async for batch in backend.stream_arrow_async("async/*.parquet")]
+        assert sum(batch.num_rows for batch in arrow_batches) == 4
+        await backend.delete_async("async/m.bin")
+        assert await backend.exists_async("async/m.bin") is False
+
+    asyncio.run(_run_async())
+
+
+def test_sqlspec_object_store_backend_signing_and_registry_alias() -> None:
+    """Verify ObjectStoreBackend presigning parity and StorageRegistry alias registration."""
+    from sqlspec.storage.registry import StorageRegistry
+
+    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend, register_storage_alias
+
+    unsigned = ObjectStoreBackend("memory://")
+    assert unsigned.supports_signing is False
+    with pytest.raises(NotImplementedError):
+        unsigned.sign_sync("reports/daily.csv")
+    with pytest.raises(NotImplementedError):
+        asyncio.run(unsigned.sign_async("reports/daily.csv"))
+
+    s3_cfg = S3Config(
+        bucket="my-bucket",
+        region="us-east-1",
+        access_key_id="AKIAIOSFODNN7EXAMPLE",
+        secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    )
+    signed_backend = ObjectStoreBackend(
+        s3_cfg,
+        signing=SigningConfig(
+            provider="s3",
+            bucket="my-bucket",
+            region="us-east-1",
+            access_key_id="AKIAIOSFODNN7EXAMPLE",
+            secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ),
+    )
+    assert signed_backend.supports_signing is True
+    single_url = signed_backend.sign_sync("exports/data.parquet", expires_in=300)
+    assert isinstance(single_url, str) and "X-Amz-Signature=" in single_url
+    batch_urls = asyncio.run(
+        signed_backend.sign_async(["exports/a.parquet", "exports/b.parquet"], expires_in=300, for_upload=True)
+    )
+    assert isinstance(batch_urls, list) and len(batch_urls) == 2
+
+    registry = StorageRegistry()
+    register_storage_alias("artifacts", "memory://", registry=registry, base_path="tenant-a")
+    resolved = registry.get("artifacts")
+    assert isinstance(resolved, ObjectStoreBackend)
+    resolved.write_bytes_sync("run-1/out.bin", b"ok-alias")
+    assert resolved.read_bytes_sync("run-1/out.bin") == b"ok-alias"
+    assert resolved.resolve_uri("run-1/out.bin").startswith("memory://tenant-a/run-1/out.bin")

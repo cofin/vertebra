@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import mmap
 import os
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
 import msgspec
@@ -17,25 +19,27 @@ from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConf
 from sqlspec.exceptions import StackExecutionError
 from sqlspec.utils.schema import to_value_type
 
+from vertebra.db.arrow import ArrowCursor, read_arrow_shm
 from vertebra.extensions.broker import (
     AsyncSHMBrokerTransport,
     SyncBrokerLeaseSource,
     SyncSHMBrokerTransport,
 )
 from vertebra.extensions.broker.errors import LeaseQuarantinedError
-from vertebra.extensions.sqlspec.adapters import (
+from vertebra.extensions.sqlspec._driver import (
     DeferredAsyncExceptionHandler,
     DeferredSyncExceptionHandler,
-    _compile_many_transport,
-    _unwrap_typed_parameters,
+    compile_many_transport,
+    unwrap_typed_parameters,
 )
 from vertebra.extensions.sqlspec.provider import (
     BrokerRpcRequest,
     BrokerRpcResponse,
-    SharedArrowBuffer,
     SQLSpecAsyncProvider,
     SQLSpecSyncProvider,
     _BaseSQLSpecProvider,
+    _coerce_pyarrow_table,
+    _unlink_arrow_shm,
 )
 from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.module_loader import import_optional
@@ -441,7 +445,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
     ) -> Any:
         """Execute a batch SQL statement across parameters and return affected row count."""
         with self._operation_lease():
-            _prepared, compiled_sql, compiled_many = _compile_many_transport(
+            _prepared, compiled_sql, compiled_many = compile_many_transport(
                 self,
                 statement,
                 parameters,
@@ -938,12 +942,17 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                 raise SQLSpecImproperConfigurationError(msg)
             if resp.is_arrow_shm:
                 try:
-                    table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
+                    table = self._read_arrow_shm_table(
+                        resp.arrow_shm_name,
+                        resp.arrow_byte_len,
+                        resp.rowcount,
+                        resp.columns,
+                    )
                 finally:
                     self._release_arrow_shm(resp.arrow_shm_name)
             else:
                 dict_rows = self._rows_to_dicts(resp.rows, resp.columns)
-                table = SharedArrowBuffer.coerce_table(dict_rows, columns=resp.columns)
+                table = self._coerce_inline_arrow_table(dict_rows, columns=resp.columns)
             return self._wrap_arrow_result(
                 prepared,
                 compiled_sql,
@@ -980,7 +989,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
             prepared.statement_config,
             prepared_statement=prepared,
         )
-        unwrapped_params = _unwrap_typed_parameters(prepared_params)
+        unwrapped_params = unwrap_typed_parameters(prepared_params)
         rpc_params = ProxySyncDriver._coerce_rpc_params(unwrapped_params)
         return compiled_sql, rpc_params, prepared
 
@@ -1059,10 +1068,69 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         return ProxySyncDriver._rows_to_dicts(rows, columns)
 
     @staticmethod
+    def _read_arrow_shm_cursor(
+        shm_name: str,
+        byte_len: int,
+        row_count: int,
+        columns: Sequence[str],
+    ) -> ArrowCursor:
+        """Open a VTBARROW SHM segment as an ArrowCursor without eager row materialization."""
+        native_mod = import_optional("vertebra._vertebra")
+        native_cls = getattr(native_mod, "ArrowCursor", None) if native_mod is not None else None
+        if native_cls is not None:
+            native_cur = native_cls(shm_name, byte_len, row_count)
+            return ArrowCursor(native_cur, columns=columns, used_shm=True, row_count=row_count)
+        shm_path = Path("/dev/shm") / shm_name.lstrip("/")
+        if not shm_path.exists():
+            msg = f"Shared Arrow buffer {shm_name!r} does not exist at {shm_path}"
+            raise FileNotFoundError(msg)
+        fd = os.open(shm_path, os.O_RDONLY)
+        try:
+            mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        finally:
+            os.close(fd)
+        return read_arrow_shm(mm)
+
+    @classmethod
+    def _read_arrow_shm_table(
+        cls,
+        shm_name: str,
+        byte_len: int,
+        row_count: int,
+        columns: Sequence[str],
+    ) -> Any:
+        """Decode a VTBARROW SHM segment into an Arrow Table or ArrowCursor."""
+        cursor = cls._read_arrow_shm_cursor(shm_name, byte_len, row_count, columns)
+        pa = import_optional("pyarrow")
+        if pa is not None:
+            return cursor.to_arrow_table()
+        return ArrowCursor(
+            bytes(cursor.buffer_view()),
+            rows=[tuple(r.get(c) for c in columns) for r in cursor.to_pylist()],
+            columns=columns,
+        )
+
+    @staticmethod
+    def _coerce_inline_arrow_table(
+        dict_rows: list[dict[str, Any]],
+        *,
+        columns: Sequence[str] | None = None,
+    ) -> Any:
+        """Coerce inline RPC rows into a PyArrow Table when available or an ArrowCursor otherwise."""
+        pa = import_optional("pyarrow")
+        if pa is not None:
+            return _coerce_pyarrow_table(pa, dict_rows, columns=columns)
+        cols = tuple(columns) if columns else (tuple(dict_rows[0].keys()) if dict_rows else ())
+        tuple_rows = [tuple(row.get(c) for c in cols) for row in dict_rows]
+        return ArrowCursor(b"", rows=tuple_rows, columns=cols)
+
+    @staticmethod
     def _hydrate_arrow_table(table: Any, rpc_columns: Sequence[str], schema_type: type[Any]) -> list[Any]:
-        """Convert Arrow or SharedArrowTable rows and validate them into `schema_type` via msgspec."""
+        """Convert Arrow or ArrowCursor rows and validate them into `schema_type` via msgspec."""
+        if isinstance(table, ArrowCursor):
+            return ProxySyncDriver._convert_rows(table.to_pylist(), schema_type)
         raw_rows = getattr(table, "_rows", None)
-        if raw_rows is not None:
+        if raw_rows is not None and not isinstance(table, ArrowCursor):
             return ProxySyncDriver._convert_rows(
                 ProxySyncDriver._select_inline_dicts(raw_rows, rpc_columns),
                 schema_type,
@@ -1072,9 +1140,14 @@ class ProxySyncDriver(SyncDriverAdapterBase):
         return ProxySyncDriver._convert_rows(list(table), schema_type)
 
     def _unpack_select_typed(self, resp: BrokerRpcResponse, schema_type: type[Any]) -> list[Any]:
-        """Read spilled Arrow SHM and hydrate into `schema_type`."""
+        """Read spilled VTBARROW SHM and hydrate into `schema_type`."""
         try:
-            table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
+            table = self._read_arrow_shm_table(
+                resp.arrow_shm_name,
+                resp.arrow_byte_len,
+                resp.rowcount,
+                resp.columns,
+            )
             return self._hydrate_arrow_table(table, resp.columns, schema_type)
         finally:
             self._release_arrow_shm(resp.arrow_shm_name)
@@ -1082,9 +1155,18 @@ class ProxySyncDriver(SyncDriverAdapterBase):
     def _unpack_select_rows(self, resp: BrokerRpcResponse) -> tuple[list[dict[str, Any]], list[str]]:
         if resp.is_arrow_shm:
             try:
-                table = SharedArrowBuffer.read_table(resp.arrow_shm_name, resp.arrow_byte_len)
-                dict_rows: list[dict[str, Any]] = table.to_pylist()
-                columns = list(resp.columns) if resp.columns else list(table.column_names)
+                cursor = self._read_arrow_shm_cursor(
+                    resp.arrow_shm_name,
+                    resp.arrow_byte_len,
+                    resp.rowcount,
+                    resp.columns,
+                )
+                dict_rows: list[dict[str, Any]] = cursor.to_pylist()
+                columns = list(resp.columns) if resp.columns else list(cursor._columns)
+                if not columns:
+                    table = cursor.to_arrow_table()
+                    if hasattr(table, "column_names"):
+                        columns = list(table.column_names)
                 return dict_rows, columns
             finally:
                 self._release_arrow_shm(resp.arrow_shm_name)
@@ -1246,7 +1328,7 @@ class ProxySyncDriver(SyncDriverAdapterBase):
                 record_last=False,
             )
         finally:
-            SharedArrowBuffer.unlink(shm_name)
+            _unlink_arrow_shm(shm_name)
 
     def _acquire_broker_lease(self) -> Any:
         """Acquire a lease from self.broker via typed broker contracts."""
@@ -1747,7 +1829,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
     ) -> Any:
         """Execute a batch SQL statement asynchronously across parameters and return affected row count."""
         async with self._operation_lease():
-            _prepared, compiled_sql, compiled_many = _compile_many_transport(
+            _prepared, compiled_sql, compiled_many = compile_many_transport(
                 self,
                 statement,
                 parameters,
@@ -2252,14 +2334,18 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
             if resp.is_arrow_shm:
                 try:
                     table = await SyncPool.default().submit_async(
-                        SharedArrowBuffer.read_table, resp.arrow_shm_name, resp.arrow_byte_len
+                        ProxySyncDriver._read_arrow_shm_table,
+                        resp.arrow_shm_name,
+                        resp.arrow_byte_len,
+                        resp.rowcount,
+                        resp.columns,
                     )
                 finally:
                     await self._release_arrow_shm(resp.arrow_shm_name)
             else:
                 dict_rows = ProxySyncDriver._rows_to_dicts(resp.rows, resp.columns)
                 table = await SyncPool.default().submit_async(
-                    SharedArrowBuffer.coerce_table, dict_rows, columns=resp.columns
+                    ProxySyncDriver._coerce_inline_arrow_table, dict_rows, columns=resp.columns
                 )
             return ProxySyncDriver._wrap_arrow_result(
                 prepared,
@@ -2330,18 +2416,29 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
 
     @staticmethod
     def _read_and_hydrate_arrow(
-        shm_name: str, byte_len: int, rpc_columns: Sequence[str], schema_type: type[Any]
+        shm_name: str,
+        byte_len: int,
+        rpc_columns: Sequence[str],
+        schema_type: type[Any],
+        row_count: int = 0,
     ) -> list[Any]:
-        table = SharedArrowBuffer.read_table(shm_name, byte_len)
+        table = ProxySyncDriver._read_arrow_shm_table(shm_name, byte_len, row_count, rpc_columns)
         return ProxySyncDriver._hydrate_arrow_table(table, rpc_columns, schema_type)
 
     @staticmethod
     def _read_and_unpack_arrow_dicts(
-        shm_name: str, byte_len: int, rpc_columns: Sequence[str]
+        shm_name: str,
+        byte_len: int,
+        rpc_columns: Sequence[str],
+        row_count: int = 0,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        table = SharedArrowBuffer.read_table(shm_name, byte_len)
-        dict_rows: list[dict[str, Any]] = table.to_pylist()
-        columns = list(rpc_columns) if rpc_columns else list(table.column_names)
+        cursor = ProxySyncDriver._read_arrow_shm_cursor(shm_name, byte_len, row_count, rpc_columns)
+        dict_rows: list[dict[str, Any]] = cursor.to_pylist()
+        columns = list(rpc_columns) if rpc_columns else list(cursor._columns)
+        if not columns:
+            table = cursor.to_arrow_table()
+            if hasattr(table, "column_names"):
+                columns = list(table.column_names)
         return dict_rows, columns
 
     async def _unpack_select_typed(self, resp: BrokerRpcResponse, schema_type: type[Any]) -> list[Any]:
@@ -2353,6 +2450,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                 resp.arrow_byte_len,
                 resp.columns,
                 schema_type,
+                resp.rowcount,
             )
         finally:
             await self._release_arrow_shm(resp.arrow_shm_name)
@@ -2365,6 +2463,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                     resp.arrow_shm_name,
                     resp.arrow_byte_len,
                     resp.columns,
+                    resp.rowcount,
                 )
             finally:
                 await self._release_arrow_shm(resp.arrow_shm_name)
@@ -2493,7 +2592,7 @@ class ProxyAsyncDriver(AsyncDriverAdapterBase):
                 record_last=False,
             )
         finally:
-            await SyncPool.default().submit_async(SharedArrowBuffer.unlink, shm_name)
+            await SyncPool.default().submit_async(_unlink_arrow_shm, shm_name)
 
     async def _acquire_broker_lease(self) -> Any:
         """Acquire a lease asynchronously from self.broker via typed broker contracts."""

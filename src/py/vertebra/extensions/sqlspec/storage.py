@@ -38,9 +38,14 @@ from vertebra.storage._arrow import (
     write_batches_async,
     write_batches_sync,
 )
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
+
+try:
+    from sqlspec.storage.backends.base import ObjectStoreBase
+except ImportError as exc:
+    raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
 if TYPE_CHECKING:
     from sqlspec.protocols import ObjectStoreProtocol
@@ -75,8 +80,8 @@ class ArrowFlightSerializer:
         return decode_msgpack(payload)
 
 
-class ObjectStoreBackend:
-    """SQLSpec ObjectStoreProtocol implementation backed by Vertebra's native ObjectStore."""
+class ObjectStoreBackend(ObjectStoreBase):
+    """SQLSpec ObjectStoreBase implementation backed by Vertebra's native ObjectStore."""
 
     backend_type: ClassVar[str] = "vertebra"
     supports_direct_arrow_write: ClassVar[bool] = True

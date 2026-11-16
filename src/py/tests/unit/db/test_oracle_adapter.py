@@ -69,7 +69,7 @@ from vertebra.db.driver.capabilities import (
     SyncPipelineCapable,
 )
 from vertebra.db.rls import AsyncTenantConnectionScope, TenantConnectionScope, TenantPredicate, TenantScopeConfig
-from vertebra.extensions.sqlspec.adapters import OracleAsyncDriver, OracleSyncDriver
+from vertebra.extensions.sqlspec.adapters.oracle import OracleAsyncDriver, OracleSyncDriver
 from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
