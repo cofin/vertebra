@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import inspect
 import sys
 import time
 import types
@@ -14,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import pytest
 
+import vertebra.framework.queues.valkey as valkey_queue_mod
 from vertebra.db.adapters.postgres import PostgreSQLConfig
+from vertebra.framework.di import Container, Provide
 from vertebra.framework.queues import (
     CronSchedule,
     MemoryQueueBackend,
@@ -31,7 +34,16 @@ from vertebra.framework.queues import (
     ValkeyStreamClient,
     task,
 )
+from vertebra.framework.queues.backends import (
+    ValkeyQueueBackend as BackendsValkeyQueueBackend,
+)
 from vertebra.framework.queues.scheduler import CronScheduler
+from vertebra.framework.queues.valkey import (
+    ValkeyQueueBackend as DirectValkeyQueueBackend,
+)
+from vertebra.framework.queues.valkey import (
+    ValkeyStreamClient as DirectValkeyStreamClient,
+)
 from vertebra.server.lanes import LaneConfig, WorkerRunner
 from vertebra.server.platform import LameDuckController
 from vertebra.telemetry.otel import SpanExporter, TraceContext
@@ -43,7 +55,7 @@ from vertebra.typing import (
 from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
 
 class _FakeOracleQueueExecutor:
@@ -999,11 +1011,11 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     res2 = await sched2.tick(now=t0)
     res3 = await sched3.tick(now=t0)
 
-    total_t0 = len(res1) + len(res2) + len(res3)
+    total_t0 = res1 + res2 + res3
     assert total_t0 == 1
-    assert len(res1) == 1
-    assert len(res2) == 0
-    assert len(res3) == 0
+    assert res1 == 1
+    assert res2 == 0
+    assert res3 == 0
 
     await asyncio.sleep(0.12)
 
@@ -1011,10 +1023,10 @@ async def test_distributed_cron_scheduler_leader_election_and_failover() -> None
     res_failover_2 = await sched2.tick(now=t1)
     res_failover_3 = await sched3.tick(now=t1)
 
-    total_t1 = len(res_failover_2) + len(res_failover_3)
+    total_t1 = res_failover_2 + res_failover_3
     assert total_t1 == 1
-    assert len(res_failover_2) == 1
-    assert len(res_failover_3) == 0
+    assert res_failover_2 == 1
+    assert res_failover_3 == 0
 
     claimed = await backend.dequeue(["io"], batch_size=10)
     assert len(claimed) == 2
@@ -1047,7 +1059,8 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
         env = await qsvc.enqueue("slow_cpu_job")
         assert env.task_name == "slow_cpu_job"
     finally:
-        TraceContext.set_current(token.old_value if hasattr(token, "old_value") else None)
+        old_ctx = getattr(token, "old_value", None)
+        TraceContext.set_current(old_ctx if isinstance(old_ctx, TraceContext) else None)
 
     runner = WorkerRunner(
         [LaneConfig(queue_name="cpu", concurrency=2, drain_timeout_s=2.0, lane_kind="cpu")],
@@ -1084,18 +1097,18 @@ async def test_multi_lane_worker_runner_lame_duck_drain_and_otel_spans() -> None
 async def test_oracle_queue_backend_requires_oracledb_and_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OracleQueueBackend raises MissingDependencyError when oracledb is absent and ImproperConfigurationError without executor."""
-    monkeypatch.setitem(sys.modules, "oracledb", None)
-    reset_dependency_cache("oracledb")
+    """OracleQueueBackend raises MissingDependencyError when vertebra._oracle is absent and ImproperConfigurationError without executor."""
+    monkeypatch.setitem(sys.modules, "vertebra._oracle", None)
+    reset_dependency_cache("vertebra._oracle")
     try:
         with pytest.raises(MissingDependencyError) as exc_info:
             OracleQueueBackend(QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1"))
-        assert exc_info.value.package == "oracledb"
-        assert exc_info.value.install_package == "oracledb"
+        assert exc_info.value.package == "vertebra-core[oracle]"
+        assert exc_info.value.install_package == "vertebra-core[oracle]"
 
         with pytest.raises(MissingDependencyError) as svc_exc:
             QueueService(QueueConfig(backend_url="oracle://localhost:1521/FREEPDB1"))
-        assert svc_exc.value.package == "oracledb"
+        assert svc_exc.value.package == "vertebra-core[oracle]"
 
         fake = _FakeOracleQueueExecutor()
         assert isinstance(fake, OracleQueueExecutor)
@@ -1112,12 +1125,12 @@ async def test_oracle_queue_backend_requires_oracledb_and_executor(
         assert await service.drain_once(("io",)) == [42]
         await service.close()
 
-        monkeypatch.setitem(sys.modules, "oracledb", types.ModuleType("oracledb"))
-        reset_dependency_cache("oracledb")
-        with pytest.raises(ImproperConfigurationError, match="requires an OracleQueueExecutor"):
+        monkeypatch.setitem(sys.modules, "vertebra._oracle", types.ModuleType("vertebra._oracle"))
+        reset_dependency_cache("vertebra._oracle")
+        with pytest.raises(ImproperConfigurationError, match="is unsupported"):
             OracleQueueBackend(QueueConfig())
     finally:
-        reset_dependency_cache("oracledb")
+        reset_dependency_cache("vertebra._oracle")
 
 
 @pytest.mark.anyio
@@ -1159,8 +1172,8 @@ async def test_postgres_queue_backend_requires_native_postgres_and_executor(
 
         monkeypatch.setitem(sys.modules, "vertebra._postgres", types.ModuleType("vertebra._postgres"))
         reset_dependency_cache("vertebra._postgres")
-        with pytest.raises(ImproperConfigurationError, match="requires a PostgreSQLQueueExecutor"):
-            PostgreSQLQueueBackend(QueueConfig(backend_url="postgresql://localhost:5432/vtb"))
+        with pytest.raises(ImproperConfigurationError, match="do not support memory:// DSNs"):
+            PostgreSQLQueueBackend(QueueConfig())
     finally:
         reset_dependency_cache("vertebra._postgres")
 
@@ -1250,28 +1263,9 @@ def test_valkey_queue_backend_url_schemes(url: str, valid: bool, expected_err: s
 
 def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     """ValkeyQueueBackend and ValkeyStreamClient are isolated from framework.queues.redis."""
-    import inspect
-
-    import vertebra.framework.queues.valkey as valkey_queue_mod
-    from vertebra.framework.queues import (
-        ValkeyQueueBackend as RootValkeyQueueBackend,
-    )
-    from vertebra.framework.queues import (
-        ValkeyStreamClient as RootValkeyStreamClient,
-    )
-    from vertebra.framework.queues.backends import (
-        ValkeyQueueBackend as BackendsValkeyQueueBackend,
-    )
-    from vertebra.framework.queues.valkey import (
-        ValkeyQueueBackend as DirectValkeyQueueBackend,
-    )
-    from vertebra.framework.queues.valkey import (
-        ValkeyStreamClient as DirectValkeyStreamClient,
-    )
-
-    assert RootValkeyQueueBackend is DirectValkeyQueueBackend
+    assert ValkeyQueueBackend is DirectValkeyQueueBackend
     assert BackendsValkeyQueueBackend is DirectValkeyQueueBackend
-    assert RootValkeyStreamClient is DirectValkeyStreamClient
+    assert ValkeyStreamClient is DirectValkeyStreamClient
 
     source = inspect.getsource(valkey_queue_mod)
     assert "vertebra.framework.queues.redis" not in source
@@ -1285,3 +1279,58 @@ def test_valkey_queue_backend_isolation(monkeypatch: pytest.MonkeyPatch) -> None
     backend = QueueService._build_backend(QueueConfig(backend_url="valkey://localhost:6379/0", stream_prefix="test"))
     assert isinstance(backend, DirectValkeyQueueBackend)
     assert backend.client is fake
+
+
+@pytest.mark.anyio
+async def test_worker_runner_scoped_di_and_cron_scheduler_register() -> None:
+    """Verify WorkerRunner per-task Container.scope() DI, generator teardown, and CronScheduler.register."""
+    cleaned_up: list[str] = []
+
+    async def get_db_session() -> AsyncIterator[dict[str, str]]:
+        session = {"id": "session-1"}
+        try:
+            yield session
+        finally:
+            cleaned_up.append("session-closed")
+
+    container = Container()
+    container.graph.register("db_session", Provide(dependency=get_db_session, scope="request"))
+    container.graph.compile()
+
+    backend = MemoryQueueBackend()
+    qsvc = QueueService(backend=backend)
+
+    invoked_with: list[dict[str, str]] = []
+
+    @task(lane="io")
+    async def task_with_di(db_session: dict[str, str]) -> str:
+        invoked_with.append(db_session)
+        return "done"
+
+    qsvc.register(task_with_di)
+    await qsvc.enqueue("task_with_di")
+
+    runner = WorkerRunner(
+        [LaneConfig(queue_name="io", concurrency=2, lane_kind="io")],
+        queue_service=qsvc,
+        container=container,
+    )
+
+    processed = await runner.process_once()
+    assert processed == 1
+    assert len(invoked_with) == 1
+    assert invoked_with[0] == {"id": "session-1"}
+    assert cleaned_up == ["session-closed"]
+
+    sched = CronScheduler(qsvc, node_id="sched-test", lease_ttl_seconds=10.0)
+    sched.register("daily_sync", "0 0 * * *", "task_with_di")
+
+    t_midnight = datetime(2026, 5, 1, 0, 0, 0, tzinfo=UTC)
+    count = await sched.tick(now=t_midnight)
+    assert count == 1
+
+    t_other = datetime(2026, 5, 1, 0, 1, 0, tzinfo=UTC)
+    count_other = await sched.tick(now=t_other)
+    assert count_other == 0
+
+    await backend.close()

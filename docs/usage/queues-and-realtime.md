@@ -1,31 +1,42 @@
 # Queues, LiveState, Email & Telemetry
 
-`vertebra.framework` includes distributed background task queues (`QueueService`, `CronScheduler`), WebSocket delta state synchronization (`LiveState`, `ChannelBus`), key-value stores (`KeyValueStore`), transactional email (`EmailService`), and OpenTelemetry instrumentation (`vertebra.telemetry`).
+`vertebra.framework` includes distributed background task queues (`QueueService`, `QueueBackendSettings`, `CronScheduler`), WebSocket delta state synchronization and cross-node pub/sub (`LiveState`, `ChannelsBackend`, `ChannelBus`), RESP3 key-value stores (`ValkeyStore`, `RedisStore`, `MemoryStore`, `KeyValueStore`), transactional email (`EmailService`), and OpenTelemetry instrumentation (`vertebra.telemetry`).
 
 ## Background Task Queues, Backends & Cron (`vertebra.framework.queues`)
 
-`QueueService` provides background task execution, retry policies (`TaskRetryPolicy` with exponential backoff and dead-letter queues), delayed scheduling (`enqueue_delayed`), and cron jobs (`CronScheduler` with distributed leader leases):
+`QueueService` provides background task execution, per-attempt scoped DI (`Container.scope()`), lease heartbeats, retry policies (`TaskRetryPolicy` with exponential backoff and dead-letter queues), delayed scheduling (`enqueue_delayed`), synchronous producer enqueueing (`enqueue_sync`), and cron jobs (`CronScheduler` with slot-keyed distributed leader leases):
+
+```mermaid
+flowchart LR
+    P["Producers (enqueue / enqueue_sync / CronScheduler)"]
+    Q["QueueService & QueueBackendSettings"]
+    S["SyncQueueStore / AsyncQueueStore & Stream Backends"]
+    W["WorkerRunner Lanes (io / cpu / agent)"]
+    D["Container.scope() DI & Lease Heartbeats"]
+    P --> Q
+    Q --> S
+    S --> W
+    W --> D
+```
 
 | Backend | Scheme / Class | Backing Mechanism | Requires |
 | --- | --- | --- | --- |
 | **Memory** | `memory://` (`MemoryQueueBackend`) | In-process queue for local dev and unit tests | Nothing |
-| **PostgreSQL** | `postgresql://`, `postgres://` (`PostgreSQLQueueBackend`) | `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` wakeups | `executor=` (`PostgreSQLQueueExecutor`); `vertebra-core[postgres]` |
-| **Redis** | `redis://`, `rediss://`, `unix://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling | `vertebra-core[redis]` native driver, or `client=` (`RedisStreamClient`) |
-| **Valkey** | `valkey://`, `valkeys://`, `unix://` (`ValkeyQueueBackend`) | Valkey Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling | `vertebra-core[valkey]` native driver, or `client=` (`ValkeyStreamClient`) |
-| **Oracle** | `oracle://` (`OracleQueueBackend`) | `FOR UPDATE SKIP LOCKED` transactional queue tables | `executor=` (`OracleQueueExecutor`); `oracledb` |
+| **PostgreSQL** | `postgresql://`, `postgres://` (`PostgreSQLQueueBackend`) | `SyncPostgresQueueStore` / `AsyncPostgresQueueStore` (`FOR UPDATE OF q SKIP LOCKED` + `LISTEN/NOTIFY` wakeups) | `vertebra-core[postgres]` (or custom `store=` / `executor=`) |
+| **Oracle** | `oracle://` (`OracleQueueBackend`) | `SyncOracleQueueStore` / `AsyncOracleQueueStore` (`FOR UPDATE SKIP LOCKED` + TxEventQ / `DBMS_AQ` wakeups) | `vertebra-core[oracle]` (or custom `store=` / `executor=`) |
+| **Redis** | `redis://`, `rediss://`, `unix://` (`RedisQueueBackend`) | Redis Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[redis]`, or `client=` (`RedisStreamClient`) |
+| **Valkey** | `valkey://`, `valkeys://`, `unix://` (`ValkeyQueueBackend`) | Valkey Streams consumer groups (`XREADGROUP` / `XACK`) + sorted-set delayed scheduling + Pub/Sub wakeups | `vertebra-core[valkey]`, or `client=` (`ValkeyStreamClient`) |
 | **Cloud Spanner** | `spanner://`, `spangres://` (`SpannerQueueBackend`) | Hash-sharded keys + `FOR UPDATE` claims + dead-letter table | `executor=` (`SpannerQueueExecutor`); `vertebra-core[spanner]` |
 
-Backends that need an executor raise `MissingDependencyError` when their package is missing and `ImproperConfigurationError` when it is installed but no `executor=` is passed. Vertebra does not ship these executors, so build the backend and pass it in: `QueueService(config, backend=PostgreSQLQueueBackend(config, executor=executor))`.
-
-`RedisQueueBackend` raises `MissingDependencyError` without `vertebra-core[redis]` and `ImproperConfigurationError` when `backend_url` has no host or unsupported scheme, unless `client=` is passed. `ValkeyQueueBackend` raises `MissingDependencyError` without `vertebra-core[valkey]` and `ImproperConfigurationError` when `backend_url` has no host or unsupported scheme, unless `client=` is passed. Install the optional client package for your selected queue backend (`vertebra-core[postgres]`, `vertebra-core[redis]`, `vertebra-core[valkey]`, `oracledb`, or `vertebra-core[spanner]`):
+`PostgreSQLQueueBackend` and `OracleQueueBackend` automatically construct `SyncPostgresQueueStore` / `AsyncPostgresQueueStore` and `SyncOracleQueueStore` / `AsyncOracleQueueStore` from configured drivers or DSNs (`QueueBackendSettings`), raising `MissingDependencyError` when `vertebra-core[postgres]` or `vertebra-core[oracle]` is not installed. `RedisQueueBackend` and `ValkeyQueueBackend` run directly on `vertebra-core[redis]` and `vertebra-core[valkey]` across both async (`enqueue`) and sync (`enqueue_sync`) producers. Install the optional wheel for your selected queue backend:
 
 === "uv"
 
     ```bash
     uv add "vertebra-core[postgres]"
+    uv add "vertebra-core[oracle]"
     uv add "vertebra-core[redis]"
     uv add "vertebra-core[valkey]"
-    uv add oracledb
     uv add "vertebra-core[spanner]"
     ```
 
@@ -33,9 +44,9 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     pip install "vertebra-core[postgres]"
+    pip install "vertebra-core[oracle]"
     pip install "vertebra-core[redis]"
     pip install "vertebra-core[valkey]"
-    pip install oracledb
     pip install "vertebra-core[spanner]"
     ```
 
@@ -43,9 +54,9 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     pdm add "vertebra-core[postgres]"
+    pdm add "vertebra-core[oracle]"
     pdm add "vertebra-core[redis]"
     pdm add "vertebra-core[valkey]"
-    pdm add oracledb
     pdm add "vertebra-core[spanner]"
     ```
 
@@ -53,9 +64,9 @@ Backends that need an executor raise `MissingDependencyError` when their package
 
     ```bash
     poetry add "vertebra-core[postgres]"
+    poetry add "vertebra-core[oracle]"
     poetry add "vertebra-core[redis]"
     poetry add "vertebra-core[valkey]"
-    poetry add oracledb
     poetry add "vertebra-core[spanner]"
     ```
 
@@ -63,13 +74,13 @@ Backends that need an executor raise `MissingDependencyError` when their package
 from vertebra.framework.queues import (
     CronSchedule,
     CronScheduler,
-    QueueConfig,
+    QueueBackendSettings,
     QueueService,
     TaskRetryPolicy,
     task,
 )
 
-queue = QueueService(QueueConfig(backend_url="memory://"))
+queue = QueueService(QueueBackendSettings(kind="memory", backend_url="memory://"))
 
 
 @task(
@@ -88,12 +99,12 @@ scheduler = CronScheduler(queue)
 
 Run background workers standalone (`vtb workers run app:app`) or co-located with HTTP workers (`vtb run app:app --with-workers --queues default,io`).
 
-## Real-Time `LiveState` & Pub/Sub Channels
+## Real-Time `LiveState` & Distributed Pub/Sub Channels
 
-Synchronize server state with browser clients over WebSocket binary delta frames using `LiveState` and `@live_action` (`vertebra.framework.live`), or broadcast topic events across workers with `ChannelBus` (`vertebra.framework.channels`):
+Synchronize server state with browser clients over WebSocket binary delta frames using `LiveState` and `@live_action` (`vertebra.framework.live`), or broadcast topic events across nodes with `ChannelsBackend` (`create_channels_backend`) and `ChannelBus` (`vertebra.framework.channels`) backed by `SyncNotificationSource` and `AsyncNotificationSource` across Memory, Valkey, Redis, PostgreSQL, and Oracle:
 
 ```python
-from vertebra.framework.channels import ChannelBus
+from vertebra.framework.channels import create_channels_backend
 from vertebra.framework.live import LiveState, LiveStateRoom, live_action
 
 
@@ -106,20 +117,21 @@ class CounterState(LiveState):
 
 
 room = LiveStateRoom("room:lobby", CounterState())
-bus = ChannelBus()
+bus = create_channels_backend(backend="valkey", url="valkey://localhost:6379/0")
 ```
 
-## Key-Value Stores & Transactional Email
+## Key-Value Stores (`ValkeyStore`, `RedisStore`, `KeyValueStore`) & Transactional Email
 
-Cache serialized responses or key-value state in `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 transports (`MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, `SesEmailTransport`):
+Store cached responses or key-value state in `ValkeyStore` (`vertebra._valkey`), `RedisStore` (`vertebra._redis`), `MemoryStore`, or `KeyValueStore` (`NamespacedStore`), and send transactional emails through `EmailService` across 6 transports (`MemoryEmailTransport`, `SmtpEmailTransport`, `ResendEmailTransport`, `SendGridEmailTransport`, `MailgunEmailTransport`, `SesEmailTransport`):
 
-Stores backed by Redis or Valkey prefix every key with `key_prefix` (default `"vertebra"`), and `delete_all()` removes only keys under that prefix. Expiries are sent in milliseconds, and `expires_in()` returns `None` for keys without an expiry.
+`ValkeyStore` and `RedisStore` enable RESP3 `CLIENT TRACKING` local L1 invalidation by default, prefix every key with `key_prefix` (default `"vertebra"`), and remove only keys under that prefix via `SCAN` + `UNLINK` during `delete_all()`. Expiries are sent in milliseconds, and `expires_in()` returns `None` for keys without an expiry.
 
 ```python
 from vertebra.framework.email import EmailConfig, EmailMessage, EmailService
-from vertebra.framework.stores import KeyValueStore
+from vertebra.framework.stores import KeyValueStore, ValkeyStore
 
 cache = KeyValueStore(key_prefix="app-cache")
+valkey_cache = ValkeyStore.from_url("valkey://localhost:6379/0", key_prefix="app-cache")
 email_service = EmailService(
     EmailConfig(backend="memory", default_from="noreply@example.com")
 )

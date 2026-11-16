@@ -1,13 +1,17 @@
 """Unit tests for VertebraPlugin, anyio-compatible AsgiRunner, and BuildOrchestrator ecosystem export."""
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import os
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import Resp3FakeServer
 
 import anyio
 import click
@@ -24,7 +28,8 @@ from vertebra.extensions.litestar import (
 )
 from vertebra.extensions.litestar import plugin as litestar_plugin_mod
 from vertebra.extensions.litestar import store as litestar_store_mod
-from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
+from vertebra.extensions.litestar.channels import ChannelsBackend, create_channels_plugin
+from vertebra.extensions.litestar.store import RedisStore, ValkeyStore
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._channels import ChannelBus
 from vertebra.server._dispatch import _schedule_coros
@@ -35,6 +40,8 @@ from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_msgpack_bytes
 
 litestar_mod = import_optional("litestar")
+litestar_channels_mod = import_optional("litestar.channels")
+litestar_stores_base_mod = import_optional("litestar.stores.base")
 litestar_cli_mod = import_optional("litestar.cli.main")
 litestar_compression_mod = import_optional("litestar.config.compression")
 litestar_cors_mod = import_optional("litestar.config.cors")
@@ -394,24 +401,14 @@ def test_vertebra_plugin_overrides_litestar_cli_run_command(tmp_path: Path, lite
 
 
 def test_channels_backend_accepts_engine_neutral_bus() -> None:
-    """Litestar can swap its memory backend for the shared bus directly."""
-
-    class MemoryChannelsBackend:
-        history = 3
-
-    class ChannelsPlugin:
-        def __init__(self) -> None:
-            self._backend: Any = MemoryChannelsBackend()
-
-    plugin = ChannelsPlugin()
-    app = SimpleNamespace(plugins=[plugin])
+    """Litestar ChannelsPlugin builds on engine-neutral ChannelsBackend without monkeypatching."""
+    assert litestar_channels_mod is not None
     assert issubclass(ChannelsBackend, ChannelBus)
-    replacement = swap_channels_backend(app)
-    assert isinstance(replacement, ChannelsBackend)
     bus = ChannelBus(history=2)
-    assert swap_channels_backend(app, bus) is bus
-    assert swap_channels_backend(app) is bus
-    assert plugin._backend is bus
+    plugin = create_channels_plugin(bus, channels=["orders"])
+    assert isinstance(plugin, litestar_channels_mod.ChannelsPlugin)
+    assert isinstance(plugin._backend, ChannelsBackend)
+    assert plugin._backend.notification_source is None
 
 
 @pytest.mark.anyio
@@ -820,3 +817,55 @@ def test_litestar_plugin_never_mutates_litestar_class_attribute() -> None:
     assert "vertebra_fastpath_bypass" not in accelerated_app.state
     assert not hasattr(litestar_mod.Litestar, "__vertebra_fastpath__")
     assert get_attached_fastpath(plain_app) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_kind", ["valkey", "redis"])
+async def test_valkey_and_redis_store_operations_isolation_and_invalidation(
+    resp3_server: Resp3FakeServer,
+    store_kind: str,
+) -> None:
+    """Verify ValkeyStore and RedisStore satisfy Litestar Store protocol, prefix isolation, and L1 invalidation."""
+    assert litestar_stores_base_mod is not None
+    litestar_base_store = litestar_stores_base_mod.Store
+
+    url = resp3_server.valkey_url if store_kind == "valkey" else resp3_server.redis_url
+    store_cls = ValkeyStore if store_kind == "valkey" else RedisStore
+
+    store1 = store_cls.from_url(url, key_prefix="tenant1")
+    store2 = store_cls.from_url(url, key_prefix="tenant2")
+
+    assert issubclass(store_cls, litestar_base_store)
+    assert isinstance(store1, litestar_base_store)
+
+    try:
+        await store1.set("session", b"token-123", expires_in=30)
+        await store2.set("session", b"token-456", expires_in=30)
+
+        assert await store1.get("session") == b"token-123"
+        assert await store2.get("session") == b"token-456"
+        assert await store1.exists("session") is True
+        assert await store1.expires_in("session") is not None
+
+        await store1.set_many({"k1": b"v1", "k2": b"v2"})
+        assert await store1.get_many(["k1", "k2", "absent"]) == {"k1": b"v1", "k2": b"v2", "absent": None}
+
+        await store1.delete("k1")
+        assert await store1.get("k1") is None
+        assert await store1.get("k2") == b"v2"
+
+        await store1.delete_all()
+        assert await store1.get("session") is None
+        assert await store1.get("k2") is None
+        assert await store2.get("session") == b"token-456"
+
+        for cmd in resp3_server.commands:
+            assert cmd[0].upper() != b"FLUSHDB"
+
+        await store2.set("user:1", b"alice", expires_in=60)
+        assert "tenant2:user:1" in store2._l1_cache
+        store2.driver.handle_invalidation_push(["tenant2:user:1"])
+        assert "tenant2:user:1" not in store2._l1_cache
+    finally:
+        await store1.close()
+        await store2.close()

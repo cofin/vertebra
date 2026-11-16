@@ -144,7 +144,12 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def handle_invalidation_push(self, keys: Sequence[str | bytes] | None) -> int:
         """Process an invalidation push frame."""
-        invalidations = self._client.drain_invalidations()
+        invalidations = list(self._client.drain_invalidations())
+        if keys is not None:
+            for k in keys:
+                s = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+                if s not in invalidations:
+                    invalidations.append(s)
         if self._invalidation_listeners and invalidations:
             for listener in self._invalidation_listeners:
                 listener(invalidations)
@@ -209,7 +214,7 @@ class SyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def delete(self, key: str) -> bool:
         """Delete key from Redis, returning True if key was removed."""
-        return bool(self._client.delete(key))
+        return bool(self._client.delete([key] if isinstance(key, str) else list(key)))
 
     def unlink(self, *keys: str) -> int:
         """Asynchronously unlink keys from Redis in background threads."""
@@ -435,7 +440,12 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     def handle_invalidation_push(self, keys: Sequence[str | bytes] | None) -> int:
         """Process an invalidation push frame."""
-        invalidations = self._client.drain_invalidations()
+        invalidations = list(self._client.drain_invalidations())
+        if keys is not None:
+            for k in keys:
+                s = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+                if s not in invalidations:
+                    invalidations.append(s)
         if self._invalidation_listeners and invalidations:
             for listener in self._invalidation_listeners:
                 listener(invalidations)
@@ -500,7 +510,7 @@ class AsyncRedisDriver(CommonDriverMixin[RedisConfig]):
 
     async def delete(self, key: str) -> bool:
         """Delete key from Redis, returning True if key was removed."""
-        return bool(await self._client.delete(key))
+        return bool(await self._client.delete([key] if isinstance(key, str) else list(key)))
 
     async def unlink(self, *keys: str) -> int:
         """Asynchronously unlink keys from Redis in background threads."""

@@ -11,20 +11,24 @@ import time
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
+from typing import TYPE_CHECKING, Any, ClassVar, cast, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
+import django
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
+from django.conf import settings
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
 from django.core.files.uploadedfile import UploadedFile
+from django.core.management import call_command
 from django.db.migrations.writer import MigrationWriter
 from django.db.models import FileField
 from django.db.models.fields.files import FieldFile
+from django.tasks import TaskResultStatus, task, task_backends
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -45,11 +49,11 @@ from vertebra.extensions.django import (
     MsgspecView,
     OpenAPIConfig,
     ORMBridge,
-    QueuesBackend,
     RouteCompiler,
     SecurityBridge,
     SwaggerDocsConfig,
     SyncStorageRegistry,
+    TaskBackend,
     TemplateBridge,
     VertebraAppConfig,
     VertebraConfig,
@@ -71,6 +75,7 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
 from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
 from vertebra.extensions.sqlspec.adapters import PostgresSyncConfig, SQLiteSyncConfig
+from vertebra.framework.di import Container
 from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (
     AsyncObjectStore,
@@ -512,7 +517,7 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     msg = await layer.receive(ch)
     assert msg == {"type": "order.updated", "id": 10}
 
-    queues = QueuesBackend()
+    queues = TaskBackend()
 
     @queues.task("sum_pair")
     def sum_pair(x: int, y: int) -> int:
@@ -1124,3 +1129,57 @@ else:
 def test_django_compiled_route_inherits_compiled_route_base() -> None:
     """Django CompiledRoute subclasses CompiledRouteBase."""
     assert issubclass(DjangoCompiledRoute, CompiledRouteBase)
+
+
+if not settings.configured:
+    settings.configure(
+        INSTALLED_APPS=[
+            "vertebra.extensions.django",
+        ],
+        TASKS={
+            "default": {
+                "BACKEND": "vertebra.extensions.django.tasks.TaskBackend",
+            }
+        },
+    )
+    django.setup()
+
+
+class MultiplierService:
+    def calc(self, x: int, y: int) -> int:
+        return x * y
+
+
+@task
+def compute_sum_task(a: int, b: int) -> int:
+    return a + b
+
+
+@task
+async def async_mult_task(a: int, b: int, service: MultiplierService | None = None) -> int:
+    assert service is not None
+    return service.calc(a, b)
+
+
+def test_django_tasks_backend_and_worker_command() -> None:
+    """Verify Django 6.0+ TaskBackend and vertebra_worker management command."""
+    res = compute_sum_task.enqueue(15, 25)
+    assert res.status == TaskResultStatus.READY
+
+    call_command("vertebra_worker", "--once")
+
+    updated = compute_sum_task.get_result(res.id)
+    assert updated.status == TaskResultStatus.SUCCESSFUL
+    assert updated.return_value == 40
+
+    container = Container(singletons={"service": MultiplierService()})
+    cast(TaskBackend, task_backends["default"])._container = container
+
+    res_async = asyncio.run(async_mult_task.aenqueue(6, 7))
+    assert res_async.status == TaskResultStatus.READY
+
+    call_command("vertebra_worker", "--once")
+
+    updated_async = async_mult_task.get_result(res_async.id)
+    assert updated_async.status == TaskResultStatus.SUCCESSFUL
+    assert cast(Any, updated_async.return_value) == 42

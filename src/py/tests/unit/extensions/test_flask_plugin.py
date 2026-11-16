@@ -35,6 +35,7 @@ from vertebra.extensions.flask import (
     VertebraConfig,
     VertebraPlugin,
     ViteConfig,
+    attach_channels,
     attach_storage,
     convert_werkzeug_rule,
     mcp_tool,
@@ -274,6 +275,15 @@ async def test_flask_ecosystem_bridges() -> None:
     jwt = JWTAuthGuard(b"super-secret-key-at-least-32-bytes-long")
     assert jwt.verify_header(None) is None
     assert jwt.verify_header("Basic abc") is None
+
+    channels = attach_channels(app)
+    channels.subscribe(["flask-alerts"])
+    channels.publish("flask-alerts", {"alert": "critical"})
+    listener = channels.listen(["flask-alerts"])
+    msg = next(listener)
+    assert msg.channel == "flask-alerts"
+    assert b"critical" in msg.data
+    channels.close()
 
 
 @pytest.mark.anyio

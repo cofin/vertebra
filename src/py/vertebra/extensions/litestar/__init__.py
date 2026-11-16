@@ -14,7 +14,7 @@ if TYPE_CHECKING:
         create_autowire_plugin,
         ensure_autowire_before_route_compiler,
     )
-    from vertebra.extensions.litestar.channels import ChannelsBackend, swap_channels_backend
+    from vertebra.extensions.litestar.channels import ChannelsBackend, create_channels_plugin
     from vertebra.extensions.litestar.config import VertebraConfig
     from vertebra.extensions.litestar.email import SESEmailBackend, SESEmailConfig
     from vertebra.extensions.litestar.fastpath import (
@@ -132,6 +132,7 @@ __all__ = (
     "convert_path_params",
     "create_asyncapi_plugin",
     "create_autowire_plugin",
+    "create_channels_plugin",
     "create_htmx_plugin",
     "create_ingress_identity_mechanism",
     "create_jwt_authentication_mechanism",
@@ -160,7 +161,6 @@ __all__ = (
     "provide_driver",
     "queues",
     "security",
-    "swap_channels_backend",
     "swap_response_cache_store",
     "vite",
 )
@@ -207,6 +207,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "convert_path_params": ("vertebra.extensions.litestar.router", "convert_path_params"),
     "create_asyncapi_plugin": ("vertebra.extensions.litestar.asyncapi", "create_asyncapi_plugin"),
     "create_autowire_plugin": ("vertebra.extensions.litestar.autowire", "create_autowire_plugin"),
+    "create_channels_plugin": ("vertebra.extensions.litestar.channels", "create_channels_plugin"),
     "create_htmx_plugin": ("vertebra.extensions.litestar.htmx", "create_htmx_plugin"),
     "create_ingress_identity_mechanism": (
         "vertebra.extensions.litestar.security",
@@ -247,7 +248,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "provide_driver": ("vertebra.db.registry", "provide_driver"),
     "queues": ("vertebra.extensions.litestar.queues", ""),
     "security": ("vertebra.extensions.litestar.security", ""),
-    "swap_channels_backend": ("vertebra.extensions.litestar.channels", "swap_channels_backend"),
     "swap_response_cache_store": ("vertebra.extensions.litestar.store", "swap_response_cache_store"),
     "vite": ("vertebra.extensions.litestar.vite", ""),
 }

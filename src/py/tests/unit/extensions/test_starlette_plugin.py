@@ -47,6 +47,19 @@ from vertebra.extensions.starlette.fastpath import (
 from vertebra.extensions.starlette.fastpath import (
     CompiledRoute as StarletteCompiledRoute,
 )
+from vertebra.extensions.starlette.queues import (
+    QueueService as StarletteQueueService,
+)
+from vertebra.extensions.starlette.queues import (
+    attach_queue_service as attach_starlette_queue_service,
+)
+from vertebra.extensions.starlette.queues import (
+    get_queue_service as get_starlette_queue_service,
+)
+from vertebra.extensions.starlette.queues import (
+    queue_lifespan as starlette_queue_lifespan,
+)
+from vertebra.framework.queues import MemoryQueueBackend, task
 from vertebra.server._channels import ChannelBus
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath
@@ -316,6 +329,54 @@ async def test_cache_store_delete_all_removes_only_its_prefix(resp3_server: Resp
     await driver.close()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("driver_kind", ["valkey", "redis"])
+async def test_starlette_cache_store_driver_isolation_and_invalidation(
+    resp3_server: Resp3FakeServer,
+    driver_kind: str,
+) -> None:
+    """Verify Starlette CacheStore works across Valkey and Redis with prefix isolation and invalidation."""
+    url = resp3_server.valkey_url if driver_kind == "valkey" else resp3_server.redis_url
+    if driver_kind == "valkey":
+        store1 = CacheStore.from_valkey(url, key_prefix="tenant1")
+        store2 = CacheStore.from_valkey(url, key_prefix="tenant2")
+    else:
+        store1 = CacheStore.from_redis(url, key_prefix="tenant1")
+        store2 = CacheStore.from_redis(url, key_prefix="tenant2")
+
+    try:
+        await store1.set("session", b"token-123", expires_in=30)
+        await store2.set("session", b"token-456", expires_in=30)
+
+        assert await store1.get("session") == b"token-123"
+        assert await store2.get("session") == b"token-456"
+
+        assert store1.get_sync("session") == b"token-123"
+        assert store2.get_sync("session") == b"token-456"
+
+        await store1.set_many({"k1": b"v1", "k2": b"v2"})
+        many_res = await store1.get_many(["k1", "k2", "absent"])
+        assert many_res == {"k1": b"v1", "k2": b"v2", "absent": None}
+
+        await store1.delete("k1")
+        assert await store1.get("k1") is None
+        assert await store1.get("k2") == b"v2"
+
+        await store1.delete_all()
+        assert await store1.get("session") is None
+        assert await store1.get("k2") is None
+        assert await store2.get("session") == b"token-456"
+
+        await store2.set("user:1", b"alice", expires_in=60)
+        assert "tenant2:user:1" in store2._entries
+        assert store2._async_driver is not None
+        store2._async_driver.handle_invalidation_push(["tenant2:user:1"])
+        assert "tenant2:user:1" not in store2._entries
+    finally:
+        await store1.close()
+        await store2.close()
+
+
 def test_channels_backend_accepts_engine_neutral_bus() -> None:
     """Starlette attachments accept both the adapter and the shared channel bus."""
     assert issubclass(ChannelsBackend, ChannelBus)
@@ -435,3 +496,27 @@ async def test_starlette_compiled_route_base_attachment_and_buffered_responses()
     assert subclass_asgi_called is True
     assert decode_json(proto.take_response().body) == {"custom": True}
     assert bg_called is False
+
+
+@pytest.mark.anyio
+async def test_starlette_queue_service_and_lifespan() -> None:
+    """Verify Starlette attach_queue_service, get_queue_service, and queue_lifespan."""
+    app = _make_mock_starlette_app()
+    qsvc = attach_starlette_queue_service(app, StarletteQueueService(backend=MemoryQueueBackend()))
+    assert get_starlette_queue_service(app) is qsvc
+
+    executed = []
+
+    @task(lane="io")
+    def job(val: int) -> int:
+        executed.append(val)
+        return val * 2
+
+    qsvc.register(job)
+    await qsvc.enqueue("job", 21)
+
+    async with starlette_queue_lifespan(app, run_worker=False) as svc:
+        assert svc is qsvc
+        results = await svc.drain_once(("io",))
+        assert results == [42]
+        assert executed == [21]

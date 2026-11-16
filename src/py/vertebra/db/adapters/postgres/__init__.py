@@ -58,6 +58,10 @@ if TYPE_CHECKING:
         SyncPipelineClientProtocol,
         SyncPostgresPipeline,
     )
+    from vertebra.db.adapters.postgres.queue import (
+        AsyncPostgresQueueStore,
+        SyncPostgresQueueStore,
+    )
     from vertebra.db.adapters.postgres.types import (
         PG_UNCHANGED_TOAST,
         PgArray,
@@ -98,6 +102,7 @@ __all__ = (
     "AsyncPipelineClientProtocol",
     "AsyncPostgresNotificationSource",
     "AsyncPostgresPipeline",
+    "AsyncPostgresQueueStore",
     "AsyncPostgreSQLDriver",
     "CompiledPostgresBinds",
     "EventSessionRegistry",
@@ -142,6 +147,7 @@ __all__ = (
     "SyncPipelineClientProtocol",
     "SyncPostgresNotificationSource",
     "SyncPostgresPipeline",
+    "SyncPostgresQueueStore",
     "SyncPostgreSQLDriver",
     "TemporalKind",
     "TemporalSpecial",
@@ -168,6 +174,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.postgres.notify",
     "vertebra.db.adapters.postgres.options",
     "vertebra.db.adapters.postgres.pipeline",
+    "vertebra.db.adapters.postgres.queue",
     "vertebra.db.adapters.postgres.types",
     "vertebra.db.arrow",
 ]
@@ -181,6 +188,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
         "AsyncPostgresNotificationSource",
     ),
     "AsyncPostgresPipeline": ("vertebra.db.adapters.postgres.pipeline", "AsyncPostgresPipeline"),
+    "AsyncPostgresQueueStore": ("vertebra.db.adapters.postgres.queue", "AsyncPostgresQueueStore"),
     "AsyncPostgreSQLDriver": ("vertebra.db.adapters.postgres._async", "AsyncPostgreSQLDriver"),
     "CompiledPostgresBinds": ("vertebra.db.adapters.postgres.binds", "CompiledPostgresBinds"),
     "EventSessionRegistry": ("vertebra.db.adapters.postgres.events", "EventSessionRegistry"),
@@ -234,6 +242,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
         "SyncPostgresNotificationSource",
     ),
     "SyncPostgresPipeline": ("vertebra.db.adapters.postgres.pipeline", "SyncPostgresPipeline"),
+    "SyncPostgresQueueStore": ("vertebra.db.adapters.postgres.queue", "SyncPostgresQueueStore"),
     "SyncPostgreSQLDriver": ("vertebra.db.adapters.postgres._sync", "SyncPostgreSQLDriver"),
     "TemporalKind": ("vertebra.db.adapters.postgres.types", "TemporalKind"),
     "TemporalSpecial": ("vertebra.db.adapters.postgres.types", "TemporalSpecial"),

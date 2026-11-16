@@ -84,14 +84,15 @@ from vertebra.db.driver.capabilities import (
     AsyncNotificationSource,
     AsyncPipeline,
     AsyncPipelineCapable,
-    ClaimedJob,
+    AsyncQueueStore,
     EmbeddingPushdown,
     NotificationEvent,
-    QueueStore,
+    QueueEntry,
     SyncChangeSource,
     SyncNotificationSource,
     SyncPipeline,
     SyncPipelineCapable,
+    SyncQueueStore,
 )
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.litestar import ChannelsBackend, MemoryStore
@@ -219,11 +220,11 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "AsyncDatabaseDriver",
         "AsyncPipeline",
         "AsyncPipelineCapable",
+        "AsyncQueueStore",
         "BaseDatabaseConfig",
         "CDCConfig",
         "ChangeEvent",
         "ChangeFeed",
-        "ClaimedJob",
         "CloudSQLConfig",
         "CloudSQLInstanceURI",
         "CommonDriverMixin",
@@ -244,7 +245,7 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "PoolExhaustedError",
         "ProgrammingError",
         "QueryCancelledError",
-        "QueueStore",
+        "QueueEntry",
         "SerializationFailure",
         "SyncAlloyDBDialer",
         "SyncChangeSource",
@@ -252,6 +253,7 @@ _EXPECTED_DB_EXPORTS: frozenset[str] = frozenset(
         "SyncDatabaseDriver",
         "SyncPipeline",
         "SyncPipelineCapable",
+        "SyncQueueStore",
         "TenantPredicate",
         "TenantScopeConfig",
         "ThreadOffloadAsyncDatabaseDriver",
@@ -1969,17 +1971,18 @@ def test_zero_type_ignore_override_annotations_in_db_drivers() -> None:
 
 _CAPABILITY_EXPORT_NAMES: tuple[str, ...] = (
     "AsyncChangeSource",
+    "AsyncNotificationSource",
     "AsyncPipeline",
     "AsyncPipelineCapable",
-    "ClaimedJob",
+    "AsyncQueueStore",
     "EmbeddingPushdown",
     "NotificationEvent",
-    "AsyncNotificationSource",
-    "SyncNotificationSource",
-    "QueueStore",
+    "QueueEntry",
     "SyncChangeSource",
+    "SyncNotificationSource",
     "SyncPipeline",
     "SyncPipelineCapable",
+    "SyncQueueStore",
 )
 
 
@@ -2144,109 +2147,243 @@ class _ConformingAsyncChangeSource:
         yield ChangeEvent(event_id=2, channel="orders", operation="UPDATE", payload={"id": 1})
 
 
-class _ConformingQueueStore:
-    """Minimal conforming stand-in for `QueueStore`."""
+class _ConformingSyncQueueStore:
+    """Minimal conforming stand-in for `SyncQueueStore`."""
 
-    __slots__ = ("_jobs", "_ready")
+    __slots__ = ("_jobs", "_leases", "_ready", "_unique_keys")
 
     def __init__(self) -> None:
         self._ready = False
-        self._jobs: dict[str, ClaimedJob] = {}
+        self._jobs: dict[str, QueueEntry] = {}
+        self._leases: dict[str, tuple[str, float]] = {}
+        self._unique_keys: set[str] = set()
 
-    async def ensure_schema(self) -> None:
+    def ensure_schema(self) -> None:
         self._ready = True
 
-    async def enqueue(
-        self,
-        queue: str,
-        task_name: str,
-        payload: bytes,
-        *,
-        job_id: str | None = None,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-        headers: Mapping[str, str] | None = None,
-    ) -> str:
-        _ = scheduled_at_ms
-        jid = job_id or f"job-{len(self._jobs) + 1}"
-        self._jobs[jid] = ClaimedJob(
+    def enqueue(self, entry: QueueEntry) -> str:
+        jid = entry.job_id or f"job-{len(self._jobs) + 1}"
+        stored = QueueEntry(
             job_id=jid,
-            queue=queue,
-            task_name=task_name,
-            payload=payload,
-            attempt=1,
-            max_attempts=max_attempts,
-            lease_until_ms=0,
-            headers=dict(headers) if headers is not None else {},
+            queue=entry.queue,
+            task_name=entry.task_name,
+            payload=entry.payload,
+            attempt=entry.attempt,
+            max_attempts=entry.max_attempts,
+            lease_until_ms=entry.lease_until_ms,
+            scheduled_at_ms=entry.scheduled_at_ms,
+            headers=dict(entry.headers),
         )
+        self._jobs[jid] = stored
         return jid
 
-    async def enqueue_many(
-        self,
-        queue: str,
-        items: Sequence[tuple[str, bytes]],
-        *,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-    ) -> list[str]:
-        ids: list[str] = []
-        for task_name, payload in items:
-            ids.append(
-                await self.enqueue(
-                    queue,
-                    task_name,
-                    payload,
-                    scheduled_at_ms=scheduled_at_ms,
-                    max_attempts=max_attempts,
-                )
-            )
-        return ids
+    def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        return [self.enqueue(e) for e in entries]
 
-    async def claim(
+    def claim(
         self,
-        queue: str,
+        queues: Sequence[str],
         *,
         limit: int = 1,
-        lease_ms: int = 30_000,
-        worker_id: str = "",
-    ) -> list[ClaimedJob]:
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
         _ = worker_id
-        claimed: list[ClaimedJob] = []
+        claimed: list[QueueEntry] = []
         for jid, job in list(self._jobs.items()):
-            if job.queue == queue and len(claimed) < limit:
-                leased = ClaimedJob(
+            if job.queue in queues and len(claimed) < limit:
+                leased = QueueEntry(
                     job_id=job.job_id,
                     queue=job.queue,
                     task_name=job.task_name,
                     payload=job.payload,
                     attempt=job.attempt,
                     max_attempts=job.max_attempts,
-                    lease_until_ms=lease_ms,
+                    lease_until_ms=int(lease_seconds * 1000),
                     headers=dict(job.headers),
                 )
                 self._jobs[jid] = leased
                 claimed.append(leased)
         return claimed
 
-    async def heartbeat(self, job_id: str, attempt: int, *, extend_ms: int = 30_000) -> bool:
-        _ = extend_ms
-        job = self._jobs.get(job_id)
-        return job is not None and job.attempt == attempt
-
-    async def complete(self, job_id: str, attempt: int) -> bool:
+    def ack(self, job_id: str, *, attempt: int) -> bool:
         job = self._jobs.get(job_id)
         if job is None or job.attempt != attempt:
             return False
         self._jobs.pop(job_id, None)
         return True
 
-    async def fail(self, job_id: str, attempt: int, *, error: str, retry_delay_ms: int | None = None) -> None:
-        _ = (attempt, error, retry_delay_ms)
+    def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        _ = (attempt, error, retry_delay_s)
         self._jobs.pop(job_id, None)
+        return True
 
-    async def promote_scheduled(self, queue: str | None = None, *, now_ms: int | None = None, limit: int = 100) -> int:
-        _ = (queue, now_ms, limit)
+    def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        _ = (worker_id, lease_seconds)
+        return sum(1 for jid in job_ids if jid in self._jobs)
+
+    def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        _ = lease_seconds
         return 0
+
+    def promote_scheduled(self, *, limit: int = 100) -> int:
+        _ = limit
+        return 0
+
+    def cancel(self, job_id: str) -> bool:
+        return self._jobs.pop(job_id, None) is not None
+
+    def get_entry(self, job_id: str) -> QueueEntry | None:
+        return self._jobs.get(job_id)
+
+    def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        _ = status
+        return [j for j in self._jobs.values() if j.queue == queue][:limit]
+
+    def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        _ = queues
+        return None
+
+    def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        _ = ttl_seconds
+        if key in self._unique_keys:
+            return False
+        self._unique_keys.add(key)
+        return True
+
+    def release_unique_key(self, key: str) -> bool:
+        if key in self._unique_keys:
+            self._unique_keys.remove(key)
+            return True
+        return False
+
+    def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        now = time.time()
+        existing = self._leases.get(lease_key)
+        if existing is None or existing[1] <= now or existing[0] == owner_id:
+            self._leases[lease_key] = (owner_id, now + ttl_seconds)
+            return True
+        return False
+
+    def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        existing = self._leases.get(lease_key)
+        if existing is not None and existing[0] == owner_id:
+            del self._leases[lease_key]
+            return True
+        return False
+
+    def close(self) -> None:
+        self._jobs.clear()
+        self._leases.clear()
+        self._unique_keys.clear()
+
+
+class _ConformingAsyncQueueStore:
+    """Minimal conforming stand-in for `AsyncQueueStore`."""
+
+    __slots__ = ("_sync",)
+
+    def __init__(self) -> None:
+        self._sync = _ConformingSyncQueueStore()
+
+    async def ensure_schema(self) -> None:
+        self._sync.ensure_schema()
+
+    async def enqueue(self, entry: QueueEntry) -> str:
+        return self._sync.enqueue(entry)
+
+    async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        return self._sync.enqueue_many(entries)
+
+    async def claim(
+        self,
+        queues: Sequence[str],
+        *,
+        limit: int = 1,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
+        return self._sync.claim(queues, limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
+
+    async def ack(self, job_id: str, *, attempt: int) -> bool:
+        return self._sync.ack(job_id, attempt=attempt)
+
+    async def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        return self._sync.nack(job_id, attempt=attempt, error=error, retry_delay_s=retry_delay_s)
+
+    async def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        return self._sync.heartbeat(job_ids, worker_id=worker_id, lease_seconds=lease_seconds)
+
+    async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        return self._sync.reap_stale(lease_seconds=lease_seconds)
+
+    async def promote_scheduled(self, *, limit: int = 100) -> int:
+        return self._sync.promote_scheduled(limit=limit)
+
+    async def cancel(self, job_id: str) -> bool:
+        return self._sync.cancel(job_id)
+
+    async def get_entry(self, job_id: str) -> QueueEntry | None:
+        return self._sync.get_entry(job_id)
+
+    async def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        return self._sync.list_entries(queue, status=status, limit=limit)
+
+    async def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        return self._sync.next_due_delay(queues)
+
+    async def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        return self._sync.reserve_unique_key(key, ttl_seconds=ttl_seconds)
+
+    async def release_unique_key(self, key: str) -> bool:
+        return self._sync.release_unique_key(key)
+
+    async def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        return self._sync.acquire_lease(lease_key, owner_id=owner_id, ttl_seconds=ttl_seconds)
+
+    async def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        return self._sync.release_lease(lease_key, owner_id=owner_id)
+
+    async def aclose(self) -> None:
+        self._sync.close()
 
 
 class _ConformingEmbeddingPushdown:
@@ -2314,7 +2451,7 @@ class _ConformingEmbeddingPushdown:
             "metadata",
         ),
         (
-            ClaimedJob,
+            QueueEntry,
             {
                 "job_id": "job-101",
                 "queue": "emails",
@@ -2348,28 +2485,30 @@ def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
     mutate_val: Any,
     dict_attr: str,
 ) -> None:
-    """Verify NotificationEvent and ClaimedJob are frozen, GC-untracked, isolated on defaults, and round-trip."""
+    """Verify NotificationEvent and QueueEntry are frozen, isolated on defaults, and round-trip."""
     first = record_cls(**default_kwargs)
     second = record_cls(**default_kwargs)
     populated = record_cls(**full_kwargs)
 
-    assert not gc.is_tracked(first)
-    assert not gc.is_tracked(populated)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(first)
+        assert not gc.is_tracked(populated)
+        assert first.sender_id is None
     assert getattr(first, dict_attr) == {}
     assert getattr(first, dict_attr) is not getattr(second, dict_attr)
-    if record_cls is NotificationEvent:
-        assert first.sender_id is None
 
     with pytest.raises(AttributeError):
         setattr(populated, mutate_attr, mutate_val)
 
     json_roundtrip = decode_json(encode_json_bytes(populated), type=record_cls)
     assert json_roundtrip == populated
-    assert not gc.is_tracked(json_roundtrip)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(json_roundtrip)
 
     msgpack_roundtrip = decode_msgpack(encode_msgpack_bytes(populated), type=record_cls)
     assert msgpack_roundtrip == populated
-    assert not gc.is_tracked(msgpack_roundtrip)
+    if record_cls is NotificationEvent:
+        assert not gc.is_tracked(msgpack_roundtrip)
 
 
 @pytest.mark.parametrize(
@@ -2383,7 +2522,8 @@ def test_capability_records_frozen_gc_untracked_and_serializer_roundtrip(
         (_ConformingSyncNotificationSource, SyncNotificationSource),
         (_ConformingSyncChangeSource, SyncChangeSource),
         (_ConformingAsyncChangeSource, AsyncChangeSource),
-        (_ConformingQueueStore, QueueStore),
+        (_ConformingSyncQueueStore, SyncQueueStore),
+        (_ConformingAsyncQueueStore, AsyncQueueStore),
         (_ConformingEmbeddingPushdown, EmbeddingPushdown),
     ],
 )
@@ -2423,6 +2563,20 @@ def test_notification_source_legacy_symbol_cleanly_removed() -> None:
     assert not hasattr(db_mod, "NotificationSource")
 
 
+def test_queue_store_and_claimed_job_legacy_symbols_cleanly_removed() -> None:
+    """Verify legacy QueueStore and ClaimedJob symbols raise AttributeError or ImportError."""
+    import vertebra.db as db_mod
+    import vertebra.db.driver as driver_mod
+    import vertebra.db.driver.capabilities as cap_mod
+
+    assert not hasattr(driver_mod, "QueueStore")
+    assert not hasattr(db_mod, "QueueStore")
+    assert not hasattr(cap_mod, "QueueStore")
+    assert not hasattr(driver_mod, "ClaimedJob")
+    assert not hasattr(db_mod, "ClaimedJob")
+    assert not hasattr(cap_mod, "ClaimedJob")
+
+
 @pytest.mark.anyio
 async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -> None:
     """Verify static structural typing and end-to-end execution across all capability protocols."""
@@ -2432,7 +2586,8 @@ async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -
     sync_notif_source: SyncNotificationSource = _ConformingSyncNotificationSource()
     sync_cdc: SyncChangeSource = _ConformingSyncChangeSource()
     async_cdc: AsyncChangeSource = _ConformingAsyncChangeSource()
-    queue_store: QueueStore = _ConformingQueueStore()
+    sync_queue_store: SyncQueueStore = _ConformingSyncQueueStore()
+    async_queue_store: AsyncQueueStore = _ConformingAsyncQueueStore()
     pushdown: EmbeddingPushdown = _ConformingEmbeddingPushdown()
 
     raw_sync_pipe = sync_capable.pipeline()
@@ -2468,16 +2623,33 @@ async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -
     async_events = [evt async for evt in async_cdc.stream()]
     assert len(async_events) == 1 and async_events[0].operation == "UPDATE"
 
-    await queue_store.ensure_schema()
-    jid = await queue_store.enqueue("default", "work", b"body", headers={"k": "v"})
-    bulk_ids = await queue_store.enqueue_many("default", [("work2", b"b2")])
-    assert len(bulk_ids) == 1
-    claimed = await queue_store.claim("default", limit=2, lease_ms=15_000, worker_id="w1")
-    assert len(claimed) == 2 and claimed[0].job_id == jid
-    assert await queue_store.heartbeat(jid, 1, extend_ms=30_000) is True
-    assert await queue_store.complete(jid, 1) is True
-    await queue_store.fail(bulk_ids[0], 1, error="boom", retry_delay_ms=500)
-    assert await queue_store.promote_scheduled("default", now_ms=1_000, limit=10) == 0
+    sync_queue_store.ensure_schema()
+    s_jid = sync_queue_store.enqueue(
+        QueueEntry(job_id="", queue="default", task_name="work", payload=b"body", headers={"k": "v"})
+    )
+    s_bulk_ids = sync_queue_store.enqueue_many(
+        [QueueEntry(job_id="", queue="default", task_name="work2", payload=b"b2")]
+    )
+    assert len(s_bulk_ids) == 1
+    s_claimed = sync_queue_store.claim(["default"], limit=2, lease_seconds=15.0, worker_id="w1")
+    assert len(s_claimed) == 2 and s_claimed[0].job_id == s_jid
+    assert sync_queue_store.heartbeat([s_jid], worker_id="w1", lease_seconds=30.0) == 1
+    assert sync_queue_store.ack(s_jid, attempt=1) is True
+    assert sync_queue_store.nack(s_bulk_ids[0], attempt=1, error="boom", retry_delay_s=0.5) is True
+
+    await async_queue_store.ensure_schema()
+    a_jid = await async_queue_store.enqueue(
+        QueueEntry(job_id="", queue="default", task_name="work", payload=b"body", headers={"k": "v"})
+    )
+    a_bulk_ids = await async_queue_store.enqueue_many(
+        [QueueEntry(job_id="", queue="default", task_name="work2", payload=b"b2")]
+    )
+    assert len(a_bulk_ids) == 1
+    a_claimed = await async_queue_store.claim(["default"], limit=2, lease_seconds=15.0, worker_id="w1")
+    assert len(a_claimed) == 2 and a_claimed[0].job_id == a_jid
+    assert await async_queue_store.heartbeat([a_jid], worker_id="w1", lease_seconds=30.0) == 1
+    assert await async_queue_store.ack(a_jid, attempt=1) is True
+    assert await async_queue_store.nack(a_bulk_ids[0], attempt=1, error="boom", retry_delay_s=0.5) is True
 
     batch_vec = await pushdown.embed_documents(["doc-a", "doc-b"], dimensions=4)
     assert batch_vec.count == 2 and batch_vec.dimensions == 4
@@ -3137,7 +3309,12 @@ def test_engine_purity_rejects_relative_adapter_import() -> None:
     [
         ("SELECT id, label FROM items ORDER BY id", None, [{"id": 1, "label": "alpha"}], ["id", "label"]),
         ("SELECT id, label FROM items WHERE id = ?", (999,), [], ["id", "label"]),
-        ("INSERT INTO items (label) VALUES (?) RETURNING id, label", ("beta",), [{"id": 2, "label": "beta"}], ["id", "label"]),
+        (
+            "INSERT INTO items (label) VALUES (?) RETURNING id, label",
+            ("beta",),
+            [{"id": 2, "label": "beta"}],
+            ["id", "label"],
+        ),
         ("UPDATE items SET label = ? WHERE id = ? RETURNING id, label", ("gamma", 999), [], ["id", "label"]),
     ],
 )

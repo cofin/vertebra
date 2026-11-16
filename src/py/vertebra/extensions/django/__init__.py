@@ -63,7 +63,6 @@ if TYPE_CHECKING:
         rows_to_structs,
     )
     from vertebra.extensions.django.plugin import VertebraPlugin
-    from vertebra.extensions.django.queues import QueuesBackend, TaskEnvelope
     from vertebra.extensions.django.router import (
         RouteCompiler,
         RouteEntry,
@@ -71,6 +70,7 @@ if TYPE_CHECKING:
     )
     from vertebra.extensions.django.security import JWTAuthGuard, RateLimitGuard, SecurityBridge
     from vertebra.extensions.django.storage import AsyncStorageRegistry, DjangoStorage, SyncStorageRegistry
+    from vertebra.extensions.django.tasks import TaskBackend
     from vertebra.extensions.django.templates import TemplateBridge
     from vertebra.extensions.django.vite import ViteBridge, ViteConfig, attach_vite
 
@@ -96,7 +96,6 @@ __all__ = (
     "ORMBridge",
     "OpenAPIConfig",
     "PromptController",
-    "QueuesBackend",
     "RateLimitGuard",
     "RouteCompiler",
     "RouteEntry",
@@ -106,7 +105,7 @@ __all__ = (
     "SkillController",
     "SwaggerDocsConfig",
     "SyncStorageRegistry",
-    "TaskEnvelope",
+    "TaskBackend",
     "TemplateBridge",
     "VertebraAppConfig",
     "VertebraConfig",
@@ -159,7 +158,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ORMBridge": ("vertebra.extensions.django.orm", "ORMBridge"),
     "OpenAPIConfig": ("vertebra.extensions.django.openapi", "OpenAPIConfig"),
     "PromptController": ("vertebra.extensions.django.mcp", "PromptController"),
-    "QueuesBackend": ("vertebra.extensions.django.queues", "QueuesBackend"),
     "RateLimitGuard": ("vertebra.extensions.django.security", "RateLimitGuard"),
     "RouteCompiler": ("vertebra.extensions.django.router", "RouteCompiler"),
     "RouteEntry": ("vertebra.extensions.django.router", "RouteEntry"),
@@ -169,7 +167,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SkillController": ("vertebra.extensions.django.mcp", "SkillController"),
     "SwaggerDocsConfig": ("vertebra.extensions.django.openapi", "SwaggerDocsConfig"),
     "SyncStorageRegistry": ("vertebra.extensions.django.storage", "SyncStorageRegistry"),
-    "TaskEnvelope": ("vertebra.extensions.django.queues", "TaskEnvelope"),
+    "TaskBackend": ("vertebra.extensions.django.tasks", "TaskBackend"),
     "TemplateBridge": ("vertebra.extensions.django.templates", "TemplateBridge"),
     "VertebraAppConfig": ("vertebra.extensions.django.apps", "VertebraAppConfig"),
     "VertebraConfig": ("vertebra.extensions.django.config", "VertebraConfig"),

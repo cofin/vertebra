@@ -46,7 +46,7 @@ app = Litestar(
 )
 ```
 
-`VertebraConfig(swap_memory_channels=True, swap_memory_response_cache=True)` opts into replacing Litestar's in-memory channels backend and response cache store with Vertebra's implementations. Both are off by default.
+`VertebraConfig(swap_memory_response_cache=True)` opts into replacing Litestar's default response cache store with Vertebra's `MemoryStore` (off by default); attach `create_channels_plugin(...)` for realtime pub/sub channels.
 
 ### CLI Integration (`litestar run` Override & `vtb` CLI Extensions)
 
@@ -58,8 +58,8 @@ app = Litestar(
 
 - **Route Compiler**: `RouteCompiler` extracts Litestar routes into an optimized route table matched by the native HTTP router.
 - **Fast-Path Dispatch**: `FastPath` dispatches simple handlers directly, bypassing ASGI middleware layers when routes have no custom guards or intermediate transforms.
-- **Realtime Channels**: `ChannelsBackend` integrates with Litestar Channels through the engine-neutral `ChannelBus` in `vertebra.server._channels` (also available from `vertebra.framework.channels`). It provides local fan-out, bounded history, and optional `NotificationSource`, `AsyncChangeSource`, and `ChangeFeed` bridges. Client disconnection and cleanup use cancellation-shielded scopes.
-- **Response Caching**: `ResponseCacheStore` backs Litestar's `ResponseCacheConfig` using Vertebra's in-memory / SHM cache store.
+- **Realtime Channels**: `create_channels_plugin` (`ChannelsBackend`) integrates Litestar `ChannelsPlugin` with the engine-neutral `ChannelBus` across Memory, Valkey (`vertebra._valkey`), Redis (`vertebra._redis`), PostgreSQL (`vertebra._postgres`), and Oracle (`vertebra._oracle`) over `SyncNotificationSource` and `AsyncNotificationSource` with origin-node deduplication and cancellation-shielded stream cleanup.
+- **Response & Key-Value Stores**: `ValkeyStore` (`vertebra._valkey` with RESP3 `CLIENT TRACKING` L1 invalidation), `RedisStore` (`vertebra._redis`), `MemoryStore`, and `ResponseCacheStore` implement `litestar.stores.base.Store` with prefix-scoped `SCAN` + `UNLINK` deletion.
 
 ### Litestar Ecosystem Plugins (`vertebra.extensions.litestar.*`)
 
@@ -67,7 +67,7 @@ Vertebra provides modular, independently installable extensions for the Litestar
 
 | Plugin | Module | Optional Extra | Description |
 | --- | --- | --- | --- |
-| **Queues** | `vertebra.extensions.litestar.queues` | `queues` | `SHMQueueBackend` with adaptive wakeup clamping, `SHMExecutionBackend`, `create_shm_queue_config`, and `create_sqlspec_queue_config`. |
+| **Queues** | `vertebra.extensions.litestar.queues` | `queues` | `litestar-queues>=0.14.0` integration: `StoreQueueBackend` (`StoreQueueBackendConfig`, `create_store_queue_config`) over `AsyncQueueStore`, `SHMQueueBackend` (`SHMQueueBackendConfig`, `create_shm_queue_config`), `SHMExecutionBackend`, `create_sqlspec_queue_config`, and `ContainerTaskDependencyProvider`. |
 | **Security** | `vertebra.extensions.litestar.security` | `security` | `JWTAuthenticationMechanism` accelerated by native `JWTGuard`, `IngressIdentityMechanism` for trusted mTLS/XFCC headers, and `RateLimitGuard`. |
 | **Autowire** | `vertebra.extensions.litestar.autowire` | `autowire` | `AutowireBridgeIntegration` running controller discovery deterministically before the route compiler. |
 | **Email** | `vertebra.extensions.litestar.email` | `email` | `SESEmailBackend` with native AWS SigV4 signing (`py_sign_aws_sigv4_headers`) requiring zero `botocore` dependency. |
@@ -186,9 +186,9 @@ store = SyncObjectStore("memory://")
 backend = ObjectStoreBackend(store=store, prefix="uploads")
 ```
 
-## Django 6.0+ Databases & Caching (`vertebra.extensions.django`)
+## Django 6.0+ Databases, Caching, Tasks & Channels (`vertebra.extensions.django`)
 
-Vertebra supports Django `6.0+` (`vertebra-core[django]`) with 5 native `DATABASES` engines over `vertebra.db.dbapi` (`vertebra.extensions.django.db.backends.{postgresql,mysql,oracle,sqlite3,spanner}`, with `spanner` guarded by `django-google-spanner`) and native `CACHES` via `vertebra.extensions.django.cache.CacheBackend` (routing synchronous calls to `SyncCacheBackend` and `a*` async methods directly to `AsyncCacheBackend`). BigQuery, DuckDB, and SQL Server are not supported as Django `DATABASES` backends and raise `ImproperConfigurationError` during startup validation (use SQLAlchemy or SQLSpec instead).
+Vertebra supports Django `6.0+` (`vertebra-core[django]`) with 5 native `DATABASES` engines over `vertebra.db.dbapi` (`vertebra.extensions.django.db.backends.{postgresql,mysql,oracle,sqlite3,spanner}`, with `spanner` guarded by `django-google-spanner`), native `CACHES` via `vertebra.extensions.django.cache.CacheBackend` (`SyncCacheBackend` / `AsyncCacheBackend`), `django.tasks` background execution via `vertebra.extensions.django.tasks.TaskBackend` (`enqueue` via `SyncQueueStore`, `aenqueue` via `AsyncQueueStore`, and `python manage.py vertebra_worker` with `Container.scope()` DI), and distributed `CHANNEL_LAYERS` via `vertebra.extensions.django.channels.ChannelLayer` across Memory, Valkey, Redis, PostgreSQL, and Oracle. BigQuery, DuckDB, and SQL Server are not supported as Django `DATABASES` backends and raise `ImproperConfigurationError` during startup validation (use SQLAlchemy or SQLSpec instead).
 
 ```python
 DATABASES = {
@@ -202,6 +202,20 @@ CACHES = {
     "default": {
         "BACKEND": "vertebra.extensions.django.cache.CacheBackend",
         "LOCATION": "shm:///vtb-django-cache",
+    }
+}
+
+TASKS = {
+    "default": {
+        "BACKEND": "vertebra.extensions.django.tasks.TaskBackend",
+        "OPTIONS": {"BACKEND_URL": "postgresql://app_user:secret@localhost:5432/app"},
+    }
+}
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "vertebra.extensions.django.channels.ChannelLayer",
+        "CONFIG": {"url": "valkey://localhost:6379/0"},
     }
 }
 ```

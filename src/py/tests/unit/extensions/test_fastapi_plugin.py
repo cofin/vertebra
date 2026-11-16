@@ -42,6 +42,18 @@ from vertebra.extensions.fastapi.fastpath import (
 from vertebra.extensions.fastapi.fastpath import (
     CompiledRoute as FastAPICompiledRoute,
 )
+from vertebra.extensions.fastapi.queues import (
+    QueueService as FastAPIQueueService,
+)
+from vertebra.extensions.fastapi.queues import (
+    attach_queue_service as attach_fastapi_queue_service,
+)
+from vertebra.extensions.fastapi.queues import (
+    get_queue_service as get_fastapi_queue_service,
+)
+from vertebra.extensions.fastapi.queues import (
+    queue_lifespan as fastapi_queue_lifespan,
+)
 from vertebra.extensions.flask import VertebraPlugin as FlaskVertebraPlugin
 from vertebra.extensions.flask import vertebra_route
 from vertebra.extensions.litestar.fastpath import (
@@ -52,6 +64,7 @@ from vertebra.extensions.litestar.router import RouterTable as LitestarRouterTab
 from vertebra.extensions.starlette import VertebraPlugin as StarletteVertebraPlugin
 from vertebra.extensions.starlette.fastpath import serialize_buffered_response
 from vertebra.framework._app import App
+from vertebra.framework.queues import MemoryQueueBackend, task
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath, resolve_fastpath_provider
 from vertebra.server.worker import _instantiate_mount_runners
@@ -565,3 +578,26 @@ def test_fastapi_compiled_route_base_attachment_and_buffered_response_types() ->
 
     assert _CustomMsgspecJSONResponse not in BUFFERED_RESPONSE_TYPES
     assert serialize_buffered_response(_CustomMsgspecJSONResponse({"fast": False})) is None
+
+
+@pytest.mark.anyio
+async def test_fastapi_queue_extension() -> None:
+    """Verify FastAPI attach_queue_service, get_queue_service, and queue_lifespan."""
+    app, _ = _make_mock_fastapi_app()
+    qsvc = attach_fastapi_queue_service(app, FastAPIQueueService(backend=MemoryQueueBackend()))
+    assert get_fastapi_queue_service(app) is qsvc
+
+    ran = []
+
+    @task(lane="io")
+    def compute(x: int) -> int:
+        ran.append(x)
+        return x + 10
+
+    qsvc.register(compute)
+    await qsvc.enqueue("compute", 5)
+
+    async with fastapi_queue_lifespan(app, run_worker=False) as svc:
+        assert svc is qsvc
+        assert await svc.drain_once(("io",)) == [15]
+        assert ran == [5]

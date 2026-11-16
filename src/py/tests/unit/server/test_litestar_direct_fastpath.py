@@ -14,7 +14,7 @@ import pytest
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.extensions.litestar.channels import (
     ChannelsBackend,
-    swap_channels_backend,
+    create_channels_plugin,
 )
 from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
@@ -697,7 +697,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
     def get_cached() -> dict[str, str]:
         return {"cached": "yes"}
 
-    channels_plugin = ChannelsPlugin(backend=MemoryChannelsBackend(history=10), channels=["alerts"])
+    channels_plugin = create_channels_plugin(history=10, channels=["alerts"])
     cache_config = ResponseCacheConfig(store="response_cache")
     app = Litestar(
         route_handlers=[get_cached],
@@ -706,7 +706,7 @@ async def test_swap_channels_backend_and_response_cache_store() -> None:
         stores={"response_cache": LitestarMemoryStore()},
     )
 
-    swapped_channels = swap_channels_backend(app)
+    swapped_channels = channels_plugin._backend
     assert isinstance(swapped_channels, ChannelsBackend)
     await swapped_channels.on_startup()
     await swapped_channels.subscribe(["alerts"])

@@ -40,6 +40,18 @@ sources:
 - id: supervisor-py
   resource: src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime
   title: Shared libpython runtime verification for packaged vertebra-server
+- id: shm-queue-py
+  resource: src/py/vertebra/extensions/litestar/queues/shm_backend.py::SHMQueueBackend
+  title: Single-host POSIX SHM queue backend
+- id: channel-bus-py
+  resource: src/py/vertebra/server/_channels.py::ChannelBus
+  title: Bounded subscriber backpressure and notification bridge
+- id: pg-notify-py
+  resource: src/py/vertebra/db/adapters/postgres/notify.py::AsyncPostgresNotificationSource
+  title: PostgreSQL NOTIFY 8000-byte frame limit and spill envelopes
+- id: ora-notify-py
+  resource: src/py/vertebra/db/adapters/oracle/notify.py::AsyncOracleNotificationSource
+  title: Oracle TxEventQ and DBMS_AQ notification transport
 ---
 
 # Server Runtime Limitations
@@ -50,6 +62,7 @@ sources:
 - `BatchBridge::submit_stream_frame` detects client closure via `StreamDelivery::Closed` (`ConnectionResetError` in Python), whereas SHM worker streams learn of closed receivers asynchronously when dispatcher sweeps fire `notify_disconnect` or reader shutdown cancels delivery [^streams-http-rs] [^shm-reader-rs].
 - ID generation in `vertebra-core` requires a functioning OS entropy source (`getrandom::fill`) and panics on failure rather than falling back to time-seeded PRNG state; Unix worker forks automatically advance `FORK_GENERATION` via `pthread_atfork` to reseed child entropy pools [^core-id-rs].
 - Packaged POSIX `vertebra-server` wheels use `$ORIGIN`/`@loader_path` relative rpaths and require a dynamically linked shared `libpython` runtime (`ENABLE_SHARED=1`, checked by `EmbeddedPythonRuntime.require_shared_library` unless `VERTEBRA_SERVER_BINARY` is set) [^supervisor-py].
+- `SHMQueueBackend` and memory `ChannelBus` operate across single-host processes only; cross-host queue wakeups and channels require Valkey, Redis, PostgreSQL (`NOTIFY` capped at `8,000` bytes — send wakeup IDs or `ChangeFeed` spill envelopes), or Oracle (`TxEventQ` / `DBMS_AQ`, falling back to adaptive polling when AQ privileges are absent) [^shm-queue-py] [^channel-bus-py] [^pg-notify-py] [^ora-notify-py].
 <!-- truth: end -->
 
 ## Operational Context
@@ -64,3 +77,7 @@ Current server architecture and streaming transport details live in [ASGI, RSGI 
 [^streams-http-rs]: `src/rs/vertebra-http/src/dispatcher/streams.rs::ResponseStreamRegistry` — `FrameReceiver` `Infallible` contract and `notify_disconnect`.
 [^core-id-rs]: `src/rs/vertebra-core/src/id.rs` — Fail-loud OS entropy pool and Unix `pthread_atfork` reseed hook.
 [^supervisor-py]: `src/py/vertebra/supervisor/_supervisor.py::EmbeddedPythonRuntime` — Shared `libpython` validation for packaged `vertebra-server`.
+[^shm-queue-py]: `src/py/vertebra/extensions/litestar/queues/shm_backend.py::SHMQueueBackend` — Single-host POSIX SHM queue backend.
+[^channel-bus-py]: `src/py/vertebra/server/_channels.py::ChannelBus` — Bounded subscriber backpressure and notification bridge.
+[^pg-notify-py]: `src/py/vertebra/db/adapters/postgres/notify.py::AsyncPostgresNotificationSource` — PostgreSQL `NOTIFY` 8000-byte frame limit and spill envelopes.
+[^ora-notify-py]: `src/py/vertebra/db/adapters/oracle/notify.py::AsyncOracleNotificationSource` — Oracle `TxEventQ` and `DBMS_AQ` notification transport.

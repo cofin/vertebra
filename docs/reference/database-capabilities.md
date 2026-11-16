@@ -40,13 +40,55 @@ agent bridge. Creating providers and registering their tools opens no database c
       members: false
       summary: false
 
+::: vertebra.db.driver.capabilities.SyncNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.capabilities.AsyncNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.capabilities.SyncQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.driver.capabilities.AsyncQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
 ::: vertebra.db.adapters.postgres.notify.PostgresNotifyConfig
     options:
       heading_level: 4
       members: false
       summary: false
 
-::: vertebra.db.adapters.postgres.notify.PostgresNotificationSource
+::: vertebra.db.adapters.postgres.notify.SyncPostgresNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.notify.AsyncPostgresNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.queue.SyncPostgresQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.postgres.queue.AsyncPostgresQueueStore
     options:
       heading_level: 4
       members: false
@@ -88,7 +130,49 @@ agent bridge. Creating providers and registering their tools opens no database c
       members: false
       summary: false
 
-::: vertebra.db.adapters.oracle.notify.OracleNotificationSource
+::: vertebra.db.adapters.oracle.notify.SyncOracleNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.oracle.notify.AsyncOracleNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.oracle.queue.SyncOracleQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.oracle.queue.AsyncOracleQueueStore
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.redis.notify.SyncRedisNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.redis.notify.AsyncRedisNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.valkey.notify.SyncValkeyNotificationSource
+    options:
+      heading_level: 4
+      members: false
+      summary: false
+
+::: vertebra.db.adapters.valkey.notify.AsyncValkeyNotificationSource
     options:
       heading_level: 4
       members: false

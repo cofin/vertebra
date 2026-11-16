@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+import contextlib
+from typing import TYPE_CHECKING, Any
 
 from vertebra.extensions.litestar.channels import ChannelsBackend
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from datetime import timedelta
+
+    from vertebra.db.driver.capabilities import AsyncNotificationSource, AsyncQueueStore
 
 try:
     from litestar_queues.config import QueueConfig, WorkerConfig
@@ -34,6 +40,8 @@ def create_sqlspec_queue_config(
     maintenance_table_name: str = "queue_maintenance",
     worker_wakeups: Any = None,
     manage_schema: bool = False,
+    queue_store_class: Any = None,
+    events_store_class: Any = None,
     worker: WorkerConfig | None = None,
     delivery: EventDeliveryConfig | None = None,
     stream: EventStreamConfig | None = None,
@@ -72,6 +80,13 @@ def create_sqlspec_queue_config(
         history=history,
     )
 
+    if queue_store_class is not None:
+        with contextlib.suppress(AttributeError, TypeError):
+            sqlspec_config.queue_store_class = queue_store_class
+    if events_store_class is not None:
+        with contextlib.suppress(AttributeError, TypeError):
+            sqlspec_config.events_store_class = events_store_class
+
     backend_config = sqlspec_backend_mod.SQLSpecBackendConfig(
         sqlspec_config=sqlspec_config,
         queue_table_name=queue_table_name,
@@ -99,6 +114,7 @@ def create_shm_queue_config(
     max_wakeup_timeout: float = 30.0,
     worker: WorkerConfig | None = None,
     events: QueueEventsConfig | None = None,
+    task_dependency_provider: Any = None,
     **kwargs: Any,
 ) -> QueueConfig:
     """Create a QueueConfig using Vertebra SHMQueueBackend and SHMExecutionBackend."""
@@ -107,13 +123,53 @@ def create_shm_queue_config(
         package="litestar-queues",
         extra="queues",
     )
+    from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
 
+    backend_config = SHMQueueBackendConfig(
+        min_wakeup_timeout=min_wakeup_timeout,
+        max_wakeup_timeout=max_wakeup_timeout,
+    )
     resolved_worker = worker if worker is not None else WorkerConfig()
 
     return QueueConfig(
-        queue_backend="vertebra.extensions.litestar.queues.backend.SHMQueueBackend",
+        queue_backend=backend_config,
         execution_backend="vertebra.extensions.litestar.queues.backend.SHMExecutionBackend",
         worker=resolved_worker,
         events=events,
+        task_dependency_provider=task_dependency_provider,
+        **kwargs,
+    )
+
+
+def create_store_queue_config(
+    store: AsyncQueueStore,
+    *,
+    notification_source: AsyncNotificationSource | None = None,
+    terminal_ttl: timedelta | None = None,
+    worker: WorkerConfig | None = None,
+    events: QueueEventsConfig | None = None,
+    task_dependency_provider: Any = None,
+    **kwargs: Any,
+) -> QueueConfig:
+    """Create a QueueConfig backed by StoreQueueBackendConfig."""
+    ensure_module(
+        "litestar_queues",
+        package="litestar-queues",
+        extra="queues",
+    )
+    from vertebra.extensions.litestar.queues.backend import StoreQueueBackendConfig
+
+    backend_config = StoreQueueBackendConfig(
+        store=store,
+        notification_source=notification_source,
+        terminal_ttl=terminal_ttl,
+    )
+    resolved_worker = worker if worker is not None else WorkerConfig()
+
+    return QueueConfig(
+        queue_backend=backend_config,
+        worker=resolved_worker,
+        events=events,
+        task_dependency_provider=task_dependency_provider,
         **kwargs,
     )

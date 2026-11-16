@@ -21,7 +21,8 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from vertebra.framework.queues.base import QueueService, TaskLane
+    from vertebra.framework.di import Container
+    from vertebra.framework.queues.base import QueueService, TaskEnvelope, TaskLane
     from vertebra.framework.queues.scheduler import CronScheduler
 
 __all__ = (
@@ -71,6 +72,8 @@ class WorkerRunner:
     """Admission-controlled multi-lane worker runner with QueueService integration and lame-duck drain."""
 
     __slots__ = (
+        "_container",
+        "_heartbeat_interval_seconds",
         "_in_flight",
         "_lame_duck",
         "_lanes",
@@ -90,6 +93,8 @@ class WorkerRunner:
         lame_duck: LameDuckController | None = None,
         span_exporter: SpanExporter | None = None,
         scheduler: CronScheduler | None = None,
+        container: Container | None = None,
+        heartbeat_interval_seconds: float = 10.0,
     ) -> None:
         self._lanes: dict[str, LaneConfig] = {lane.queue_name: lane for lane in lanes}
         self._semaphores: dict[str, asyncio.Semaphore] = {
@@ -101,6 +106,8 @@ class WorkerRunner:
         self._lame_duck = lame_duck or LameDuckController()
         self._span_exporter = span_exporter
         self._scheduler = scheduler
+        self._container = container
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._metrics: dict[str, LaneMetrics] = {
             lane.queue_name: LaneMetrics(queue_name=lane.queue_name) for lane in lanes
         }
@@ -119,6 +126,21 @@ class WorkerRunner:
     def queue_service(self) -> QueueService | None:
         """Return the bound QueueService if configured."""
         return self._queue_service
+
+    @property
+    def scheduler(self) -> CronScheduler | None:
+        """Return the bound CronScheduler if configured."""
+        return self._scheduler
+
+    @property
+    def container(self) -> Container | None:
+        """Return the bound Container if configured."""
+        return self._container
+
+    @property
+    def heartbeat_interval_seconds(self) -> float:
+        """Return the interval in seconds between visibility lease heartbeats."""
+        return self._heartbeat_interval_seconds
 
     @property
     def is_stopping(self) -> bool:
@@ -168,6 +190,16 @@ class WorkerRunner:
             return 0
 
         env = envelopes[0]
+        semaphore = self._semaphores.get(env.lane)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(10)
+            self._semaphores[env.lane] = semaphore
+
+        async with semaphore:
+            return await self._process_envelope_guarded(env)
+
+    async def _process_envelope_guarded(self, env: TaskEnvelope) -> int:
+        """Execute single task envelope with lease heartbeats, scoped DI, and OpenTelemetry spans."""
         start_nano = time.time_ns()
         parent_ctx = TraceContext.parse(env.traceparent) if env.traceparent else None
         active_trace = parent_ctx.new_child() if parent_ctx else TraceContext.generate()
@@ -175,8 +207,33 @@ class WorkerRunner:
 
         status = "ok"
         err_str: str | None = None
+        assert self._queue_service is not None
+        backend = self._queue_service.backend
+        store = getattr(backend, "store", None) or getattr(backend, "_store", None)
+        heartbeat_task: asyncio.Task[None] | None = None
+        stop_heartbeat = asyncio.Event()
+
+        if store is not None and hasattr(store, "heartbeat") and callable(store.heartbeat):
+
+            async def _heartbeat_loop() -> None:
+                while not stop_heartbeat.is_set():
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=self._heartbeat_interval_seconds)
+                    if stop_heartbeat.is_set():
+                        break
+                    with contextlib.suppress(Exception):
+                        res = store.heartbeat(
+                            [env.task_id],
+                            worker_id="worker",
+                            lease_seconds=self._heartbeat_interval_seconds * 3,
+                        )
+                        if inspect.isawaitable(res):
+                            await res
+
+            heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
         try:
-            await self._queue_service.process_envelope(env)
+            await self._queue_service.process_envelope(env, container=self._container)
             m = self._metrics.get(env.lane)
             if m:
                 self._metrics[env.lane] = LaneMetrics(
@@ -198,8 +255,19 @@ class WorkerRunner:
                 )
             raise
         finally:
+            stop_heartbeat.set()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+            if store is not None and hasattr(store, "reap_stale") and callable(store.reap_stale):
+                with contextlib.suppress(Exception):
+                    res = store.reap_stale()
+                    if inspect.isawaitable(res):
+                        await res
             end_nano = time.time_ns()
-            TraceContext.set_current(token.old_value if hasattr(token, "old_value") else None)
+            old_ctx = getattr(token, "old_value", None)
+            TraceContext.set_current(old_ctx if isinstance(old_ctx, TraceContext) else None)
             if self._span_exporter is not None:
                 backend_scheme = self._queue_service.config.backend_url.split("://")[0]
                 attrs: dict[str, Any] = {
@@ -244,6 +312,9 @@ class WorkerRunner:
                     )
 
         while not self._stopping:
+            if self._scheduler is not None:
+                with contextlib.suppress(Exception):
+                    await self._scheduler.tick()
             processed = await self.process_once()
             if processed == 0:
                 await asyncio.sleep(poll_interval_s)

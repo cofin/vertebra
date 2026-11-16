@@ -18,14 +18,15 @@ __all__ = (
     "AsyncNotificationSource",
     "AsyncPipeline",
     "AsyncPipelineCapable",
-    "ClaimedJob",
+    "AsyncQueueStore",
     "EmbeddingPushdown",
     "NotificationEvent",
-    "QueueStore",
+    "QueueEntry",
     "SyncChangeSource",
     "SyncNotificationSource",
     "SyncPipeline",
     "SyncPipelineCapable",
+    "SyncQueueStore",
 )
 
 
@@ -45,32 +46,18 @@ class NotificationEvent(FrozenBaseStruct, frozen=True, gc=False):
     """Engine-specific notification metadata mapping."""
 
 
-class ClaimedJob(FrozenBaseStruct, frozen=True, gc=False):
-    """Durable background job record leased from a ``QueueStore``."""
+class QueueEntry(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Durable background job record leased from or enqueued to a queue store."""
 
     job_id: str
-    """Unique job identifier."""
-
     queue: str
-    """Logical queue name from which the job was claimed."""
-
     task_name: str
-    """Registered task handler name."""
-
     payload: bytes
-    """Serialized task invocation payload bytes."""
-
-    attempt: int
-    """One-based delivery attempt counter used to fence completion and failure updates."""
-
-    max_attempts: int
-    """Maximum delivery attempts permitted before dead-letter transition."""
-
-    lease_until_ms: int
-    """Unix epoch timestamp in milliseconds when the active visibility lease expires."""
-
+    attempt: int = 1
+    max_attempts: int = 3
+    lease_until_ms: int = 0
+    scheduled_at_ms: int | None = None
     headers: dict[str, str] = msgspec.field(default_factory=dict)
-    """Optional string metadata headers propagated alongside the job."""
 
 
 @runtime_checkable
@@ -202,63 +189,208 @@ class AsyncChangeSource(Protocol):
 
 
 @runtime_checkable
-class QueueStore(Protocol):
-    """Capability protocol for durable database-backed background job queues."""
+class SyncQueueStore(Protocol):
+    """Capability protocol for synchronous database-backed background job queues."""
+
+    def ensure_schema(self) -> None:
+        """Idempotently create or migrate backing queue tables and indexes."""
+        ...
+
+    def enqueue(self, entry: QueueEntry) -> str:
+        """Enqueue a single job entry and return its assigned job_id."""
+        ...
+
+    def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        """Bulk-enqueue job entries and return their assigned job_id values."""
+        ...
+
+    def claim(
+        self,
+        queues: Sequence[str],
+        *,
+        limit: int = 1,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
+        """Atomically claim up to limit ready jobs under a visibility lease."""
+        ...
+
+    def ack(self, job_id: str, *, attempt: int) -> bool:
+        """Mark a fenced (job_id, attempt) claim as completed."""
+        ...
+
+    def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        """Record a failed (job_id, attempt) execution and schedule retry or dead-lettering."""
+        ...
+
+    def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        """Extend the visibility lease for active (job_ids, worker_id) claims."""
+        ...
+
+    def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        """Reap abandoned in-flight claims back into ready status."""
+        ...
+
+    def promote_scheduled(self, *, limit: int = 100) -> int:
+        """Promote due scheduled jobs into ready status."""
+        ...
+
+    def cancel(self, job_id: str) -> bool:
+        """Cancel an enqueued or scheduled job."""
+        ...
+
+    def get_entry(self, job_id: str) -> QueueEntry | None:
+        """Retrieve a specific queue entry by job_id."""
+        ...
+
+    def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        """List queue entries matching optional status up to limit."""
+        ...
+
+    def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        """Return the delay in seconds until the next scheduled job is due, or None."""
+        ...
+
+    def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        """Reserve an idempotency key for ttl_seconds."""
+        ...
+
+    def release_unique_key(self, key: str) -> bool:
+        """Release an idempotency key reservation."""
+        ...
+
+    def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        """Attempt to acquire a distributed leader lease for a cron or coordination slot."""
+        ...
+
+    def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        """Release a held distributed leader lease."""
+        ...
+
+    def close(self) -> None:
+        """Close backing store connections and release resources."""
+        ...
+
+
+@runtime_checkable
+class AsyncQueueStore(Protocol):
+    """Capability protocol for asynchronous database-backed background job queues."""
 
     async def ensure_schema(self) -> None:
         """Idempotently create or migrate backing queue tables and indexes."""
         ...
 
-    async def enqueue(
-        self,
-        queue: str,
-        task_name: str,
-        payload: bytes,
-        *,
-        job_id: str | None = None,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-        headers: Mapping[str, str] | None = None,
-    ) -> str:
-        """Enqueue a single job and return its assigned ``job_id``."""
+    async def enqueue(self, entry: QueueEntry) -> str:
+        """Enqueue a single job entry and return its assigned job_id."""
         ...
 
-    async def enqueue_many(
-        self,
-        queue: str,
-        items: Sequence[tuple[str, bytes]],
-        *,
-        scheduled_at_ms: int | None = None,
-        max_attempts: int = 3,
-    ) -> list[str]:
-        """Bulk-enqueue ``(task_name, payload)`` pairs and return their assigned ``job_id`` values."""
+    async def enqueue_many(self, entries: Sequence[QueueEntry]) -> list[str]:
+        """Bulk-enqueue job entries and return their assigned job_id values."""
         ...
 
     async def claim(
         self,
-        queue: str,
+        queues: Sequence[str],
         *,
         limit: int = 1,
-        lease_ms: int = 30_000,
-        worker_id: str = "",
-    ) -> list[ClaimedJob]:
-        """Atomically claim up to ``limit`` ready jobs under a visibility lease."""
+        worker_id: str,
+        lease_seconds: float = 30.0,
+    ) -> list[QueueEntry]:
+        """Atomically claim up to limit ready jobs under a visibility lease."""
         ...
 
-    async def heartbeat(self, job_id: str, attempt: int, *, extend_ms: int = 30_000) -> bool:
-        """Extend the visibility lease for an active ``(job_id, attempt)`` claim."""
+    async def ack(self, job_id: str, *, attempt: int) -> bool:
+        """Mark a fenced (job_id, attempt) claim as completed."""
         ...
 
-    async def complete(self, job_id: str, attempt: int) -> bool:
-        """Mark a fenced ``(job_id, attempt)`` claim as completed."""
+    async def nack(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        error: str,
+        retry_delay_s: float | None = None,
+    ) -> bool:
+        """Record a failed (job_id, attempt) execution and schedule retry or dead-lettering."""
         ...
 
-    async def fail(self, job_id: str, attempt: int, *, error: str, retry_delay_ms: int | None = None) -> None:
-        """Record a failed ``(job_id, attempt)`` execution and schedule retry or dead-lettering."""
+    async def heartbeat(
+        self,
+        job_ids: Sequence[str],
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> int:
+        """Extend the visibility lease for active (job_ids, worker_id) claims."""
         ...
 
-    async def promote_scheduled(self, queue: str | None = None, *, now_ms: int | None = None, limit: int = 100) -> int:
-        """Promote due scheduled jobs into ready state and return the promoted count."""
+    async def reap_stale(self, *, lease_seconds: float = 300.0) -> int:
+        """Reap abandoned in-flight claims back into ready status."""
+        ...
+
+    async def promote_scheduled(self, *, limit: int = 100) -> int:
+        """Promote due scheduled jobs into ready status."""
+        ...
+
+    async def cancel(self, job_id: str) -> bool:
+        """Cancel an enqueued or scheduled job."""
+        ...
+
+    async def get_entry(self, job_id: str) -> QueueEntry | None:
+        """Retrieve a specific queue entry by job_id."""
+        ...
+
+    async def list_entries(
+        self,
+        queue: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[QueueEntry]:
+        """List queue entries matching optional status up to limit."""
+        ...
+
+    async def next_due_delay(self, queues: Sequence[str]) -> float | None:
+        """Return the delay in seconds until the next scheduled job is due, or None."""
+        ...
+
+    async def reserve_unique_key(self, key: str, *, ttl_seconds: float) -> bool:
+        """Reserve an idempotency key for ttl_seconds."""
+        ...
+
+    async def release_unique_key(self, key: str) -> bool:
+        """Release an idempotency key reservation."""
+        ...
+
+    async def acquire_lease(self, lease_key: str, *, owner_id: str, ttl_seconds: float) -> bool:
+        """Attempt to acquire a distributed leader lease for a cron or coordination slot."""
+        ...
+
+    async def release_lease(self, lease_key: str, *, owner_id: str) -> bool:
+        """Release a held distributed leader lease."""
+        ...
+
+    async def aclose(self) -> None:
+        """Close backing store connections and release resources."""
         ...
 
 

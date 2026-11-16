@@ -111,7 +111,7 @@ sqlalchemy-gcp = [
     "sqlalchemy-spanner",
 ]
 queues = [
-    "litestar-queues>=0.12.0",
+    "litestar-queues>=0.14.0",
 ]
 security = [
     "litestar-security>=0.6.0",
@@ -224,7 +224,7 @@ test = [
     "flask>=3.0.0",
     "django>=6.0",
     "dogpile.cache>=1.3.3",
-    "litestar-queues>=0.12.0",
+    "litestar-queues>=0.14.0",
     "litestar-security>=0.6.0",
     "litestar-autowire>=0.2.0",
     "litestar-email>=0.4.0",

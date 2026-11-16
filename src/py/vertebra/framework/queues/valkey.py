@@ -6,16 +6,18 @@ import contextlib
 import time
 import urllib.parse
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import msgspec
 
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
+    QueueBackendSettings,
     QueueConfig,
     TaskEnvelope,
     TaskLane,
+    TaskResultRecord,
 )
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module
@@ -24,9 +26,14 @@ from vertebra.utils.serializers import decode_json, encode_json_bytes
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from vertebra._valkey import AsyncValkeyClient
+    from vertebra._valkey import AsyncValkeyClient, SyncValkeyClient
+    from vertebra.db.adapters.valkey.notify import (
+        AsyncValkeyNotificationSource,
+        SyncValkeyNotificationSource,
+    )
 
 __all__ = (
+    "SyncValkeyStreamClient",
     "ValkeyQueueBackend",
     "ValkeyStreamClient",
 )
@@ -185,6 +192,48 @@ class ValkeyStreamClient(Protocol):
         ...
 
 
+@runtime_checkable
+class SyncValkeyStreamClient(Protocol):
+    """Protocol covering the synchronous subset of Valkey commands required by ValkeyQueueBackend."""
+
+    def xadd(
+        self,
+        stream: str,
+        fields: Mapping[str, Any],
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        """Append entry to stream."""
+        ...
+
+    def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
+        """Add members to sorted set."""
+        ...
+
+    def set(
+        self,
+        key: str,
+        value: str,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> Any:
+        """Set key with optional NX and PX options."""
+        ...
+
+    def get(self, key: str) -> str | None:
+        """Get string value by key."""
+        ...
+
+    def publish(self, channel: str, message: Any) -> int:
+        """Publish message to channel."""
+        ...
+
+    def close(self) -> None:
+        """Close client connection."""
+        ...
+
+
 class _ValkeyStreamAdapter:
     """Adapter bridging AsyncValkeyClient to the ValkeyStreamClient protocol."""
 
@@ -318,38 +367,186 @@ class _ValkeyStreamAdapter:
 
     async def aclose(self) -> None:
         """Close client connection."""
+        res = self._client.aclose()
+        if hasattr(res, "__await__"):
+            await res
+
+
+class _SyncValkeyStreamAdapter:
+    """Adapter bridging SyncValkeyClient to the SyncValkeyStreamClient protocol."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: SyncValkeyClient) -> None:
+        """Initialize adapter wrapping a native SyncValkeyClient."""
+        self._client = client
+
+    def xadd(
+        self,
+        stream: str,
+        fields: Mapping[str, Any],
+        id: str = "*",
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        """Append entry to stream."""
+        field_seq: list[tuple[bytes | str, bytes | str]] = [
+            (
+                k.decode("utf-8") if isinstance(k, bytes) else str(k),
+                v if isinstance(v, (str, bytes)) else str(v),
+            )
+            for k, v in fields.items()
+        ]
+        res = self._client.xadd(stream, field_seq, id=id, maxlen=maxlen, approximate=approximate)
+        return res.decode("utf-8") if isinstance(res, bytes) else str(res)
+
+    def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
+        """Add members to sorted set."""
+        member_seq: list[tuple[bytes | str, float]] = [
+            (k.decode("utf-8") if isinstance(k, bytes) else str(k), float(v)) for k, v in mapping.items()
+        ]
+        return int(self._client.zadd(key, member_seq))
+
+    def set(
+        self,
+        key: str,
+        value: str,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> Any:
+        """Set key with optional NX and PX options."""
+        return self._client.set(key, value, nx=nx, px=px)
+
+    def get(self, key: str) -> str | None:
+        """Get string value by key."""
+        raw = self._client.get(key)
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+    def publish(self, channel: str, message: Any) -> int:
+        """Publish message to channel."""
+        return int(self._client.publish(channel, message))
+
+    def close(self) -> None:
+        """Close client connection."""
         self._client.close()
 
 
 class ValkeyQueueBackend:
     """Distributed task queue backend powered by Valkey Streams and Sorted Sets."""
 
-    __slots__ = ("_client", "_config", "_prefix")
+    __slots__ = (
+        "_client",
+        "_config",
+        "_notification_source",
+        "_prefix",
+        "_sync_client",
+        "_sync_notification_source",
+    )
 
     def __init__(
         self,
-        config: QueueConfig | None = None,
+        config: QueueConfig | QueueBackendSettings | None = None,
         *,
         client: ValkeyStreamClient | None = None,
+        sync_client: SyncValkeyStreamClient | None = None,
+        notification_source: AsyncValkeyNotificationSource | None = None,
+        sync_notification_source: SyncValkeyNotificationSource | None = None,
     ) -> None:
-        """Bind the queue backend to a Valkey Streams client.
+        """Bind the queue backend to Valkey Streams clients and notification sources.
 
         Args:
-            config: Queue configuration.
+            config: Queue configuration or settings.
             client: Pre-built ValkeyStreamClient bound as given.
+            sync_client: Pre-built SyncValkeyStreamClient bound as given.
+            notification_source: Optional AsyncValkeyNotificationSource for wakeup broadcast.
+            sync_notification_source: Optional SyncValkeyNotificationSource for sync wakeup broadcast.
 
         Raises:
             MissingDependencyError: When client is None and vertebra-core[valkey] is not installed.
             ImproperConfigurationError: When client is None and config.backend_url is invalid.
         """
+        if client is None:
+            ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
         self._config = config or QueueConfig(stream_prefix="vtb:valkey:queue")
-        self._prefix = self._config.stream_prefix
+        self._prefix = getattr(self._config, "stream_prefix", "vtb:valkey:queue")
+        self._notification_source = notification_source
+        self._sync_notification_source = sync_notification_source
         self._client: ValkeyStreamClient = client if client is not None else self._build_client(self._config)
+        self._sync_client: SyncValkeyStreamClient | None = sync_client
 
     @property
     def client(self) -> ValkeyStreamClient:
         """Return the active ValkeyStreamClient."""
         return self._client
+
+    @property
+    def sync_client(self) -> SyncValkeyStreamClient:
+        """Return the active SyncValkeyStreamClient."""
+        return self._get_sync_client()
+
+    @property
+    def notification_source(self) -> AsyncValkeyNotificationSource | None:
+        """Return the active AsyncValkeyNotificationSource."""
+        return self._notification_source
+
+    @property
+    def sync_notification_source(self) -> SyncValkeyNotificationSource | None:
+        """Return the active SyncValkeyNotificationSource."""
+        return self._sync_notification_source
+
+    def _get_sync_client(self) -> SyncValkeyStreamClient:
+        """Return or lazily construct a synchronous Valkey stream client."""
+        if self._sync_client is not None:
+            return self._sync_client
+        sync_cli = getattr(self._client, "sync_client", None)
+        if sync_cli is not None:
+            return cast("SyncValkeyStreamClient", sync_cli)
+        if isinstance(self._client, SyncValkeyStreamClient):
+            return self._client
+        self._sync_client = self._build_sync_client(self._config)
+        return self._sync_client
+
+    def enqueue_sync(self, envelope: TaskEnvelope) -> TaskEnvelope:
+        """Synchronously enqueue task into delayed ZSET or target lane stream."""
+        now = time.time()
+        encoded_bytes = encode_json_bytes(envelope)
+        encoded_str = encoded_bytes.decode("utf-8")
+        sync_cli = self._get_sync_client()
+
+        if envelope.scheduled_at is not None and envelope.scheduled_at > now:
+            scheduled_key = f"{self._prefix}:scheduled"
+            sync_cli.zadd(scheduled_key, {encoded_str: envelope.scheduled_at})
+            return envelope
+
+        stream_key = f"{self._prefix}:lane:{envelope.lane}"
+        entry_id = sync_cli.xadd(
+            stream_key,
+            {
+                "payload": encoded_str,
+                "lane": envelope.lane,
+                "task_name": envelope.task_name,
+            },
+        )
+        if self._sync_notification_source is not None:
+            with contextlib.suppress(Exception):
+                self._sync_notification_source.publish("vertebra_queue_wakeup", envelope.lane)
+
+        return TaskEnvelope(
+            task_id=envelope.task_id,
+            task_name=envelope.task_name,
+            lane=envelope.lane,
+            args=envelope.args,
+            kwargs=envelope.kwargs,
+            attempt=envelope.attempt,
+            max_retries=envelope.max_retries,
+            enqueued_at=envelope.enqueued_at,
+            scheduled_at=envelope.scheduled_at,
+            idempotency_key=envelope.idempotency_key,
+            traceparent=envelope.traceparent,
+            receipt_handle=entry_id,
+        )
 
     async def enqueue(self, envelope: TaskEnvelope) -> TaskEnvelope:
         """Enqueue task into delayed ZSET or target lane stream."""
@@ -371,6 +568,10 @@ class ValkeyQueueBackend:
                 "task_name": envelope.task_name,
             },
         )
+        if self._notification_source is not None:
+            with contextlib.suppress(Exception):
+                await self._notification_source.publish("vertebra_queue_wakeup", envelope.lane)
+
         return TaskEnvelope(
             task_id=envelope.task_id,
             task_name=envelope.task_name,
@@ -386,6 +587,38 @@ class ValkeyQueueBackend:
             receipt_handle=entry_id,
         )
 
+    def store_result(self, record: TaskResultRecord, *, ttl_seconds: float | None = 86400.0) -> None:
+        """Synchronously persist task execution result."""
+        key = f"{self._prefix}:result:{record.task_id}"
+        payload = encode_json_bytes(record).decode("utf-8")
+        px = int(ttl_seconds * 1000) if ttl_seconds is not None else None
+        self._get_sync_client().set(key, payload, px=px)
+
+    async def astore_result(self, record: TaskResultRecord, *, ttl_seconds: float | None = 86400.0) -> None:
+        """Asynchronously persist task execution result."""
+        key = f"{self._prefix}:result:{record.task_id}"
+        payload = encode_json_bytes(record).decode("utf-8")
+        px = int(ttl_seconds * 1000) if ttl_seconds is not None else None
+        await self._client.set(key, payload, px=px)
+
+    def get_result(self, task_id: str) -> TaskResultRecord | None:
+        """Synchronously retrieve task execution result."""
+        key = f"{self._prefix}:result:{task_id}"
+        raw = self._get_sync_client().get(key)
+        if raw is None:
+            return None
+        raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
+        return msgspec.convert(decode_json(raw_bytes), type=TaskResultRecord)
+
+    async def aget_result(self, task_id: str) -> TaskResultRecord | None:
+        """Asynchronously retrieve task execution result."""
+        key = f"{self._prefix}:result:{task_id}"
+        raw = await self._client.get(key)
+        if raw is None:
+            return None
+        raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
+        return msgspec.convert(decode_json(raw_bytes), type=TaskResultRecord)
+
     async def dequeue(
         self,
         lanes: Sequence[TaskLane],
@@ -396,6 +629,7 @@ class ValkeyQueueBackend:
         """Claim tasks across lanes using XAUTOCLAIM visibility recovery then XREADGROUP."""
         await self.promote_scheduled()
         min_idle_ms = int(self._config.visibility_timeout_seconds * 1000)
+        consumer_group = getattr(self._config, "consumer_group", "vertebra-workers")
         claimed: list[TaskEnvelope] = []
 
         for lane in lanes:
@@ -405,7 +639,7 @@ class ValkeyQueueBackend:
             with contextlib.suppress(Exception):
                 await self._client.xgroup_create(
                     stream_key,
-                    self._config.consumer_group,
+                    consumer_group,
                     id="0",
                     mkstream=True,
                 )
@@ -413,7 +647,7 @@ class ValkeyQueueBackend:
             remaining = batch_size - len(claimed)
             _, recovered_entries, _ = await self._client.xautoclaim(
                 stream_key,
-                self._config.consumer_group,
+                consumer_group,
                 self._config.consumer_name,
                 min_idle_ms,
                 count=remaining,
@@ -441,7 +675,7 @@ class ValkeyQueueBackend:
             block_ms = int(timeout_seconds * 1000) if timeout_seconds > 0 else None
             remaining = batch_size - len(claimed)
             read_results = await self._client.xreadgroup(
-                self._config.consumer_group,
+                consumer_group,
                 self._config.consumer_name,
                 read_streams,
                 count=remaining,
@@ -461,10 +695,11 @@ class ValkeyQueueBackend:
         """Acknowledge completed stream entry via XACK and XDEL."""
         if not envelope.receipt_handle:
             return
+        consumer_group = getattr(self._config, "consumer_group", "vertebra-workers")
         stream_key = f"{self._prefix}:lane:{envelope.lane}"
         await self._client.xack(
             stream_key,
-            self._config.consumer_group,
+            consumer_group,
             envelope.receipt_handle,
         )
         await self._client.xdel(stream_key, envelope.receipt_handle)
@@ -478,11 +713,12 @@ class ValkeyQueueBackend:
         send_to_dlq: bool = False,
     ) -> DeadLetterEntry | None:
         """Nack task envelope, routing to DLQ stream or re-scheduling in ZSET."""
+        consumer_group = getattr(self._config, "consumer_group", "vertebra-workers")
         if envelope.receipt_handle:
             stream_key = f"{self._prefix}:lane:{envelope.lane}"
             await self._client.xack(
                 stream_key,
-                self._config.consumer_group,
+                consumer_group,
                 envelope.receipt_handle,
             )
             await self._client.xdel(stream_key, envelope.receipt_handle)
@@ -501,10 +737,11 @@ class ValkeyQueueBackend:
             )
             dlq_payload = encode_json_bytes(dlq_entry).decode("utf-8")
             dlq_key = f"{self._prefix}:dlq"
+            dlq_max_len = getattr(self._config, "dlq_max_len", 10_000)
             await self._client.xadd(
                 dlq_key,
                 {"payload": dlq_payload, "dlq_id": dlq_id},
-                maxlen=self._config.dlq_max_len,
+                maxlen=dlq_max_len,
             )
             return dlq_entry
 
@@ -632,6 +869,8 @@ class ValkeyQueueBackend:
     async def close(self) -> None:
         """Close client connection."""
         await self._client.aclose()
+        if self._sync_client is not None:
+            self._sync_client.close()
 
     def _decode_envelope(self, fields: Any, receipt_handle: str) -> TaskEnvelope:
         """Decode TaskEnvelope from stream entry fields."""
@@ -648,9 +887,10 @@ class ValkeyQueueBackend:
         return env
 
     @staticmethod
-    def _build_client(config: QueueConfig) -> ValkeyStreamClient:
+    def _build_client(config: QueueConfig | QueueBackendSettings) -> ValkeyStreamClient:
         """Build an AsyncValkeyClient wrapped in _ValkeyStreamAdapter from config.backend_url."""
         url = config.backend_url
+        parsed = urllib.parse.urlparse(url)
         if url.startswith("memory://"):
             msg = "ValkeyQueueBackend does not support memory:// URLs"
             raise ImproperConfigurationError(msg)
@@ -660,7 +900,6 @@ class ValkeyQueueBackend:
         if not (url.startswith("valkey://") or url.startswith("valkeys://") or url.startswith("unix://")):
             msg = f"Unsupported Valkey URL scheme in {url!r}; expected valkey://, valkeys://, or unix://"
             raise ImproperConfigurationError(msg)
-        parsed = urllib.parse.urlparse(url)
         if url.startswith("unix://"):
             path = url.removeprefix("unix://")
             if not path or not path.strip("/"):
@@ -671,5 +910,32 @@ class ValkeyQueueBackend:
             raise ImproperConfigurationError(msg)
 
         mod = ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
-        client = mod.AsyncValkeyClient(url=url)
+        client = mod.AsyncValkeyClient(url)
         return _ValkeyStreamAdapter(client)
+
+    @staticmethod
+    def _build_sync_client(config: QueueConfig | QueueBackendSettings) -> SyncValkeyStreamClient:
+        """Build a SyncValkeyClient wrapped in _SyncValkeyStreamAdapter from config.backend_url."""
+        url = config.backend_url
+        parsed = urllib.parse.urlparse(url)
+        if url.startswith("memory://"):
+            msg = "ValkeyQueueBackend does not support memory:// URLs"
+            raise ImproperConfigurationError(msg)
+        if url.startswith("redis://") or url.startswith("rediss://"):
+            msg = "redis:// URLs are not supported by ValkeyQueueBackend; use RedisQueueBackend instead"
+            raise ImproperConfigurationError(msg)
+        if not (url.startswith("valkey://") or url.startswith("valkeys://") or url.startswith("unix://")):
+            msg = f"Unsupported Valkey URL scheme in {url!r}; expected valkey://, valkeys://, or unix://"
+            raise ImproperConfigurationError(msg)
+        if url.startswith("unix://"):
+            path = url.removeprefix("unix://")
+            if not path or not path.strip("/"):
+                msg = f"Valkey queue backend_url {url!r} has no socket path"
+                raise ImproperConfigurationError(msg)
+        elif not parsed.hostname:
+            msg = f"Valkey queue backend_url {url!r} has no host; pass a valkey://host:port URL or client= to bind a ValkeyStreamClient"
+            raise ImproperConfigurationError(msg)
+
+        mod = ensure_module("vertebra._valkey", package="vertebra-core[valkey]", extra="valkey")
+        client = mod.SyncValkeyClient(url)
+        return _SyncValkeyStreamAdapter(client)

@@ -42,6 +42,10 @@ if TYPE_CHECKING:
         AsyncOraclePipeline,
         SyncOraclePipeline,
     )
+    from vertebra.db.adapters.oracle.queue import (
+        AsyncOracleQueueStore,
+        SyncOracleQueueStore,
+    )
     from vertebra.db.arrow import ArrowCursor
 
 __all__ = (
@@ -59,6 +63,7 @@ __all__ = (
     "AsyncOracleNotificationSource",
     "AsyncOraclePipeline",
     "AsyncOraclePool",
+    "AsyncOracleQueueStore",
     "OracleConfig",
     "OracleConnectDescriptor",
     "OracleCore",
@@ -72,6 +77,7 @@ __all__ = (
     "SyncOracleNotificationSource",
     "SyncOraclePipeline",
     "SyncOraclePool",
+    "SyncOracleQueueStore",
     "parse_tnsnames_ora",
     "resolve_tns_alias",
 )
@@ -83,6 +89,7 @@ __lazy_modules__ = [
     "vertebra.db.adapters.oracle.driver",
     "vertebra.db.adapters.oracle.notify",
     "vertebra.db.adapters.oracle.pipeline",
+    "vertebra.db.adapters.oracle.queue",
     "vertebra.db.arrow",
 ]
 
@@ -101,6 +108,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AsyncOracleNotificationSource": ("vertebra.db.adapters.oracle.notify", "AsyncOracleNotificationSource"),
     "AsyncOraclePipeline": ("vertebra.db.adapters.oracle.pipeline", "AsyncOraclePipeline"),
     "AsyncOraclePool": ("vertebra.db.adapters.oracle.driver", "AsyncOraclePool"),
+    "AsyncOracleQueueStore": ("vertebra.db.adapters.oracle.queue", "AsyncOracleQueueStore"),
     "OracleConfig": ("vertebra.db.adapters.oracle.config", "OracleConfig"),
     "OracleConnectDescriptor": ("vertebra.db.adapters.oracle.config", "OracleConnectDescriptor"),
     "OracleCore": ("vertebra.db.adapters.oracle.core", "OracleCore"),
@@ -113,6 +121,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SyncOracleNotificationSource": ("vertebra.db.adapters.oracle.notify", "SyncOracleNotificationSource"),
     "SyncOraclePipeline": ("vertebra.db.adapters.oracle.pipeline", "SyncOraclePipeline"),
     "SyncOraclePool": ("vertebra.db.adapters.oracle.driver", "SyncOraclePool"),
+    "SyncOracleQueueStore": ("vertebra.db.adapters.oracle.queue", "SyncOracleQueueStore"),
     "parse_tnsnames_ora": ("vertebra.db.adapters.oracle.config", "parse_tnsnames_ora"),
     "resolve_tns_alias": ("vertebra.db.adapters.oracle.config", "resolve_tns_alias"),
 }

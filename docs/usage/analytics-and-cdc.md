@@ -80,10 +80,12 @@ notify_config = PostgresNotifyConfig(
 )
 ```
 
-`PostgresNotificationSource(driver, notify_config, change_feed=feed)` publishes
-parameterized PostgreSQL notifications using the feed's spill envelopes. Its
+`AsyncPostgresNotificationSource(driver, notify_config, change_feed=feed)` and
+`SyncPostgresNotificationSource(sync_driver, notify_config, change_feed=feed)` publish
+parameterized PostgreSQL notifications using the feed's spill envelopes. Their
 `build_emit_message_sql()` helper builds logical replication message SQL. Live
-`LISTEN` streaming requires a driver that implements `listen_notifications()`.
+`LISTEN` streaming uses `async for event in source.listen():` or synchronous
+`for event in sync_source.listen():` for CLI/worker loops.
 For durable logical replication streaming over `pgoutput`, pass a replication
 driver and `PostgresChangeConfig(slot=..., publication=...)` to
 `PostgresChangeSource`, which commits checkpoint progress before sending wire
