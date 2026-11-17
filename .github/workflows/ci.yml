@@ -118,7 +118,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: |
-          uv sync --frozen --all-extras --group test --group lint --group build --no-install-workspace
+          uv sync --frozen --all-extras --group test --group lint --group build --no-install-local
           make ts-install && make ts-build
           UV_NO_SYNC=1 make dev
       - name: Run lint
