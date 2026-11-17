@@ -8,11 +8,15 @@ version = "0.3.0"
 description = "Native Rust MySQL 8.4/9 and MariaDB client extension for Vertebra."
 requires-python = ">=3.12"
 license = { text = "MIT" }
+dependencies = ["vertebra-core==0.3.0"]
 
 [tool.maturin]
 python-source = "../../py"
 module-name = "vertebra._mysql"
 features = ["extension-module"]
+include = [
+    { path = "vertebra/_mysql.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",

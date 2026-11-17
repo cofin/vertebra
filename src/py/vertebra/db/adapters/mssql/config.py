@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar, Final, Self
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
@@ -12,6 +13,7 @@ from vertebra.db.adapters.mssql.core import (
     MSSQLCore,
 )
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
+from vertebra.db.driver._cloud_auth import AZURE_MSSQL_SCOPE, AzureEntraTokenProvider
 from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 
@@ -94,6 +96,8 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     """Cloud SQL authentication mode (`PASSWORD` or `IAM`)."""
     cloudsql_proxy_addr: str | None = None
     """Optional local address override for Cloud SQL Admin API mTLS `:3307` proxy testing."""
+    token_provider: Any = None
+    """Optional cloud database token provider (`AzureEntraTokenProvider`) for TDS `FEDAUTH` authentication."""
     pool_min_size: int = 1
     """Minimum number of pooled TDS sessions per worker."""
     pool_max_size: int = 10
@@ -127,14 +131,22 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         self._validate_pem_bytes(self.ca_pem, "ca_pem")
         self._validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
         self._validate_pem_bytes(self.client_key_pem, "client_key_pem")
+        if isinstance(self.token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "token_provider",
+                self.token_provider.with_default_scope(AZURE_MSSQL_SCOPE),
+            )
 
     def __repr__(self) -> str:
         redacted_dsn = self._redact_dsn(self.dsn)
+        provider_name = type(self.token_provider).__name__ if self.token_provider is not None else None
         return (
             f"MSSQLConfig(dsn={redacted_dsn!r}, host={self.host!r}, port={self.port!r}, "
             f"database={self.database!r}, user={self.user!r}, password='[REDACTED]', "
             f"encryption={self.encryption!r}, trust_server_certificate={self.trust_server_certificate!r}, "
-            f"read_only_intent={self.read_only_intent!r}, cloud_sql_instance={self.cloud_sql_instance!r})"
+            f"read_only_intent={self.read_only_intent!r}, cloud_sql_instance={self.cloud_sql_instance!r}, "
+            f"token_provider={provider_name!r})"
         )
 
     @staticmethod
@@ -205,7 +217,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
-        return (
+        base_key = (
             "mssql",
             self.host.lower(),
             int(self.port),
@@ -213,6 +225,43 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             self.user,
             self.cloud_sql_instance or "",
         )
+        if self.token_provider is None:
+            return base_key
+        try:
+            provider_key: Any = hash(self.token_provider)
+        except TypeError:
+            provider_key = id(self.token_provider)
+        return (*base_key, type(self.token_provider).__qualname__, provider_key)
+
+    def resolve_aad_token_sync(self, *, force_refresh: bool = False) -> str | None:
+        """Synchronously resolve an Azure Entra ID bearer token from `token_provider`."""
+        if self.token_provider is None:
+            return None
+        resolve_fn: Callable[..., Any] | None = getattr(self.token_provider, "resolve_sync", None)
+        if not callable(resolve_fn):
+            msg = "MSSQLConfig.token_provider must implement resolve_sync()"
+            raise ImproperConfigurationError(msg)
+        raw = resolve_fn(force_refresh=force_refresh)
+        return self._validate_resolved_token(raw)
+
+    async def resolve_aad_token_async(self, *, force_refresh: bool = False) -> str | None:
+        """Asynchronously resolve an Azure Entra ID bearer token from `token_provider`."""
+        if self.token_provider is None:
+            return None
+        resolve_fn: Callable[..., Awaitable[Any]] | None = getattr(self.token_provider, "resolve_async", None)
+        if not callable(resolve_fn):
+            msg = "MSSQLConfig.token_provider must implement resolve_async()"
+            raise ImproperConfigurationError(msg)
+        raw = await resolve_fn(force_refresh=force_refresh)
+        return self._validate_resolved_token(raw)
+
+    @staticmethod
+    def _validate_resolved_token(raw: Any) -> str:
+        """Validate a resolved bearer token string and reject blank or NUL-containing values."""
+        if not isinstance(raw, str) or "\x00" in raw or not raw.strip():
+            msg = "MSSQLConfig.token_provider must return a non-empty bearer token string"
+            raise ImproperConfigurationError(msg)
+        return raw.strip()
 
     def create_sync_driver(self, **kwargs: Any) -> Any:
         """Instantiate `SyncMSSQLDriver` bound to this configuration."""

@@ -24,7 +24,7 @@ from vertebra.agent.spec import TRANSFER_TOOL_NAME, Agent, AgentGroup, AgentMess
 from vertebra.agent.telemetry import AgentTelemetryRecorder
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.typing import VertebraError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 
 __all__ = [
@@ -111,10 +111,7 @@ class GoogleGenAIProvider:
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        genai_module = import_optional("google.genai")
-        if genai_module is None:
-            msg = "The 'google-genai' package is required to use GoogleGenAIProvider"
-            raise RuntimeError(msg)
+        genai_module = ensure_module("google.genai", package="google-genai", extra="google-genai")
         self._client = genai_module.Client(api_key=self.api_key)
         return self._client
 
@@ -207,6 +204,7 @@ class ConfirmationGate:
         self.max_tickets = int(max_tickets)
         self._clock = clock
         self._tickets: dict[str, ConfirmationTicket] = {}
+        self._wildcard_payload_tokens: set[str] = set()
 
     def request_confirmation(
         self,
@@ -239,14 +237,48 @@ class ConfirmationGate:
             expires_at_unix_ms=int((now_s + self.ttl_seconds) * 1000),
         )
         self._tickets[token] = ticket
+        self._wildcard_payload_tokens.discard(token)
         return ticket
 
-    def approve(self, token: str, *, owner_id: str | None = None) -> bool:
-        """Approve a pending, unexpired confirmation ticket.
+    def approve(
+        self,
+        token: str,
+        *,
+        owner_id: str | None = None,
+        target: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Approve a pending ticket or register a single-use target/payload approval ticket.
 
         Returns:
-            True when the ticket is pending, unexpired, and ``owner_id`` matches; False otherwise.
+            True when approval succeeds; False on unknown, expired, non-pending, or wrong-owner tokens.
         """
+        if target is not None:
+            now_s = float(self._clock())
+            now_ms = int(now_s * 1000)
+            if token not in self._tickets and len(self._tickets) >= self.max_tickets:
+                self._prune_inactive(now_ms)
+                if len(self._tickets) >= self.max_tickets:
+                    msg = f"ConfirmationGate capacity of {self.max_tickets} active tickets exceeded"
+                    raise ConfirmationCapacityError(msg)
+            normalized_target = "*" if target == "*" else target.upper()
+            direct_ticket = ConfirmationTicket(
+                token=token,
+                tool_name=normalized_target,
+                call_id="direct",
+                arguments=deepcopy(dict(payload)) if payload is not None else {},
+                owner_id=owner_id,
+                status="approved",
+                created_at_iso=datetime.fromtimestamp(now_s, tz=UTC).isoformat(),
+                expires_at_unix_ms=int((now_s + self.ttl_seconds) * 1000),
+            )
+            self._tickets[token] = direct_ticket
+            if target == "*" and payload is None:
+                self._wildcard_payload_tokens.add(token)
+            else:
+                self._wildcard_payload_tokens.discard(token)
+            return True
+
         ticket = self._refresh_ticket(token)
         if ticket is None or ticket.status != "pending":
             return False
@@ -273,14 +305,49 @@ class ConfirmationGate:
         )
         return True
 
-    def is_approved(self, token: str | None, *, owner_id: str | None = None) -> bool:
-        """Check whether a token is currently approved and unexpired under the specified owner."""
+    def is_approved(
+        self,
+        token: str | None,
+        *,
+        owner_id: str | None = None,
+        target: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Check whether a token is currently approved and unexpired under the specified owner, target, and payload."""
         if not token or not isinstance(token, str):
             return False
         ticket = self._refresh_ticket(token)
         if ticket is None or ticket.status != "approved":
             return False
-        return self._owner_matches(ticket, owner_id)
+        if not self._owner_matches(ticket, owner_id):
+            return False
+        if token in self._wildcard_payload_tokens:
+            return True
+        if target is not None:
+            if ticket.tool_name != "*" and ticket.tool_name.upper() != target.upper():
+                return False
+            expected_payload = dict(payload) if payload is not None else {}
+            return self.arguments_equal(ticket.arguments, expected_payload)
+        if payload is not None:
+            return self.arguments_equal(ticket.arguments, dict(payload))
+        return True
+
+    def consume(
+        self,
+        token: str | None,
+        *,
+        target: str = "*",
+        payload: Mapping[str, Any] | None = None,
+        owner_id: str | None = None,
+    ) -> bool:
+        """Atomically verify and consume a single-use approved confirmation ticket."""
+        if not self.is_approved(token, owner_id=owner_id, target=target, payload=payload):
+            return False
+        assert token is not None
+        ticket = self._tickets[token]
+        self._tickets[token] = msgspec.structs.replace(ticket, status="consumed")
+        self._wildcard_payload_tokens.discard(token)
+        return True
 
     def can_consume_call_approval(
         self,
@@ -379,6 +446,7 @@ class ConfirmationGate:
         ):
             ticket = msgspec.structs.replace(ticket, status="expired")
             self._tickets[token] = ticket
+            self._wildcard_payload_tokens.discard(token)
         return ticket
 
     def _prune_inactive(self, now_ms: int) -> None:
@@ -386,6 +454,7 @@ class ConfirmationGate:
             refreshed = self._refresh_ticket(tok, now_ms=now_ms)
             if refreshed is not None and refreshed.status in ("rejected", "consumed", "expired"):
                 del self._tickets[tok]
+                self._wildcard_payload_tokens.discard(tok)
 
 
 class RetryPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):

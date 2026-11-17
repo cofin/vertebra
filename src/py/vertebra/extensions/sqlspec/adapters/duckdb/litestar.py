@@ -1,14 +1,28 @@
 """DuckDB Litestar session store supporting both sync and async Vertebra DuckDB configs."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.extensions.litestar.store import (
+    MAX_TABLE_NAME_LENGTH,
+    VALID_TABLE_NAME_PATTERN,
+    BaseSQLSpecStore,
+    CompanionIndex,
+)
+from sqlspec.migrations.schema import SchemaTarget
 from sqlspec.utils.sync_tools import async_
+from sqlspec.utils.text import split_qualified_identifier
 
-from vertebra.extensions.sqlspec.adapters.duckdb.core import format_duckdb_identifier
+from vertebra.extensions.sqlspec.adapters.duckdb.core import format_duckdb_identifier, split_schema_and_table
+
+if TYPE_CHECKING:
+    from sqlspec.migrations.schema import DropStatement
 
 __all__ = ("DuckDBLitestarStore",)
+
+_MAX_TABLE_NAME_PARTS: Final[int] = 2
 
 
 def _timestamp_to_datetime(ts: str | datetime | None) -> datetime | None:
@@ -25,9 +39,28 @@ class DuckDBLitestarStore(BaseSQLSpecStore[Any]):
 
     __slots__ = ()
 
+    adapter_name = "vertebra_duckdb"
+    _dialect: ClassVar[str] = "duckdb"
+
     def __init__(self, config: Any) -> None:
         """Initialize the DuckDB Litestar session store for `DuckDBSyncConfig` or `DuckDBAsyncConfig`."""
         super().__init__(config)
+
+    @staticmethod
+    def _ensure_table_name(table_name: str) -> None:
+        """Validate a 1- or 2-part DuckDB session table identifier."""
+        cleaned = table_name.strip()
+        if not cleaned or cleaned != table_name:
+            msg = f"Invalid table name: {table_name!r}"
+            raise ValueError(msg)
+        parts = split_qualified_identifier(cleaned, quote_chars='"')
+        if not parts or len(parts) > _MAX_TABLE_NAME_PARTS:
+            msg = f"Invalid table name: {table_name!r}"
+            raise ValueError(msg)
+        for segment in parts:
+            if len(segment) > MAX_TABLE_NAME_LENGTH or not VALID_TABLE_NAME_PATTERN.fullmatch(segment):
+                msg = f"Invalid table name: {table_name!r}"
+                raise ValueError(msg)
 
     def _table_ref(self) -> str:
         return format_duckdb_identifier(self._table_name)
@@ -49,6 +82,34 @@ class DuckDBLitestarStore(BaseSQLSpecStore[Any]):
     def _drop_table_sql(self) -> list[str]:
         idx_name = format_duckdb_identifier(f"idx_{self._table_name.replace('.', '_')}_expires_at")
         return [f"DROP INDEX IF EXISTS {idx_name}", f"DROP TABLE IF EXISTS {self._table_ref()}"]
+
+    def _schema_target(self) -> SchemaTarget:
+        """Build the DuckDB Litestar session `SchemaTarget` with optional schema scope."""
+        if "." in self._table_name:
+            schema_name, bare_table = split_schema_and_table(self._table_name)
+            return SchemaTarget.from_ddl(bare_table, self._table_ddl(), schema=schema_name, dialect="duckdb")
+        bare_table = self._table_name.strip('"')
+        return SchemaTarget.from_ddl(bare_table, self._table_ddl(), dialect="duckdb")
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the DuckDB session table."""
+        return super().get_schema_targets()
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return DuckDB companion expiration index definitions parsed from store DDL."""
+        return super().get_companion_indexes()
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create any missing DuckDB companion expiration indexes synchronously."""
+        super().reconcile_companion_objects_sync(driver)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create any missing DuckDB companion expiration indexes asynchronously."""
+        await super().reconcile_companion_objects_async(driver)
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return ordered downgrade drop statements for the DuckDB session index and table."""
+        return super().downgrade_drops()
 
     def _datetime_to_param(self, dt: datetime | None) -> str | None:
         if dt is None:

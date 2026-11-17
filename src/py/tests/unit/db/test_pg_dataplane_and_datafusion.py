@@ -8,10 +8,15 @@ import re
 import socket
 import sys
 import threading
-from typing import Any
+import types
+from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import MagicMock
 
 import pyarrow as pa
+import pyarrow.csv as pa_csv
+import pyarrow.json as pa_json
+import pyarrow.parquet as pq
 import pytest
 
 from tests.unit.db.postgres_ports import FakeDirectClientFactory, FakePostgresCluster, FakeSyncPostgresPool
@@ -26,6 +31,7 @@ from vertebra.db import arrow as arrow_module
 from vertebra.db.adapters.datafusion import (
     ARROW_STREAM_MEDIA_TYPE,
     DataFusionConfig,
+    DataFusionCore,
     DataFusionEngine,
     TableRegistration,
 )
@@ -39,7 +45,9 @@ from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryRes
 from vertebra.db.driver import AsyncNotificationSource, DataError, NotSupportedError
 from vertebra.extensions.sqlspec.adapters.postgres import PostgresSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
+from vertebra.storage import LocalConfig, MemoryConfig, SyncObjectStore
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
+from vertebra.utils import module_loader as module_loader_module
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json
 
@@ -104,22 +112,33 @@ def test_cdc_listen_notify_spill_and_logical_emit() -> None:
     assert len(bridge.replay_since(1)) == 1
 
 
-def test_embedded_datafusion_and_memfd_scm_rights(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedded_datafusion_and_memfd_scm_rights(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Verify DataFusionEngine fail-closed execution, ctx injection, and anonymous memfd + SCM_RIGHTS."""
+    events_path = tmp_path / "events_archive.parquet"
+    pq.write_table(pa.Table.from_pylist([{"event_id": 1, "kind": "click"}]), events_path)
+
     ctx = None if datafusion is not None else _DeterministicSessionContext()
     engine = DataFusionEngine(DataFusionConfig(mode="in_process"), ctx=ctx)
     assert engine.supports_cloud_run_ingress is True
-    engine.register_table(TableRegistration(name="events_archive", uri="gs://bucket/events.parquet"))
+    engine.register_table(TableRegistration(name="events_archive", uri=str(events_path), format="parquet"))
     plan = engine.explain_plan("SELECT * FROM events_archive")
     assert plan["media_type"] == ARROW_STREAM_MEDIA_TYPE
     assert plan["referenced_tables"] == ["events_archive"]
+    assert "events_archive" in plan["logical_plan"]
+    assert plan["physical_plan"]
     assert engine.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
+    assert engine.execute_dicts("SELECT * FROM events_archive") == [{"event_id": 1, "kind": "click"}]
 
     cursor = ArrowCursor.from_rows([{"id": 10, "label": "ok"}])
     engine.register_arrow_table("cursor_tbl", cursor)
     assert engine.execute_dicts("SELECT * FROM cursor_tbl") == [{"id": 10, "label": "ok"}]
     with pytest.raises(Exception, match="missing_datafusion_table"):
         engine.execute_dicts("SELECT * FROM missing_datafusion_table")
+    with pytest.raises(Exception, match="missing_datafusion_table"):
+        engine.explain_plan("SELECT * FROM missing_datafusion_table")
 
     monkeypatch.setitem(sys.modules, "datafusion", None)
     reset_dependency_cache("datafusion")
@@ -417,17 +436,117 @@ def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: 
         ArrowCursor.from_rows([{"id": 1}], threshold_rows=1)
 
 
+@pytest.mark.parametrize(
+    ("operation", "missing"),
+    [
+        ("to_arrow_table", "pyarrow"),
+        ("to_polars", "polars"),
+        ("to_polars", "pyarrow"),
+        ("write_arrow_shm", "pyarrow"),
+        ("read_arrow_shm", "pyarrow"),
+    ],
+)
+def test_arrow_helpers_require_optional_dependencies(
+    operation: str,
+    missing: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrow conversion and SHM helpers fail loudly with MissingDependencyError when optional modules are absent."""
+    table = pa.Table.from_pydict({"id": [1], "name": ["alpha"]})
+    ipc_bytes = arrow_module.write_arrow_shm(table)
+    cursor = arrow_module.read_arrow_shm(ipc_bytes)
+
+    original = module_loader_module.import_optional
+    monkeypatch.setattr(
+        module_loader_module,
+        "import_optional",
+        lambda name: None if name == missing else original(name),
+    )
+
+    with pytest.raises(MissingDependencyError, match=missing):
+        if operation == "to_arrow_table":
+            cursor.to_arrow_table()
+        elif operation == "to_polars":
+            cursor.to_polars()
+        elif operation == "write_arrow_shm":
+            arrow_module.write_arrow_shm(table)
+        else:
+            arrow_module.read_arrow_shm(ipc_bytes)
+
+
+@pytest.mark.parametrize(
+    ("operation", "payload"),
+    [
+        ("to_arrow_table", b"not-arrow"),
+        ("to_arrow_table", b'[{"a":1}]'),
+        ("to_polars", b"not-arrow"),
+        ("to_polars", b'[{"a":1}]'),
+        ("write_arrow_shm", b"not-arrow"),
+        ("write_arrow_shm", b'[{"a":1}]'),
+        ("write_arrow_shm", b""),
+        ("write_arrow_shm", {"a": 1}),
+        ("write_arrow_shm", "not-arrow"),
+        ("read_arrow_shm", b"not-arrow"),
+        ("read_arrow_shm", b'[{"a":1}]'),
+        ("read_arrow_shm", b""),
+        ("read_arrow_shm", b"VTBARROW" + b"\x00" * 8),
+    ],
+)
+def test_arrow_helpers_reject_non_ipc_payloads(operation: str, payload: Any) -> None:
+    """Arrow conversion and SHM helpers raise DataError on non-IPC payloads instead of falling back to JSON or self."""
+    with pytest.raises(DataError):
+        if operation == "to_arrow_table":
+            ArrowCursor(payload).to_arrow_table()
+        elif operation == "to_polars":
+            ArrowCursor(payload).to_polars()
+        elif operation == "write_arrow_shm":
+            arrow_module.write_arrow_shm(payload)
+        else:
+            arrow_module.read_arrow_shm(payload)
+
+
+def test_arrow_cursor_empty_buffer_constructs_from_rows_and_polars_roundtrip() -> None:
+    """Empty-buffer cursors materialize from buffered rows while valid IPC round-trips to Arrow and Polars."""
+    row_cursor = ArrowCursor(b"", rows=[(1, "alpha")], columns=["id", "name"])
+    row_table = row_cursor.to_arrow_table()
+    assert row_table.to_pylist() == [{"id": 1, "name": "alpha"}]
+    assert row_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+
+    shm_view = arrow_module.write_arrow_shm(row_table)
+    ipc_cursor = arrow_module.read_arrow_shm(shm_view)
+    assert ipc_cursor.to_arrow_table().equals(row_table)
+    assert ipc_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+
+
 class _DeterministicDataFrame:
     """In-memory Arrow DataFrame stand-in for SessionContext contract tests."""
 
-    __slots__ = ("_table",)
+    __slots__ = ("_table", "_table_name")
 
-    def __init__(self, table: pa.Table) -> None:
+    def __init__(self, table: pa.Table, *, table_name: str | None = None) -> None:
         self._table = table
+        self._table_name = table_name
 
     def to_arrow_table(self) -> pa.Table:
         """Return the underlying normalized PyArrow table."""
         return self._table
+
+    def logical_plan(self) -> str:
+        """Return a deterministic logical plan representation."""
+        if self._table_name is None:
+            return "Projection: 1 AS ok\n  EmptyRelation"
+        return f"Projection: *\n  TableScan: {self._table_name}"
+
+    def execution_plan(self) -> str:
+        """Return a deterministic physical execution plan representation."""
+        if self._table_name is None:
+            return "ProjectionExec: expr=[1 as ok]"
+        return f"DataSourceExec: table={self._table_name} rows={self._table.num_rows}"
+
+    def explain(self, verbose: bool = False, analyze: bool = False) -> None:
+        """Mirror ``datafusion.DataFrame.explain`` returning None."""
+        _ = (verbose, analyze)
+        return None
 
 
 class _DeterministicSessionContext:
@@ -445,6 +564,18 @@ class _DeterministicSessionContext:
             raise TypeError(msg)
         self.tables[name] = table
 
+    def register_parquet(self, name: str, path: str) -> None:
+        """Read a Parquet file into the in-memory session catalog."""
+        self.tables[name] = pq.read_table(DataFusionCore.resolve_local_path(path))
+
+    def register_csv(self, name: str, path: str) -> None:
+        """Read a CSV file into the in-memory session catalog."""
+        self.tables[name] = pa_csv.read_csv(DataFusionCore.resolve_local_path(path))
+
+    def register_json(self, name: str, path: str) -> None:
+        """Read an NDJSON file into the in-memory session catalog."""
+        self.tables[name] = pa_json.read_json(DataFusionCore.resolve_local_path(path))
+
     def sql(self, query: str) -> _DeterministicDataFrame:
         """Evaluate supported test projections against registered PyArrow tables or raise."""
         normalized = " ".join(query.strip().split())
@@ -456,7 +587,7 @@ class _DeterministicSessionContext:
             if tbl_name not in self.tables:
                 msg = f"Table {tbl_name!r} not found in SessionContext"
                 raise RuntimeError(msg)
-            return _DeterministicDataFrame(self.tables[tbl_name])
+            return _DeterministicDataFrame(self.tables[tbl_name], table_name=tbl_name)
         msg = f"Invalid or unsupported DataFusion SQL: {query}"
         raise RuntimeError(msg)
 
@@ -616,15 +747,161 @@ def test_datafusion_config_post_init_validation(bad_kwargs: dict[str, Any]) -> N
 
 
 def test_datafusion_removed_pgwire_and_vendor_wrappers_absent() -> None:
-    """Verify removed pgwire fields and vendor-specific registration wrappers are absent."""
+    """Verify removed pgwire fields are absent on DataFusionConfig."""
     cfg = DataFusionConfig()
     assert not hasattr(cfg, "pgwire_host")
     assert not hasattr(cfg, "pgwire_port")
     assert not hasattr(cfg, "require_mtls_for_pgwire")
-    for removed in (
+
+
+@pytest.mark.parametrize(
+    "removed",
+    [
         "register_bigquery_table",
         "register_bigquery_query",
         "register_spanner_table",
         "register_spanner_query",
-    ):
-        assert not hasattr(DataFusionEngine, removed)
+    ],
+    ids=["bigquery-table", "bigquery-query", "spanner-table", "spanner-query"],
+)
+def test_datafusion_removed_vendor_wrapper_absent(removed: str) -> None:
+    """Verify removed vendor-specific registration wrappers are absent on DataFusionEngine."""
+    assert not hasattr(DataFusionEngine, removed)
+
+
+def test_datafusion_session_config_propagates_partitions_and_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DataFusionEngine passes target_partitions and memory_limit_mb bytes to SessionContext builders."""
+    observed: dict[str, Any] = {}
+
+    class _FakeSessionConfig:
+        def __init__(self) -> None:
+            self.partitions: int | None = None
+
+        def with_target_partitions(self, partitions: int) -> _FakeSessionConfig:
+            self.partitions = partitions
+            return self
+
+    class _FakeRuntimeEnvBuilder:
+        def __init__(self) -> None:
+            self.memory_bytes: int | None = None
+
+        def with_fair_spill_pool(self, size_bytes: int) -> _FakeRuntimeEnvBuilder:
+            self.memory_bytes = size_bytes
+            return self
+
+    class _FakeSessionContext(_DeterministicSessionContext):
+        def __init__(self, session_config: _FakeSessionConfig, runtime_env: _FakeRuntimeEnvBuilder) -> None:
+            super().__init__()
+            observed["partitions"] = session_config.partitions
+            observed["memory_bytes"] = runtime_env.memory_bytes
+
+    fake_mod: Any = types.ModuleType("datafusion")
+    fake_mod.SessionConfig = _FakeSessionConfig
+    fake_mod.RuntimeEnvBuilder = _FakeRuntimeEnvBuilder
+    fake_mod.SessionContext = _FakeSessionContext
+    monkeypatch.setitem(sys.modules, "datafusion", fake_mod)
+    reset_dependency_cache("datafusion")
+    try:
+        engine = DataFusionEngine(DataFusionConfig(target_partitions=2, memory_limit_mb=128))
+        assert observed == {"partitions": 2, "memory_bytes": 128 * 1024 * 1024}
+        assert engine.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
+    finally:
+        reset_dependency_cache("datafusion")
+
+
+@pytest.mark.parametrize("source_format", ["parquet", "csv", "ndjson"])
+def test_datafusion_register_table_file_sources(
+    tmp_path: Path,
+    source_format: Literal["parquet", "csv", "ndjson"],
+) -> None:
+    """Verify DataFusionEngine registers Parquet, CSV, and NDJSON sources and plans queries."""
+    rows = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+    if source_format == "parquet":
+        src_path = tmp_path / "items.parquet"
+        pq.write_table(pa.Table.from_pylist(rows), src_path)
+    elif source_format == "csv":
+        src_path = tmp_path / "items.csv"
+        src_path.write_text("id,name\n1,alpha\n2,beta\n", encoding="utf-8")
+    else:
+        src_path = tmp_path / "items.ndjson"
+        src_path.write_text('{"id": 1, "name": "alpha"}\n{"id": 2, "name": "beta"}\n', encoding="utf-8")
+
+    ctx = None if datafusion is not None else _DeterministicSessionContext()
+    engine = DataFusionEngine(DataFusionConfig(target_partitions=2, memory_limit_mb=128), ctx=ctx)
+    reg = engine.register_table(TableRegistration(name="items_src", uri=src_path.as_uri(), format=source_format))
+    assert reg.format == source_format
+    plan = engine.explain_plan("SELECT * FROM items_src")
+    assert plan["referenced_tables"] == ["items_src"]
+    assert "items_src" in plan["logical_plan"]
+    assert plan["physical_plan"]
+    assert engine.execute_dicts("SELECT * FROM items_src") == rows
+
+
+@pytest.mark.parametrize("bad_format", ["vortex", "duckdb", "oracle"])
+def test_datafusion_register_table_rejects_unsupported_formats(
+    bad_format: Literal["vortex", "duckdb", "oracle"],
+) -> None:
+    """Verify unsupported non-Arrow formats raise NotSupportedError and empty arrow raises ImproperConfigurationError."""
+    ctx = None if datafusion is not None else _DeterministicSessionContext()
+    engine = DataFusionEngine(DataFusionConfig(), ctx=ctx)
+    with pytest.raises(NotSupportedError):
+        engine.register_table(TableRegistration(name="bad_tbl", uri="file:///tmp/bad.dat", format=bad_format))
+    with pytest.raises(ImproperConfigurationError):
+        engine.register_table(TableRegistration(name="missing_arrow", uri="arrow://missing", format="arrow"))
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "local"])
+def test_datafusion_register_parquet_from_store_and_query(
+    tmp_path: Path,
+    store_kind: str,
+) -> None:
+    """Verify register_parquet_from_store works across MemoryConfig and LocalConfig stores."""
+    rows = [{"order_id": 101, "amount": 42}, {"order_id": 102, "amount": 88}]
+    sink = pa.BufferOutputStream()
+    pq.write_table(pa.Table.from_pylist(rows), sink)
+    parquet_bytes = sink.getvalue().to_pybytes()
+
+    store = SyncObjectStore(MemoryConfig()) if store_kind == "memory" else SyncObjectStore(LocalConfig(root=tmp_path))
+    try:
+        store.put("datasets/orders.parquet", parquet_bytes)
+        ctx = None if datafusion is not None else _DeterministicSessionContext()
+        engine = DataFusionEngine(DataFusionConfig(), ctx=ctx)
+        reg = engine.register_parquet_from_store("orders_tbl", store, "datasets/orders.parquet")
+        assert reg.name == "orders_tbl"
+        assert reg.format == "parquet"
+        assert engine.execute_dicts("SELECT * FROM orders_tbl") == rows
+        plan = engine.explain_plan("SELECT * FROM orders_tbl")
+        assert plan["referenced_tables"] == ["orders_tbl"]
+    finally:
+        store.close()
+
+
+def test_datafusion_lightweight_ctx_fallback_without_file_methods(tmp_path: Path) -> None:
+    """Verify lightweight ctx doubles implementing only register_table and sql still register file sources."""
+
+    class _TableOnlyContext:
+        def __init__(self) -> None:
+            self.tables: dict[str, pa.Table] = {}
+
+        def register_table(self, name: str, table: pa.Table) -> None:
+            self.tables[name] = table
+
+        def sql(self, query: str) -> _DeterministicDataFrame:
+            tbl_name = query.strip().split()[-1]
+            if tbl_name not in self.tables:
+                raise RuntimeError(f"Unknown table: {tbl_name}")
+            return _DeterministicDataFrame(self.tables[tbl_name], table_name=tbl_name)
+
+    csv_path = tmp_path / "fallback.csv"
+    csv_path.write_text("k,v\n1,one\n", encoding="utf-8")
+    engine = DataFusionEngine(DataFusionConfig(), ctx=_TableOnlyContext())
+    engine.register_table(TableRegistration(name="fallback_csv", uri=str(csv_path), format="csv"))
+    assert engine.execute_dicts("SELECT * FROM fallback_csv") == [{"k": 1, "v": "one"}]
+
+
+def test_vertebra_drivers_directory_removed() -> None:
+    """Verify empty legacy src/py/vertebra/drivers directory has been deleted."""
+    drivers_dir = Path(__file__).resolve().parents[3] / "vertebra" / "drivers"
+    assert not drivers_dir.exists()

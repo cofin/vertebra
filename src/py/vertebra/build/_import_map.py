@@ -1,5 +1,6 @@
 """Import map generation and wheel-native @vertebra/client synchronization."""
 
+import importlib.metadata
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,16 +12,39 @@ from vertebra.utils.serializers import decode_json, format_json
 __all__ = ("ImportMapGenerator", "load_client_subpaths")
 
 
+def _client_package_json_candidates() -> tuple[Path, ...]:
+    """Return candidate paths to the ``@vertebra/client`` ``package.json`` manifest."""
+    return (
+        Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "package.json",
+        Path(__file__).resolve().parents[1] / "server" / "_js" / "bundle" / "package.json",
+    )
+
+
+def _resolve_client_version(package_json_path: Path | None = None) -> str:
+    """Resolve the ``@vertebra/client`` version from ``package.json`` or package metadata."""
+    candidates = (package_json_path,) if package_json_path is not None else _client_package_json_candidates()
+    for pkg_file in candidates:
+        if not pkg_file.is_file():
+            continue
+        try:
+            raw = decode_json(pkg_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, dict):
+            version = raw.get("version")
+            if isinstance(version, str) and version.strip():
+                return version.strip()
+    try:
+        return importlib.metadata.version("vertebra-core")
+    except importlib.metadata.PackageNotFoundError:
+        from vertebra import __version__
+
+        return __version__
+
+
 def load_client_subpaths(package_json_path: Path | None = None) -> tuple[tuple[str, str, str], ...]:
     """Derive ``(subpath, js_rel, types_rel)`` tuples from ``@vertebra/client`` ``package.json`` ``exports``."""
-    candidates: tuple[Path, ...]
-    if package_json_path is not None:
-        candidates = (package_json_path,)
-    else:
-        candidates = (
-            Path(__file__).resolve().parents[3] / "ts" / "vertebra-client" / "package.json",
-            Path(__file__).resolve().parents[1] / "server" / "_js" / "bundle" / "package.json",
-        )
+    candidates = (package_json_path,) if package_json_path is not None else _client_package_json_candidates()
     pkg_file = next((p for p in candidates if p.is_file()), None)
     if pkg_file is None:
         return _FALLBACK_CLIENT_SUBPATHS
@@ -157,7 +181,7 @@ class ImportMapGenerator:
         }
         pkg_manifest: dict[str, Any] = {
             "name": "@vertebra/client",
-            "version": "0.1.0",
+            "version": _resolve_client_version(),
             "private": True,
             "description": "Wheel-packaged TypeScript client SDK for Vertebra",
             "type": "module",

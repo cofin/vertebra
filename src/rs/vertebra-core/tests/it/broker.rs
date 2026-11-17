@@ -109,10 +109,12 @@ fn test_shm_lease_table_ttl_reap_and_aba_generation_guard() {
     let g0 = table.try_acquire(100, 1_000_000, 0).unwrap();
     assert_eq!(g0.slot_index, 0);
 
-    // Sleep 5ms for TTL to expire
-    std::thread::sleep(Duration::from_millis(5));
+    // Advance monotonic timestamp past 1ms TTL without sleeping
+    assert_eq!(
+        table.reap_expired(g0.acquired_ns.saturating_add(1_000_001)),
+        1
+    );
 
-    // Pool was exhausted, but try_acquire calls reap_expired internally
     let g1 = table.try_acquire(101, 0, 0).unwrap();
     assert_eq!(g1.slot_index, 0);
     assert_ne!(g0.generation, g1.generation);
@@ -132,7 +134,7 @@ fn test_shm_lease_table_ttl_reap_and_aba_generation_guard() {
 #[cfg(unix)]
 #[test]
 fn test_shm_lease_table_cross_process_named_shm() {
-    let name = format!("/vtb-test-broker-{}", std::process::id());
+    let name = crate::unique_shm_name("/vtb-test-broker");
     let req_size = ShmLeaseTable::required_size(4, 2);
 
     let region_primary = match ShmRegion::create_named(&name, req_size) {
@@ -185,7 +187,7 @@ fn test_shm_lease_table_cross_process_named_shm() {
 
 #[test]
 fn test_shm_statement_cache_create_and_attach_persistence() {
-    let shm_name = format!("/vtb-stmt-test-{}", std::process::id());
+    let shm_name = crate::unique_shm_name("/vtb-stmt-test");
     let req_size = ShmStatementCache::required_size(16);
     let region1 = ShmRegion::create_named(&shm_name, req_size).unwrap();
     let cache1 = ShmStatementCache::init_in_region(region1, 16).unwrap();
@@ -217,7 +219,7 @@ fn test_shm_statement_cache_create_and_attach_persistence() {
 #[cfg(unix)]
 #[test]
 fn test_shm_lease_table_colocated_statement_cache_and_channel_ring_across_named_shm() {
-    let name = format!("/vtb-colocated-it-{}", std::process::id());
+    let name = crate::unique_shm_name("/vtb-colocated-it");
     let (primary, primary_stmt) = match ShmLeaseTable::create_with_statements(&name, 4, 2, 16) {
         Ok(pair) => pair,
         Err(_) => return,

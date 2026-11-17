@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pyarrow as pa
 import pytest
 from sqlspec import StatementStack
+from sqlspec.config import ADKConfig
+from sqlspec.exceptions import MigrationError, PermissionDeniedError, StackExecutionError
 from sqlspec.exceptions import NotFoundError as SQLSpecNotFoundError
-from sqlspec.exceptions import PermissionDeniedError, StackExecutionError
+from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore
+from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore, BaseSyncADKArtifactStore
+from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
+from sqlspec.migrations.context import MigrationContext
+from sqlspec.migrations.runner import SyncMigrationRunner
 
 from tests.unit.db.test_bigquery import _MockBigQueryRestServer
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
@@ -32,6 +42,7 @@ from vertebra.extensions.sqlspec._driver import (
     SyncAdapterConfig,
 )
 from vertebra.extensions.sqlspec.adapters.bigquery import (
+    BigQueryADKConfig,
     BigQueryAsyncADKArtifactStore,
     BigQueryAsyncADKMemoryStore,
     BigQueryAsyncADKStore,
@@ -46,7 +57,10 @@ from vertebra.extensions.sqlspec.adapters.bigquery import (
     BigQuerySyncConfig,
     BigQuerySyncDriver,
 )
+from vertebra.extensions.sqlspec.adapters.bigquery import adk as bq_adk_mod
 from vertebra.extensions.sqlspec.adapters.bigquery import config as bq_config_mod
+from vertebra.extensions.sqlspec.adapters.bigquery import reconcile as bigquery_reconcile
+from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteSyncConfig
 from vertebra.storage import SigningConfig, SyncObjectStore
 
 
@@ -65,6 +79,8 @@ class _InMemoryBigQueryEngine:
         self.executed_sql: list[tuple[str, Any]] = []
         self.sessions: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self.app_states: dict[str, str] = {}
+        self.user_states: dict[tuple[str, str], str] = {}
         self.memories: list[dict[str, Any]] = []
         self.artifacts: list[dict[str, Any]] = []
         self.kv_store: dict[str, dict[str, Any]] = {}
@@ -122,9 +138,50 @@ class _InMemoryBigQueryEngine:
                 self.events = [e for e in self.events if e.get("session_id") != sid]
                 return 1
 
-        if "VERTEBRA_ADK_MEMORIES" in upper and (upper.startswith("INSERT ") or upper.startswith("MERGE ")):
-            self.memories = [m for m in self.memories if m.get("id") != params.get("id")]
-            self.memories.append(dict(params))
+        if "VERTEBRA_ADK_MEMORIES" in upper:
+            if upper.startswith("INSERT ") or upper.startswith("MERGE "):
+                self.memories = [m for m in self.memories if m.get("id") != params.get("id")]
+                self.memories.append(dict(params))
+                return 1
+            if upper.startswith("DELETE "):
+                before_len = len(self.memories)
+                if "SESSION_ID = @SESSION_ID" in upper:
+                    mem_sid = params.get("session_id")
+                    app = params.get("app_name")
+                    uid = params.get("user_id")
+                    self.memories = [
+                        m
+                        for m in self.memories
+                        if not (
+                            m.get("session_id") == mem_sid
+                            and (app is None or m.get("app_name") == app)
+                            and (uid is None or m.get("user_id") == uid)
+                        )
+                    ]
+                elif "INSERTED_AT < @CUTOFF" in upper:
+                    cutoff = str(params.get("cutoff", ""))
+                    app = params.get("app_name")
+                    scope = params.get("scope")
+                    self.memories = [
+                        m
+                        for m in self.memories
+                        if not (
+                            str(m.get("inserted_at", "")) < cutoff
+                            and (app is None or m.get("app_name") == app)
+                            and (scope is None or m.get("scope") == scope)
+                        )
+                    ]
+                return before_len - len(self.memories)
+
+        if "ADK_APP_STATE" in upper and upper.startswith("MERGE "):
+            app = str(params["app_name"])
+            self.app_states[app] = str(params["state"])
+            return 1
+
+        if "ADK_USER_STATE" in upper and upper.startswith("MERGE "):
+            app = str(params["app_name"])
+            uid = str(params["user_id"])
+            self.user_states[(app, uid)] = str(params["state"])
             return 1
 
         if "VERTEBRA_ADK_ARTIFACTS" in upper:
@@ -251,10 +308,76 @@ class _InMemoryBigQueryEngine:
             sid = str(params.get("session_id", ""))
             return [e for e in self.events if e.get("session_id") == sid]
 
+        if "ADK_APP_STATE" in upper:
+            app = str(params.get("app_name", ""))
+            state_val = self.app_states.get(app)
+            return [{"state": state_val}] if state_val is not None else []
+
+        if "ADK_USER_STATE" in upper:
+            app = str(params.get("app_name", ""))
+            uid = str(params.get("user_id", ""))
+            state_val = self.user_states.get((app, uid))
+            return [{"state": state_val}] if state_val is not None else []
+
         if "VERTEBRA_ADK_MEMORIES" in upper:
             uid = str(params.get("user_id", ""))
             app = params.get("app_name")
-            return [m for m in self.memories if m.get("user_id") == uid and (app is None or m.get("app_name") == app)]
+            if "SCOPE = 'APP'" in upper and "OR SCOPE = 'APP'" not in upper:
+                scoped = [m for m in self.memories if m.get("app_name") == app and m.get("scope") == "app"]
+            elif "SCOPE = 'USER'" in upper:
+                scoped = [
+                    m
+                    for m in self.memories
+                    if m.get("app_name") == app and m.get("user_id") == uid and m.get("scope") == "user"
+                ]
+            else:
+                scoped = [
+                    m
+                    for m in self.memories
+                    if m.get("app_name") == app and (m.get("user_id") == uid or m.get("scope") == "app")
+                ]
+            top_k = int(params.get("top_k", len(scoped) or 20))
+            if "VECTOR_SEARCH(" in upper:
+                assert "DISTANCE_TYPE => 'COSINE'" in upper
+                assert "ORDER BY DISTANCE ASC LIMIT @TOP_K" in upper
+                q_emb = [float(x) for x in params.get("query_embedding", ())]
+
+                def _cosine_dist(row: dict[str, Any]) -> float:
+                    r_emb = row.get("embedding")
+                    if not isinstance(r_emb, Sequence) or len(r_emb) != len(q_emb) or not q_emb:
+                        return 2.0
+                    dot = sum(float(a) * float(b) for a, b in zip(q_emb, r_emb, strict=True))
+                    na = math.sqrt(sum(float(a) * float(a) for a in q_emb))
+                    nb = math.sqrt(sum(float(b) * float(b) for b in r_emb))
+                    if na == 0.0 or nb == 0.0:
+                        return 2.0
+                    return 1.0 - (dot / (na * nb))
+
+                ranked: list[dict[str, Any]] = []
+                for item in scoped:
+                    copy_row = dict(item)
+                    copy_row["distance"] = _cosine_dist(item)
+                    ranked.append(copy_row)
+                ranked.sort(key=lambda r: float(r["distance"]))
+                return ranked[:top_k]
+            if "SEARCH(CONTENT_TEXT, @QUERY)" in upper:
+                assert "ORDER BY TIMESTAMP DESC LIMIT @TOP_K" in upper
+                terms = [t for t in str(params.get("query", "")).lower().split() if t]
+                matched_fts = [
+                    dict(item)
+                    for item in scoped
+                    if all(term in str(item.get("content_text") or "").lower() for term in terms)
+                ]
+                matched_fts.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+                return matched_fts[:top_k]
+            assert "LIKE LOWER(@PATTERN)" in upper
+            assert "ORDER BY TIMESTAMP DESC LIMIT @TOP_K" in upper
+            needle = str(params.get("pattern", "%")).strip("%").lower()
+            matched_like = [
+                dict(item) for item in scoped if not needle or needle in str(item.get("content_text") or "").lower()
+            ]
+            matched_like.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+            return matched_like[:top_k]
 
         if "VERTEBRA_ADK_ARTIFACTS" in upper:
             if "MAX(VERSION)" in upper or "COALESCE(MAX(" in upper:
@@ -1423,3 +1546,660 @@ async def test_bigquery_adk_memory_search_propagates_non_missing_table_errors() 
     async_mem = BigQueryAsyncADKMemoryStore(async_cfg)
     with pytest.raises(RuntimeError, match="vector index corrupted"):
         await async_mem.search_entries("alpha", "app", "u1", embedding=[0.1, 0.2])
+
+
+def test_bigquery_adk_stores_subclass_upstream_no_python_ranking_and_require_google_adk() -> None:
+    """Verify upstream ADK inheritance, __slots__, aligned config keys, removed Python ranking helpers, and google-adk error."""
+    assert issubclass(BigQuerySyncADKStore, BaseSyncADKStore)
+    assert issubclass(BigQueryAsyncADKStore, BaseAsyncADKStore)
+    assert issubclass(BigQuerySyncADKMemoryStore, BaseSyncADKMemoryStore)
+    assert issubclass(BigQueryAsyncADKMemoryStore, BaseAsyncADKMemoryStore)
+    assert issubclass(BigQuerySyncADKArtifactStore, BaseSyncADKArtifactStore)
+    assert issubclass(BigQueryAsyncADKArtifactStore, BaseAsyncADKArtifactStore)
+
+    for removed_symbol in (
+        "_FallbackADKMemoryCommon",
+        "_FallbackADKArtifactCommon",
+        "_rank_memory_rows",
+        "_cosine_similarity",
+        "_keyword_score",
+        "_decode_embedding",
+    ):
+        assert not hasattr(bq_adk_mod, removed_symbol)
+
+    for store_cls in (
+        BigQuerySyncADKStore,
+        BigQueryAsyncADKStore,
+        BigQuerySyncADKMemoryStore,
+        BigQueryAsyncADKMemoryStore,
+        BigQuerySyncADKArtifactStore,
+        BigQueryAsyncADKArtifactStore,
+    ):
+        assert "__slots__" in store_cls.__dict__
+
+    expected_keys = {
+        "retention",
+        "enable_memory",
+        "memory_table",
+        "artifact_table",
+        "memory_use_fts",
+        "memory_max_results",
+        "memory_retention_days",
+        "owner_id_column",
+        "partition_by_day",
+        "require_partition_filter",
+    }
+    config_keys = set(BigQueryADKConfig.__optional_keys__) | set(ADKConfig.__optional_keys__)
+    assert expected_keys <= config_keys
+
+    missing_script = (
+        "import sys\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        "sys.modules['google.adk'] = None\n"
+        "try:\n"
+        "    import vertebra.extensions.sqlspec.adapters.bigquery.adk\n"
+        "except MissingDependencyError as exc:\n"
+        "    assert exc.install_package == 'vertebra-core[adk]'\n"
+        "else:\n"
+        "    raise AssertionError('Expected MissingDependencyError when google.adk is absent')\n"
+    )
+    subprocess.run([sys.executable, "-c", missing_script], check=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_bigquery_adk_state_deltas_sql_ranking_partition_filter_and_owner_delete(
+    is_async_mode: bool,
+) -> None:
+    """Verify state delta merging, GoogleSQL ranking, partition filters, and owner-scoped memory deletion."""
+    engine = _InMemoryBigQueryEngine()
+    adk_ext: BigQueryADKConfig = {
+        "session_table": "vertebra_adk_sessions",
+        "events_table": "vertebra_adk_events",
+        "memory_table": "vertebra_adk_memories",
+        "artifact_table": "vertebra_adk_artifacts",
+        "memory_use_fts": True,
+        "memory_max_results": 5,
+        "memory_retention_days": 30,
+        "partition_by_day": True,
+        "require_partition_filter": True,
+        "retention": {"event_ttl_seconds": 172800},
+    }
+    cfg: BigQuerySyncConfig | BigQueryAsyncConfig
+    if is_async_mode:
+        cfg = BigQueryAsyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_SimulatedAsyncCoreDriver(engine),
+            share_pool=False,
+            extension_config={"adk": adk_ext},
+        )
+        adk_store: Any = BigQueryAsyncADKStore(cfg)
+        mem_store: Any = BigQueryAsyncADKMemoryStore(cfg)
+        await adk_store.create_tables()
+        await mem_store.create_tables()
+        created = await adk_store.create_session(
+            "sess-delta",
+            "agent-app",
+            "user-a",
+            state={"local": "v1"},
+            app_state_delta={"app:theme": "dark"},
+            user_state_delta={"user:lang": "en"},
+        )
+        assert created["state"] == {"local": "v1", "app:theme": "dark", "user:lang": "en"}
+        updated = await adk_store.append_event_and_update_state(
+            {
+                "id": "ev-delta-1",
+                "app_name": "agent-app",
+                "user_id": "user-a",
+                "session_id": "sess-delta",
+                "invocation_id": "inv-delta-1",
+                "timestamp": datetime.now(UTC),
+                "event_data": {"author": "user"},
+            },
+            "agent-app",
+            "user-a",
+            "sess-delta",
+            state={"local": "v2"},
+            app_state_delta={"app:tier": "pro"},
+            user_state_delta={"user:tz": "UTC"},
+        )
+        assert updated["state"] == {
+            "local": "v2",
+            "app:theme": "dark",
+            "app:tier": "pro",
+            "user:lang": "en",
+            "user:tz": "UTC",
+        }
+        assert await adk_store.get_app_state("agent-app") == {"app:theme": "dark", "app:tier": "pro"}
+        assert await adk_store.get_user_state("agent-app", "user-a") == {"user:lang": "en", "user:tz": "UTC"}
+    else:
+        cfg = BigQuerySyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_SimulatedSyncCoreDriver(engine),
+            share_pool=False,
+            extension_config={"adk": adk_ext},
+        )
+        adk_store = BigQuerySyncADKStore(cfg)
+        mem_store = BigQuerySyncADKMemoryStore(cfg)
+        adk_store.create_tables()
+        mem_store.create_tables()
+        created = adk_store.create_session(
+            "sess-delta",
+            "agent-app",
+            "user-a",
+            state={"local": "v1"},
+            app_state_delta={"app:theme": "dark"},
+            user_state_delta={"user:lang": "en"},
+        )
+        assert created["state"] == {"local": "v1", "app:theme": "dark", "user:lang": "en"}
+        updated = adk_store.append_event_and_update_state(
+            {
+                "id": "ev-delta-1",
+                "app_name": "agent-app",
+                "user_id": "user-a",
+                "session_id": "sess-delta",
+                "invocation_id": "inv-delta-1",
+                "timestamp": datetime.now(UTC),
+                "event_data": {"author": "user"},
+            },
+            "agent-app",
+            "user-a",
+            "sess-delta",
+            state={"local": "v2"},
+            app_state_delta={"app:tier": "pro"},
+            user_state_delta={"user:tz": "UTC"},
+        )
+        assert updated["state"] == {
+            "local": "v2",
+            "app:theme": "dark",
+            "app:tier": "pro",
+            "user:lang": "en",
+            "user:tz": "UTC",
+        }
+        assert adk_store.get_app_state("agent-app") == {"app:theme": "dark", "app:tier": "pro"}
+        assert adk_store.get_user_state("agent-app", "user-a") == {"user:lang": "en", "user:tz": "UTC"}
+
+    t0 = datetime(2026, 11, 17, 1, 0, tzinfo=UTC)
+    t1 = datetime(2026, 11, 17, 2, 0, tzinfo=UTC)
+    entries: list[Any] = [
+        {
+            "id": "mem-1",
+            "session_id": "sess-1",
+            "app_name": "agent-app",
+            "user_id": "user-a",
+            "scope": "user",
+            "event_id": "e1",
+            "author": "user",
+            "timestamp": t0,
+            "content_json": {"text": "alpha memory older"},
+            "content_text": "alpha memory older",
+            "metadata_json": None,
+            "inserted_at": t0,
+            "embedding": [1.0, 0.0],
+        },
+        {
+            "id": "mem-2",
+            "session_id": "sess-1",
+            "app_name": "agent-app",
+            "user_id": "user-a",
+            "scope": "user",
+            "event_id": "e2",
+            "author": "user",
+            "timestamp": t1,
+            "content_json": {"text": "alpha memory newer"},
+            "content_text": "alpha memory newer",
+            "metadata_json": None,
+            "inserted_at": t1,
+            "embedding": [0.0, 1.0],
+        },
+        {
+            "id": "mem-other-user",
+            "session_id": "sess-1",
+            "app_name": "agent-app",
+            "user_id": "user-b",
+            "scope": "user",
+            "event_id": "e3",
+            "author": "user",
+            "timestamp": t1,
+            "content_json": {"text": "other user session"},
+            "content_text": "other user session",
+            "metadata_json": None,
+            "inserted_at": t1,
+            "embedding": [0.0, 1.0],
+        },
+    ]
+
+    if is_async_mode:
+        await mem_store.insert_memory_entries(entries)
+        vec_hits = await mem_store.search_entries("alpha", "agent-app", "user-a", limit=2, embedding=[0.9, 0.1])
+        fts_hits = await mem_store.search_entries("alpha", "agent-app", "user-a", limit=2)
+    else:
+        mem_store.insert_memory_entries(entries)
+        vec_hits = mem_store.search_entries("alpha", "agent-app", "user-a", limit=2, embedding=[0.9, 0.1])
+        fts_hits = mem_store.search_entries("alpha", "agent-app", "user-a", limit=2)
+
+    assert [hit["id"] for hit in vec_hits] == ["mem-1", "mem-2"]
+    assert [hit["id"] for hit in fts_hits] == ["mem-2", "mem-1"]
+
+    like_cfg: Any
+    like_ext = {**adk_ext, "memory_use_fts": False}
+    if is_async_mode:
+        like_cfg = BigQueryAsyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_SimulatedAsyncCoreDriver(engine),
+            share_pool=False,
+            extension_config={"adk": like_ext},
+        )
+        like_store: Any = BigQueryAsyncADKMemoryStore(like_cfg)
+        like_hits = await like_store.search_entries("newer", "agent-app", "user-a", limit=2)
+        deleted = await mem_store.delete_entries_by_session("sess-1", "agent-app", "user-a")
+    else:
+        like_cfg = BigQuerySyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_SimulatedSyncCoreDriver(engine),
+            share_pool=False,
+            extension_config={"adk": like_ext},
+        )
+        like_store = BigQuerySyncADKMemoryStore(like_cfg)
+        like_hits = like_store.search_entries("newer", "agent-app", "user-a", limit=2)
+        deleted = mem_store.delete_entries_by_session("sess-1", "agent-app", "user-a")
+
+    assert [hit["id"] for hit in like_hits] == ["mem-2"]
+    assert deleted == 2
+    assert [m["id"] for m in engine.memories] == ["mem-other-user"]
+
+    search_sqls = [
+        sql for sql, _ in engine.executed_sql if "VERTEBRA_ADK_MEMORIES" in sql.upper() and "SELECT" in sql.upper()
+    ]
+    assert any(
+        "VECTOR_SEARCH(" in sql and "ORDER BY distance ASC LIMIT @top_k" in sql and "timestamp IS NOT NULL" in sql
+        for sql in search_sqls
+    )
+    assert any(
+        "SEARCH(content_text, @query)" in sql
+        and "ORDER BY timestamp DESC LIMIT @top_k" in sql
+        and "timestamp IS NOT NULL" in sql
+        for sql in search_sqls
+    )
+    assert any(
+        "LOWER(content_text) LIKE LOWER(@pattern)" in sql
+        and "ORDER BY timestamp DESC LIMIT @top_k" in sql
+        and "timestamp IS NOT NULL" in sql
+        for sql in search_sqls
+    )
+    assert any(
+        "DELETE FROM" in sql and "WHERE session_id = @session_id AND app_name = @app_name AND user_id = @user_id" in sql
+        for sql, _ in engine.executed_sql
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_bigquery_adk_missing_table_returns_empty_results(is_async_mode: bool) -> None:
+    """Missing BigQuery tables return empty results cleanly across ADK, memory, and artifact reads."""
+
+    class _MissingTableSyncCore(_SimulatedSyncCoreDriver):
+        def select(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            *,
+            schema_type: type[Any] | None = None,
+        ) -> list[Any]:
+            _ = (sql, parameters, schema_type)
+            raise NotFoundError("Table test-proj:app_ds.adk_memory was not found in location US")
+
+    class _MissingTableAsyncCore(_SimulatedAsyncCoreDriver):
+        async def select(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            *,
+            schema_type: type[Any] | None = None,
+        ) -> list[Any]:
+            _ = (sql, parameters, schema_type)
+            raise NotFoundError("Table test-proj:app_ds.adk_memory was not found in location US")
+
+    engine = _InMemoryBigQueryEngine()
+    if is_async_mode:
+        cfg = BigQueryAsyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_MissingTableAsyncCore(engine),
+            share_pool=False,
+        )
+        adk_store: Any = BigQueryAsyncADKStore(cfg)
+        mem_store: Any = BigQueryAsyncADKMemoryStore(cfg)
+        art_store: Any = BigQueryAsyncADKArtifactStore(cfg)
+        assert await adk_store.get_session("app", "user", "sess") is None
+        assert await adk_store.list_sessions("app", "user") == []
+        assert await mem_store.search_entries("q", "app", "user") == []
+        assert await art_store.list_artifact_keys("app", "user") == []
+    else:
+        sync_cfg = BigQuerySyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=_MissingTableSyncCore(engine),
+            share_pool=False,
+        )
+        sync_adk = BigQuerySyncADKStore(sync_cfg)
+        sync_mem = BigQuerySyncADKMemoryStore(sync_cfg)
+        sync_art = BigQuerySyncADKArtifactStore(sync_cfg)
+        assert sync_adk.get_session("app", "user", "sess") is None
+        assert sync_adk.list_sessions("app", "user") == []
+        assert sync_mem.search_entries("q", "app", "user") == []
+        assert sync_art.list_artifact_keys("app", "user") == []
+
+
+@pytest.mark.parametrize("store_cls", [BigQueryEventQueueStore, BigQueryLitestarStore])
+def test_bigquery_events_litestar_slots_and_reconcile_hooks(store_cls: type[Any]) -> None:
+    """Verify BigQuery event/Litestar stores declare ``__slots__``, schema targets, drops, and lazy ADK import."""
+    assert "__slots__" in store_cls.__dict__
+    cfg = BigQuerySyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        extension_config={
+            "litestar": {"session_table": "vtb_sessions", "partition_expiration_days": 7},
+            "events": {"queue_table": "vtb_events", "require_partition_filter": True},
+        },
+    )
+    store = store_cls(cfg)
+    assert not hasattr(store, "__dict__")
+
+    targets = store.get_schema_targets()
+    assert len(targets) == 1
+    target = targets[0]
+    assert target.schema == "app_ds"
+    assert isinstance(target.create_statement, str)
+    assert "CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`." in target.create_statement
+    assert "CLUSTER BY " in target.create_statement
+    assert "PARTITION BY DATE(" in target.create_statement
+
+    drops = store.downgrade_drops()
+    assert len(drops) == 1
+    assert "DROP TABLE IF EXISTS `test-proj`.`app_ds`." in drops[0].statement
+
+    if store_cls is BigQueryEventQueueStore:
+        assert store.companion_index_statement() is None
+    else:
+        assert store.get_companion_indexes() == []
+
+    assert bigquery_reconcile.down is bigquery_reconcile.downgrade
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import vertebra.extensions.sqlspec.adapters.bigquery.reconcile; "
+                "assert 'google.adk' not in sys.modules; "
+                "assert 'vertebra.extensions.sqlspec.adapters.bigquery.adk' not in sys.modules"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_bigquery_reconcile_and_downgrade_litestar_events_adk(is_async_mode: bool) -> None:
+    """Verify GoogleSQL reconcile -> non-transactional DDL -> additive alter -> reverse-order downgrade."""
+    engine = _InMemoryBigQueryEngine()
+    commit_calls = 0
+
+    class _ReconcileSyncCore(_SimulatedSyncCoreDriver):
+        def commit(self) -> None:
+            nonlocal commit_calls
+            commit_calls += 1
+
+        def execute_script(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            self._engine.execute_sql(sql, parameters)
+            return []
+
+    class _ReconcileAsyncCore(_SimulatedAsyncCoreDriver):
+        async def commit(self) -> None:
+            nonlocal commit_calls
+            commit_calls += 1
+
+        async def execute_script(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            self._sync._engine.execute_sql(sql, parameters)
+            return []
+
+    ext_cfg: dict[str, Any] = {
+        "litestar": {"session_table": "vtb_sessions"},
+        "events": {"queue_table": "vtb_events"},
+        "adk": {
+            "session_table": "vertebra_adk_sessions",
+            "events_table": "vertebra_adk_events",
+            "memory_table": "vertebra_adk_memories",
+        },
+    }
+
+    if is_async_mode:
+        core_async = _ReconcileAsyncCore(engine)
+        acfg = BigQueryAsyncConfig(
+            project_id="test-proj",
+            dataset_id="app_ds",
+            connection_instance=core_async,
+            share_pool=False,
+            extension_config=ext_cfg,
+        )
+        adriver = BigQueryAsyncDriver(core_async)
+        actx = MigrationContext(config=acfg, driver=adriver)
+        awaitable = bigquery_reconcile.reconcile(actx)
+        assert awaitable is not None
+        await awaitable
+
+        executed = [sql for sql, _ in engine.executed_sql]
+        assert any(
+            "CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vtb_sessions`" in s and "CLUSTER BY session_id" in s
+            for s in executed
+        )
+        assert any(
+            "CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vtb_events`" in s
+            and "CLUSTER BY channel, status, available_at" in s
+            for s in executed
+        )
+        assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_sessions`" in s for s in executed)
+        assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_events`" in s for s in executed)
+        assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_memories`" in s for s in executed)
+        assert not any("CREATE INDEX" in s.upper() for s in executed)
+        assert commit_calls == 0
+
+        engine.executed_sql.clear()
+        down_awaitable = bigquery_reconcile.downgrade(actx)
+        assert down_awaitable is not None
+        await down_awaitable
+        drop_sqls = [sql for sql, _ in engine.executed_sql if sql.startswith("DROP TABLE IF EXISTS")]
+        assert drop_sqls == [
+            "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vtb_events`",
+            "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_memories`",
+            "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_events`",
+            "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_sessions`",
+            "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vtb_sessions`",
+        ]
+        return
+
+    core_sync = _ReconcileSyncCore(engine)
+    cfg = BigQuerySyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        connection_instance=core_sync,
+        share_pool=False,
+        extension_config=ext_cfg,
+    )
+    sdriver = BigQuerySyncDriver(core_sync)
+    sctx = MigrationContext(config=cfg, driver=sdriver)
+    assert bigquery_reconcile.reconcile(sctx) is None
+
+    executed = [sql for sql, _ in engine.executed_sql]
+    assert any(
+        "CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vtb_sessions`" in s and "CLUSTER BY session_id" in s
+        for s in executed
+    )
+    assert any(
+        "CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vtb_events`" in s
+        and "CLUSTER BY channel, status, available_at" in s
+        for s in executed
+    )
+    assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_sessions`" in s for s in executed)
+    assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_events`" in s for s in executed)
+    assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_memories`" in s for s in executed)
+    assert not any("CREATE INDEX" in s.upper() for s in executed)
+    assert commit_calls == 0
+
+    engine.executed_sql.clear()
+    assert bigquery_reconcile.downgrade(sctx) is None
+    drop_sqls = [sql for sql, _ in engine.executed_sql if sql.startswith("DROP TABLE IF EXISTS")]
+    assert drop_sqls == [
+        "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vtb_events`",
+        "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_memories`",
+        "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_events`",
+        "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vertebra_adk_sessions`",
+        "DROP TABLE IF EXISTS `test-proj`.`app_ds`.`vtb_sessions`",
+    ]
+
+
+def test_bigquery_add_extension_migrations_runner_discovery_and_errors(tmp_path: Path) -> None:
+    """Verify ``add_extension_migrations`` discovers BigQuery reconciler, additive ALTER, and error contracts."""
+    migrations_dir = tmp_path / "bq_migrations"
+    migrations_dir.mkdir()
+    engine = _InMemoryBigQueryEngine()
+
+    class _RunnerSyncCore(_SimulatedSyncCoreDriver):
+        def execute_script(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            self._engine.execute_sql(sql, parameters)
+            return []
+
+        def select(
+            self,
+            sql: str,
+            parameters: Mapping[str, Any] | Sequence[Any] | None = None,
+            *,
+            schema_type: type[Any] | None = None,
+        ) -> list[Any]:
+            _ = schema_type
+            upper = sql.upper()
+            if "INFORMATION_SCHEMA.TABLES" in upper:
+                self._engine.executed_sql.append((sql, dict(parameters) if isinstance(parameters, Mapping) else {}))
+                return [
+                    {
+                        "table_catalog": "test-proj",
+                        "table_schema": "app_ds",
+                        "table_name": "vtb_sessions",
+                        "table_type": "BASE TABLE",
+                    }
+                ]
+            if (
+                "INFORMATION_SCHEMA.COLUMNS" in upper
+                and isinstance(parameters, Mapping)
+                and parameters.get("table_name") == "vtb_sessions"
+            ):
+                self._engine.executed_sql.append((sql, dict(parameters)))
+                return [
+                    {
+                        "table_name": "vtb_sessions",
+                        "column_name": "session_id",
+                        "data_type": "STRING",
+                        "is_nullable": "NO",
+                    },
+                    {
+                        "table_name": "vtb_sessions",
+                        "column_name": "data",
+                        "data_type": "BYTES",
+                        "is_nullable": "NO",
+                    },
+                    {
+                        "table_name": "vtb_sessions",
+                        "column_name": "expires_at",
+                        "data_type": "TIMESTAMP",
+                        "is_nullable": "YES",
+                    },
+                    {
+                        "table_name": "vtb_sessions",
+                        "column_name": "created_at",
+                        "data_type": "TIMESTAMP",
+                        "is_nullable": "NO",
+                    },
+                ]
+            return super().select(sql, parameters, schema_type=schema_type)
+
+    core_sync = _RunnerSyncCore(engine)
+
+    cfg = BigQuerySyncConfig(
+        project_id="test-proj",
+        dataset_id="app_ds",
+        connection_instance=core_sync,
+        share_pool=False,
+        migration_config={"script_location": str(migrations_dir)},
+        extension_config={
+            "litestar": {"session_table": "vtb_sessions"},
+            "events": {"queue_table": "vtb_events"},
+            "adk": {"session_table": "vertebra_adk_sessions", "events_table": "vertebra_adk_events"},
+        },
+    )
+    cfg.add_extension_migrations(
+        "litestar",
+        "vertebra.extensions.sqlspec:adapters/bigquery",
+        migration_mode="reconcile",
+    )
+    cfg.add_extension_migrations(
+        "events",
+        "vertebra.extensions.sqlspec:adapters/bigquery",
+        migration_mode="reconcile",
+    )
+    cfg.add_extension_migrations(
+        "adk",
+        "vertebra.extensions.sqlspec:adapters/bigquery",
+        migration_mode="reconcile",
+    )
+    commands = cfg.get_migration_commands()
+    assert {desc.name for desc in commands.extension_reconcilers} == {"litestar", "events", "adk"}
+    assert all(desc.module_path.name == "reconcile.py" for desc in commands.extension_reconcilers)
+    assert isinstance(commands.runner, SyncMigrationRunner)
+
+    driver = BigQuerySyncDriver(core_sync)
+    for desc in commands.extension_reconcilers:
+        commands.runner.execute_reconciliation(driver, desc)
+
+    executed = [sql for sql, _ in engine.executed_sql]
+    assert any(
+        "ALTER TABLE `test-proj`.`app_ds`.`vtb_sessions`" in s and "ADD COLUMN `updated_at` TIMESTAMP" in s
+        for s in executed
+    )
+    assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vtb_events`" in s for s in executed)
+    assert any("CREATE TABLE IF NOT EXISTS `test-proj`.`app_ds`.`vertebra_adk_sessions`" in s for s in executed)
+
+    async_cfg = BigQueryAsyncConfig(project_id="test-proj", dataset_id="app_ds")
+    async_driver = BigQueryAsyncDriver(_SimulatedAsyncCoreDriver(engine))
+    for bad_ctx in (
+        MigrationContext(config=None, driver=driver),
+        MigrationContext(config=cfg, driver=None),
+        MigrationContext(config=cfg, driver=driver, extension_config={"migration_mode": "invalid"}),
+        MigrationContext(config=async_cfg, driver=driver),
+        MigrationContext(config=cfg, driver=async_driver),
+        MigrationContext(config=SQLiteSyncConfig(database=":memory:"), driver=driver),
+    ):
+        with pytest.raises(MigrationError):
+            bigquery_reconcile.reconcile(bad_ctx)
+        with pytest.raises(MigrationError):
+            bigquery_reconcile.downgrade(bad_ctx)

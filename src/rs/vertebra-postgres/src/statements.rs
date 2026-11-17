@@ -1,6 +1,6 @@
 //! Protocol-level prepared statement cache and pooler capability negotiation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use crate::errors::PostgresError;
@@ -196,13 +196,25 @@ pub struct CachedStatement {
     pub schema_generation: u64,
 }
 
+#[derive(Clone, Debug)]
+struct LruSlot {
+    entry: Option<(StatementKey, CachedStatement)>,
+    prev: Option<usize>,
+    next: Option<usize>,
+    next_free: Option<usize>,
+}
+
 /// Per-session bounded LRU cache of named protocol-level prepared statements.
 #[derive(Clone, Debug)]
 pub struct StatementCache {
     capacity: usize,
     schema_generation: u64,
     next_statement_id: u64,
-    entries: Vec<(StatementKey, CachedStatement)>,
+    slots: Vec<LruSlot>,
+    index: HashMap<StatementKey, usize>,
+    head: Option<usize>,
+    tail: Option<usize>,
+    free: Option<usize>,
     evicted_names: Vec<String>,
 }
 
@@ -213,7 +225,11 @@ impl StatementCache {
             capacity,
             schema_generation: 1,
             next_statement_id: 1,
-            entries: Vec::new(),
+            slots: Vec::new(),
+            index: HashMap::new(),
+            head: None,
+            tail: None,
+            free: None,
             evicted_names: Vec::new(),
         }
     }
@@ -223,29 +239,117 @@ impl StatementCache {
         self.capacity
     }
 
+    fn unlink(&mut self, idx: usize) {
+        let prev = self.slots[idx].prev;
+        let next = self.slots[idx].next;
+        match prev {
+            Some(p) => self.slots[p].next = next,
+            None => self.head = next,
+        }
+        match next {
+            Some(n) => self.slots[n].prev = prev,
+            None => self.tail = prev,
+        }
+        self.slots[idx].prev = None;
+        self.slots[idx].next = None;
+    }
+
+    fn push_tail(&mut self, idx: usize) {
+        let tail = self.tail;
+        self.slots[idx].prev = tail;
+        self.slots[idx].next = None;
+        match tail {
+            Some(t) => self.slots[t].next = Some(idx),
+            None => self.head = Some(idx),
+        }
+        self.tail = Some(idx);
+    }
+
+    fn move_to_tail(&mut self, idx: usize) {
+        if self.tail == Some(idx) {
+            return;
+        }
+        self.unlink(idx);
+        self.push_tail(idx);
+    }
+
+    fn alloc_slot(&mut self, key: StatementKey, value: CachedStatement) -> usize {
+        if let Some(idx) = self.free {
+            self.free = self.slots[idx].next_free.take();
+            self.slots[idx].entry = Some((key, value));
+            self.slots[idx].prev = None;
+            self.slots[idx].next = None;
+            idx
+        } else {
+            let idx = self.slots.len();
+            self.slots.push(LruSlot {
+                entry: Some((key, value)),
+                prev: None,
+                next: None,
+                next_free: None,
+            });
+            idx
+        }
+    }
+
+    fn free_slot(&mut self, idx: usize) -> Option<(StatementKey, CachedStatement)> {
+        self.unlink(idx);
+        let removed = self.slots[idx].entry.take();
+        self.slots[idx].next_free = self.free;
+        self.free = Some(idx);
+        removed
+    }
+
+    fn pop_head(&mut self) -> Option<(StatementKey, CachedStatement)> {
+        let head_idx = self.head?;
+        let (key, value) = self.free_slot(head_idx)?;
+        self.index.remove(&key);
+        Some((key, value))
+    }
+
     /// Update the effective capacity, evicting oldest entries into `evicted_names` if shrunk.
     pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
         if capacity == 0 {
-            for (_, cached) in self.entries.drain(..) {
-                self.evicted_names.push(cached.name);
+            while let Some((_, evicted)) = self.pop_head() {
+                self.evicted_names.push(evicted.name);
             }
+            self.slots.clear();
+            self.index.clear();
+            self.head = None;
+            self.tail = None;
+            self.free = None;
             return;
         }
-        while self.entries.len() > capacity {
-            let (_, evicted) = self.entries.remove(0);
+        while self.index.len() > capacity {
+            let Some((_, evicted)) = self.pop_head() else {
+                break;
+            };
             self.evicted_names.push(evicted.name);
         }
     }
 
     /// Return the number of currently live cached statements.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.index.len()
     }
 
     /// Return `true` when the cache holds no live statements.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.index.is_empty()
+    }
+
+    /// Return `true` if a cached statement exists for `(sql, param_oids)` at the current `schema_generation`.
+    pub fn contains(&self, sql: &str, param_oids: &[u32]) -> bool {
+        if self.capacity == 0 {
+            return false;
+        }
+        let key = StatementKey {
+            sql: sql.to_owned(),
+            param_oids: param_oids.to_vec(),
+            schema_generation: self.schema_generation,
+        };
+        self.index.contains_key(&key)
     }
 
     /// Return the current schema generation counter.
@@ -296,21 +400,25 @@ impl StatementCache {
         if self.capacity == 0 {
             return None;
         }
-        let generation = self.schema_generation;
-        let idx = self.entries.iter().position(|(k, _)| {
-            k.schema_generation == generation
-                && k.sql == sql
-                && k.param_oids.as_slice() == param_oids
-        })?;
-        let (key, cached) = self.entries.remove(idx);
-        let out = cached.clone();
-        self.entries.push((key, cached));
-        Some(out)
+        let key = StatementKey {
+            sql: sql.to_owned(),
+            param_oids: param_oids.to_vec(),
+            schema_generation: self.schema_generation,
+        };
+        self.get_by_key(&key)
     }
 
     /// Look up a cached statement by [`StatementKey`], promoting it to MRU.
     pub fn get_by_key(&mut self, key: &StatementKey) -> Option<CachedStatement> {
-        self.get(&key.sql, &key.param_oids)
+        if self.capacity == 0 || key.schema_generation != self.schema_generation {
+            return None;
+        }
+        let idx = *self.index.get(key)?;
+        self.move_to_tail(idx);
+        self.slots[idx]
+            .entry
+            .as_ref()
+            .map(|(_, cached)| cached.clone())
     }
 
     /// Look up a cached statement by `sql` when the caller provided no explicit parameter OIDs and the statement has a unique match at the current generation.
@@ -319,13 +427,26 @@ impl StatementCache {
             return None;
         }
         let generation = self.schema_generation;
-        let idx = self.entries.iter().rposition(|(k, _)| {
-            k.schema_generation == generation && k.sql == sql && k.param_oids.len() == param_count
-        })?;
-        let (key, cached) = self.entries.remove(idx);
-        let out = cached.clone();
-        self.entries.push((key, cached));
-        Some(out)
+        let mut cur = self.tail;
+        let mut found = None;
+        while let Some(idx) = cur {
+            let slot = &self.slots[idx];
+            if let Some((k, _)) = &slot.entry
+                && k.schema_generation == generation
+                && k.sql == sql
+                && k.param_oids.len() == param_count
+            {
+                found = Some(idx);
+                break;
+            }
+            cur = slot.prev;
+        }
+        let idx = found?;
+        self.move_to_tail(idx);
+        self.slots[idx]
+            .entry
+            .as_ref()
+            .map(|(_, cached)| cached.clone())
     }
 
     /// Insert a prepared statement with a pre-allocated `name` into the LRU cache.
@@ -349,16 +470,26 @@ impl StatementCache {
             description,
             schema_generation: self.schema_generation,
         };
-        if let Some(idx) = self.entries.iter().position(|(k, _)| k == &key) {
-            let (_, old) = self.entries.remove(idx);
-            if old.name != cached.name {
-                self.evicted_names.push(old.name);
+        if let Some(&idx) = self.index.get(&key) {
+            if let Some((_, old)) = &mut self.slots[idx].entry {
+                if old.name != cached.name {
+                    self.evicted_names
+                        .push(std::mem::replace(&mut old.name, cached.name.clone()));
+                }
+                *old = cached.clone();
             }
-        } else if self.entries.len() >= self.capacity {
-            let (_, evicted) = self.entries.remove(0);
+            self.move_to_tail(idx);
+            return Some(cached);
+        }
+        while self.index.len() >= self.capacity {
+            let Some((_, evicted)) = self.pop_head() else {
+                break;
+            };
             self.evicted_names.push(evicted.name);
         }
-        self.entries.push((key, cached.clone()));
+        let idx = self.alloc_slot(key.clone(), cached.clone());
+        self.index.insert(key, idx);
+        self.push_tail(idx);
         Some(cached)
     }
 
@@ -388,19 +519,61 @@ impl StatementCache {
 
     /// Evict a specific statement by `name` (e.g. after `0A000` or `26000`), optionally queuing `Close(b'S', name)`.
     pub fn evict_by_name(&mut self, name: &str, queue_close: bool) {
-        if let Some(idx) = self.entries.iter().position(|(_, c)| c.name == name) {
-            let (_, removed) = self.entries.remove(idx);
+        let mut cur = self.head;
+        let mut found = None;
+        while let Some(idx) = cur {
+            let slot = &self.slots[idx];
+            if let Some((_, cached)) = &slot.entry
+                && cached.name == name
+            {
+                found = Some(idx);
+                break;
+            }
+            cur = slot.next;
+        }
+        if let Some(idx) = found
+            && let Some((key, removed)) = self.free_slot(idx)
+        {
+            self.index.remove(&key);
             if queue_close {
                 self.evicted_names.push(removed.name);
             }
         }
     }
 
+    /// Remove and unlink a specific statement by [`StatementKey`].
+    pub fn invalidate_key(&mut self, key: &StatementKey) -> Option<CachedStatement> {
+        let idx = self.index.remove(key)?;
+        self.free_slot(idx).map(|(_, cached)| cached)
+    }
+
+    /// Remove and unlink a cached statement by `(sql, param_oids)` at the current `schema_generation`.
+    pub fn remove(&mut self, sql: &str, param_oids: &[u32]) -> Option<CachedStatement> {
+        if self.capacity == 0 {
+            return None;
+        }
+        let key = StatementKey {
+            sql: sql.to_owned(),
+            param_oids: param_oids.to_vec(),
+            schema_generation: self.schema_generation,
+        };
+        self.invalidate_key(&key)
+    }
+
     /// Bump `schema_generation` and clear all cached statements without emitting SQL `DEALLOCATE`.
     pub fn invalidate_all(&mut self) {
         self.schema_generation = self.schema_generation.wrapping_add(1);
-        self.entries.clear();
+        self.slots.clear();
+        self.index.clear();
+        self.head = None;
+        self.tail = None;
+        self.free = None;
         self.evicted_names.clear();
+    }
+
+    /// Bump `schema_generation` and clear all cached statements.
+    pub fn clear(&mut self) {
+        self.invalidate_all();
     }
 
     /// Clear all cached statements and queued evictions during `DISCARD ALL` pool return reset.
@@ -411,8 +584,17 @@ impl StatementCache {
     /// Bump `schema_generation` and queue all live cached statements for protocol `Close(b'S', name)`.
     pub fn invalidate_and_queue_close(&mut self) {
         self.schema_generation = self.schema_generation.wrapping_add(1);
-        for (_, cached) in self.entries.drain(..) {
-            self.evicted_names.push(cached.name);
+        let mut cur = self.head;
+        while let Some(idx) = cur {
+            cur = self.slots[idx].next;
+            if let Some((_, cached)) = self.slots[idx].entry.take() {
+                self.evicted_names.push(cached.name);
+            }
         }
+        self.slots.clear();
+        self.index.clear();
+        self.head = None;
+        self.tail = None;
+        self.free = None;
     }
 }

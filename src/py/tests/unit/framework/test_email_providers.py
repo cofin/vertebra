@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 
-from tests.unit.framework.test_distributed_queues import FakeRedisStreamClient
+from tests.unit.framework.queue_test_doubles import FakeRedisStreamClient
 from vertebra.framework.email import (
     EmailAttachment,
     EmailConfig,

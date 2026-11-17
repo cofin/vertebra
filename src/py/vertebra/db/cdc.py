@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import threading
 from typing import TYPE_CHECKING, Any
 
 from vertebra.typing import FrozenBaseStruct
@@ -65,7 +66,7 @@ class CDCConfig(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):
 class ChangeFeed:
     """Publish change-feed envelopes with bounded history and spill storage."""
 
-    __slots__ = ("_config", "_history", "_listeners", "_next_id", "_spill_store", "_store")
+    __slots__ = ("_config", "_history", "_id_lock", "_listeners", "_next_id", "_spill_store", "_store")
 
     def __init__(
         self,
@@ -79,6 +80,7 @@ class ChangeFeed:
         self._history: collections.deque[ChangeEvent] = collections.deque(maxlen=self._config.max_history_size)
         self._listeners: list[Any] = []
         self._next_id: int = 1
+        self._id_lock = threading.Lock()
 
     @property
     def config(self) -> CDCConfig:
@@ -92,51 +94,54 @@ class ChangeFeed:
 
     def add_listener(self, callback: Any) -> None:
         """Register a listener callback invoked with each published ChangeEvent."""
-        self._listeners.append(callback)
+        with self._id_lock:
+            self._listeners.append(callback)
 
     def publish_event(self, operation: str, payload: dict[str, Any]) -> tuple[str, ChangeEvent]:
         """Encode an event, spilling payloads that exceed the inline byte threshold."""
-        event_id = self._next_id
-        self._next_id += 1
         encoded = encode_json_bytes(payload)
         spilled = len(encoded) > self._config.spill_threshold_bytes
-        if spilled:
-            prefix = self._config.spill_prefix.rstrip("/")
-            spill_key = f"{prefix}/{event_id}.json" if prefix else f"{event_id}.json"
-            if self._store is not None:
-                self._store.put(spill_key, encoded)
+        with self._id_lock:
+            event_id = self._next_id
+            self._next_id += 1
+            if spilled:
+                prefix = self._config.spill_prefix.rstrip("/")
+                spill_key = f"{prefix}/{event_id}.json" if prefix else f"{event_id}.json"
+                if self._store is not None:
+                    self._store.put(spill_key, encoded)
+                else:
+                    self._spill_store[event_id] = payload
+                    if len(self._spill_store) > self._config.max_memory_spills:
+                        self._spill_store.popitem(last=False)
+                wire_envelope = encode_json(
+                    {
+                        "event_id": event_id,
+                        "channel": self._config.channel,
+                        "operation": operation,
+                        "spilled": True,
+                        "spill_key": spill_key,
+                    }
+                )
             else:
-                self._spill_store[event_id] = payload
-                if len(self._spill_store) > self._config.max_memory_spills:
-                    self._spill_store.popitem(last=False)
-            wire_envelope = encode_json(
-                {
-                    "event_id": event_id,
-                    "channel": self._config.channel,
-                    "operation": operation,
-                    "spilled": True,
-                    "spill_key": spill_key,
-                }
+                wire_envelope = encode_json(
+                    {
+                        "event_id": event_id,
+                        "channel": self._config.channel,
+                        "operation": operation,
+                        "spilled": False,
+                        "payload": payload,
+                    }
+                )
+            evt = ChangeEvent(
+                event_id=event_id,
+                channel=self._config.channel,
+                operation=operation,
+                payload=payload,
+                spilled=spilled,
             )
-        else:
-            wire_envelope = encode_json(
-                {
-                    "event_id": event_id,
-                    "channel": self._config.channel,
-                    "operation": operation,
-                    "spilled": False,
-                    "payload": payload,
-                }
-            )
-        evt = ChangeEvent(
-            event_id=event_id,
-            channel=self._config.channel,
-            operation=operation,
-            payload=payload,
-            spilled=spilled,
-        )
-        self._history.append(evt)
-        for listener in tuple(self._listeners):
+            self._history.append(evt)
+            listeners = tuple(self._listeners)
+        for listener in listeners:
             listener(evt)
         return wire_envelope, evt
 
@@ -152,11 +157,12 @@ class ChangeFeed:
                 spill_key = str(decoded.get("spill_key") or default_key)
                 payload = dict(decode_json(self._store.get(spill_key)))
             else:
-                if event_id not in self._spill_store:
-                    msg = f"Evicted or unknown in-memory CDC spill id: {event_id}"
-                    raise KeyError(msg)
-                payload = self._spill_store[event_id]
-                self._spill_store.move_to_end(event_id)
+                with self._id_lock:
+                    if event_id not in self._spill_store:
+                        msg = f"Evicted or unknown in-memory CDC spill id: {event_id}"
+                        raise KeyError(msg)
+                    payload = self._spill_store[event_id]
+                    self._spill_store.move_to_end(event_id)
         else:
             payload = dict(decoded.get("payload") or {})
 
@@ -170,7 +176,9 @@ class ChangeFeed:
 
     def replay_since(self, last_event_id: int) -> list[ChangeEvent]:
         """Return all buffered ``ChangeEvent`` items with ``event_id > last_event_id``."""
-        return [evt for evt in self._history if evt.event_id > last_event_id]
+        with self._id_lock:
+            history = tuple(self._history)
+        return [evt for evt in history if evt.event_id > last_event_id]
 
     def flush_to_parquet(self, path: str) -> PutResult:
         """Flush in-memory history events to a PyArrow Parquet object in the attached ObjectStore."""
@@ -188,6 +196,8 @@ class ChangeFeed:
                 ("payload", pa.string()),
             ]
         )
+        with self._id_lock:
+            history = tuple(self._history)
         records = [
             {
                 "event_id": evt.event_id,
@@ -196,7 +206,7 @@ class ChangeFeed:
                 "spilled": evt.spilled,
                 "payload": encode_json(evt.payload),
             }
-            for evt in self._history
+            for evt in history
         ]
         table = pa.Table.from_pylist(records, schema=schema)
         sink = pa.BufferOutputStream()

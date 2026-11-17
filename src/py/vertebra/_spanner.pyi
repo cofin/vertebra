@@ -1,7 +1,55 @@
 """Type stubs for the vertebra._spanner native extension module."""
 
 from collections.abc import Awaitable, Sequence
-from typing import Any, final
+from typing import Any, TypedDict, final, type_check_only
+
+@type_check_only
+class SpannerFieldSchema(TypedDict):
+    """Cloud Spanner query result column schema descriptor."""
+
+    name: str
+    """Result column name."""
+    type: str
+    """Cloud Spanner column type identifier."""
+
+@type_check_only
+class SpannerQueryResult(TypedDict):
+    """Cloud Spanner query result payload."""
+
+    columns: list[str]
+    """Ordered output column names."""
+    schema: list[SpannerFieldSchema]
+    """Schema descriptors for result columns."""
+    rows: list[list[Any]]
+    """Decoded tabular result rows."""
+    row_count_exact: int | None
+    """Exact affected row count for DML statements."""
+    row_count_lower_bound: int | None
+    """Lower bound on affected row count for PDML statements."""
+
+@type_check_only
+class SpannerCommitResult(TypedDict):
+    """Cloud Spanner transaction commit summary."""
+
+    commit_timestamp_micros: int | None
+    """Server-assigned commit timestamp in Unix microseconds."""
+    mutation_count: int | None
+    """Applied mutation count returned when commit stats are enabled."""
+    retry_count: int
+    """Number of transient retry attempts performed before commit succeeded."""
+
+@type_check_only
+class SpannerBatchWriteResult(TypedDict):
+    """Cloud Spanner BatchWrite mutation group status payload."""
+
+    indexes: list[int]
+    """Indexes of mutation groups covered by this status entry."""
+    status_code: int
+    """gRPC status code for the mutation group batch."""
+    status_message: str
+    """Human-readable status message returned by Spanner."""
+    commit_timestamp_micros: int | None
+    """Commit timestamp in Unix microseconds when the batch succeeded."""
 
 __version__: str
 FREE_THREADED: bool
@@ -30,7 +78,7 @@ class SyncSpannerReadWriteTransaction:
         sql: str,
         params_json: str | None = None,
         request_tag: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> SpannerQueryResult:
         """Execute a SQL query inside this transaction and return result columns, schema, and rows."""
         ...
     def execute_dml(
@@ -51,7 +99,7 @@ class SyncSpannerReadWriteTransaction:
     def commit(
         self,
         mutations_json: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> SpannerCommitResult:
         """Commit this transaction with optional buffered mutations and return commit statistics."""
         ...
     def rollback(self) -> None:
@@ -71,7 +119,7 @@ class AsyncSpannerReadWriteTransaction:
         sql: str,
         params_json: str | None = None,
         request_tag: str | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[SpannerQueryResult]:
         """Execute a SQL query inside this transaction asynchronously."""
         ...
     def execute_dml(
@@ -92,7 +140,7 @@ class AsyncSpannerReadWriteTransaction:
     def commit(
         self,
         mutations_json: str | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[SpannerCommitResult]:
         """Commit this transaction with optional buffered mutations asynchronously."""
         ...
     def rollback(self) -> Awaitable[None]:
@@ -162,7 +210,7 @@ class SyncSpannerClient:
         params_json: str | None = None,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> dict[str, Any]:
+    ) -> SpannerQueryResult:
         """Execute a streaming SQL read at the requested staleness bound."""
         ...
     def execute_dml(
@@ -196,14 +244,14 @@ class SyncSpannerClient:
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
         max_commit_delay_ms: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> SpannerCommitResult:
         """Commit a JSON-encoded list of Spanner mutations and return commit statistics."""
         ...
     def batch_write(
         self,
         mutation_groups_json: str,
         exclude_txn_from_change_streams: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SpannerBatchWriteResult]:
         """Commit independent mutation groups via `BatchWrite` and return per-group statuses."""
         ...
     def update_ddl(
@@ -220,7 +268,7 @@ class SyncSpannerClient:
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> dict[str, Any]:
+    ) -> SpannerQueryResult:
         """Execute a parallel `PartitionQuery` read with optional Spanner Data Boost."""
         ...
     def begin_read_write_transaction(
@@ -299,7 +347,7 @@ class AsyncSpannerClient:
         params_json: str | None = None,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[SpannerQueryResult]:
         """Execute a streaming SQL read asynchronously on the shared Tokio runtime."""
         ...
     def execute_dml(
@@ -333,14 +381,14 @@ class AsyncSpannerClient:
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
         max_commit_delay_ms: int | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[SpannerCommitResult]:
         """Commit a JSON-encoded list of Spanner mutations asynchronously."""
         ...
     def batch_write(
         self,
         mutation_groups_json: str,
         exclude_txn_from_change_streams: bool = False,
-    ) -> Awaitable[list[dict[str, Any]]]:
+    ) -> Awaitable[list[SpannerBatchWriteResult]]:
         """Commit independent mutation groups asynchronously via `BatchWrite`."""
         ...
     def update_ddl(
@@ -357,7 +405,7 @@ class AsyncSpannerClient:
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[SpannerQueryResult]:
         """Execute a parallel `PartitionQuery` read asynchronously with optional Data Boost."""
         ...
     def begin_read_write_transaction(

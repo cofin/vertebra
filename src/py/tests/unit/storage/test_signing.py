@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import calendar
+import hashlib
+import hmac as py_hmac
 import json
 import os
 import subprocess
@@ -856,3 +858,153 @@ async def test_r2_config_custom_domain_forwards_option_and_presigns_on_s3_api_ho
     assert signed.startswith("https://acct123456.r2.cloudflarestorage.com/r2-assets/reports/q4.parquet?")
     assert "assets.example.com" not in signed
     assert verifier.verify_presigned_url(signed, method="GET", timestamp=ts + 10)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider_kind", ["hmac", "s3", "r2", "gcs-rsa", "gcs-hmac", "azure", "oci"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_verify_presigned_url_multicloud_matrix(provider_kind: str, asynchronous: bool) -> None:
+    """Verify SyncObjectStore and AsyncObjectStore presigned URL verification across all providers."""
+    ts = 1_700_000_000
+    object_key = "reports/q4.parquet"
+    az_key = base64.b64encode(b"0123456789abcdef0123456789abcdef").decode("ascii")
+
+    if provider_kind == "hmac":
+        signing = SigningConfig(
+            provider="hmac",
+            hmac_secret="test-token-placeholder-hmac-32b",
+            endpoint="https://cdn.example.com",
+        )
+        store_url = "memory://"
+    elif provider_kind == "s3":
+        signing = SigningConfig(
+            provider="s3",
+            bucket="s3-analytics",
+            region="us-east-1",
+            access_key_id="test-token-placeholder",
+            secret_access_key="test-token-placeholder-secret",
+        )
+        store_url = "memory://"
+    elif provider_kind == "r2":
+        signing = SigningConfig(
+            provider="s3",
+            bucket="r2-assets",
+            region="auto",
+            access_key_id="test-token-placeholder",
+            secret_access_key="test-token-placeholder-secret",
+            endpoint="https://acct123456.r2.cloudflarestorage.com",
+        )
+        store_url = "memory://"
+    elif provider_kind == "gcs-rsa":
+        pem_key = subprocess.check_output(
+            ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        pub_pem = subprocess.check_output(
+            ["openssl", "rsa", "-pubout"],
+            input=pem_key,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        signing = SigningConfig(
+            provider="gcs",
+            bucket="gcs-rsa-bucket",
+            service_account_email="signer@test-gcp-proj.iam.gserviceaccount.com",
+            private_key_pem=pem_key,
+            verify_key_pem=pub_pem,
+        )
+        store_url = "memory://"
+    elif provider_kind == "gcs-hmac":
+        signing = SigningConfig(
+            provider="gcs",
+            bucket="gcs-hmac-bucket",
+            access_key_id="GOOG1ETESTPLACEHOLDER",
+            secret_access_key="test-token-placeholder-gcs-secret",
+        )
+        store_url = "memory://"
+    elif provider_kind == "azure":
+        signing = SigningConfig(
+            provider="azure",
+            account="devstoreaccount1",
+            container="az-lake",
+            azure_access_key=az_key,
+        )
+        store_url = "memory://"
+    else:
+        signing = SigningConfig(
+            provider="oci",
+            bucket="oci-warehouse",
+            namespace="mytenancy",
+            region="us-ashburn-1",
+            par_token="test-token-placeholder",
+        )
+        store_url = "memory://"
+
+    store: SyncObjectStore | AsyncObjectStore = (
+        AsyncObjectStore(store_url, signing=signing) if asynchronous else SyncObjectStore(store_url, signing=signing)
+    )
+
+    if provider_kind == "gcs-hmac":
+        canonical_uri, canonical_qs, _, sts = native_storage_mod.build_gcs_v4_canonical_request(
+            "gcs-hmac-bucket",
+            "GOOG1ETESTPLACEHOLDER",
+            "GET",
+            object_key,
+            600,
+            ts,
+            None,
+        )
+        assert sts.startswith("GOOG4-RSA-SHA256")
+        assert "X-Goog-Credential=" in canonical_qs
+        assert canonical_uri == "/gcs-hmac-bucket/reports/q4.parquet"
+
+        datestamp = time.strftime("%Y%m%d", time.gmtime(ts))
+        k_date = py_hmac.new(b"GOOG4test-token-placeholder-gcs-secret", datestamp.encode(), hashlib.sha256).digest()
+        k_region = py_hmac.new(k_date, b"auto", hashlib.sha256).digest()
+        k_service = py_hmac.new(k_region, b"storage", hashlib.sha256).digest()
+        k_signing = py_hmac.new(k_service, b"goog4_request", hashlib.sha256).digest()
+        hmac_qs = canonical_qs.replace("GOOG4-RSA-SHA256", "GOOG4-HMAC-SHA256")
+        hmac_canon_req = f"GET\n{canonical_uri}\n{hmac_qs}\nhost:storage.googleapis.com\n\nhost\nUNSIGNED-PAYLOAD"
+        hmac_sts = (
+            f"GOOG4-HMAC-SHA256\n{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(ts))}"
+            f"\n{datestamp}/auto/storage/goog4_request\n"
+            f"{hashlib.sha256(hmac_canon_req.encode()).hexdigest()}"
+        )
+        sig_hex = py_hmac.new(k_signing, hmac_sts.encode(), hashlib.sha256).hexdigest()
+        signed_url = f"https://storage.googleapis.com{canonical_uri}?{hmac_qs}&X-Goog-Signature={sig_hex}"
+    elif asynchronous:
+        assert isinstance(store, AsyncObjectStore)
+        signed_url = await store.presign_get(object_key, expires_in_secs=600, timestamp=ts)
+    else:
+        assert isinstance(store, SyncObjectStore)
+        signed_url = store.presign_get(object_key, expires_in_secs=600, timestamp=ts)
+
+    assert store.verify_presigned_url(signed_url, method="GET", timestamp=ts + 10) is True
+
+    if provider_kind == "oci":
+        assert store.verify_presigned_url(signed_url, method="GET", timestamp=ts + 10, object_path=object_key) is True
+        assert store.verify_presigned_url(signed_url, method="GET", timestamp=ts + 10, object_path="other.bin") is False
+        assert store.verify_presigned_url(signed_url, method="GET", timestamp=ts + 700, expires_at=ts + 600) is False
+        assert store.verify_presigned_url(signed_url.replace("test-token-placeholder", "tampered-tok")) is False
+    else:
+        assert store.verify_presigned_url(signed_url, method="PUT", timestamp=ts + 10) is False
+        assert store.verify_presigned_url(signed_url, method="GET", timestamp=ts + 700) is False
+        assert store.verify_presigned_url(signed_url[:-4] + "0000", method="GET", timestamp=ts + 10) is False
+
+
+def test_verify_presigned_url_gcs_missing_key_raises_value_error() -> None:
+    """Verify GCS presigned URL verification fails loudly with ValueError when verification keys are missing."""
+    store = SyncObjectStore(
+        "memory://",
+        signing=SigningConfig(
+            provider="gcs",
+            bucket="ml-artifacts",
+            service_account_email="signer@project.iam.gserviceaccount.com",
+            access_token="test-token-placeholder",
+        ),
+    )
+    with pytest.raises(ValueError, match="verify_key_pem"):
+        store.verify_presigned_url(
+            "https://storage.googleapis.com/ml-artifacts/test.bin?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+        )

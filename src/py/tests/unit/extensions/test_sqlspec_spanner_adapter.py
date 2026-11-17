@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import subprocess
 import sys
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -27,6 +28,9 @@ from sqlspec.exceptions import (
     SQLSpecError,
     UniqueViolationError,
 )
+from sqlspec.exceptions import (
+    ImproperConfigurationError as SQLSpecImproperConfigurationError,
+)
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 
 from vertebra._vertebra import SpannerAbortedError, SpannerError
@@ -45,24 +49,31 @@ from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerAsyncADKMemoryStore,
     SpannerAsyncADKStore,
     SpannerAsyncConfig,
+    SpannerAsyncConnectionContext,
     SpannerAsyncDataDictionary,
     SpannerAsyncDriver,
+    SpannerAsyncSessionContext,
     SpannerConnectionBatch,
+    SpannerConnectionParams,
     SpannerConnectionShim,
+    SpannerDriverFeatures,
     SpannerEventQueueStore,
     SpannerLitestarStore,
+    SpannerPoolParams,
     SpannerSyncADKArtifactStore,
     SpannerSyncADKMemoryStore,
     SpannerSyncADKStore,
     SpannerSyncConfig,
+    SpannerSyncConnectionContext,
     SpannerSyncDataDictionary,
     SpannerSyncDriver,
+    SpannerSyncSessionContext,
     encode_spanner_parameters,
     map_spanner_exception,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 _SPANNER_ADAPTER_DIR = (
     Path(__file__).resolve().parents[3] / "vertebra" / "extensions" / "sqlspec" / "adapters" / "spanner"
@@ -302,15 +313,33 @@ class _RecordingSpannerAsyncNative:
 
 
 def test_spanner_lazy_exports_and_no_adk_eager_import() -> None:
-    """Verify PEP 562 lazy Spanner exports do not eagerly import ``google.adk``."""
+    """Verify PEP 562 lazy Spanner exports do not eagerly import ``pyarrow`` or ``google.adk``."""
+    probe = (
+        "import sys; "
+        "import vertebra.extensions.sqlspec.adapters.spanner as sp; "
+        "cfg = sp.SpannerSyncConfig(project_id='p', instance_id='i', database_id='d'); "
+        "acfg = sp.SpannerAsyncConfig(project_id='p', instance_id='i', database_id='d'); "
+        "assert cfg.dialect == 'spanner' and acfg.dialect == 'spanner'; "
+        "assert 'pyarrow' not in sys.modules; "
+        "assert 'google.adk' not in sys.modules"
+    )
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+
     pkg = import_module("vertebra.extensions.sqlspec.adapters.spanner")
-    assert "google.adk" not in sys.modules
     assert pkg.SpannerSyncConfig is SpannerSyncConfig
     assert pkg.SpannerAsyncConfig is SpannerAsyncConfig
     assert pkg.SpangresSyncConfig is SpangresSyncConfig
     assert pkg.SpangresAsyncConfig is SpangresAsyncConfig
     assert pkg.SpannerSyncDriver is SpannerSyncDriver
     assert pkg.SpannerAsyncDriver is SpannerAsyncDriver
+    assert pkg.SpannerSyncConnectionContext is SpannerSyncConnectionContext
+    assert pkg.SpannerAsyncConnectionContext is SpannerAsyncConnectionContext
+    assert pkg.SpannerSyncSessionContext is SpannerSyncSessionContext
+    assert pkg.SpannerAsyncSessionContext is SpannerAsyncSessionContext
+    assert pkg.SpannerConnectionParams is SpannerConnectionParams
+    assert pkg.SpannerPoolParams is SpannerPoolParams
+    assert pkg.SpannerDriverFeatures is SpannerDriverFeatures
     assert pkg.SpannerSyncADKStore is SpannerSyncADKStore
     assert pkg.SpannerAsyncADKStore is SpannerAsyncADKStore
     assert pkg.SpannerSyncADKMemoryStore is SpannerSyncADKMemoryStore
@@ -323,6 +352,8 @@ def test_spanner_lazy_exports_and_no_adk_eager_import() -> None:
     assert pkg.SpannerAsyncDataDictionary is SpannerAsyncDataDictionary
     assert pkg.SpannerConnectionShim is SpannerConnectionShim
     assert pkg.SpannerConnectionBatch is SpannerConnectionBatch
+    with pytest.raises(AttributeError):
+        _ = pkg.NonExistentSpannerExport
 
 
 @pytest.mark.parametrize("module_path", sorted(_SPANNER_ADAPTER_DIR.glob("*.py")))
@@ -434,6 +465,42 @@ def test_spanner_and_spangres_config_and_store_resolution() -> None:
             store_suffix="ADKMemoryStore",
         )
         is SpannerAsyncADKMemoryStore
+    )
+    assert (
+        resolve_extension_store_class(
+            sync_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is SpannerSyncADKArtifactStore
+    )
+    assert (
+        resolve_extension_store_class(
+            async_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is SpannerAsyncADKArtifactStore
+    )
+    assert (
+        resolve_extension_store_class(
+            pg_sync_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is SpannerSyncADKArtifactStore
+    )
+    assert (
+        resolve_extension_store_class(
+            pg_async_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is SpannerAsyncADKArtifactStore
     )
 
 
@@ -824,3 +891,242 @@ def test_map_spanner_exception_translations(exc: BaseException, expected_cls: ty
         assert mapped is None
     else:
         assert isinstance(mapped, expected_cls)
+
+
+@pytest.mark.parametrize("method_name", ["select_to_arrow", "load_from_arrow"])
+def test_spanner_arrow_missing_dependency_error(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    """Verify Arrow methods raise ``MissingDependencyError`` with ``extra='arrow'`` when ``pyarrow`` is absent."""
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    sync_cfg = SpannerSyncConfig(
+        project_id="proj-spanner",
+        instance_id="inst-spanner",
+        database_id="db-spanner",
+        connection_instance=_RecordingSpannerSyncNative(),
+    )
+    async_cfg = SpannerAsyncConfig(
+        project_id="proj-async",
+        instance_id="inst-async",
+        database_id="db-async",
+        connection_instance=_RecordingSpannerAsyncNative(),
+    )
+
+    with sync_cfg.provide_session() as sync_driver, pytest.raises(MissingDependencyError, match="arrow"):
+        if method_name == "select_to_arrow":
+            sync_driver.select_to_arrow("SELECT 1")
+        else:
+            sync_driver.load_from_arrow("items", b"arrow-bytes")
+
+    async def _run_async() -> None:
+        async with async_cfg.provide_session() as async_driver:
+            with pytest.raises(MissingDependencyError, match="arrow"):
+                if method_name == "select_to_arrow":
+                    await async_driver.select_to_arrow("SELECT 1")
+                else:
+                    await async_driver.load_from_arrow("items", b"arrow-bytes")
+
+    asyncio.run(_run_async())
+
+
+def test_spanner_sessions_distinct_drivers_closed_and_stale_reads() -> None:
+    """Verify concurrent/repeated ``provide_session`` returns distinct drivers, marks closed, and preserves stale reads."""
+    sync_native = _RecordingSpannerSyncNative()
+    sync_cfg = SpannerSyncConfig(
+        project_id="proj-spanner",
+        instance_id="inst-spanner",
+        database_id="db-spanner",
+        connection_instance=sync_native,
+        reset_session_on_release=True,
+    )
+    with sync_cfg.provide_session() as driver_one, sync_cfg.provide_session() as driver_two:
+        assert driver_one is not driver_two
+        assert driver_one.connection is sync_native
+        assert driver_two.connection is sync_native
+    assert not driver_one.connection
+    assert not driver_two.connection
+    assert repr(driver_one.connection) == "<ClosedConnection>"
+    assert repr(driver_two.connection) == "<ClosedConnection>"
+
+    with sync_cfg.provide_connection("ignored-arg", custom_flag=True) as conn:
+        assert conn is sync_native
+
+    staleness = StalenessBound.exact_staleness(2500)
+    with sync_cfg.provide_session(transaction=False, read_only=True, staleness=staleness) as ro_drv:
+        assert ro_drv.is_read_only is True
+        assert ro_drv.in_transaction is False
+        assert ro_drv.staleness is staleness
+    assert not any(call[0] == "begin" for call in sync_native.calls)
+
+    with pytest.raises(RuntimeError, match="boom"), sync_cfg.provide_session(transaction=True) as tx_drv:
+        assert tx_drv.in_transaction is True
+        raise RuntimeError("boom")
+    assert tx_drv.in_transaction is False
+    assert any(call[0] == "rollback" for call in sync_native.calls)
+
+    async_native = _RecordingSpannerAsyncNative()
+    async_cfg = SpannerAsyncConfig(
+        project_id="proj-async",
+        instance_id="inst-async",
+        database_id="db-async",
+        connection_instance=async_native,
+        reset_session_on_release=True,
+    )
+
+    async def _verify_async() -> None:
+        async with async_cfg.provide_session() as a_one, async_cfg.provide_session() as a_two:
+            assert a_one is not a_two
+            assert a_one.connection is async_native
+            assert a_two.connection is async_native
+        assert not a_one.connection
+        assert not a_two.connection
+        assert repr(a_one.connection) == "<ClosedConnection>"
+        assert repr(a_two.connection) == "<ClosedConnection>"
+
+        async with async_cfg.provide_connection("ignored-arg", custom_flag=True) as a_conn:
+            assert a_conn is async_native
+
+        async with async_cfg.provide_session(transaction=False, read_only=True, staleness=staleness) as a_ro:
+            assert a_ro.is_read_only is True
+            assert a_ro.in_transaction is False
+            assert a_ro.staleness is staleness
+
+    asyncio.run(_verify_async())
+
+
+@pytest.mark.parametrize(
+    ("replica_spec", "expected_project", "expected_instance", "expected_database"),
+    [
+        ("spanner://ro-proj/ro-inst/ro-db", "ro-proj", "ro-inst", "ro-db"),
+        ("db-ro", "primary-proj", "primary-inst", "db-ro"),
+        (
+            {"database_id": "db-dict", "staleness": StalenessBound.exact_staleness(1500)},
+            "primary-proj",
+            "primary-inst",
+            "db-dict",
+        ),
+    ],
+)
+def test_spanner_replicas_routing_and_validation(
+    replica_spec: str | dict[str, Any],
+    expected_project: str,
+    expected_instance: str,
+    expected_database: str,
+) -> None:
+    """Verify ``replicas=`` configures derived Spanner and Spangres replica pools and rejects ``replicas=True``."""
+    sync_primary = SpannerSyncConfig(
+        project_id="primary-proj",
+        instance_id="primary-inst",
+        database_id="db-primary",
+        replicas=[replica_spec],
+    )
+    assert "default" in sync_primary.replica_groups
+    replica_cfg = sync_primary.replica_groups["default"].specs[0].config
+    assert isinstance(replica_cfg, SpannerSyncConfig)
+    assert replica_cfg.is_replica is True
+    assert replica_cfg.resolve_spanner_config().project_id == expected_project
+    assert replica_cfg.resolve_spanner_config().instance_id == expected_instance
+    assert replica_cfg.resolve_spanner_config().database_id == expected_database
+
+    async_primary = SpannerAsyncConfig(
+        project_id="primary-proj",
+        instance_id="primary-inst",
+        database_id="db-primary",
+        replicas=[replica_spec],
+    )
+    assert "default" in async_primary.replica_groups
+    async_replica = async_primary.replica_groups["default"].specs[0].config
+    assert isinstance(async_replica, SpannerAsyncConfig)
+    assert async_replica.is_replica is True
+    assert async_replica.resolve_spanner_config().database_id == expected_database
+
+    pg_primary = SpangresSyncConfig(
+        project_id="primary-proj",
+        instance_id="primary-inst",
+        database_id="db-primary",
+        replicas=[replica_spec],
+    )
+    pg_replica = pg_primary.replica_groups["default"].specs[0].config
+    assert isinstance(pg_replica, SpangresSyncConfig)
+    assert pg_replica.dialect == "spangres"
+
+    with pytest.raises((ImproperConfigurationError, SQLSpecImproperConfigurationError)):
+        SpannerSyncConfig(
+            project_id="primary-proj",
+            instance_id="primary-inst",
+            database_id="db-primary",
+            replicas=True,
+        )
+
+
+def test_spanner_select_to_storage_streaming(tmp_path: Path) -> None:
+    """Verify ``select_to_storage`` streams rows through ``_select_for_storage`` and ``_write_storage_result``."""
+    sync_native = _RecordingSpannerSyncNative()
+    sync_native.description_cols = ["id", "name"]
+    sync_native.description_rows = [(1, "alpha"), (2, "beta")]
+    sync_cfg = SpannerSyncConfig(
+        project_id="proj-spanner",
+        instance_id="inst-spanner",
+        database_id="db-spanner",
+        connection_instance=sync_native,
+    )
+    sync_out = tmp_path / "sync-export.parquet"
+    with sync_cfg.provide_session() as sync_drv:
+        sync_job = sync_drv.select_to_storage("SELECT id, name FROM users", sync_out, format_hint="parquet")
+    assert sync_job.status == "completed"
+    assert sync_out.exists()
+    assert sync_job.telemetry["rows_processed"] == 2
+
+    async_native = _RecordingSpannerAsyncNative()
+    async_native.description_cols = ["id", "name"]
+    async_native.description_rows = [(3, "gamma")]
+    async_cfg = SpannerAsyncConfig(
+        project_id="proj-async",
+        instance_id="inst-async",
+        database_id="db-async",
+        connection_instance=async_native,
+    )
+    async_out = tmp_path / "async-export.parquet"
+
+    async def _run_async() -> Any:
+        async with async_cfg.provide_session() as async_drv:
+            return await async_drv.select_to_storage("SELECT id, name FROM users", async_out, format_hint="parquet")
+
+    async_job = asyncio.run(_run_async())
+    assert async_job.status == "completed"
+    assert async_out.exists()
+    assert async_job.telemetry["rows_processed"] == 1
+
+
+def test_spanner_adapter_classes_use_slots() -> None:
+    """Verify Spanner config, driver, and session/connection context classes enforce ``__slots__``."""
+    sync_cfg = SpannerSyncConfig(
+        project_id="proj-spanner",
+        instance_id="inst-spanner",
+        database_id="db-spanner",
+        connection_instance=_RecordingSpannerSyncNative(),
+    )
+    async_cfg = SpannerAsyncConfig(
+        project_id="proj-async",
+        instance_id="inst-async",
+        database_id="db-async",
+        connection_instance=_RecordingSpannerAsyncNative(),
+    )
+    pg_sync = SpangresSyncConfig(project_id="proj-spanner", instance_id="inst-spanner", database_id="db-spanner")
+    pg_async = SpangresAsyncConfig(project_id="proj-async", instance_id="inst-async", database_id="db-async")
+
+    instances: list[Any] = [
+        sync_cfg,
+        async_cfg,
+        pg_sync,
+        pg_async,
+        sync_cfg.create_driver(),
+        async_cfg.create_driver(),
+        SpannerSyncConnectionContext(sync_cfg),
+        SpannerAsyncConnectionContext(async_cfg),
+        SpannerSyncSessionContext(sync_cfg),
+        SpannerAsyncSessionContext(async_cfg),
+    ]
+    for obj in instances:
+        assert not hasattr(obj, "__dict__"), f"{type(obj).__name__} unexpectedly exposes __dict__"

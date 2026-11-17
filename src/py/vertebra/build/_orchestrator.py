@@ -259,7 +259,7 @@ class BuildOrchestrator:
             manifest_content = manifest_gen.generate(routes)
             (out / "manifest.json").write_text(manifest_content, encoding="utf-8")
 
-            (out / "routes.ts").write_text(_render_routes_ts(routes), encoding="utf-8")
+            (out / "routes.ts").write_text(self._render_routes_ts(routes), encoding="utf-8")
             self.export_litestar_artifacts(app, output_dir=out)
 
             logger.info("Codegen complete: %d routes", len(routes))
@@ -267,16 +267,78 @@ class BuildOrchestrator:
             logger.exception("Codegen failed")
             raise
 
+    @staticmethod
+    def _render_routes_ts(routes: list[RouteMetadata]) -> str:
+        """Render typed TypeScript HTTP and WebSocket route registries and wsUrl helper."""
+        lines = [
+            "// Auto-generated route tree",
+            "export const routes = {",
+        ]
+        for route in sorted(routes, key=lambda r: r.operation_id):
+            escaped_op = encode_json(route.operation_id)
+            lines.append(f"  {escaped_op}: {{ method: {encode_json(route.method)}, path: {encode_json(route.path)} }},")
+        lines.append("} as const;")
 
-def _render_routes_ts(routes: list[RouteMetadata]) -> str:
-    """Render a typed TypeScript routes mapping object."""
-    lines = [
-        "// Auto-generated route tree",
-        "export const routes = {",
-    ]
-    for route in sorted(routes, key=lambda r: r.operation_id):
-        escaped_op = encode_json(route.operation_id)
-        lines.append(f"  {escaped_op}: {{ method: {encode_json(route.method)}, path: {encode_json(route.path)} }},")
-    lines.append("} as const;")
-    lines.append("")
-    return "\n".join(lines)
+        ws_routes = sorted(
+            (route for route in routes if route.protocol == "websocket"),
+            key=lambda r: r.channel_key or r.operation_id,
+        )
+        if ws_routes:
+            lines.extend(
+                [
+                    "",
+                    "export const websocketRoutes = {",
+                ]
+            )
+            for route in ws_routes:
+                key = encode_json(route.channel_key or route.operation_id)
+                lines.append(f'  {key}: {{ method: "WS", path: {encode_json(route.path)} }},')
+            lines.extend(
+                [
+                    "} as const;",
+                    "",
+                    "export type WebSocketRouteName = keyof typeof websocketRoutes;",
+                    "",
+                    "export function wsUrl<K extends WebSocketRouteName>(",
+                    "  name: K,",
+                    "  params?: Record<string, string | number | boolean>,",
+                    "  options?: { baseUrl?: string; query?: Record<string, string | number | boolean | null | undefined> },",
+                    "): string {",
+                    "  const entry = websocketRoutes[name];",
+                    "  if (!entry) {",
+                    "    throw new Error(`Unknown WebSocket route: ${name}`);",
+                    "  }",
+                    "  let path: string = entry.path;",
+                    "  if (params) {",
+                    "    for (const [k, v] of Object.entries(params)) {",
+                    "      const encoded = encodeURIComponent(String(v));",
+                    "      path = path",
+                    '        .replace(new RegExp(`\\\\{${k}(?::[^}]+)?\\\\}`, "g"), encoded)',
+                    '        .replace(new RegExp(`:${k}(?=/|$)`, "g"), encoded);',
+                    "    }",
+                    "  }",
+                    '  if (!path.startsWith("/")) {',
+                    "    path = `/${path}`;",
+                    "  }",
+                    "  const rawBase =",
+                    '    options?.baseUrl ?? (typeof window !== "undefined" && window.location ? window.location.origin : "ws://localhost");',
+                    "  const wsBase = rawBase",
+                    '    .replace(/^http:/i, "ws:")',
+                    '    .replace(/^https:/i, "wss:")',
+                    '    .replace(/\\/+$/, "");',
+                    "  const url = `${wsBase}${path}`;",
+                    "  if (!options?.query) {",
+                    "    return url;",
+                    "  }",
+                    "  const pairs: string[] = [];",
+                    "  for (const [k, v] of Object.entries(options.query)) {",
+                    "    if (v === undefined || v === null) continue;",
+                    "    pairs.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);",
+                    "  }",
+                    '  return pairs.length > 0 ? `${url}?${pairs.join("&")}` : url;',
+                    "}",
+                ]
+            )
+
+        lines.append("")
+        return "\n".join(lines)

@@ -24,6 +24,8 @@ pub mod platform;
 pub mod process;
 pub mod proto;
 pub mod protocol;
+#[cfg(feature = "pyo3")]
+pub mod py_async;
 pub mod router;
 pub mod shm;
 pub mod sync;

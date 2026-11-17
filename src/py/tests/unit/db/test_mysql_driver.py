@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import datetime
 import decimal
+import hashlib
 import importlib
+import socket
 import struct
 import sys
+import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -15,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from sqlalchemy import Column, MetaData, Table, create_engine, select, text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import vertebra.db.adapters.mysql.driver as mysql_driver_mod
 from vertebra._mysql import (
@@ -23,6 +28,7 @@ from vertebra._mysql import (
     SyncMySQLClient,
     map_mysql_error,
 )
+from vertebra._vertebra import LeaseBroker
 from vertebra.db import (
     ArrowCursor,
     AsyncPipelineCapable,
@@ -48,9 +54,12 @@ from vertebra.db.adapters.mysql import (
     compile_mysql_statement,
     map_mysql_exception,
 )
-from vertebra.db.dbapi import SyncDBAPIConnection
+from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, CloudSQLConfig, SyncCloudSQLDialer
+from vertebra.db.driver import AZURE_MYSQL_SCOPE, AwsRdsIamTokenProvider, AzureEntraTokenProvider
+from vertebra.db.driver._common import MYSQL_DIALECT_TAG
 from vertebra.extensions.sqlalchemy import (
+    AsyncMySQLDialect,
     SyncMySQLDialect,
     Vector,
 )
@@ -524,9 +533,13 @@ def test_dbapi_connection_routes_mysql_and_dialect_compilation(
 
     vec = Vector(512)
     assert vec.get_col_spec("mysql+vtb") == "VECTOR(512)"
-    dist_expr = vec.cosine_distance([0.1, 0.2], param_name="q")
-    assert dist_expr.compile_sql("mysql+vtb") == "DISTANCE_COSINE(embedding, :q)"
-    assert SyncMySQLDialect().type_descriptor(vec) is vec
+    dialect_instance: Any = SyncMySQLDialect()
+    tbl = Table("items", MetaData(), Column("embedding", vec))
+    compiled_dist = (
+        select(tbl).where(tbl.c.embedding.cosine_distance([0.1, 0.2]) < 0.5).compile(dialect=dialect_instance)
+    )
+    assert "DISTANCE_COSINE(items.embedding, ?)" in str(compiled_dist)
+    assert dialect_instance.type_descriptor(vec) is vec
     assert SyncMySQLClient is not None
     assert AsyncMySQLClient is not None
 
@@ -557,3 +570,894 @@ def test_mysql_driver_and_pipeline_resolution_identity(
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
+
+
+def test_sync_mysql_driver_uses_common_mixin_broker_and_bytes_statement_cache(
+    mysql_server: MySQLWireTestServer,
+) -> None:
+    """SyncMySQLDriver forwards broker, caches bytes StatementPlan entries, and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    cfg = MySQLConfig.from_url(mysql_server.dsn, broker=broker)
+    driver = SyncMySQLDriver(cfg)
+    assert driver.broker is broker
+    try:
+        driver.execute("CREATE TABLE broker_items (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
+        insert_sql = "INSERT INTO broker_items (id, label) VALUES (%s, %s)"
+        assert driver.execute(insert_sql, (1, "alpha")) == 1
+        assert driver.execute(insert_sql, (2, "beta")) == 1
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(MYSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 2
+        assert plan.compiled_sql == insert_sql.encode("utf-8")
+
+        with pytest.raises(NotFoundError):
+            driver.select_one("SELECT id FROM broker_items WHERE id = %s", (999,))
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_mysql_driver_uses_common_mixin_broker_and_bytes_statement_cache(
+    mysql_server: MySQLWireTestServer,
+) -> None:
+    """AsyncMySQLDriver forwards broker, caches bytes StatementPlan entries, and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    cfg = MySQLConfig.from_url(mysql_server.dsn)
+    driver = AsyncMySQLDriver(cfg, broker=broker)
+    assert driver.broker is broker
+    try:
+        await driver.execute("CREATE TABLE broker_items (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
+        insert_sql = "INSERT INTO broker_items (id, label) VALUES (%s, %s)"
+        assert await driver.execute(insert_sql, (1, "alpha")) == 1
+        assert await driver.execute(insert_sql, (2, "beta")) == 1
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(MYSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 2
+        assert plan.compiled_sql == insert_sql.encode("utf-8")
+
+        with pytest.raises(NotFoundError):
+            await driver.select_one("SELECT id FROM broker_items WHERE id = %s", (999,))
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        await driver.close()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "tail_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+def test_sync_mysql_pipeline_exit_contract(mysql_server: MySQLWireTestServer, scenario: str) -> None:
+    """SyncMySQLPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    driver = SyncMySQLDriver(MySQLConfig.from_url(mysql_server.dsn))
+    try:
+        driver.execute("CREATE TABLE pipe_r114 (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
+        if scenario == "auto_flush":
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "auto"))
+            assert driver.in_transaction is False
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [{"id": 1, "label": "auto"}]
+        elif scenario == "tail_flush":
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "first"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "tail"))
+            assert driver.in_transaction is False
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "first"},
+                {"id": 2, "label": "tail"},
+            ]
+        elif scenario == "caller_tx_rollback":
+            driver.begin()
+            driver.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "outer"))
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "inner"))
+            assert driver.in_transaction is True
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "outer"},
+                {"id": 2, "label": "inner"},
+            ]
+            driver.rollback()
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"), driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "first"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "discarded"))
+                raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == []
+        else:
+            driver.begin()
+            driver.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "outer_kept"))
+            with pytest.raises(RuntimeError, match="abort_inner"), driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "inner_flushed"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (3, "inner_discarded"))
+                raise RuntimeError("abort_inner")
+            assert driver.in_transaction is True
+            driver.commit()
+            assert driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "outer_kept"},
+            ]
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "tail_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+async def test_async_mysql_pipeline_exit_contract(mysql_server: MySQLWireTestServer, scenario: str) -> None:
+    """AsyncMySQLPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    driver = AsyncMySQLDriver(MySQLConfig.from_url(mysql_server.dsn))
+    try:
+        await driver.execute("CREATE TABLE pipe_r114 (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)")
+        if scenario == "auto_flush":
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "auto"))
+            assert driver.in_transaction is False
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "auto"},
+            ]
+        elif scenario == "tail_flush":
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "first"))
+                assert await pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "tail"))
+            assert driver.in_transaction is False
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "first"},
+                {"id": 2, "label": "tail"},
+            ]
+        elif scenario == "caller_tx_rollback":
+            await driver.begin()
+            await driver.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "outer"))
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "inner"))
+            assert driver.in_transaction is True
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "outer"},
+                {"id": 2, "label": "inner"},
+            ]
+            await driver.rollback()
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"):
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "first"))
+                    assert await pipe.results() == [1]
+                    pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "discarded"))
+                    raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == []
+        else:
+            await driver.begin()
+            await driver.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (1, "outer_kept"))
+            with pytest.raises(RuntimeError, match="abort_inner"):
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (2, "inner_flushed"))
+                    assert await pipe.results() == [1]
+                    pipe.execute("INSERT INTO pipe_r114 (id, label) VALUES (%s, %s)", (3, "inner_discarded"))
+                    raise RuntimeError("abort_inner")
+            assert driver.in_transaction is True
+            await driver.commit()
+            assert await driver.select("SELECT id, label FROM pipe_r114 ORDER BY id") == [
+                {"id": 1, "label": "outer_kept"},
+            ]
+    finally:
+        await driver.close()
+
+
+def _mysql_packet(seq: int, payload: bytes) -> bytes:
+    length = len(payload)
+    header = bytes((length & 0xFF, (length >> 8) & 0xFF, (length >> 16) & 0xFF, seq & 0xFF))
+    return header + payload
+
+
+def _read_mysql_packet(conn: socket.socket) -> tuple[int, bytes]:
+    header = b""
+    while len(header) < 4:
+        chunk = conn.recv(4 - len(header))
+        if not chunk:
+            raise EOFError("unexpected EOF reading MySQL header")
+        header += chunk
+    length = header[0] | (header[1] << 8) | (header[2] << 16)
+    seq = header[3]
+    payload = b""
+    while len(payload) < length:
+        chunk = conn.recv(length - len(payload))
+        if not chunk:
+            raise EOFError("unexpected EOF reading MySQL payload")
+        payload += chunk
+    return seq, payload
+
+
+def _mysql_native_scramble(password: str, nonce: bytes) -> bytes:
+    if not password:
+        return b""
+    stage1 = hashlib.sha1(password.encode("utf-8")).digest()
+    stage2 = hashlib.sha1(stage1).digest()
+    challenge = hashlib.sha1(nonce + stage2).digest()
+    return bytes(a ^ b for a, b in zip(stage1, challenge, strict=True))
+
+
+def _extract_handshake_auth_data(payload: bytes) -> bytes:
+    caps = struct.unpack_from("<I", payload, 0)[0]
+    pos = 32
+    nul = payload.find(b"\x00", pos)
+    pos = nul + 1
+    if caps & 0x0020_0000:
+        first = payload[pos]
+        pos += 1
+        auth_len = first if first < 251 else struct.unpack_from("<H", payload, pos)[0]
+        if first >= 251:
+            pos += 2
+    else:
+        auth_len = payload[pos]
+        pos += 1
+    return payload[pos : pos + auth_len]
+
+
+def _mysql_handshake_v10(conn_id: int, nonce: bytes) -> bytes:
+    caps = (
+        0x0000_0001
+        | 0x0000_0002
+        | 0x0000_0004
+        | 0x0000_0008
+        | 0x0000_0200
+        | 0x0000_2000
+        | 0x0000_8000
+        | 0x0008_0000
+        | 0x0020_0000
+    )
+    return (
+        b"\x0a"
+        + b"8.4.0-Vertebra\x00"
+        + struct.pack("<I", conn_id)
+        + nonce[:8]
+        + b"\x00"
+        + struct.pack("<H", caps & 0xFFFF)
+        + b"\x2d"
+        + struct.pack("<H", 0x0002)
+        + struct.pack("<H", (caps >> 16) & 0xFFFF)
+        + b"\x15"
+        + (b"\x00" * 10)
+        + nonce[8:20]
+        + b"\x00"
+        + b"mysql_native_password\x00"
+    )
+
+
+def _mysql_ok_packet() -> bytes:
+    return b"\x00\x00\x00\x02\x00\x00\x00"
+
+
+def _mysql_err_packet(errno: int, sqlstate: str, message: str) -> bytes:
+    return b"\xff" + struct.pack("<H", errno) + b"#" + sqlstate.encode("ascii") + message.encode("utf-8")
+
+
+def test_mysql_config_token_provider_redaction_and_ssl_defaults() -> None:
+    """Verify MySQLConfig redacts RDS credentials, defaults TLS to require, and preserves explicit ssl_mode."""
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+        port=3306,
+        region="us-east-1",
+        username="iam_user",
+        access_key_id="AKIAEXAMPLEKEY1234",
+        secret_access_key="test-secret-key-placeholder",
+        session_token="test-session-placeholder",
+        clock=lambda: 1_794_873_600.0,
+    )
+    cfg = MySQLConfig(
+        dsn="mysql://iam_user:inline-secret@db.example.us-east-1.rds.amazonaws.com:3306/appdb",
+        token_provider=provider,
+    )
+    assert cfg.canonical_ssl_mode == "require"
+    params = cfg.parse_dsn_params()
+    assert params["ssl_mode"] == "require"
+    expected_token = provider.resolve_sync()
+    assert params["password"] == expected_token
+    assert "X-Amz-Signature=" in expected_token
+
+    for rendered in (repr(cfg), repr(SyncMySQLDriver(cfg)), repr(AsyncMySQLDriver(cfg))):
+        assert "inline-secret" not in rendered
+        assert "AKIAEXAMPLEKEY1234" not in rendered
+        assert "test-secret-key-placeholder" not in rendered
+        assert "test-session-placeholder" not in rendered
+        assert "X-Amz-Signature" not in rendered
+        assert "AwsRdsIamTokenProvider" in rendered
+
+    explicit_verify = MySQLConfig.from_url(
+        "mysql://iam_user@db.example.us-east-1.rds.amazonaws.com:3306/appdb?ssl_mode=verify-ca",
+        token_provider=provider,
+    )
+    assert explicit_verify.canonical_ssl_mode == "verify-ca"
+    assert explicit_verify.parse_dsn_params()["ssl_mode"] == "verify-ca"
+
+    explicit_disable = MySQLConfig(
+        dsn="mysql://iam_user@127.0.0.1:3306/appdb?ssl_mode=disable",
+        token_provider=provider,
+    )
+    assert explicit_disable.parse_dsn_params()["ssl_mode"] == "disable"
+
+    other_provider = AwsRdsIamTokenProvider(
+        endpoint_host="db2.example.us-east-1.rds.amazonaws.com",
+        port=3306,
+        region="us-east-1",
+        username="iam_user",
+        access_key_id="AKIAEXAMPLEKEY1234",
+        secret_access_key="test-secret-key-placeholder",
+        clock=lambda: 1_794_873_600.0,
+    )
+    assert cfg.pool_key() != MySQLConfig(dsn=cfg.dsn, token_provider=other_provider).pool_key()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mysql_drivers_rds_iam_wire_auth_and_close_isolation(mode: str) -> None:
+    """Verify Sync and Async MySQL drivers authenticate with SigV4 RDS tokens and isolate close state."""
+    provider_a = AwsRdsIamTokenProvider(
+        endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+        port=3306,
+        region="us-east-1",
+        username="vtb",
+        access_key_id="AKIAEXAMPLEKEY1234",
+        secret_access_key="test-secret-key-placeholder",
+        session_token="test-session-placeholder",
+        clock=lambda: 1_794_873_600.0,
+    )
+    expected_token = provider_a.resolve_sync()
+    srv = MySQLWireTestServer(expected_password=expected_token)
+    try:
+        cfg_a = MySQLConfig(
+            dsn=f"mysql://vtb@127.0.0.1:{srv.port}/vtb?ssl_mode=disable",
+            token_provider=provider_a,
+        )
+        provider_b = AwsRdsIamTokenProvider(
+            endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+            port=3306,
+            region="us-east-1",
+            username="vtb",
+            access_key_id="AKIAEXAMPLEKEY1234",
+            secret_access_key="test-secret-key-placeholder",
+            clock=lambda: 1_794_873_600.0,
+            signer=lambda *, now_ts: f"wrong-token-{int(now_ts)}",
+        )
+        cfg_b = MySQLConfig(
+            dsn=f"mysql://vtb@127.0.0.1:{srv.port}/vtb?ssl_mode=disable",
+            token_provider=provider_b,
+        )
+
+        if mode == "sync":
+            drv_a = SyncMySQLDriver(cfg_a)
+            drv_b = SyncMySQLDriver(cfg_b)
+            try:
+                drv_a.connect()
+                assert drv_a.ping() is True
+                drv_a.execute("CREATE TABLE rds_iam_items (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)")
+                drv_a.execute("INSERT INTO rds_iam_items (id, label) VALUES (%s, %s)", (1, "ok"))
+                assert drv_a.select("SELECT id, label FROM rds_iam_items") == [{"id": 1, "label": "ok"}]
+                drv_a.close()
+                assert drv_a.ping() is False
+                with pytest.raises(OperationalError, match="closed"):
+                    drv_a.execute("SELECT 1")
+                drv_a.connect()
+                assert drv_a.ping() is True
+                with pytest.raises(ProgrammingError):
+                    drv_b.ping()
+            finally:
+                drv_a.close()
+                drv_b.close()
+        else:
+            async_drv_a = AsyncMySQLDriver(cfg_a)
+            async_drv_b = AsyncMySQLDriver(cfg_b)
+            try:
+                await async_drv_a.connect()
+                assert await async_drv_a.ping() is True
+                await async_drv_a.execute("CREATE TABLE rds_iam_items (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)")
+                await async_drv_a.execute("INSERT INTO rds_iam_items (id, label) VALUES (%s, %s)", (1, "ok"))
+                assert await async_drv_a.select("SELECT id, label FROM rds_iam_items") == [{"id": 1, "label": "ok"}]
+                await async_drv_a.close()
+                assert await async_drv_a.ping() is False
+                with pytest.raises(OperationalError, match="closed"):
+                    await async_drv_a.execute("SELECT 1")
+                await async_drv_a.connect()
+                assert await async_drv_a.ping() is True
+                with pytest.raises(ProgrammingError):
+                    await async_drv_b.ping()
+            finally:
+                await async_drv_a.close()
+                await async_drv_b.close()
+    finally:
+        srv.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mysql_drivers_token_provider_refresh_and_auth_retry(mode: str) -> None:
+    """Verify Sync and Async MySQL drivers rotate expiring IAM tokens and force-refresh once on 1045."""
+    now = [1000.0]
+    issued: list[str] = []
+
+    def _sync_mint(*, now_ts: float) -> str:
+        token = f"test-token-placeholder-{len(issued) + 1}-{int(now_ts)}"
+        issued.append(token)
+        return token
+
+    async def _async_mint(*, now_ts: float) -> str:
+        await asyncio.sleep(0)
+        return _sync_mint(now_ts=now_ts)
+
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host="127.0.0.1",
+        port=3306,
+        region="us-east-1",
+        username="iam_user",
+        refresh_margin_seconds=60.0,
+        token_ttl_seconds=900,
+        clock=lambda: now[0],
+        signer=_async_mint if mode == "async" else _sync_mint,
+    )
+
+    nonce = b"12345678901234567890"
+    auth_results: list[tuple[int, bool]] = []
+    reject_conn_indices = {2, 4, 5}
+    stop_event = threading.Event()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(16)
+        srv.settimeout(0.2)
+        port = srv.getsockname()[1]
+
+        def _handle_conn(conn: socket.socket, conn_idx: int) -> None:
+            with conn:
+                conn.sendall(_mysql_packet(0, _mysql_handshake_v10(conn_idx + 1, nonce)))
+                try:
+                    seq, payload = _read_mysql_packet(conn)
+                except EOFError:
+                    return
+                auth_data = _extract_handshake_auth_data(payload)
+                latest_token = issued[-1] if issued else ""
+                expected_scramble = _mysql_native_scramble(latest_token, nonce)
+                matched = auth_data == expected_scramble
+                auth_results.append((conn_idx, matched))
+                if conn_idx in reject_conn_indices or not matched:
+                    conn.sendall(_mysql_packet(seq + 1, _mysql_err_packet(1045, "28000", "Access denied for user")))
+                    return
+                conn.sendall(_mysql_packet(seq + 1, _mysql_ok_packet()))
+                while True:
+                    try:
+                        cmd_seq, cmd_payload = _read_mysql_packet(conn)
+                    except EOFError:
+                        break
+                    if not cmd_payload or cmd_payload[0] == 0x01:
+                        break
+                    if cmd_payload[0] == 0x0E:
+                        conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
+                    else:
+                        conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
+
+        def _server() -> None:
+            idx = 0
+            while not stop_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                t = threading.Thread(target=_handle_conn, args=(conn, idx), daemon=True)
+                t.start()
+                idx += 1
+
+        srv_thread = threading.Thread(target=_server, daemon=True)
+        srv_thread.start()
+
+        cfg = MySQLConfig(
+            dsn=f"mysql://iam_user@127.0.0.1:{port}/appdb?ssl_mode=disable",
+            token_provider=provider,
+        )
+        try:
+            if mode == "sync":
+                driver = SyncMySQLDriver(cfg)
+                try:
+                    driver.connect()
+                    assert driver.ping() is True
+                    assert len(issued) == 1
+
+                    now[0] = 1850.0
+                    assert driver.ping() is True
+                    assert len(issued) == 2
+
+                    driver.close()
+                    driver.connect()
+                    assert driver.ping() is True
+                    assert len(issued) == 3
+
+                    driver.close()
+                    driver.connect()
+                    with pytest.raises(ProgrammingError) as exc_info:
+                        driver.ping()
+                    assert exc_info.value.vendor_code == 1045
+                    assert exc_info.value.sqlstate == "28000"
+                    assert len(issued) == 4
+                    for tok in issued:
+                        assert tok not in repr(driver)
+                        assert tok not in str(exc_info.value)
+                finally:
+                    driver.close()
+            else:
+                async_driver = AsyncMySQLDriver(cfg)
+                try:
+                    await async_driver.connect()
+                    assert await async_driver.ping() is True
+                    assert len(issued) == 1
+
+                    now[0] = 1850.0
+                    assert await async_driver.ping() is True
+                    assert len(issued) == 2
+
+                    await async_driver.close()
+                    await async_driver.connect()
+                    assert await async_driver.ping() is True
+                    assert len(issued) == 3
+
+                    await async_driver.close()
+                    await async_driver.connect()
+                    with pytest.raises(ProgrammingError) as exc_info:
+                        await async_driver.ping()
+                    assert exc_info.value.vendor_code == 1045
+                    assert exc_info.value.sqlstate == "28000"
+                    assert len(issued) == 4
+                    for tok in issued:
+                        assert tok not in repr(async_driver)
+                        assert tok not in str(exc_info.value)
+                finally:
+                    await async_driver.close()
+        finally:
+            stop_event.set()
+            srv_thread.join(timeout=2.0)
+
+    assert len(auth_results) == 6
+    assert all(matched for _, matched in auth_results)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("explicit_scope", "expected_scope"),
+    [
+        (None, AZURE_MYSQL_SCOPE),
+        ("https://custom.mysql.example/.default", "https://custom.mysql.example/.default"),
+    ],
+)
+async def test_mysql_drivers_azure_entra_default_scope_wire_auth_and_refresh(
+    mode: str,
+    explicit_scope: str | None,
+    expected_scope: str,
+) -> None:
+    """Verify Sync and Async MySQL drivers inject AZURE_MYSQL_SCOPE, pass bearer tokens, and refresh pre-expiry."""
+    now = [1000.0]
+    seen_scopes: list[str] = []
+    issued: list[str] = []
+
+    def _sync_fetch(scope: str) -> dict[str, Any]:
+        seen_scopes.append(scope)
+        tok = f"test-token-placeholder-mysql-{len(issued) + 1}"
+        issued.append(tok)
+        return {"access_token": tok, "expires_in": 600}
+
+    async def _async_fetch(scope: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return _sync_fetch(scope)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="mysql-client",
+        client_secret="test-client-secret-placeholder",
+        scope=explicit_scope,
+        refresh_margin_seconds=120.0,
+        clock=lambda: now[0],
+        fetcher=_async_fetch if mode == "async" else _sync_fetch,
+    )
+
+    nonce = b"12345678901234567890"
+    auth_results: list[bool] = []
+    stop_event = threading.Event()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        srv.settimeout(0.2)
+        port = srv.getsockname()[1]
+
+        def _handle_conn(conn: socket.socket, conn_idx: int) -> None:
+            with conn:
+                conn.sendall(_mysql_packet(0, _mysql_handshake_v10(conn_idx + 1, nonce)))
+                try:
+                    seq, payload = _read_mysql_packet(conn)
+                except EOFError:
+                    return
+                auth_data = _extract_handshake_auth_data(payload)
+                latest_token = issued[-1] if issued else ""
+                matched = auth_data == _mysql_native_scramble(latest_token, nonce)
+                auth_results.append(matched)
+                if not matched:
+                    conn.sendall(_mysql_packet(seq + 1, _mysql_err_packet(1045, "28000", "Access denied for user")))
+                    return
+                conn.sendall(_mysql_packet(seq + 1, _mysql_ok_packet()))
+                while True:
+                    try:
+                        cmd_seq, cmd_payload = _read_mysql_packet(conn)
+                    except EOFError:
+                        break
+                    if not cmd_payload or cmd_payload[0] == 0x01:
+                        break
+                    conn.sendall(_mysql_packet(cmd_seq + 1, _mysql_ok_packet()))
+
+        def _server() -> None:
+            idx = 0
+            while not stop_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                t = threading.Thread(target=_handle_conn, args=(conn, idx), daemon=True)
+                t.start()
+                idx += 1
+
+        srv_thread = threading.Thread(target=_server, daemon=True)
+        srv_thread.start()
+
+        cfg = MySQLConfig(
+            dsn=f"mysql://entra_user@127.0.0.1:{port}/appdb?ssl_mode=disable",
+            token_provider=provider,
+        )
+        try:
+            if mode == "sync":
+                driver = SyncMySQLDriver(cfg)
+                try:
+                    assert driver.config.token_provider.scope == expected_scope
+                    driver.connect()
+                    assert driver.ping() is True
+                    assert len(issued) == 1
+
+                    now[0] = 1480.0
+                    assert driver.ping() is True
+                    assert len(issued) == 2
+
+                    for rendered in (repr(cfg), repr(driver)):
+                        assert "test-client-secret-placeholder" not in rendered
+                        assert all(tok not in rendered for tok in issued)
+                finally:
+                    driver.close()
+            else:
+                async_driver = AsyncMySQLDriver(cfg)
+                try:
+                    assert async_driver.config.token_provider.scope == expected_scope
+                    await async_driver.connect()
+                    assert await async_driver.ping() is True
+                    assert len(issued) == 1
+
+                    now[0] = 1480.0
+                    assert await async_driver.ping() is True
+                    assert len(issued) == 2
+
+                    for rendered in (repr(cfg), repr(async_driver)):
+                        assert "test-client-secret-placeholder" not in rendered
+                        assert all(tok not in rendered for tok in issued)
+                finally:
+                    await async_driver.close()
+        finally:
+            stop_event.set()
+            srv_thread.join(timeout=2.0)
+
+    assert seen_scopes == [expected_scope, expected_scope]
+    assert auth_results == [True, True]
+
+
+class _FakeMySQLError(Exception):
+    """Exception double carrying vendor_code and sqlstate for MySQL dialect tests."""
+
+    def __init__(self, *args: Any, vendor_code: int | None = None, sqlstate: str | None = None) -> None:
+        super().__init__(*args)
+        self.vendor_code = vendor_code
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.parametrize(
+    "dialect_cls",
+    [SyncMySQLDialect, AsyncMySQLDialect],
+)
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_code", "expected_disconnect"),
+    [
+        (lambda: _FakeMySQLError("MySQL server has gone away", vendor_code=2006), 2006, True),
+        (lambda: _FakeMySQLError("Lost connection during query", vendor_code=2013), 2013, True),
+        (lambda: _FakeMySQLError(2013, "Lost connection"), 2013, True),
+        (
+            lambda: (
+                RuntimeError("outer")
+                if False
+                else _raise_with_cause(
+                    _FakeMySQLError("wrapped"),
+                    _FakeMySQLError("inner gone away", vendor_code=2006),
+                )
+            ),
+            2006,
+            True,
+        ),
+        (lambda: _FakeMySQLError("comm link", sqlstate="08S01"), None, True),
+        (lambda: _FakeMySQLError("duplicate entry", vendor_code=1062), 1062, False),
+        (lambda: _FakeMySQLError("deadlock", sqlstate="40001"), None, False),
+    ],
+)
+def test_mysql_extract_error_code_and_disconnect(
+    dialect_cls: type[SyncMySQLDialect | AsyncMySQLDialect],
+    exc_factory: Any,
+    expected_code: int | None,
+    expected_disconnect: bool,
+) -> None:
+    """Verify MySQL _extract_error_code and is_disconnect across vendor codes, causes, and SQLSTATE 08*."""
+    dialect = dialect_cls()
+    err = exc_factory()
+    assert dialect._extract_error_code(err) == expected_code
+    assert dialect.is_disconnect(err) is expected_disconnect
+
+
+def _raise_with_cause(outer: Exception, cause: Exception) -> Exception:
+    outer.__cause__ = cause
+    return outer
+
+
+class _FakeMySQLSyncProtocolDriver:
+    """Protocol-fake sync MySQL driver supporting initialize(), do_ping(), and isolation levels."""
+
+    def __init__(self) -> None:
+        self.isolation_level = "REPEATABLE-READ"
+        self.statements: list[str] = []
+
+    def begin(self, isolation_level: str | None = None) -> None:
+        _ = isolation_level
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]:
+        _ = parameters
+        self.statements.append(sql)
+        upper = sql.strip().upper()
+        if upper == "SELECT VERSION()":
+            return [("8.0.36",)], (("version", None, None, None, None, None, None),)
+        if upper == "SELECT DATABASE()":
+            return [("appdb",)], (("database", None, None, None, None, None, None),)
+        if upper == "SELECT @@CHARACTER_SET_CLIENT":
+            return [("utf8mb4",)], (("charset", None, None, None, None, None, None),)
+        if upper == "SELECT @@TRANSACTION_ISOLATION":
+            return [(self.isolation_level,)], (("isolation", None, None, None, None, None, None),)
+        if upper == "SELECT @@SQL_MODE":
+            return [("STRICT_TRANS_TABLES",)], (("sql_mode", None, None, None, None, None, None),)
+        if upper == "SELECT @@LOWER_CASE_TABLE_NAMES":
+            return [(0,)], (("lctn", None, None, None, None, None, None),)
+        if upper.startswith("SET SESSION TRANSACTION ISOLATION LEVEL "):
+            self.isolation_level = upper.removeprefix("SET SESSION TRANSACTION ISOLATION LEVEL ").replace(" ", "-")
+            return [], None
+        if upper == "SELECT 1":
+            return [(1,)], (("1", None, None, None, None, None, None),)
+        return [], None
+
+
+class _FakeMySQLAsyncProtocolDriver:
+    """Protocol-fake async MySQL driver delegating to _FakeMySQLSyncProtocolDriver."""
+
+    def __init__(self, sync_driver: _FakeMySQLSyncProtocolDriver) -> None:
+        self._sync = sync_driver
+
+    async def begin(self, isolation_level: str | None = None) -> None:
+        self._sync.begin(isolation_level)
+
+    async def commit(self) -> None:
+        self._sync.commit()
+
+    async def rollback(self) -> None:
+        self._sync.rollback()
+
+    async def close(self) -> None:
+        self._sync.close()
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]:
+        return self._sync.execute_with_description(sql, parameters)
+
+
+@pytest.mark.anyio
+async def test_mysql_sync_and_async_engine_initialize_and_isolation() -> None:
+    """Verify create_engine('mysql+vtb://...') and create_async_engine('mysql+vtb_async://...') lifecycle."""
+    sync_driver = _FakeMySQLSyncProtocolDriver()
+    sync_engine = create_engine(
+        "mysql+vtb://localhost:3306/appdb",
+        creator=lambda: SyncDBAPIConnection(
+            "mysql+vtb://localhost:3306/appdb",
+            driver=sync_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        with sync_engine.connect() as conn:
+            assert sync_engine.dialect.server_version_info == (8, 0, 36)
+            assert sync_engine.dialect.default_schema_name == "appdb"
+            dbapi_conn = conn.connection.dbapi_connection
+            assert dbapi_conn is not None
+            assert sync_engine.dialect.do_ping(dbapi_conn) is True
+            assert sync_engine.dialect.get_isolation_level(dbapi_conn) == "REPEATABLE READ"
+            sync_engine.dialect.set_isolation_level(dbapi_conn, "READ COMMITTED")
+            assert sync_engine.dialect.get_isolation_level(dbapi_conn) == "READ COMMITTED"
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+    finally:
+        sync_engine.dispose()
+
+    async_inner = _FakeMySQLSyncProtocolDriver()
+    async_driver = _FakeMySQLAsyncProtocolDriver(async_inner)
+    async_engine = create_async_engine(
+        "mysql+vtb_async://localhost:3306/appdb",
+        async_creator=lambda: AsyncDBAPIConnection(
+            "mysql+vtb_async://localhost:3306/appdb",
+            driver=async_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        async with async_engine.connect() as aconn:
+            assert async_engine.dialect.server_version_info == (8, 0, 36)
+            assert async_engine.dialect.default_schema_name == "appdb"
+
+            def _exercise_async_dbapi(sc: Any) -> tuple[bool, str, str]:
+                raw = sc.connection.dbapi_connection
+                assert raw is not None
+                ping = async_engine.dialect.do_ping(raw)
+                before = async_engine.dialect.get_isolation_level(raw)
+                async_engine.dialect.set_isolation_level(raw, "READ COMMITTED")
+                after = async_engine.dialect.get_isolation_level(raw)
+                return ping, before, after
+
+            ping_ok, level, updated_level = await aconn.run_sync(_exercise_async_dbapi)
+            assert ping_ok is True
+            assert level == "REPEATABLE READ"
+            assert updated_level == "READ COMMITTED"
+            assert (await aconn.execute(text("SELECT 1"))).scalar() == 1
+    finally:
+        await async_engine.dispose()

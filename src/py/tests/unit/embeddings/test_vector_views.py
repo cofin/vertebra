@@ -68,16 +68,9 @@ def test_vector_batch_view_2d_pep3118_and_row_slicing() -> None:
 
 
 def test_mrl_truncation_and_int8_binary_quantization() -> None:
-    """Verify MRL truncation (768 -> 512/256/128) renormalizes to unit norm and quantizes to int8/binary."""
+    """Verify int8 and binary quantization preserve expected dtype, shape, and byte counts."""
     raw = [math.sin(i * 0.1) for i in range(768)]
     vec = VectorView.from_f32(raw, normalize=True)
-
-    for target_dim in (512, 256, 128):
-        truncated = vec.truncate(target_dim)
-        assert truncated.dimensions == target_dim
-        assert math.isclose(truncated.norm(), 1.0, rel_tol=1e-5, abs_tol=1e-5)
-        mv = memoryview(truncated)
-        assert mv.shape == (target_dim,)
 
     q_i8 = vec.quantize_int8()
     assert q_i8.dtype == "int8"
@@ -95,6 +88,23 @@ def test_mrl_truncation_and_int8_binary_quantization() -> None:
     assert mv_bin.format == "B"
     assert mv_bin.shape == (96,)
     assert mv_bin.nbytes == 96
+
+
+@pytest.mark.parametrize(
+    "target_dim",
+    [512, 256, 128],
+    ids=["dim-512", "dim-256", "dim-128"],
+)
+def test_mrl_truncation_renormalizes_to_unit_norm(target_dim: int) -> None:
+    """Verify MRL truncation (768 -> 512/256/128) renormalizes to unit norm."""
+    raw = [math.sin(i * 0.1) for i in range(768)]
+    vec = VectorView.from_f32(raw, normalize=True)
+
+    truncated = vec.truncate(target_dim)
+    assert truncated.dimensions == target_dim
+    assert math.isclose(truncated.norm(), 1.0, rel_tol=1e-5, abs_tol=1e-5)
+    mv = memoryview(truncated)
+    assert mv.shape == (target_dim,)
 
 
 def test_batch_mrl_quantization_and_top_k_similarity() -> None:

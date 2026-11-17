@@ -120,12 +120,12 @@ def ensure_pyarrow() -> Any:
 
 def ensure_numpy() -> Any:
     """Ensure ``numpy`` is installed and return the imported module."""
-    return ensure_module("numpy")
+    return ensure_module("numpy", package="numpy", extra="numpy")
 
 
 def ensure_pandas() -> Any:
     """Ensure ``pandas`` is installed and return the imported module."""
-    return ensure_module("pandas")
+    return ensure_module("pandas", package="pandas", extra="pandas")
 
 
 def import_string(dotted_path: str) -> Any:

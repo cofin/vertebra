@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpClient } from "../../src/client/client";
 import { TimeoutError } from "../../src/client/errors";
 import { computeBackoffDelay } from "../../src/client/retry";
@@ -20,6 +20,35 @@ describe("HttpClient", () => {
     expect(rootExports.HttpClient).toBe(HttpClient);
     expect(rootExports.WebSocketClient).toBe(WebSocketClient);
     expect(rootExports.HotReloadClient).toBe(HotReloadClient);
+    expect(typeof rootExports.routeUrl).toBe("function");
+    expect(typeof rootExports.wsUrl).toBe("function");
+    expect(typeof rootExports.interpolateRoutePath).toBe("function");
+  });
+
+  it("routeUrl and wsUrl support RouteRegistry contracts from root export", () => {
+    const httpRoutes = {
+      "users.get": { method: "GET", path: "/users/{id}" },
+    } as const satisfies rootExports.RouteRegistry;
+    const wsRoutes = {
+      ws_rooms: { method: "WS", path: "/ws/rooms/{room_id}" },
+    } as const satisfies rootExports.RouteRegistry;
+
+    expect(rootExports.routeUrl(httpRoutes, "users.get", { id: 42 }, { query: { active: true, skip: null } })).toBe(
+      "/users/42?active=true",
+    );
+    expect(rootExports.wsUrl(wsRoutes, "ws_rooms", { room_id: "lobby" }, { baseUrl: "http://localhost:8000" })).toBe(
+      "ws://localhost:8000/ws/rooms/lobby",
+    );
+    expect(() => rootExports.routeUrl(httpRoutes, "nope" as keyof typeof httpRoutes)).toThrow("Unknown route: nope");
+    expect(() => rootExports.wsUrl(wsRoutes, "nope_ws" as keyof typeof wsRoutes)).toThrow(
+      "Unknown WebSocket route: nope_ws",
+    );
+
+    const flat = { "users.get": "/users/{id}" } as const;
+    const _rejectFlat = () =>
+      // @ts-expect-error flat string map is rejected by RouteRegistry
+      rootExports.routeUrl(flat, "users.get");
+    expect(typeof _rejectFlat).toBe("function");
   });
 
   it("interpolates path parameters correctly", async () => {
@@ -97,7 +126,7 @@ describe("HttpClient", () => {
 
     await client.call("GET", "/search", { q: "vertebra", page: 1 });
 
-    const url = mockFetch.mock.calls[0][0] as string;
+    const url = mockFetch.mock.calls[0]?.[0] as string;
     expect(url).toContain("q=vertebra");
     expect(url).toContain("page=1");
   });
@@ -222,10 +251,76 @@ describe("QueryCache", () => {
     const kNested2 = QueryCache.stableKey("POST", "/items", { y: [1, 2], z: { a: 2, b: 1 } });
     expect(kNested1).toBe(kNested2);
   });
+
+  it("does not refetch on re-entry at staleTime=0 until invalidate bumps epoch", async () => {
+    const cache = new QueryCache();
+    const key = QueryCache.stableKey("GET", "/items", undefined);
+    let calls = 0;
+    const fetcher = async () => {
+      calls += 1;
+      return { count: calls };
+    };
+
+    const first = await cache.getOrCreate(key, 0, fetcher);
+    expect(first).toEqual({ count: 1 });
+    expect(calls).toBe(1);
+
+    const cached = await cache.getOrCreate(key, 0, fetcher);
+    expect(cached).toEqual({ count: 1 });
+    expect(calls).toBe(1);
+
+    cache.invalidate();
+    const refetched = await cache.getOrCreate(key, 0, fetcher);
+    expect(refetched).toEqual({ count: 2 });
+    expect(calls).toBe(2);
+  });
 });
 
 describe("initHtmx", () => {
-  it("returns undefined without allocating an unused client", () => {
-    expect(initHtmx({ baseURL: "http://api.test" })).toBeUndefined();
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("injects configured headers and JSON Content-Type for non-GET htmx:configRequest events", () => {
+    const doc = new EventTarget();
+    vi.stubGlobal("document", doc);
+
+    initHtmx({
+      baseURL: "http://api.test",
+      headers: { "X-Vertebra-Token": "test-token-placeholder" },
+    });
+
+    const postHeaders: Record<string, string> = {};
+    doc.dispatchEvent(
+      new CustomEvent("htmx:configRequest", {
+        detail: { verb: "POST", headers: postHeaders },
+      }),
+    );
+    expect(postHeaders["X-Vertebra-Token"]).toBe("test-token-placeholder");
+    expect(postHeaders["Content-Type"]).toBe("application/json");
+
+    const getHeaders: Record<string, string> = {};
+    doc.dispatchEvent(
+      new CustomEvent("htmx:configRequest", {
+        detail: { verb: "GET", headers: getHeaders },
+      }),
+    );
+    expect(getHeaders["X-Vertebra-Token"]).toBe("test-token-placeholder");
+    expect(getHeaders["Content-Type"]).toBeUndefined();
+  });
+
+  it("logs htmx:responseError details to console.error", () => {
+    const doc = new EventTarget();
+    vi.stubGlobal("document", doc);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    initHtmx({ baseURL: "http://api.test" });
+
+    const errorDetail = { xhr: { status: 500 }, pathInfo: { requestPath: "/items" } };
+    doc.dispatchEvent(new CustomEvent("htmx:responseError", { detail: errorDetail }));
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith("[vertebra:htmx] request failed:", errorDetail);
   });
 });

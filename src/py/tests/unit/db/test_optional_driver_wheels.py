@@ -80,7 +80,17 @@ def test_root_pyproject_dependency_group_omits_pypi_duckdb(group_name: str) -> N
     """Non-duckdb dependency groups in `pyproject.toml` do not include PyPI `duckdb`."""
     group_deps = _ROOT_PYPROJECT_DATA.get("dependency-groups", {})[group_name]
     assert not any(
-        isinstance(dep, str) and dep.startswith("duckdb") and not dep.startswith("vertebra-duckdb")
+        isinstance(dep, str)
+        and dep.split("[", 1)[0]
+        .split(";", 1)[0]
+        .split("=", 1)[0]
+        .split("<", 1)[0]
+        .split(">", 1)[0]
+        .split("!", 1)[0]
+        .split("~", 1)[0]
+        .strip()
+        .lower()
+        == "duckdb"
         for dep in group_deps
     ), f"dependency-groups.{group_name} unexpectedly contains PyPI duckdb"
 
@@ -204,6 +214,33 @@ def test_optional_wheel_pyproject_isolation_and_exclusions(
     assert all(f"**/py/vertebra/{stub}" in excludes for stub in sibling_stubs)
     stub_file = _REPO_ROOT / "src" / "py" / "vertebra" / own_stub
     assert stub_file.is_file()
+
+
+@pytest.mark.parametrize(
+    ("pkg_name", "rel_path", "own_stub"),
+    SIBLING_WHEEL_MANIFESTS,
+    ids=[item[0] for item in SIBLING_WHEEL_MANIFESTS],
+)
+def test_optional_wheel_pins_core_stub_includes_and_bumpversion(
+    pkg_name: str,
+    rel_path: str,
+    own_stub: str,
+) -> None:
+    """Every companion crate pins `vertebra-core`, includes its `.pyi` stub, and registers in bumpversion."""
+    root_version = _ROOT_PYPROJECT_DATA["project"]["version"]
+    data = tomllib.loads((_REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+    assert data["project"]["name"] == pkg_name
+    assert data["project"]["dependencies"] == [f"vertebra-core=={root_version}"]
+
+    includes = data["tool"]["maturin"].get("include", [])
+    assert {"path": f"vertebra/{own_stub}", "format": ["sdist", "wheel"]} in includes
+
+    bump_files = _ROOT_PYPROJECT_DATA["tool"]["bumpversion"]["files"]
+    assert {
+        "filename": rel_path,
+        "search": "vertebra-core=={current_version}",
+        "replace": "vertebra-core=={new_version}",
+    } in bump_files
 
 
 @pytest.mark.parametrize("extra_name", ["mysql", "mssql", "redis", "sqlite", "valkey"])

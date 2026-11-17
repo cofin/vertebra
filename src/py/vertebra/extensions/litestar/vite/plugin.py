@@ -3,38 +3,52 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from vertebra.build._assets import (
+from vertebra.framework.vite import (
     PROTECTED_METADATA_FILENAMES,
     AssetManifest,
     EarlyHintsSpec,
     ManifestEntry,
     ResolvedAssetTags,
+    ViteBridge,
+    ViteConfig,
     escape_html_json,
+    get_vertebra_client_path,
+    get_vertebra_client_vite_aliases,
     is_fingerprinted_asset,
     is_protected_build_metadata_path,
 )
-from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
-try:
-    from litestar.response import Response as LitestarResponse
-    from litestar_vite import ViteConfig, VitePlugin
-    from litestar_vite.config._paths import PathConfig
-except ImportError as exc:
-    raise MissingDependencyError(
-        "litestar-vite",
-        install_package="litestar-vite",
-        extra="vite",
-    ) from exc
+if TYPE_CHECKING:
+    from litestar_vite import ViteConfig as LitestarViteConfig
+    from litestar_vite import VitePlugin
+
+    class BundlerVitePlugin(VitePlugin):
+        """Slotted VitePlugin subclass exposing resolved @vertebra/client aliases."""
+
+        __slots__ = ("client_aliases",)
+
+        client_aliases: dict[str, str]
+
+        def __init__(
+            self,
+            config: LitestarViteConfig | None = None,
+            *,
+            client_aliases: dict[str, str] | None = None,
+        ) -> None: ...
+
 
 __all__ = (
     "PROTECTED_METADATA_FILENAMES",
     "AssetManifest",
+    "BundlerVitePlugin",
     "EarlyHintsSpec",
     "ManifestEntry",
     "ResolvedAssetTags",
+    "ViteBridge",
+    "ViteConfig",
     "_StaticAfterRequestHook",
     "_StaticBeforeRequestHook",
     "create_vite_plugin",
@@ -44,6 +58,44 @@ __all__ = (
     "is_fingerprinted_asset",
     "is_protected_build_metadata_path",
 )
+
+_CACHED_VITE_PLUGIN_CLS: type[Any] | None = None
+
+
+def _get_bundler_vite_plugin_cls() -> type[BundlerVitePlugin]:
+    global _CACHED_VITE_PLUGIN_CLS
+    if _CACHED_VITE_PLUGIN_CLS is None:
+        vite_mod = ensure_module("litestar_vite", extra="vite")
+        base_cls: Any = vite_mod.VitePlugin
+
+        def __init__(
+            self: Any,
+            config: LitestarViteConfig | None = None,
+            *,
+            client_aliases: dict[str, str] | None = None,
+        ) -> None:
+            base_cls.__init__(self, config)
+            self.client_aliases = dict(client_aliases) if client_aliases is not None else {}
+
+        _CACHED_VITE_PLUGIN_CLS = type(
+            "BundlerVitePlugin",
+            (base_cls,),
+            {
+                "__module__": __name__,
+                "__doc__": "Slotted VitePlugin subclass exposing resolved @vertebra/client aliases.",
+                "__slots__": ("client_aliases",),
+                "__init__": __init__,
+            },
+        )
+    return cast("type[BundlerVitePlugin]", _CACHED_VITE_PLUGIN_CLS)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind ``BundlerVitePlugin`` to ``litestar_vite.VitePlugin``."""
+    if name == "BundlerVitePlugin":
+        return _get_bundler_vite_plugin_cls()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 
 class _StaticBeforeRequestHook:
@@ -63,7 +115,8 @@ class _StaticBeforeRequestHook:
             else path.lstrip("/")
         )
         if is_protected_build_metadata_path(rel_path) or is_protected_build_metadata_path(path):
-            return LitestarResponse(content=b"", status_code=404, media_type="text/plain")
+            response_mod = ensure_module("litestar.response", extra="litestar")
+            return response_mod.Response(content=b"", status_code=404, media_type="text/plain")
         return None
 
 
@@ -85,51 +138,27 @@ class _StaticAfterRequestHook:
         return response
 
 
-def get_vertebra_client_path() -> Path:
-    """Return the filesystem path to the @vertebra/client TypeScript SDK package."""
-    ensure_module("litestar_vite", extra="vite")
-    cwd = Path.cwd()
-    repo_ts_path = cwd / "src" / "ts" / "vertebra-client"
-    if repo_ts_path.is_dir():
-        return repo_ts_path
-
-    module_dir = Path(__file__).resolve().parent.parent.parent
-    bundled_path = module_dir / "client"
-    if bundled_path.is_dir():
-        return bundled_path
-
-    return repo_ts_path
-
-
-def get_vertebra_client_vite_aliases() -> dict[str, str]:
-    """Return Vite resolve.alias mappings for @vertebra/client."""
-    client_path = get_vertebra_client_path()
-    dist_path = client_path / "dist"
-    target = dist_path if dist_path.is_dir() else (client_path / "src")
-    return {
-        "@vertebra/client": str(target),
-    }
-
-
 def create_vite_plugin(
-    config: ViteConfig | None = None,
+    config: LitestarViteConfig | None = None,
     *,
     bundle_dir: str | Path = "public",
     resource_dir: str | Path = "resources",
     include_client_alias: bool = True,
     **kwargs: Any,
-) -> VitePlugin:
-    """Create a VitePlugin configured with @vertebra/client asset paths."""
-    _ = include_client_alias
-    ensure_module("litestar_vite", extra="vite")
+) -> BundlerVitePlugin:
+    """Create a slotted BundlerVitePlugin configured with @vertebra/client asset paths."""
+    plugin_cls = _get_bundler_vite_plugin_cls()
+    aliases = get_vertebra_client_vite_aliases() if include_client_alias else {}
     if config is not None:
-        return VitePlugin(config)
+        return plugin_cls(config, client_aliases=aliases)
 
-    resolved_config = ViteConfig(
-        paths=PathConfig(
+    vite_mod = ensure_module("litestar_vite", extra="vite")
+    paths_mod = ensure_module("litestar_vite.config._paths", extra="vite")
+    resolved_config = vite_mod.ViteConfig(
+        paths=paths_mod.PathConfig(
             bundle_dir=Path(bundle_dir),
             resource_dir=Path(resource_dir),
         ),
         **kwargs,
     )
-    return VitePlugin(resolved_config)
+    return plugin_cls(resolved_config, client_aliases=aliases)

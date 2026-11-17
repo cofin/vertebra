@@ -15,6 +15,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-05T00:14:04Z'
 verified:
+- by: agent:flow-executor
+  at: '2026-11-17T08:15:00Z'
+  commit: 5a833832
 - by: agent:flow-learn
   at: '2026-11-14T17:15:00Z'
   commit: 1b191388
@@ -48,10 +51,10 @@ sources:
 # ADR-004: Optional Driver Wheels and Shared-Memory Ownership
 
 <!-- truth: start -->
-- Native database clients ship in optional per-engine distributions (`vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, `vertebra-duckdb`, `vertebra-bigquery`, and `vertebra-spanner`), exposed through core install extras (`vertebra._postgres`, `_mysql`, `_mssql`, `_oracle`, `_duckdb`, `_bigquery`, `_spanner`).
+- Native database and cache clients ship in 10 optional per-engine distributions (`vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, `vertebra-duckdb`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-sqlite`, `vertebra-redis`, and `vertebra-valkey`) alongside `vertebra-bundler` and `vertebra-storage` (`12` total companion PyO3 crates), exposed through core install extras (`vertebra._postgres`, `_mysql`, `_mssql`, `_oracle`, `_duckdb`, `_bigquery`, `_spanner`, `_sqlite`, `_redis`, `_valkey`, `_bundler`, `_storage`).
+- Every companion crate pins `vertebra-core==<version>` via `bumpversion`, includes only its own `vertebra/_<name>.pyi` stub, and excludes all `.py`, `.so`, `py.typed`, and sibling `.pyi` files.
 - `vertebra._vertebra` owns canonical database exception classes and `ArrowCursor`; extension modules resolve those Python objects at runtime.
-- Cross-extension Arrow handoff uses a named `vertebra.ShmCapsule` with an atomic ownership context and producer-owned cleanup callbacks.
-- Each separately linked extension uses its own event-loop completion drainer attribute (such as `_vertebra_postgres_completion_drainer` for `_postgres`).
+- Cross-extension Arrow handoff uses a named `vertebra.ShmCapsule` with an atomic ownership context and producer-owned cleanup callbacks; each extension uses its own event-loop completion drainer attribute.
 <!-- truth: end -->
 
 ## Context
@@ -60,7 +63,7 @@ Database SDKs bring dependency trees that HTTP-only applications do not need. Ke
 
 ## Decision
 
-Ship native database clients in per-driver PyO3 wheels and keep reusable transport, framing, completion, and Arrow helpers in `vertebra-db`. All seven database extension wheels (`vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, `vertebra-duckdb`, `vertebra-bigquery`, and `vertebra-spanner`) follow this boundary.[^src-db-manifest][^src-python-packaging]
+Ship native database and cache clients in per-driver PyO3 wheels and keep reusable transport, framing, completion, and Arrow helpers in `vertebra-db`. All 10 database and cache driver wheels (`vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, `vertebra-duckdb`, `vertebra-bigquery`, `vertebra-spanner`, `vertebra-sqlite`, `vertebra-redis`, and `vertebra-valkey`) plus `vertebra-bundler` and `vertebra-storage` (12 companion crates total alongside core `vertebra-core`) follow this boundary, pin `vertebra-core==<version>`, and ship their own `vertebra/_<name>.pyi` stub exclusively.[^src-db-manifest][^src-python-packaging]
 
 Keep database exceptions and `ArrowCursor` canonical in `vertebra._vertebra`. Optional extensions import those Python objects and use distinct event-loop drainer attributes. Transfer Arrow mappings with `construct_py_arrow_cursor`: a `vertebra.ShmCapsule` carries the pointer, length, atomic context, and cleanup callbacks. The core cursor claims the context once and invokes the producing extension's callback when its last backing owner drops.[^src-db-py-async][^src-core-shm][^src-py-arrow-cursor]
 
@@ -76,7 +79,7 @@ Required Unix Arrow mappings use `allocate_shm_region` and propagate named-alloc
 
 ## Consequences
 
-Core and optional engine distributions need coordinated versions, artifact builds, wheel-entry checks (`tools/scripts/_wheel_verify.py` via `make {duckdb,mysql,mssql}-wheel-check`), and isolated installed-wheel checks (`_wheel_verify.py` via `verify_postgres_wheel.py`, `verify_oracle_wheel.py`, and `verify_storage_wheel.py` for `make {postgres,oracle,storage,bigquery,spanner,bundler}-wheel-check`). The capsule layout and callback ownership form a cross-extension compatibility seam. Changes must preserve validation, single adoption, failure cleanup, and live-view lifetime; unlinking a Unix SHM name does not unmap active cursor backing.[^src-python-packaging][^src-core-shm][^src-py-arrow-cursor]
+Core and optional engine distributions require coordinated `vertebra-core==<version>` pins (`[tool.bumpversion]` in `pyproject.toml`), `.pyi` include/exclude rules in each companion `pyproject.toml`, artifact builds (`build_sdist` covers `core` plus all 12 companion crates), and all 13 PR wheel-isolation checks (`make core-wheel-check`, `tools/scripts/_wheel_verify.py` via `make {sqlite,duckdb,mysql,mssql,redis,valkey}-wheel-check`, `verify_postgres_wheel.py`, `verify_oracle_wheel.py`, and `verify_storage_wheel.py` for `make {storage,bigquery,spanner,bundler}-wheel-check`). The capsule layout and callback ownership form a cross-extension compatibility seam. Changes must preserve validation, single adoption, failure cleanup, and live-view lifetime; unlinking a Unix SHM name does not unmap active cursor backing.[^src-python-packaging][^src-core-shm][^src-py-arrow-cursor]
 
 The [extension architecture](../architecture/worker/pyo3-ffi-and-batch-dispatch.md#database--storage-extension-boundaries), [FFI pattern](../patterns/rust/ffi-and-gil-discipline.md#cross-extension-ownership), and [runtime gotchas](../gotchas/pyo3-and-python-runtime.md#cross-extension-arrow-capsules-and-release) define the implementation rules.
 

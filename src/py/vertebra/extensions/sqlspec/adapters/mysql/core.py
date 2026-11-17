@@ -1,5 +1,7 @@
 """MySQL and MariaDB SQLSpec core statement compilation, coercion, and error helpers."""
 
+from __future__ import annotations
+
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -7,7 +9,13 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlspec.core import DriverParameterProfile, ParameterStyle, StatementConfig, build_statement_config_from_profile
+from sqlspec.core import (
+    DriverParameterProfile,
+    ParameterStyle,
+    StatementConfig,
+    TypedParameter,
+    build_statement_config_from_profile,
+)
 from sqlspec.data_dictionary.dialects.mysql.config import parse_mysql_engine_version
 from sqlspec.exceptions import (
     CheckViolationError,
@@ -31,7 +39,6 @@ from sqlspec.utils.serializers import from_json, to_json
 from sqlspec.utils.type_converters import build_decimal_converter, build_uuid_coercions
 
 from vertebra.db.adapters.mysql.config import MySQLConfig
-from vertebra.extensions.sqlspec._driver import unwrap_typed_parameters
 from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
@@ -55,6 +62,7 @@ __all__ = (
     "normalize_mysql_many_parameters",
     "normalize_mysql_parameters",
     "parse_mysql_vector",
+    "unwrap_typed_parameters",
 )
 
 MYSQL_TABLE_NOT_FOUND_ERRNO = 1146
@@ -180,6 +188,19 @@ def build_statement_config(
 def default_statement_config() -> StatementConfig:
     """Return the default `ParameterStyle.QMARK` MySQL statement configuration."""
     return build_statement_config()
+
+
+def unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
+    if isinstance(bound, dict):
+        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(unwrap_typed_parameters(value) for value in bound)
+    if isinstance(bound, list):
+        return [unwrap_typed_parameters(value) for value in bound]
+    if isinstance(bound, TypedParameter):
+        return unwrap_typed_parameters(bound.value)
+    return bound
 
 
 def _coerce_param(value: Any) -> Any:

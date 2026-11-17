@@ -1,3 +1,10 @@
+export interface RouteDefinition {
+  readonly method: string;
+  readonly path: string;
+}
+
+export type RouteRegistry = Readonly<Record<string, RouteDefinition>>;
+
 export interface RouteUrlOptions {
   baseUrl?: string;
   query?: Record<string, string | number | boolean | null | undefined>;
@@ -38,17 +45,17 @@ export function interpolateRoutePath(
 /**
  * Build an HTTP URL from a route registry map, route key, path parameters, and options.
  */
-export function routeUrl<R extends Record<string, string>, K extends keyof R & string>(
+export function routeUrl<R extends RouteRegistry, K extends keyof R & string>(
   routes: R,
   name: K,
   params?: Record<string, string | number | boolean>,
   options?: RouteUrlOptions,
 ): string {
-  const pathTemplate = routes[name];
-  if (!pathTemplate) {
+  const entry = routes[name];
+  if (!entry) {
     throw new Error(`Unknown route: ${name}`);
   }
-  const path = interpolateRoutePath(pathTemplate, params, options?.query);
+  const path = interpolateRoutePath(entry.path, params, options?.query);
   if (!options?.baseUrl) {
     return path;
   }
@@ -60,17 +67,17 @@ export function routeUrl<R extends Record<string, string>, K extends keyof R & s
  * Build a WebSocket (`ws:` or `wss:`) URL from a WebSocket route registry map,
  * route key, path parameters, and options.
  */
-export function wsUrl<R extends Record<string, string>, K extends keyof R & string>(
+export function wsUrl<R extends RouteRegistry, K extends keyof R & string>(
   wsRoutes: R,
   name: K,
   params?: Record<string, string | number | boolean>,
   options?: RouteUrlOptions,
 ): string {
-  const pathTemplate = wsRoutes[name];
-  if (!pathTemplate) {
+  const entry = wsRoutes[name];
+  if (!entry) {
     throw new Error(`Unknown WebSocket route: ${name}`);
   }
-  const path = interpolateRoutePath(pathTemplate, params, options?.query);
+  const path = interpolateRoutePath(entry.path, params, options?.query);
   const rawBase =
     options?.baseUrl ?? (typeof window !== "undefined" && window.location ? window.location.origin : "ws://localhost");
   const wsBase = rawBase

@@ -4,20 +4,33 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from django.db.backends.postgresql.base import (
-    DatabaseWrapper as DjangoPostgreSQLDatabaseWrapper,
-)
-
 from vertebra.db.adapters.postgres import PoolerMode, PostgreSQLConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from django.db.backends.postgresql.base import (
+        DatabaseWrapper as DjangoPostgreSQLDatabaseWrapper,
+    )
+
     from vertebra.db.dbapi import SyncDBAPICursor
+else:
+    DjangoPostgreSQLDatabaseWrapper = ensure_module(
+        "django.db.backends.postgresql.base", package="django", extra="django"
+    ).DatabaseWrapper
 
 __all__ = ("DatabaseWrapper",)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve optional Django PostgreSQL backend classes on demand."""
+    if name == "DjangoPostgreSQLDatabaseWrapper":
+        return ensure_module("django.db.backends.postgresql.base", package="django", extra="django").DatabaseWrapper
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 
 class DatabaseWrapper(DatabaseWrapperMixin, DjangoPostgreSQLDatabaseWrapper):

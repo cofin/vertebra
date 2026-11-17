@@ -6,7 +6,7 @@ vertebra.framework.App and Litestar applications with automatic opt-attribute ha
 """
 
 import contextlib
-from collections.abc import AsyncIterable, AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -342,7 +342,7 @@ class AgentPlugin:
                                     aclose = getattr(stream, "aclose", None)
                                     if callable(aclose):
                                         with contextlib.suppress(BaseException):
-                                            await aclose()
+                                            await cast("Awaitable[Any]", aclose())
 
                             return stream_cls(
                                 _litestar_stream(),

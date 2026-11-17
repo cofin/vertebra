@@ -35,6 +35,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Framework Subdomains](domains/framework/subdomains.md)
   - [Distributed Queues, Cron Leader Election & Transactional Email](domains/framework/distributed-queues-and-email.md)
   - [Live State Synchronization](domains/framework/live-state.md)
+  - [Framework Extension Limitations](domains/framework/framework-extension-limitations.md)
   - [`vtb` Command-Line Interface](domains/framework/cli.md)
 - **Agent Protocols & Harness (`domains/agent/`)**:
   - [Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols](domains/agent/mcp-and-a2a-protocol-harness.md)
@@ -52,6 +53,7 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Frontend Bundler, Codegen & Client SDK Domain](domains/frontend/bundler-and-client-sdk.md)
   - [Standalone & Onefile Packaging and PGO Tooling](domains/frontend/packaging-and-pgo.md)
   - [WASM Plugin Host & Browser Bridge](domains/frontend/wasm.md)
+  - [Client, Bundler, WASM, and Packaging Limitations](domains/frontend/client-and-packaging-limitations.md)
 - **Storage, Data, Telemetry & Extensions (`domains/storage/`, `domains/data/`, `domains/telemetry/`, `domains/extensions/`)**:
   - [Object Storage, Streaming & Presigning](domains/storage/object-storage.md)
   - [Object Storage Implementation Limitations](domains/storage/object-storage-limitations.md)
@@ -69,6 +71,9 @@ Curated current-state engineering documentation for **Vertebra** (`src/py/verteb
   - [Logging, Trace Context, SQL Trace Propagation & GenAI Metrics](domains/telemetry/logging-tracing-and-genai.md)
   - [Framework Extensions: Litestar, Starlette, FastAPI, Flask, and Django](domains/extensions/litestar.md)
   - [SQLSpec, Advanced Alchemy & SQLAlchemy Dialect Extensions](domains/extensions/sqlspec-alchemy-and-dialects.md)
+  - [SQLSpec Adapter, Proxy & Store Limitations](domains/extensions/sqlspec-limitations.md)
+  - [SQLAlchemy Dialects, DB-API & Alembic Limitations](domains/extensions/sqlalchemy-limitations.md)
+  - [Advanced Alchemy & Cache Limitations](domains/extensions/alchemy-limitations.md)
   - [Oracle APEX, ORDS & 26ai Duality View Integration](domains/extensions/oracle-apex.md)
   - [gRPC Services & Wire Framing](domains/extensions/grpc.md)
 

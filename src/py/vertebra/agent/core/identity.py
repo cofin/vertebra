@@ -5,12 +5,13 @@ import logging
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
 import vertebra.agent.core.context as context_module
+from vertebra.framework.security import AuthenticatedPrincipal, JWKSConfig, JWKSVerifier
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json
 
@@ -31,7 +32,10 @@ __all__ = [
     "IapIdentitySource",
     "IdentityRequest",
     "IdentitySource",
+    "JwksIdentitySource",
     "MtlsIdentitySource",
+    "caller_identity_from_principal",
+    "extract_bearer_token",
 ]
 
 
@@ -223,3 +227,125 @@ class IapIdentitySource:
                 if isinstance(kid, str) and kid:
                     indexed[kid] = dict(entry)
         return indexed
+
+
+def extract_bearer_token(
+    headers: Mapping[str, Any] | Sequence[tuple[bytes, bytes]],
+    *,
+    header_name: str = "authorization",
+) -> str | None:
+    """Extract a Bearer token string from HTTP/ASGI headers, returning None if absent or non-Bearer."""
+    target = header_name.lower()
+    raw_value: str | None = None
+    if isinstance(headers, Mapping):
+        for key, value in headers.items():
+            if str(key).lower() == target and isinstance(value, str):
+                raw_value = value
+                break
+    else:
+        for raw_key, raw_val in headers:
+            if raw_key.decode("latin-1").lower() == target:
+                raw_value = raw_val.decode("latin-1")
+                break
+    if not raw_value:
+        return None
+    parts = raw_value.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip()
+
+
+def caller_identity_from_principal(
+    principal: AuthenticatedPrincipal,
+    *,
+    tenant_claim: str = "tenant_id",
+    roles_claim: str = "roles",
+) -> "CallerIdentity":
+    """Convert a verified ``AuthenticatedPrincipal`` into a ``CallerIdentity``."""
+    claims = principal.claims
+    user_id = principal.sub if principal.sub else None
+    raw_email = claims.get("email")
+    email = raw_email if isinstance(raw_email, str) and raw_email else None
+    raw_tenant = claims.get(tenant_claim)
+    tenant_id = raw_tenant.strip() if isinstance(raw_tenant, str) and raw_tenant.strip() else "default"
+    raw_roles = claims.get(roles_claim)
+    if isinstance(raw_roles, str):
+        roles = tuple(role for role in raw_roles.split() if role)
+    elif isinstance(raw_roles, (list, tuple)):
+        roles = tuple(str(role) for role in raw_roles if str(role))
+    else:
+        roles = ()
+    return context_module.CallerIdentity(
+        user_id=user_id,
+        email=email,
+        tenant_id=tenant_id,
+        roles=roles,
+        scopes=principal.scopes,
+        auth_scheme="jwt",
+    )
+
+
+class JwksIdentitySource:
+    """Resolve ``CallerIdentity`` from inbound Bearer JWTs verified against a JWKS endpoint."""
+
+    def __init__(
+        self,
+        verifier: JWKSVerifier | None = None,
+        *,
+        config: JWKSConfig | None = None,
+        async_client: Any = None,
+        sync_client: Any = None,
+        clock: Callable[[], float] | None = None,
+        tenant_claim: str = "tenant_id",
+        roles_claim: str = "roles",
+    ) -> None:
+        if verifier is None and config is None:
+            msg = "JwksIdentitySource requires either verifier or config"
+            raise ValueError(msg)
+        if verifier is not None and config is not None:
+            msg = "JwksIdentitySource accepts either verifier or config, not both"
+            raise ValueError(msg)
+        if verifier is not None:
+            self.verifier = verifier
+        else:
+            assert config is not None
+            self.verifier = JWKSVerifier(
+                config,
+                async_client=async_client,
+                sync_client=sync_client,
+                clock=clock,
+            )
+        self.tenant_claim = tenant_claim
+        self.roles_claim = roles_claim
+
+    def resolve(self, request: IdentityRequest) -> "CallerIdentity | None":
+        """Synchronously verify an Authorization Bearer JWT and return a CallerIdentity or None."""
+        token = extract_bearer_token(request.headers)
+        if not token:
+            return None
+        try:
+            principal = self.verifier.verify_token_sync(token)
+        except Exception as exc:
+            logger.warning("JWKS bearer verification failed (%s)", type(exc).__name__)
+            return None
+        return caller_identity_from_principal(
+            principal,
+            tenant_claim=self.tenant_claim,
+            roles_claim=self.roles_claim,
+        )
+
+    async def resolve_async(self, request: IdentityRequest) -> "CallerIdentity | None":
+        """Asynchronously verify an Authorization Bearer JWT and return a CallerIdentity or None."""
+        token = extract_bearer_token(request.headers)
+        if not token:
+            return None
+        try:
+            principal = await self.verifier.verify_token(token)
+        except Exception as exc:
+            logger.warning("JWKS bearer verification failed (%s)", type(exc).__name__)
+            return None
+        return caller_identity_from_principal(
+            principal,
+            tenant_claim=self.tenant_claim,
+            roles_claim=self.roles_claim,
+        )

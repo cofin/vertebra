@@ -205,14 +205,14 @@ pub(crate) fn with_buffer_slice<R>(
         return f(py_bytes.as_bytes());
     }
     let py_buf = PyBuffer::<u8>::get(obj)?;
-    if py_buf.is_c_contiguous() {
+    if py_buf.readonly() && py_buf.is_c_contiguous() {
         let len = py_buf.item_count();
         let slice = if len == 0 {
             &[][..]
         } else {
-            // SAFETY: `py_buf` is verified C-contiguous (`PyBuffer<u8>`), `len > 0`
-            // ensures `buf_ptr()` is non-null and valid for `len` bytes, and `py_buf`
-            // stays alive across `f(slice)` while the GIL is held.
+            // SAFETY: `py_buf` is verified readonly and C-contiguous (`PyBuffer<u8>`),
+            // `len > 0` ensures `buf_ptr()` is non-null and valid for `len` bytes, and
+            // `py_buf` stays alive across `f(slice)` while the GIL is held.
             unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
         };
         let res = f(slice);
@@ -846,25 +846,29 @@ pub fn submit_raw_response(
     slot_capacity: usize,
 ) -> PyResult<Vec<Vec<u8>>> {
     let py_buf = PyBuffer::<u8>::get(body)?;
-    let owned_fallback: Option<Vec<u8>> = if py_buf.is_c_contiguous() {
-        None
-    } else {
-        Some(py_buf.to_vec(py)?)
-    };
+    let (py_buf_guard, owned_fallback): (Option<PyBuffer<u8>>, Option<Vec<u8>>) =
+        if py_buf.readonly() && py_buf.is_c_contiguous() {
+            (Some(py_buf), None)
+        } else {
+            let owned = py_buf.to_vec(py)?;
+            drop(py_buf);
+            (None, Some(owned))
+        };
 
-    let body_slice: &[u8] = match &owned_fallback {
-        Some(vec) => vec.as_slice(),
-        None => {
+    let body_slice: &[u8] = match (&py_buf_guard, &owned_fallback) {
+        (_, Some(vec)) => vec.as_slice(),
+        (Some(py_buf), None) => {
             let len = py_buf.item_count();
             if len == 0 {
                 &[]
             } else {
-                // SAFETY: `py_buf` is C-contiguous (`owned_fallback` is `None`), `len > 0`
-                // guarantees `buf_ptr()` is non-null and valid for `len` bytes, and `py_buf`
-                // remains alive until the end of `submit_raw_response`.
+                // SAFETY: `py_buf` is readonly and C-contiguous (`owned_fallback` is `None`),
+                // `len > 0` guarantees `buf_ptr()` is non-null and valid for `len` bytes, and
+                // `py_buf_guard` remains alive until the end of `submit_raw_response`.
                 unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
             }
         }
+        (None, None) => unreachable!(),
     };
 
     let cap = slot_capacity.max(RESPONSE_SLOT_HEADER_LEN + 64);

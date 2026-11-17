@@ -1,4 +1,4 @@
-"""Sync and async native CacheStore for Starlette and FastAPI applications."""
+"""Sync and async cache store integration for Starlette and FastAPI applications."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Self
 
+from vertebra.cache import AsyncCacheStore, CacheStats, SyncCacheStore
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.db.adapters.valkey import AsyncValkeyDriver, SyncValkeyDriver, ValkeyConfig
 from vertebra.utils.text import validate_identifier
@@ -15,15 +16,18 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = (
+    "AsyncCacheStore",
+    "CacheStats",
     "CacheStore",
+    "SyncCacheStore",
     "attach_cache_store",
 )
 
 
 class CacheStore:
-    """Monotonic TTL cache store with both async and sync methods and optional Valkey/Redis backing."""
+    """TTL cache store delegating local entries to neutral vertebra.cache with optional Valkey/Redis drivers."""
 
-    __slots__ = ("_async_driver", "_entries", "_key_prefix", "_sync_driver")
+    __slots__ = ("_async_driver", "_entries", "_key_prefix", "_sync_cache", "_sync_driver")
 
     def __init__(
         self,
@@ -31,21 +35,18 @@ class CacheStore:
         async_driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
         sync_driver: SyncValkeyDriver | SyncRedisDriver | None = None,
         key_prefix: str = "vertebra",
+        url: str | None = None,
     ) -> None:
-        """Initialize store with optional Valkey or Redis backing drivers.
-
-        Args:
-            async_driver: Optional async Valkey or Redis driver.
-            sync_driver: Optional sync Valkey or Redis driver.
-            key_prefix: Namespace prepended to every key as ``<key_prefix>:<key>``; ``delete_all`` removes only keys under it.
-
-        Raises:
-            ValueError: When ``key_prefix`` is not a valid identifier.
-        """
+        """Initialize store with optional Valkey/Redis backing drivers or neutral cache URL."""
         self._key_prefix = validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)
         self._entries: dict[str, tuple[bytes, float | None]] = {}
         self._async_driver = async_driver
         self._sync_driver = sync_driver
+        self._sync_cache: SyncCacheStore | None = (
+            SyncCacheStore(url or "memory://", key_prefix=f"{self._key_prefix}:")
+            if async_driver is None and sync_driver is None
+            else None
+        )
         if isinstance(async_driver, (AsyncValkeyDriver, AsyncRedisDriver)):
             async_driver.add_invalidation_listener(self._on_driver_invalidate)
 
@@ -88,6 +89,8 @@ class CacheStore:
 
     def get_sync(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
         """Synchronously retrieve bytes for key if present and unexpired."""
+        if self._sync_cache is not None and renew_for is None:
+            return self._sync_cache.get(key)
         full_key = self._make_key(key)
         entry = self._entries.get(full_key)
         if entry is None:
@@ -98,10 +101,14 @@ class CacheStore:
         now = time.monotonic()
         if expires_at is not None and now >= expires_at:
             self._entries.pop(full_key, None)
+            if self._sync_cache is not None:
+                self._sync_cache.delete(key)
             return None
         if renew_for is not None:
             ttl_s = renew_for.total_seconds() if isinstance(renew_for, timedelta) else float(renew_for)
             self._entries[full_key] = (value, now + ttl_s)
+            if self._sync_cache is not None:
+                self._sync_cache.set(key, value, ttl=ttl_s)
         return value
 
     def set_sync(
@@ -114,8 +121,11 @@ class CacheStore:
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
         full_key = self._make_key(key)
         ttl_ms = self._ttl_milliseconds(expires_in)
-        expires_at = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
+        ttl_s = None if ttl_ms is None else ttl_ms / 1000.0
+        expires_at = None if ttl_s is None else time.monotonic() + ttl_s
         self._entries[full_key] = (raw, expires_at)
+        if self._sync_cache is not None:
+            self._sync_cache.set(key, raw, ttl=ttl_s)
         if self._sync_driver is not None:
             self._sync_driver.set(full_key, raw, px=ttl_ms)
 
@@ -123,11 +133,15 @@ class CacheStore:
         """Synchronously delete key from the store."""
         full_key = self._make_key(key)
         self._entries.pop(full_key, None)
+        if self._sync_cache is not None:
+            self._sync_cache.delete(key)
         if self._sync_driver is not None:
             self._sync_driver.delete(full_key)
 
     async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
         """Asynchronously retrieve bytes for key if present and unexpired."""
+        if self._sync_cache is not None and renew_for is None:
+            return self._sync_cache.get(key)
         full_key = self._make_key(key)
         entry = self._entries.get(full_key)
         if entry is None:
@@ -138,10 +152,14 @@ class CacheStore:
         now = time.monotonic()
         if expires_at is not None and now >= expires_at:
             self._entries.pop(full_key, None)
+            if self._sync_cache is not None:
+                self._sync_cache.delete(key)
             return None
         if renew_for is not None:
             ttl_s = renew_for.total_seconds() if isinstance(renew_for, timedelta) else float(renew_for)
             self._entries[full_key] = (value, now + ttl_s)
+            if self._sync_cache is not None:
+                self._sync_cache.set(key, value, ttl=ttl_s)
         return value
 
     async def set(
@@ -154,8 +172,11 @@ class CacheStore:
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
         full_key = self._make_key(key)
         ttl_ms = self._ttl_milliseconds(expires_in)
-        expires_at = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
+        ttl_s = None if ttl_ms is None else ttl_ms / 1000.0
+        expires_at = None if ttl_s is None else time.monotonic() + ttl_s
         self._entries[full_key] = (raw, expires_at)
+        if self._sync_cache is not None:
+            self._sync_cache.set(key, raw, ttl=ttl_s)
         if self._async_driver is not None:
             await self._async_driver.set(full_key, raw, px=ttl_ms)
 
@@ -163,12 +184,16 @@ class CacheStore:
         """Asynchronously delete key from the store."""
         full_key = self._make_key(key)
         self._entries.pop(full_key, None)
+        if self._sync_cache is not None:
+            self._sync_cache.delete(key)
         if self._async_driver is not None:
             await self._async_driver.delete(full_key)
 
     async def delete_all(self) -> None:
         """Delete every key under this store's ``key_prefix`` with ``SCAN`` + ``UNLINK``."""
         self._entries.clear()
+        if self._sync_cache is not None:
+            self._sync_cache.clear()
         if self._async_driver is None:
             return
         pattern = f"{self._key_prefix}:*"
@@ -194,7 +219,9 @@ class CacheStore:
             await self.set(k, v, expires_in=expires_in)
 
     async def close(self) -> None:
-        """Close any underlying Valkey or Redis drivers."""
+        """Close any underlying Valkey, Redis, or neutral cache stores."""
+        if self._sync_cache is not None:
+            self._sync_cache.close()
         if self._async_driver is not None:
             await self._async_driver.close()
         if self._sync_driver is not None:
@@ -206,11 +233,7 @@ class CacheStore:
 
     @staticmethod
     def _ttl_milliseconds(expires_in: int | timedelta | None) -> int | None:
-        """Convert ``expires_in`` to whole milliseconds, rounding up.
-
-        Raises:
-            ValueError: When ``expires_in`` is zero or negative.
-        """
+        """Convert ``expires_in`` to whole milliseconds, rounding up."""
         if expires_in is None:
             return None
         seconds = expires_in.total_seconds() if isinstance(expires_in, timedelta) else float(expires_in)
@@ -225,8 +248,11 @@ class CacheStore:
             self._entries.pop(str_key, None)
 
 
-def attach_cache_store(app: Any, store: CacheStore | None = None) -> CacheStore:
-    """Attach a CacheStore instance to ``app.state.cache``."""
+def attach_cache_store(
+    app: Any,
+    store: CacheStore | SyncCacheStore | AsyncCacheStore | None = None,
+) -> CacheStore | SyncCacheStore | AsyncCacheStore:
+    """Attach a CacheStore or neutral cache store instance to ``app.state.cache``."""
     resolved = store if store is not None else CacheStore()
     state = getattr(app, "state", None)
     if state is not None:

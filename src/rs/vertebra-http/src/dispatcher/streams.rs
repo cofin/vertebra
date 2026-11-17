@@ -23,6 +23,9 @@ struct StreamEntry {
     cancelled: CancellationToken,
 }
 
+/// Default bounded per-stream frame queue capacity.
+pub const DEFAULT_STREAM_QUEUE_DEPTH: usize = 64;
+
 /// Per-response bounded channels with producer backpressure and disconnect reporting.
 pub struct ResponseStreamRegistry {
     streams: DashMap<u64, StreamEntry>,
@@ -31,7 +34,7 @@ pub struct ResponseStreamRegistry {
 
 impl Default for ResponseStreamRegistry {
     fn default() -> Self {
-        Self::with_capacity(64)
+        Self::with_capacity(DEFAULT_STREAM_QUEUE_DEPTH)
     }
 }
 
@@ -42,6 +45,16 @@ impl ResponseStreamRegistry {
             streams: DashMap::new(),
             capacity: capacity.max(1),
         }
+    }
+
+    /// Return the configured per-stream bounded frame capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Close and cancel a single stream if still active.
+    pub fn close(&self, request_id: u64) -> bool {
+        self.remove(request_id).is_some()
     }
 
     /// Deliver on a detached producer thread, blocking while the client applies backpressure.

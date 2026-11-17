@@ -2,23 +2,46 @@
 
 from __future__ import annotations
 
+import contextlib
+import subprocess
+import sys
 import threading
-from collections.abc import Awaitable
+import time
+from collections.abc import AsyncIterator, Awaitable
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
+import jwt
 import msgspec
 import pytest
+from advanced_alchemy.config import EngineConfig, RoutingConfig
+from advanced_alchemy.extensions.starlette import (
+    SQLAlchemyAsyncConfig as StarletteSQLAlchemyAsyncConfig,
+)
+from advanced_alchemy.extensions.starlette import (
+    SQLAlchemySyncConfig as StarletteSQLAlchemySyncConfig,
+)
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope
 from vertebra.agent.mcp.controllers import mcp_tool
 from vertebra.agent.mcp.routes import AsgiMcpApp
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
+from vertebra.extensions.alchemy import (
+    create_async_alchemy_config,
+    create_starlette_alchemy,
+    create_sync_alchemy_config,
+)
 from vertebra.extensions.starlette import (
     AsyncStorageRegistry,
     CacheStore,
@@ -518,3 +541,294 @@ async def test_starlette_queue_service_and_lifespan() -> None:
         results = await svc.drain_once(("io",))
         assert results == [42]
         assert executed == [21]
+
+
+@pytest.mark.anyio
+async def test_starlette_alchemy_factory_routing_and_engine_instance() -> None:
+    """Verify Starlette Alchemy config factories, routing_config, engine_instance, and app binding."""
+    with pytest.raises(ValueError, match="at least one configuration"):
+        create_starlette_alchemy()
+
+    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", framework="starlette")
+    sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", framework="starlette")
+    assert isinstance(async_cfg, StarletteSQLAlchemyAsyncConfig)
+    assert isinstance(sync_cfg, StarletteSQLAlchemySyncConfig)
+
+    app = Starlette()
+    ext = create_starlette_alchemy(async_cfg, app=app)
+    assert ext.config == [async_cfg]
+    assert async_cfg.app is app
+
+    routing_cfg = RoutingConfig(primary_connection_string="sqlite+vtb:///:memory:")
+    routed_sync = create_sync_alchemy_config(framework="starlette", routing_config=routing_cfg)
+    assert isinstance(routed_sync, StarletteSQLAlchemySyncConfig)
+    assert routed_sync.routing_config is routing_cfg
+
+    sync_engine = create_engine("sqlite+vtb:///:memory:")
+    async_engine = create_async_engine("sqlite+vtb_async:///:memory:")
+    explicit_ec = EngineConfig(pool_pre_ping=False, pool_recycle=cast("Any", None), poolclass=NullPool)
+    try:
+        prebuilt_sync = create_sync_alchemy_config(
+            framework="starlette",
+            engine_instance=sync_engine,
+            engine_config=explicit_ec,
+        )
+        prebuilt_async = create_async_alchemy_config(
+            framework="starlette",
+            engine_instance=async_engine,
+            engine_config=explicit_ec,
+        )
+        assert prebuilt_sync.engine_instance is sync_engine
+        assert prebuilt_sync.engine_config is explicit_ec
+        assert prebuilt_async.engine_instance is async_engine
+        assert prebuilt_async.engine_config is explicit_ec
+    finally:
+        sync_engine.dispose()
+        await async_engine.dispose()
+
+
+def test_starlette_plugin_testclient_lifespan_cors_openapi_and_idempotency() -> None:
+    """Verify TestClient executes wrapped lifespan, CORS offload, OpenAPI 304 ETag, exception handlers, and idempotency."""
+    lifespan_counts = {"startup": 0, "shutdown": 0}
+    openapi_hits = {"count": 0}
+
+    class _BoomError(RuntimeError):
+        pass
+
+    @contextlib.asynccontextmanager
+    async def custom_lifespan(target_app: Starlette) -> AsyncIterator[dict[str, str]]:
+        lifespan_counts["startup"] += 1
+        target_app.state.custom_started = True
+        try:
+            yield {"lifespan_marker": "ok"}
+        finally:
+            lifespan_counts["shutdown"] += 1
+            target_app.state.custom_stopped = True
+
+    async def ping(_request: Any) -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    async def openapi_json(_request: Any) -> JSONResponse:
+        openapi_hits["count"] += 1
+        return JSONResponse({"openapi": "3.1.0", "info": {"title": "Test", "version": "1.0.0"}})
+
+    async def boom(_request: Any) -> JSONResponse:
+        raise _BoomError("handled")
+
+    async def handle_boom(_request: Any, exc: Exception) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=418)
+
+    app = Starlette(
+        routes=[
+            Route("/ping", ping, methods=["GET"]),
+            Route("/openapi.json", openapi_json, methods=["GET"]),
+            Route("/boom", boom, methods=["GET"]),
+        ],
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["https://app.example.com"],
+                allow_methods=["GET", "POST"],
+                allow_headers=["Authorization", "Content-Type"],
+                allow_credentials=True,
+                max_age=300,
+            ),
+        ],
+        exception_handlers={_BoomError: handle_boom},
+        lifespan=custom_lifespan,
+    )
+
+    plugin = VertebraPlugin()
+    assert plugin.init_app(app) is app
+    mw_count_after_first = len(app.user_middleware)
+    lifespan_after_first = app.router.lifespan_context
+
+    assert plugin.init_app(app) is app
+    assert len(app.user_middleware) == mw_count_after_first
+    assert app.router.lifespan_context is lifespan_after_first
+
+    with TestClient(app) as client:
+        assert lifespan_counts == {"startup": 1, "shutdown": 0}
+        assert app.state.custom_started is True
+        assert app.state.vertebra_lifespan_active is True
+
+        preflight = client.options(
+            "/ping",
+            headers={
+                "Origin": "https://app.example.com",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+        assert preflight.status_code == 204
+        assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
+        assert preflight.headers["access-control-allow-credentials"] == "true"
+        assert "GET" in preflight.headers["access-control-allow-methods"]
+
+        ping_resp = client.get("/ping", headers={"Origin": "https://app.example.com"})
+        assert ping_resp.status_code == 200
+        assert ping_resp.json() == {"ok": True}
+        assert ping_resp.headers["access-control-allow-origin"] == "https://app.example.com"
+
+        schema_resp = client.get("/openapi.json")
+        assert schema_resp.status_code == 200
+        assert schema_resp.json()["openapi"] == "3.1.0"
+        etag = schema_resp.headers["etag"]
+        assert etag
+        assert openapi_hits["count"] == 1
+
+        cached_resp = client.get("/openapi.json", headers={"If-None-Match": etag})
+        assert cached_resp.status_code == 304
+        assert cached_resp.content == b""
+        assert openapi_hits["count"] == 1
+
+        exc_resp = client.get("/boom")
+        assert exc_resp.status_code == 418
+        assert exc_resp.json() == {"error": "handled"}
+
+    assert lifespan_counts == {"startup": 1, "shutdown": 1}
+    assert app.state.custom_stopped is True
+    assert app.state.vertebra_lifespan_active is False
+
+
+@pytest.mark.parametrize(
+    "blocked_modules",
+    [
+        ("litestar", "litestar_queues"),
+        ("starlette", "starlette.routing", "starlette.responses", "starlette.requests", "starlette.middleware"),
+    ],
+)
+def test_starlette_extension_imports_isolated_in_subprocess(blocked_modules: tuple[str, ...]) -> None:
+    """Importing vertebra.extensions.starlette and its submodules succeeds without litestar or starlette."""
+    script = f"""
+import importlib
+import sys
+
+for mod in {list(blocked_modules)!r}:
+    sys.modules[mod] = None
+
+pkg = importlib.import_module("vertebra.extensions.starlette")
+for sub in (
+    "channels",
+    "config",
+    "fastpath",
+    "mcp",
+    "offload",
+    "openapi",
+    "plugin",
+    "queues",
+    "router",
+    "security",
+    "storage",
+    "store",
+    "vite",
+):
+    importlib.import_module(f"vertebra.extensions.starlette.{{sub}}")
+
+for loaded_name in list(sys.modules):
+    if loaded_name.startswith("vertebra.extensions.litestar"):
+        raise AssertionError(f"Unexpected litestar import: {{loaded_name}}")
+
+assert hasattr(pkg, "VertebraPlugin")
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+
+def test_starlette_missing_dependency_error_only_when_helpers_run() -> None:
+    """Blocking starlette allows imports but raises MissingDependencyError when Starlette helpers execute."""
+    script = """
+import importlib
+import sys
+from types import SimpleNamespace
+
+for mod in ("starlette", "starlette.routing", "starlette.responses", "starlette.middleware"):
+    sys.modules[mod] = None
+
+from vertebra.extensions.starlette import (
+    OpenAPIConfig,
+    VertebraPlugin,
+    ViteExtension,
+    mount_docs_routes,
+    mount_mcp_routes,
+)
+from vertebra.extensions.starlette.queues import (
+    QueueService,
+    attach_queue_service,
+    get_queue_service,
+)
+from vertebra.extensions.starlette.vite import clear_vite_bridges, vite_asset, vite_hmr_client
+from vertebra.framework.queues import MemoryQueueBackend
+from vertebra.typing import MissingDependencyError
+
+clear_vite_bridges()
+vite_ext = ViteExtension()
+app = SimpleNamespace(routes=[], state=SimpleNamespace())
+vite_ext.init_app(app)
+assert "<script" in vite_asset("src/main.ts")
+assert vite_hmr_client() == ""
+
+qsvc = attach_queue_service(app, QueueService(backend=MemoryQueueBackend()))
+assert get_queue_service(app) is qsvc
+
+for fn in (
+    lambda: VertebraPlugin(app),
+    lambda: mount_docs_routes(app, OpenAPIConfig()),
+    lambda: mount_mcp_routes(app),
+):
+    try:
+        fn()
+    except MissingDependencyError:
+        pass
+    else:
+        raise AssertionError("Expected MissingDependencyError when starlette is missing")
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+
+@pytest.mark.anyio
+async def test_starlette_jwt_auth_backend_and_vite_extension_delegation() -> None:
+    """Verify Starlette JWTAuthBackend validates Bearer tokens and ViteExtension delegates to ViteBridge."""
+    secret = "test-token-placeholder-secret-32b"
+    token = jwt.encode(
+        {"sub": "user-42", "scope": "read:items write:items", "exp": int(time.time()) + 300},
+        secret,
+        algorithm="HS256",
+    )
+    backend = JWTAuthBackend(secret)
+    auth_res = await backend.authenticate(SimpleNamespace(headers={"authorization": f"Bearer {token}"}))
+    assert auth_res is not None
+    scopes, principal = auth_res
+    assert scopes == ("read:items", "write:items")
+    assert principal.sub == "user-42"
+    assert principal.is_authenticated is True
+    assert await backend.authenticate(SimpleNamespace(headers={"authorization": "Bearer invalid-token"})) is None
+
+    from vertebra.extensions.starlette.vite import (
+        ViteConfig,
+        ViteExtension,
+        clear_vite_bridges,
+        vite_asset,
+        vite_hmr_client,
+    )
+
+    clear_vite_bridges()
+    vite = ViteExtension(config=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
+    app = SimpleNamespace(state=SimpleNamespace())
+    vite.init_app(app)
+    assert app.state.vite is vite
+    assert app.state.vite_bridge is vite.bridge
+    assert "http://localhost:5173/@vite/client" in vite_hmr_client()
+    assert "http://localhost:5173/src/app.ts" in vite_asset("src/app.ts")
+    clear_vite_bridges()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import secrets
+import threading
 import time
 from collections import deque
 from collections.abc import Mapping
@@ -112,25 +113,31 @@ class SpanData(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class SpanExporter:
-    """Bounded lock-free-style ring buffer for completed telemetry spans."""
+    """Bounded thread-safe ring buffer for completed telemetry spans."""
+
+    __slots__ = ("_lock", "_ring", "capacity")
 
     def __init__(self, capacity: int = 4096) -> None:
         self.capacity = max(1, capacity)
         self._ring: deque[SpanData] = deque(maxlen=self.capacity)
+        self._lock = threading.Lock()
 
     def record_span(self, span: SpanData) -> None:
         """Append a completed span to the bounded ring buffer."""
-        self._ring.append(span)
+        with self._lock:
+            self._ring.append(span)
 
     def get_spans(self) -> list[SpanData]:
         """Return all buffered spans without draining the ring buffer."""
-        return list(self._ring)
+        with self._lock:
+            return list(self._ring)
 
     def drain_spans(self) -> list[SpanData]:
         """Drain and return all buffered spans for batch OTLP export."""
-        spans = list(self._ring)
-        self._ring.clear()
-        return spans
+        with self._lock:
+            spans = list(self._ring)
+            self._ring.clear()
+            return spans
 
 
 class GenAiUsage(msgspec.Struct, frozen=True, gc=False, kw_only=True, cache_hash=True):
@@ -273,15 +280,19 @@ class GenAiMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class GenAiRecorder:
     """Records gen_ai.client.token.usage and gen_ai.client.operation.duration metrics."""
 
+    __slots__ = ("_cost_table", "_lock", "_samples", "max_samples")
+
     def __init__(self, cost_table: Any | None = None, *, max_samples: int = 1024) -> None:
         self.max_samples = max_samples
         self._samples: deque[GenAiMetricSample] = deque(maxlen=max_samples)
         self._cost_table = cost_table
+        self._lock = threading.Lock()
 
     @property
     def samples(self) -> tuple[GenAiMetricSample, ...]:
         """Return recorded GenAI telemetry samples."""
-        return tuple(self._samples)
+        with self._lock:
+            return tuple(self._samples)
 
     def record_generation(
         self,
@@ -322,12 +333,14 @@ class GenAiRecorder:
             agent_name=agent_name,
             status=status,
         )
-        self._samples.append(sample)
+        with self._lock:
+            self._samples.append(sample)
         return sample
 
     def duration_histogram(self, operation: str) -> HistogramSnapshot:
         """Calculate statistical duration histogram for a specific operation."""
-        matching = [s.duration_seconds for s in self._samples if s.operation == operation]
+        with self._lock:
+            matching = [s.duration_seconds for s in self._samples if s.operation == operation]
         if not matching:
             return HistogramSnapshot(
                 count=0,
@@ -355,21 +368,24 @@ class GenAiRecorder:
 
     def total_cost(self, agent_name: str | None = None) -> float:
         """Return the sum of all recorded USD costs, optionally filtered by agent name."""
-        return sum(s.usd_cost for s in self._samples if agent_name is None or s.agent_name == agent_name)
+        with self._lock:
+            return sum(s.usd_cost for s in self._samples if agent_name is None or s.agent_name == agent_name)
 
     def total_tokens(self, agent_name: str | None = None) -> int:
         """Return the sum of all recorded tokens, optionally filtered by agent name."""
-        return sum(
-            s.input_tokens + s.output_tokens + s.thought_tokens
-            for s in self._samples
-            if agent_name is None or s.agent_name == agent_name
-        )
+        with self._lock:
+            return sum(
+                s.input_tokens + s.output_tokens + s.thought_tokens
+                for s in self._samples
+                if agent_name is None or s.agent_name == agent_name
+            )
 
     def drain(self) -> list[GenAiMetricSample]:
         """Drain and return all recorded GenAI telemetry samples."""
-        drained = list(self._samples)
-        self._samples.clear()
-        return drained
+        with self._lock:
+            drained = list(self._samples)
+            self._samples.clear()
+            return drained
 
 
 class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -395,20 +411,26 @@ class DbPoolMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 class DbPoolRecorder:
     """Records database connection pool and statement cache telemetry metrics."""
 
+    __slots__ = ("_lock", "_samples")
+
     def __init__(self) -> None:
         self._samples: list[DbPoolMetricSample] = []
+        self._lock = threading.Lock()
 
     @property
     def samples(self) -> tuple[DbPoolMetricSample, ...]:
         """Return recorded database pool telemetry samples."""
-        return tuple(self._samples)
+        with self._lock:
+            return tuple(self._samples)
 
     def record_sample(self, sample: DbPoolMetricSample) -> None:
         """Record a database pool telemetry metric sample."""
-        self._samples.append(sample)
+        with self._lock:
+            self._samples.append(sample)
 
     def drain_samples(self) -> list[DbPoolMetricSample]:
         """Drain and return all buffered database pool metric samples."""
-        samples = list(self._samples)
-        self._samples.clear()
-        return samples
+        with self._lock:
+            samples = list(self._samples)
+            self._samples.clear()
+            return samples

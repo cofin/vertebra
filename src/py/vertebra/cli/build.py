@@ -1,6 +1,7 @@
 """Build command for frontend assets, standalone directories, and onefile binaries."""
 
 from pathlib import Path
+from typing import Literal
 
 import click
 
@@ -70,6 +71,13 @@ _LEGACY_TARGETS: frozenset[str] = frozenset({"frontend", "backend", "all"})
     default=False,
     help="Stage .agents/skills into the standalone bundle (application repositories only)",
 )
+@click.option(
+    "--compression",
+    type=click.Choice(["zlib", "zstd"]),
+    default="zlib",
+    show_default=True,
+    help="Compression algorithm for --onefile payloads",
+)
 def build(
     target: str,
     profile: str,
@@ -81,6 +89,7 @@ def build(
     output: Path | None,
     project_dir: Path,
     include_agent_skills: bool,
+    compression: Literal["zlib", "zstd"],
 ) -> None:
     """Build Vertebra application assets, standalone distributions, or onefile binaries."""
     resolved_project = project_dir.resolve()
@@ -110,7 +119,7 @@ def build(
 
         if onefile:
             binary_out = output or (resolved_project / "dist" / f"{resolved_project.name}-{target_tuple.rust_triple}")
-            onefile_builder = OnefileBuilder(dist_dir=staged_dir, target=target_tuple)
+            onefile_builder = OnefileBuilder(dist_dir=staged_dir, target=target_tuple, compression=compression)
             created = onefile_builder.build(binary_out)
             console.success(f"Onefile executable created -> {created}")
         return

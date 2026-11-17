@@ -51,6 +51,8 @@ import {
   interpolateRoutePath,
   type ClientConfig,
   type RetryConfig,
+  type RouteDefinition,
+  type RouteRegistry,
   type RouteResponse,
   type RouteUrlOptions,
 } from "@vertebra/client";
@@ -61,6 +63,8 @@ import {
 | `HttpClient` | Class | Type-safe fetch client with automatic JSON serialization, timeout handling, and retry backoff (`baseURL`). |
 | `ClientConfig` | Type | Base URL, default headers, timeout, and `RetryConfig` options for `HttpClient`. |
 | `RetryConfig` | Type | Maximum attempts, base delay, jitter, and retryable HTTP status codes. |
+| `RouteDefinition` | Type | Generated route descriptor containing HTTP `method` and `path` pattern. |
+| `RouteRegistry` | Type | Immutable mapping of route names to `RouteDefinition` entries. |
 | `RouteResponse` | Type | Typed response wrapper pairing HTTP status, headers, and decoded payload. |
 | `RouteUrlOptions` | Type | Path parameters, query parameters, and base URL options for `routeUrl` and `wsUrl`. |
 | `routeUrl` | Function | Resolves a named route or path template into a formatted HTTP URL with interpolated parameters and query string. |

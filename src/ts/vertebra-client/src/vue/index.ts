@@ -22,7 +22,7 @@ export function useClient(): HttpClient {
  * Vue 3.5 composable for data fetching.
  * Support reactive input via Ref or Getter.
  */
-export function useQuery<TInput = any, TOutput = any>(
+export function useQuery<TInput = unknown, TOutput = unknown>(
   method: string,
   path: string,
   input?: MaybeRefOrGetter<TInput>,
@@ -45,9 +45,9 @@ export function useQuery<TInput = any, TOutput = any>(
       if (seq === requestSeq) {
         data.value = result;
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (seq === requestSeq) {
-        error.value = err;
+        error.value = err instanceof Error ? err : new Error(String(err));
       }
     } finally {
       if (seq === requestSeq) {
@@ -71,7 +71,7 @@ export function useQuery<TInput = any, TOutput = any>(
 /**
  * Vue 3.5 mutation composable.
  */
-export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
+export function useMutation<TInput = unknown, TOutput = unknown>(method: string, path: string) {
   const client = useClient();
   const loading = ref(false);
   const error = ref<Error | null>(null);
@@ -82,8 +82,8 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
     try {
       const result = await client.call<TInput, TOutput>(method, path, input);
       return result;
-    } catch (err: any) {
-      error.value = err;
+    } catch (err: unknown) {
+      error.value = err instanceof Error ? err : new Error(String(err));
       throw err;
     } finally {
       loading.value = false;

@@ -7,13 +7,15 @@ import inspect
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast, runtime_checkable
 
 import msgspec
 
 from vertebra._vertebra import (
     BrokerAttachClient,
     BrokerEngineRegistry,
+    DataError,
+    InterfaceError,
     LeaseBroker,
     ReclaimedLease,
     StatementCache,
@@ -37,11 +39,14 @@ from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.utils.sync_tools import SyncPool
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Awaitable, Callable, Iterable, Iterator
     from types import TracebackType
+
+    from vertebra._vertebra import PartitionStats
 
 __all__ = (
     "AsyncBrokerLeaseSource",
+    "AsyncBrokerStream",
     "AsyncConnectionLease",
     "AsyncSHMBrokerTransport",
     "BrokerConfig",
@@ -109,8 +114,6 @@ class BrokerConfig(msgspec.Struct, frozen=True, gc=False):
     role: Literal["owner", "worker"] = "owner"
     state_key: str = "db_broker"
     metrics_state_key: str = "db_broker_metrics"
-    acquire_timeout: float = 5.0
-    lease_ttl: float = 30.0
     socket_path: str | None = None
     attach_secret: bytes | str | None = None
 
@@ -254,15 +257,15 @@ class SyncConnectionLease(_BaseConnectionLease):
                 "quarantined lease cannot be released without disposal",
             )
         if not self._released:
-            self._released = True
             if self._transport is not None:
-                release_sync_fn = getattr(self._transport, "release_sync", None) or getattr(
-                    self._transport, "_release_sync", None
-                )
+                release_sync_fn = getattr(self._transport, "_release_sync", None)
+                if not callable(release_sync_fn):
+                    release_sync_fn = getattr(self._transport, "release_sync", None)
                 if callable(release_sync_fn):
                     release_sync_fn(self.lease_id)
                 else:
                     self._transport.release(self.lease_id)
+            self._released = True
 
     def __enter__(self) -> SyncConnectionLease:
         return self
@@ -289,11 +292,11 @@ class AsyncConnectionLease(_BaseConnectionLease):
                 "quarantined lease cannot be released without disposal",
             )
         if not self._released:
-            self._released = True
             if self._transport is not None:
                 res = self._transport.release(self.lease_id)
                 if inspect.isawaitable(res):
                     await res
+            self._released = True
 
     def release_sync(self) -> None:
         """Release the connection lease synchronously from non-greenlet teardown paths."""
@@ -304,19 +307,14 @@ class AsyncConnectionLease(_BaseConnectionLease):
                 "quarantined lease cannot be released without disposal",
             )
         if not self._released:
-            self._released = True
             if self._transport is not None:
-                release_sync_fn = getattr(self._transport, "release_sync", None) or getattr(
-                    self._transport, "_release_sync", None
-                )
-                if callable(release_sync_fn):
-                    release_sync_fn(self.lease_id)
-                else:
-                    res = self._transport.release(self.lease_id)
-                    if inspect.isawaitable(res):
-                        close_fn = getattr(res, "close", None)
-                        if callable(close_fn):
-                            close_fn()
+                release_sync_fn = getattr(self._transport, "_release_sync", None)
+                if not callable(release_sync_fn):
+                    release_sync_fn = getattr(self._transport, "release_sync", None)
+                if not callable(release_sync_fn):
+                    raise InterfaceError("transport does not support synchronous lease release")
+                release_sync_fn(self.lease_id)
+            self._released = True
 
     async def __aenter__(self) -> AsyncConnectionLease:
         return self
@@ -331,8 +329,11 @@ class AsyncConnectionLease(_BaseConnectionLease):
             await self.release()
 
 
-class BrokerStream:
-    """Streaming cursor over DBRPC query execution or chunk sources with cancellation quarantine."""
+_STREAM_END = object()
+
+
+class _BaseBrokerStream:
+    """Shared streaming cursor state, DBRPC frame decoding, and cancellation helpers."""
 
     def __init__(
         self,
@@ -376,64 +377,47 @@ class BrokerStream:
         """Return the broker lease bound to this stream, if any."""
         return self._lease
 
-    def __iter__(self) -> BrokerStream:
-        return self
-
-    def __next__(self) -> DbRpcResponse:
+    def _ensure_active(self) -> None:
         if self._cancelled or (self._lease is not None and self._lease.quarantined):
             raise LeaseQuarantinedError(
                 self._lease.slot_index if self._lease is not None else 0,
                 self._lease.generation if self._lease is not None else 0,
                 "broker stream cancelled and backing lease quarantined",
             )
-        if self._exhausted:
-            raise StopIteration
 
-        if self._chunk_iter is not None:
-            chunk = next(self._chunk_iter)
-            if self._cancelled or (self._lease is not None and self._lease.quarantined):
-                raise LeaseQuarantinedError(
-                    self._lease.slot_index if self._lease is not None else 0,
-                    self._lease.generation if self._lease is not None else 0,
-                    "broker stream cancelled and backing lease quarantined",
-                )
-            if isinstance(chunk, DbRpcResponse):
-                return chunk
-            if isinstance(chunk, str):
-                return DbRpcResponse(request_id=self._request_id, status=0, arrow_shm=chunk)
-            try:
-                return decode_dbrpc_response(chunk)
-            except Exception:
-                return DbRpcResponse(request_id=self._request_id, status=0, rows=((chunk,),))
-
-        if self._engine_pool_id is None:
-            self._exhausted = True
-            raise StopIteration
-
+    def _decode_chunk(self, chunk: DbRpcResponse | bytes | str) -> DbRpcResponse:
+        if isinstance(chunk, DbRpcResponse):
+            return chunk
+        if isinstance(chunk, str):
+            return DbRpcResponse(request_id=self._request_id, status=0, arrow_shm=chunk)
         try:
-            if not self._started:
-                self._started = True
-                resp = self._transport._execute_dbrpc_impl(
-                    self._dialect_tag,
-                    self._engine_pool_id,
-                    DbRpcOp.EXECUTE,
-                    sql=self._sql,
-                    params=self._params,
-                    lease=self._lease,
-                    chunk_rows=self._chunk_size,
-                )
-            else:
-                resp = self._transport._execute_dbrpc_impl(
-                    self._dialect_tag,
-                    self._engine_pool_id,
-                    DbRpcOp.FETCH_CHUNK,
-                    lease=self._lease,
-                    chunk_rows=self._chunk_size,
-                )
-        except Exception:
-            self._exhausted = True
+            return decode_dbrpc_response(chunk)
+        except DataError:
             raise
+        except (msgspec.MsgspecError, ValueError, TypeError) as exc:
+            raise DataError(f"Malformed DBRPC response frame: {exc}") from exc
 
+    def _execute_next_dbrpc(self, engine_pool_id: int) -> DbRpcResponse:
+        if not self._started:
+            self._started = True
+            return self._transport._execute_dbrpc_impl(
+                self._dialect_tag,
+                engine_pool_id,
+                DbRpcOp.EXECUTE,
+                sql=self._sql,
+                params=self._params,
+                lease=self._lease,
+                chunk_rows=self._chunk_size,
+            )
+        return self._transport._execute_dbrpc_impl(
+            self._dialect_tag,
+            engine_pool_id,
+            DbRpcOp.FETCH_CHUNK,
+            lease=self._lease,
+            chunk_rows=self._chunk_size,
+        )
+
+    def _mark_exhausted_if_terminal(self, resp: DbRpcResponse) -> DbRpcResponse:
         if (
             resp.arrow_shm is not None
             or resp.rows is None
@@ -442,12 +426,7 @@ class BrokerStream:
             self._exhausted = True
         return resp
 
-    def cancel(self) -> None:
-        """Abort the active stream and quarantine the backing connection lease."""
-        if self._cancelled:
-            return
-        self._cancelled = True
-        self._exhausted = True
+    def _cancel_impl(self) -> None:
         if self._engine_pool_id is not None and self._dialect_tag > 0:
             with contextlib.suppress(Exception):
                 req = DbRpcRequest(
@@ -468,9 +447,63 @@ class BrokerStream:
         if self._lease is not None and not self._lease.quarantined:
             self._transport._quarantine_impl(self._lease)
 
+    def _detach_chunk_iter(self) -> Iterator[DbRpcResponse | bytes | str] | None:
+        self._exhausted = True
+        chunk_iter = self._chunk_iter
+        self._chunk_iter = None
+        return chunk_iter
+
+
+class BrokerStream(_BaseBrokerStream):
+    """Streaming cursor over DBRPC query execution or chunk sources with cancellation quarantine."""
+
+    def __iter__(self) -> BrokerStream:
+        return self
+
+    def __next__(self) -> DbRpcResponse:
+        self._ensure_active()
+        if self._exhausted:
+            raise StopIteration
+
+        if self._chunk_iter is not None:
+            chunk = next(self._chunk_iter, _STREAM_END)
+            if chunk is _STREAM_END:
+                self._exhausted = True
+                raise StopIteration
+            self._ensure_active()
+            return self._decode_chunk(cast("DbRpcResponse | bytes | str", chunk))
+
+        pool_id = self._engine_pool_id
+        if pool_id is None:
+            self._exhausted = True
+            raise StopIteration
+
+        try:
+            resp = self._execute_next_dbrpc(pool_id)
+        except Exception:
+            self._exhausted = True
+            raise
+        return self._mark_exhausted_if_terminal(resp)
+
+    def cancel(self) -> None:
+        """Abort the active stream and quarantine the backing connection lease."""
+        if self._cancelled:
+            return
+        self._cancelled = True
+        chunk_iter = self._detach_chunk_iter()
+        close_fn = getattr(chunk_iter, "close", None)
+        if callable(close_fn):
+            with contextlib.suppress(Exception):
+                close_fn()
+        self._cancel_impl()
+
     def close(self) -> None:
         """Mark the stream exhausted without quarantining unless already cancelled."""
-        self._exhausted = True
+        chunk_iter = self._detach_chunk_iter()
+        close_fn = getattr(chunk_iter, "close", None)
+        if callable(close_fn):
+            with contextlib.suppress(Exception):
+                close_fn()
 
     def __enter__(self) -> BrokerStream:
         return self
@@ -485,6 +518,79 @@ class BrokerStream:
             self.cancel()
         else:
             self.close()
+
+
+class AsyncBrokerStream(_BaseBrokerStream):
+    """Asynchronous streaming cursor over DBRPC query execution or chunk sources."""
+
+    def __aiter__(self) -> AsyncBrokerStream:
+        return self
+
+    async def __anext__(self) -> DbRpcResponse:
+        self._ensure_active()
+        if self._exhausted:
+            raise StopAsyncIteration
+
+        if self._chunk_iter is not None:
+            chunk = await SyncPool.default().submit_async(next, self._chunk_iter, _STREAM_END)
+            if chunk is _STREAM_END:
+                self._exhausted = True
+                raise StopAsyncIteration
+            self._ensure_active()
+            return self._decode_chunk(cast("DbRpcResponse | bytes | str", chunk))
+
+        pool_id = self._engine_pool_id
+        if pool_id is None:
+            self._exhausted = True
+            raise StopAsyncIteration
+
+        try:
+            resp = await SyncPool.default().submit_async(self._execute_next_dbrpc, pool_id)
+        except Exception:
+            self._exhausted = True
+            raise
+        self._ensure_active()
+        return self._mark_exhausted_if_terminal(resp)
+
+    async def _close_chunk_iter_async(self) -> None:
+        chunk_iter = self._detach_chunk_iter()
+        if chunk_iter is None:
+            return
+        aclose_fn: Callable[[], Awaitable[Any]] | None = getattr(chunk_iter, "aclose", None)
+        if callable(aclose_fn):
+            with contextlib.suppress(Exception):
+                await aclose_fn()
+            return
+        close_fn: Callable[[], Any] | None = getattr(chunk_iter, "close", None)
+        if callable(close_fn):
+            with contextlib.suppress(Exception):
+                await SyncPool.default().submit_async(close_fn)
+
+    async def cancel(self) -> None:
+        """Abort the active stream asynchronously and quarantine the backing connection lease."""
+        if self._cancelled:
+            return
+        self._cancelled = True
+        await self._close_chunk_iter_async()
+        await SyncPool.default().submit_async(self._cancel_impl)
+
+    async def aclose(self) -> None:
+        """Mark the stream exhausted and release chunk resources idempotently."""
+        await self._close_chunk_iter_async()
+
+    async def __aenter__(self) -> AsyncBrokerStream:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None and not self._exhausted and self._lease is not None and not self._cancelled:
+            await self.cancel()
+        else:
+            await self.aclose()
 
 
 class _BaseSHMBrokerTransport:
@@ -512,17 +618,7 @@ class _BaseSHMBrokerTransport:
         native: LeaseBroker | None = None,
     ) -> None:
         raw_cfg = config or BrokerConfig()
-        acq_ms = (
-            int(raw_cfg.acquire_timeout * 1000)
-            if raw_cfg.acquire_timeout != 5.0 and raw_cfg.acquire_timeout_ms == 5_000
-            else raw_cfg.acquire_timeout_ms
-        )
-        ttl_ms = (
-            int(raw_cfg.lease_ttl * 1000)
-            if raw_cfg.lease_ttl != 30.0 and raw_cfg.lease_ttl_ms == 30_000
-            else raw_cfg.lease_ttl_ms
-        )
-        self._config = msgspec.structs.replace(raw_cfg, acquire_timeout_ms=acq_ms, lease_ttl_ms=ttl_ms)
+        self._config = raw_cfg
 
         if raw_cfg.role not in ("owner", "worker"):
             raise ValueError(f"unsupported broker role: {raw_cfg.role!r}")
@@ -813,7 +909,9 @@ class _BaseSHMBrokerTransport:
         """Return live metrics snapshot across processes."""
         stats = self._native.stats()
         stmt_stats = self._stmt_cache.stats()
-        partition_stats_fn = getattr(self._native, "partition_stats", None)
+        partition_stats_fn: Callable[[int], PartitionStats | None] | None = getattr(
+            self._native, "partition_stats", None
+        )
         with self._lock:
             partition_items = [
                 (pool_name, pool_id, dict(self._pool_counters.get(pool_name, self._empty_pool_counters())))
@@ -1156,6 +1254,19 @@ class _BaseSHMBrokerTransport:
             for ch, data, ts_ns, lid in frames
         ]
 
+    def _get_pinned_session_impl(self, session_id: str) -> _BaseConnectionLease | None:
+        """Return currently pinned lease for ``session_id`` if still valid."""
+        with self._lock:
+            return self._pinned_sessions.get(session_id)
+
+    def _unpin_session_impl(self, session_id: str) -> _BaseConnectionLease | None:
+        """Detach logical ``session_id`` affinity without releasing the underlying lease."""
+        with self._lock:
+            lease = self._pinned_sessions.pop(session_id, None)
+            if lease is not None:
+                lease._pinned_session_id = None
+            return lease
+
     def _close_impl(self) -> None:
         """Release broker resources."""
         pass
@@ -1230,16 +1341,11 @@ class SyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
     def get_pinned_session(self, session_id: str) -> _BaseConnectionLease | None:
         """Return currently pinned lease for ``session_id`` if still valid."""
-        with self._lock:
-            return self._pinned_sessions.get(session_id)
+        return self._get_pinned_session_impl(session_id)
 
     def unpin_session(self, session_id: str) -> _BaseConnectionLease | None:
         """Detach logical ``session_id`` affinity without releasing the underlying lease."""
-        with self._lock:
-            lease = self._pinned_sessions.pop(session_id, None)
-            if lease is not None:
-                lease._pinned_session_id = None
-            return lease
+        return self._unpin_session_impl(session_id)
 
     def begin_transaction(
         self,
@@ -1497,38 +1603,13 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         )
         return lease
 
-    def acquire_sync(
-        self,
-        worker_id: int | None = None,
-        timeout_ms: int | None = None,
-        bind_key: str | None = "default",
-        timeout: float | None = None,
-        partition: int | None = None,
-    ) -> SyncConnectionLease:
-        """Acquire a connection lease synchronously without awaiting the event loop."""
-        return self._acquire_sync(
-            worker_id=worker_id,
-            timeout_ms=timeout_ms,
-            bind_key=bind_key,
-            timeout=timeout,
-            partition=partition,
-        )
-
     async def release(self, lease_id: str) -> bool:
         """Release an acquired connection lease asynchronously."""
-        return self._release_impl(lease_id)
-
-    def release_sync(self, lease_id: str) -> bool:
-        """Release an acquired connection lease synchronously without awaiting the event loop."""
-        return self._release_impl(lease_id)
+        return await SyncPool.default().submit_async(self._release_impl, lease_id)
 
     async def quarantine(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
         """Move an active lease into quarantine asynchronously."""
-        self._quarantine_impl(target)
-
-    def quarantine_sync(self, target: _BaseConnectionLease | str | tuple[int, int]) -> None:
-        """Move an active lease into quarantine synchronously without awaiting the event loop."""
-        self._quarantine_impl(target)
+        await SyncPool.default().submit_async(self._quarantine_impl, target)
 
     async def dispose_quarantined(
         self,
@@ -1536,7 +1617,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         generation: int | None = None,
     ) -> None:
         """Return a quarantined slot back to the free pool asynchronously."""
-        self._dispose_quarantined_impl(target, generation)
+        await SyncPool.default().submit_async(self._dispose_quarantined_impl, target, generation)
 
     def quarantined_count(self) -> int:
         """Return count of currently quarantined connection slots."""
@@ -1544,7 +1625,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
     async def reclaim_worker_leases(self, worker_pid: int) -> list[ReclaimedLease]:
         """Transition all active leases held by ``worker_pid`` into quarantine."""
-        return self._reclaim_worker_leases_impl(worker_pid)
+        return await SyncPool.default().submit_async(self._reclaim_worker_leases_impl, worker_pid)
 
     async def pin_session(
         self,
@@ -1568,6 +1649,14 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         with self._lock:
             self._pinned_sessions[session_id] = lease
         return lease
+
+    async def get_pinned_session(self, session_id: str) -> _BaseConnectionLease | None:
+        """Return currently pinned lease for ``session_id`` asynchronously if still valid."""
+        return await SyncPool.default().submit_async(self._get_pinned_session_impl, session_id)
+
+    async def unpin_session(self, session_id: str) -> _BaseConnectionLease | None:
+        """Detach logical ``session_id`` affinity asynchronously without releasing the underlying lease."""
+        return await SyncPool.default().submit_async(self._unpin_session_impl, session_id)
 
     async def begin_transaction(
         self,
@@ -1661,7 +1750,7 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
                     lease=lease,
                 )
             except Exception:
-                self._quarantine_impl(lease)
+                await self.quarantine(lease)
                 raise
         lease._in_transaction = False
         if lease._pinned_session_id is not None:
@@ -1720,9 +1809,9 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
         | Callable[[], Iterator[DbRpcResponse | bytes | str]]
         | None = None,
         on_cancel: Callable[[], None] | None = None,
-    ) -> BrokerStream:
-        """Open a streaming DBRPC cursor supporting ``VTBARROW`` and row chunk responses."""
-        return BrokerStream(
+    ) -> AsyncBrokerStream:
+        """Open an async streaming DBRPC cursor supporting ``VTBARROW`` and row chunk responses."""
+        return AsyncBrokerStream(
             self,
             dialect_tag,
             engine_pool_id,
@@ -1736,20 +1825,16 @@ class AsyncSHMBrokerTransport(_BaseSHMBrokerTransport):
 
     async def publish(self, channel: str, payload: bytes, lease_id: str | None = None) -> ChannelMessage:
         """Publish a message to a named shared-memory channel asynchronously."""
-        return self._publish_impl(channel, payload, lease_id)
+        return await SyncPool.default().submit_async(self._publish_impl, channel, payload, lease_id)
 
     async def drain_channel(self, channel: str) -> list[ChannelMessage]:
         """Drain buffered messages for channel asynchronously."""
-        return self._drain_channel_impl(channel)
+        return await SyncPool.default().submit_async(self._drain_channel_impl, channel)
 
     async def drain_all_channels(self) -> list[ChannelMessage]:
         """Drain buffered messages across all channels asynchronously."""
-        return self._drain_all_channels_impl()
+        return await SyncPool.default().submit_async(self._drain_all_channels_impl)
 
     async def close(self) -> None:
         """Release broker resources asynchronously."""
-        self._close_impl()
-
-    def close_sync(self) -> None:
-        """Release broker resources synchronously."""
-        self._close_impl()
+        await SyncPool.default().submit_async(self._close_impl)

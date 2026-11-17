@@ -101,6 +101,8 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
                 timed_ok = c1.query("SELECT 1", timeout=5.0)
                 assert timed_ok.rows == ((1,),)
                 pid1 = c1.query("SELECT pg_backend_pid()").rows[0][0]
+                c1.begin()
+                c1.query("SELECT pg_advisory_xact_lock($1::int8)", [7391001])
                 with pytest.raises(OperationalError) as exc_info:
                     c1.query(f"SELECT pg_sleep(5), '{marker}'", timeout=0.1)
                 assert exc_info.value.sqlstate is None
@@ -112,6 +114,12 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
             try:
                 pid2 = c2.query("SELECT pg_backend_pid()").rows[0][0]
                 assert pid2 != pid1
+                c2.begin()
+                try:
+                    c2.query("SET LOCAL lock_timeout = '2s'")
+                    c2.query("SELECT pg_advisory_xact_lock($1::int8)", [7391001])
+                finally:
+                    c2.rollback()
                 deadline = time.monotonic() + 2.0
                 lingering = 1
                 while time.monotonic() < deadline:
@@ -124,7 +132,6 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
                     lingering = cell
                     if lingering == 0:
                         break
-                    time.sleep(0.02)
                 assert lingering == 0
             finally:
                 c2.close()
@@ -142,6 +149,8 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
                 atimed = await ac1.query("SELECT 1", timeout=5.0)
                 assert atimed.rows == ((1,),)
                 apid1 = (await ac1.query("SELECT pg_backend_pid()")).rows[0][0]
+                await ac1.begin()
+                await ac1.query("SELECT pg_advisory_xact_lock($1::int8)", [7391002])
                 with pytest.raises(OperationalError) as exc_info:
                     await ac1.query(f"SELECT pg_sleep(5), '{marker}'", timeout=0.1)
                 assert exc_info.value.sqlstate is None
@@ -153,6 +162,12 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
             try:
                 apid2 = (await ac2.query("SELECT pg_backend_pid()")).rows[0][0]
                 assert apid2 != apid1
+                await ac2.begin()
+                try:
+                    await ac2.query("SET LOCAL lock_timeout = '2s'")
+                    await ac2.query("SELECT pg_advisory_xact_lock($1::int8)", [7391002])
+                finally:
+                    await ac2.rollback()
                 deadline = time.monotonic() + 2.0
                 lingering = 1
                 while time.monotonic() < deadline:
@@ -165,7 +180,7 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
                     lingering = cell
                     if lingering == 0:
                         break
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0)
                 assert lingering == 0
             finally:
                 await ac2.close()

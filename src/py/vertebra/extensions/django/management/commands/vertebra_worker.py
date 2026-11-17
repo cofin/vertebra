@@ -4,15 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from typing import Any
-
-from django.core.management.base import BaseCommand
-from django.tasks import task_backends
-from django.utils.module_loading import import_string
+from typing import TYPE_CHECKING, Any
 
 from vertebra.framework.di import Container
 from vertebra.framework.queues.base import TaskDef, TaskLane
 from vertebra.server.lanes import LaneConfig, WorkerRunner
+from vertebra.utils.module_loader import ensure_module, import_optional
+
+_base_cmd_mod = import_optional("django.core.management.base")
+
+if TYPE_CHECKING:
+    from django.core.management.base import BaseCommand as _BaseCommand
+else:
+    _BaseCommand = _base_cmd_mod.BaseCommand if _base_cmd_mod is not None else object
+
+__all__ = ("Command",)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve optional Django management base classes on demand."""
+    if name == "BaseCommand":
+        return ensure_module("django.core.management.base", package="django", extra="django").BaseCommand
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 
 def _queue_to_lane(queue_name: str) -> TaskLane:
@@ -24,10 +38,15 @@ def _queue_to_lane(queue_name: str) -> TaskLane:
     return "io"
 
 
-class Command(BaseCommand):
+class Command(_BaseCommand):
     """Run Vertebra worker processing tasks from Django task backends."""
 
     help = "Run the Vertebra worker to process queued Django 6.0+ background tasks."
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if _base_cmd_mod is None:
+            ensure_module("django.core.management.base", package="django", extra="django")
+        super().__init__(*args, **kwargs)
 
     def add_arguments(self, parser: Any) -> None:
         """Add CLI arguments for worker execution."""
@@ -62,8 +81,9 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         """Execute the worker command with configured options."""
         _ = args
+        tasks_mod = ensure_module("django.tasks", package="django", extra="django")
         backend_alias = options.get("backend", "default")
-        backend = task_backends[backend_alias]
+        backend = tasks_mod.task_backends[backend_alias]
         explicit_queues: list[str] | None = options.get("queues")
         queues = list(explicit_queues) if explicit_queues else list(backend.queues)
         concurrency = options.get("concurrency", 1)
@@ -135,7 +155,8 @@ class Command(BaseCommand):
             backend.update_task_running(env.task_id, worker_id=worker_id)
             if env.task_name not in backend.queue_service.registered_tasks:
                 try:
-                    obj = import_string(env.task_name)
+                    mod_loader = ensure_module("django.utils.module_loading", package="django", extra="django")
+                    obj = mod_loader.import_string(env.task_name)
                     func = getattr(obj, "func", obj)
                     backend.queue_service.register(TaskDef(name=env.task_name, fn=func, lane=env.lane))
                 except Exception as exc:

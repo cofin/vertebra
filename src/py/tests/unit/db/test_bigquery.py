@@ -6,6 +6,7 @@ import importlib
 import json
 import sys
 import threading
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -1256,3 +1257,283 @@ def test_bigquery_select_one_forwards_maximum_bytes_billed() -> None:
     assert row_opt == {"id": 1}
     assert captured_caps == [0, 250]
     assert bq_pkg.ObjectRef is bq_object_tables_mod.ObjectRef
+
+
+@pytest.mark.parametrize(
+    ("with_tx", "fail_rollback", "fail_close"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+def test_sync_bigquery_driver_close_invokes_client_close_and_clears_state(
+    with_tx: bool,
+    fail_rollback: bool,
+    fail_close: bool,
+) -> None:
+    """Verify SyncBigQueryDriver.close rolls back before client.close and always clears client state."""
+    events: list[tuple[str, bool]] = []
+    driver_ref: list[SyncBigQueryDriver] = []
+
+    class _SpySyncBigQueryClient:
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            session_id: str | None = None,
+            create_session: bool = False,
+            destination_table: str | None = None,
+            write_disposition: str | None = None,
+            maximum_bytes_billed: int | None = None,
+            job_timeout_ms: int | None = None,
+            priority: str | None = None,
+            labels: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            _ = (
+                params_json,
+                session_id,
+                create_session,
+                destination_table,
+                write_disposition,
+                maximum_bytes_billed,
+                job_timeout_ms,
+                priority,
+                labels,
+            )
+            if sql == "BEGIN TRANSACTION":
+                return {"session_id": "spy-session-1", "columns": [], "rows": []}
+            if sql == "ROLLBACK TRANSACTION":
+                events.append(("rollback", driver_ref[0]._client is not None))
+                if fail_rollback:
+                    msg = "rollback boom"
+                    raise RuntimeError(msg)
+            return {"columns": [], "rows": []}
+
+        def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
+            _ = (sql, params_json)
+            return {}
+
+        def read_table_arrow(
+            self,
+            project_id: str,
+            dataset_id: str,
+            table_id: str,
+            selected_fields: Sequence[str] | None = None,
+            row_restriction: str | None = None,
+            max_streams: int = 4,
+            compression: str = "LZ4_FRAME",
+        ) -> Any:
+            _ = (project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression)
+            raise NotImplementedError
+
+        def append_arrow(
+            self,
+            parent_table: str,
+            arrow_ipc_bytes: bytes,
+            mode: str = "_default",
+        ) -> dict[str, Any]:
+            _ = (parent_table, arrow_ipc_bytes, mode)
+            return {}
+
+        def close(self) -> None:
+            events.append(("close", driver_ref[0]._client is not None))
+            if fail_close:
+                msg = "close boom"
+                raise RuntimeError(msg)
+
+    spy: Any = _SpySyncBigQueryClient()
+    driver = SyncBigQueryDriver(BigQueryConfig(project_id="test-proj"), client=spy)
+    driver_ref.append(driver)
+    if with_tx:
+        driver.begin()
+
+    if fail_close:
+        with pytest.raises(RuntimeError, match="close boom"):
+            driver.close()
+    else:
+        driver.close()
+
+    expected: list[tuple[str, bool]] = []
+    if with_tx:
+        expected.append(("rollback", True))
+    expected.append(("close", True))
+    assert events == expected
+    assert driver._client is None
+    assert driver._closed is True
+    assert driver._in_transaction is False
+    assert driver.session_id is None
+
+    driver.close()
+    assert events == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("awaitable_close", [False, True])
+@pytest.mark.parametrize(
+    ("with_tx", "fail_rollback", "fail_close"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+async def test_async_bigquery_driver_close_invokes_and_awaits_client_close(
+    awaitable_close: bool,
+    with_tx: bool,
+    fail_rollback: bool,
+    fail_close: bool,
+) -> None:
+    """Verify AsyncBigQueryDriver.close handles sync and async client.close and clears state in finally."""
+    events: list[tuple[str, bool]] = []
+    driver_ref: list[AsyncBigQueryDriver] = []
+
+    class _SpyAsyncBigQueryClient:
+        async def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            session_id: str | None = None,
+            create_session: bool = False,
+            destination_table: str | None = None,
+            write_disposition: str | None = None,
+            maximum_bytes_billed: int | None = None,
+            job_timeout_ms: int | None = None,
+            priority: str | None = None,
+            labels: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            _ = (
+                params_json,
+                session_id,
+                create_session,
+                destination_table,
+                write_disposition,
+                maximum_bytes_billed,
+                job_timeout_ms,
+                priority,
+                labels,
+            )
+            if sql == "BEGIN TRANSACTION":
+                return {"session_id": "spy-session-async", "columns": [], "rows": []}
+            if sql == "ROLLBACK TRANSACTION":
+                events.append(("rollback", driver_ref[0]._client is not None))
+                if fail_rollback:
+                    msg = "rollback boom"
+                    raise RuntimeError(msg)
+            return {"columns": [], "rows": []}
+
+        async def dry_run(self, sql: str, params_json: str | None = None) -> dict[str, Any]:
+            _ = (sql, params_json)
+            return {}
+
+        async def read_table_arrow(
+            self,
+            project_id: str,
+            dataset_id: str,
+            table_id: str,
+            selected_fields: Sequence[str] | None = None,
+            row_restriction: str | None = None,
+            max_streams: int = 4,
+            compression: str = "LZ4_FRAME",
+        ) -> Any:
+            _ = (project_id, dataset_id, table_id, selected_fields, row_restriction, max_streams, compression)
+            raise NotImplementedError
+
+        async def append_arrow(
+            self,
+            parent_table: str,
+            arrow_ipc_bytes: bytes,
+            mode: str = "_default",
+        ) -> dict[str, Any]:
+            _ = (parent_table, arrow_ipc_bytes, mode)
+            return {}
+
+        def close(self) -> Any:
+            if awaitable_close:
+
+                async def _finish() -> None:
+                    events.append(("close", driver_ref[0]._client is not None))
+                    if fail_close:
+                        msg = "close boom"
+                        raise RuntimeError(msg)
+
+                return _finish()
+            events.append(("close", driver_ref[0]._client is not None))
+            if fail_close:
+                msg = "close boom"
+                raise RuntimeError(msg)
+            return None
+
+    spy: Any = _SpyAsyncBigQueryClient()
+    driver = AsyncBigQueryDriver(BigQueryConfig(project_id="test-proj"), client=spy)
+    driver_ref.append(driver)
+    if with_tx:
+        await driver.begin()
+
+    if fail_close:
+        with pytest.raises(RuntimeError, match="close boom"):
+            await driver.close()
+    else:
+        await driver.close()
+
+    expected: list[tuple[str, bool]] = []
+    if with_tx:
+        expected.append(("rollback", True))
+    expected.append(("close", True))
+    assert events == expected
+    assert driver._client is None
+    assert driver._closed is True
+    assert driver._in_transaction is False
+    assert driver.session_id is None
+
+    await driver.close()
+    assert events == expected
+
+
+@pytest.mark.parametrize("method_name", ["query", "dry_run", "read_table_arrow", "append_arrow"])
+def test_sync_bigquery_native_client_close_is_idempotent_and_rejects_operations(method_name: str) -> None:
+    """Verify SyncBigQueryClient.close is idempotent and subsequent operations raise BigQueryError."""
+    client = SyncBigQueryClient(
+        project_id="p1", rest_endpoint="http://127.0.0.1:9", storage_endpoint="http://127.0.0.1:9"
+    )
+    client.close()
+    client.close()
+
+    with pytest.raises(BigQueryError) as excinfo:
+        if method_name == "query":
+            client.query("SELECT 1")
+        elif method_name == "dry_run":
+            client.dry_run("SELECT 1")
+        elif method_name == "read_table_arrow":
+            client.read_table_arrow("p1", "ds", "tbl")
+        else:
+            client.append_arrow("projects/p1/datasets/ds/tables/tbl", b"")
+    assert excinfo.value.code == 3
+    assert "BigQuery client is closed" in str(excinfo.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method_name", ["query", "dry_run", "read_table_arrow", "append_arrow"])
+async def test_async_bigquery_native_client_close_is_idempotent_and_rejects_operations(method_name: str) -> None:
+    """Verify AsyncBigQueryClient.close is idempotent and subsequent operations raise BigQueryError."""
+    client = AsyncBigQueryClient(
+        project_id="p1", rest_endpoint="http://127.0.0.1:9", storage_endpoint="http://127.0.0.1:9"
+    )
+    client.close()
+    client.close()
+
+    with pytest.raises(BigQueryError) as excinfo:
+        if method_name == "query":
+            await client.query("SELECT 1")
+        elif method_name == "dry_run":
+            await client.dry_run("SELECT 1")
+        elif method_name == "read_table_arrow":
+            await client.read_table_arrow("p1", "ds", "tbl")
+        else:
+            await client.append_arrow("projects/p1/datasets/ds/tables/tbl", b"")
+    assert excinfo.value.code == 3
+    assert "BigQuery client is closed" in str(excinfo.value)

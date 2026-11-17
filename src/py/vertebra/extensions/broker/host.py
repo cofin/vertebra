@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import queue
 import threading
 import time
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
 __all__ = ("BrokerHost", "ShutdownReport")
 
+logger = logging.getLogger(__name__)
+
 
 class ShutdownReport(msgspec.Struct, frozen=True, gc=False):
     """Structured summary produced by bounded ``BrokerHost.stop`` shutdown."""
@@ -37,6 +39,10 @@ class ShutdownReport(msgspec.Struct, frozen=True, gc=False):
     rolled_back_leases: int = 0
     disposed_leases: int = 0
     rollback_errors: int = 0
+    disposal_errors: int = 0
+    last_disposal_error: str | None = None
+    pool_close_errors: int = 0
+    last_pool_close_error: str | None = None
     pending_leases: int = 0
     elapsed_ms: float = 0.0
 
@@ -49,6 +55,7 @@ class _SessionRegistration(msgspec.Struct, frozen=True):
     session_id: int = 0
     on_rollback: Callable[[ReclaimedLease], None] | None = None
     on_dispose: Callable[[ReclaimedLease], None] | None = None
+    on_disposal_error: Callable[[ReclaimedLease, Exception], None] | None = None
 
 
 class _HostExecutor:
@@ -154,6 +161,7 @@ class BrokerHost:
         socket_path: str | None = None,
         secret: bytes | str | None = None,
         transport: SyncSHMBrokerTransport | None = None,
+        on_disposal_error: Callable[[ReclaimedLease, Exception], None] | None = None,
     ) -> None:
         base_cfg = config or BrokerConfig()
         if transport is None and base_cfg.role != "owner":
@@ -168,6 +176,7 @@ class BrokerHost:
         self._lease_sessions: dict[tuple[int, int], _SessionRegistration] = {}
         self._default_rollback: Callable[[ReclaimedLease], None] | None = None
         self._default_dispose: Callable[[ReclaimedLease], None] | None = None
+        self._default_disposal_error: Callable[[ReclaimedLease, Exception], None] | None = on_disposal_error
         self._lock = threading.Lock()
         self._started = False
         self._stopped = False
@@ -175,6 +184,10 @@ class BrokerHost:
         self._rolled_back_leases = 0
         self._disposed_leases = 0
         self._rollback_errors = 0
+        self._disposal_errors = 0
+        self._last_disposal_error: str | None = None
+        self._pool_close_errors = 0
+        self._last_pool_close_error: str | None = None
 
     def __repr__(self) -> str:
         """Render host summary with attach credentials redacted."""
@@ -204,6 +217,51 @@ class BrokerHost:
     def owning_thread_id(self) -> int | None:
         """Return OS thread ID of the single thread owning engine sessions."""
         return self._executor.owning_thread_id
+
+    @property
+    def rollback_errors(self) -> int:
+        """Return total rollback hook or engine RPC failures observed during recovery."""
+        with self._lock:
+            return self._rollback_errors
+
+    @property
+    def disposal_errors(self) -> int:
+        """Return total disposal hook or quarantine disposal failures observed during recovery."""
+        with self._lock:
+            return self._disposal_errors
+
+    @property
+    def last_disposal_error(self) -> str | None:
+        """Return most recent disposal failure summary, or None when clean."""
+        with self._lock:
+            return self._last_disposal_error
+
+    @property
+    def pool_close_errors(self) -> int:
+        """Return total registered engine pool close failures observed during shutdown."""
+        with self._lock:
+            return self._pool_close_errors
+
+    @property
+    def last_pool_close_error(self) -> str | None:
+        """Return most recent engine pool close failure summary, or None when clean."""
+        with self._lock:
+            return self._last_pool_close_error
+
+    def status(self) -> dict[str, Any]:
+        """Return live supervision and recovery error counters for this broker host."""
+        with self._lock:
+            return {
+                "started": self._started and not self._stopped,
+                "closed_pools": self._closed_pools,
+                "rolled_back_leases": self._rolled_back_leases,
+                "disposed_leases": self._disposed_leases,
+                "rollback_errors": self._rollback_errors,
+                "disposal_errors": self._disposal_errors,
+                "last_disposal_error": self._last_disposal_error,
+                "pool_close_errors": self._pool_close_errors,
+                "last_pool_close_error": self._last_pool_close_error,
+            }
 
     def start(self) -> None:
         """Start the owning session executor, discover installed engines, and bind UDS attach."""
@@ -252,11 +310,14 @@ class BrokerHost:
         *,
         on_rollback: Callable[[ReclaimedLease], None] | None = None,
         on_dispose: Callable[[ReclaimedLease], None] | None = None,
+        on_disposal_error: Callable[[ReclaimedLease, Exception], None] | None = None,
     ) -> None:
-        """Register default rollback and disposal callbacks invoked on crashed-worker recovery."""
+        """Register default rollback, disposal, and error callbacks invoked on crashed-worker recovery."""
         with self._lock:
             self._default_rollback = on_rollback
             self._default_dispose = on_dispose
+            if on_disposal_error is not None:
+                self._default_disposal_error = on_disposal_error
 
     def register_lease_session(
         self,
@@ -268,6 +329,7 @@ class BrokerHost:
         session_id: int = 0,
         on_rollback: Callable[[ReclaimedLease], None] | None = None,
         on_dispose: Callable[[ReclaimedLease], None] | None = None,
+        on_disposal_error: Callable[[ReclaimedLease, Exception], None] | None = None,
     ) -> None:
         """Attach explicit rollback/disposal hooks or engine pool metadata to a leased slot."""
         with self._lock:
@@ -277,6 +339,7 @@ class BrokerHost:
                 session_id=session_id,
                 on_rollback=on_rollback,
                 on_dispose=on_dispose,
+                on_disposal_error=on_disposal_error,
             )
 
     def on_worker_exit(self, worker_pid: int, *, timeout: float = 10.0) -> int:
@@ -325,6 +388,10 @@ class BrokerHost:
                 rolled_back_leases=self._rolled_back_leases,
                 disposed_leases=self._disposed_leases,
                 rollback_errors=self._rollback_errors,
+                disposal_errors=self._disposal_errors,
+                last_disposal_error=self._last_disposal_error,
+                pool_close_errors=self._pool_close_errors,
+                last_pool_close_error=self._last_pool_close_error,
                 pending_leases=pending,
                 elapsed_ms=elapsed_ms,
             )
@@ -349,6 +416,49 @@ class BrokerHost:
         for lease in reclaimed:
             self._recover_single_lease(lease)
 
+    def _record_disposal_error(
+        self,
+        *,
+        lease: ReclaimedLease,
+        stage: str,
+        exc: Exception,
+        callback: Callable[[ReclaimedLease, Exception], None] | None,
+    ) -> None:
+        detail = (
+            f"{stage} failed for slot={lease.slot_index} generation={lease.generation}: {type(exc).__name__}: {exc}"
+        )
+        with self._lock:
+            self._disposal_errors += 1
+            self._last_disposal_error = detail
+        logger.warning(
+            "Broker lease disposal failed during recovery (stage=%s slot=%s generation=%s pool_id=%s): %s",
+            stage,
+            lease.slot_index,
+            lease.generation,
+            lease.pool_id,
+            exc,
+            exc_info=exc,
+            extra={
+                "stage": stage,
+                "slot_index": lease.slot_index,
+                "generation": lease.generation,
+                "pool_id": lease.pool_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        if callback is not None:
+            try:
+                callback(lease, exc)
+            except Exception as cb_exc:
+                logger.warning(
+                    "Broker on_disposal_error callback failed (stage=%s slot=%s generation=%s): %s",
+                    stage,
+                    lease.slot_index,
+                    lease.generation,
+                    cb_exc,
+                    exc_info=cb_exc,
+                )
+
     def _recover_single_lease(self, lease: ReclaimedLease) -> None:
         with self._lock:
             reg = self._lease_sessions.pop((lease.slot_index, lease.generation), None)
@@ -357,9 +467,13 @@ class BrokerHost:
             pool_binding = self._pools.get(lease.pool_id) if lease.pool_id is not None else None
             default_rollback = self._default_rollback
             default_dispose = self._default_dispose
+            default_disposal_error = self._default_disposal_error
 
         rollback_fn = reg.on_rollback if reg is not None and reg.on_rollback is not None else default_rollback
         dispose_fn = reg.on_dispose if reg is not None and reg.on_dispose is not None else default_dispose
+        disposal_error_fn = (
+            reg.on_disposal_error if reg is not None and reg.on_disposal_error is not None else default_disposal_error
+        )
 
         try:
             if rollback_fn is not None:
@@ -380,11 +494,26 @@ class BrokerHost:
             with self._lock:
                 self._rollback_errors += 1
             if dispose_fn is not None:
-                with contextlib.suppress(Exception):
+                try:
                     dispose_fn(lease)
+                except Exception as exc:
+                    self._record_disposal_error(
+                        lease=lease,
+                        stage="on_dispose",
+                        exc=exc,
+                        callback=disposal_error_fn,
+                    )
         finally:
-            with contextlib.suppress(Exception):
+            try:
                 self._transport.dispose_quarantined(lease.slot_index, lease.generation)
+            except Exception as exc:
+                self._record_disposal_error(
+                    lease=lease,
+                    stage="dispose_quarantined",
+                    exc=exc,
+                    callback=disposal_error_fn,
+                )
+            else:
                 with self._lock:
                     self._disposed_leases += 1
 
@@ -411,8 +540,31 @@ class BrokerHost:
         with self._lock:
             items = list(self._pools.items())
             self._pools.clear()
-        for _pool_id, (dialect_tag, engine_pool_id) in items:
-            with contextlib.suppress(Exception):
+        for pool_id, (dialect_tag, engine_pool_id) in items:
+            try:
                 BrokerEngineRegistry.close_pool(dialect_tag, engine_pool_id)
-            with self._lock:
-                self._closed_pools += 1
+            except Exception as exc:
+                error_detail = (
+                    f"close_pool failed for pool_id={pool_id} dialect_tag={dialect_tag} "
+                    f"engine_pool_id={engine_pool_id}: {type(exc).__name__}: {exc}"
+                )
+                with self._lock:
+                    self._pool_close_errors += 1
+                    self._last_pool_close_error = error_detail
+                logger.warning(
+                    "Broker engine pool close failed during shutdown (pool_id=%s dialect_tag=%s engine_pool_id=%s): %s",
+                    pool_id,
+                    dialect_tag,
+                    engine_pool_id,
+                    exc,
+                    exc_info=exc,
+                    extra={
+                        "pool_id": pool_id,
+                        "dialect_tag": dialect_tag,
+                        "engine_pool_id": engine_pool_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                with self._lock:
+                    self._closed_pools += 1

@@ -16,16 +16,18 @@ crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
+hmac = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, default-features = false, features = ["sync"] }
+tokio = { version = "1.54", default-features = false, features = ["sync"] }
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64"] }
 bytes = { workspace = true }
 chrono = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
+pyo3 = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
@@ -34,7 +36,7 @@ zstd = { workspace = true, optional = true }
 default = ["compression", "gcp-auth"]
 compression = ["dep:lz4_flex", "dep:zstd"]
 gcp-auth = ["dep:reqwest", "dep:url", "dep:chrono", "tokio/process", "tokio/time"]
-macos-ulock = []
+pyo3 = ["dep:pyo3", "tokio/rt", "tokio/rt-multi-thread"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import Field
 from dataclasses import fields as dataclasses_fields
 from dataclasses import is_dataclass as dataclasses_is_dataclass
-from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, is_typeddict, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast, is_typeddict, runtime_checkable
 
 import msgspec
 from msgspec import Struct
@@ -154,7 +154,7 @@ def is_coroutine_callable(obj: Any) -> bool:
     if inspect.iscoroutinefunction(obj):
         return True
     if callable(obj) and not isinstance(obj, type):
-        return inspect.iscoroutinefunction(type(obj).__call__)
+        return inspect.iscoroutinefunction(cast("Any", type(obj)).__call__)
     return False
 
 
@@ -163,7 +163,7 @@ def is_async_generator_callable(obj: Any) -> bool:
     if inspect.isasyncgenfunction(obj):
         return True
     if callable(obj) and not isinstance(obj, type):
-        return inspect.isasyncgenfunction(type(obj).__call__)
+        return inspect.isasyncgenfunction(cast("Any", type(obj)).__call__)
     return False
 
 
@@ -172,7 +172,7 @@ def is_generator_callable(obj: Any) -> bool:
     if inspect.isgeneratorfunction(obj):
         return True
     if callable(obj) and not isinstance(obj, type):
-        return inspect.isgeneratorfunction(type(obj).__call__)
+        return inspect.isgeneratorfunction(cast("Any", type(obj)).__call__)
     return False
 
 

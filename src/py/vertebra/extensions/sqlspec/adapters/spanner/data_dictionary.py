@@ -1,5 +1,7 @@
 """Spanner synchronous and asynchronous SQLSpec data dictionaries over GoogleSQL and Spangres catalog SQL."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
@@ -15,9 +17,7 @@ from sqlspec.data_dictionary import (
     MetadataSupport,
     TableMetadata,
     VersionInfo,
-    get_data_dictionary_loader,
 )
-from sqlspec.data_dictionary.dialects.spanner import SPANNER_CONFIG
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
@@ -26,6 +26,7 @@ from vertebra.extensions.sqlspec.adapters.spanner.core import (
 )
 
 if TYPE_CHECKING:
+    from sqlspec.data_dictionary import DialectConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 __all__ = (
@@ -77,7 +78,7 @@ _SPANGRES_TYPE_OVERRIDES: Final[dict[str, str]] = {
     "bigint": "BIGINT",
     "float": "DOUBLE PRECISION",
     "float32": "REAL",
-    "varchar": "VARCHAR({length})",
+    "varchar": "TEXT",
 }
 
 
@@ -93,17 +94,6 @@ def _resolve_driver_mode(driver: Any, configured: str | None) -> Literal["google
         if candidate and normalize_spanner_dialect(candidate) == "spangres":
             return "postgresql"
     return "googlesql"
-
-
-def _require_catalog_sql(domain: str, name: str, mode: Literal["googlesql", "postgresql"]) -> str:
-    loader = get_data_dictionary_loader()
-    query_text = loader.get_domain_query_text("spanner", domain, name, mode=mode)
-    if query_text is None and mode != "googlesql":
-        query_text = loader.get_domain_query_text("spanner", domain, name)
-    if query_text is None:
-        msg = f"Missing Spanner catalog query {mode}/{domain}/{name}"
-        raise RuntimeError(msg)
-    return query_text
 
 
 def _table_metadata_from_rows(
@@ -277,43 +267,81 @@ def _spanner_capabilities(
     )
 
 
-class SpannerSyncDataDictionary(SyncDataDictionaryBase):
-    """Synchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
+class _SpannerDialectDescriptor:
+    """Expose class-level ``'spanner'`` for loader lookups and instance dialect for runtime checks."""
 
-    dialect: ClassVar[str] = "spanner"
+    __slots__ = ()
 
-    def __init__(self, *, dialect: str | None = None) -> None:
-        super().__init__()
-        self._configured_dialect: str | None = dialect
-        object.__setattr__(self, "dialect", sqlspec_dialect_name(dialect or "googlesql"))
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> str:
+        if instance is None:
+            return "spanner"
+        return cast("str", instance.configured_dialect)
+
+
+class _SpannerDataDictionaryMixin:
+    """Shared Cloud Spanner mode dispatch, SQL resolution, and type/feature helpers."""
+
+    __slots__ = ()
+
+    dialect: ClassVar[str] = cast("str", _SpannerDialectDescriptor())
+    _configured_dialect: str | None
+
+    if TYPE_CHECKING:
+
+        def get_dialect_config(self) -> DialectConfig: ...
+
+        def get_query_text(self, domain: str, operation: str, *, mode: str | None = None) -> str: ...
+
+        def get_query_text_or_none(self, domain: str, operation: str, *, mode: str | None = None) -> str | None: ...
 
     @property
     def configured_dialect(self) -> Literal["spanner", "spangres"]:
         """Return the configured SQLSpec dialect identifier."""
         return sqlspec_dialect_name(self._configured_dialect or "googlesql")
 
-    def get_version(self, driver: "SyncDriverAdapterBase") -> VersionInfo | None:
+    def _resolve_catalog_sql(self, domain: str, name: str, mode: Literal["googlesql", "postgresql"]) -> str:
+        if mode != "googlesql":
+            query_text = self.get_query_text_or_none(domain, name, mode=mode)
+            if query_text is not None:
+                return query_text
+        return self.get_query_text(domain, name, mode=mode if mode == "googlesql" else None)
+
+    def _feature_flag_for_mode(self, mode: Literal["googlesql", "postgresql"], feature: str) -> bool:
+        if mode == "postgresql" and feature == "supports_property_graphs":
+            return False
+        return bool(self.get_dialect_config().get_feature_flag(feature))
+
+    def _optimal_type_for_mode(self, mode: Literal["googlesql", "postgresql"], type_category: str) -> str:
+        if mode == "postgresql" and type_category in _SPANGRES_TYPE_OVERRIDES:
+            return _SPANGRES_TYPE_OVERRIDES[type_category]
+        return self.get_dialect_config().get_optimal_type(type_category)
+
+
+class SpannerSyncDataDictionary(_SpannerDataDictionaryMixin, SyncDataDictionaryBase):
+    """Synchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
+
+    __slots__ = ("_configured_dialect",)
+
+    def __init__(self, *, dialect: str | None = None) -> None:
+        super().__init__()
+        self._configured_dialect: str | None = dialect
+
+    def get_version(self, driver: SyncDriverAdapterBase) -> VersionInfo | None:
         """Return None because Cloud Spanner is a versionless managed cloud database."""
         _ = driver
         return None
 
-    def get_feature_flag(self, driver: "SyncDriverAdapterBase", feature: str) -> bool:
+    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
         """Return whether ``feature`` is supported by the active Spanner dialect."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        if mode == "postgresql" and feature == "supports_property_graphs":
-            return False
-        return bool(SPANNER_CONFIG.feature_flags.get(feature, False))
+        return self._feature_flag_for_mode(_resolve_driver_mode(driver, self._configured_dialect), feature)
 
-    def get_optimal_type(self, driver: "SyncDriverAdapterBase", type_category: str) -> str:
+    def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
         """Return the canonical Spanner GoogleSQL or Spangres SQL type name for ``type_category``."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        if mode == "postgresql" and type_category in _SPANGRES_TYPE_OVERRIDES:
-            return _SPANGRES_TYPE_OVERRIDES[type_category]
-        return str(SPANNER_CONFIG.type_mappings.get(type_category, "STRING(MAX)"))
+        return self._optimal_type_for_mode(_resolve_driver_mode(driver, self._configured_dialect), type_category)
 
     def get_metadata_capabilities(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> MetadataCapabilityProfile:
         """Describe supported Cloud Spanner catalog metadata domains for the active dialect."""
@@ -322,19 +350,19 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_tables(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         schema: str | None = None,
     ) -> list[TableMetadata]:
         """List Cloud Spanner tables including interleaved parent metadata when available."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
-        sql = _require_catalog_sql("tables", "by_schema", mode)
+        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
         rows = [dict(row) for row in driver.select(sql, {"schema_name": schema})]
         return _table_metadata_from_rows(rows, default_schema)
 
     def get_columns(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ColumnMetadata]:
@@ -342,7 +370,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("columns", query_name, mode)
+        sql = self._resolve_catalog_sql("columns", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -351,7 +379,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_indexes(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[IndexMetadata]:
@@ -359,7 +387,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("indexes", query_name, mode)
+        sql = self._resolve_catalog_sql("indexes", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -368,7 +396,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_foreign_keys(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ForeignKeyMetadata]:
@@ -376,7 +404,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("foreign_keys", query_name, mode)
+        sql = self._resolve_catalog_sql("foreign_keys", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -385,13 +413,13 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_interleaved_tables(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         parent_table: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
         """List interleaved child tables and their ``on_delete_action``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = _require_catalog_sql("tables", "by_schema", mode)
+        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
         rows = [dict(row) for row in driver.select(sql, {"schema_name": schema})]
         filtered: list[dict[str, Any]] = []
         for row in rows:
@@ -405,13 +433,13 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_change_streams(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         change_stream_name: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
         """List Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = _require_catalog_sql("change_streams", "list", mode)
+        sql = self._resolve_catalog_sql("change_streams", "list", mode)
         return [
             dict(row)
             for row in driver.select(
@@ -422,7 +450,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
 
     def get_property_graphs(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         property_graph_name: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -430,7 +458,7 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         if mode == "postgresql":
             return []
-        sql = _require_catalog_sql("property_graphs", "list", mode)
+        sql = self._resolve_catalog_sql("property_graphs", "list", mode)
         return [
             dict(row)
             for row in driver.select(
@@ -439,48 +467,32 @@ class SpannerSyncDataDictionary(SyncDataDictionaryBase):
             )
         ]
 
-    def list_available_features(self) -> list[str]:
-        """Return sorted capability feature names declared for Cloud Spanner."""
-        return sorted(SPANNER_CONFIG.feature_flags.keys())
 
-
-class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
+class SpannerAsyncDataDictionary(_SpannerDataDictionaryMixin, AsyncDataDictionaryBase):
     """Asynchronous SQLSpec data dictionary for Cloud Spanner (GoogleSQL and Spangres)."""
 
-    dialect: ClassVar[str] = "spanner"
+    __slots__ = ("_configured_dialect",)
 
     def __init__(self, *, dialect: str | None = None) -> None:
         super().__init__()
         self._configured_dialect: str | None = dialect
-        object.__setattr__(self, "dialect", sqlspec_dialect_name(dialect or "googlesql"))
 
-    @property
-    def configured_dialect(self) -> Literal["spanner", "spangres"]:
-        """Return the configured SQLSpec dialect identifier."""
-        return sqlspec_dialect_name(self._configured_dialect or "googlesql")
-
-    async def get_version(self, driver: "AsyncDriverAdapterBase") -> VersionInfo | None:
+    async def get_version(self, driver: AsyncDriverAdapterBase) -> VersionInfo | None:
         """Return None because Cloud Spanner is a versionless managed cloud database."""
         _ = driver
         return None
 
-    async def get_feature_flag(self, driver: "AsyncDriverAdapterBase", feature: str) -> bool:
+    async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
         """Return whether ``feature`` is supported by the active Spanner dialect."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        if mode == "postgresql" and feature == "supports_property_graphs":
-            return False
-        return bool(SPANNER_CONFIG.feature_flags.get(feature, False))
+        return self._feature_flag_for_mode(_resolve_driver_mode(driver, self._configured_dialect), feature)
 
-    async def get_optimal_type(self, driver: "AsyncDriverAdapterBase", type_category: str) -> str:
+    async def get_optimal_type(self, driver: AsyncDriverAdapterBase, type_category: str) -> str:
         """Return the canonical Spanner GoogleSQL or Spangres SQL type name for ``type_category``."""
-        mode = _resolve_driver_mode(driver, self._configured_dialect)
-        if mode == "postgresql" and type_category in _SPANGRES_TYPE_OVERRIDES:
-            return _SPANGRES_TYPE_OVERRIDES[type_category]
-        return str(SPANNER_CONFIG.type_mappings.get(type_category, "STRING(MAX)"))
+        return self._optimal_type_for_mode(_resolve_driver_mode(driver, self._configured_dialect), type_category)
 
     async def get_metadata_capabilities(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> MetadataCapabilityProfile:
         """Describe supported Cloud Spanner catalog metadata domains for the active dialect."""
@@ -489,19 +501,19 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_tables(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         schema: str | None = None,
     ) -> list[TableMetadata]:
         """Asynchronously list Cloud Spanner tables."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
-        sql = _require_catalog_sql("tables", "by_schema", mode)
+        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
         rows = [dict(row) for row in await driver.select(sql, {"schema_name": schema})]
         return _table_metadata_from_rows(rows, default_schema)
 
     async def get_columns(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ColumnMetadata]:
@@ -509,7 +521,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("columns", query_name, mode)
+        sql = self._resolve_catalog_sql("columns", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -518,7 +530,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_indexes(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[IndexMetadata]:
@@ -526,7 +538,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("indexes", query_name, mode)
+        sql = self._resolve_catalog_sql("indexes", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -535,7 +547,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_foreign_keys(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ForeignKeyMetadata]:
@@ -543,7 +555,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         default_schema = "public" if mode == "postgresql" else ""
         query_name = "by_table" if table is not None else "by_schema"
-        sql = _require_catalog_sql("foreign_keys", query_name, mode)
+        sql = self._resolve_catalog_sql("foreign_keys", query_name, mode)
         params: dict[str, Any] = {"schema_name": schema}
         if table is not None:
             params["table_name"] = table
@@ -552,13 +564,13 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_interleaved_tables(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         parent_table: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronously list interleaved child tables and their ``on_delete_action``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = _require_catalog_sql("tables", "by_schema", mode)
+        sql = self._resolve_catalog_sql("tables", "by_schema", mode)
         rows = [dict(row) for row in await driver.select(sql, {"schema_name": schema})]
         filtered: list[dict[str, Any]] = []
         for row in rows:
@@ -572,13 +584,13 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_change_streams(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         change_stream_name: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronously list Cloud Spanner change streams registered in ``INFORMATION_SCHEMA``."""
         mode = _resolve_driver_mode(driver, self._configured_dialect)
-        sql = _require_catalog_sql("change_streams", "list", mode)
+        sql = self._resolve_catalog_sql("change_streams", "list", mode)
         return [
             dict(row)
             for row in await driver.select(
@@ -589,7 +601,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def get_property_graphs(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         property_graph_name: str | None = None,
         schema: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -597,7 +609,7 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
         mode = _resolve_driver_mode(driver, self._configured_dialect)
         if mode == "postgresql":
             return []
-        sql = _require_catalog_sql("property_graphs", "list", mode)
+        sql = self._resolve_catalog_sql("property_graphs", "list", mode)
         return [
             dict(row)
             for row in await driver.select(
@@ -605,7 +617,3 @@ class SpannerAsyncDataDictionary(AsyncDataDictionaryBase):
                 {"schema_name": schema, "property_graph_name": property_graph_name},
             )
         ]
-
-    def list_available_features(self) -> list[str]:
-        """Return sorted capability feature names declared for Cloud Spanner."""
-        return sorted(SPANNER_CONFIG.feature_flags.keys())

@@ -24,7 +24,6 @@ from typing import (
 
 __all__ = (
     "ATTRS_INSTALLED",
-    "NANOID_INSTALLED",
     "NUMPY_INSTALLED",
     "PYDANTIC_INSTALLED",
     "UNSET",
@@ -227,7 +226,6 @@ def attrs_asdict_stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 ATTRS_INSTALLED = dependency_flag("attrs")
-NANOID_INSTALLED = dependency_flag("fastnanoid")
 NUMPY_INSTALLED = dependency_flag("numpy")
 PYDANTIC_INSTALLED = dependency_flag("pydantic")
 UVLOOP_INSTALLED = dependency_flag("uvloop")

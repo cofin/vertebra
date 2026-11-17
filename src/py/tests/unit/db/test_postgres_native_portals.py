@@ -9,6 +9,7 @@ import socket
 import struct
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -109,7 +110,14 @@ def _parse_execute_max_rows(body: bytes) -> tuple[str, int]:
     return portal_name, max_rows
 
 
-def _serve_stateful_portal_session(conn: socket.socket, pid: int, secret: int, total_rows: int) -> list[str]:
+def _serve_stateful_portal_session(
+    conn: socket.socket,
+    pid: int,
+    secret: int,
+    total_rows: int,
+    *,
+    on_event: Callable[[str], None] | None = None,
+) -> list[str]:
     """Serve stateful BEGIN/open_portal/Execute(max_rows)/Close(P)/COMMIT|ROLLBACK/DISCARD ALL."""
     events: list[str] = []
     next_row = 0
@@ -146,6 +154,8 @@ def _serve_stateful_portal_session(conn: socket.socket, pid: int, secret: int, t
                 else:
                     tx = b"T" if in_tx else b"I"
                     conn.sendall(_frame(b"C", b"OK\x00") + _frame(b"Z", tx))
+                if on_event is not None:
+                    on_event(f"Q:{sql}")
                 continue
 
             if b"P" in tags and b"B" in tags and b"E" not in tags:
@@ -385,6 +395,15 @@ def test_cancelled_async_portal_fetch_and_gc_drop_retire_and_restore_pool_capaci
     srv.listen(4)
     port = srv.getsockname()[1]
     saw_cancel = threading.Event()
+    saw_rollback = threading.Event()
+    rollback_waiter: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+
+    def _on_c2_event(event: str) -> None:
+        if event == "Q:ROLLBACK":
+            saw_rollback.set()
+            entry = rollback_waiter.get("ev")
+            if entry is not None:
+                entry[0].call_soon_threadsafe(entry[1].set)
 
     def _run_server() -> None:
         c1, _ = srv.accept()
@@ -421,7 +440,7 @@ def test_cancelled_async_portal_fetch_and_gc_drop_retire_and_restore_pool_capaci
                 _read_group(c1)
 
         c2, _ = srv.accept()
-        _serve_stateful_portal_session(c2, 5202, 0x22334455, 3)
+        _serve_stateful_portal_session(c2, 5202, 0x22334455, 3, on_event=_on_c2_event)
         srv.close()
 
     bg = threading.Thread(target=_run_server, daemon=True)
@@ -454,13 +473,17 @@ def test_cancelled_async_portal_fetch_and_gc_drop_retire_and_restore_pool_capaci
         assert chunk.rows == ((0,),)
         p2 = None
         gc.collect()
+        rollback_ev = asyncio.Event()
+        rollback_waiter["ev"] = (asyncio.get_running_loop(), rollback_ev)
+        if not saw_rollback.is_set():
+            await asyncio.wait_for(rollback_ev.wait(), timeout=2.0)
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             try:
                 await c2.close()
                 break
             except InterfaceError:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
         assert c2.closed
 
         c3 = await pool.acquire()

@@ -8,11 +8,15 @@ version = "0.3.0"
 description = "Native Rust SQLite client extension for Vertebra."
 requires-python = ">=3.12"
 license = { text = "MIT" }
+dependencies = ["vertebra-core==0.3.0"]
 
 [tool.maturin]
 python-source = "../../py"
 module-name = "vertebra._sqlite"
 features = ["extension-module"]
+include = [
+    { path = "vertebra/_sqlite.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",

@@ -2,41 +2,47 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import msgspec
-
-from vertebra.build._assets import AssetManifest, EarlyHintsSpec
-from vertebra.extensions.litestar.vite import (
+from vertebra.framework.vite import (
+    AssetManifest,
+    EarlyHintsSpec,
+    ViteBridge,
+    ViteConfig,
+    clear_vite_bridges,
+    get_active_vite_bridge,
     get_vertebra_client_path,
     get_vertebra_client_vite_aliases,
+    register_vite_bridge,
+    vite_asset,
+    vite_hmr_client,
 )
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 __all__ = (
     "AssetManifest",
     "EarlyHintsSpec",
     "ViteAssetBridge",
+    "ViteBridge",
     "ViteConfig",
     "attach_vite",
+    "clear_vite_bridges",
+    "get_active_vite_bridge",
     "get_vertebra_client_path",
     "get_vertebra_client_vite_aliases",
+    "register_vite_bridge",
+    "vite_asset",
+    "vite_hmr_client",
 )
-
-
-class ViteConfig(msgspec.Struct, frozen=True, gc=False):
-    """Configuration for Flask Vite asset and HMR integration."""
-
-    manifest_path: str | None = None
-    asset_url: str = "/static/build/"
-    dev_mode: bool = False
-    dev_server_url: str = "http://localhost:5173"
 
 
 class ViteAssetBridge:
     """Resolves Vite manifest assets and HMR tags for Flask Jinja2 templates."""
 
-    __slots__ = ("_config", "_early_hints", "_manifest")
+    __slots__ = ("_bridge",)
 
     def __init__(
         self,
@@ -44,52 +50,58 @@ class ViteAssetBridge:
         *,
         manifest: AssetManifest | None = None,
     ) -> None:
-        self._config = config or ViteConfig()
-        self._manifest: AssetManifest | None
-        if manifest is not None:
-            self._manifest = manifest
-        elif self._config.manifest_path is not None and Path(self._config.manifest_path).exists():
-            self._manifest = AssetManifest.from_file(Path(self._config.manifest_path))
-        else:
-            self._manifest = None
-        self._early_hints = EarlyHintsSpec()
+        self._bridge = ViteBridge(config or ViteConfig(), manifest=manifest)
+
+    @property
+    def bridge(self) -> ViteBridge:
+        """Return the underlying neutral ``ViteBridge``."""
+        return self._bridge
 
     @property
     def config(self) -> ViteConfig:
         """Return the ``ViteConfig``."""
-        return self._config
+        return self._bridge.config
 
     @property
     def manifest(self) -> AssetManifest | None:
         """Return the loaded ``AssetManifest`` when available."""
-        return self._manifest
+        return self._bridge.manifest
 
-    def hmr_client_tag(self) -> str:
+    @property
+    def early_hints(self) -> EarlyHintsSpec:
+        """Return the active ``EarlyHintsSpec``."""
+        return self._bridge.early_hints
+
+    def hmr_client_tag(self, *, csp_nonce: str | None = None) -> str:
         """Return the ``@vite/client`` script tag in dev mode or empty string in production."""
-        if not self._config.dev_mode:
-            return ""
-        base = self._config.dev_server_url.rstrip("/")
-        return f'<script type="module" src="{base}/@vite/client"></script>'
+        return self._bridge.hmr_client_tag(csp_nonce=csp_nonce)
 
-    def asset_tags(self, entry: str) -> str:
+    def asset_tags(
+        self,
+        entry: str,
+        *,
+        csp_nonce: str | None = None,
+        preload_dynamic: bool | None = None,
+    ) -> str:
         """Return ``<script>`` and ``<link>`` tags for ``entry``."""
-        if self._config.dev_mode:
-            base = self._config.dev_server_url.rstrip("/")
-            clean = entry.lstrip("/")
-            return f'<script type="module" src="{base}/{clean}"></script>'
-        prefix = self._config.asset_url.rstrip("/")
-        clean = entry.lstrip("/")
-        return f'<script type="module" src="{prefix}/{clean}"></script>'
+        return self._bridge.asset_tags(
+            entry,
+            csp_nonce=csp_nonce,
+            preload_dynamic=preload_dynamic,
+        )
 
 
 def attach_vite(
-    app: Any,
+    app: Flask | Any,
     config: ViteConfig | None = None,
     *,
     attribute: str = "vite",
+    bridge_name: str = "default",
 ) -> ViteAssetBridge:
     """Attach a ``ViteAssetBridge`` to a Flask app and register Jinja2 template helpers."""
+    ensure_module("flask", extra="flask")
     bridge = ViteAssetBridge(config or ViteConfig())
+    register_vite_bridge(bridge.bridge, name=bridge_name)
     setattr(app, attribute, bridge)
     extensions = getattr(app, "extensions", None)
     if isinstance(extensions, dict):

@@ -331,6 +331,7 @@ async fn shm_worker_crash_sweeps_inflight_with_502_and_reclaims_rings() {
 
 #[tokio::test]
 async fn shm_reader_and_sweeper_exit_on_cancellation() {
+    use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
     use vertebra_http::dispatcher::{ShmDispatcher, shm_reader};
 
@@ -339,13 +340,21 @@ async fn shm_reader_and_sweeper_exit_on_cancellation() {
     let dispatcher = Arc::new(Dispatcher::from_shm(Arc::clone(&shm)));
 
     let shutdown = CancellationToken::new();
+    let ready = Arc::new(Notify::new());
 
     let sweeper_handle = shm.spawn_sweeper(shutdown.clone());
-    let reader_handle =
-        shm_reader::spawn_response_readers(vec![pair], Arc::clone(&dispatcher), shutdown.clone());
+    let reader_handle = shm_reader::spawn_response_readers_with_ready(
+        vec![pair],
+        Arc::clone(&dispatcher),
+        shutdown.clone(),
+        Arc::clone(&ready),
+    );
 
-    // Brief pause to allow tasks to enter their wait loops
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Wait deterministically until the reader task enters its wait loop
+    tokio::time::timeout(Duration::from_secs(2), ready.notified())
+        .await
+        .expect("reader did not signal ready within 2s");
+    tokio::task::yield_now().await;
 
     // Trigger cancellation
     shutdown.cancel();
@@ -362,6 +371,115 @@ async fn shm_reader_and_sweeper_exit_on_cancellation() {
         reader_res.is_ok(),
         "reader did not exit on cancellation within 200ms"
     );
+}
+
+#[tokio::test]
+async fn shm_reader_stops_and_joins_before_reclaim_and_drains_after_respawn() {
+    use std::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+    use vertebra_http::dispatcher::shm_reader::ResponseReaderRegistry;
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+    use vertebra_http::workers::{RingFactory, Supervisor, WorkerLifecycle};
+
+    let mut factory = RingFactory::new(1, RingPairConfig::compact()).expect("ring factory");
+    let pair_0 = factory.ring_pair(0);
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn child");
+    let _ = child.wait();
+    let lifecycle = WorkerLifecycle::new(
+        child,
+        Arc::clone(&pair_0),
+        0,
+        "app:app".into(),
+        "python".into(),
+    );
+    factory.add_lifecycle(lifecycle);
+
+    let factory = Arc::new(Mutex::new(factory));
+    let shm = ShmDispatcher::new(vec![Arc::clone(&pair_0)], 16);
+    let dispatcher = Arc::new(Dispatcher::from_shm(Arc::clone(&shm)));
+    let shutdown = CancellationToken::new();
+    let readers = ResponseReaderRegistry::spawn_all(
+        vec![Arc::clone(&pair_0)],
+        Arc::clone(&dispatcher),
+        shutdown.clone(),
+    );
+    assert_eq!(readers.active_readers(), 1);
+
+    let (batch_pre, mut rxs_pre) = make_batch(1);
+    assert_eq!(dispatcher.dispatch(batch_pre), 1);
+    let mut buf = vec![0u8; pair_0.request_ring.payload_capacity()];
+    let len = pair_0
+        .request_ring
+        .try_recv(&mut buf)
+        .expect("pre-exit request in ring");
+    assert!(len > 0);
+    let (tx_pre, rx_pre) = oneshot::channel();
+    let cid_pre = shm
+        .correlation_shard(0)
+        .lock()
+        .unwrap()
+        .insert(0, tx_pre, 0)
+        .expect("insert pre-exit correlation")
+        .raw();
+    pair_0
+        .response_rings
+        .send_response(cid_pre, 200, b"", b"pre-exit-ok")
+        .expect("send pre-exit response");
+    pair_0.response_notifier.notify().expect("notify pre-exit");
+    let resp_pre = tokio::time::timeout(Duration::from_secs(2), rx_pre)
+        .await
+        .expect("pre-exit timeout")
+        .expect("pre-exit recv");
+    assert_eq!(resp_pre.status, 200);
+    assert_eq!(resp_pre.body.as_ref(), b"pre-exit-ok");
+
+    Supervisor::handle_worker_exit_with_readers(&factory, &shm, Some(&readers), 0).await;
+    assert_eq!(readers.active_readers(), 0);
+
+    let swept_rx = rxs_pre.pop().unwrap();
+    let swept_resp = tokio::time::timeout(Duration::from_secs(2), swept_rx)
+        .await
+        .expect("502 timeout")
+        .expect("502 recv");
+    assert_eq!(swept_resp.status, 502);
+
+    shm.set_worker_healthy(0, true);
+    readers.spawn_worker_reader(
+        0,
+        Arc::clone(&pair_0),
+        Arc::clone(&dispatcher),
+        shutdown.clone(),
+    );
+    assert_eq!(readers.active_readers(), 1);
+
+    let (tx_post, rx_post) = oneshot::channel();
+    let cid_post = shm
+        .correlation_shard(0)
+        .lock()
+        .unwrap()
+        .insert(0, tx_post, 0)
+        .expect("insert post-respawn correlation")
+        .raw();
+    pair_0
+        .response_rings
+        .send_response(cid_post, 201, b"", b"post-respawn-ok")
+        .expect("send post-respawn response");
+    pair_0
+        .response_notifier
+        .notify()
+        .expect("notify post-respawn");
+    let resp_post = tokio::time::timeout(Duration::from_secs(2), rx_post)
+        .await
+        .expect("post-respawn timeout")
+        .expect("post-respawn recv");
+    assert_eq!(resp_post.status, 201);
+    assert_eq!(resp_post.body.as_ref(), b"post-respawn-ok");
+
+    shutdown.cancel();
+    readers.stop_and_join_all().await;
+    assert_eq!(readers.active_readers(), 0);
 }
 
 #[tokio::test]

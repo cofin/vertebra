@@ -8,10 +8,11 @@ import contextlib
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
+from sqlspec.exceptions import EventChannelError, MigrationError
 from sqlspec.extensions.events import (
     AsyncEventBackendProtocol,
     BaseEventQueueStore,
@@ -21,11 +22,14 @@ from sqlspec.extensions.events import (
     encode_notify_payload,
     normalize_event_channel_name,
 )
+from sqlspec.extensions.litestar.store import CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.db.adapters.oracle.notify import AsyncOracleNotificationSource, SyncOracleNotificationSource
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
     escape_oracle_literal,
     oracle_ensure_utc,
+    oracle_identifier,
     oracle_index_name,
     oracle_json_column_ddl,
     oracle_json_dumps,
@@ -34,7 +38,9 @@ from vertebra.extensions.sqlspec.adapters.oracle.core import (
     oracle_row_value,
     oracle_table_feature_clause,
     oracle_table_ref,
+    validate_oracle_table_name,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
@@ -47,15 +53,30 @@ __all__ = (
 )
 
 
-def _plsql_ignore_exists(stmt: str) -> str:
-    """Wrap an Oracle DDL statement to suppress `ORA-00955`."""
+_ORACLE_NATIVE_BACKENDS: Final[frozenset[str]] = frozenset({"aq", "txeventq"})
+_ORACLE_JSON_QUEUE_MIN_MAJOR: Final[int] = 21
+_DEFAULT_AQ_QUEUE: Final[str] = "SQLSPEC_EVENTS_QUEUE"
+_PROBE_USER_QUEUE_SQL: Final[str] = (
+    "SELECT name, TRIM(enqueue_enabled), TRIM(dequeue_enabled) FROM user_queues WHERE name = :name"
+)
+_PROBE_USER_QUEUE_TABLE_SQL: Final[str] = "SELECT queue_table FROM user_queue_tables WHERE queue_table = :name"
+_CREATE_QUEUE_TABLE_PLSQL: Final[str] = (
+    "BEGIN DBMS_AQADM.CREATE_QUEUE_TABLE(queue_table => :queue_table, queue_payload_type => 'JSON'); END;"
+)
+_CREATE_QUEUE_PLSQL: Final[str] = (
+    "BEGIN DBMS_AQADM.CREATE_QUEUE(queue_name => :queue_name, queue_table => :queue_table); END;"
+)
+_CREATE_TXEVENTQ_PLSQL: Final[str] = (
+    "BEGIN DBMS_AQADM.CREATE_TRANSACTIONAL_EVENT_QUEUE(queue_name => :queue_name, queue_payload_type => 'JSON'); END;"
+)
+_START_QUEUE_PLSQL: Final[str] = "BEGIN DBMS_AQADM.START_QUEUE(queue_name => :queue_name); END;"
+
+
+def _plsql_ignore_exists(stmt: str, *, allow_existing_column_index: bool = False) -> str:
+    """Wrap an Oracle DDL statement to suppress `ORA-00955` (and optionally `ORA-01408`)."""
     escaped = escape_oracle_literal(stmt)
-    return (
-        "BEGIN\n"
-        f"    EXECUTE IMMEDIATE '{escaped}';\n"
-        "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;\n"
-        "END;"
-    )
+    cond = "SQLCODE NOT IN (-955, -1408)" if allow_existing_column_index else "SQLCODE != -955"
+    return f"BEGIN\n    EXECUTE IMMEDIATE '{escaped}';\nEXCEPTION WHEN OTHERS THEN IF {cond} THEN RAISE; END IF;\nEND;"
 
 
 def _plsql_ignore_missing(stmt: str, *, code: int = -942) -> str:
@@ -70,11 +91,248 @@ def _plsql_ignore_missing(stmt: str, *, code: int = -942) -> str:
     )
 
 
+def _validate_bare_oracle_queue_name(queue_name: str) -> str:
+    """Validate that an expanded Oracle queue name is a bare unquoted SQL identifier."""
+    if "." in queue_name:
+        msg = (
+            f"Invalid Oracle aq_queue '{queue_name}': configure a bare unquoted queue name "
+            "without schema qualification."
+        )
+        raise MigrationError(msg)
+    try:
+        return oracle_identifier(queue_name, "aq_queue")
+    except ImproperConfigurationError as exc:
+        msg = (
+            f"Invalid Oracle aq_queue '{queue_name}': configure a bare unquoted queue name "
+            "without schema qualification."
+        )
+        raise MigrationError(msg) from exc
+
+
+def _expand_channel_queue_name(template: str, channel: str) -> str:
+    """Expand an Oracle AQ queue-name template containing `{channel}`."""
+    if "{" in template:
+        return template.format(channel=channel.upper())
+    return template
+
+
+def _oracle_native_backend_targets(config: Any, settings: Mapping[str, Any], backend_name: str) -> tuple[str, ...]:
+    """Validate and expand Oracle AQ or TxEventQ queue names for reconcile provisioning."""
+    if backend_name not in _ORACLE_NATIVE_BACKENDS:
+        return ()
+
+    cache = getattr(config, "_oracle_version_cache", None)
+    if (
+        cache is not None
+        and cache.resolved
+        and cache.version is not None
+        and cache.version.major < _ORACLE_JSON_QUEUE_MIN_MAJOR
+    ):
+        msg = (
+            f"Oracle events backend '{backend_name}' requires Oracle 21c or newer for JSON payload queues "
+            f"(detected major version {cache.version.major}); upgrade to Oracle 21c+ or use "
+            'migration_mode="versioned".'
+        )
+        raise MigrationError(msg)
+
+    raw_template = settings.get("aq_queue", _DEFAULT_AQ_QUEUE)
+    if raw_template is None:
+        template = _DEFAULT_AQ_QUEUE
+    elif isinstance(raw_template, str):
+        template = raw_template
+    else:
+        msg = f"Invalid Oracle aq_queue {raw_template!r}: configure a bare unquoted queue name."
+        raise MigrationError(msg)
+
+    raw_channels = settings.get("aq_channels")
+    if raw_channels is None:
+        channels: list[Any] = []
+    elif isinstance(raw_channels, str) or not isinstance(raw_channels, Sequence):
+        msg = "Oracle events setting 'aq_channels' must be a sequence of channel names."
+        raise MigrationError(msg)
+    else:
+        channels = list(raw_channels)
+
+    has_channel_placeholder = "{channel}" in template
+    if has_channel_placeholder and not channels:
+        msg = (
+            "Oracle events aq_queue template contains '{channel}', which requires non-empty 'aq_channels' "
+            'during reconcile; configure aq_channels or use migration_mode="versioned".'
+        )
+        raise MigrationError(msg)
+    if channels and not has_channel_placeholder:
+        msg = (
+            "Oracle events 'aq_channels' requires '{channel}' in 'aq_queue'; "
+            "omit aq_channels for a fixed queue name or include '{channel}' in aq_queue."
+        )
+        raise MigrationError(msg)
+
+    if has_channel_placeholder:
+        resolved_names: list[str] = []
+        for raw_channel in channels:
+            if not isinstance(raw_channel, str):
+                msg = f"Invalid events channel name in 'aq_channels': {raw_channel!r}"
+                raise MigrationError(msg)
+            try:
+                normalized_channel = normalize_event_channel_name(raw_channel)
+            except EventChannelError as exc:
+                raise MigrationError(str(exc)) from exc
+            expanded = _expand_channel_queue_name(template, normalized_channel).upper()
+            _validate_bare_oracle_queue_name(expanded)
+            resolved_names.append(expanded)
+        return tuple(dict.fromkeys(resolved_names))
+
+    expanded = _expand_channel_queue_name(template, "").upper()
+    _validate_bare_oracle_queue_name(expanded)
+    return (expanded,)
+
+
+def _extract_queue_flags(row: Any) -> tuple[str, str]:
+    """Extract upper-cased enqueue and dequeue enabled flags from a `user_queues` row."""
+    if isinstance(row, Mapping):
+        lower_map = {str(key).lower(): val for key, val in row.items()}
+        enq = lower_map.get("enqueue_enabled", lower_map.get("trim(enqueue_enabled)"))
+        deq = lower_map.get("dequeue_enabled", lower_map.get("trim(dequeue_enabled)"))
+        if enq is not None and deq is not None:
+            return str(enq).strip().upper(), str(deq).strip().upper()
+        values = tuple(row.values())
+        return str(values[1]).strip().upper(), str(values[2]).strip().upper()
+    return str(row[1]).strip().upper(), str(row[2]).strip().upper()
+
+
+def _is_dbms_aqadm_privilege_error(exc: Exception) -> bool:
+    """Return whether a driver error indicates missing `DBMS_AQADM` privileges."""
+    text = str(exc).upper()
+    if "ORA-01031" in text:
+        return True
+    return "ORA-06550" in text and "PLS-00201" in text and "DBMS_AQADM" in text
+
+
+def _wrap_aqadm_privilege_error(queue_name: str) -> MigrationError:
+    """Build a `MigrationError` naming required Oracle queue-administration grants."""
+    msg = (
+        f"Oracle events queue provisioning for '{queue_name}' failed due to missing privileges; "
+        "grant AQ_ADMINISTRATOR_ROLE and GRANT EXECUTE ON DBMS_AQADM to the database user."
+    )
+    return MigrationError(msg)
+
+
+def _exec_aqadm_sync(driver: Any, queue_name: str, statement: str, parameters: dict[str, Any]) -> None:
+    """Execute one `DBMS_AQADM` PL/SQL block synchronously, translating privilege refusals."""
+    try:
+        driver.execute(statement, parameters)
+    except Exception as exc:
+        if _is_dbms_aqadm_privilege_error(exc):
+            raise _wrap_aqadm_privilege_error(queue_name) from exc
+        raise
+
+
+async def _exec_aqadm_async(driver: Any, queue_name: str, statement: str, parameters: dict[str, Any]) -> None:
+    """Execute one `DBMS_AQADM` PL/SQL block asynchronously, translating privilege refusals."""
+    try:
+        await driver.execute(statement, parameters)
+    except Exception as exc:
+        if _is_dbms_aqadm_privilege_error(exc):
+            raise _wrap_aqadm_privilege_error(queue_name) from exc
+        raise
+
+
+def _reconcile_oracle_native_backend_sync(
+    driver: Any, backend_name: str, targets: tuple[str, ...], *, create_schema: bool
+) -> None:
+    """Provision missing or stopped Oracle AQ or TxEventQ queues on a synchronous driver."""
+    if not targets or backend_name not in _ORACLE_NATIVE_BACKENDS:
+        return
+
+    for raw_name in targets:
+        queue_name = raw_name.upper()
+        rows = driver.select(_PROBE_USER_QUEUE_SQL, {"name": queue_name})
+        if rows:
+            enq_enabled, deq_enabled = _extract_queue_flags(rows[0])
+            if enq_enabled == "YES" and deq_enabled == "YES":
+                continue
+            if not create_schema:
+                msg = (
+                    f"Oracle events queue '{queue_name}' is stopped while create_schema=False; "
+                    "start the queue manually or set create_schema=True."
+                )
+                raise MigrationError(msg)
+            _exec_aqadm_sync(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+            continue
+
+        if not create_schema:
+            msg = (
+                f"Oracle events queue '{queue_name}' does not exist while create_schema=False; "
+                "provision the queue manually or set create_schema=True."
+            )
+            raise MigrationError(msg)
+
+        if backend_name == "aq":
+            queue_table = f"{queue_name[:125]}_QT"
+            qt_rows = driver.select(_PROBE_USER_QUEUE_TABLE_SQL, {"name": queue_table})
+            if not qt_rows:
+                _exec_aqadm_sync(driver, queue_name, _CREATE_QUEUE_TABLE_PLSQL, {"queue_table": queue_table})
+            _exec_aqadm_sync(
+                driver, queue_name, _CREATE_QUEUE_PLSQL, {"queue_name": queue_name, "queue_table": queue_table}
+            )
+            _exec_aqadm_sync(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+        else:
+            _exec_aqadm_sync(driver, queue_name, _CREATE_TXEVENTQ_PLSQL, {"queue_name": queue_name})
+            _exec_aqadm_sync(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+
+
+async def _reconcile_oracle_native_backend_async(
+    driver: Any, backend_name: str, targets: tuple[str, ...], *, create_schema: bool
+) -> None:
+    """Provision missing or stopped Oracle AQ or TxEventQ queues on an asynchronous driver."""
+    if not targets or backend_name not in _ORACLE_NATIVE_BACKENDS:
+        return
+
+    for raw_name in targets:
+        queue_name = raw_name.upper()
+        rows = await driver.select(_PROBE_USER_QUEUE_SQL, {"name": queue_name})
+        if rows:
+            enq_enabled, deq_enabled = _extract_queue_flags(rows[0])
+            if enq_enabled == "YES" and deq_enabled == "YES":
+                continue
+            if not create_schema:
+                msg = (
+                    f"Oracle events queue '{queue_name}' is stopped while create_schema=False; "
+                    "start the queue manually or set create_schema=True."
+                )
+                raise MigrationError(msg)
+            await _exec_aqadm_async(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+            continue
+
+        if not create_schema:
+            msg = (
+                f"Oracle events queue '{queue_name}' does not exist while create_schema=False; "
+                "provision the queue manually or set create_schema=True."
+            )
+            raise MigrationError(msg)
+
+        if backend_name == "aq":
+            queue_table = f"{queue_name[:125]}_QT"
+            qt_rows = await driver.select(_PROBE_USER_QUEUE_TABLE_SQL, {"name": queue_table})
+            if not qt_rows:
+                await _exec_aqadm_async(driver, queue_name, _CREATE_QUEUE_TABLE_PLSQL, {"queue_table": queue_table})
+            await _exec_aqadm_async(
+                driver, queue_name, _CREATE_QUEUE_PLSQL, {"queue_name": queue_name, "queue_table": queue_table}
+            )
+            await _exec_aqadm_async(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+        else:
+            await _exec_aqadm_async(driver, queue_name, _CREATE_TXEVENTQ_PLSQL, {"queue_name": queue_name})
+            await _exec_aqadm_async(driver, queue_name, _START_QUEUE_PLSQL, {"queue_name": queue_name})
+
+
 class OracleEventQueueStore(BaseEventQueueStore["OracleSyncConfig | OracleAsyncConfig"]):
     """Oracle durable event queue store supporting 23ai native `JSON` and 19c `BLOB CHECK (... IS JSON)`."""
 
+    __slots__ = ()
+
     extension_config_options = BaseEventQueueStore.extension_config_options | frozenset(
         {
+            "aq_channels",
             "aq_queue",
             "aq_visibility",
             "aq_wait_seconds",
@@ -85,6 +343,12 @@ class OracleEventQueueStore(BaseEventQueueStore["OracleSyncConfig | OracleAsyncC
             "table_options",
         }
     )
+
+    def _split_table_name(self) -> tuple[str | None, str]:
+        parts = validate_oracle_table_name(self.table_name)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, parts[0]
 
     def _storage_mode(self) -> str:
         override = self.settings.get("json_storage")
@@ -102,11 +366,26 @@ class OracleEventQueueStore(BaseEventQueueStore["OracleSyncConfig | OracleAsyncC
     def _string_type(self, length: int) -> str:
         return f"VARCHAR2({length})"
 
+    def _index_name(self) -> str:
+        return oracle_index_name("idx", self.table_name, "ch_st")
+
+    def _index_ddl(self) -> str:
+        table_ref = oracle_table_ref(self.table_name)
+        idx_name = self._index_name()
+        return f"CREATE INDEX {idx_name} ON {table_ref} (channel, status, available_at)"
+
+    def _index_existence_target(self) -> tuple[str | None, str]:
+        return self._split_table_name()
+
+    def _wrap_create_statement(self, statement: str, object_type: str) -> str:
+        if object_type == "index":
+            return _plsql_ignore_exists(statement, allow_existing_column_index=True)
+        return _plsql_ignore_exists(statement)
+
     def create_statements(self) -> list[str]:
         """Build Oracle PL/SQL blocks creating event queue table and pending index idempotently."""
         mode = self._storage_mode()
         table_ref = oracle_table_ref(self.table_name)
-        idx_name = oracle_index_name("idx", self.table_name, "ch_st")
         payload_col = oracle_json_column_ddl("payload_json", mode, not_null=True)
         metadata_col = oracle_json_column_ddl("metadata_json", mode, not_null=False)
         features = oracle_table_feature_clause(self.settings)
@@ -123,17 +402,110 @@ class OracleEventQueueStore(BaseEventQueueStore["OracleSyncConfig | OracleAsyncC
             "created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL"
             f"){features}"
         )
-        create_idx = _plsql_ignore_exists(f"CREATE INDEX {idx_name} ON {table_ref} (channel, status, available_at)")
+        create_idx = self.companion_index_statement()
         return [create_tbl, create_idx]
 
     def drop_statements(self) -> list[str]:
         """Build Oracle PL/SQL DROP blocks ignoring missing index/table errors."""
         table_ref = oracle_table_ref(self.table_name)
-        idx_name = oracle_index_name("idx", self.table_name, "ch_st")
+        idx_name = self._index_name()
         return [
             _plsql_ignore_missing(f"DROP INDEX {idx_name}", code=-1418),
             _plsql_ignore_missing(f"DROP TABLE {table_ref}", code=-942),
         ]
+
+    def prepare_schema_sync(self, driver: Any) -> None:
+        """Populate the pool-scoped Oracle version cache on an active synchronous driver."""
+        if (
+            self.settings.get("json_storage") is not None
+            and self.settings.get("backend") not in _ORACLE_NATIVE_BACKENDS
+        ):
+            return
+        cache = getattr(self._config, "_oracle_version_cache", None)
+        if cache is None or cache.resolved:
+            return
+        data_dict: Any = getattr(driver, "data_dictionary", None)
+        get_version: Any = getattr(data_dict, "get_version", None)
+        if callable(get_version):
+            cache.set(get_version(driver))
+
+    async def prepare_schema_async(self, driver: Any) -> None:
+        """Populate the pool-scoped Oracle version cache on an active asynchronous driver."""
+        if (
+            self.settings.get("json_storage") is not None
+            and self.settings.get("backend") not in _ORACLE_NATIVE_BACKENDS
+        ):
+            return
+        cache = getattr(self._config, "_oracle_version_cache", None)
+        if cache is None or cache.resolved:
+            return
+        data_dict: Any = getattr(driver, "data_dictionary", None)
+        get_version = getattr(data_dict, "get_version", None)
+        if callable(get_version):
+            cache.set(await cast("Any", get_version)(driver))
+
+    def _schema_target(self) -> SchemaTarget:
+        schema_name, bare_table = self._split_table_name()
+        return SchemaTarget.from_ddl(
+            bare_table,
+            self.create_statements()[0],
+            schema=schema_name,
+            dialect="oracle",
+        )
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the Oracle event queue table."""
+        return [self._schema_target()]
+
+    def companion_index_statement(self) -> str:
+        """Return PL/SQL-guarded companion index DDL for the Oracle event queue table."""
+        return self._wrap_create_statement(self._index_ddl(), "index")
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return companion index descriptors for the Oracle event queue table."""
+        schema_name, bare_table = self._split_table_name()
+        return [
+            CompanionIndex(
+                name=self._index_name(),
+                table=bare_table,
+                schema=schema_name,
+                ddl=self.companion_index_statement(),
+            )
+        ]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion index on a synchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                driver.execute_script(index.ddl)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion index on an asynchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                await driver.execute_script(index.ddl)
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return downgrade drop statements for the Oracle event queue index and table."""
+        return [DropStatement(statement) for statement in self.drop_statements()]
+
+    def native_backend_targets(self, backend_name: str) -> tuple[str, ...]:
+        """Return validated Oracle AQ or TxEventQ queue names for reconcile provisioning."""
+        return _oracle_native_backend_targets(self._config, self.settings, backend_name)
+
+    def reconcile_native_backend_sync(
+        self, driver: Any, backend_name: str, targets: tuple[str, ...], *, create_schema: bool
+    ) -> None:
+        """Provision missing or stopped Oracle AQ or TxEventQ queues on a synchronous driver."""
+        _reconcile_oracle_native_backend_sync(driver, backend_name, targets, create_schema=create_schema)
+
+    async def reconcile_native_backend_async(
+        self, driver: Any, backend_name: str, targets: tuple[str, ...], *, create_schema: bool
+    ) -> None:
+        """Provision missing or stopped Oracle AQ or TxEventQ queues on an asynchronous driver."""
+        await _reconcile_oracle_native_backend_async(driver, backend_name, targets, create_schema=create_schema)
 
 
 def _encode_aq_frame(event_id: str, payload: dict[str, Any], metadata: dict[str, Any] | None) -> str:
@@ -200,6 +572,22 @@ def _decode_aq_event(
 class OracleSyncEventsBackend(SyncEventBackendProtocol):
     """Synchronous Oracle AQ / TxEventQ event backend over `SyncOracleNotificationSource`."""
 
+    __slots__ = (
+        "_buffers",
+        "_closed",
+        "_cond",
+        "_config",
+        "_owns_source",
+        "_pump_done",
+        "_pump_error",
+        "_pump_thread",
+        "_queue",
+        "_raw_queues",
+        "_source",
+        "_subscribed",
+        "_unacked",
+    )
+
     supports_sync: ClassVar[bool] = True
     backend_name: ClassVar[str] = "oracle_aq"
 
@@ -228,10 +616,9 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
     def _ensure_source(self) -> SyncOracleNotificationSource:
         if self._source is not None:
             return self._source
-        native_driver = (
-            self._config.provide_connection_instance()
-            if hasattr(self._config, "provide_connection_instance")
-            else self._config._driver_cls(self._config.driver_config)
+        provide_conn = getattr(self._config, "provide_connection_instance", None)
+        native_driver: Any = (
+            provide_conn() if callable(provide_conn) else self._config._driver_cls(self._config.driver_config)
         )
         self._source = SyncOracleNotificationSource(native_driver)
         self._owns_source = True
@@ -428,6 +815,20 @@ class OracleSyncEventsBackend(SyncEventBackendProtocol):
 
 class OracleAsyncEventsBackend(AsyncEventBackendProtocol):
     """Asynchronous Oracle AQ / TxEventQ event backend over `AsyncOracleNotificationSource`."""
+
+    __slots__ = (
+        "_buffers",
+        "_channel_queues",
+        "_closed",
+        "_config",
+        "_owns_source",
+        "_pump_error",
+        "_pump_task",
+        "_queue",
+        "_source",
+        "_subscribed",
+        "_unacked",
+    )
 
     supports_async: ClassVar[bool] = True
     backend_name: ClassVar[str] = "oracle_aq"

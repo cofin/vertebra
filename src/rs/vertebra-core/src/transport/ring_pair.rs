@@ -310,9 +310,13 @@ impl TieredRingSet {
         large_fd: RawFd,
         xlarge_fd: RawFd,
     ) -> Result<Self, RingPairError> {
+        // SAFETY: caller guarantees each FD is a valid, open SPSC ring mapping matching `config`.
         let small = unsafe { Self::attach_tier_ring(&config.small, small_fd)? };
+        // SAFETY: caller guarantees each FD is a valid, open SPSC ring mapping matching `config`.
         let medium = unsafe { Self::attach_tier_ring(&config.medium, medium_fd)? };
+        // SAFETY: caller guarantees each FD is a valid, open SPSC ring mapping matching `config`.
         let large = unsafe { Self::attach_tier_ring(&config.large, large_fd)? };
+        // SAFETY: caller guarantees each FD is a valid, open SPSC ring mapping matching `config`.
         let xlarge = unsafe { Self::attach_tier_ring(&config.xlarge, xlarge_fd)? };
 
         Ok(Self {
@@ -343,6 +347,7 @@ impl TieredRingSet {
         let layout = RingLayout::new(tier.slot_size, tier.slot_count, ChannelMode::Spsc);
         // SAFETY: caller guarantees fd is valid and points to an initialized region.
         let region = Arc::new(unsafe { ShmRegion::map(fd, layout.total_size)? });
+        // SAFETY: `region` was mapped with `layout.total_size` and initialized with `layout`.
         let ring = unsafe { SpscRing::attach(region, layout)? };
         Ok(Arc::new(ring))
     }
@@ -551,6 +556,7 @@ impl TieredRingSet {
             return Err(RingPairError::ResponseTooLarge(total_size));
         }
         let (name, mut region) = ShmRegion::create_overflow_region("rs", total_size)?;
+        // SAFETY: `region` was just created exclusively with at least `total_size` bytes.
         write_fn(unsafe { &mut region.as_mut_slice()[..total_size] });
         let name_bytes = name.as_bytes();
         let env_len = 16 + name_bytes.len();
@@ -892,6 +898,7 @@ impl RingPair {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        // SAFETY: `req_region` was freshly created exclusively with `req_layout.total_size` bytes.
         let request_ring =
             Arc::new(unsafe { MpmcRing::initialize(req_region, req_layout, pid, epoch)? });
 
@@ -933,9 +940,12 @@ impl RingPair {
             config.request_slots,
             ChannelMode::Mpmc,
         );
+        // SAFETY: caller guarantees `req_ring_fd` is a valid, open SHM FD of `req_layout.total_size`.
         let req_region = Arc::new(unsafe { ShmRegion::map(req_ring_fd, req_layout.total_size)? });
+        // SAFETY: `req_region` was mapped with `req_layout.total_size` and initialized with `req_layout`.
         let request_ring = Arc::new(unsafe { MpmcRing::attach(req_region, req_layout)? });
 
+        // SAFETY: caller guarantees all four response tier FDs are valid and match `config.response_tiers`.
         let response_rings = unsafe {
             TieredRingSet::from_inherited(
                 &config.response_tiers,
@@ -946,14 +956,18 @@ impl RingPair {
             )?
         };
 
+        // SAFETY: caller guarantees `req_notify_fd` is a valid inherited eventfd descriptor.
         #[cfg(target_os = "linux")]
         let request_notifier = unsafe { Notifier::from_raw_fd(req_notify_fd) };
+        // SAFETY: caller guarantees `resp_notify_fd` is a valid inherited eventfd descriptor.
         #[cfg(target_os = "linux")]
         let response_notifier = unsafe { Notifier::from_raw_fd(resp_notify_fd) };
 
+        // SAFETY: caller guarantees `req_notify_fd` and `req_notify_write_fd` are valid inherited pipe FDs.
         #[cfg(not(target_os = "linux"))]
         let request_notifier =
             unsafe { Notifier::from_raw_fds(req_notify_fd, req_notify_write_fd) };
+        // SAFETY: caller guarantees `resp_notify_fd` and `resp_notify_write_fd` are valid inherited pipe FDs.
         #[cfg(not(target_os = "linux"))]
         let response_notifier =
             unsafe { Notifier::from_raw_fds(resp_notify_fd, resp_notify_write_fd) };
@@ -1106,6 +1120,7 @@ impl RingPair {
         #[cfg(not(target_os = "linux"))]
         let resp_notify_write_fd: RawFd = env_parse("VERTEBRA_RESP_NOTIFY_WRITE_FD")?;
 
+        // SAFETY: child process inherited open ring and notifier FDs configured by the parent supervisor.
         unsafe {
             Self::from_inherited(
                 config,
@@ -1507,6 +1522,7 @@ mod tests {
                     })
                     .collect();
 
+                let flags = flags & !(crate::protocol::flags::COMPRESSED | crate::protocol::flags::SHM_OVERFLOW);
                 let snap = BatchSnapshot::new_with_flags(slab_data.clone(), nodes.clone(), flags);
                 let mut buf = vec![0u8; snap.serialized_size()];
                 let written = snap.serialize_into(&mut buf);
@@ -1674,11 +1690,13 @@ mod tests {
         let mut region = crate::shm::ShmRegion::create_file_backed("/tmp/vtb-test-ovf", 8192)
             .expect("create file-backed overflow");
         region.disarm_unlink();
+        // SAFETY: `region` was freshly created with 8192 bytes, and 18 bytes fit within it.
         unsafe {
             std::ptr::copy_nonoverlapping(b"hello-tmp-overflow".as_ptr(), region.as_ptr(), 18);
         }
         let opened =
             crate::shm::ShmRegion::open_named("/tmp/vtb-test-ovf", 8192).expect("open file-backed");
+        // SAFETY: `opened` mapped 8192 bytes and is valid for an 18-byte immutable slice.
         let slice = unsafe { std::slice::from_raw_parts(opened.as_ptr(), 18) };
         assert_eq!(slice, b"hello-tmp-overflow");
         let _ = crate::shm::shm_unlink_named("/tmp/vtb-test-ovf");

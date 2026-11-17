@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, Protocol, cast
 
 from vertebra.db.dbapi._sync import (
+    BINARY,
+    DATETIME,
+    NUMBER,
+    ROWID,
+    STRING,
     Binary,
     DatabaseError,
     DataError,
+    Date,
+    DateFromTicks,
+    DescriptionTuple,
     Error,
     IntegrityError,
     InterfaceError,
@@ -16,24 +25,118 @@ from vertebra.db.dbapi._sync import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    Time,
+    TimeFromTicks,
+    Timestamp,
+    TimestampFromTicks,
     Warning,
+    _apply_dialect_metadata,
+    _DBAPIOutBindVar,
+    _extract_out_bind_vars,
+    _populate_out_bind_vars,
+    _resolve_dbapi_config,
     _translate_errors,
     coerce_dbapi_rows_and_desc,
     is_insert_sql,
     is_read_only_sql,
     is_row_returning_sql,
 )
-from vertebra.db.registry import DatabaseRegistry
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from vertebra.db.driver._common import BaseDatabaseConfig
+from vertebra.db.registry import AnyDatabaseConfig, DatabaseRegistry
 
 __all__ = (
     "AsyncDBAPIConnection",
     "AsyncDBAPICursor",
     "AsyncDBAPIModule",
+    "AsyncSQLDriverProtocol",
     "async_connect",
 )
+
+
+class AsyncSQLDriverProtocol(Protocol):
+    """Protocol describing asynchronous Vertebra SQL drivers consumed by AsyncDBAPIConnection."""
+
+    dialect: str
+    closed: bool
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Execute a statement asynchronously and return rows with column metadata."""
+        ...
+
+    async def execute_tuples(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> list[tuple[Any, ...]]:
+        """Execute a statement asynchronously and return tuple rows."""
+        ...
+
+    async def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> int:
+        """Execute a statement asynchronously and return affected row count."""
+        ...
+
+    async def execute_many(
+        self,
+        sql: str,
+        parameter_sets: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ) -> int:
+        """Execute a statement asynchronously across parameter sets and return affected row count."""
+        ...
+
+    async def select(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> list[Any]:
+        """Execute a query asynchronously and return hydrated row records."""
+        ...
+
+    async def begin(self) -> None:
+        """Begin a native asynchronous transaction."""
+        ...
+
+    async def commit(self) -> None:
+        """Commit the active asynchronous transaction."""
+        ...
+
+    async def rollback(self) -> None:
+        """Roll back the active asynchronous transaction."""
+        ...
+
+    async def close(self) -> None:
+        """Close the underlying asynchronous driver."""
+        ...
+
+
+def _build_async_driver(
+    config: AnyDatabaseConfig | BaseDatabaseConfig,
+    *,
+    broker: Any,
+    share_pool: bool,
+    lease_managed: bool,
+) -> tuple[AsyncSQLDriverProtocol, bool]:
+    """Construct or acquire an asynchronous driver for config inside PEP 249 error translation."""
+    with _translate_errors():
+        has_shared_key = config.pool_key() is not None
+        has_custom_broker = broker is not None and broker is not DatabaseRegistry._DEFAULT_BROKER
+        if share_pool and not lease_managed and has_shared_key and not has_custom_broker:
+            driver = DatabaseRegistry.default().get_shared_driver(cast("Any", config))
+            return cast("AsyncSQLDriverProtocol", driver), False
+        target_registry = DatabaseRegistry(broker=None if lease_managed else broker)
+        build_fn = getattr(config, "build_async_driver", None)
+        if not callable(build_fn):
+            msg = f"{type(config).__name__} does not support asynchronous DBAPI connections"
+            raise InterfaceError(msg)
+        driver = build_fn(target_registry)
+        return cast("AsyncSQLDriverProtocol", driver), True
 
 
 class AsyncDBAPICursor:
@@ -54,11 +157,11 @@ class AsyncDBAPICursor:
     def __init__(self, connection: AsyncDBAPIConnection) -> None:
         """Initialize asynchronous cursor."""
         self._conn = connection
-        self._driver = connection.driver
+        self._driver: AsyncSQLDriverProtocol | None = connection.driver
         self._closed: bool = False
         self._rows: list[tuple[Any, ...]] = []
         self._pos: int = 0
-        self.description: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
+        self.description: DescriptionTuple | None = None
         self.rowcount: int = -1
         self.lastrowid: int | None = None
         self.arraysize: int = 1
@@ -80,11 +183,16 @@ class AsyncDBAPICursor:
         self._require_open()
         self.lastrowid = None
         params: Sequence[Any] | dict[str, Any] = () if parameters is None else parameters
+        out_vars = _extract_out_bind_vars(params)
         await self._conn.begin()
         is_row_ret = is_row_returning_sql(operation)
         with _translate_errors():
-            if not is_row_ret and self._driver is not None and hasattr(self._driver, "execute_dml"):
-                affected, captured_rowid = await self._driver.execute_dml(operation, params)
+            execute_dml_fn = cast(
+                "Callable[[str, Sequence[Any] | Mapping[str, Any]], Awaitable[tuple[int, int | None]]] | None",
+                getattr(self._driver, "execute_dml", None) if self._driver is not None else None,
+            )
+            if not is_row_ret and callable(execute_dml_fn):
+                affected, captured_rowid = await execute_dml_fn(operation, params)
                 self._rows = []
                 self.description = None
                 self.rowcount = int(affected)
@@ -127,6 +235,7 @@ class AsyncDBAPICursor:
                 self._rows = []
                 self.description = None
                 self.rowcount = -1
+        _populate_out_bind_vars(out_vars, self._rows, self._driver)
         self._pos = 0
         if self._conn.autocommit and (self._conn._in_transaction or not is_read_only_sql(operation)):
             await self._conn.commit()
@@ -141,6 +250,9 @@ class AsyncDBAPICursor:
         self._require_open()
         self.lastrowid = None
         if not seq_of_parameters:
+            self._rows = []
+            self.description = None
+            self._pos = 0
             self.rowcount = 0
             return self
         await self._conn.begin()
@@ -154,25 +266,35 @@ class AsyncDBAPICursor:
                 self.rowcount = int(affected)
             elif not is_row_ret:
                 total_affected = 0
+                execute_dml_fn = cast(
+                    "Callable[[str, Sequence[Any] | Mapping[str, Any]], Awaitable[tuple[int, int | None]]] | None",
+                    getattr(self._driver, "execute_dml", None) if self._driver is not None else None,
+                )
                 for params in seq_of_parameters:
                     if self._driver is not None and hasattr(self._driver, "execute"):
                         total_affected += int(await self._driver.execute(operation, params))
-                    elif self._driver is not None and hasattr(self._driver, "execute_dml"):
-                        aff, _ = await self._driver.execute_dml(operation, params)
+                    elif callable(execute_dml_fn):
+                        aff, _ = await execute_dml_fn(operation, params)
                         total_affected += int(aff)
                 self._rows = []
                 self.description = None
                 self._pos = 0
                 self.rowcount = total_affected
             else:
-                total = 0
-                last_rows: list[tuple[Any, ...]] = []
-                last_desc: tuple[tuple[str, Any, None, None, None, None, None], ...] | None = None
+                accumulated_rows: list[tuple[Any, ...]] = []
+                last_desc: DescriptionTuple | None = None
                 for params in seq_of_parameters:
-                    if hasattr(self._driver, "execute_with_description"):
+                    if self._driver is not None and hasattr(self._driver, "execute_with_description"):
                         res = await self._driver.execute_with_description(operation, params)
                         rows, desc = coerce_dbapi_rows_and_desc(res)
-                    elif hasattr(self._driver, "select"):
+                    elif self._driver is not None and hasattr(self._driver, "execute_tuples"):
+                        rows = await self._driver.execute_tuples(operation, params)
+                        desc = (
+                            tuple((f"col_{i}", None, None, None, None, None, None) for i in range(len(rows[0])))
+                            if rows
+                            else None
+                        )
+                    elif self._driver is not None and hasattr(self._driver, "select"):
                         dict_rows = await self._driver.select(operation, params)
                         if dict_rows:
                             keys = tuple(dict_rows[0].keys())
@@ -182,13 +304,13 @@ class AsyncDBAPICursor:
                             rows, desc = [], None
                     else:
                         rows, desc = [], None
-                    total += len(rows)
-                    last_rows = rows
-                    last_desc = desc
-                self._rows = last_rows
+                    accumulated_rows.extend(rows)
+                    if desc is not None:
+                        last_desc = desc
+                self._rows = accumulated_rows
                 self.description = last_desc
                 self._pos = 0
-                self.rowcount = total
+                self.rowcount = len(accumulated_rows)
         if self._conn.autocommit and (self._conn._in_transaction or not is_read_only_sql(operation)):
             await self._conn.commit()
         return self
@@ -206,6 +328,9 @@ class AsyncDBAPICursor:
         """Fetch up to size plain-tuple rows asynchronously."""
         self._require_open()
         batch_size = self.arraysize if size is None else size
+        if batch_size < 0:
+            msg = f"fetchmany size must be non-negative (got {batch_size})"
+            raise ProgrammingError(msg)
         batch = self._rows[self._pos : self._pos + batch_size]
         self._pos += len(batch)
         return batch
@@ -216,6 +341,43 @@ class AsyncDBAPICursor:
         rest = self._rows[self._pos :]
         self._pos = len(self._rows)
         return rest
+
+    def var(
+        self,
+        type_code: Any,
+        size: int = 0,
+        arraysize: int = 1,
+        outconverter: Any = None,
+    ) -> Any:
+        """Create an output bind variable for engines supporting out parameters."""
+        self._require_open()
+        driver_var_fn = getattr(self._driver, "var", None) if self._driver is not None else None
+        if callable(driver_var_fn):
+            with _translate_errors():
+                return driver_var_fn(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+        return _DBAPIOutBindVar(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+
+    async def nextset(self) -> bool | None:
+        """Advance to the next result set asynchronously when supported by the driver."""
+        self._require_open()
+        nextset_fn = getattr(self._driver, "nextset", None) if self._driver is not None else None
+        if callable(nextset_fn):
+            with _translate_errors():
+                result = nextset_fn()
+                if inspect.isawaitable(result):
+                    result = await result
+            if isinstance(result, tuple):
+                self._rows, self.description = coerce_dbapi_rows_and_desc(result)
+                self._pos = 0
+                self.rowcount = len(self._rows)
+                return True
+            if result:
+                return True
+        self._rows = []
+        self.description = None
+        self._pos = 0
+        self.rowcount = -1
+        return None
 
     def setinputsizes(self, sizes: Any) -> None:
         """Accept PEP 249 input buffer size hints as a no-op."""
@@ -248,9 +410,9 @@ class AsyncDBAPICursor:
         direct = getattr(driver, "lastrowid", None)
         if isinstance(direct, int) and not isinstance(direct, bool):
             return direct
-        last_rowid_fn = getattr(driver, "last_insert_rowid", None)
+        last_rowid_fn = cast("Callable[[], Any] | None", getattr(driver, "last_insert_rowid", None))
         if callable(last_rowid_fn):
-            val = last_rowid_fn()
+            val: Any = last_rowid_fn()
             if inspect.isawaitable(val):
                 val = await val
             return int(val) if val is not None else None
@@ -274,23 +436,16 @@ class AsyncDBAPIConnection:
 
     def __init__(
         self,
-        url: str | None = None,
+        url: str | BaseDatabaseConfig | None = None,
         *,
         driver: Any = None,
         broker: Any = None,
         share_pool: bool = True,
         lease_managed: bool = False,
+        autocommit: bool | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize asynchronous PEP 249 connection with a non-empty database URL."""
-        _ = kwargs
-
-        if url is None and driver is None:
-            exc = ValueError("Unsupported database URL scheme: ''")
-            raise InterfaceError(f"Cannot parse Vertebra database URL: {exc}") from exc
-
-        resolved_url = str(url) if url is not None else getattr(driver, "url", getattr(driver, "dsn", ""))
-        self._url = resolved_url
         self._share_pool = bool(share_pool)
         self._broker = (
             broker
@@ -300,32 +455,29 @@ class AsyncDBAPIConnection:
         self._in_transaction = False
         self.closed: bool = False
 
-        self._config: Any = None
         driver_broker = None if lease_managed else self._broker
-        if resolved_url or driver is None:
-            try:
-                self._config = (
-                    DatabaseRegistry.parse_url(resolved_url, broker=driver_broker)
-                    if driver_broker is not None
-                    else DatabaseRegistry.parse_url(resolved_url)
-                )
-            except ValueError as exc:
-                msg = f"Cannot parse Vertebra database URL: {exc}"
-                raise InterfaceError(msg) from exc
+        resolved_url, resolved_config = _resolve_dbapi_config(
+            url,
+            driver=driver,
+            driver_broker=driver_broker,
+            connect_kwargs=kwargs,
+        )
+        self._url: str = resolved_url
+        self._config: AnyDatabaseConfig | BaseDatabaseConfig | None = resolved_config
+        self._autocommit: bool = bool(getattr(self._config, "requires_statement_autocommit", False))
+        self._driver: AsyncSQLDriverProtocol | None = driver
+        self._owns_driver: bool = driver is not None
 
-        self._autocommit = bool(getattr(self._config, "requires_statement_autocommit", False))
-        self._driver = driver
-        self._owns_driver = driver is not None
-        if self._driver is None:
-            has_shared_key = self._config is not None and self._config.pool_key() is not None
-            has_custom_broker = broker is not None and broker is not DatabaseRegistry._DEFAULT_BROKER
-            if self._share_pool and not lease_managed and has_shared_key and not has_custom_broker:
-                assert self._config is not None
-                self._driver = DatabaseRegistry.default().get_shared_driver(self._config)
-            else:
-                target_registry = DatabaseRegistry(broker=None if lease_managed else self._broker)
-                self._driver = self._config.build_async_driver(target_registry)
-                self._owns_driver = True
+        if self._driver is None and self._config is not None:
+            self._driver, self._owns_driver = _build_async_driver(
+                self._config,
+                broker=broker,
+                share_pool=self._share_pool,
+                lease_managed=lease_managed,
+            )
+
+        if autocommit is not None:
+            self.autocommit = bool(autocommit)
 
     @property
     def url(self) -> str:
@@ -333,7 +485,7 @@ class AsyncDBAPIConnection:
         return self._url
 
     @property
-    def config(self) -> Any:
+    def config(self) -> AnyDatabaseConfig | BaseDatabaseConfig | None:
         """Return the parsed database configuration."""
         return self._config
 
@@ -343,7 +495,7 @@ class AsyncDBAPIConnection:
         return self._broker
 
     @property
-    def driver(self) -> Any:
+    def driver(self) -> AsyncSQLDriverProtocol | None:
         """Return the active asynchronous driver."""
         return self._driver
 
@@ -443,29 +595,47 @@ class AsyncDBAPIModule:
     InternalError = InternalError
     ProgrammingError = ProgrammingError
     NotSupportedError = NotSupportedError
+
+    Date = staticmethod(Date)
+    Time = staticmethod(Time)
+    Timestamp = staticmethod(Timestamp)
+    DateFromTicks = staticmethod(DateFromTicks)
+    TimeFromTicks = staticmethod(TimeFromTicks)
+    TimestampFromTicks = staticmethod(TimestampFromTicks)
     Binary = Binary
+    STRING = STRING
+    BINARY = BINARY
+    NUMBER = NUMBER
+    DATETIME = DATETIME
+    ROWID = ROWID
 
-    sqlite_version: str = "3.45.0"
-    sqlite_version_info: tuple[int, ...] = (3, 45, 0)
+    sqlite_version: str
+    sqlite_version_info: tuple[int, ...]
 
-    def __init__(self, *, paramstyle: str = "qmark") -> None:
-        """Initialize asynchronous DBAPI module."""
+    def __init__(self, *, paramstyle: str = "qmark", dialect: str | None = None) -> None:
+        """Initialize asynchronous DBAPI module with optional dialect version metadata."""
         self.paramstyle = paramstyle
+        self.dialect = dialect
+        _apply_dialect_metadata(self, dialect)
 
-    def connect(self, *args: Any, **kwargs: Any) -> Any:
+    def connect(self, *args: Any, **kwargs: Any) -> AsyncDBAPIConnection:
         """Open a standalone AsyncDBAPIConnection instance with a required URL."""
-        url_arg: str | None = None
-        if args and isinstance(args[0], str):
+        url_arg: str | BaseDatabaseConfig | None = None
+        if args and isinstance(args[0], (str, BaseDatabaseConfig)):
             url_arg = args[0]
         elif "url" in kwargs:
             url_arg = kwargs.pop("url")
-        if (not url_arg or not url_arg.strip()) and "driver" not in kwargs:
+        if (
+            not isinstance(url_arg, BaseDatabaseConfig)
+            and (not url_arg or not str(url_arg).strip())
+            and "driver" not in kwargs
+        ):
             raise InterfaceError("A non-empty database connection URL is required.")
         return AsyncDBAPIConnection(url_arg, **kwargs)
 
 
-async def async_connect(url: str | None = None, **kwargs: Any) -> AsyncDBAPIConnection:
+async def async_connect(url: str | BaseDatabaseConfig | None = None, **kwargs: Any) -> AsyncDBAPIConnection:
     """Open a standalone asynchronous PEP 249 DB-API connection."""
-    if (not url or not str(url).strip()) and "driver" not in kwargs:
+    if not isinstance(url, BaseDatabaseConfig) and (not url or not str(url).strip()) and "driver" not in kwargs:
         raise InterfaceError("A non-empty database connection URL is required.")
     return AsyncDBAPIConnection(url, **kwargs)

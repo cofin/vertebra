@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const DEFAULT_REFRESH_SKEW_MS: u64 = 300_000;
 pub const DEFAULT_GCP_SCOPES: &[&str] = &["https://www.googleapis.com/auth/cloud-platform"];
@@ -18,6 +20,12 @@ pub const GCP_TOKEN_CACHE_ABI_VERSION: u32 = 1;
 pub(crate) const DEFAULT_TOKEN_TTL_MS: u64 = 3_600_000;
 pub(crate) const DEFAULT_OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 pub(crate) const DEFAULT_IAM_ENDPOINT: &str = "https://iamcredentials.googleapis.com";
+pub(crate) const DEFAULT_UNIVERSE_DOMAIN: &str = "googleapis.com";
+pub(crate) const STS_GRANT_TYPE_TOKEN_EXCHANGE: &str =
+    "urn:ietf:params:oauth:grant-type:token-exchange";
+pub(crate) const STS_REQUESTED_TOKEN_TYPE_ACCESS: &str =
+    "urn:ietf:params:oauth:token-type:access_token";
+pub(crate) const AWS_IMDSV2_TTL_SECONDS: u64 = 300;
 
 /// How token and IAM HTTP requests reach the network; metadata requests never use a proxy.
 #[allow(clippy::large_enum_variant)]
@@ -48,6 +56,16 @@ fn url_is_loopback(raw_url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn url_is_link_local_metadata(raw_url: &str) -> bool {
+    url::Url::parse(raw_url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| matches!(h, "169.254.169.254" | "metadata.google.internal"))
+        })
+        .unwrap_or(false)
+}
+
 fn source_uses_loopback_endpoint(source: &GcpAuthSource) -> bool {
     match source {
         GcpAuthSource::AuthorizedUser { token_uri, .. } => url_is_loopback(token_uri),
@@ -56,8 +74,65 @@ fn source_uses_loopback_endpoint(source: &GcpAuthSource) -> bool {
             base, iam_endpoint, ..
         } => url_is_loopback(iam_endpoint) || source_uses_loopback_endpoint(base),
         GcpAuthSource::MetadataServer { endpoint, .. } => url_is_loopback(endpoint),
+        GcpAuthSource::ExternalAccount {
+            token_url,
+            service_account_impersonation_url,
+            token_info_url,
+            credential_source,
+            ..
+        } => {
+            url_is_loopback(token_url)
+                || service_account_impersonation_url
+                    .as_deref()
+                    .is_some_and(url_is_loopback)
+                || token_info_url.as_deref().is_some_and(url_is_loopback)
+                || match credential_source {
+                    ExternalSubjectTokenSource::File { .. } => false,
+                    ExternalSubjectTokenSource::Url { url, .. } => url_is_loopback(url),
+                    ExternalSubjectTokenSource::Aws {
+                        region_url,
+                        url,
+                        regional_cred_verification_url,
+                        imdsv2_session_token_url,
+                        ..
+                    } => {
+                        region_url.as_deref().is_some_and(url_is_loopback)
+                            || url.as_deref().is_some_and(url_is_loopback)
+                            || imdsv2_session_token_url
+                                .as_deref()
+                                .is_some_and(url_is_loopback)
+                            || url_is_loopback(regional_cred_verification_url)
+                    }
+                }
+        }
         GcpAuthSource::Static { .. } | GcpAuthSource::GcloudCli { .. } => false,
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalCredentialFormat {
+    Text,
+    Json { subject_token_field_name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalSubjectTokenSource {
+    File {
+        path: PathBuf,
+        format: ExternalCredentialFormat,
+    },
+    Url {
+        url: String,
+        headers: HashMap<String, String>,
+        format: ExternalCredentialFormat,
+    },
+    Aws {
+        environment_id: String,
+        region_url: Option<String>,
+        url: Option<String>,
+        regional_cred_verification_url: String,
+        imdsv2_session_token_url: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +189,18 @@ pub enum GcpAuthSource {
         quota_project_id: Option<String>,
         impersonate_service_account: Option<String>,
     },
+    ExternalAccount {
+        audience: String,
+        subject_token_type: String,
+        token_url: String,
+        credential_source: ExternalSubjectTokenSource,
+        service_account_impersonation_url: Option<String>,
+        quota_project_id: Option<String>,
+        scopes: Vec<String>,
+        token_info_url: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -136,6 +223,85 @@ struct IamGenerateTokenResponse {
     access_token: String,
     #[serde(rename = "expireTime", default)]
     expire_time: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExternalCredentialFormatFile {
+    #[serde(rename = "type", default)]
+    format_type: String,
+    #[serde(default)]
+    subject_token_field_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExternalAccountCredentialSourceFile {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    format: Option<ExternalCredentialFormatFile>,
+    #[serde(default)]
+    environment_id: Option<String>,
+    #[serde(default)]
+    region_url: Option<String>,
+    #[serde(default)]
+    regional_cred_verification_url: Option<String>,
+    #[serde(default)]
+    imdsv2_session_token_url: Option<String>,
+    #[serde(default)]
+    executable: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ExternalAccountCredentialFile {
+    #[serde(rename = "type", default)]
+    cred_type: String,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    subject_token_type: Option<String>,
+    #[serde(default)]
+    token_url: Option<String>,
+    #[serde(default)]
+    credential_source: Option<ExternalAccountCredentialSourceFile>,
+    #[serde(default)]
+    service_account_impersonation_url: Option<String>,
+    #[serde(default)]
+    quota_project_id: Option<String>,
+    #[serde(default)]
+    token_info_url: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    universe_domain: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AwsImdsCredentials {
+    #[serde(rename = "AccessKeyId")]
+    access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    secret_access_key: String,
+    #[serde(rename = "Token", default)]
+    token: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AwsSignedHeader {
+    key: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct AwsSignedRequestPayload {
+    url: String,
+    method: String,
+    headers: Vec<AwsSignedHeader>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +335,16 @@ struct ServiceAccountJwtClaims<'a> {
     aud: &'a str,
     iat: u64,
     exp: u64,
+}
+
+pub(crate) struct ExternalAccountStsRequest<'a> {
+    pub(crate) audience: &'a str,
+    pub(crate) subject_token_type: &'a str,
+    pub(crate) token_url: &'a str,
+    pub(crate) credential_source: &'a ExternalSubjectTokenSource,
+    pub(crate) scopes: &'a [String],
+    pub(crate) client_id: Option<&'a str>,
+    pub(crate) client_secret: Option<&'a str>,
 }
 
 type TokenFetchResult = Result<(String, u64, Option<String>), String>;
@@ -273,6 +449,425 @@ pub fn parse_service_account_key_json(
         project_id,
         quota_project_id,
     })
+}
+
+fn validate_http_url(raw: &str, field_name: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("external_account {field_name} must not be empty"));
+    }
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|e| format!("invalid external_account {field_name} '{trimmed}': {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(format!(
+            "external_account {field_name} must be an http or https URL with a host: '{trimmed}'"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_external_credential_format(
+    raw_format: Option<ExternalCredentialFormatFile>,
+) -> Result<ExternalCredentialFormat, String> {
+    let Some(fmt) = raw_format else {
+        return Ok(ExternalCredentialFormat::Text);
+    };
+    let kind = fmt.format_type.trim().to_ascii_lowercase();
+    match kind.as_str() {
+        "" | "text" => Ok(ExternalCredentialFormat::Text),
+        "json" => {
+            let field_name = fmt
+                .subject_token_field_name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    "external_account credential_source.format 'json' requires a non-empty subject_token_field_name".to_string()
+                })?;
+            Ok(ExternalCredentialFormat::Json {
+                subject_token_field_name: field_name,
+            })
+        }
+        other => Err(format!(
+            "unsupported external_account credential_source.format.type '{other}'"
+        )),
+    }
+}
+
+pub fn parse_external_account_json(
+    raw_json: &str,
+    quota_project_override: Option<&str>,
+    token_uri_override: Option<&str>,
+    universe_domain_override: Option<&str>,
+    scopes: Vec<String>,
+) -> Result<GcpAuthSource, String> {
+    let parsed: ExternalAccountCredentialFile = serde_json::from_str(raw_json)
+        .map_err(|e| format!("invalid external_account JSON: {e}"))?;
+    if parsed.cred_type != "external_account" {
+        return Err(format!(
+            "expected credential type 'external_account', found '{}'",
+            parsed.cred_type
+        ));
+    }
+
+    if let Some(ref raw_ud) = parsed.universe_domain
+        && raw_ud.trim().is_empty()
+    {
+        return Err("external_account universe_domain must not be empty".to_string());
+    }
+    let cred_universe_domain = parsed
+        .universe_domain
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(DEFAULT_UNIVERSE_DOMAIN);
+    let expected_universe_domain = universe_domain_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_UNIVERSE_DOMAIN);
+    if cred_universe_domain != expected_universe_domain {
+        return Err(format!(
+            "external_account universe_domain '{cred_universe_domain}' does not match configured universe_domain '{expected_universe_domain}'"
+        ));
+    }
+
+    let audience = parsed
+        .audience
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "external_account requires a non-empty audience".to_string())?;
+    let subject_token_type = parsed
+        .subject_token_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "external_account requires a non-empty subject_token_type".to_string())?;
+    let raw_token_url = token_uri_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or(parsed.token_url)
+        .ok_or_else(|| "external_account requires a non-empty token_url".to_string())?;
+    let token_url = validate_http_url(&raw_token_url, "token_url")?;
+
+    let service_account_impersonation_url = match parsed.service_account_impersonation_url {
+        Some(raw) => Some(validate_http_url(
+            &raw,
+            "service_account_impersonation_url",
+        )?),
+        None => None,
+    };
+    let token_info_url = match parsed.token_info_url {
+        Some(raw) if !raw.trim().is_empty() => Some(validate_http_url(&raw, "token_info_url")?),
+        _ => None,
+    };
+    let client_id = parsed
+        .client_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let client_secret = parsed
+        .client_secret
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let quota_project_id = quota_project_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| parsed.quota_project_id.filter(|s| !s.trim().is_empty()));
+
+    let cs = parsed
+        .credential_source
+        .ok_or_else(|| "external_account requires credential_source".to_string())?;
+    if cs.executable.is_some() {
+        return Err(
+            "external_account executable credential_source is not supported for security reasons"
+                .to_string(),
+        );
+    }
+
+    let credential_source = if let Some(raw_env_id) = cs.environment_id {
+        let env_id = raw_env_id.trim().to_string();
+        if !env_id.starts_with("aws1") {
+            return Err(format!(
+                "unsupported external_account environment_id '{env_id}'"
+            ));
+        }
+        let raw_regional_url = cs
+            .regional_cred_verification_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "external_account aws1 credential_source requires regional_cred_verification_url"
+                    .to_string()
+            })?;
+        let probe_url = raw_regional_url.replace("{region}", "us-east-1");
+        validate_http_url(
+            &probe_url,
+            "credential_source.regional_cred_verification_url",
+        )?;
+        let region_url = match cs.region_url {
+            Some(raw) if !raw.trim().is_empty() => {
+                Some(validate_http_url(&raw, "credential_source.region_url")?)
+            }
+            _ => None,
+        };
+        let url = match cs.url {
+            Some(raw) if !raw.trim().is_empty() => {
+                Some(validate_http_url(&raw, "credential_source.url")?)
+            }
+            _ => None,
+        };
+        let imdsv2_session_token_url = match cs.imdsv2_session_token_url {
+            Some(raw) if !raw.trim().is_empty() => Some(validate_http_url(
+                &raw,
+                "credential_source.imdsv2_session_token_url",
+            )?),
+            _ => None,
+        };
+        ExternalSubjectTokenSource::Aws {
+            environment_id: env_id,
+            region_url,
+            url,
+            regional_cred_verification_url: raw_regional_url,
+            imdsv2_session_token_url,
+        }
+    } else if let Some(raw_file) = cs.file {
+        if cs.url.is_some() {
+            return Err(
+                "external_account credential_source cannot specify both file and url".to_string(),
+            );
+        }
+        let trimmed = raw_file.trim();
+        if trimmed.is_empty() {
+            return Err("external_account credential_source.file must not be empty".to_string());
+        }
+        let format = parse_external_credential_format(cs.format)?;
+        ExternalSubjectTokenSource::File {
+            path: PathBuf::from(trimmed),
+            format,
+        }
+    } else if let Some(raw_url) = cs.url {
+        let url = validate_http_url(&raw_url, "credential_source.url")?;
+        let format = parse_external_credential_format(cs.format)?;
+        let mut headers = HashMap::new();
+        if let Some(raw_headers) = cs.headers {
+            for (k, v) in raw_headers {
+                let key = k.trim();
+                if key.is_empty() {
+                    return Err(
+                        "external_account credential_source.headers contains an empty header name"
+                            .to_string(),
+                    );
+                }
+                headers.insert(key.to_string(), v);
+            }
+        }
+        ExternalSubjectTokenSource::Url {
+            url,
+            headers,
+            format,
+        }
+    } else {
+        return Err(
+            "external_account credential_source must specify file, url, or aws1 environment_id"
+                .to_string(),
+        );
+    };
+
+    Ok(GcpAuthSource::ExternalAccount {
+        audience,
+        subject_token_type,
+        token_url,
+        credential_source,
+        service_account_impersonation_url,
+        quota_project_id,
+        scopes,
+        token_info_url,
+        client_id,
+        client_secret,
+    })
+}
+
+fn extract_subject_token(raw: &str, format: &ExternalCredentialFormat) -> Result<String, String> {
+    match format {
+        ExternalCredentialFormat::Text => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err("external_account subject token payload is empty".to_string());
+            }
+            Ok(trimmed.to_string())
+        }
+        ExternalCredentialFormat::Json {
+            subject_token_field_name,
+        } => {
+            let parsed: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|e| format!("invalid external_account JSON subject token payload: {e}"))?;
+            let token = parsed
+                .get(subject_token_field_name)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "external_account JSON subject token missing non-empty string field '{subject_token_field_name}'"
+                    )
+                })?;
+            Ok(token.to_string())
+        }
+    }
+}
+
+fn parse_aws_region_from_az(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("AWS region_url returned empty region".to_string());
+    }
+    let bytes = trimmed.as_bytes();
+    let region = if bytes.len() >= 2
+        && bytes[bytes.len() - 1].is_ascii_lowercase()
+        && bytes[bytes.len() - 2].is_ascii_digit()
+    {
+        &trimmed[..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    Ok(region.to_string())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|e| format!("HMAC-SHA256 initialization failed: {e}"))?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn aws_sigv4_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+fn build_aws_sigv4_subject_token(
+    regional_cred_verification_url: &str,
+    region: &str,
+    audience: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    session_token: Option<&str>,
+    now_unix_ms: u64,
+) -> Result<String, String> {
+    let target_url = regional_cred_verification_url.replace("{region}", region);
+    let parsed = url::Url::parse(&target_url)
+        .map_err(|e| format!("invalid AWS regional_cred_verification_url '{target_url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host in AWS regional_cred_verification_url".to_string())?;
+    let host_header = match parsed.port() {
+        Some(port)
+            if (parsed.scheme() == "http" && port != 80)
+                || (parsed.scheme() == "https" && port != 443) =>
+        {
+            format!("{host}:{port}")
+        }
+        _ => host.to_string(),
+    };
+
+    let now_secs = i64::try_from(now_unix_ms / 1_000)
+        .map_err(|_| "timestamp overflow during AWS SigV4 signing".to_string())?;
+    let dt = chrono::DateTime::from_timestamp(now_secs, 0)
+        .ok_or_else(|| "invalid timestamp for AWS SigV4 signing".to_string())?;
+    let amz_date = dt.format("%Y%m%dT%H%M%SZ").to_string();
+    let datestamp = dt.format("%Y%m%d").to_string();
+
+    let canonical_uri = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let mut query_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| {
+            (
+                aws_sigv4_encode_component(&k),
+                aws_sigv4_encode_component(&v),
+            )
+        })
+        .collect();
+    query_pairs.sort();
+    let canonical_querystring = query_pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let mut signed_header_map = std::collections::BTreeMap::new();
+    signed_header_map.insert("host", host_header);
+    signed_header_map.insert("x-amz-date", amz_date.clone());
+    if let Some(tok) = session_token.map(str::trim).filter(|s| !s.is_empty()) {
+        signed_header_map.insert("x-amz-security-token", tok.to_string());
+    }
+    signed_header_map.insert("x-goog-cloud-target-resource", audience.to_string());
+
+    let mut canonical_headers = String::new();
+    let mut signed_header_names = Vec::with_capacity(signed_header_map.len());
+    for (k, v) in &signed_header_map {
+        use std::fmt::Write;
+        let _ = writeln!(&mut canonical_headers, "{k}:{}", v.trim());
+        signed_header_names.push(*k);
+    }
+    let signed_headers = signed_header_names.join(";");
+    let payload_hash = sha256_hex(b"");
+    let canonical_request = format!(
+        "POST\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+
+    let credential_scope = format!("{datestamp}/{region}/sts/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let k_date = hmac_sha256(
+        format!("AWS4{secret_access_key}").as_bytes(),
+        datestamp.as_bytes(),
+    )?;
+    let k_region = hmac_sha256(&k_date, region.as_bytes())?;
+    let k_service = hmac_sha256(&k_region, b"sts")?;
+    let k_signing = hmac_sha256(&k_service, b"aws4_request")?;
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes())?);
+    let auth_header = format!(
+        "AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    );
+
+    let mut headers = Vec::with_capacity(signed_header_map.len() + 1);
+    headers.push(AwsSignedHeader {
+        key: "Authorization".to_string(),
+        value: auth_header,
+    });
+    for (k, v) in signed_header_map {
+        headers.push(AwsSignedHeader {
+            key: k.to_string(),
+            value: v,
+        });
+    }
+
+    let payload = AwsSignedRequestPayload {
+        url: target_url,
+        method: "POST".to_string(),
+        headers,
+    };
+    serde_json::to_string(&payload)
+        .map_err(|e| format!("failed to serialize AWS SigV4 subject_token: {e}"))
 }
 
 pub(crate) fn normalize_gcp_options(raw_opts: &HashMap<String, String>) -> HashMap<String, String> {
@@ -548,12 +1143,10 @@ impl GcpTokenCache {
         }
 
         let scope_refs: Vec<&str> = effective_scopes.iter().map(String::as_str).collect();
-        let cache = Self::from_options(&merged, &scope_refs).ok_or_else(|| {
-            "unable to discover GCP credentials (checked gcp_options, GOOGLE_APPLICATION_CREDENTIALS, and ambient ADC)".to_string()
-        })?;
+        let cache = Self::from_options_result(&merged, &scope_refs)?;
         if matches!(cache.source, GcpAuthSource::Static { .. }) && !effective_scopes.is_empty() {
             return Err(
-                "static access token cannot satisfy explicit non-empty OAuth scopes; configure a refreshable credential source (service_account, authorized_user, metadata_server, impersonated_service_account, or gcloud_cli)".to_string(),
+                "static access token cannot satisfy explicit non-empty OAuth scopes; configure a refreshable credential source (service_account, authorized_user, external_account, metadata_server, impersonated_service_account, or gcloud_cli)".to_string(),
             );
         }
         let mut inner = Arc::try_unwrap(cache).unwrap_or_else(|arc| Self {
@@ -574,6 +1167,13 @@ impl GcpTokenCache {
         raw_opts: &HashMap<String, String>,
         default_scopes: &[&str],
     ) -> Option<Arc<Self>> {
+        Self::from_options_result(raw_opts, default_scopes).ok()
+    }
+
+    pub fn from_options_result(
+        raw_opts: &HashMap<String, String>,
+        default_scopes: &[&str],
+    ) -> Result<Arc<Self>, String> {
         let opts = normalize_gcp_options(raw_opts);
         let skew_ms = opts
             .get("refresh_skew_ms")
@@ -601,6 +1201,20 @@ impl GcpTokenCache {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| discover_ambient_impersonated_service_account(allow_ambient));
+        let universe_domain_override = opts
+            .get("universe_domain")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if allow_ambient {
+                    std::env::var("GOOGLE_CLOUD_UNIVERSE_DOMAIN")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                }
+            });
         let custom_scopes = parse_scopes_option(&opts);
         let fallback_scopes = || -> Vec<String> {
             let base = if default_scopes.is_empty() {
@@ -628,35 +1242,55 @@ impl GcpTokenCache {
         let mut base_source: Option<GcpAuthSource> = None;
         let mut explicit_credential_requested = false;
 
-        let parse_adc_source = |adc_path: &Path| -> Option<GcpAuthSource> {
-            let raw = std::fs::read_to_string(adc_path).ok()?;
-            if let Some(sa_key) = parse_service_account_key_json(
-                &raw,
-                quota_project_id.as_deref(),
-                token_uri_override,
-            ) {
-                return Some(GcpAuthSource::ServiceAccount {
+        let parse_adc_source_str = |raw: &str| -> Result<GcpAuthSource, String> {
+            if let Some(sa_key) =
+                parse_service_account_key_json(raw, quota_project_id.as_deref(), token_uri_override)
+            {
+                return Ok(GcpAuthSource::ServiceAccount {
                     key: sa_key,
                     scopes: default_sa_scopes(),
                 });
             }
-            if let Ok(parsed) = serde_json::from_str::<AdcCredentialFile>(&raw)
-                && parsed.cred_type == "authorized_user"
-                && let (Some(cid), Some(csec), Some(rtok)) =
-                    (parsed.client_id, parsed.client_secret, parsed.refresh_token)
-            {
-                return Some(GcpAuthSource::AuthorizedUser {
-                    client_id: cid,
-                    client_secret: csec,
-                    refresh_token: rtok,
-                    quota_project_id: quota_project_id.clone().or(parsed.quota_project_id),
-                    token_uri: token_uri_override
-                        .map(str::to_string)
-                        .or(parsed.token_uri)
-                        .unwrap_or_else(|| DEFAULT_OAUTH_TOKEN_URI.to_string()),
-                });
+            let parsed: AdcCredentialFile = serde_json::from_str(raw)
+                .map_err(|e| format!("invalid ADC credentials JSON: {e}"))?;
+            match parsed.cred_type.as_str() {
+                "authorized_user" => {
+                    if let (Some(cid), Some(csec), Some(rtok)) =
+                        (parsed.client_id, parsed.client_secret, parsed.refresh_token)
+                    {
+                        Ok(GcpAuthSource::AuthorizedUser {
+                            client_id: cid,
+                            client_secret: csec,
+                            refresh_token: rtok,
+                            quota_project_id: quota_project_id.clone().or(parsed.quota_project_id),
+                            token_uri: token_uri_override
+                                .map(str::to_string)
+                                .or(parsed.token_uri)
+                                .unwrap_or_else(|| DEFAULT_OAUTH_TOKEN_URI.to_string()),
+                        })
+                    } else {
+                        Err("authorized_user ADC JSON missing client_id, client_secret, or refresh_token".to_string())
+                    }
+                }
+                "external_account" => parse_external_account_json(
+                    raw,
+                    quota_project_id.as_deref(),
+                    token_uri_override,
+                    universe_domain_override.as_deref(),
+                    default_sa_scopes(),
+                ),
+                other => Err(format!("unsupported ADC credential type '{other}'")),
             }
-            None
+        };
+
+        let parse_adc_source = |adc_path: &Path| -> Result<GcpAuthSource, String> {
+            let raw = std::fs::read_to_string(adc_path).map_err(|e| {
+                format!(
+                    "failed to read ADC credentials file '{}': {e}",
+                    adc_path.display()
+                )
+            })?;
+            parse_adc_source_str(&raw)
         };
 
         let build_metadata_source = || -> GcpAuthSource {
@@ -690,7 +1324,8 @@ impl GcpTokenCache {
                 inline_json,
                 quota_project_id.as_deref(),
                 token_uri_override,
-            )?;
+            )
+            .ok_or_else(|| "invalid service_account_key JSON".to_string())?;
             base_source = Some(GcpAuthSource::ServiceAccount {
                 key: sa_key,
                 scopes: default_sa_scopes(),
@@ -716,11 +1351,30 @@ impl GcpTokenCache {
                         token_uri_override,
                     )
                 })
-            }?;
+            }
+            .ok_or_else(|| "invalid service_account_path or service_account JSON".to_string())?;
             base_source = Some(GcpAuthSource::ServiceAccount {
                 key: sa_key,
                 scopes: default_sa_scopes(),
             });
+        } else if let Some(ext_json) = opts
+            .get("external_account_json")
+            .filter(|v| !v.trim().is_empty())
+        {
+            explicit_credential_requested = true;
+            base_source = Some(parse_external_account_json(
+                ext_json,
+                quota_project_id.as_deref(),
+                token_uri_override,
+                universe_domain_override.as_deref(),
+                default_sa_scopes(),
+            )?);
+        } else if let Some(cred_json) = opts
+            .get("credentials_json")
+            .filter(|v| !v.trim().is_empty())
+        {
+            explicit_credential_requested = true;
+            base_source = Some(parse_adc_source_str(cred_json)?);
         } else if opts.contains_key("client_id")
             || opts.contains_key("client_secret")
             || opts.contains_key("refresh_token")
@@ -731,7 +1385,9 @@ impl GcpTokenCache {
                 opts.get("client_secret").filter(|v| !v.trim().is_empty()),
                 opts.get("refresh_token").filter(|v| !v.trim().is_empty()),
             ) else {
-                return None;
+                return Err(
+                    "authorized_user options require non-empty client_id, client_secret, and refresh_token".to_string(),
+                );
             };
             let token_uri = opts
                 .get("token_uri")
@@ -746,7 +1402,9 @@ impl GcpTokenCache {
             });
         } else if explicit_adc.is_some_and(|v| !v.trim().is_empty()) {
             explicit_credential_requested = true;
-            let adc_path = explicit_adc_candidate.as_ref()?;
+            let adc_path = explicit_adc_candidate.as_ref().ok_or_else(|| {
+                "explicit application_credentials path does not exist".to_string()
+            })?;
             base_source = Some(parse_adc_source(adc_path)?);
         } else if let Some(tok) = opts
             .get("access_token")
@@ -780,7 +1438,17 @@ impl GcpTokenCache {
 
         if !explicit_credential_requested && base_source.is_none() && allow_ambient {
             if let Some(ref adc_path) = ambient_adc_candidate {
-                base_source = parse_adc_source(adc_path);
+                match parse_adc_source(adc_path) {
+                    Ok(src) => base_source = Some(src),
+                    Err(err) => {
+                        if let Ok(raw) = std::fs::read_to_string(adc_path)
+                            && let Ok(parsed) = serde_json::from_str::<AdcCredentialFile>(&raw)
+                            && parsed.cred_type == "external_account"
+                        {
+                            return Err(err);
+                        }
+                    }
+                }
             }
             if base_source.is_none() && target_service_account.is_none() {
                 for env_var in ["GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"] {
@@ -821,10 +1489,12 @@ impl GcpTokenCache {
                 quota_project_id,
             }
         } else {
-            base_source?
+            base_source.ok_or_else(|| {
+                "unable to discover GCP credentials (checked gcp_options, GOOGLE_APPLICATION_CREDENTIALS, and ambient ADC)".to_string()
+            })?
         };
 
-        Some(Arc::new(Self::with_proxy_policy(
+        Ok(Arc::new(Self::with_proxy_policy(
             source,
             skew_ms,
             proxy_policy,
@@ -874,6 +1544,9 @@ impl GcpTokenCache {
                 quota_project_id, ..
             }
             | GcpAuthSource::GcloudCli {
+                quota_project_id, ..
+            }
+            | GcpAuthSource::ExternalAccount {
                 quota_project_id, ..
             } => quota_project_id.as_deref(),
             GcpAuthSource::ServiceAccount { key, .. } => key.quota_project_id.as_deref(),
@@ -1233,8 +1906,397 @@ impl GcpTokenCache {
                         quota_project_id.clone(),
                     ))
                 }
+                GcpAuthSource::ExternalAccount {
+                    audience,
+                    subject_token_type,
+                    token_url,
+                    credential_source,
+                    service_account_impersonation_url,
+                    quota_project_id,
+                    scopes,
+                    client_id,
+                    client_secret,
+                    ..
+                } => {
+                    let sts_req = ExternalAccountStsRequest {
+                        audience,
+                        subject_token_type,
+                        token_url,
+                        credential_source,
+                        scopes,
+                        client_id: client_id.as_deref(),
+                        client_secret: client_secret.as_deref(),
+                    };
+                    let (sts_token, sts_expires_at_unix_ms) = self
+                        .exchange_external_account_sts_token(
+                            sts_req,
+                            service_account_impersonation_url.is_some(),
+                            now_unix_ms,
+                        )
+                        .await?;
+                    let Some(imp_url) = service_account_impersonation_url else {
+                        return Ok((sts_token, sts_expires_at_unix_ms, quota_project_id.clone()));
+                    };
+
+                    let default_scopes_owned: Vec<String>;
+                    let effective_scopes: &[String] = if !self.requested_scopes.is_empty() {
+                        &self.requested_scopes
+                    } else if !scopes.is_empty() {
+                        scopes
+                    } else {
+                        default_scopes_owned = DEFAULT_GCP_SCOPES
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect();
+                        &default_scopes_owned
+                    };
+                    let mut req = self.client.post(imp_url).bearer_auth(&sts_token).json(
+                        &IamGenerateTokenRequest {
+                            scope: effective_scopes,
+                        },
+                    );
+                    if let Some(qp) = quota_project_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        req = req.header("x-goog-user-project", qp);
+                    }
+                    let resp = req
+                        .send()
+                        .await
+                        .map_err(|e| format!("IAM generateAccessToken failed: {e}"))?;
+                    if !resp.status().is_success() {
+                        return Err(format!(
+                            "IAM generateAccessToken returned HTTP {}",
+                            resp.status()
+                        ));
+                    }
+                    let parsed: IamGenerateTokenResponse = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("invalid IAM generateAccessToken JSON: {e}"))?;
+                    let token = parsed.access_token.trim().to_string();
+                    if token.is_empty() {
+                        return Err(
+                            "IAM generateAccessToken returned empty accessToken".to_string()
+                        );
+                    }
+                    let expires_at_unix_ms = parsed
+                        .expire_time
+                        .as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_millis().max(0) as u64)
+                        .unwrap_or_else(|| now_unix_ms.saturating_add(DEFAULT_TOKEN_TTL_MS));
+                    Ok((token, expires_at_unix_ms, quota_project_id.clone()))
+                }
             }
         })
+    }
+
+    pub(crate) async fn fetch_external_sts_token(
+        &self,
+        sts_req: ExternalAccountStsRequest<'_>,
+    ) -> Result<String, String> {
+        let (tok, _) = self
+            .exchange_external_account_sts_token(sts_req, true, current_unix_ms())
+            .await?;
+        Ok(tok)
+    }
+
+    async fn exchange_external_account_sts_token(
+        &self,
+        sts_req: ExternalAccountStsRequest<'_>,
+        for_impersonation: bool,
+        now_unix_ms: u64,
+    ) -> Result<(String, u64), String> {
+        let ExternalAccountStsRequest {
+            audience,
+            subject_token_type,
+            token_url,
+            credential_source,
+            scopes,
+            client_id,
+            client_secret,
+        } = sts_req;
+        let subject_token = self
+            .fetch_external_subject_token(credential_source, audience, now_unix_ms)
+            .await?;
+
+        let sts_scope = if for_impersonation {
+            DEFAULT_GCP_SCOPES.join(" ")
+        } else if !self.requested_scopes.is_empty() {
+            self.requested_scopes.join(" ")
+        } else if !scopes.is_empty() {
+            scopes.join(" ")
+        } else {
+            DEFAULT_GCP_SCOPES.join(" ")
+        };
+
+        let form_body = {
+            let mut form_ser = url::form_urlencoded::Serializer::new(String::new());
+            form_ser
+                .append_pair("grant_type", STS_GRANT_TYPE_TOKEN_EXCHANGE)
+                .append_pair("audience", audience)
+                .append_pair("scope", &sts_scope)
+                .append_pair("requested_token_type", STS_REQUESTED_TOKEN_TYPE_ACCESS)
+                .append_pair("subject_token", &subject_token)
+                .append_pair("subject_token_type", subject_token_type);
+            if let Some(cid) = client_id.map(str::trim).filter(|s| !s.is_empty())
+                && client_secret.map(str::trim).is_none_or(str::is_empty)
+            {
+                form_ser.append_pair("client_id", cid);
+            }
+            form_ser.finish()
+        };
+
+        let mut req = self
+            .client
+            .post(token_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form_body);
+        if let (Some(cid), Some(csec)) = (
+            client_id.map(str::trim).filter(|s| !s.is_empty()),
+            client_secret.map(str::trim).filter(|s| !s.is_empty()),
+        ) {
+            req = req.basic_auth(cid, Some(csec));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("GCP STS token exchange request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "GCP STS token exchange returned HTTP {}",
+                resp.status()
+            ));
+        }
+        let parsed: OAuthTokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("invalid GCP STS token JSON: {e}"))?;
+        let token = parsed.access_token.trim().to_string();
+        if token.is_empty() {
+            return Err("GCP STS token exchange returned empty access_token".to_string());
+        }
+        let ttl_ms = parsed
+            .expires_in
+            .map(|s| s.saturating_mul(1_000))
+            .unwrap_or(DEFAULT_TOKEN_TTL_MS);
+        Ok((token, now_unix_ms.saturating_add(ttl_ms)))
+    }
+
+    async fn fetch_external_subject_token(
+        &self,
+        credential_source: &ExternalSubjectTokenSource,
+        audience: &str,
+        now_unix_ms: u64,
+    ) -> Result<String, String> {
+        match credential_source {
+            ExternalSubjectTokenSource::File { path, format } => {
+                let raw = std::fs::read_to_string(path).map_err(|e| {
+                    format!(
+                        "failed to read external_account subject token file '{}': {e}",
+                        path.display()
+                    )
+                })?;
+                extract_subject_token(&raw, format)
+            }
+            ExternalSubjectTokenSource::Url {
+                url,
+                headers,
+                format,
+            } => {
+                let client = if url_is_link_local_metadata(url) {
+                    &self.metadata_client
+                } else {
+                    &self.client
+                };
+                let mut req = client.get(url);
+                for (k, v) in headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let resp = req.send().await.map_err(|e| {
+                    format!("external_account URL subject token request failed: {e}")
+                })?;
+                if !resp.status().is_success() {
+                    return Err(format!(
+                        "external_account URL subject token request returned HTTP {}",
+                        resp.status()
+                    ));
+                }
+                let raw = resp.text().await.map_err(|e| {
+                    format!("failed to read external_account URL subject token body: {e}")
+                })?;
+                extract_subject_token(&raw, format)
+            }
+            ExternalSubjectTokenSource::Aws {
+                region_url,
+                url,
+                regional_cred_verification_url,
+                imdsv2_session_token_url,
+                ..
+            } => {
+                let env_region = std::env::var("AWS_REGION")
+                    .ok()
+                    .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let env_ak = std::env::var("AWS_ACCESS_KEY_ID")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let env_sk = std::env::var("AWS_SECRET_ACCESS_KEY")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let env_tok = std::env::var("AWS_SESSION_TOKEN")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+
+                let need_imds = env_region.is_none() || env_ak.is_none() || env_sk.is_none();
+                let imds_token = if need_imds && let Some(token_url) = imdsv2_session_token_url {
+                    let ttl_secs = AWS_IMDSV2_TTL_SECONDS.clamp(1, 21_600);
+                    let resp = self
+                        .metadata_client
+                        .put(token_url)
+                        .header("X-aws-ec2-metadata-token-ttl-seconds", ttl_secs.to_string())
+                        .send()
+                        .await
+                        .map_err(|e| format!("AWS IMDSv2 session token request failed: {e}"))?;
+                    if !resp.status().is_success() {
+                        return Err(format!(
+                            "AWS IMDSv2 session token request returned HTTP {}",
+                            resp.status()
+                        ));
+                    }
+                    let tok = resp
+                        .text()
+                        .await
+                        .map_err(|e| format!("failed to read AWS IMDSv2 session token: {e}"))?;
+                    let trimmed = tok.trim().to_string();
+                    if trimmed.is_empty() {
+                        return Err("AWS IMDSv2 session token response was empty".to_string());
+                    }
+                    Some(trimmed)
+                } else {
+                    None
+                };
+
+                let region = match env_region {
+                    Some(r) => r,
+                    None => {
+                        let r_url = region_url.as_deref().ok_or_else(|| {
+                            "AWS region not set in AWS_REGION/AWS_DEFAULT_REGION and no region_url configured".to_string()
+                        })?;
+                        let mut req = self.metadata_client.get(r_url);
+                        if let Some(ref tok) = imds_token {
+                            req = req.header("X-aws-ec2-metadata-token", tok);
+                        }
+                        let resp = req
+                            .send()
+                            .await
+                            .map_err(|e| format!("AWS region_url request failed: {e}"))?;
+                        if !resp.status().is_success() {
+                            return Err(format!("AWS region_url returned HTTP {}", resp.status()));
+                        }
+                        let body = resp
+                            .text()
+                            .await
+                            .map_err(|e| format!("failed to read AWS region_url response: {e}"))?;
+                        parse_aws_region_from_az(&body)?
+                    }
+                };
+
+                let (access_key_id, secret_access_key, session_token) = if let (
+                    Some(ak),
+                    Some(sk),
+                ) = (env_ak, env_sk)
+                {
+                    (ak, sk, env_tok)
+                } else {
+                    let creds_url = url.as_deref().ok_or_else(|| {
+                            "AWS credentials not set in AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and no IMDS url configured".to_string()
+                        })?;
+                    let mut req = self.metadata_client.get(creds_url);
+                    if let Some(ref tok) = imds_token {
+                        req = req.header("X-aws-ec2-metadata-token", tok);
+                    }
+                    let resp = req
+                        .send()
+                        .await
+                        .map_err(|e| format!("AWS IMDS credentials request failed: {e}"))?;
+                    if !resp.status().is_success() {
+                        return Err(format!(
+                            "AWS IMDS credentials request returned HTTP {}",
+                            resp.status()
+                        ));
+                    }
+                    let first_body = resp
+                        .text()
+                        .await
+                        .map_err(|e| format!("failed to read AWS IMDS response: {e}"))?;
+                    let cred_json = if first_body.trim_start().starts_with('{') {
+                        first_body
+                    } else {
+                        let role_name = first_body
+                            .lines()
+                            .next()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| {
+                                "AWS IMDS role discovery returned empty role name".to_string()
+                            })?;
+                        let role_url = format!("{}/{}", creds_url.trim_end_matches('/'), role_name);
+                        let mut role_req = self.metadata_client.get(&role_url);
+                        if let Some(ref tok) = imds_token {
+                            role_req = role_req.header("X-aws-ec2-metadata-token", tok);
+                        }
+                        let role_resp = role_req
+                            .send()
+                            .await
+                            .map_err(|e| format!("AWS IMDS role credentials failed: {e}"))?;
+                        if !role_resp.status().is_success() {
+                            return Err(format!(
+                                "AWS IMDS role credentials returned HTTP {}",
+                                role_resp.status()
+                            ));
+                        }
+                        role_resp
+                            .text()
+                            .await
+                            .map_err(|e| format!("failed to read AWS IMDS role credentials: {e}"))?
+                    };
+                    let parsed: AwsImdsCredentials = serde_json::from_str(&cred_json)
+                        .map_err(|e| format!("invalid AWS IMDS credentials JSON: {e}"))?;
+                    if parsed.access_key_id.trim().is_empty()
+                        || parsed.secret_access_key.trim().is_empty()
+                    {
+                        return Err(
+                            "AWS IMDS credentials contained empty AccessKeyId or SecretAccessKey"
+                                .to_string(),
+                        );
+                    }
+                    (
+                        parsed.access_key_id,
+                        parsed.secret_access_key,
+                        parsed.token.filter(|s| !s.trim().is_empty()),
+                    )
+                };
+
+                build_aws_sigv4_subject_token(
+                    regional_cred_verification_url,
+                    &region,
+                    audience,
+                    &access_key_id,
+                    &secret_access_key,
+                    session_token.as_deref(),
+                    now_unix_ms,
+                )
+            }
+        }
     }
 }
 

@@ -8,7 +8,7 @@ import {
   WorkflowLiveSubscriber,
 } from "../src/agent/index";
 import { fnv1aFieldId, fnv1aStateId, StateOpcode } from "../src/live/index";
-import { interpolateRoutePath, routeUrl, wsUrl } from "../src/router";
+import { interpolateRoutePath, type RouteDefinition, type RouteRegistry, routeUrl, wsUrl } from "../src/router";
 import { type BrowserModelContextTool, registerWebMCPTools } from "../src/webmcp";
 
 describe("@vertebra/client/agent SDK", () => {
@@ -207,24 +207,48 @@ describe("@vertebra/client/agent SDK", () => {
 
   it("routeUrl and wsUrl interpolate typed path and query parameters cleanly", () => {
     const httpRoutes = {
-      "get.users.by_id": "/users/{id:int}",
-    } as const;
+      "get.users.by_id": { method: "GET", path: "/users/{id}" },
+    } as const satisfies RouteRegistry;
     const wsRoutes = {
-      chat_room: "/ws/rooms/{room_id:str}",
-    } as const;
+      chat_room: { method: "WS", path: "/ws/rooms/{room_id}" },
+    } as const satisfies RouteRegistry;
+    const def: RouteDefinition = httpRoutes["get.users.by_id"];
+    expect(def.method).toBe("GET");
 
-    expect(interpolateRoutePath("/items/{id:int}", { id: 42 }, { page: 2 })).toBe("/items/42?page=2");
-    expect(routeUrl(httpRoutes, "get.users.by_id", { id: 7 }, { baseUrl: "https://api.example.com/" })).toBe(
-      "https://api.example.com/users/7",
+    expect(interpolateRoutePath("/items/{id:int}", { id: 42 }, { page: 2, empty: null, skipped: undefined })).toBe(
+      "/items/42?page=2",
     );
+    expect(
+      routeUrl(
+        httpRoutes,
+        "get.users.by_id",
+        { id: 7 },
+        { baseUrl: "https://api.example.com/", query: { tab: "profile", omit: undefined, blank: null, page: 1 } },
+      ),
+    ).toBe("https://api.example.com/users/7?tab=profile&page=1");
     expect(
       wsUrl(
         wsRoutes,
         "chat_room",
         { room_id: "general" },
-        { baseUrl: "https://api.example.com", query: { token: "abc" } },
+        { baseUrl: "https://api.example.com", query: { token: "abc", skip: null } },
       ),
     ).toBe("wss://api.example.com/ws/rooms/general?token=abc");
+    expect(() => routeUrl(httpRoutes, "missing.route" as keyof typeof httpRoutes)).toThrow(
+      "Unknown route: missing.route",
+    );
+    expect(() => wsUrl(wsRoutes, "missing_ws" as keyof typeof wsRoutes)).toThrow("Unknown WebSocket route: missing_ws");
+
+    const flatHttp = { "get.users.by_id": "/users/{id}" } as const;
+    const flatWs = { chat_room: "/ws/rooms/{room_id}" } as const;
+    const _rejectFlatHttp = () =>
+      // @ts-expect-error flat string map is not a RouteRegistry
+      routeUrl(flatHttp, "get.users.by_id");
+    const _rejectFlatWs = () =>
+      // @ts-expect-error flat string map is not a RouteRegistry
+      wsUrl(flatWs, "chat_room");
+    expect(typeof _rejectFlatHttp).toBe("function");
+    expect(typeof _rejectFlatWs).toBe("function");
   });
 
   it("registerWebMCPTools prioritizes document.modelContext, forwards signal, isolates errors, and supports HMR disposal", async () => {
@@ -340,6 +364,182 @@ describe("@vertebra/client/agent SDK", () => {
       } else {
         navObj.modelContext = prevNavModelContext;
       }
+    }
+  });
+
+  it("WebMCP execute parses text/event-stream SSE responses with intermediate notifications", async () => {
+    const manifest = {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      mcpEndpoint: "https://app.example.com/mcp",
+      tools: [
+        {
+          name: "stream_tool",
+          description: "Streams SSE result",
+          inputSchema: { type: "object" },
+        },
+      ],
+    };
+
+    const sseFetch: typeof fetch = async () =>
+      new Response(
+        [
+          'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}\n\n',
+          'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"ok":true}}\n\n',
+        ].join(""),
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+
+    const handle = await registerWebMCPTools(manifest, {
+      fetchImpl: sseFetch,
+      modelContext: null,
+    });
+    const out = await handle.tools[0]?.execute({});
+    expect(out).toEqual({ ok: true });
+    handle.dispose();
+  });
+
+  it("WebMCP enforces requiresConfirmation fail-closed before calling fetchImpl", async () => {
+    const manifest = {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      mcpEndpoint: "https://app.example.com/mcp",
+      tools: [
+        {
+          name: "delete_record",
+          description: "Deletes a record",
+          inputSchema: { type: "object" },
+          requiresConfirmation: true,
+        },
+      ],
+    };
+
+    let fetchCalls = 0;
+    const mockFetch: typeof fetch = async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: { deleted: true } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const declinedHandle = await registerWebMCPTools(manifest, {
+      fetchImpl: mockFetch,
+      modelContext: null,
+      onConfirm: () => false,
+    });
+    await expect(declinedHandle.tools[0]?.execute({ id: 7 })).rejects.toThrow(
+      "WebMCP tool call 'delete_record' cancelled: user confirmation declined",
+    );
+    expect(fetchCalls).toBe(0);
+
+    const rejectedHandle = await registerWebMCPTools(manifest, {
+      fetchImpl: mockFetch,
+      modelContext: null,
+      onConfirm: async () => {
+        throw new Error("prompt crashed");
+      },
+    });
+    await expect(rejectedHandle.tools[0]?.execute({ id: 7 })).rejects.toThrow("prompt crashed");
+    expect(fetchCalls).toBe(0);
+
+    const g = globalThis as Record<string, unknown>;
+    const prevConfirm = g.confirm;
+    delete g.confirm;
+    try {
+      const nonInteractiveHandle = await registerWebMCPTools(manifest, {
+        fetchImpl: mockFetch,
+        modelContext: null,
+      });
+      await expect(nonInteractiveHandle.tools[0]?.execute({ id: 7 })).rejects.toThrow(
+        "WebMCP tool call 'delete_record' cancelled: user confirmation declined",
+      );
+      expect(fetchCalls).toBe(0);
+
+      g.confirm = () => true;
+      let interactionWrapped = false;
+      const wrappedConfirmHandle = await registerWebMCPTools(manifest, {
+        fetchImpl: mockFetch,
+        modelContext: null,
+      });
+      const wrappedOut = await wrappedConfirmHandle.tools[0]?.execute(
+        { id: 8 },
+        {
+          requestUserInteraction: async (cb) => {
+            interactionWrapped = true;
+            return await cb();
+          },
+        },
+      );
+      expect(interactionWrapped).toBe(true);
+      expect(wrappedOut).toEqual({ deleted: true });
+      expect(fetchCalls).toBe(1);
+    } finally {
+      if (prevConfirm === undefined) {
+        delete g.confirm;
+      } else {
+        g.confirm = prevConfirm;
+      }
+    }
+
+    const acceptedHandle = await registerWebMCPTools(manifest, {
+      fetchImpl: mockFetch,
+      modelContext: null,
+      onConfirm: async ({ tool, args }) => tool.name === "delete_record" && args.id === 9,
+    });
+    const out = await acceptedHandle.tools[0]?.execute({ id: 9 });
+    expect(out).toEqual({ deleted: true });
+    expect(fetchCalls).toBe(2);
+  });
+
+  it("WebMCP supports browser registerTool(tool, { signal }) without unregisterTool", async () => {
+    const signals: AbortSignal[] = [];
+    const registeredArgsCount: number[] = [];
+    const docContext = {
+      registerTool: (...args: [BrowserModelContextTool, { signal?: AbortSignal }?]) => {
+        registeredArgsCount.push(args.length);
+        const opts = args[1];
+        if (opts?.signal) {
+          signals.push(opts.signal);
+        }
+      },
+    };
+
+    const g = globalThis as Record<string, unknown>;
+    const prevDoc = g.document;
+    g.document = { modelContext: docContext };
+    try {
+      const manifest = {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        mcpEndpoint: "https://app.example.com/mcp",
+        tools: [
+          {
+            name: "ping_tool",
+            description: "Ping",
+            inputSchema: { type: "object" },
+          },
+        ],
+      };
+
+      const handle1 = await registerWebMCPTools(manifest);
+      expect(registeredArgsCount).toEqual([2]);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(false);
+
+      const handle2 = await registerWebMCPTools(manifest);
+      expect(registeredArgsCount).toEqual([2, 2]);
+      expect(signals).toHaveLength(2);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(signals[1]?.aborted).toBe(false);
+
+      handle1.dispose();
+      expect(signals[1]?.aborted).toBe(false);
+
+      handle2.dispose();
+      expect(signals[1]?.aborted).toBe(true);
+    } finally {
+      g.document = prevDoc;
     }
   });
 });

@@ -11,9 +11,10 @@ from urllib.parse import quote, unquote, urlparse
 
 from msgspec.structs import fields
 
+from vertebra.framework.storage import AsyncStorageRegistry, SyncStorageRegistry
 from vertebra.storage import AsyncObjectStore, StorageConfig, SyncObjectStore
-from vertebra.typing import ImproperConfigurationError, MissingDependencyError
-from vertebra.utils.module_loader import import_optional
+from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_module, import_optional
 
 _storage_module = import_optional("django.core.files.storage")
 _file_module = import_optional("django.core.files.base")
@@ -46,40 +47,6 @@ __all__ = (
 )
 
 
-class SyncStorageRegistry:
-    """Named ``SyncObjectStore`` registry for Django applications."""
-
-    __slots__ = ("_stores",)
-
-    def __init__(self, stores: dict[str, SyncObjectStore] | None = None) -> None:
-        self._stores: dict[str, SyncObjectStore] = dict(stores or {})
-
-    def register(self, name: str, store: SyncObjectStore) -> None:
-        """Register a ``SyncObjectStore`` under ``name``."""
-        self._stores[name] = store
-
-    def get(self, name: str = "default") -> SyncObjectStore:
-        """Return the ``SyncObjectStore`` registered under ``name``."""
-        return self._stores[name]
-
-
-class AsyncStorageRegistry:
-    """Named ``AsyncObjectStore`` registry for Django applications."""
-
-    __slots__ = ("_stores",)
-
-    def __init__(self, stores: dict[str, AsyncObjectStore] | None = None) -> None:
-        self._stores: dict[str, AsyncObjectStore] = dict(stores or {})
-
-    def register(self, name: str, store: AsyncObjectStore) -> None:
-        """Register an ``AsyncObjectStore`` under ``name``."""
-        self._stores[name] = store
-
-    def get(self, name: str = "default") -> AsyncObjectStore:
-        """Return the ``AsyncObjectStore`` registered under ``name``."""
-        return self._stores[name]
-
-
 class _DigestOptions(TypedDict, total=False):
     """Typed integrity kwargs forwarded to object store upload methods."""
 
@@ -104,7 +71,7 @@ class DjangoStorage(_StorageBase):
         expires_in: int = 3600,
     ) -> None:
         if _storage_module is None:
-            raise MissingDependencyError("django", install_package="django", extra="django")
+            ensure_module("django.core.files.storage", package="django", extra="django")
         target = store if store is not None else async_store if async_store is not None else config
         if target is None or isinstance(target, str) and not target.strip():
             msg = "Django storage requires an explicit store, configuration, or URI"

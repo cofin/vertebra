@@ -22,7 +22,9 @@ jobs:
       agents: ${{ steps.filter.outputs.agents }}
       python: ${{ steps.filter.outputs.python }}
       rust: ${{ steps.filter.outputs.rust }}
+      rust_macos: ${{ steps.filter.outputs.rust_macos }}
       typescript: ${{ steps.filter.outputs.typescript }}
+      packaging: ${{ steps.filter.outputs.packaging }}
       docs: ${{ steps.filter.outputs.docs }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -46,8 +48,18 @@ jobs:
               - 'uv.lock'
             rust:
               - 'src/rs/**'
+            rust_macos:
+              - 'src/rs/**'
+              - '.github/workflows/ci.yml'
             typescript:
               - 'src/ts/**'
+            packaging:
+              - 'src/rs/vertebra-*/**'
+              - 'src/py/vertebra/**'
+              - 'tools/scripts/*wheel*.py'
+              - 'pyproject.toml'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
             docs:
               - 'docs/**'
               - 'zensical.toml'
@@ -101,7 +113,13 @@ jobs:
         with:
           enable-cache: true
       - name: Install dependencies
-        run: make ts-install
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          uv sync --frozen --all-extras --group test --group lint --group build
+          make ts-install && make ts-build
+          make dev
       - name: Run lint
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -177,7 +195,7 @@ jobs:
 
   test-rust-macos:
     needs: [changes, lint]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust_macos == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -190,12 +208,12 @@ jobs:
           workspaces: "src/rs"
           shared-key: "vertebra"
           cache-on-failure: true
-      - name: Test with macOS ulock and feature flags
+      - name: Test with macOS feature flags
         working-directory: src/rs
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
-        run: cargo test --workspace --features tls,http3,compression,gcp,macos-ulock
+        run: cargo test --workspace --features tls,http3,compression,gcp
 
   test-typescript:
     runs-on: ubuntu-latest
@@ -382,6 +400,41 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: make valkey-wheel-check
 
+  optional-wheel-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.packaging == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [duckdb, mysql, mssql, oracle, storage, bigquery, spanner, bundler]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "wheel-${{ matrix.package }}"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install build and runtime dependencies
+        run: uv sync --frozen --group build
+      - name: Build TypeScript client bundle
+        run: make ts-install && make ts-build
+      - name: Verify vertebra-${{ matrix.package }} wheel isolation
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: make ${{ matrix.package }}-wheel-check
+
   postgres-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -512,7 +565,6 @@ jobs:
   conformance-oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
     needs: [changes, lint]
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     steps:

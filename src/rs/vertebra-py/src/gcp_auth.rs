@@ -18,6 +18,8 @@ use crate::async_bridge::{
 };
 use crate::errors::auth_error_to_py;
 
+// SAFETY: C-ABI callback registered inside `GcpTokenCacheCapsule`; callers must supply a live
+// `Arc<NativeGcpTokenCache>` pointer as `ctx`, valid `out_ctx`, and valid `complete_cb` pointer.
 unsafe extern "C" fn refresh_token_cache_on_db_runtime(
     ctx: *const c_void,
     force_refresh: bool,

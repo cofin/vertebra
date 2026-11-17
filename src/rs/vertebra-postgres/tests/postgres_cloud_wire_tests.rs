@@ -1064,6 +1064,11 @@ async fn alloydb_admin_v1alpha_paths_and_json_contract() {
                 Some("Bearer vtb-admin-tok")
             );
             if method == "GET" {
+                if path == "/v1beta/projects/p1/locations/us-central1/clusters/c1/instances/i1/connectionInfo" {
+                    let err_json = serde_json::json!({ "error": { "code": 404, "message": "v1beta unavailable" } });
+                    write_http_json(&mut stream, 404, &err_json.to_string()).await;
+                    return;
+                }
                 assert_eq!(
                     path,
                     "/v1alpha/projects/p1/locations/us-central1/clusters/c1/instances/i1/connectionInfo"
@@ -1074,6 +1079,11 @@ async fn alloydb_admin_v1alpha_paths_and_json_contract() {
                 });
                 write_http_json(&mut stream, 200, &json.to_string()).await;
             } else if method == "POST" {
+                if path == "/v1beta/projects/p1/locations/us-central1/clusters/c1:generateClientCertificate" {
+                    let err_json = serde_json::json!({ "error": { "code": 404, "message": "v1beta unavailable" } });
+                    write_http_json(&mut stream, 404, &err_json.to_string()).await;
+                    return;
+                }
                 assert_eq!(
                     path,
                     "/v1alpha/projects/p1/locations/us-central1/clusters/c1:generateClientCertificate"
@@ -1672,4 +1682,286 @@ async fn cloudsql_mtls_and_alloydb_end_to_end_dial_keepalive_and_token_expiry_gu
     assert_eq!(&alloy_buf, b"ALLOY_OK");
     alloy_pg_task.await.unwrap();
     alloy_admin_task.abort();
+}
+
+#[tokio::test]
+async fn alloydb_admin_v1beta_direct_501_fallback_psc_auto_dns_and_403_guard() {
+    let ca = Arc::new(TestCa::new());
+    let ca_beta = Arc::clone(&ca);
+    let beta_paths: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let beta_paths_srv = Arc::clone(&beta_paths);
+
+    let (beta_addr, beta_task) = spawn_http_mock(move |mut stream| {
+        let ca = Arc::clone(&ca_beta);
+        let paths = Arc::clone(&beta_paths_srv);
+        async move {
+            let (method, path, _, body) = read_http_request(&mut stream).await;
+            paths.lock().unwrap().push(format!("{method} {path}"));
+            if method == "GET" {
+                assert_eq!(
+                    path,
+                    "/v1beta/projects/p1/locations/us-central1/clusters/c1/instances/i1/connectionInfo"
+                );
+                let json = serde_json::json!({
+                    "ipAddress": "10.60.0.1",
+                    "pscDnsName": "",
+                    "pscAutoDnsName": "auto.psc.alloydb.goog."
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            } else {
+                assert_eq!(
+                    path,
+                    "/v1beta/projects/p1/locations/us-central1/clusters/c1:generateClientCertificate"
+                );
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let pub_key = req["publicKey"].as_str().unwrap();
+                let leaf_pem = ca.sign_rsa_public_key_pem(pub_key, 4_600);
+                let json = serde_json::json!({
+                    "pemCertificateChain": [leaf_pem],
+                    "caCert": ca.ca_pem
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            }
+        }
+    })
+    .await;
+
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let connector = CloudConnector::with_clock(clock);
+    let uri =
+        AlloyDbClusterUri::parse("projects/p1/locations/us-central1/clusters/c1/instances/i1")
+            .unwrap();
+    let mut admin_opts = HashMap::new();
+    admin_opts.insert("access_token".to_string(), "admin-tok".to_string());
+    let mut iam_opts = HashMap::new();
+    iam_opts.insert("access_token".to_string(), "alloy-tok".to_string());
+    iam_opts.insert("expires_at_unix_ms".to_string(), "2200000".to_string());
+    iam_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
+
+    let cfg_beta = CloudConnectorConfig::new(
+        CloudResourceTarget::AlloyDb(uri.clone()),
+        IpType::Psc,
+        AuthType::Iam,
+    )
+    .with_admin_endpoint(format!("http://{beta_addr}"))
+    .unwrap()
+    .with_cloud_auth_options(admin_opts.clone())
+    .with_iam_auth_options(Some(iam_opts.clone()));
+
+    let mat_beta = connector
+        .prepare(&cfg_beta, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("v1beta direct with pscAutoDnsName");
+    assert_eq!(mat_beta.host, "auto.psc.alloydb.goog");
+    assert_eq!(
+        mat_beta.peer_dns_name.as_deref(),
+        Some("auto.psc.alloydb.goog")
+    );
+    assert_eq!(beta_paths.lock().unwrap().len(), 2);
+    beta_task.abort();
+
+    let ca_501 = Arc::clone(&ca);
+    let saw_alpha_after_501 = Arc::new(AtomicUsize::new(0));
+    let saw_alpha_srv = Arc::clone(&saw_alpha_after_501);
+    let (fallback_addr, fallback_task) = spawn_http_mock(move |mut stream| {
+        let ca = Arc::clone(&ca_501);
+        let saw_alpha = Arc::clone(&saw_alpha_srv);
+        async move {
+            let (method, path, _, body) = read_http_request(&mut stream).await;
+            if path.starts_with("/v1beta/") {
+                write_http_json(&mut stream, 501, r#"{"error":"not implemented"}"#).await;
+                return;
+            }
+            if method == "GET" {
+                saw_alpha.fetch_add(1, Ordering::SeqCst);
+                let json = serde_json::json!({ "ipAddress": "10.60.0.2" });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            } else {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let pub_key = req["publicKey"].as_str().unwrap();
+                let leaf_pem = ca.sign_rsa_public_key_pem(pub_key, 4_600);
+                let json = serde_json::json!({
+                    "pemCertificateChain": [leaf_pem],
+                    "caCert": ca.ca_pem
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            }
+        }
+    })
+    .await;
+
+    let cfg_501 = CloudConnectorConfig::new(
+        CloudResourceTarget::AlloyDb(uri.clone()),
+        IpType::Private,
+        AuthType::Iam,
+    )
+    .with_admin_endpoint(format!("http://{fallback_addr}"))
+    .unwrap()
+    .with_cloud_auth_options(admin_opts.clone())
+    .with_iam_auth_options(Some(iam_opts.clone()));
+    let mat_501 = connector
+        .prepare(&cfg_501, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("501 falls back to v1alpha");
+    assert_eq!(mat_501.host, "10.60.0.2");
+    assert_eq!(saw_alpha_after_501.load(Ordering::SeqCst), 1);
+    fallback_task.abort();
+
+    let forbidden_paths: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fp_srv = Arc::clone(&forbidden_paths);
+    let (forbidden_addr, forbidden_task) = spawn_http_mock(move |mut stream| {
+        let paths = Arc::clone(&fp_srv);
+        async move {
+            let (method, path, _, _) = read_http_request(&mut stream).await;
+            paths.lock().unwrap().push(format!("{method} {path}"));
+            write_http_json(&mut stream, 403, r#"{"error":"permission denied"}"#).await;
+        }
+    })
+    .await;
+
+    let cfg_403 = CloudConnectorConfig::new(
+        CloudResourceTarget::AlloyDb(uri),
+        IpType::Private,
+        AuthType::Iam,
+    )
+    .with_admin_endpoint(format!("http://{forbidden_addr}"))
+    .unwrap()
+    .with_cloud_auth_options(admin_opts)
+    .with_iam_auth_options(Some(iam_opts));
+    let err_403 = connector
+        .prepare(&cfg_403, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect_err("403 IAM failure must not fall back to v1alpha");
+    assert!(matches!(err_403, PostgresError::Transport(ref m) if m.contains("403")));
+    assert_eq!(forbidden_paths.lock().unwrap().len(), 1);
+    forbidden_task.abort();
+}
+
+#[tokio::test]
+async fn alloydb_metadata_exchange_error_surfaces_structured_code_and_diagnostics() {
+    use _postgres::cloud::dial_alloydb;
+    use _postgres::config::{PostgresConfig, RawPostgresOptions};
+    use rcgen::{DnType, KeyUsagePurpose};
+    use rustls::ServerConfig;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::TlsAcceptor;
+    use vertebra_db::dialer::encode_alloydb_metadata_response;
+
+    let ca = Arc::new(TestCa::new());
+    let issuer = Issuer::new(
+        ca.ca_params.clone(),
+        KeyPair::from_pem(&ca.ca_key.serialize_pem()).unwrap(),
+    );
+    let mut alloy_srv_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+    alloy_srv_params
+        .distinguished_name
+        .push(DnType::CommonName, "alloydb-err");
+    alloy_srv_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    let alloy_srv_key = KeyPair::generate().unwrap();
+    let alloy_srv_cert = alloy_srv_params.signed_by(&alloy_srv_key, &issuer).unwrap();
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    let ca_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(ca.ca_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    roots.add_parsable_certificates(ca_certs);
+    let client_verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .unwrap();
+    let srv_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(
+        &mut std::io::BufReader::new(alloy_srv_cert.pem().as_bytes()),
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    let srv_pk: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut std::io::BufReader::new(
+        alloy_srv_key.serialize_pem().as_bytes(),
+    ))
+    .unwrap()
+    .unwrap();
+    let srv_cfg = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(srv_certs, srv_pk)
+        .unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(srv_cfg));
+
+    let pg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pg_addr = pg_listener.local_addr().unwrap();
+    let pg_task = tokio::spawn(async move {
+        let (sock, _) = pg_listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(sock).await.unwrap();
+        let mut hdr = [0u8; 4];
+        tls.read_exact(&mut hdr).await.unwrap();
+        let len = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; len];
+        tls.read_exact(&mut body).await.unwrap();
+        let resp = encode_alloydb_metadata_response(2, "IAM token expired: invalid audience");
+        tls.write_all(&resp).await.unwrap();
+    });
+
+    let ca_for_admin = Arc::clone(&ca);
+    let (admin_addr, admin_task) = spawn_http_mock(move |mut stream| {
+        let ca = Arc::clone(&ca_for_admin);
+        async move {
+            let (method, _, _, body) = read_http_request(&mut stream).await;
+            if method == "GET" {
+                let json = serde_json::json!({ "ipAddress": "127.0.0.1" });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            } else {
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let pub_key = req["publicKey"].as_str().unwrap();
+                let leaf = ca.sign_rsa_public_key_pem(pub_key, 4_102_444_800);
+                let json = serde_json::json!({
+                    "pemCertificateChain": [leaf],
+                    "caCert": ca.ca_pem
+                });
+                write_http_json(&mut stream, 200, &json.to_string()).await;
+            }
+        }
+    })
+    .await;
+
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let connector = CloudConnector::with_clock(clock);
+    let mut raw = RawPostgresOptions::new("127.0.0.1", "iam-user", "appdb");
+    raw.alloydb_instance_uri =
+        Some("projects/p1/locations/us-central1/clusters/c1/instances/i1".to_string());
+    raw.alloydb_ip_type = "PRIVATE".to_string();
+    raw.enable_iam_auth = true;
+    raw.cloud_auth_options
+        .insert("admin_endpoint".to_string(), format!("http://{admin_addr}"));
+    raw.cloud_auth_options
+        .insert("access_token".to_string(), "admin-tok".to_string());
+    raw.cloud_auth_options
+        .insert("proxy_port".to_string(), pg_addr.port().to_string());
+    raw.iam_auth_options
+        .insert("access_token".to_string(), "alloy-login-tok".to_string());
+    raw.iam_auth_options
+        .insert("expires_at_unix_ms".to_string(), "2500000".to_string());
+    raw.iam_auth_options.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/alloydb.login".to_string(),
+    );
+    let pg_cfg = PostgresConfig::validate(raw).unwrap();
+
+    let err = dial_alloydb(&pg_cfg, &connector, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect_err("rejected MetadataExchangeResponse must surface diagnostic message");
+    let rendered = err.to_string();
+    assert!(rendered.contains("ERROR"));
+    assert!(rendered.contains("code=2"));
+    assert!(rendered.contains("IAM token expired: invalid audience"));
+
+    pg_task.await.unwrap();
+    admin_task.abort();
 }

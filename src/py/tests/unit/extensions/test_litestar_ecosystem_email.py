@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -105,3 +106,29 @@ def test_missing_dependency_error_on_missing_email(monkeypatch: pytest.MonkeyPat
     with pytest.raises(MissingDependencyError) as exc_info:
         ensure_module("litestar_email", extra="email")
     assert "email" in exc_info.value.install_package
+
+
+def test_email_backend_module_imports_with_litestar_email_blocked() -> None:
+    """Email backend module imports cleanly when litestar_email is blocked in sys.modules."""
+    script = (
+        "import importlib, sys\n"
+        "for mod in ('litestar', 'litestar_email', 'litestar_email.backends', 'litestar_email.backends.base'):\n"
+        "    sys.modules[mod] = None\n"
+        "imported = importlib.import_module('vertebra.extensions.litestar.email.backend')\n"
+        "cfg = imported.SESEmailConfig(region='us-east-1')\n"
+        "assert cfg.region == 'us-east-1'\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        "try:\n"
+        "    imported.SESEmailBackend(cfg)\n"
+        "except MissingDependencyError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('Expected MissingDependencyError for SESEmailBackend')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

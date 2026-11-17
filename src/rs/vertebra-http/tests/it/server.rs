@@ -292,6 +292,8 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
     fn get_int_sockopt(fd: i32, optname: i32) -> i32 {
         let mut val: libc::c_int = 0;
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `fd` is an open socket FD from `AsRawFd`, `val` is a stack `c_int`, and
+        // `len` is initialized to `size_of::<libc::c_int>()` as both input and output size.
         let rc = unsafe {
             libc::getsockopt(
                 fd,
@@ -306,8 +308,11 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
     }
 
     fn kernel_nodename() -> String {
+        // SAFETY: `libc::utsname` is a plain C byte-array struct where all-zero is valid.
         let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+        // SAFETY: `&raw mut uts` points to an aligned, mutable stack `libc::utsname`.
         assert_eq!(unsafe { libc::uname(&raw mut uts) }, 0);
+        // SAFETY: `libc::uname` returned `0`, so `uts.nodename` holds a NUL-terminated C string.
         unsafe { std::ffi::CStr::from_ptr(uts.nodename.as_ptr()) }
             .to_string_lossy()
             .into_owned()
@@ -746,14 +751,30 @@ async fn test_server_enforces_payload_limits_profile_discovery_and_access_log() 
     assert_eq!(prof_unauth.status(), 401);
 
     let prof_ok = client
-        .get(format!("http://{addr}/debug/pprof/profile"))
+        .get(format!("http://{addr}/debug/pprof/profile?duration_ms=25"))
         .header("Authorization", "Bearer secret-prof-token")
         .send()
         .await
         .unwrap();
-    assert_eq!(prof_ok.status(), 200);
-    let prof_json = prof_ok.text().await.unwrap();
-    assert!(prof_json.contains("\"profile\":\"cpu\""));
+    #[cfg(not(all(unix, feature = "profiling")))]
+    {
+        assert_eq!(prof_ok.status(), 404);
+        let prof_json = prof_ok.text().await.unwrap();
+        assert_eq!(prof_json, "{\"error\":\"profiling feature disabled\"}");
+    }
+    #[cfg(all(unix, feature = "profiling"))]
+    {
+        assert_eq!(prof_ok.status(), 200);
+        assert!(!prof_ok.bytes().await.unwrap().is_empty());
+    }
+
+    let prof_heap = client
+        .get(format!("http://{addr}/debug/pprof/heap"))
+        .header("Authorization", "Bearer secret-prof-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prof_heap.status(), 404);
 
     let card_resp = client
         .get(format!("http://{addr}/.well-known/agent-card.json"))
@@ -896,9 +917,10 @@ async fn test_handle_buffered_worker_dispatch_and_payload_limits() {
         },
         ..ServerConfig::default()
     });
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(16);
     let state = Arc::new(ServerState::new(
         router,
-        Arc::new(Dispatcher::new()),
+        Arc::new(dispatcher),
         cfg,
         vec![collector_tx],
     ));
@@ -994,4 +1016,697 @@ async fn test_handle_buffered_worker_dispatch_and_payload_limits() {
             .status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
+}
+
+#[tokio::test]
+async fn test_graceful_drain_finishes_in_flight_and_terminates_stalled_socket() {
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/slow");
+    table.insert("GET", "/hello");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(16);
+    let dispatcher = Arc::new(dispatcher);
+    let (collector_tx, mut collector_rx) =
+        tokio::sync::mpsc::channel::<vertebra_http::batcher::PendingRequest>(16);
+
+    let (slow_started_tx, slow_started_rx) = oneshot::channel::<()>();
+    let mut slow_started_tx = Some(slow_started_tx);
+    let worker_handle = tokio::spawn(async move {
+        while let Some(pending) = collector_rx.recv().await {
+            if pending.path_and_query.path() == "/slow" {
+                if let Some(tx) = slow_started_tx.take() {
+                    let _ = tx.send(());
+                }
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    let _ = pending.reply.send(PendingResponse::unary(
+                        200,
+                        Bytes::new(),
+                        Bytes::from_static(b"slow-done"),
+                    ));
+                });
+            } else {
+                let _ = pending.reply.send(PendingResponse::unary(
+                    200,
+                    Bytes::new(),
+                    Bytes::from_static(b"hello"),
+                ));
+            }
+        }
+    });
+
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        drain_timeout: Duration::from_millis(250),
+        header_read_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = http_client();
+    let slow_req_task = tokio::spawn(async move {
+        let resp = client
+            .get(format!("http://{addr}/slow"))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.text().await.unwrap();
+        (status, body)
+    });
+
+    slow_started_rx.await.unwrap();
+
+    let mut stalled = TcpStream::connect(addr).await.unwrap();
+    stalled
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    shutdown_tx.send(()).unwrap();
+
+    let (slow_status, slow_body) = slow_req_task.await.unwrap();
+    assert_eq!(slow_status, 200);
+    assert_eq!(slow_body, "slow-done");
+
+    let mut buf = [0u8; 64];
+    let stalled_read = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf))
+        .await
+        .expect("stalled socket must terminate when drain_timeout expires");
+    match stalled_read {
+        Ok(0) | Err(_) => {}
+        Ok(n) => panic!("expected EOF or reset on stalled socket, read {n} bytes"),
+    }
+
+    tokio::time::timeout(Duration::from_secs(2), server_handle)
+        .await
+        .expect("server must finish after drain_timeout")
+        .unwrap();
+    worker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_max_connections_caps_concurrent_connections_until_client_closes() {
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/hello");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(16);
+    let dispatcher = Arc::new(dispatcher);
+    let (collector_tx, mut collector_rx) =
+        tokio::sync::mpsc::channel::<vertebra_http::batcher::PendingRequest>(16);
+
+    let worker_handle = tokio::spawn(async move {
+        while let Some(pending) = collector_rx.recv().await {
+            let _ = pending.reply.send(PendingResponse::unary(
+                200,
+                Bytes::new(),
+                Bytes::from_static(b"hello"),
+            ));
+        }
+    });
+
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        max_connections: 2,
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    async fn send_keepalive_hello(stream: &mut TcpStream) {
+        stream
+            .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "unexpected EOF waiting for keep-alive response");
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(5).any(|w| w == b"hello") {
+                break;
+            }
+        }
+        assert!(String::from_utf8_lossy(&buf).contains("200 OK"));
+    }
+
+    let mut c1 = TcpStream::connect(addr).await.unwrap();
+    send_keepalive_hello(&mut c1).await;
+
+    let mut c2 = TcpStream::connect(addr).await.unwrap();
+    send_keepalive_hello(&mut c2).await;
+
+    let mut c3 = TcpStream::connect(addr).await.unwrap();
+    c3.write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut c3_buf = Vec::new();
+    let blocked =
+        tokio::time::timeout(Duration::from_millis(120), c3.read_to_end(&mut c3_buf)).await;
+    assert!(
+        blocked.is_err(),
+        "3rd connection must wait while 2 max_connections permits are held"
+    );
+
+    drop(c1);
+
+    tokio::time::timeout(Duration::from_secs(2), c3.read_to_end(&mut c3_buf))
+        .await
+        .expect("3rd connection should proceed once 1st closes")
+        .unwrap();
+    let c3_resp = String::from_utf8_lossy(&c3_buf);
+    assert!(c3_resp.contains("200 OK"));
+    assert!(c3_resp.ends_with("hello"));
+
+    drop(c2);
+    drop(c3);
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(2), server_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    worker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_header_read_timeout_closes_slowloris_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/hello");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(16);
+    let dispatcher = Arc::new(dispatcher);
+    let (collector_tx, _collector_rx) = tokio::sync::mpsc::channel(4);
+
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        header_read_timeout: Duration::from_millis(120),
+        keepalive_timeout: Duration::from_secs(10),
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut slowloris = TcpStream::connect(addr).await.unwrap();
+    slowloris
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 64];
+    let res = tokio::time::timeout(Duration::from_secs(2), slowloris.read(&mut buf))
+        .await
+        .expect("slowloris connection must close at header_read_timeout");
+    match res {
+        Ok(0) | Err(_) => {}
+        Ok(n) => panic!("expected connection close, got {n} bytes"),
+    }
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(2), server_handle)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_h2c_prior_knowledge_serves_cleartext_http2() {
+    use bytes::Bytes;
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/hello");
+    table.insert("POST", "/echo");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(16);
+    let dispatcher = Arc::new(dispatcher);
+    let (collector_tx, mut collector_rx) =
+        tokio::sync::mpsc::channel::<vertebra_http::batcher::PendingRequest>(16);
+
+    let worker_handle = tokio::spawn(async move {
+        while let Some(pending) = collector_rx.recv().await {
+            let body = if pending.path_and_query.path() == "/echo" {
+                pending.body
+            } else {
+                Bytes::from_static(b"h2c-hello")
+            };
+            let _ = pending
+                .reply
+                .send(PendingResponse::unary(200, Bytes::new(), body));
+        }
+    });
+
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        enable_h2c_prior_knowledge: true,
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+
+    let resp = client
+        .get(format!("http://{addr}/hello"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.version(), reqwest::Version::HTTP_2);
+    assert_eq!(resp.text().await.unwrap(), "h2c-hello");
+
+    let echo = client
+        .post(format!("http://{addr}/echo"))
+        .body("prior-knowledge-payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(echo.status(), 200);
+    assert_eq!(echo.version(), reqwest::Version::HTTP_2);
+    assert_eq!(echo.text().await.unwrap(), "prior-knowledge-payload");
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(2), server_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    worker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_handle_with_peer_forwards_client_ip_to_access_logger() {
+    use bytes::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use vertebra_http::access_log::{AccessLogFormat, AccessLogger};
+    use vertebra_http::response::handle_with_peer;
+    use vertebra_http::server::ServerState;
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut table = RouteTable::new();
+    table.insert("GET", "/hello");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (collector_tx, mut collector_rx) =
+        tokio::sync::mpsc::channel::<vertebra_http::batcher::PendingRequest>(4);
+
+    tokio::spawn(async move {
+        while let Some(pending) = collector_rx.recv().await {
+            let _ = pending.reply.send(PendingResponse::unary(
+                200,
+                Bytes::new(),
+                Bytes::from_static(b"ok"),
+            ));
+        }
+    });
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let logger = Arc::new(AccessLogger::with_writer(
+        AccessLogFormat::Json,
+        SharedWriter(Arc::clone(&captured)),
+    ));
+
+    let (dispatcher, _direct_rx) = Dispatcher::new_direct(4);
+    let mut state = ServerState::new(
+        router,
+        Arc::new(dispatcher),
+        Arc::new(ServerConfig::default()),
+        vec![collector_tx],
+    );
+    state.access_logger = Some(Arc::clone(&logger));
+    let state = Arc::new(state);
+
+    let (mut client_io, server_io) = tokio::io::duplex(4096);
+    let peer: SocketAddr = "203.0.113.42:54321".parse().unwrap();
+    let srv_state = Arc::clone(&state);
+    let conn_task = tokio::spawn(async move {
+        http1::Builder::new()
+            .serve_connection(
+                TokioIo::new(server_io),
+                service_fn(move |req| {
+                    let s = Arc::clone(&srv_state);
+                    async move { handle_with_peer(req, peer, s).await }
+                }),
+            )
+            .await
+            .unwrap();
+    });
+
+    client_io
+        .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    client_io.read_to_end(&mut raw).await.unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("200 OK"));
+    conn_task.await.unwrap();
+
+    assert!(logger.flush(Duration::from_secs(2)));
+    let log_str = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(
+        log_str.contains("\"remote_addr\":\"203.0.113.42\""),
+        "expected peer IP in access log, got: {log_str}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_batch_bridge_publish_pubsub_delivers_sse_event() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let srv = spawn_test_server().await;
+    let client = http_client();
+
+    let mut resp = client
+        .get(format!("http://{}/__vertebra/sse/alerts", srv.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let bridge = BatchBridge::get().expect("bridge initialized");
+    let event_id = bridge
+        .publish_pubsub("alerts", b"{\"status\":\"ok\"}", Some("alert-1"))
+        .expect("pubsub event id");
+    assert_eq!(event_id, 1);
+    assert_eq!(
+        bridge.publish_pubsub("alerts", b"{\"status\":\"ok\"}", Some("alert-1")),
+        None
+    );
+
+    let chunk = tokio::time::timeout(Duration::from_secs(2), resp.chunk())
+        .await
+        .expect("timed out waiting for SSE chunk")
+        .unwrap()
+        .expect("non-empty SSE chunk");
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("id: 1"), "missing id in SSE frame: {text}");
+    assert!(
+        text.contains("event: alerts"),
+        "missing event in SSE frame: {text}"
+    );
+    assert!(
+        text.contains("data: {\"status\":\"ok\"}"),
+        "missing data in SSE frame: {text}"
+    );
+
+    drop(resp);
+    srv.shutdown().await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_server_enforces_multipart_limits_and_boundary_before_worker_dispatch() {
+    use std::sync::atomic::AtomicUsize;
+    use vertebra_http::multipart::MultipartLimits;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_bridge();
+    drain_stale();
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/upload");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let dispatcher = Arc::new(Dispatcher::new());
+    let (collector, collector_tx) =
+        RequestBatcher::new(Arc::clone(&dispatcher), BatchLimit::default(), 64);
+    let collector_handle = tokio::spawn(collector.run());
+
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_running = Arc::clone(&running);
+    let worker_hits = Arc::new(AtomicUsize::new(0));
+    let worker_hits_bg = Arc::clone(&worker_hits);
+
+    let worker_handle = tokio::spawn(async move {
+        while worker_running.load(Ordering::Acquire) {
+            let snapshot = tokio::task::spawn_blocking(|| {
+                BatchBridge::get().and_then(|b| b.poll_batch(Duration::from_millis(5)))
+            })
+            .await
+            .unwrap();
+
+            if let Some(batch) = snapshot {
+                worker_hits_bg.fetch_add(batch.len(), Ordering::AcqRel);
+                let responses: Vec<BridgeResponse> = (0..batch.len())
+                    .map(|i| BridgeResponse {
+                        request_id: batch.node(i).correlation_id,
+                        status: 200,
+                        headers_raw: bytes::Bytes::new(),
+                        body: batch.body_bytes_owned(i),
+                    })
+                    .collect();
+
+                if let Some(bridge) = BatchBridge::get() {
+                    let _ = bridge.submit_responses_async(responses).await;
+                }
+            }
+        }
+    });
+
+    let resp_dispatcher = Arc::clone(&dispatcher);
+    let resp_handle = tokio::spawn(async move {
+        let bridge = BatchBridge::get().expect("bridge not initialized");
+        while let Some(resps) = bridge.recv_responses().await {
+            for resp in resps {
+                resp_dispatcher.complete(
+                    resp.request_id,
+                    PendingResponse {
+                        status: resp.status,
+                        headers_mp: resp.headers_raw,
+                        body: resp.body,
+                        stream_rx: None,
+                    },
+                );
+            }
+        }
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        multipart_limits: MultipartLimits {
+            max_fields: 1,
+            max_file_size: 8,
+            max_total_size: 256,
+        },
+        ..ServerConfig::default()
+    });
+
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let srv = TestServer {
+        addr,
+        running,
+        shutdown_tx: Some(shutdown_tx),
+        collector_handle,
+        worker_handle,
+        resp_handle,
+        server_handle,
+    };
+
+    let client = http_client();
+    let url = format!("http://{addr}/upload");
+
+    let missing_boundary = client
+        .post(&url)
+        .header("content-type", "multipart/form-data")
+        .body("not-multipart")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_boundary.status(), 400);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let boundary = "----VertebraBoundaryTest";
+    let malformed = client
+        .post(&url)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body("corrupt-stream-without-closing-boundary")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), 400);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let too_many_fields = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"a\"\r\n\r\n\
+         1\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"b\"\r\n\r\n\
+         2\r\n\
+         --{boundary}--\r\n"
+    );
+    let fields_resp = client
+        .post(&url)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(too_many_fields)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fields_resp.status(), 413);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let file_too_large = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"doc\"; filename=\"f.bin\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n\
+         0123456789abcdef\r\n\
+         --{boundary}--\r\n"
+    );
+    let file_resp = client
+        .post(&url)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(file_too_large)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(file_resp.status(), 413);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 0);
+
+    let valid_body = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"doc\"; filename=\"ok.bin\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n\
+         ok1234\r\n\
+         --{boundary}--\r\n"
+    );
+    let ok_resp = client
+        .post(&url)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(valid_body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_resp.status(), 200);
+    assert_eq!(ok_resp.text().await.unwrap(), valid_body);
+    assert_eq!(worker_hits.load(Ordering::Acquire), 1);
+
+    srv.shutdown().await;
 }

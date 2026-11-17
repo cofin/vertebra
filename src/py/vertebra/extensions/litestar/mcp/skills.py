@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
@@ -81,8 +82,8 @@ class ObjectStoreSkillSource:
         key = f"{self._prefix}/{file.uri.removeprefix('skill://')}"
         data: bytes | None = None
         if hasattr(self._store, "get"):
-            raw = await self._store.get(key) if hasattr(self._store.get, "__await__") else self._store.get(key)
-            if hasattr(raw, "__await__"):
+            raw = self._store.get(key)
+            if inspect.isawaitable(raw):
                 raw = await raw
             data = bytes(raw) if raw is not None else None
 

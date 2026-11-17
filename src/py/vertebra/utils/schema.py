@@ -102,16 +102,17 @@ def to_value_type[T](value: Any, value_type: type[T]) -> T:
                 return cast("T", False)
         return cast("T", bool(value))
 
+    raw_value: Any = value
     if value_type is int:
-        return cast("T", int(value))
+        return cast("T", int(raw_value))
     if value_type is float:
-        return cast("T", float(value))
+        return cast("T", float(raw_value))
     if value_type is str:
         return cast("T", str(value))
     if value_type is bytes:
         if isinstance(value, str):
             return cast("T", value.encode("utf-8"))
-        return cast("T", bytes(value))
+        return cast("T", bytes(raw_value))
     if value_type is Decimal:
         return cast("T", Decimal(str(value)))
     if value_type is UUID:

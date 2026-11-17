@@ -13,6 +13,7 @@ from vertebra.extensions.django.openapi import attach_openapi_docs, extract_open
 from vertebra.extensions.django.router import RouteCompiler
 from vertebra.extensions.django.vite import ViteBridge, attach_vite
 from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -126,13 +127,10 @@ class VertebraPlugin:
 
         active_settings = self._settings
         if active_settings is None:
-            try:
-                from django.conf import settings as django_settings
-
-                if django_settings.configured:
-                    active_settings = django_settings
-            except Exception:
-                active_settings = None
+            django_conf = import_optional("django.conf")
+            django_settings = getattr(django_conf, "settings", None) if django_conf is not None else None
+            if django_settings is not None and getattr(django_settings, "configured", False):
+                active_settings = django_settings
         if active_settings is not None:
             self._validate_settings(active_settings)
 

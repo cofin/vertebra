@@ -1,10 +1,21 @@
 """Vertebra SQL Server (MSSQL) SQLSpec adapter package with PEP 562 lazy attribute loading."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.mssql._typing import (
+        MSSQLAsyncConnectionContext,
+        MSSQLAsyncSessionContext,
+        MSSQLConnectionParams,
+        MSSQLDriverFeatures,
+        MSSQLPoolParams,
+        MSSQLSyncConnectionContext,
+        MSSQLSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.mssql.adk import (
         MSSQLADKConfig,
         MSSQLAsyncADKArtifactStore,
@@ -37,16 +48,23 @@ __all__ = (
     "MSSQLAsyncADKMemoryStore",
     "MSSQLAsyncADKStore",
     "MSSQLAsyncConfig",
+    "MSSQLAsyncConnectionContext",
     "MSSQLAsyncDataDictionary",
     "MSSQLAsyncDriver",
+    "MSSQLAsyncSessionContext",
+    "MSSQLConnectionParams",
+    "MSSQLDriverFeatures",
     "MSSQLEventQueueStore",
     "MSSQLLitestarStore",
+    "MSSQLPoolParams",
     "MSSQLSyncADKArtifactStore",
     "MSSQLSyncADKMemoryStore",
     "MSSQLSyncADKStore",
     "MSSQLSyncConfig",
+    "MSSQLSyncConnectionContext",
     "MSSQLSyncDataDictionary",
     "MSSQLSyncDriver",
+    "MSSQLSyncSessionContext",
     "build_connection_config",
     "build_statement_config",
     "default_statement_config",
@@ -61,22 +79,41 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "MSSQLAsyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.mssql.adk", "MSSQLAsyncADKMemoryStore"),
     "MSSQLAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.mssql.adk", "MSSQLAsyncADKStore"),
     "MSSQLAsyncConfig": ("vertebra.extensions.sqlspec.adapters.mssql.config", "MSSQLAsyncConfig"),
+    "MSSQLAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.mssql._typing",
+        "MSSQLAsyncConnectionContext",
+    ),
     "MSSQLAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.mssql.data_dictionary",
         "MSSQLAsyncDataDictionary",
     ),
     "MSSQLAsyncDriver": ("vertebra.extensions.sqlspec.adapters.mssql.driver", "MSSQLAsyncDriver"),
+    "MSSQLAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.mssql._typing",
+        "MSSQLAsyncSessionContext",
+    ),
+    "MSSQLConnectionParams": ("vertebra.extensions.sqlspec.adapters.mssql._typing", "MSSQLConnectionParams"),
+    "MSSQLDriverFeatures": ("vertebra.extensions.sqlspec.adapters.mssql._typing", "MSSQLDriverFeatures"),
     "MSSQLEventQueueStore": ("vertebra.extensions.sqlspec.adapters.mssql.events", "MSSQLEventQueueStore"),
     "MSSQLLitestarStore": ("vertebra.extensions.sqlspec.adapters.mssql.litestar", "MSSQLLitestarStore"),
+    "MSSQLPoolParams": ("vertebra.extensions.sqlspec.adapters.mssql._typing", "MSSQLPoolParams"),
     "MSSQLSyncADKArtifactStore": ("vertebra.extensions.sqlspec.adapters.mssql.adk", "MSSQLSyncADKArtifactStore"),
     "MSSQLSyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.mssql.adk", "MSSQLSyncADKMemoryStore"),
     "MSSQLSyncADKStore": ("vertebra.extensions.sqlspec.adapters.mssql.adk", "MSSQLSyncADKStore"),
     "MSSQLSyncConfig": ("vertebra.extensions.sqlspec.adapters.mssql.config", "MSSQLSyncConfig"),
+    "MSSQLSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.mssql._typing",
+        "MSSQLSyncConnectionContext",
+    ),
     "MSSQLSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.mssql.data_dictionary",
         "MSSQLSyncDataDictionary",
     ),
     "MSSQLSyncDriver": ("vertebra.extensions.sqlspec.adapters.mssql.driver", "MSSQLSyncDriver"),
+    "MSSQLSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.mssql._typing",
+        "MSSQLSyncSessionContext",
+    ),
     "build_connection_config": ("vertebra.extensions.sqlspec.adapters.mssql.core", "build_connection_config"),
     "build_statement_config": ("vertebra.extensions.sqlspec.adapters.mssql.core", "build_statement_config"),
     "default_statement_config": ("vertebra.extensions.sqlspec.adapters.mssql.core", "default_statement_config"),
@@ -96,3 +133,8 @@ def __getattr__(name: str) -> Any:
     value = getattr(ensure_module(module_path), attr_name)
     globals()[name] = value
     return value
+
+
+def __dir__() -> list[str]:
+    """Return sorted exported module attributes."""
+    return sorted(__all__)

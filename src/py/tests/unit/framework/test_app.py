@@ -1,12 +1,17 @@
 """Tests for App route registration, Controller, Router, ProcedureRouter, and handler ID stability."""
 
+import asyncio
 import importlib.resources
 import sys
+import time
 from types import ModuleType
 from typing import Annotated, Any
 
+import httpx
+import jwt as pyjwt
 import msgspec
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import vertebra
 import vertebra.framework as vtb_framework
@@ -18,6 +23,14 @@ from vertebra.framework.autowire import AutowireConfig, AutowireLoader
 from vertebra.framework.di import Inject, Provide
 from vertebra.framework.openapi import OpenAPISpecBuilder
 from vertebra.framework.procedures import Procedure, ProcedureRouter, query
+from vertebra.framework.security import (
+    AuthenticatedPrincipal,
+    JWKSConfig,
+    JWKSVerifier,
+    JWTAuthGuard,
+    RateLimitGuard,
+)
+from vertebra.utils.serializers import encode_json_bytes
 
 
 def test_handler_id_stability_same_method_path_same_id() -> None:
@@ -436,6 +449,19 @@ def test_welcome_page_assets_shipped_in_package_data() -> None:
     assert "--bg-canvas" in css_asset.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("docs_path", ["/docs", "/swagger"], ids=["docs", "swagger"])
+def test_app_enable_docs_serves_html_for_docs_routes(docs_path: str) -> None:
+    """Verify App.enable_docs() registers HTML doc routes for /docs and /swagger."""
+    app = App(debug=True)
+    app.enable_docs()
+    docs_id = _make_handler_id("GET", docs_path)
+    docs_resp = app._handlers[docs_id]()
+    assert isinstance(docs_resp, Response)
+    assert docs_resp.status == 200
+    assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
+    assert b"<!doctype html>" in bytes(docs_resp.body).lower()
+
+
 def test_welcome_page_renderer_snapshot_and_html_escaping(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify WelcomePageRenderer.collect_snapshot and HTML escaping across routes, procedures, mounts, and docs."""
     monkeypatch.setenv("VERTEBRA_TOPOLOGY", "shm")
@@ -458,14 +484,6 @@ def test_welcome_page_renderer_snapshot_and_html_escaping(monkeypatch: pytest.Mo
     app.mount("/sub", lambda *_args: None, protocol="asgi")
     app.enable_docs()
 
-    for docs_path in ("/docs", "/swagger"):
-        docs_id = _make_handler_id("GET", docs_path)
-        docs_resp = app._handlers[docs_id]()
-        assert isinstance(docs_resp, Response)
-        assert docs_resp.status == 200
-        assert (b"content-type", b"text/html; charset=utf-8") in docs_resp.headers
-        assert b"<!doctype html>" in bytes(docs_resp.body).lower()
-
     snapshot = welcome_cls.collect_snapshot(app)
     assert isinstance(snapshot, vtb_framework.WelcomeSnapshot)
     assert snapshot.topology == "SHM"
@@ -487,3 +505,222 @@ def test_welcome_page_renderer_snapshot_and_html_escaping(monkeypatch: pytest.Mo
     assert '<script src="http' not in rendered.lower()
     assert '<img src="http' not in rendered.lower()
     assert "@import" not in rendered.lower()
+
+
+def _generate_rsa_jwk_pair(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = pyjwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+    jwk["kid"] = kid
+    jwk["use"] = "sig"
+    jwk["alg"] = "RS256"
+    return private_key, jwk
+
+
+@pytest.mark.anyio
+async def test_jwks_verifier_caches_keys_and_coalesces_kid_rotation() -> None:
+    rsa_priv_1, rsa_jwk_1 = _generate_rsa_jwk_pair("kid-1")
+    ec_priv_2 = ec.generate_private_key(ec.SECP256R1())
+    ec_jwk_2 = pyjwt.algorithms.ECAlgorithm.to_jwk(ec_priv_2.public_key(), as_dict=True)
+    ec_jwk_2["kid"] = "kid-2"
+    ec_jwk_2["use"] = "sig"
+    ec_jwk_2["alg"] = "ES256"
+
+    active_keys: list[dict[str, Any]] = [rsa_jwk_1]
+    fetch_count = 0
+    now_value = 1000.0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fetch_count
+        fetch_count += 1
+        return httpx.Response(200, content=encode_json_bytes({"keys": active_keys}))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    verifier = JWKSVerifier(
+        JWKSConfig(
+            jwks_url="https://idp.example.com/.well-known/jwks.json",
+            issuer="https://idp.example.com",
+            audience="vertebra-api",
+            cache_ttl_seconds=300.0,
+            min_refresh_interval_seconds=5.0,
+        ),
+        async_client=client,
+        clock=lambda: now_value,
+    )
+    try:
+        future_exp = int(time.time()) + 300
+        tok1 = pyjwt.encode(
+            {
+                "sub": "user-1",
+                "iss": "https://idp.example.com",
+                "aud": "vertebra-api",
+                "exp": future_exp,
+                "scope": "read write",
+            },
+            rsa_priv_1,
+            algorithm="RS256",
+            headers={"kid": "kid-1"},
+        )
+        p1 = await verifier.verify_token(tok1)
+        p2 = await verifier.verify_header(f"Bearer {tok1}")
+        assert isinstance(p1, AuthenticatedPrincipal)
+        assert p1.sub == "user-1"
+        assert p1.scopes == ("read", "write")
+        assert p1.is_authenticated is True
+        assert p1.display_name == "user-1"
+        assert p2 == p1
+        assert fetch_count == 1
+        assert await verifier.verify_header(None) is None
+        assert await verifier.verify_header("Basic test-token-placeholder") is None
+
+        active_keys = [rsa_jwk_1, ec_jwk_2]
+        now_value += 10.0
+        tok2 = pyjwt.encode(
+            {
+                "sub": "user-2",
+                "iss": "https://idp.example.com",
+                "aud": "vertebra-api",
+                "exp": future_exp,
+                "scopes": ["admin"],
+            },
+            ec_priv_2,
+            algorithm="ES256",
+            headers={"kid": "kid-2"},
+        )
+        results = await asyncio.gather(*(verifier.verify_token(tok2) for _ in range(5)))
+        assert fetch_count == 2
+        assert all(item.sub == "user-2" and item.scopes == ("admin",) for item in results)
+    finally:
+        await verifier.aclose()
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unknown-kid", "tampered-sig", "wrong-iss", "wrong-aud", "expired", "premature", "alg-none"],
+)
+def test_jwks_verifier_rejects_invalid_tokens_and_sync_fetch_errors(case: str) -> None:
+    rsa_priv, rsa_jwk = _generate_rsa_jwk_pair("kid-main")
+    other_priv, _ = _generate_rsa_jwk_pair("kid-other")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=encode_json_bytes({"keys": [rsa_jwk]}))
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(handler))
+    verifier = JWKSVerifier(
+        JWKSConfig(
+            jwks_url="https://idp.example.com/jwks.json",
+            issuer="https://idp.example.com",
+            audience="api-svc",
+        ),
+        sync_client=sync_client,
+    )
+    try:
+        now = int(time.time())
+        if case == "unknown-kid":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "api-svc", "exp": now + 60},
+                rsa_priv,
+                algorithm="RS256",
+                headers={"kid": "missing-kid"},
+            )
+        elif case == "tampered-sig":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "api-svc", "exp": now + 60},
+                other_priv,
+                algorithm="RS256",
+                headers={"kid": "kid-main"},
+            )
+        elif case == "wrong-iss":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://evil.example.com", "aud": "api-svc", "exp": now + 60},
+                rsa_priv,
+                algorithm="RS256",
+                headers={"kid": "kid-main"},
+            )
+        elif case == "wrong-aud":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "wrong-aud", "exp": now + 60},
+                rsa_priv,
+                algorithm="RS256",
+                headers={"kid": "kid-main"},
+            )
+        elif case == "expired":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "api-svc", "exp": now - 60},
+                rsa_priv,
+                algorithm="RS256",
+                headers={"kid": "kid-main"},
+            )
+        elif case == "premature":
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "api-svc", "exp": now + 600, "nbf": now + 300},
+                rsa_priv,
+                algorithm="RS256",
+                headers={"kid": "kid-main"},
+            )
+        else:
+            token = pyjwt.encode(
+                {"sub": "u", "iss": "https://idp.example.com", "aud": "api-svc", "exp": now + 60},
+                "",
+                algorithm="none",
+                headers={"kid": "kid-main"},
+            )
+
+        with pytest.raises(ValueError):
+            verifier.verify_token_sync(token)
+    finally:
+        verifier.close()
+        sync_client.close()
+
+
+@pytest.mark.anyio
+async def test_jwks_verifier_fetch_failures_and_guards() -> None:
+    rsa_priv, _ = _generate_rsa_jwk_pair("kid-1")
+    token = pyjwt.encode(
+        {"sub": "u", "exp": int(time.time()) + 60},
+        rsa_priv,
+        algorithm="RS256",
+        headers={"kid": "kid-1"},
+    )
+
+    err_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(503)))
+    err_verifier = JWKSVerifier(JWKSConfig(jwks_url="https://idp.example.com/jwks"), async_client=err_client)
+    try:
+        with pytest.raises(RuntimeError):
+            await err_verifier.verify_token(token)
+    finally:
+        await err_verifier.aclose()
+        await err_client.aclose()
+
+    bad_json_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=b"not-json"))
+    )
+    bad_json_verifier = JWKSVerifier(JWKSConfig(jwks_url="https://idp.example.com/jwks"), async_client=bad_json_client)
+    try:
+        with pytest.raises(ValueError):
+            await bad_json_verifier.verify_token(token)
+    finally:
+        await bad_json_verifier.aclose()
+        await bad_json_client.aclose()
+
+    limiter = RateLimitGuard(capacity=2, refill_rate=0.0)
+    assert limiter.remaining("k1") == 2
+    assert limiter.allow("k1") is True
+    assert limiter.remaining("k1") == 1
+    assert limiter.allow("k1") is True
+    assert limiter.allow("k1") is False
+    assert limiter.reset_after("k1") == float("inf")
+
+    secret = b"test-token-placeholder-secret-32-bytes"
+    hmac_token = pyjwt.encode(
+        {"sub": "hmac-user", "scope": "items:read", "exp": int(time.time()) + 60}, secret, algorithm="HS256"
+    )
+    guard = JWTAuthGuard(secret)
+    assert guard.verify_header(None) is None
+    assert guard.verify_header("Basic test-token-placeholder") is None
+    principal = guard.verify_header(f"Bearer {hmac_token}")
+    assert principal is not None
+    assert principal.sub == "hmac-user"
+    assert principal.scopes == ("items:read",)
+    with pytest.raises(ValueError):
+        guard.verify_header("Bearer test-token-placeholder")

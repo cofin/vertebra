@@ -10,6 +10,8 @@ use windows_sys::Win32::System::Threading::{WaitOnAddress, WakeByAddressAll, Wak
 
 pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), SyncError> {
     let expected_val = expected;
+    // SAFETY: `word` and `expected_val` are valid, 4-byte-aligned `u32`-sized values borrowed
+    // for the duration of `WaitOnAddress`.
     let res = unsafe {
         WaitOnAddress(
             word as *const AtomicU32 as *const core::ffi::c_void,
@@ -20,6 +22,7 @@ pub(crate) fn wait_on_address(word: &AtomicU32, expected: u32) -> Result<(), Syn
     };
     if res == 0 {
         return Err(SyncError::Syscall(io::Error::from_raw_os_error(
+            // SAFETY: `GetLastError` reads the calling thread's last-error value with no pointers.
             unsafe { GetLastError() } as i32,
         )));
     }
@@ -36,6 +39,8 @@ pub(crate) fn wait_on_address_timeout(
     }
     let expected_val = expected;
     let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+    // SAFETY: `word` and `expected_val` are valid, 4-byte-aligned `u32`-sized values borrowed
+    // for the duration of `WaitOnAddress`.
     let res = unsafe {
         WaitOnAddress(
             word as *const AtomicU32 as *const core::ffi::c_void,
@@ -45,6 +50,7 @@ pub(crate) fn wait_on_address_timeout(
         )
     };
     if res == 0 {
+        // SAFETY: `GetLastError` reads the calling thread's last-error value with no pointers.
         let err = unsafe { GetLastError() };
         if err == ERROR_TIMEOUT {
             return Ok(false);
@@ -55,11 +61,13 @@ pub(crate) fn wait_on_address_timeout(
 }
 
 pub(crate) fn wake_one(word: &AtomicU32) -> Result<(), SyncError> {
+    // SAFETY: `word` points to a valid, 4-byte-aligned `AtomicU32` borrowed for this call.
     unsafe { WakeByAddressSingle(word as *const AtomicU32 as *const core::ffi::c_void) };
     Ok(())
 }
 
 pub(crate) fn wake_all(word: &AtomicU32) -> Result<(), SyncError> {
+    // SAFETY: `word` points to a valid, 4-byte-aligned `AtomicU32` borrowed for this call.
     unsafe { WakeByAddressAll(word as *const AtomicU32 as *const core::ffi::c_void) };
     Ok(())
 }

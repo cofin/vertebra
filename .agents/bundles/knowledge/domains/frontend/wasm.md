@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:02:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -26,25 +29,31 @@ sources:
   - id: src-tests-wasm-test-ts
     resource: src/ts/vertebra-client/tests/wasm.test.ts
     title: "TypeScript client module (src/ts/vertebra-client/tests/wasm.test.ts)"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Optional [wasmtime] dependency declaration in pyproject.toml"
 ---
 
 # WASM Plugin Host & Browser Bridge
 
 <!-- truth: start -->
-- `WASMPluginHost`, `WASMModuleConfig`, and `WASMSandboxPolicy` validate the 8-byte WebAssembly magic header (`\x00asm\x01\x00\x00\x00`) and enforce per-call fuel budgets (`WASMExecutionError`) without bundling an external Wasm engine.
+- `WASMPluginHost`, `WASMModuleConfig`, and `WASMSandboxPolicy` validate the 8-byte WebAssembly magic header (`\x00asm\x01\x00\x00\x00`) and enforce per-call fuel, memory, and epoch-deadline budgets (`WASMExecutionError`), optionally executing guest modules via the `[wasmtime]` extra (`wasmtime>=25.0`, raising `MissingDependencyError` when absent).
+- `_validate_policy_support` fails closed with `ImproperConfigurationError` at `WASMPluginHost()` creation and `register_module()` whenever `allow_network=True`, `allowed_preopen_dirs`, `env_vars`, or custom `epoch_timeout_ms != 500` cannot be enforced by the active runtime or `exports` callback mode.
 - `@vertebra/client/wasm` exports `WASMClient` and `WASM_MAGIC_BYTES` for validated browser and worker module instantiation under bounded memory page limits.
 <!-- truth: end -->
 
-Vertebra provides a capability-scoped WebAssembly plugin host in Python ([`vertebra.wasm`](../../../../../src/py/vertebra/wasm/__init__.py)[^src-wasm-init-py]) and a matching browser/worker instantiation helper in TypeScript ([`@vertebra/client/wasm`](../../../../../src/ts/vertebra-client/src/wasm.ts)[^src-src-wasm-ts]).
+Vertebra provides a capability-scoped WebAssembly plugin host in Python ([`vertebra.wasm`](../../../../../src/py/vertebra/wasm/__init__.py)[^src-wasm-init-py], optional `[wasmtime]` extra in [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject-toml]) and a matching browser/worker instantiation helper in TypeScript ([`@vertebra/client/wasm`](../../../../../src/ts/vertebra-client/src/wasm.ts)[^src-src-wasm-ts]).
 
 ## 1. Python Sandboxed Host (`vertebra.wasm`)
 
 | Symbol | Responsibility |
 |---|---|
 | [`WASM_MAGIC_HEADER`](../../../../../src/py/vertebra/wasm/__init__.py) | Canonical 8-byte WebAssembly binary magic + version header (`b"\x00asm\x01\x00\x00\x00"`). |
-| [`WASMSandboxPolicy`](../../../../../src/py/vertebra/wasm/__init__.py) | Frozen `msgspec.Struct(gc=False, kw_only=True)` specifying `max_memory_bytes` (default `64 MiB`), `max_fuel` (`10_000_000`), `epoch_timeout_ms` (`500`), `allow_network` (`False`), `allowed_preopen_dirs`, and `env_vars`. |
-| [`WASMModuleConfig`](../../../../../src/py/vertebra/wasm/__init__.py) | Frozen `msgspec.Struct(gc=False, kw_only=True)` pairing `name: str`, `wasm_source: Path \| bytes`, and `policy: WASMSandboxPolicy`. |
-| [`WASMPluginHost`](../../../../../src/py/vertebra/wasm/__init__.py) | Validates binaries via `validate_binary(wasm_bytes)`, registers guest modules and callable exports via `register_module(config, exports=...)`, and enforces `fuel_cost <= policy.max_fuel` on `call_export(module_name, export_name, *args, fuel_cost=100)`, raising [`WASMExecutionError`](../../../../../src/py/vertebra/wasm/__init__.py) when fuel is exceeded. |
+| [`WASMSandboxPolicy`](../../../../../src/py/vertebra/wasm/__init__.py) | Frozen `msgspec.Struct(gc=False, kw_only=True)` specifying `max_memory_bytes` (default `64 MiB`), `max_fuel` (`10_000_000`), `epoch_timeout_ms` (`500`), `allow_network` (`False`), `allowed_preopen_dirs`, and `env_vars`; rejects non-positive limits with `ValueError`. |
+| [`WASMModuleConfig`](../../../../../src/py/vertebra/wasm/__init__.py) | Frozen `msgspec.Struct(gc=False, kw_only=True)` pairing `name: str`, `wasm_source: str \| Path \| bytes`, and `policy: WASMSandboxPolicy`. |
+| [`WASMPluginHost`](../../../../../src/py/vertebra/wasm/__init__.py) | Validates binaries via `validate_binary(wasm_bytes)`, enforces fail-closed policy support via `_validate_policy_support` on `__init__` and `register_module(config, exports=...)`, raises `MissingDependencyError("wasmtime", extra="wasmtime")` for guest Wasm registration when `[wasmtime]` is not installed, enforces fuel, memory limits, WASI capabilities (`WasiConfig`), and `threading.Timer` epoch deadlines on `call_export`, and provides zero-copy-buffered `call_json`, `call_msgpack`, and `dispatch_http` (`WASMHttpEnvelope` / `WASMHttpResponse`). |
+
+- **Fail-closed sandbox enforcement**: `_validate_policy_support(policy, exports_mode=...)` raises `ImproperConfigurationError` at host creation (`WASMPluginHost(policy)` when `wasmtime` is present) and at `register_module(config, exports=...)` whenever `allow_network=True` (requires `WasiConfig.inherit_network`, `Linker.define_wasi`, `Store.set_wasi`), `allowed_preopen_dirs` (requires `WasiConfig.preopen_dir`), `env_vars` (requires `WasiConfig.set_env`), or `epoch_timeout_ms != 500` (requires `Config.epoch_interruption`, `Engine.increment_epoch`, `Store.set_epoch_deadline`) are enabled without runtime support or under Python `exports` callback mode (`exports_mode=True`).
 
 ## 2. TypeScript Client Loader (`@vertebra/client/wasm`)
 
@@ -56,3 +65,4 @@ Provenance sources: [^src-tests-wasm-test-ts].
 [^src-wasm-init-py]: `src/py/vertebra/wasm/__init__.py` — Python implementation module (src/py/vertebra/wasm/__init__.py).
 [^src-src-wasm-ts]: `src/ts/vertebra-client/src/wasm.ts` — TypeScript client module (src/ts/vertebra-client/src/wasm.ts).
 [^src-tests-wasm-test-ts]: `src/ts/vertebra-client/tests/wasm.test.ts` — TypeScript client module (src/ts/vertebra-client/tests/wasm.test.ts).
+[^src-pyproject-toml]: `pyproject.toml` — Optional `[wasmtime]` dependency declaration in `pyproject.toml`.

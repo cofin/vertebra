@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gc
+import itertools
+import os
 from typing import Any, cast
 
 import pytest
@@ -25,6 +27,8 @@ from vertebra.server._fastpath import (
     serialize_fastpath_special_result,
 )
 from vertebra.storage import AsyncObjectStore, StreamingStorageResponse
+
+_COUNTER = itertools.count(1)
 
 
 def test_request_body_view_returns_readonly_memoryview() -> None:
@@ -183,11 +187,16 @@ def test_serialize_fastpath_special_result_returns_zero_copy_arrow_memoryview() 
     assert isinstance(raw_view, memoryview)
     assert raw_view.obj is backing
 
-    shm_cursor = RustArrowCursor.write_ipc_to_shm("/vtb-test-zc-arrow", bytes(backing), 1)
-    shm_serialized = serialize_fastpath_special_result(shm_cursor)
-    assert shm_serialized is not None
-    assert isinstance(shm_serialized[2], memoryview)
-    assert bytes(shm_serialized[2]) == bytes(backing)
+    shm_name = f"/vtb-test-zc-arrow-{os.getpid()}-{next(_COUNTER)}"
+    shm_cursor = RustArrowCursor.write_ipc_to_shm(shm_name, bytes(backing), 1)
+    try:
+        shm_serialized = serialize_fastpath_special_result(shm_cursor)
+        assert shm_serialized is not None
+        assert isinstance(shm_serialized[2], memoryview)
+        assert bytes(shm_serialized[2]) == bytes(backing)
+        del shm_serialized
+    finally:
+        shm_cursor.release()
 
     class ImpostorArrowCursor:
         def buffer_view(self) -> memoryview:

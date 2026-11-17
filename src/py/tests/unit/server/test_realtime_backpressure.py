@@ -83,6 +83,7 @@ class _ConformingAsyncNotificationSource:
         self.published: list[tuple[str, bytes]] = []
         self.subscribed: set[str] = set()
         self._queue: asyncio.Queue[NotificationEvent] = asyncio.Queue()
+        self.drained_event: asyncio.Event | None = None
 
     async def publish(self, channel: str, payload: bytes | str) -> None:
         raw = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
@@ -99,6 +100,8 @@ class _ConformingAsyncNotificationSource:
         while True:
             evt = await self._queue.get()
             yield evt
+            if self.drained_event is not None:
+                self.drained_event.set()
 
     def inject_event(self, channel: str, payload: bytes, sender_id: str | None = None) -> None:
         self._queue.put_nowait(NotificationEvent(channel=channel, payload=payload, sender_id=sender_id))
@@ -172,9 +175,17 @@ async def test_channel_bus_origin_node_deduplication() -> None:
 
     node1_received: list[bytes] = []
     node2_received: list[bytes] = []
+    source1_drained = asyncio.Event()
+    source1.drained_event = source1_drained
+    node2_ready = asyncio.Event()
 
     bus1.add_listener(lambda ch, payload: node1_received.append(payload))
-    bus2.add_listener(lambda ch, payload: node2_received.append(payload))
+
+    def _on_node2(_ch: str, payload: bytes) -> None:
+        node2_received.append(payload)
+        node2_ready.set()
+
+    bus2.add_listener(_on_node2)
 
     await bus1.publish(b"hello from alpha", ["chat"])
 
@@ -188,7 +199,8 @@ async def test_channel_bus_origin_node_deduplication() -> None:
     source1.inject_event(remote_channel, remote_envelope)
     source2.inject_event(remote_channel, remote_envelope)
 
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(source1_drained.wait(), timeout=2.0)
+    await asyncio.wait_for(node2_ready.wait(), timeout=2.0)
 
     assert node1_received == [b"hello from alpha"]
     assert node2_received == [b"hello from alpha"]

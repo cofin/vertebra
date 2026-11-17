@@ -1,16 +1,30 @@
 """Zero-code-change Litestar v2 and v3 startup introspection for Rust middleware and asset offloading."""
 
-import hashlib
-import os
-import re
-from pathlib import Path
-from typing import Any
+from __future__ import annotations
 
-import msgspec
+import hashlib
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.extensions.litestar.router import _unpack_route_handler_map_entry
+from vertebra.server._offload import (
+    CompressionOffloadSpec,
+    CorsOffloadSpec,
+    OffloadPlan,
+    OpenApiOffloadSpec,
+    StaticMountOffloadSpec,
+    evaluate_cors_response_headers,
+    evaluate_openapi_cache_request,
+    is_rust_offload_active,
+)
+from vertebra.server._offload import (
+    evaluate_cors_preflight as _server_evaluate_cors_preflight,
+)
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import encode_json, encode_json_bytes
+from vertebra.utils.serializers import encode_json_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 __all__ = (
     "CompressionOffloadSpec",
@@ -25,124 +39,14 @@ __all__ = (
     "_get_handler_opt",
     "_get_handler_request_class",
     "_is_default_local_filesystem",
-    "_is_rust_offload_active",
     "_rebuild_litestar_routing_trie",
     "_supports_v2_layer_resolution",
     "evaluate_cors_preflight",
     "evaluate_cors_response_headers",
     "evaluate_openapi_cache_request",
+    "is_rust_offload_active",
     "offload_middlewares",
 )
-
-
-class CompressionOffloadSpec(msgspec.Struct, frozen=True, gc=False):
-    """Extracted Litestar CompressionConfig parameters for Rust vertebra-http."""
-
-    backend: str
-    minimum_size: int
-    gzip_compress_level: int
-    brotli_quality: int
-    zstd_level: int
-    exclude_patterns: tuple[str, ...]
-    exclude_opt_key: str | None
-    excluded_paths: tuple[str, ...]
-
-
-class CorsOffloadSpec(msgspec.Struct, frozen=True, gc=False):
-    """Extracted Litestar CORSConfig parameters for Rust vertebra-http."""
-
-    allow_origins: tuple[str, ...]
-    allow_methods: tuple[str, ...]
-    allow_headers: tuple[str, ...]
-    allow_credentials: bool
-    expose_headers: tuple[str, ...]
-    max_age: int
-    allow_origin_regex: str | None = None
-
-
-class StaticMountOffloadSpec(msgspec.Struct, frozen=True, gc=False):
-    """Extracted static file mount configuration for zero-GIL Rust asset serving."""
-
-    path_prefix: str
-    directories: tuple[str, ...]
-    html_mode: bool
-    send_as_attachment: bool
-    headers: dict[str, str]
-
-
-class OpenApiOffloadSpec(msgspec.Struct, frozen=True, gc=False):
-    """Pre-rendered OpenAPI JSON payload and ETag for zero-GIL Rust serving."""
-
-    schema_path: str
-    body: bytes
-    etag: str
-    content_type: str = "application/vnd.oai.openapi+json"
-
-
-class OffloadPlan(msgspec.Struct, frozen=True, gc=False):
-    """Complete startup offload plan extracted from an unmodified Litestar v2 or v3 app."""
-
-    compression: CompressionOffloadSpec | None
-    cors: CorsOffloadSpec | None
-    static_mounts: tuple[StaticMountOffloadSpec, ...]
-    openapi: OpenApiOffloadSpec | None
-
-    def to_server_config(self) -> dict[str, Any]:
-        """Serialize this offload plan into the dictionary schema consumed by vertebra-http ServerConfig."""
-        compression_payload: dict[str, Any] | None = None
-        if self.compression is not None:
-            compression_payload = {
-                "backend": self.compression.backend,
-                "minimum_size": self.compression.minimum_size,
-                "gzip_compress_level": self.compression.gzip_compress_level,
-                "brotli_quality": self.compression.brotli_quality,
-                "zstd_level": self.compression.zstd_level,
-                "exclude_patterns": list(self.compression.exclude_patterns),
-                "excluded_paths": list(self.compression.excluded_paths),
-            }
-
-        cors_payload: dict[str, Any] | None = None
-        if self.cors is not None:
-            cors_payload = {
-                "allow_origins": list(self.cors.allow_origins),
-                "allow_methods": list(self.cors.allow_methods),
-                "allow_headers": list(self.cors.allow_headers),
-                "allow_credentials": self.cors.allow_credentials,
-                "expose_headers": list(self.cors.expose_headers),
-                "max_age": max(0, self.cors.max_age),
-                "allow_origin_regex": self.cors.allow_origin_regex,
-            }
-
-        mounts_payload: list[dict[str, Any]] = [
-            {
-                "path_prefix": mount.path_prefix,
-                "directories": list(mount.directories),
-                "html_mode": mount.html_mode,
-                "send_as_attachment": mount.send_as_attachment,
-                "headers": dict(mount.headers),
-            }
-            for mount in self.static_mounts
-        ]
-
-        openapi_payload: dict[str, Any] | None = None
-        if self.openapi is not None:
-            openapi_payload = {
-                "schema_path": self.openapi.schema_path,
-                "body": self.openapi.body.decode("utf-8"),
-                "etag": self.openapi.etag,
-                "content_type": self.openapi.content_type,
-            }
-
-        return {
-            "compression": compression_payload,
-            "cors": cors_payload,
-            "static_mounts": mounts_payload,
-            "openapi": openapi_payload,
-        }
-
-    def to_server_config_json(self) -> str:
-        """Encode this offload plan as a JSON string for VERTEBRA_OFFLOAD_CONFIG."""
-        return encode_json(self.to_server_config())
 
 
 def offload_middlewares(
@@ -187,87 +91,23 @@ def offload_middlewares(
 
 def evaluate_cors_preflight(
     spec: CorsOffloadSpec,
+    headers: Any = None,
     *,
-    origin: str,
+    method: str = "OPTIONS",
+    origin: str | None = None,
     access_control_request_method: str | None = None,
     access_control_request_headers: str | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Evaluate an OPTIONS CORS preflight request against CorsOffloadSpec."""
-    if not _origin_allowed(spec, origin):
-        return 400, []
-    if (
-        access_control_request_method is not None
-        and "*" not in spec.allow_methods
-        and access_control_request_method.upper() not in {m.upper() for m in spec.allow_methods}
-    ):
-        return 400, []
-    wildcard = "*" in spec.allow_origins
-    allow_origin = "*" if (wildcard and not spec.allow_credentials) else origin
-    headers: list[tuple[str, str]] = [("access-control-allow-origin", allow_origin)]
-    if spec.allow_credentials:
-        headers.append(("access-control-allow-credentials", "true"))
-    methods = (
-        access_control_request_method or "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        if "*" in spec.allow_methods
-        else ", ".join(spec.allow_methods)
+    result = _server_evaluate_cors_preflight(
+        spec,
+        headers,
+        method=method,
+        origin=origin,
+        access_control_request_method=access_control_request_method,
+        access_control_request_headers=access_control_request_headers,
     )
-    headers.append(("access-control-allow-methods", methods))
-    allow_hdrs = access_control_request_headers or "*" if "*" in spec.allow_headers else ", ".join(spec.allow_headers)
-    if allow_hdrs:
-        headers.append(("access-control-allow-headers", allow_hdrs))
-    headers.append(("access-control-max-age", str(spec.max_age)))
-    headers.append(("vary", "Origin"))
-    return 204, headers
-
-
-def evaluate_cors_response_headers(
-    spec: CorsOffloadSpec,
-    *,
-    origin: str,
-) -> list[tuple[str, str]]:
-    """Generate CORS response headers for a non-preflight request."""
-    if not _origin_allowed(spec, origin):
-        return []
-    wildcard = "*" in spec.allow_origins
-    allow_origin = "*" if (wildcard and not spec.allow_credentials) else origin
-    headers: list[tuple[str, str]] = [("access-control-allow-origin", allow_origin)]
-    if spec.allow_credentials:
-        headers.append(("access-control-allow-credentials", "true"))
-    if spec.expose_headers:
-        headers.append(("access-control-expose-headers", ", ".join(spec.expose_headers)))
-    if allow_origin != "*":
-        headers.append(("vary", "Origin"))
-    return headers
-
-
-def evaluate_openapi_cache_request(
-    spec: OpenApiOffloadSpec,
-    *,
-    if_none_match: str | None = None,
-) -> tuple[int, list[tuple[str, str]], bytes]:
-    """Return a 304 Not Modified or 200 OK response for the cached OpenAPI JSON payload."""
-    headers = [
-        ("content-type", spec.content_type),
-        ("etag", spec.etag),
-        ("cache-control", "public, max-age=0, must-revalidate"),
-    ]
-    if if_none_match is not None and if_none_match.strip() == spec.etag:
-        return 304, headers, b""
-    return 200, headers, spec.body
-
-
-def _origin_allowed(spec: CorsOffloadSpec, origin: str) -> bool:
-    if "*" in spec.allow_origins or origin in spec.allow_origins:
-        return True
-    return spec.allow_origin_regex is not None and re.fullmatch(spec.allow_origin_regex, origin) is not None
-
-
-def _is_rust_offload_active() -> bool:
-    for key in ("VERTEBRA_SERVER_ACTIVE", "VERTEBRA_RUST_OFFLOAD"):
-        raw = os.environ.get(key, "").strip().lower()
-        if raw in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    return (400, []) if result is None else result
 
 
 def _supports_v2_layer_resolution(handler: Any) -> bool:
@@ -286,7 +126,7 @@ def _get_handler_guards(handler: Any) -> tuple[Any, ...]:
     if _supports_v2_layer_resolution(handler):
         resolve_fn = getattr(handler, "resolve_guards", None)
         if callable(resolve_fn):
-            return tuple(resolve_fn())
+            return tuple(cast("Iterable[Any]", resolve_fn()))
     raw = getattr(handler, "guards", None)
     if raw is None or _is_empty_sentinel(raw):
         return ()
@@ -297,7 +137,7 @@ def _get_handler_middleware(handler: Any) -> tuple[Any, ...]:
     if _supports_v2_layer_resolution(handler):
         resolve_fn = getattr(handler, "resolve_middleware", None)
         if callable(resolve_fn):
-            return tuple(resolve_fn())
+            return tuple(cast("Iterable[Any]", resolve_fn()))
     raw = getattr(handler, "middleware", None)
     if raw is None or _is_empty_sentinel(raw):
         return ()
@@ -321,7 +161,7 @@ def _get_handler_exception_handlers(handler: Any) -> dict[Any, Any]:
     if _supports_v2_layer_resolution(handler):
         resolve_fn = getattr(handler, "resolve_exception_handlers", None)
         if callable(resolve_fn):
-            return dict(resolve_fn())
+            return dict(cast("Mapping[Any, Any]", resolve_fn()))
     raw = getattr(handler, "exception_handlers", None)
     if _is_empty_sentinel(raw) or not isinstance(raw, dict):
         return {}

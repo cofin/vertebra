@@ -9,6 +9,9 @@ tags:
 - object-store
 - signing
 verified:
+- by: agent:flow-executor
+  at: "2026-11-17T08:15:00Z"
+  commit: 5a833832
 - by: agent:flow-archive
   at: "2026-11-14T18:30:30Z"
   commit: 1b191388
@@ -88,9 +91,15 @@ sources:
 - id: tests-storage-engine
   resource: src/rs/vertebra-storage/tests/storage_engine_tests.rs
   title: Rust integration tests for vertebra-storage
-- id: tests-storage-unit
-  resource: src/py/tests/unit/storage/test_storage_store.py
-  title: Python store, range, and response contract tests
+- id: tests-storage-core
+  resource: src/py/tests/unit/storage/test_storage_core_and_ranges.py
+  title: Python core CRUD, range, and conditional check tests
+- id: tests-storage-arrow
+  resource: src/py/tests/unit/storage/test_storage_arrow_and_streaming.py
+  title: Python Arrow, Parquet, IPC streaming, and buffered reader/writer tests
+- id: tests-storage-bulk
+  resource: src/py/tests/unit/storage/test_storage_bulk_checksums_and_backends.py
+  title: Python bulk transfer, multipart, checksum, and backend wiring tests
 - id: tests-storage-integration
   resource: src/py/tests/integration/storage/conftest.py
   title: Emulator integration fixtures
@@ -104,7 +113,7 @@ sources:
 <!-- truth: start -->
 - `vertebra._storage` (`#[pymodule(gil_used = false)]`, typed in `_storage.pyi`) exports `SyncObjectStore`, `AsyncObjectStore`, `SyncStreamReader`, `AsyncStreamReader`, `SyncMultipartUpload`, `AsyncMultipartUpload`, `ObjectMeta`, `StorageBuffer`, `RustTaskAwaitable`, and signing functions over `object_store 0.13` [^storage-lib] [^storage-pyi].
 - Sync calls release the GIL with `py.detach()`; async calls return `RustTaskAwaitable` completed through a per-loop `AsyncCompletionQueue` and `Notifier` (`eventfd` on Linux, pipe elsewhere) registered with `loop.add_reader` [^storage-lib] [^core-notify].
-- `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot` (`gcp_auth.rs`) and audience-bound `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot` (`gcp_identity.rs`) live in `vertebra._vertebra`; `vertebra.storage` re-exports all six types. Canonical ADC discovery evaluates `explicit options -> ambient ADC file (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC) -> ambient env tokens (GOOGLE_OAUTH_ACCESS_TOKEN / CLOUDSDK_AUTH_ACCESS_TOKEN) -> GCE metadata server`, and GCS stores pass `token_cache._capsule()` to `vertebra._storage` (`PyCapsule` `vertebra.GcpTokenCacheCapsule`), while `gcp_identity.rs` supports `authorized_user` (`client_id` audience), service-account, GCE metadata, and `target_service_account` ID token minting [^core-gcp-auth] [^core-gcp-identity] [^py-gcp-auth] [^py-gcp-identity] [^storage-lib].
+- `SyncGcpTokenCache`, `AsyncGcpTokenCache`, `GcpTokenSnapshot` (`gcp_auth.rs`) and audience-bound `SyncGcpIdTokenCache`, `AsyncGcpIdTokenCache`, `GcpIdTokenSnapshot` (`gcp_identity.rs`) live in `vertebra._vertebra`; `vertebra.storage` re-exports all six types. Canonical ADC discovery evaluates `explicit options -> ambient ADC file (GOOGLE_APPLICATION_CREDENTIALS / gcloud ADC, including service_account, authorized_user, and external_account WIF) -> ambient env tokens (GOOGLE_OAUTH_ACCESS_TOKEN / CLOUDSDK_AUTH_ACCESS_TOKEN) -> GCE metadata server`, and GCS stores pass `token_cache._capsule()` to `vertebra._storage` (`PyCapsule` `vertebra.GcpTokenCacheCapsule`), while `gcp_identity.rs` supports `authorized_user` (`client_id` audience), service-account, GCE metadata, and `target_service_account` ID token minting [^core-gcp-auth] [^core-gcp-identity] [^py-gcp-auth] [^py-gcp-identity] [^storage-lib].
 - One shared cache backs GCS data requests (`RefreshingGcpCredentialProvider`), server-side `compose`, and keyless IAM `signBlob`; `compose` and `signBlob` invalidate the observed token generation and retry once on `401` [^storage-gcp-auth] [^storage-store] [^storage-signing].
 - GCS `allow_ambient_adc=false` builds the client with `GoogleCloudStorageBuilder::new()` instead of `from_env()`; `access_token` installs a static bearer provider, `skip_signature` installs an empty bearer and skips signing, and `quota_project_id` becomes `x-goog-user-project` on storage, compose, IAM, and token requests [^storage-store] [^storage-signing] [^core-gcp-auth].
 - HTTP clients are pooled: `object_store` clients keep 64 idle connections per host, the GCS compose and IAM `reqwest` clients keep 32, all with 10 s connect and 300 s total timeouts [^storage-store] [^storage-signing].
@@ -115,7 +124,8 @@ sources:
 - `StorageError::Precondition` maps to `vertebra.typing.PreconditionError` (an `OSError`); `AlreadyExists` maps to `FileExistsError`, so `if_not_exists=True`, `copy(..., overwrite=False)`, and `rename(..., overwrite=False)` raise `FileExistsError` while `if_match` / `if_none_match` failures raise `PreconditionError`; S3/B2 use conditional multipart completion and R2 uses `cf-copy-destination-if-none-match: *`, while unsupported provider conditions fail with the backend error [^storage-lib] [^py-typing] [^storage-store].
 - GCS `if_match` accepts a numeric generation directly or resolves a matching ETag to the object generation before a conditional `PutMode::Update` [^storage-store].
 - `OciObjectStore` streams GET bodies (`bytes_stream`) instead of buffering whole objects [^storage-oci].
-- `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a `.part` sibling and renames it into place; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
+- `put_file` / `get_file` stream files over 8 MiB in parts; `get_file` writes a sibling `.{name}.{pid}.{seq}.part` file, flushes and calls `sync_all` on the `.part` file before renaming into place, and calls `sync_all` on the destination parent directory on Unix; `get_files` / `put_files` run with bounded `buffer_unordered(concurrency)` and keep results in input order [^storage-store].
+- `supports_atomic_rename` is `True` on `file`/`local`, `memory`, and `oci` and `False` on `s3`, `r2`, `gcs`, `azure`, and `http`; `rename(..., atomic_only=True)` raises `ValueError` (`StorageError::InvalidInput`) when the backend lacks native atomic rename instead of falling back to `copy` + `delete` [^storage-store] [^storage-lib] [^py-store].
 - Python adds `download_many`, `upload_many`, and `staged_download` (unique directory under writable `/dev/shm`, else the temp dir; caller-owned `destination` preserves pre-existing files), rejecting duplicate basenames or keys before any transfer [^py-store].
 - `glob` matches full keys, so `*` and `?` also match `/`; `compose` uses the GCS compose API with 32-source folds whose temporaries are deleted on success, failure, or cancellation, and multipart concatenation elsewhere [^py-store] [^storage-store].
 - `open_reader(..., read_ahead=4_194_304)` serves short reads from one cached range window; `open_writer(..., part_size=8_388_608)` returns `SyncWritableFile` (`io.RawIOBase`) or `AsyncWritableFile`, whose `aclose()` returns `PutResult | None` [^py-store].
@@ -131,11 +141,11 @@ Known caveats (R2 custom domains, non-atomic cloud rename, unsupported provider 
 
 ## Rust Engine
 
-`ObjectStoreEngine` wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`, and adds conditional `put_opts`, multipart sessions, file transfers, paging, `rename`, and GCS `compose` [^storage-store]. `MultipartUploadSession` buffers normalized S3/B2, R2, GCS, and OCI writes into 8 MiB parts so every non-final part meets the 5 MiB minimum [^storage-r2]. `SyncStreamReader` / `AsyncStreamReader` slice streamed `Bytes` to an optional `chunk_size` as zero-copy `StorageBuffer` views [^storage-lib]. `.to_async()` and `.to_sync()` clone the shared engine `Arc`, so in-memory data and HTTP pools are shared across handles [^storage-lib].
+`ObjectStoreEngine` wraps `Arc<dyn object_store::ObjectStore>` across `memory`, `file`, `s3`/`b2`, `r2`, `oci`, `gs`/`gcs`, `az`/`azure`/`abfs`, and `http`/`https`, and adds conditional `put_opts`, multipart sessions, file transfers (with `sync_all` durability on the `.part` file and parent directory in `get_file`), paging, `rename_with_options` (`supports_atomic_rename` / `atomic_only`), and GCS `compose` [^storage-store]. `MultipartUploadSession` buffers normalized S3/B2, R2, GCS, and OCI writes into 8 MiB parts so every non-final part meets the 5 MiB minimum [^storage-r2]. `SyncStreamReader` / `AsyncStreamReader` slice streamed `Bytes` to an optional `chunk_size` as zero-copy `StorageBuffer` views [^storage-lib]. `.to_async()` and `.to_sync()` clone the shared engine `Arc`, so in-memory data and HTTP pools are shared across handles [^storage-lib].
 
 ## Signing
 
-`signing.rs` implements Vertebra HMAC URLs (`X-Vtb-Expires`, `X-Vtb-Method`, `X-Vtb-Signature`, constant-time verification), AWS SigV4 query and header signing (`UNSIGNED-PAYLOAD`, RFC 3986 path encoding, 1–604800 s expiry), GCS V4 `GOOG4-RSA-SHA256` with local PKCS#8 keys or sync/async IAM `signBlob`, and Azure service SAS; `oci.rs` builds PAR URLs and Cavage request signatures [^storage-signing] [^storage-oci]. `verify_presigned_url` checks HMAC and SigV4 only; GCS, Azure, and OCI verification raises `NotImplementedError` [^py-store].
+`signing.rs` implements Vertebra HMAC URLs (`X-Vtb-Expires`, `X-Vtb-Method`, `X-Vtb-Signature`, constant-time verification), AWS SigV4 query and header signing (`UNSIGNED-PAYLOAD`, RFC 3986 path encoding, 1–604800 s expiry), GCS V4 `GOOG4-RSA-SHA256` with local PKCS#8 keys or sync/async IAM `signBlob`, and Azure service SAS; `oci.rs` builds PAR URLs and Cavage request signatures [^storage-signing] [^storage-oci]. `verify_presigned_url` verifies HMAC-SHA256 (`py_verify_hmac_url`), AWS/R2 SigV4 (`py_verify_s3_v4_url`), GCS V4 (`py_verify_gcs_v4_url` using `verify_key_pem`, PEM private key, or HMAC credentials), Azure service SAS (`py_verify_azure_sas_url`), and OCI PAR URLs (`py_verify_oci_par_url`, validating `object_path` / `expires_at` / `now_ts`) [^py-store] [^storage-signing].
 
 ## Python Facade
 
@@ -157,7 +167,7 @@ Batch codecs drain each encoded chunk into native `put_stream` before advancing 
 
 ## Tests
 
-Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py`; companion wheel and sdist isolation is checked by `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` [^tests-storage-engine] [^tests-storage-unit] [^tests-storage-integration] [^verify-storage-wheel].
+Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Python contracts live in `test_storage_core_and_ranges.py`, `test_storage_arrow_and_streaming.py`, and `test_storage_bulk_checksums_and_backends.py` under `src/py/tests/unit/storage/`; emulator fixtures for S3, Azure, GCS, and R2 live in the integration `conftest.py`; companion wheel and sdist isolation is checked by `verify_storage_wheel.py` and `make {storage,bigquery,spanner,bundler}-wheel-check` [^tests-storage-engine] [^tests-storage-core] [^tests-storage-arrow] [^tests-storage-bulk] [^tests-storage-integration] [^verify-storage-wheel].
 
 [^core-gcp-auth]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared Rust GCP OAuth2 token cache and capsule name.
 [^core-gcp-identity]: `src/rs/vertebra-core/src/gcp_identity.rs` — Audience-scoped GCP OIDC ID token cache.
@@ -182,6 +192,8 @@ Rust engine, streaming, and signing tests run in `storage_engine_tests.rs`; Pyth
 [^ext-sqlspec-storage]: `src/py/vertebra/extensions/sqlspec/storage.py` — SQLSpec ObjectStoreProtocol adapter.
 [^ext-django-storage]: `src/py/vertebra/extensions/django/storage.py` — Deconstructible Django Storage with native readers.
 [^tests-storage-engine]: `src/rs/vertebra-storage/tests/storage_engine_tests.rs` — Rust integration tests for `vertebra-storage`.
-[^tests-storage-unit]: `src/py/tests/unit/storage/test_storage_store.py` — Python store, range, and response contract tests.
+[^tests-storage-core]: `src/py/tests/unit/storage/test_storage_core_and_ranges.py` — Python core CRUD, range, and conditional check tests.
+[^tests-storage-arrow]: `src/py/tests/unit/storage/test_storage_arrow_and_streaming.py` — Python Arrow, Parquet, IPC streaming, and buffered reader/writer tests.
+[^tests-storage-bulk]: `src/py/tests/unit/storage/test_storage_bulk_checksums_and_backends.py` — Python bulk transfer, multipart, checksum, and backend wiring tests.
 [^tests-storage-integration]: `src/py/tests/integration/storage/conftest.py` — Emulator integration fixtures.
 [^verify-storage-wheel]: `tools/scripts/verify_storage_wheel.py::main` — Companion wheel and sdist isolation verifier for `storage`, `bigquery`, `spanner`, and `bundler`.

@@ -33,7 +33,7 @@ rustls          = { workspace = true, optional = true }
 tokio-rustls    = { workspace = true, optional = true }
 rustls-pemfile  = { workspace = true, optional = true }
 quinn           = { workspace = true, optional = true }
-h3              = { workspace = true, optional = true }
+h3              = { workspace = true, features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"], optional = true }
 h3-quinn        = { workspace = true, optional = true }
 
 # Python embedding (for server binary — needs auto-initialize, NOT extension-module)
@@ -63,6 +63,9 @@ dashmap    = { workspace = true }
 mimalloc   = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.15", features = ["protobuf-codec"], optional = true }
+
 [features]
 default = ["python", "mimalloc"]
 python = ["dep:pyo3", "dep:_vertebra"]
@@ -70,6 +73,7 @@ mimalloc = ["dep:mimalloc"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
 compression = ["vertebra-core/compression"]
 http3 = ["tls", "dep:quinn", "dep:h3", "dep:h3-quinn"]
+profiling = ["dep:pprof"]
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

@@ -10,7 +10,7 @@ import logging
 import signal
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import msgspec
 
@@ -21,10 +21,26 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from contextlib import AbstractAsyncContextManager
 
     from vertebra.framework.di import Container
     from vertebra.framework.queues.base import QueueService, TaskEnvelope, TaskLane
     from vertebra.framework.queues.scheduler import CronScheduler
+
+    class _LifespanFactory(Protocol):
+        """Callable protocol returning an async lifespan context manager."""
+
+        def __call__(self) -> AbstractAsyncContextManager[Any]:
+            """Create a lifespan async context manager."""
+            ...
+
+    class _ReapStaleFn(Protocol):
+        """Callable protocol for sync or async stale-task reaping."""
+
+        def __call__(self) -> int | Awaitable[int]:
+            """Reap stale queued tasks and return the reaped count."""
+            ...
+
 
 __all__ = (
     "QUEUE_SERVICE_STATE_KEY",
@@ -433,7 +449,7 @@ class WorkerRunner:
         lifespan_cm = getattr(app, "lifespan", None)
         try:
             if callable(lifespan_cm):
-                async with lifespan_cm():
+                async with cast("_LifespanFactory", lifespan_cm)():
                     res = _invoke()
                     if inspect.isawaitable(res):
                         await res
@@ -526,7 +542,7 @@ class WorkerRunner:
             return 0
         self._last_reap_at = now
         with contextlib.suppress(Exception):
-            res = store.reap_stale()
+            res = cast("_ReapStaleFn", store.reap_stale)()
             if inspect.isawaitable(res):
                 return int(await res)
             return int(res)

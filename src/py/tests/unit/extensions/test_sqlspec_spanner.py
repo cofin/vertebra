@@ -8,15 +8,25 @@ import inspect
 import json
 import math
 import re
+import subprocess
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
 from sqlspec import StatementStack
+from sqlspec.config import ADKConfig
 from sqlspec.data_dictionary import get_data_dictionary_loader
-from sqlspec.exceptions import NotFoundError
+from sqlspec.exceptions import MigrationError, NotFoundError
+from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore
+from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore, BaseSyncADKArtifactStore
+from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyncADKMemoryStore
+from sqlspec.extensions.litestar.store import CompanionIndex
+from sqlspec.migrations.context import MigrationContext
+from sqlspec.migrations.runner import SyncMigrationRunner
 
 from tests.unit.db.test_spanner import FakeAsyncSpannerClient, FakeSpannerClient
 from vertebra.db import NotSupportedError
@@ -29,6 +39,9 @@ from vertebra.extensions.sqlspec._driver import (
     SyncAdapterConfig,
 )
 from vertebra.extensions.sqlspec.adapters.spanner import (
+    SpangresAsyncConfig,
+    SpangresSyncConfig,
+    SpannerADKConfig,
     SpannerAsyncADKArtifactStore,
     SpannerAsyncADKMemoryStore,
     SpannerAsyncADKStore,
@@ -46,6 +59,8 @@ from vertebra.extensions.sqlspec.adapters.spanner import (
 from vertebra.extensions.sqlspec.adapters.spanner import (
     SpannerSyncDriver as SQLSpecSyncSpannerDriver,
 )
+from vertebra.extensions.sqlspec.adapters.spanner import adk as spanner_adk_module
+from vertebra.extensions.sqlspec.adapters.spanner import reconcile as spanner_reconcile
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
     farm_fingerprint_shard,
     farmhash_fingerprint64,
@@ -54,6 +69,7 @@ from vertebra.extensions.sqlspec.adapters.spanner.driver import (
     _execute_async_select,
     _execute_sync_select,
 )
+from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteSyncConfig
 from vertebra.typing import ImproperConfigurationError
 
 
@@ -202,11 +218,31 @@ class _StoreFakeSpannerClient(_ClosableFakeSpannerClient):
 
     def __init__(self) -> None:
         super().__init__()
+        self.executed_queries: list[str] = []
         self._conn.create_function("PARSE_JSON", 1, lambda val: val)
         self._conn.create_function("APPROX_COSINE_DISTANCE", 2, self._cosine_distance)
         self._conn.create_function("COSINE_DISTANCE", 2, self._cosine_distance)
         self._conn.create_function("SEARCH", 2, self._fts_search)
+        self._conn.create_function("SCORE", 2, self._fts_score)
         self._conn.create_function("FARM_FINGERPRINT", 1, lambda val: abs(hash(str(val))))
+
+    @staticmethod
+    def _fts_score(text: Any, query: Any) -> float:
+        haystack = str(text or "").lower()
+        tokens = [tok for tok in re.split(r"\s+", str(query or "").lower()) if tok]
+        if not tokens:
+            return 0.0
+        return float(sum(haystack.count(tok) for tok in tokens))
+
+    def query(
+        self,
+        sql: str,
+        params_json: str | None = None,
+        staleness_mode: str = "strong",
+        staleness_ms: int = 0,
+    ) -> dict[str, Any]:
+        self.executed_queries.append(sql)
+        return super().query(sql, params_json, staleness_mode, staleness_ms)
 
     @staticmethod
     def _cosine_distance(lhs: Any, rhs: Any) -> float:
@@ -253,6 +289,7 @@ class _StoreFakeSpannerClient(_ClosableFakeSpannerClient):
     def _adapt_sql(self, sql: str, params_json: str | None) -> tuple[str, list[Any]]:
         rewritten = re.sub(r",\s*options\s*=>\s*JSON\s*'[^']*'", "", sql, flags=re.IGNORECASE)
         rewritten = re.sub(r"SEARCH\(\s*content_tokens\s*,", "SEARCH(content_text,", rewritten, flags=re.IGNORECASE)
+        rewritten = re.sub(r"SCORE\(\s*content_tokens\s*,", "SCORE(content_text,", rewritten, flags=re.IGNORECASE)
         upper_rewritten = rewritten.upper()
         insert_marker = "WHEN NOT MATCHED THEN INSERT"
         insert_idx = upper_rewritten.find(insert_marker)
@@ -326,7 +363,7 @@ def test_spanner_sync_stores_adk_memory_artifact_kv_and_event_queue() -> None:
     assert "CREATE OR REPLACE PROPERTY GRAPH" in mem_store.build_property_graph_sql("mem_g")
     mem_store.create_tables()
     now = datetime.now(UTC)
-    mem_entries = [
+    mem_entries: list[Any] = [
         {
             "id": "m1",
             "session_id": "s1",
@@ -993,3 +1030,876 @@ async def test_spanner_farmhash_fingerprint_cached_core_close_and_adk_error_prop
     async_mem_store = SpannerAsyncADKMemoryStore(broken_async_cfg)
     with pytest.raises(RuntimeError, match="broken search index"):
         await async_mem_store.search_entries("hello", "app", "u1", embedding=[0.1, 0.2])
+
+
+def test_spanner_adk_upstream_bases_slots_config_and_missing_dependency() -> None:
+    """Verify upstream ADK base inheritance, __slots__, removed Python ranking helpers, config keys, and MissingDependencyError."""
+    for removed_symbol in (
+        "_rank_memory_rows",
+        "_cosine_similarity",
+        "_keyword_score",
+        "_decode_embedding",
+        "_FallbackArtifactStoreBase",
+        "_FallbackSyncADKArtifactStore",
+        "_FallbackAsyncADKArtifactStore",
+        "_FallbackMemoryStoreBase",
+        "_FallbackSyncADKMemoryStore",
+        "_FallbackAsyncADKMemoryStore",
+    ):
+        assert not hasattr(spanner_adk_module, removed_symbol), f"{removed_symbol} must not exist"
+
+    assert issubclass(SpannerSyncADKStore, BaseSyncADKStore)
+    assert issubclass(SpannerAsyncADKStore, BaseAsyncADKStore)
+    assert issubclass(SpannerSyncADKMemoryStore, BaseSyncADKMemoryStore)
+    assert issubclass(SpannerAsyncADKMemoryStore, BaseAsyncADKMemoryStore)
+    assert issubclass(SpannerSyncADKArtifactStore, BaseSyncADKArtifactStore)
+    assert issubclass(SpannerAsyncADKArtifactStore, BaseAsyncADKArtifactStore)
+
+    expected_keys = {
+        "shard_count",
+        "session_table_options",
+        "events_table_options",
+        "retention",
+        "enable_memory",
+        "memory_table",
+        "artifact_table",
+        "use_fts",
+        "vector_dimensions",
+        "scann_num_leaves",
+        "scann_quantizer",
+        "owner_id_column",
+    }
+    config_keys = set(SpannerADKConfig.__optional_keys__) | set(ADKConfig.__optional_keys__)
+    assert expected_keys <= config_keys
+
+    sync_cfg = SpannerSyncConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        share_pool=False,
+        extension_config={
+            "adk": {
+                "shard_count": 4,
+                "session_table_options": "row_deletion_policy = 'none'",
+                "events_table_options": "row_deletion_policy = 'none'",
+                "retention": {"session_ttl_seconds": 86400, "event_ttl_seconds": 172800},
+                "enable_memory": True,
+                "memory_table": "adk_memory",
+                "artifact_table": "adk_artifact",
+                "use_fts": True,
+                "vector_dimensions": 8,
+                "scann_num_leaves": 128,
+                "scann_quantizer": "SQ8",
+                "owner_id_column": "tenant_id STRING(64)",
+            }
+        },
+    )
+    async_cfg = SpannerAsyncConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        share_pool=False,
+        extension_config=sync_cfg.extension_config,
+    )
+    for store in (
+        SpannerSyncADKStore(sync_cfg),
+        SpannerAsyncADKStore(async_cfg),
+        SpannerSyncADKMemoryStore(sync_cfg),
+        SpannerAsyncADKMemoryStore(async_cfg),
+        SpannerSyncADKArtifactStore(sync_cfg),
+        SpannerAsyncADKArtifactStore(async_cfg),
+    ):
+        assert not hasattr(store, "__dict__"), f"{type(store).__name__} must define __slots__"
+
+    missing_script = (
+        "import sys\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        "sys.modules['google.adk'] = None\n"
+        "try:\n"
+        "    import vertebra.extensions.sqlspec.adapters.spanner.adk\n"
+        "except MissingDependencyError as exc:\n"
+        "    assert exc.install_package == 'vertebra-core[adk]'\n"
+        "else:\n"
+        "    raise AssertionError('Expected MissingDependencyError when google.adk is absent')\n"
+    )
+    subprocess.run([sys.executable, "-c", missing_script], check=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_spanner_adk_state_deltas_sql_ranking_and_owner_scoped_delete(is_async_mode: bool) -> None:
+    """Verify app/user state delta merging, SQL-native vector/FTS/RRF ranking, and owner-scoped deletion."""
+    client = _StoreFakeSpannerClient()
+    core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="spanner-adk-db"),
+        client=client,
+    )
+    adk_ext: SpannerADKConfig = {
+        "memory_use_fts": True,
+        "memory_max_results": 5,
+        "vector_dimensions": 4,
+    }
+    try:
+        if is_async_mode:
+            cfg: Any = SpannerAsyncConfig(
+                project_id="test-proj",
+                instance_id="test-inst",
+                database_id="spanner-adk-db",
+                connection_instance=core,
+                share_pool=False,
+                extension_config={"adk": adk_ext},
+            )
+            adk_store: Any = SpannerAsyncADKStore(cfg)
+            mem_store: Any = SpannerAsyncADKMemoryStore(cfg)
+            await adk_store.create_tables()
+            await mem_store.create_tables()
+            created = await adk_store.create_session(
+                "sess-delta",
+                "agent-app",
+                "user-a",
+                state={"local": "v1"},
+                app_state_delta={"app:theme": "dark"},
+                user_state_delta={"user:lang": "en"},
+            )
+            assert created["state"] == {"local": "v1", "app:theme": "dark", "user:lang": "en"}
+            updated = await adk_store.append_event_and_update_state(
+                {
+                    "id": "ev-delta-1",
+                    "app_name": "agent-app",
+                    "user_id": "user-a",
+                    "session_id": "sess-delta",
+                    "invocation_id": "inv-delta-1",
+                    "timestamp": datetime.now(UTC),
+                    "event_data": {"author": "user"},
+                },
+                "agent-app",
+                "user-a",
+                "sess-delta",
+                state={"local": "v2"},
+                app_state_delta={"app:tier": "pro"},
+                user_state_delta={"user:tz": "UTC"},
+            )
+            assert updated["state"] == {
+                "local": "v2",
+                "app:theme": "dark",
+                "app:tier": "pro",
+                "user:lang": "en",
+                "user:tz": "UTC",
+            }
+            assert await adk_store.get_app_state("agent-app") == {"app:theme": "dark", "app:tier": "pro"}
+            assert await adk_store.get_user_state("agent-app", "user-a") == {"user:lang": "en", "user:tz": "UTC"}
+            with pytest.raises(ValueError, match="does not match"):
+                await adk_store.append_event_and_update_state(
+                    {
+                        "id": "ev-bad",
+                        "app_name": "other-app",
+                        "user_id": "user-a",
+                        "session_id": "sess-delta",
+                        "invocation_id": "inv-bad",
+                        "timestamp": datetime.now(UTC),
+                        "event_data": {},
+                    },
+                    "agent-app",
+                    "user-a",
+                    "sess-delta",
+                    state={},
+                )
+        else:
+            cfg = SpannerSyncConfig(
+                project_id="test-proj",
+                instance_id="test-inst",
+                database_id="spanner-adk-db",
+                connection_instance=core,
+                share_pool=False,
+                extension_config={"adk": adk_ext},
+            )
+            adk_store = SpannerSyncADKStore(cfg)
+            mem_store = SpannerSyncADKMemoryStore(cfg)
+            adk_store.create_tables()
+            mem_store.create_tables()
+            created = adk_store.create_session(
+                "sess-delta",
+                "agent-app",
+                "user-a",
+                state={"local": "v1"},
+                app_state_delta={"app:theme": "dark"},
+                user_state_delta={"user:lang": "en"},
+            )
+            assert created["state"] == {"local": "v1", "app:theme": "dark", "user:lang": "en"}
+            updated = adk_store.append_event_and_update_state(
+                {
+                    "id": "ev-delta-1",
+                    "app_name": "agent-app",
+                    "user_id": "user-a",
+                    "session_id": "sess-delta",
+                    "invocation_id": "inv-delta-1",
+                    "timestamp": datetime.now(UTC),
+                    "event_data": {"author": "user"},
+                },
+                "agent-app",
+                "user-a",
+                "sess-delta",
+                state={"local": "v2"},
+                app_state_delta={"app:tier": "pro"},
+                user_state_delta={"user:tz": "UTC"},
+            )
+            assert updated["state"] == {
+                "local": "v2",
+                "app:theme": "dark",
+                "app:tier": "pro",
+                "user:lang": "en",
+                "user:tz": "UTC",
+            }
+            assert adk_store.get_app_state("agent-app") == {"app:theme": "dark", "app:tier": "pro"}
+            assert adk_store.get_user_state("agent-app", "user-a") == {"user:lang": "en", "user:tz": "UTC"}
+            with pytest.raises(ValueError, match="does not match"):
+                adk_store.append_event_and_update_state(
+                    {
+                        "id": "ev-bad",
+                        "app_name": "other-app",
+                        "user_id": "user-a",
+                        "session_id": "sess-delta",
+                        "invocation_id": "inv-bad",
+                        "timestamp": datetime.now(UTC),
+                        "event_data": {},
+                    },
+                    "agent-app",
+                    "user-a",
+                    "sess-delta",
+                    state={},
+                )
+
+        t0 = datetime(2026, 11, 17, 1, 0, tzinfo=UTC)
+        t1 = datetime(2026, 11, 17, 2, 0, tzinfo=UTC)
+        entries: list[Any] = [
+            {
+                "id": "mem-1",
+                "session_id": "sess-1",
+                "app_name": "agent-app",
+                "user_id": "user-a",
+                "scope": "user",
+                "event_id": "e1",
+                "author": "user",
+                "timestamp": t0,
+                "content_json": {"text": "alpha spanner memory"},
+                "content_text": "alpha spanner memory",
+                "metadata_json": None,
+                "inserted_at": t0,
+                "embedding": [1.0, 0.0, 0.0, 0.0],
+            },
+            {
+                "id": "mem-2",
+                "session_id": "sess-1",
+                "app_name": "agent-app",
+                "user_id": "user-a",
+                "scope": "user",
+                "event_id": "e2",
+                "author": "user",
+                "timestamp": t1,
+                "content_json": {"text": "alpha alpha spanner memory newer"},
+                "content_text": "alpha alpha spanner memory newer",
+                "metadata_json": None,
+                "inserted_at": t1,
+                "embedding": [0.0, 1.0, 0.0, 0.0],
+            },
+            {
+                "id": "mem-other-user",
+                "session_id": "sess-1",
+                "app_name": "agent-app",
+                "user_id": "user-b",
+                "scope": "user",
+                "event_id": "e3",
+                "author": "user",
+                "timestamp": t1,
+                "content_json": {"text": "alpha other user session"},
+                "content_text": "alpha other user session",
+                "metadata_json": None,
+                "inserted_at": t1,
+                "embedding": [0.0, 1.0, 0.0, 0.0],
+            },
+        ]
+
+        client.executed_queries.clear()
+        if is_async_mode:
+            await mem_store.insert_memory_entries(entries)
+            vec_only = await mem_store.search_entries(
+                "", "agent-app", "user-a", limit=2, embedding=[0.9, 0.1, 0.0, 0.0]
+            )
+            fts_only = await mem_store.search_entries("alpha", "agent-app", "user-a", limit=2)
+            rrf_hits = await mem_store.hybrid_rrf_search(
+                app_name="agent-app",
+                user_id="user-a",
+                query="alpha",
+                embedding=[0.9, 0.1, 0.0, 0.0],
+                top_k=2,
+            )
+            deleted = await mem_store.delete_entries_by_session("sess-1", "agent-app", "user-a")
+            remaining_other = await mem_store.search_entries("other", "agent-app", "user-b", limit=2)
+        else:
+            mem_store.insert_memory_entries(entries)
+            vec_only = mem_store.search_entries("", "agent-app", "user-a", limit=2, embedding=[0.9, 0.1, 0.0, 0.0])
+            fts_only = mem_store.search_entries("alpha", "agent-app", "user-a", limit=2)
+            rrf_hits = mem_store.hybrid_rrf_search(
+                app_name="agent-app",
+                user_id="user-a",
+                query="alpha",
+                embedding=[0.9, 0.1, 0.0, 0.0],
+                top_k=2,
+            )
+            deleted = mem_store.delete_entries_by_session("sess-1", "agent-app", "user-a")
+            remaining_other = mem_store.search_entries("other", "agent-app", "user-b", limit=2)
+
+        assert [hit["id"] for hit in vec_only] == ["mem-1", "mem-2"]
+        assert [hit["id"] for hit in fts_only] == ["mem-2", "mem-1"]
+        assert len(rrf_hits) == 2
+        assert deleted == 2
+        assert [hit["id"] for hit in remaining_other] == ["mem-other-user"]
+
+        assert any(
+            "APPROX_COSINE_DISTANCE" in sql and "ORDER BY distance ASC" in sql and "LIMIT @top_k" in sql
+            for sql in client.executed_queries
+        )
+        assert any(
+            "SEARCH(content_tokens, @query)" in sql and "ORDER BY SCORE(content_tokens, @query) DESC" in sql
+            for sql in client.executed_queries
+        )
+        assert any(
+            "WITH vector_matches AS" in sql
+            and "RANK() OVER" in sql
+            and "text_matches AS" in sql
+            and "ORDER BY rrf_score DESC" in sql
+            for sql in client.executed_queries
+        )
+    finally:
+        core.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_adk_dialect_sql_shapes_and_missing_table_tolerance(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """Verify GoogleSQL and Spangres SQL ranking builders and missing-table empty returns."""
+
+    class _MissingTableClient(_ClosableFakeSpannerClient):
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            self.executed_queries.append(sql)
+            raise RuntimeError("Table not found: adk_memory")
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.executed_queries: list[str] = []
+
+    client = _MissingTableClient()
+    core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="missing-db", dialect=dialect),
+        client=client,
+    )
+    try:
+        cfg_cls = SpangresSyncConfig if dialect == "spangres" else SpannerSyncConfig
+        async_cfg_cls = SpangresAsyncConfig if dialect == "spangres" else SpannerAsyncConfig
+        sync_cfg = cfg_cls(
+            project_id="test-proj",
+            instance_id="test-inst",
+            database_id="missing-db",
+            connection_instance=core,
+            share_pool=False,
+            extension_config={"adk": {"use_fts": True}},
+        )
+        async_cfg = async_cfg_cls(
+            project_id="test-proj",
+            instance_id="test-inst",
+            database_id="missing-db",
+            connection_instance=core,
+            share_pool=False,
+            extension_config={"adk": {"use_fts": True}},
+        )
+        sync_mem = SpannerSyncADKMemoryStore(sync_cfg)
+        async_mem = SpannerAsyncADKMemoryStore(async_cfg)
+
+        vec_sql, _ = sync_mem.build_vector_search_sql(app_name="app", user_id="u1", top_k=3)
+        fts_sql, _ = sync_mem.build_fts_search_sql(app_name="app", user_id="u1", query="hello", top_k=3)
+        rrf_sql, _ = sync_mem.build_hybrid_rrf_search_sql(app_name="app", user_id="u1", query="hello", top_k=3)
+        if dialect == "spangres":
+            assert "spanner.cosine_distance" in vec_sql
+            assert "plainto_tsquery" in fts_sql and "ts_rank" in fts_sql
+            assert "WITH vector_matches AS" in rrf_sql and "spanner.cosine_distance" in rrf_sql
+        else:
+            assert "APPROX_COSINE_DISTANCE" in vec_sql
+            assert "SEARCH(content_tokens, @query)" in fts_sql and "SCORE(content_tokens, @query)" in fts_sql
+            assert "WITH vector_matches AS" in rrf_sql and "RANK() OVER" in rrf_sql
+
+        assert sync_mem.search_entries("hello", "app", "u1", embedding=[0.1, 0.2]) == []
+        assert (
+            await async_mem.hybrid_rrf_search(app_name="app", user_id="u1", query="hello", embedding=[0.1, 0.2]) == []
+        )
+        if dialect == "spangres":
+            assert any("$1" in sql for sql in client.executed_queries)
+        else:
+            assert any("@app_name" in sql for sql in client.executed_queries)
+    finally:
+        core.close()
+
+
+class _ReconcileFakeSpannerClient(_StoreFakeSpannerClient):
+    """Recording Spanner fake tracking non-transactional DDL batches, commits, and catalog column types."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_calls: int = 0
+        self.ddl_batches: list[list[str]] = []
+        self._table_columns: dict[str, list[dict[str, Any]]] = {}
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+
+    def _record_table_schema(self, stmt: str) -> None:
+        m_create = re.match(
+            r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([A-Za-z0-9_]+)`?\s*\((.*)",
+            stmt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m_create:
+            tname = m_create.group(1)
+            body = m_create.group(2)
+            depth = 1
+            end_pos = len(body)
+            for idx, ch in enumerate(body):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end_pos = idx
+                        break
+            inner = body[:end_pos]
+            parts: list[str] = []
+            cur_buf: list[str] = []
+            pdepth = 0
+            for ch in inner:
+                if ch == "(":
+                    pdepth += 1
+                elif ch == ")":
+                    pdepth -= 1
+                elif ch == "," and pdepth == 0:
+                    parts.append("".join(cur_buf).strip())
+                    cur_buf.clear()
+                    continue
+                cur_buf.append(ch)
+            if cur_buf:
+                parts.append("".join(cur_buf).strip())
+            cols: list[dict[str, Any]] = []
+            ordinal = 0
+            for part in parts:
+                upper_part = part.upper().lstrip()
+                if not part or upper_part.startswith(("PRIMARY KEY", "CONSTRAINT", "FOREIGN KEY", "CHECK", "UNIQUE")):
+                    continue
+                tokens = part.split(None, 1)
+                if len(tokens) < 2:
+                    continue
+                ordinal += 1
+                col_name = tokens[0].strip('`"')
+                rest = tokens[1]
+                is_nullable = "NO" if re.search(r"\bNOT\s+NULL\b", rest, re.IGNORECASE) else "YES"
+                type_match = re.match(
+                    r"(ARRAY\s*<[^>]+>(?:\([^)]*\))?|STRING\s*\([^)]*\)|BYTES\s*\([^)]*\)|"
+                    r"VARCHAR\s*\([^)]*\)|DOUBLE\s+PRECISION|TOKENLIST|TIMESTAMPTZ|TIMESTAMP|"
+                    r"INT64|BIGINT|FLOAT64|FLOAT32|REAL|BOOL|BOOLEAN|JSONB|JSON|BYTEA|TEXT)",
+                    rest.strip(),
+                    re.IGNORECASE,
+                )
+                dtype = type_match.group(1).upper() if type_match else "STRING(MAX)"
+                dtype = re.sub(r"\(\s*vector_length\s*=>\s*\d+\s*\)", "", dtype, flags=re.IGNORECASE)
+                is_generated = "ALWAYS" if re.search(r"\bAS\s*\(", rest, re.IGNORECASE) else "NEVER"
+                cols.append(
+                    {
+                        "table_name": tname,
+                        "column_name": col_name,
+                        "ordinal_position": ordinal,
+                        "is_nullable": is_nullable,
+                        "spanner_type": dtype,
+                        "is_generated": is_generated,
+                        "generation_expression": None,
+                    }
+                )
+            self._table_columns[tname] = cols
+            return
+
+        m_alter = re.match(
+            r"^\s*ALTER\s+TABLE\s+`?([A-Za-z0-9_]+)`?\s+ADD\s+COLUMN\s+`?([A-Za-z0-9_]+)`?\s+(.+)$",
+            stmt,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m_alter:
+            tname, col_name, rest = m_alter.group(1), m_alter.group(2), m_alter.group(3).strip()
+            existing = self._table_columns.setdefault(tname, [])
+            is_nullable = "NO" if re.search(r"\bNOT\s+NULL\b", rest, re.IGNORECASE) else "YES"
+            dtype = rest.split()[0].upper()
+            existing.append(
+                {
+                    "table_name": tname,
+                    "column_name": col_name,
+                    "ordinal_position": len(existing) + 1,
+                    "is_nullable": is_nullable,
+                    "spanner_type": dtype,
+                    "is_generated": "NEVER",
+                    "generation_expression": None,
+                }
+            )
+
+    def update_ddl(self, statements: Sequence[str]) -> str:
+        batch = [stmt.strip().rstrip(";") for stmt in statements if stmt.strip()]
+        self.ddl_batches.append(batch)
+        for stmt in batch:
+            self._record_table_schema(stmt)
+        return super().update_ddl(statements)
+
+    def _try_information_schema(self, sql: str, params_json: str | None) -> dict[str, Any] | None:
+        if "INFORMATION_SCHEMA.COLUMNS" in sql.upper():
+            params_map = self._decode_params_map(params_json)
+            table_filter = str(params_map.get("table_name") or params_map.get("p2") or "")
+            rows_out: list[list[Any]] = []
+            for tname, cols in self._table_columns.items():
+                if table_filter and tname.lower() != table_filter.lower():
+                    continue
+                for col in cols:
+                    rows_out.append(
+                        [
+                            col["table_name"],
+                            col["column_name"],
+                            col["ordinal_position"],
+                            col["is_nullable"],
+                            col["spanner_type"],
+                            col["is_generated"],
+                            col["generation_expression"],
+                        ]
+                    )
+            return {
+                "columns": [
+                    "table_name",
+                    "column_name",
+                    "ordinal_position",
+                    "is_nullable",
+                    "spanner_type",
+                    "is_generated",
+                    "generation_expression",
+                ],
+                "rows": rows_out,
+            }
+        return super()._try_information_schema(sql, params_json)
+
+
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+@pytest.mark.parametrize("store_cls", [SpannerEventQueueStore, SpannerLitestarStore])
+def test_spanner_events_litestar_slots_and_reconcile_hooks(
+    store_cls: type[Any],
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """Verify Spanner event/Litestar stores declare ``__slots__``, schema targets, indexes, and drops."""
+    assert "__slots__" in store_cls.__dict__
+    cfg_cls = SpangresSyncConfig if dialect == "spangres" else SpannerSyncConfig
+    cfg = cfg_cls(
+        project_id="test-proj",
+        instance_id="test-inst",
+        database_id="test-db",
+        extension_config={
+            "litestar": {"session_table": "vtb_sessions"},
+            "events": {"queue_table": "vtb_events"},
+        },
+    )
+    store = store_cls(cfg)
+    assert not hasattr(store, "__dict__")
+
+    targets = store.get_schema_targets()
+    assert len(targets) == 1
+    target = targets[0]
+    assert isinstance(target.create_statement, str)
+
+    drops = [d.statement for d in store.downgrade_drops()]
+    assert len(drops) == 2
+    assert drops[0].startswith("DROP INDEX IF EXISTS ")
+    assert drops[1].startswith("DROP TABLE IF EXISTS ")
+
+    if store_cls is SpannerEventQueueStore:
+        assert target.table_name == "vtb_events"
+        companion = store.companion_index_statement()
+        assert companion is not None
+        if dialect == "spangres":
+            assert "INCLUDE (" in companion
+            assert "TTL INTERVAL" in target.create_statement
+        else:
+            assert "STORING (" in companion
+            assert "ROW DELETION POLICY" in target.create_statement
+        assert drops == ["DROP INDEX IF EXISTS idx_vtb_events_channel_status", "DROP TABLE IF EXISTS vtb_events"]
+    else:
+        assert target.table_name == "vtb_sessions"
+        indexes = store.get_companion_indexes()
+        assert len(indexes) == 1
+        assert isinstance(indexes[0], CompanionIndex)
+        assert indexes[0].name == "idx_vtb_sessions_expires_at"
+        if dialect == "spangres":
+            assert "WHERE expires_at IS NOT NULL" in indexes[0].ddl
+            assert "TTL INTERVAL" in target.create_statement
+        else:
+            assert "CREATE NULL_FILTERED INDEX IF NOT EXISTS" in indexes[0].ddl
+            assert "ROW DELETION POLICY" in target.create_statement
+        assert drops == ["DROP INDEX IF EXISTS idx_vtb_sessions_expires_at", "DROP TABLE IF EXISTS vtb_sessions"]
+
+    assert spanner_reconcile.down is spanner_reconcile.downgrade
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import vertebra.extensions.sqlspec.adapters.spanner.reconcile; "
+                "assert 'google.adk' not in sys.modules; "
+                "assert 'vertebra.extensions.sqlspec.adapters.spanner.adk' not in sys.modules"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+@pytest.mark.parametrize("is_async_mode", [False, True], ids=["sync", "async"])
+async def test_spanner_reconcile_and_downgrade_litestar_events_adk(
+    dialect: Literal["googlesql", "spangres"],
+    is_async_mode: bool,
+) -> None:
+    """Verify Spanner GoogleSQL and Spangres reconcile, idempotent companion indexes, and reverse-order drops."""
+    client = _ReconcileFakeSpannerClient()
+    core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="reconcile-db", dialect=dialect),
+        client=client,
+    )
+    ext_cfg: dict[str, Any] = {
+        "litestar": {"session_table": "vtb_sessions"},
+        "events": {"queue_table": "vtb_events"},
+        "adk": {
+            "session_table": "vertebra_adk_sessions",
+            "events_table": "vertebra_adk_events",
+            "memory_table": "vertebra_adk_memories",
+            "vector_dimensions": 4,
+        },
+    }
+    try:
+        if is_async_mode:
+            acfg_cls = SpangresAsyncConfig if dialect == "spangres" else SpannerAsyncConfig
+            acfg: Any = acfg_cls(
+                project_id="test-proj",
+                instance_id="test-inst",
+                database_id="reconcile-db",
+                connection_instance=core,
+                share_pool=False,
+                extension_config=ext_cfg,
+            )
+            async with acfg.provide_session(transaction=False) as adriver:
+                awaitable = spanner_reconcile.reconcile(MigrationContext(config=acfg, driver=adriver))
+                assert awaitable is not None
+                await awaitable
+
+                executed = list(client.ddl_history)
+                assert any("CREATE TABLE IF NOT EXISTS vtb_sessions" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vtb_events" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_sessions" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_events" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_memories" in s for s in executed)
+                if dialect == "spangres":
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_sessions_expires_at" in s
+                        and "WHERE expires_at IS NOT NULL" in s
+                        for s in executed
+                    )
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_events_channel_status" in s and "INCLUDE (" in s
+                        for s in executed
+                    )
+                else:
+                    assert any(
+                        "CREATE NULL_FILTERED INDEX IF NOT EXISTS idx_vtb_sessions_expires_at" in s for s in executed
+                    )
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_events_channel_status" in s and "STORING (" in s
+                        for s in executed
+                    )
+                    assert any("CREATE VECTOR INDEX IF NOT EXISTS vertebra_adk_memories_vec_idx" in s for s in executed)
+                    assert any("CREATE OR REPLACE PROPERTY GRAPH vertebra_adk_memories_graph" in s for s in executed)
+                assert client.commit_calls == 0
+
+                client.ddl_batches.clear()
+                second_awaitable = spanner_reconcile.reconcile(MigrationContext(config=acfg, driver=adriver))
+                assert second_awaitable is not None
+                await second_awaitable
+                assert not any("CREATE INDEX" in stmt for batch in client.ddl_batches for stmt in batch)
+
+                client.ddl_batches.clear()
+                down_awaitable = spanner_reconcile.downgrade(MigrationContext(config=acfg, driver=adriver))
+                assert down_awaitable is not None
+                await down_awaitable
+        else:
+            scfg_cls = SpangresSyncConfig if dialect == "spangres" else SpannerSyncConfig
+            scfg: Any = scfg_cls(
+                project_id="test-proj",
+                instance_id="test-inst",
+                database_id="reconcile-db",
+                connection_instance=core,
+                share_pool=False,
+                extension_config=ext_cfg,
+            )
+            with scfg.provide_session(transaction=False) as sdriver:
+                assert spanner_reconcile.reconcile(MigrationContext(config=scfg, driver=sdriver)) is None
+
+                executed = list(client.ddl_history)
+                assert any("CREATE TABLE IF NOT EXISTS vtb_sessions" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vtb_events" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_sessions" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_events" in s for s in executed)
+                assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_memories" in s for s in executed)
+                if dialect == "spangres":
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_sessions_expires_at" in s
+                        and "WHERE expires_at IS NOT NULL" in s
+                        for s in executed
+                    )
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_events_channel_status" in s and "INCLUDE (" in s
+                        for s in executed
+                    )
+                else:
+                    assert any(
+                        "CREATE NULL_FILTERED INDEX IF NOT EXISTS idx_vtb_sessions_expires_at" in s for s in executed
+                    )
+                    assert any(
+                        "CREATE INDEX IF NOT EXISTS idx_vtb_events_channel_status" in s and "STORING (" in s
+                        for s in executed
+                    )
+                    assert any("CREATE VECTOR INDEX IF NOT EXISTS vertebra_adk_memories_vec_idx" in s for s in executed)
+                    assert any("CREATE OR REPLACE PROPERTY GRAPH vertebra_adk_memories_graph" in s for s in executed)
+                assert client.commit_calls == 0
+
+                client.ddl_batches.clear()
+                assert spanner_reconcile.reconcile(MigrationContext(config=scfg, driver=sdriver)) is None
+                assert not any("CREATE INDEX" in stmt for batch in client.ddl_batches for stmt in batch)
+
+                client.ddl_batches.clear()
+                assert spanner_reconcile.downgrade(MigrationContext(config=scfg, driver=sdriver)) is None
+
+        drop_stmts = [stmt for batch in client.ddl_batches for stmt in batch if stmt.startswith("DROP ")]
+        expected_drops = [
+            "DROP INDEX IF EXISTS idx_vtb_events_channel_status",
+            "DROP TABLE IF EXISTS vtb_events",
+        ]
+        if dialect == "googlesql":
+            expected_drops.extend(
+                [
+                    "DROP PROPERTY GRAPH IF EXISTS vertebra_adk_memories_graph",
+                    "DROP VECTOR INDEX IF EXISTS vertebra_adk_memories_vec_idx",
+                ]
+            )
+        expected_drops.extend(
+            [
+                "DROP TABLE IF EXISTS vertebra_adk_memories",
+                "DROP TABLE IF EXISTS vertebra_adk_events",
+                "DROP TABLE IF EXISTS vertebra_adk_sessions",
+                "DROP INDEX IF EXISTS idx_vtb_sessions_expires_at",
+                "DROP TABLE IF EXISTS vtb_sessions",
+            ]
+        )
+        assert drop_stmts == expected_drops
+    finally:
+        core.close()
+
+
+def test_spanner_add_extension_migrations_runner_discovery_and_errors(tmp_path: Path) -> None:
+    """Verify ``add_extension_migrations`` discovers Spanner reconciler, additive ALTER, and error contracts."""
+    migrations_dir = tmp_path / "spanner_migrations"
+    migrations_dir.mkdir()
+    client = _ReconcileFakeSpannerClient()
+    client.update_ddl(
+        [
+            "CREATE TABLE vtb_sessions ("
+            "shard_id INT64 NOT NULL, "
+            "session_id STRING(256) NOT NULL, "
+            "data BYTES(MAX) NOT NULL"
+            ") PRIMARY KEY (shard_id, session_id)"
+        ]
+    )
+    core = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="runner-db"),
+        client=client,
+    )
+    try:
+        cfg = SpannerSyncConfig(
+            project_id="test-proj",
+            instance_id="test-inst",
+            database_id="runner-db",
+            connection_instance=core,
+            share_pool=False,
+            migration_config={"script_location": str(migrations_dir)},
+            extension_config={
+                "litestar": {"session_table": "vtb_sessions"},
+                "events": {"queue_table": "vtb_events"},
+                "adk": {"session_table": "vertebra_adk_sessions", "events_table": "vertebra_adk_events"},
+            },
+        )
+        cfg.add_extension_migrations(
+            "litestar",
+            "vertebra.extensions.sqlspec:adapters/spanner",
+            migration_mode="reconcile",
+        )
+        cfg.add_extension_migrations(
+            "events",
+            "vertebra.extensions.sqlspec:adapters/spanner",
+            migration_mode="reconcile",
+        )
+        cfg.add_extension_migrations(
+            "adk",
+            "vertebra.extensions.sqlspec:adapters/spanner",
+            migration_mode="reconcile",
+        )
+        commands = cfg.get_migration_commands()
+        assert {desc.name for desc in commands.extension_reconcilers} == {"litestar", "events", "adk"}
+        assert all(desc.module_path.name == "reconcile.py" for desc in commands.extension_reconcilers)
+        assert isinstance(commands.runner, SyncMigrationRunner)
+
+        with cfg.provide_session(transaction=False) as driver:
+            for desc in commands.extension_reconcilers:
+                commands.runner.execute_reconciliation(driver, desc)
+
+            assert any(
+                "ALTER TABLE `vtb_sessions`" in sql and "ADD COLUMN `expires_at` TIMESTAMP" in sql
+                for sql in client.ddl_history
+            )
+            assert any(
+                "CREATE NULL_FILTERED INDEX IF NOT EXISTS idx_vtb_sessions_expires_at" in s for s in client.ddl_history
+            )
+            assert any("CREATE TABLE IF NOT EXISTS vtb_events" in s for s in client.ddl_history)
+            assert any("CREATE TABLE IF NOT EXISTS vertebra_adk_sessions" in s for s in client.ddl_history)
+
+            async_cfg = SpannerAsyncConfig(project_id="test-proj", instance_id="test-inst", database_id="runner-db")
+            async_driver = SQLSpecAsyncSpannerDriver(FakeAsyncSpannerClient())
+            for bad_ctx in (
+                MigrationContext(config=None, driver=driver),
+                MigrationContext(config=cfg, driver=None),
+                MigrationContext(config=cfg, driver=driver, extension_config={"migration_mode": "invalid"}),
+                MigrationContext(config=async_cfg, driver=driver),
+                MigrationContext(config=cfg, driver=async_driver),
+                MigrationContext(config=SQLiteSyncConfig(database=":memory:"), driver=driver),
+            ):
+                with pytest.raises(MigrationError):
+                    spanner_reconcile.reconcile(bad_ctx)
+                with pytest.raises(MigrationError):
+                    spanner_reconcile.downgrade(bad_ctx)
+    finally:
+        core.close()

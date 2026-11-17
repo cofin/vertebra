@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
 from vertebra.framework.channels import create_channels_backend
 from vertebra.server._channels import ChannelBus
-from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
+
+    from litestar.channels.backends.base import ChannelsBackend as _LitestarChannelsBackend
 
     from vertebra.db.driver import (
         AsyncChangeSource,
@@ -25,8 +26,10 @@ __all__ = (
     "create_channels_plugin",
 )
 
+_CACHED_CHANNELS_BACKEND_CLS: type[Any] | None = None
 
-class ChannelsBackend(ChannelBus):
+
+class _ChannelsBackendImpl(ChannelBus):
     """Litestar channels pub/sub backend adapter with cancellation shielding and capability bridges."""
 
     __slots__ = ()
@@ -57,6 +60,42 @@ class ChannelsBackend(ChannelBus):
                 self._unregister_stream_queue(queue)
 
 
+if TYPE_CHECKING:
+
+    class ChannelsBackend(_ChannelsBackendImpl, _LitestarChannelsBackend):
+        """Litestar channels pub/sub backend adapter with cancellation shielding and capability bridges."""
+
+
+def _get_channels_backend_cls() -> type[ChannelsBackend]:
+    global _CACHED_CHANNELS_BACKEND_CLS
+    if _CACHED_CHANNELS_BACKEND_CLS is None:
+        base_mod = ensure_module("litestar.channels.backends.base", extra="litestar")
+        base_cls = base_mod.ChannelsBackend
+        _CACHED_CHANNELS_BACKEND_CLS = type(
+            "ChannelsBackend",
+            (_ChannelsBackendImpl, base_cls),
+            {
+                "__module__": __name__,
+                "__doc__": _ChannelsBackendImpl.__doc__,
+                "__slots__": (),
+            },
+        )
+    return cast("type[ChannelsBackend]", _CACHED_CHANNELS_BACKEND_CLS)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind ``ChannelsBackend`` to ``litestar.channels.backends.base.ChannelsBackend``."""
+    if name == "ChannelsBackend":
+        return _get_channels_backend_cls()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return module attributes including lazily bound ``ChannelsBackend``."""
+    return sorted(set(globals()) | set(__all__))
+
+
 def create_channels_plugin(
     backend: str | ChannelsBackend | ChannelBus | None = "memory",
     *,
@@ -75,16 +114,14 @@ def create_channels_plugin(
     **kwargs: Any,
 ) -> Any:
     """Create a Litestar ChannelsPlugin backed by Vertebra ChannelsBackend across 5 notification transports."""
-    ch_mod = import_optional("litestar.channels")
-    if ch_mod is None:
-        msg = "litestar.channels is required to create ChannelsPlugin"
-        raise ImproperConfigurationError(msg)
+    ch_mod = ensure_module("litestar.channels", extra="litestar")
     plugin_cls = ch_mod.ChannelsPlugin
+    channels_backend_cls = _get_channels_backend_cls()
 
-    if isinstance(backend, ChannelsBackend):
+    if isinstance(backend, channels_backend_cls):
         resolved_backend = backend
     elif isinstance(backend, ChannelBus):
-        resolved_backend = ChannelsBackend(
+        resolved_backend = channels_backend_cls(
             backend=backend,
             history=history,
             notification_source=notification_source,
@@ -107,7 +144,7 @@ def create_channels_plugin(
             maxsize=maxsize,
             **kwargs,
         )
-        resolved_backend = ChannelsBackend(
+        resolved_backend = channels_backend_cls(
             backend=resolved,
             history=history,
             notification_source=resolved.notification_source,
@@ -125,19 +162,3 @@ def create_channels_plugin(
         create_ws_route_handlers=create_ws_route_handlers,
         ws_handler_base_path=ws_handler_base_path,
     )
-
-
-def _load_channels_types() -> tuple[type[Any] | None, type[Any] | None]:
-    """Load Litestar ChannelsPlugin and MemoryChannelsBackend and register ChannelBus."""
-    ch_mod = import_optional("litestar.channels")
-    mem_mod = import_optional("litestar.channels.backends.memory")
-    if ch_mod is None or mem_mod is None:
-        return None, None
-    register_fn = getattr(ch_mod.ChannelsBackend, "register", None)
-    if callable(register_fn):
-        register_fn(ChannelBus)
-        register_fn(ChannelsBackend)
-    return ch_mod.ChannelsPlugin, mem_mod.MemoryChannelsBackend
-
-
-_ChannelsPluginCls, _MemoryChannelsBackendCls = _load_channels_types()

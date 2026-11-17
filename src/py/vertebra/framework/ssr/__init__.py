@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -456,18 +457,49 @@ def render_page_shell(
         "<!--ssr-body-->" in root_template
         or "<!--inertia-->" in root_template
         or "@inertia" in root_template
-        or "<body" in root_template
+        or "<body" in root_template.lower()
     ):
         html = root_template
         head_str = "\n".join(head_items)
-        for token in ("<!--ssr-head-->", "<!--inertia-head-->", "@inertiaHead"):
+        head_tokens = ("<!--ssr-head-->", "<!--inertia-head-->", "@inertiaHead")
+        has_head_marker = any(token in html for token in head_tokens)
+        for token in head_tokens:
             html = html.replace(token, head_str)
+        if not has_head_marker and head_str and "</head>" in html.lower():
+            html = re.sub(
+                r"</head>",
+                lambda match: f"{head_str}\n{match.group(0)}",
+                html,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        has_inertia_marker = "<!--inertia-->" in html or "@inertia" in html
+        if has_inertia_marker:
+            if "<!--ssr-body-->" in html:
+                html = html.replace("<!--ssr-body-->", body_content)
+            replaced = False
+            for token in ("<!--inertia-->", "@inertia"):
+                if token in html:
+                    html = html.replace(token, "" if replaced else app_div, 1)
+                    replaced = True
+            return html
         if "<!--ssr-body-->" in html:
-            return html.replace("<!--ssr-body-->", body_content)
-        for token in ("<!--inertia-->", "@inertia"):
-            if token in html:
-                return html.replace(token, app_div)
-        return html
+            return html.replace("<!--ssr-body-->", app_div)
+        if "</body>" in html.lower():
+            return re.sub(
+                r"</body>",
+                lambda match: f"{app_div}\n{match.group(0)}",
+                html,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        return re.sub(
+            r"<body[^>]*>",
+            lambda match: f"{match.group(0)}\n{app_div}",
+            html,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     head_str = "\n".join(head_items)
     return (
         "<!DOCTYPE html>\n"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from vertebra.framework.live import (
@@ -12,6 +14,7 @@ from vertebra.framework.live import (
     StateOpcode,
     live_action,
 )
+from vertebra.utils.serializers import encode_msgpack_bytes
 
 
 class GameState(LiveState):
@@ -133,3 +136,81 @@ def test_live_state_wire_hex_format() -> None:
         value=42,
     )
     assert frame.encode().hex() == "9501cf374157f8ddd4c9a8ced22f9095cd03e82a"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"not": "a-list"},
+        [StateOpcode.FIELD_SET],
+        [StateOpcode.FIELD_SET, 1, 2],
+        [StateOpcode.SYNC_REQUEST, 1, 99],
+        [StateOpcode.FIELD_DELETE, 1, 2, 3, 4],
+        [StateOpcode.SYNC_RESPONSE, 1],
+        [StateOpcode.ACTION_CALL, 1, 2, 3],
+        [StateOpcode.ACTION_RESULT, 1, 2],
+        [StateOpcode.BATCH_PATCH, 1, 2, 3, 4],
+        [True, 1],
+        ["FIELD_SET", 1, 2, 3, 4],
+        [0xFE, 1, 2],
+        [StateOpcode.FIELD_SET, 1, True, 3, "x"],
+    ],
+    ids=[
+        "non-list",
+        "single-item",
+        "field-set-short",
+        "sync-request-extra",
+        "field-delete-extra",
+        "sync-response-short",
+        "action-call-short",
+        "action-result-short",
+        "batch-patch-extra",
+        "bool-opcode",
+        "str-opcode",
+        "unknown-opcode",
+        "bool-field-id",
+    ],
+)
+def test_state_delta_frame_decode_rejects_invalid_arity_and_types(payload: Any) -> None:
+    """Verify StateDeltaFrame.decode raises ValueError on wrong sequence arity, non-list, or bad opcode."""
+    encoded = encode_msgpack_bytes(payload)
+    with pytest.raises(ValueError):
+        StateDeltaFrame.decode(encoded)
+
+
+@pytest.mark.anyio
+async def test_live_state_subclass_inherits_mro_annotations_and_actions() -> None:
+    """Verify LiveState subclasses inherit base annotations, defaults, deltas, and @live_action methods."""
+
+    class BaseState(LiveState):
+        count: int = 0
+
+        @live_action
+        async def bump(self, amount: int = 1) -> int:
+            self.count += amount
+            return self.count
+
+    class ChildState(BaseState):
+        label: str = "init"
+
+    state = ChildState()
+    assert state.snapshot() == {"count": 0, "label": "init"}
+
+    state.count = 5
+    state.label = "updated"
+    deltas = state.drain_deltas()
+    assert len(deltas) == 2
+    field_ids = {d.field_id for d in deltas}
+    assert field_ids == {LiveState.compute_field_id("count"), LiveState.compute_field_id("label")}
+
+    room = LiveStateRoom("room:mro", state)
+    call_frame = StateDeltaFrame(
+        opcode=StateOpcode.ACTION_CALL,
+        state_id=state.state_id,
+        field_id=LiveState.compute_field_id("bump"),
+        call_id=7,
+        value={"amount": 3},
+    ).encode()
+    responses = await room.handle_client_frame(call_frame)
+    assert len(responses) == 2
+    assert state.count == 8

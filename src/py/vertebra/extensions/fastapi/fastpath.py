@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from typing import Any, Self, get_type_hints
+from typing import Any, Self, cast, get_type_hints
 from urllib.parse import parse_qsl
 
 import anyio.to_thread
@@ -17,15 +17,10 @@ from vertebra.extensions.fastapi.dependencies import (
     execute_dependant_plan,
 )
 from vertebra.extensions.fastapi.offload import has_non_offloadable_middleware
+from vertebra.extensions.fastapi.responses import MsgspecJSONResponse
 from vertebra.extensions.fastapi.router import (
     RouterTable,
     extract_routes,
-)
-from vertebra.extensions.starlette.fastpath import (
-    BUFFERED_RESPONSE_TYPES,
-    get_starlette_request_cls,
-    preseed_request_body,
-    serialize_buffered_response,
 )
 from vertebra.server._fastpath import (
     extract_scope_body_fast,
@@ -38,8 +33,10 @@ from vertebra.server._fastpath_core import (
     CompiledRouteBase,
     has_custom_exception_handlers,
     scalar_query_converter,
+    serialize_buffered_response,
     serialize_starlette_http_exception,
 )
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 from vertebra.utils.type_guards import (
     is_coroutine_callable,
@@ -54,6 +51,81 @@ __all__ = (
     "compile_fastpath_routes",
     "dispatch_handler_direct",
 )
+
+
+def _build_buffered_response_types() -> frozenset[type]:
+    """Collect exact Starlette, FastAPI, and Vertebra buffered Response classes when installed."""
+    candidates: list[type] = [MsgspecJSONResponse]
+    starlette_mod = import_optional("starlette.responses")
+    if starlette_mod is not None:
+        for name in ("Response", "HTMLResponse", "PlainTextResponse", "JSONResponse", "RedirectResponse"):
+            cls = getattr(starlette_mod, name, None)
+            if isinstance(cls, type):
+                candidates.append(cls)
+    fastapi_mod = import_optional("fastapi.responses")
+    if fastapi_mod is not None:
+        for name in ("ORJSONResponse", "UJSONResponse"):
+            cls = getattr(fastapi_mod, name, None)
+            if isinstance(cls, type):
+                candidates.append(cls)
+    return frozenset(candidates)
+
+
+BUFFERED_RESPONSE_TYPES: frozenset[type] = _build_buffered_response_types()
+
+
+class _FallbackStarletteRequest:
+    """Lightweight Request fallback used when starlette is not installed."""
+
+    __slots__ = ("_body", "_json", "_receive", "_send", "scope")
+
+    def __init__(self, scope: Any, receive: Any = None, send: Any = None) -> None:
+        self.scope = scope
+        self._receive = receive
+        self._send = send
+        self._body: bytes = b""
+        self._json: Any = None
+
+    @property
+    def method(self) -> str:
+        return str(self.scope.get("method", "GET"))
+
+    @property
+    def path_params(self) -> dict[str, Any]:
+        params: dict[str, Any] = self.scope.get("path_params") or {}
+        return params
+
+    @property
+    def query_params(self) -> dict[str, str]:
+        raw = self.scope.get("query_string", b"")
+        text = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
+        if not text:
+            return {}
+        return dict(parse_qsl(text, keep_blank_values=True))
+
+    async def body(self) -> bytes:
+        return self._body
+
+    async def json(self) -> Any:
+        if self._json is None:
+            self._json = decode_json(self._body)
+        return self._json
+
+
+def _get_starlette_request_cls() -> Any:
+    req_mod = import_optional("starlette.requests")
+    if req_mod is not None and hasattr(req_mod, "Request"):
+        return req_mod.Request
+    return _FallbackStarletteRequest
+
+
+def _preseed_request_body(scope: Any, request: Any, body: bytes | None = None) -> None:
+    preseed_fn = getattr(scope, "preseed_request_body", None)
+    if callable(preseed_fn):
+        preseed_fn(request, body)
+        return
+    resolved = body if body is not None else b""
+    request._body = resolved
 
 
 class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
@@ -88,7 +160,10 @@ class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
         """Return True when outer middleware and custom exception layers can be bypassed safely."""
         if self.has_middleware or self.has_custom_exception_handlers:
             return False
-        return not (self.dependant_plan is not None and self.dependant_plan.has_security_requirements)
+        return not (
+            self.dependant_plan is not None
+            and (self.dependant_plan.has_security_requirements or self.dependant_plan.has_unsupported_params)
+        )
 
 
 class FastPath:
@@ -258,9 +333,9 @@ async def dispatch_handler_direct(
     """Execute a FastAPI APIRoute with zero-AsyncExitStack Depends() and zero-copy DTO decoding."""
     request: Any = None
     if compiled.needs_request:
-        req_cls = get_starlette_request_cls()
+        req_cls = _get_starlette_request_cls()
         request = req_cls(scope, receive=receive, send=send)
-        preseed_request_body(scope, request, body)
+        _preseed_request_body(scope, request, body)
 
     native_req: Any = None
     req_fn = getattr(scope, "request", None)
@@ -291,6 +366,7 @@ async def dispatch_handler_direct(
             body=body,
         )
 
+    result: Any = None
     plan = compiled.dependant_plan
     if plan is not None and plan.nodes:
         if plan.has_generator_dependencies:
@@ -384,18 +460,23 @@ async def _serialize_fastapi_result(
     if special is not None:
         return special
 
-    buffered = serialize_buffered_response(result, default_status=compiled.status_code)
+    buffered = serialize_buffered_response(
+        result,
+        default_status=compiled.status_code,
+        buffered_types=BUFFERED_RESPONSE_TYPES,
+    )
     if buffered is not None:
         return buffered
 
     if callable(result) and not isinstance(result, type):
-        await result(scope, receive, send)
+        await cast("Awaitable[Any]", result(scope, receive, send))
         return None
 
+    pydantic_ser = getattr(result, "__pydantic_serializer__", None)
     if compiled.response_serializer is not None:
         payload = compiled.response_serializer(result)
-    elif hasattr(result, "__pydantic_serializer__"):
-        payload = bytes(result.__pydantic_serializer__.to_json(result))
+    elif pydantic_ser is not None:
+        payload = bytes(pydantic_ser.to_json(result))
     else:
         payload = bytes(encode_json_bytes(result))
 
@@ -415,8 +496,8 @@ def _build_response_serializer(response_field: Any, return_annotation: Any) -> C
     to_json_fn = getattr(serializer, "to_json", None) if serializer is not None else None
     if callable(to_json_fn):
 
-        def _serialize_adapter(val: Any, _fn: Callable[[Any], Any] = to_json_fn) -> bytes:
-            return bytes(_fn(val))
+        def _serialize_adapter(val: Any) -> bytes:
+            return bytes(cast("bytes", to_json_fn(val)))
 
         return _serialize_adapter
 
@@ -424,8 +505,8 @@ def _build_response_serializer(response_field: Any, return_annotation: Any) -> C
     to_json_direct = getattr(pydantic_ser, "to_json", None) if pydantic_ser is not None else None
     if callable(to_json_direct):
 
-        def _serialize_direct(val: Any, _fn: Callable[[Any], Any] = to_json_direct) -> bytes:
-            return bytes(_fn(val))
+        def _serialize_direct(val: Any) -> bytes:
+            return bytes(cast("bytes", to_json_direct(val)))
 
         return _serialize_direct
     return None
@@ -496,8 +577,7 @@ def _compile_routes_from_table(
                     p_name == body_param_name
                     or is_msgspec_struct_type(ann)
                     or is_pydantic_model_type(ann)
-                    or p_name in {"body", "payload", "data"}
-                    and entry.method in {"POST", "PUT", "PATCH"}
+                    or (p_name in {"body", "payload", "data"} and entry.method in {"POST", "PUT", "PATCH"})
                 ):
                     body_param_name = p_name
                     body_type = ann

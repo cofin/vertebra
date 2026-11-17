@@ -69,7 +69,7 @@ async fn priority_routes_bypass_unary_saturation() {
     drop(health_permit);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn watermark_pauses_at_high_and_notifies_on_low_watermark_drain() {
     let controller = Arc::new(BackpressureController::new(test_config()));
 
@@ -79,12 +79,16 @@ async fn watermark_pauses_at_high_and_notifies_on_low_watermark_drain() {
     assert!(controller.on_stream_chunk_enqueued());
     assert!(controller.is_paused());
 
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_waiter = Arc::clone(&entered);
     let c_wait = Arc::clone(&controller);
     let waiter = tokio::spawn(async move {
+        entered_waiter.notify_one();
         c_wait.wait_until_resumed().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    entered.notified().await;
+    tokio::task::yield_now().await;
     assert!(controller.on_stream_chunk_dequeued());
     assert!(controller.is_paused());
 
@@ -105,7 +109,7 @@ async fn half_open_circuit_strictly_bounds_probe_permits() {
     controller.record_failure();
     assert_eq!(controller.snapshot().circuit_state, CircuitState::Open);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    controller.advance_circuit_clock_for_test(Duration::from_millis(100));
 
     let _p1 = controller
         .try_acquire_for_path("/api/probe1")

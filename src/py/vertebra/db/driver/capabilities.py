@@ -22,6 +22,7 @@ __all__ = (
     "EmbeddingPushdown",
     "NotificationEvent",
     "QueueEntry",
+    "QueueReservation",
     "SyncChangeSource",
     "SyncNotificationSource",
     "SyncPipeline",
@@ -58,6 +59,22 @@ class QueueEntry(FrozenBaseStruct, frozen=True, kw_only=True):
     lease_until_ms: int = 0
     scheduled_at_ms: int | None = None
     headers: dict[str, str] = msgspec.field(default_factory=dict)
+    priority: int = 0
+    expires_at_ms: int | None = None
+    completed_at_ms: int | None = None
+    worker_id: str | None = None
+    heartbeat_at_ms: int | None = None
+    result: bytes | None = None
+    error: str | None = None
+
+
+class QueueReservation(FrozenBaseStruct, frozen=True, kw_only=True):
+    """Idempotency reservation metadata binding a unique key to its owning job."""
+
+    key: str
+    job_id: str
+    task_name: str
+    created_at_ms: int
 
 
 @runtime_checkable
@@ -258,12 +275,59 @@ class SyncQueueStore(Protocol):
 
     def list_entries(
         self,
-        queue: str,
+        queue: str | None = None,
         *,
         status: str | None = None,
         limit: int = 100,
     ) -> list[QueueEntry]:
-        """List queue entries matching optional status up to limit."""
+        """List queue entries matching optional queue and status up to limit."""
+        ...
+
+    def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
+        """Delete terminal queue records completed before before_ms up to limit."""
+        ...
+
+    def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
+        """Retrieve a queue entry matching idempotency key and optional queue."""
+        ...
+
+    def reserve_identity(
+        self,
+        key: str,
+        *,
+        job_id: str,
+        task_name: str,
+        ttl_seconds: float | None = None,
+    ) -> QueueReservation | None:
+        """Acquire a single-winner reservation, returning None when acquired or the existing owner."""
+        ...
+
+    def get_reservation(self, key: str) -> QueueReservation | None:
+        """Retrieve an active identity reservation for key, or None."""
+        ...
+
+    def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
+        """Release an identity reservation, optionally fenced by expected_job_id."""
+        ...
+
+    def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
+        """Record worker_id assignment for an active fenced claim."""
+        ...
+
+    def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
+        """Update heartbeat_at_ms for active claimed jobs and return updated count."""
+        ...
+
+    def null_heartbeats(self, job_ids: Sequence[str]) -> int:
+        """Clear heartbeat_at_ms for the given job_ids and return updated count."""
+        ...
+
+    def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
+        """Interrupt a pending or running job with optional error detail."""
+        ...
+
+    def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
+        """Mark overdue jobs with expires_at_ms <= now_ms as expired up to limit."""
         ...
 
     def next_due_delay(self, queues: Sequence[str]) -> float | None:
@@ -361,12 +425,59 @@ class AsyncQueueStore(Protocol):
 
     async def list_entries(
         self,
-        queue: str,
+        queue: str | None = None,
         *,
         status: str | None = None,
         limit: int = 100,
     ) -> list[QueueEntry]:
-        """List queue entries matching optional status up to limit."""
+        """List queue entries matching optional queue and status up to limit."""
+        ...
+
+    async def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
+        """Delete terminal queue records completed before before_ms up to limit."""
+        ...
+
+    async def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
+        """Retrieve a queue entry matching idempotency key and optional queue."""
+        ...
+
+    async def reserve_identity(
+        self,
+        key: str,
+        *,
+        job_id: str,
+        task_name: str,
+        ttl_seconds: float | None = None,
+    ) -> QueueReservation | None:
+        """Acquire a single-winner reservation, returning None when acquired or the existing owner."""
+        ...
+
+    async def get_reservation(self, key: str) -> QueueReservation | None:
+        """Retrieve an active identity reservation for key, or None."""
+        ...
+
+    async def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
+        """Release an identity reservation, optionally fenced by expected_job_id."""
+        ...
+
+    async def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
+        """Record worker_id assignment for an active fenced claim."""
+        ...
+
+    async def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
+        """Update heartbeat_at_ms for active claimed jobs and return updated count."""
+        ...
+
+    async def null_heartbeats(self, job_ids: Sequence[str]) -> int:
+        """Clear heartbeat_at_ms for the given job_ids and return updated count."""
+        ...
+
+    async def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
+        """Interrupt a pending or running job with optional error detail."""
+        ...
+
+    async def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
+        """Mark overdue jobs with expires_at_ms <= now_ms as expired up to limit."""
         ...
 
     async def next_due_delay(self, queues: Sequence[str]) -> float | None:

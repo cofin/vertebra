@@ -97,12 +97,15 @@ class Embedder:
         cache: VectorCache | None = None,
     ) -> None:
         """Initialize the base embedder model name, output dimensions, and optional SHM VectorCache."""
+        if getattr(self, "_initialized", False):
+            return
         if dimensions <= 0:
             raise ValueError(f"dimensions must be > 0, got {dimensions}")
         self._model = model
         self._dimensions = dimensions
         self._cache = cache
         self._last_usage: GenAiUsage | None = None
+        self._initialized = True
 
     @property
     def model(self) -> str:

@@ -8,11 +8,15 @@ version = "0.3.0"
 description = "Native Rust Oxc/Rolldown frontend bundler and QuickJS SSR extension for Vertebra."
 requires-python = ">=3.12"
 license = { text = "MIT" }
+dependencies = ["vertebra-core==0.3.0"]
 
 [tool.maturin]
 python-source = "../../py"
 module-name = "vertebra._bundler"
 features = ["extension-module"]
+include = [
+    { path = "vertebra/_bundler.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",

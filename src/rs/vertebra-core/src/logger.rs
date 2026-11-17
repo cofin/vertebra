@@ -327,16 +327,52 @@ mod tests {
 
     #[test]
     fn flush_waits_for_underlying_sink_write_after_bufwriter_flush() {
+        #[derive(Default)]
+        struct GateState {
+            writes: usize,
+            flushes: usize,
+            allow_writes: usize,
+            allow_flushes: usize,
+            gate_enabled: bool,
+        }
+
         let sink_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        struct DelayedFlushWriter(Arc<Mutex<Vec<u8>>>);
-        impl Write for DelayedFlushWriter {
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                gate_enabled: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+
+        struct GatedFlushWriter {
+            buf: Arc<Mutex<Vec<u8>>>,
+            gate: Arc<(Mutex<GateState>, Condvar)>,
+        }
+
+        impl Write for GatedFlushWriter {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                thread::sleep(Duration::from_millis(3));
-                self.0.lock().unwrap().extend_from_slice(buf);
+                let (lock, cv) = &*self.gate;
+                let mut state = lock.lock().unwrap();
+                state.writes += 1;
+                let target = state.writes;
+                cv.notify_all();
+                while state.gate_enabled && state.allow_writes < target {
+                    state = cv.wait(state).unwrap();
+                }
+                drop(state);
+                self.buf.lock().unwrap().extend_from_slice(buf);
                 Ok(buf.len())
             }
             fn flush(&mut self) -> io::Result<()> {
-                thread::sleep(Duration::from_millis(3));
+                let (lock, cv) = &*self.gate;
+                let mut state = lock.lock().unwrap();
+                state.flushes += 1;
+                let target = state.flushes;
+                cv.notify_all();
+                while state.gate_enabled && state.allow_flushes < target {
+                    state = cv.wait(state).unwrap();
+                }
                 Ok(())
             }
         }
@@ -345,11 +381,39 @@ mod tests {
             8,
             OverflowPolicy::DropNewest,
             Duration::from_millis(100),
-            DelayedFlushWriter(Arc::clone(&sink_buf)),
+            GatedFlushWriter {
+                buf: Arc::clone(&sink_buf),
+                gate: Arc::clone(&gate),
+            },
         );
+        let (lock, cv) = &*gate;
         for idx in 0..10 {
             let payload = format!("{{\"event\":\"item-{idx}\"}}");
             assert!(core.write_bytes(payload.as_bytes()));
+
+            let mut state = lock.lock().unwrap();
+            while state.writes < idx + 1 {
+                state = cv.wait(state).unwrap();
+            }
+            drop(state);
+            assert!(!core.flush(Duration::ZERO));
+
+            {
+                let mut state = lock.lock().unwrap();
+                state.allow_writes = idx + 1;
+                cv.notify_all();
+                while state.flushes < idx + 1 {
+                    state = cv.wait(state).unwrap();
+                }
+            }
+            assert!(!core.flush(Duration::ZERO));
+
+            {
+                let mut state = lock.lock().unwrap();
+                state.allow_flushes = idx + 1;
+                cv.notify_all();
+            }
+
             assert!(core.flush(Duration::from_secs(2)));
             let snapshot = String::from_utf8(sink_buf.lock().unwrap().clone()).unwrap();
             assert!(
@@ -358,6 +422,10 @@ mod tests {
             );
             assert_eq!(core.queue().pending_len(), 0);
         }
+
+        let mut state = lock.lock().unwrap();
+        state.gate_enabled = false;
+        cv.notify_all();
     }
 
     #[test]

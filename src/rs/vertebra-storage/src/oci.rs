@@ -26,9 +26,11 @@ use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
+use vertebra_core::util::constant_time_eq;
 
 use crate::signing::{
-    SigningError, parse_rsa_private_key, rfc3986_encode, validate_expires_in_secs,
+    SigningError, parse_rsa_private_key, percent_decode_utf8, rfc3986_encode,
+    validate_expires_in_secs,
 };
 use crate::store::StorageError;
 
@@ -71,13 +73,28 @@ fn normalize_oci_par_token(par_token: &str) -> Result<String, SigningError> {
     Ok(rfc3986_encode(raw, true))
 }
 
-/// Construct a deterministic OCI Object Storage Pre-Authenticated Request (PAR) URL with RFC 3986 key escaping and expiry bounds check.
-pub fn build_oci_par_url(
+fn resolve_oci_par_base_endpoint(config: &OciParConfig) -> Result<String, SigningError> {
+    if let Some(ep) = config
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Url::parse(ep)
+            .map_err(|e| SigningError::InvalidInput(format!("invalid OCI endpoint `{ep}`: {e}")))?;
+        Ok(ep.trim_end_matches('/').to_string())
+    } else {
+        let region = config.region.trim();
+        if region.is_empty() {
+            return Err(SigningError::InvalidInput("empty OCI region".to_string()));
+        }
+        Ok(format!("https://objectstorage.{region}.oraclecloud.com"))
+    }
+}
+
+fn validate_oci_par_config(
     config: &OciParConfig,
-    object_key: &str,
-    expires_in_secs: u64,
-) -> Result<String, SigningError> {
-    validate_expires_in_secs(expires_in_secs)?;
+) -> Result<(String, String, String, String), SigningError> {
     let encoded_token = normalize_oci_par_token(&config.par_token)?;
     let namespace = config.namespace.trim();
     if namespace.is_empty() {
@@ -89,6 +106,23 @@ pub fn build_oci_par_url(
     if bucket.is_empty() {
         return Err(SigningError::InvalidInput("empty OCI bucket".to_string()));
     }
+    let base_endpoint = resolve_oci_par_base_endpoint(config)?;
+    Ok((
+        encoded_token,
+        namespace.to_string(),
+        bucket.to_string(),
+        base_endpoint,
+    ))
+}
+
+/// Construct a deterministic OCI Object Storage Pre-Authenticated Request (PAR) URL with RFC 3986 key escaping and expiry bounds check.
+pub fn build_oci_par_url(
+    config: &OciParConfig,
+    object_key: &str,
+    expires_in_secs: u64,
+) -> Result<String, SigningError> {
+    validate_expires_in_secs(expires_in_secs)?;
+    let (encoded_token, namespace, bucket, base_endpoint) = validate_oci_par_config(config)?;
     let trimmed_key = object_key.trim_start_matches('/');
     if trimmed_key.is_empty() {
         return Err(SigningError::InvalidInput(
@@ -96,30 +130,107 @@ pub fn build_oci_par_url(
         ));
     }
 
-    let base_endpoint = if let Some(ep) = config
-        .endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Url::parse(ep)
-            .map_err(|e| SigningError::InvalidInput(format!("invalid OCI endpoint `{ep}`: {e}")))?;
-        ep.trim_end_matches('/').to_string()
-    } else {
-        let region = config.region.trim();
-        if region.is_empty() {
-            return Err(SigningError::InvalidInput("empty OCI region".to_string()));
-        }
-        format!("https://objectstorage.{region}.oraclecloud.com")
-    };
-
-    let encoded_ns = rfc3986_encode(namespace, true);
-    let encoded_bkt = rfc3986_encode(bucket, true);
+    let encoded_ns = rfc3986_encode(&namespace, true);
+    let encoded_bkt = rfc3986_encode(&bucket, true);
     let encoded_key = rfc3986_encode(trimmed_key, true);
 
     Ok(format!(
         "{base_endpoint}/p/{encoded_token}/n/{encoded_ns}/b/{encoded_bkt}/o/{encoded_key}"
     ))
+}
+
+/// Verify an OCI Object Storage Pre-Authenticated Request (PAR) URL in constant time.
+pub fn verify_oci_par_url(
+    url: &str,
+    config: &OciParConfig,
+    object_key: &str,
+    expires_at_unix: Option<i64>,
+    now_unix: i64,
+) -> Result<bool, SigningError> {
+    let (encoded_token, namespace, bucket, base_endpoint) = validate_oci_par_config(config)?;
+    let trimmed_key = object_key.trim_start_matches('/');
+    if trimmed_key.is_empty() {
+        return Err(SigningError::InvalidInput(
+            "empty OCI object_key".to_string(),
+        ));
+    }
+    if let Some(exp) = expires_at_unix
+        && now_unix > exp
+    {
+        return Ok(false);
+    }
+    let expected_origin = Url::parse(&base_endpoint).map_err(|e| {
+        SigningError::InvalidInput(format!("invalid OCI endpoint `{base_endpoint}`: {e}"))
+    })?;
+    let Ok(parsed) = Url::parse(url) else {
+        return Ok(false);
+    };
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Ok(false);
+    }
+    if parsed.scheme() != expected_origin.scheme()
+        || parsed.host_str() != expected_origin.host_str()
+        || parsed.port_or_known_default() != expected_origin.port_or_known_default()
+    {
+        return Ok(false);
+    }
+    let expected_prefix = expected_origin.path().trim_end_matches('/');
+    let Some(rel_path) = parsed.path().strip_prefix(expected_prefix) else {
+        return Ok(false);
+    };
+    let segments: Vec<&str> = rel_path.split('/').collect();
+    if segments.len() != 9
+        || !segments[0].is_empty()
+        || segments[1] != "p"
+        || segments[3] != "n"
+        || segments[5] != "b"
+        || segments[7] != "o"
+    {
+        return Ok(false);
+    }
+    let encoded_ns = rfc3986_encode(&namespace, true);
+    let encoded_bkt = rfc3986_encode(&bucket, true);
+    let encoded_key = rfc3986_encode(trimmed_key, true);
+    let matches = constant_time_eq(segments[2].as_bytes(), encoded_token.as_bytes())
+        & constant_time_eq(segments[4].as_bytes(), encoded_ns.as_bytes())
+        & constant_time_eq(segments[6].as_bytes(), encoded_bkt.as_bytes())
+        & constant_time_eq(segments[8].as_bytes(), encoded_key.as_bytes());
+    Ok(matches)
+}
+
+pub(crate) fn extract_oci_par_object_key(
+    url: &str,
+    config: &OciParConfig,
+) -> Result<Option<String>, SigningError> {
+    let (_encoded_token, _namespace, _bucket, base_endpoint) = validate_oci_par_config(config)?;
+    let expected_origin = Url::parse(&base_endpoint).map_err(|e| {
+        SigningError::InvalidInput(format!("invalid OCI endpoint `{base_endpoint}`: {e}"))
+    })?;
+    let Ok(parsed) = Url::parse(url) else {
+        return Ok(None);
+    };
+    let expected_prefix = expected_origin.path().trim_end_matches('/');
+    let Some(rel_path) = parsed.path().strip_prefix(expected_prefix) else {
+        return Ok(None);
+    };
+    let segments: Vec<&str> = rel_path.split('/').collect();
+    if segments.len() != 9
+        || !segments[0].is_empty()
+        || segments[1] != "p"
+        || segments[3] != "n"
+        || segments[5] != "b"
+        || segments[7] != "o"
+        || segments[8].is_empty()
+    {
+        return Ok(None);
+    }
+    let Ok(decoded) = percent_decode_utf8(segments[8]) else {
+        return Ok(None);
+    };
+    if decoded.trim_start_matches('/').is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(decoded))
 }
 
 /// OCI `draft-cavage-http-signatures-08` credentials.

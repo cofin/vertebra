@@ -66,6 +66,125 @@ pub enum StreamDelivery {
 /// Invoke only outside async runtime threads, with the Python GIL detached.
 pub type StreamSink = Arc<dyn Fn(ResponseStreamFrame) -> StreamDelivery + Send + Sync>;
 
+/// Direct pub/sub publish callback registered by the embedded HTTP server.
+///
+/// Returns `0` when suppressed (for example by idempotency deduplication) and a non-zero
+/// event ID when delivered.
+pub type PubSubSink = Arc<dyn Fn(&str, &[u8], Option<&str>) -> u64 + Send + Sync>;
+
+/// Boxed `Send + 'static` future returned by transport-agnostic WebTransport trait methods.
+pub type WebTransportFuture<T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
+
+/// Errors returned by transport-agnostic [`WebTransportSessionOps`] and [`WebTransportStreamOps`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WebTransportBridgeError {
+    #[error("WebTransport session {0} is closed")]
+    SessionClosed(u64),
+    #[error("WebTransport stream error: {0}")]
+    Stream(String),
+    #[error("WebTransport datagram error: {0}")]
+    Datagram(String),
+    #[error("WebTransport protocol error: {0}")]
+    Protocol(String),
+}
+
+/// Shared handle to a transport-agnostic WebTransport bidirectional stream.
+pub type WebTransportStreamHandle = Arc<dyn WebTransportStreamOps>;
+
+/// Shared handle to a transport-agnostic WebTransport session.
+pub type WebTransportSessionHandle = Arc<dyn WebTransportSessionOps>;
+
+/// Direct WebTransport session callback registered by an embedded Python worker.
+pub type WebTransportSink = Arc<dyn Fn(WebTransportSessionHandle) + Send + Sync>;
+
+/// Transport-agnostic bidirectional WebTransport stream operations.
+pub trait WebTransportStreamOps: Send + Sync {
+    fn stream_id(&self) -> u64;
+    fn recv(
+        self: Arc<Self>,
+        max_bytes: usize,
+    ) -> WebTransportFuture<Result<bytes::Bytes, WebTransportBridgeError>>;
+    fn send(
+        self: Arc<Self>,
+        data: bytes::Bytes,
+    ) -> WebTransportFuture<Result<(), WebTransportBridgeError>>;
+    fn finish(self: Arc<Self>) -> WebTransportFuture<Result<(), WebTransportBridgeError>>;
+}
+
+/// Transport-agnostic WebTransport session operations.
+pub trait WebTransportSessionOps: Send + Sync {
+    fn session_id(&self) -> u64;
+    fn path(&self) -> &str;
+    fn headers(&self) -> &[(Vec<u8>, Vec<u8>)];
+    fn accept_bi(
+        self: Arc<Self>,
+    ) -> WebTransportFuture<Result<WebTransportStreamHandle, WebTransportBridgeError>>;
+    fn open_bi(
+        self: Arc<Self>,
+    ) -> WebTransportFuture<Result<WebTransportStreamHandle, WebTransportBridgeError>>;
+    fn recv_datagram(
+        self: Arc<Self>,
+    ) -> WebTransportFuture<Result<bytes::Bytes, WebTransportBridgeError>>;
+    fn send_datagram(&self, data: &[u8]) -> Result<(), WebTransportBridgeError>;
+    fn close(
+        self: Arc<Self>,
+        error_code: u32,
+        reason: String,
+    ) -> WebTransportFuture<Result<(), WebTransportBridgeError>>;
+}
+
+/// Shared-memory broker channel name carrying worker pub/sub publish frames.
+pub const SHM_PUBSUB_CHANNEL: &[u8] = b"__vtb_pubsub__";
+
+/// Encode `[topic_len: u16][key_len: u16][topic][key][payload]` for the SHM broker channel.
+///
+/// Returns `Err(total_len)` when the framed payload exceeds [`crate::broker::CHAN_MAX_PAYLOAD_BYTES`].
+pub fn encode_shm_pubsub_frame(
+    topic: &str,
+    payload: &[u8],
+    idempotency_key: Option<&str>,
+) -> Result<Vec<u8>, usize> {
+    let topic_bytes = topic.as_bytes();
+    let key_bytes = idempotency_key.map(str::as_bytes).unwrap_or(&[]);
+    let total_len = 4usize
+        .saturating_add(topic_bytes.len())
+        .saturating_add(key_bytes.len())
+        .saturating_add(payload.len());
+    if total_len > crate::broker::CHAN_MAX_PAYLOAD_BYTES {
+        return Err(total_len);
+    }
+    let mut frame = Vec::with_capacity(total_len);
+    frame.extend_from_slice(&(topic_bytes.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&(key_bytes.len() as u16).to_le_bytes());
+    frame.extend_from_slice(topic_bytes);
+    frame.extend_from_slice(key_bytes);
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+/// Decode `[topic_len: u16][key_len: u16][topic][key][payload]` from a raw SHM channel payload.
+pub fn decode_shm_pubsub_frame(raw: &[u8]) -> Option<(&str, &[u8], Option<&str>)> {
+    if raw.len() < 4 {
+        return None;
+    }
+    let topic_len = u16::from_le_bytes([raw[0], raw[1]]) as usize;
+    let key_len = u16::from_le_bytes([raw[2], raw[3]]) as usize;
+    let topic_end = 4usize.checked_add(topic_len)?;
+    let key_end = topic_end.checked_add(key_len)?;
+    if key_end > raw.len() {
+        return None;
+    }
+    let topic = std::str::from_utf8(&raw[4..topic_end]).ok()?;
+    let key = if key_len > 0 {
+        Some(std::str::from_utf8(&raw[topic_end..key_end]).ok()?)
+    } else {
+        None
+    };
+    let payload = &raw[key_end..];
+    Some((topic, payload, key))
+}
+
 /// Response data sent from Python workers back to the HTTP server.
 #[derive(Debug, Clone)]
 pub struct BridgeResponse {
@@ -112,6 +231,8 @@ pub struct BatchBridge {
     has_override_sink: AtomicBool,
     override_sink: RwLock<Option<ResponseSink>>,
     stream_sink: RwLock<Option<StreamSink>>,
+    pubsub_sink: RwLock<Option<PubSubSink>>,
+    webtransport_sink: RwLock<Option<WebTransportSink>>,
     request_notifier: Option<Notifier>,
     consumer_sleeping: CacheLine<AtomicBool>,
     consumer_count: AtomicUsize,
@@ -167,6 +288,8 @@ impl BatchBridge {
                 has_override_sink: AtomicBool::new(false),
                 override_sink: RwLock::new(None),
                 stream_sink: RwLock::new(None),
+                pubsub_sink: RwLock::new(None),
+                webtransport_sink: RwLock::new(None),
                 request_notifier: Notifier::new().ok(),
                 consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
                 consumer_count: AtomicUsize::new(max_workers.max(1)),
@@ -288,6 +411,70 @@ impl BatchBridge {
             .clone()
             .ok_or(TransportError::Disconnected)?;
         Ok(sink(frame))
+    }
+
+    /// Register a direct pub/sub publish callback for embedded workers.
+    pub fn set_pubsub_sink(&self, sink: PubSubSink) {
+        if let Ok(mut registered) = self.pubsub_sink.write() {
+            *registered = Some(sink);
+        }
+    }
+
+    /// Clear any registered pub/sub publish callback.
+    pub fn clear_pubsub_sink(&self) {
+        if let Ok(mut registered) = self.pubsub_sink.write() {
+            *registered = None;
+        }
+    }
+
+    /// Publish a pub/sub event through the registered sink without holding the sink lock.
+    pub fn publish_pubsub(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        idempotency_key: Option<&str>,
+    ) -> Option<u64> {
+        let sink = self.pubsub_sink.read().ok()?.clone()?;
+        let event_id = sink(topic, payload, idempotency_key);
+        (event_id != 0).then_some(event_id)
+    }
+
+    /// Register a direct WebTransport session handler callback for embedded workers.
+    pub fn set_webtransport_sink(&self, sink: WebTransportSink) {
+        if let Ok(mut registered) = self.webtransport_sink.write() {
+            *registered = Some(sink);
+        }
+    }
+
+    /// Clear any registered WebTransport session handler callback.
+    pub fn clear_webtransport_sink(&self) {
+        if let Ok(mut registered) = self.webtransport_sink.write() {
+            *registered = None;
+        }
+    }
+
+    /// Return `true` when an embedded WebTransport session sink is currently registered.
+    pub fn has_webtransport_sink(&self) -> bool {
+        self.webtransport_sink
+            .read()
+            .ok()
+            .is_some_and(|registered| registered.is_some())
+    }
+
+    /// Dispatch an accepted WebTransport session to the registered embedded sink.
+    ///
+    /// Returns `false` if no sink is registered.
+    pub fn submit_webtransport_session(&self, session: WebTransportSessionHandle) -> bool {
+        let sink = self
+            .webtransport_sink
+            .read()
+            .ok()
+            .and_then(|registered| registered.clone());
+        let Some(sink) = sink else {
+            return false;
+        };
+        sink(session);
+        true
     }
 
     /// Submit a zero-copy in-process request batch without acquiring `write_lock` or copying into `DataSlab`.
@@ -539,6 +726,8 @@ mod tests {
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
             stream_sink: RwLock::new(None),
+            pubsub_sink: RwLock::new(None),
+            webtransport_sink: RwLock::new(None),
             request_notifier: Notifier::new().ok(),
             consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
             consumer_count: AtomicUsize::new(1),
@@ -1097,6 +1286,8 @@ mod tests {
             has_override_sink: AtomicBool::new(false),
             override_sink: RwLock::new(None),
             stream_sink: RwLock::new(None),
+            pubsub_sink: RwLock::new(None),
+            webtransport_sink: RwLock::new(None),
             request_notifier: Notifier::new().ok(),
             consumer_sleeping: CacheLine::new(AtomicBool::new(false)),
             consumer_count: AtomicUsize::new(1),
@@ -1260,5 +1451,200 @@ mod tests {
                 assert_eq!(snap.body(0), body.as_bytes());
             }
         }
+    }
+
+    #[test]
+    fn pubsub_sink_roundtrips_and_handles_suppression_and_clear() {
+        type CapturedPubSub = (String, Vec<u8>, Option<String>);
+        let bridge = make_bridge();
+        assert_eq!(bridge.publish_pubsub("orders", b"hello", None), None);
+
+        let captured: Arc<Mutex<Vec<CapturedPubSub>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_ref = Arc::clone(&captured);
+        bridge.set_pubsub_sink(Arc::new(move |topic, payload, key| {
+            captured_ref.lock().unwrap().push((
+                topic.to_owned(),
+                payload.to_vec(),
+                key.map(str::to_owned),
+            ));
+            if key == Some("dup") { 0 } else { 7 }
+        }));
+
+        assert_eq!(
+            bridge.publish_pubsub("orders", b"payload-1", Some("k1")),
+            Some(7)
+        );
+        assert_eq!(
+            bridge.publish_pubsub("orders", b"payload-dup", Some("dup")),
+            None
+        );
+
+        bridge.clear_pubsub_sink();
+        assert_eq!(bridge.publish_pubsub("orders", b"after", None), None);
+
+        let recorded = captured.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            recorded[0],
+            (
+                "orders".to_owned(),
+                b"payload-1".to_vec(),
+                Some("k1".to_owned())
+            )
+        );
+        assert_eq!(
+            recorded[1],
+            (
+                "orders".to_owned(),
+                b"payload-dup".to_vec(),
+                Some("dup".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn shm_pubsub_frame_codec_enforces_256_byte_limit() {
+        let frame = encode_shm_pubsub_frame("events", b"{\"ok\":true}", Some("k-1")).unwrap();
+        assert_eq!(
+            decode_shm_pubsub_frame(&frame),
+            Some(("events", b"{\"ok\":true}".as_slice(), Some("k-1")))
+        );
+
+        let no_key = encode_shm_pubsub_frame("events", b"ping", None).unwrap();
+        assert_eq!(
+            decode_shm_pubsub_frame(&no_key),
+            Some(("events", b"ping".as_slice(), None))
+        );
+
+        let max_payload = vec![b'a'; crate::broker::CHAN_MAX_PAYLOAD_BYTES - 5];
+        let at_limit = encode_shm_pubsub_frame("t", &max_payload, None).unwrap();
+        assert_eq!(at_limit.len(), crate::broker::CHAN_MAX_PAYLOAD_BYTES);
+
+        let over_payload = vec![b'a'; crate::broker::CHAN_MAX_PAYLOAD_BYTES - 4];
+        assert_eq!(
+            encode_shm_pubsub_frame("t", &over_payload, None),
+            Err(crate::broker::CHAN_MAX_PAYLOAD_BYTES + 1)
+        );
+        assert_eq!(decode_shm_pubsub_frame(&[1, 0, 0]), None);
+    }
+
+    struct MockWtStream {
+        id: u64,
+    }
+
+    impl WebTransportStreamOps for MockWtStream {
+        fn stream_id(&self) -> u64 {
+            self.id
+        }
+
+        fn recv(
+            self: Arc<Self>,
+            _max_bytes: usize,
+        ) -> WebTransportFuture<Result<bytes::Bytes, WebTransportBridgeError>> {
+            Box::pin(async { Ok(bytes::Bytes::from_static(b"ok")) })
+        }
+
+        fn send(
+            self: Arc<Self>,
+            _data: bytes::Bytes,
+        ) -> WebTransportFuture<Result<(), WebTransportBridgeError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn finish(self: Arc<Self>) -> WebTransportFuture<Result<(), WebTransportBridgeError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct MockWtSession {
+        id: u64,
+        path: String,
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
+    }
+
+    impl WebTransportSessionOps for MockWtSession {
+        fn session_id(&self) -> u64 {
+            self.id
+        }
+
+        fn path(&self) -> &str {
+            &self.path
+        }
+
+        fn headers(&self) -> &[(Vec<u8>, Vec<u8>)] {
+            &self.headers
+        }
+
+        fn accept_bi(
+            self: Arc<Self>,
+        ) -> WebTransportFuture<Result<WebTransportStreamHandle, WebTransportBridgeError>> {
+            Box::pin(async { Ok(Arc::new(MockWtStream { id: 8 }) as WebTransportStreamHandle) })
+        }
+
+        fn open_bi(
+            self: Arc<Self>,
+        ) -> WebTransportFuture<Result<WebTransportStreamHandle, WebTransportBridgeError>> {
+            Box::pin(async { Ok(Arc::new(MockWtStream { id: 9 }) as WebTransportStreamHandle) })
+        }
+
+        fn recv_datagram(
+            self: Arc<Self>,
+        ) -> WebTransportFuture<Result<bytes::Bytes, WebTransportBridgeError>> {
+            Box::pin(async { Ok(bytes::Bytes::from_static(b"dg")) })
+        }
+
+        fn send_datagram(&self, _data: &[u8]) -> Result<(), WebTransportBridgeError> {
+            Ok(())
+        }
+
+        fn close(
+            self: Arc<Self>,
+            _error_code: u32,
+            _reason: String,
+        ) -> WebTransportFuture<Result<(), WebTransportBridgeError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn webtransport_sink_dispatches_and_clears() {
+        let bridge = make_bridge();
+        assert!(!bridge.has_webtransport_sink());
+
+        let first = Arc::new(MockWtSession {
+            id: 4,
+            path: "/wt".to_string(),
+            headers: vec![(b"x-test".to_vec(), b"1".to_vec())],
+        });
+        assert!(!bridge.submit_webtransport_session(first));
+
+        let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_ref = Arc::clone(&captured);
+        bridge.set_webtransport_sink(Arc::new(move |session| {
+            captured_ref
+                .lock()
+                .unwrap()
+                .push((session.session_id(), session.path().to_string()));
+        }));
+        assert!(bridge.has_webtransport_sink());
+
+        let second = Arc::new(MockWtSession {
+            id: 12,
+            path: "/chat?room=2".to_string(),
+            headers: Vec::new(),
+        });
+        assert!(bridge.submit_webtransport_session(second));
+
+        bridge.clear_webtransport_sink();
+        assert!(!bridge.has_webtransport_sink());
+        let third = Arc::new(MockWtSession {
+            id: 16,
+            path: "/after-clear".to_string(),
+            headers: Vec::new(),
+        });
+        assert!(!bridge.submit_webtransport_session(third));
+
+        let recorded = captured.lock().unwrap();
+        assert_eq!(recorded.as_slice(), &[(12, "/chat?room=2".to_string())]);
     }
 }

@@ -7,21 +7,18 @@ from __future__ import annotations
 
 import datetime
 import enum
-import uuid as _uuid_mod
+import threading
+from collections import OrderedDict
 from decimal import Decimal
-from typing import Any, ClassVar, Final, Literal, cast, overload
+from typing import Any, ClassVar, Final, Literal, overload
 
 import msgspec
 from msgspec.json import Decoder, Encoder
 
 from vertebra import typing as vertebra_typing
-from vertebra.typing import (
-    PYDANTIC_INSTALLED,
-    UUID_UTILS_INSTALLED,
-)
-from vertebra.utils.module_loader import import_optional_attr
+from vertebra.typing import PYDANTIC_INSTALLED
 from vertebra.utils.serializers._numpy import numpy_array_enc_hook
-from vertebra.utils.serializers._schema import _dump_msgspec_fields
+from vertebra.utils.serializers._schema import _dump_msgspec_fields, is_uuid_instance
 from vertebra.utils.type_guards import (
     dataclass_to_dict,
     is_attrs_instance,
@@ -41,24 +38,30 @@ __all__ = (
     "get_default_json_serializer",
 )
 
+_DEFAULT_LOCK: Final[threading.Lock] = threading.Lock()
+_MAX_TYPED_DECODERS: Final[int] = 1024
+
 
 class JSONSerializer:
     """Msgspec-based JSON serializer."""
 
-    __slots__ = ("_decoder", "_encoder", "_typed_decoders")
+    __slots__ = ("_decoder", "_decoder_lock", "_encoder", "_typed_decoders")
 
     _default: ClassVar[JSONSerializer | None] = None
 
     def __init__(self) -> None:
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_supported_value)
         self._decoder: Final[Decoder[Any]] = Decoder()
-        self._typed_decoders: dict[Any, Decoder[Any]] = {}
+        self._decoder_lock: Final[threading.Lock] = threading.Lock()
+        self._typed_decoders: OrderedDict[Any, Decoder[Any]] = OrderedDict()
 
     @classmethod
     def default(cls) -> JSONSerializer:
         """Return process-global default JSONSerializer instance."""
         if cls._default is None:
-            cls._default = cls()
+            with _DEFAULT_LOCK:
+                if cls._default is None:
+                    cls._default = cls()
         return cls._default
 
     def encode(self, data: Any, *, as_bytes: bool = False) -> str | bytes:
@@ -82,13 +85,18 @@ class JSONSerializer:
         if type is Any or type is object:
             return self._decoder.decode(raw)
         try:
-            decoder = self._typed_decoders.get(type)
-            if decoder is None:
-                decoder = Decoder(type=type)
-                self._typed_decoders[type] = decoder
-            return decoder.decode(raw)
+            with self._decoder_lock:
+                decoder = self._typed_decoders.get(type)
+                if decoder is not None:
+                    self._typed_decoders.move_to_end(type)
+                else:
+                    decoder = Decoder(type=type)
+                    if len(self._typed_decoders) >= _MAX_TYPED_DECODERS:
+                        self._typed_decoders.popitem(last=False)
+                    self._typed_decoders[type] = decoder
         except TypeError:
             return Decoder(type=type).decode(raw)
+        return decoder.decode(raw)
 
 
 def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
@@ -101,15 +109,6 @@ def convert_datetime_to_gmt_iso(value: datetime.datetime) -> str:
 def convert_date_to_iso(value: datetime.date) -> str:
     """Normalize date values to ISO 8601 strings."""
     return value.isoformat()
-
-
-_UNLOADED_UUID_TYPE: Final[object] = object()
-
-
-class _UUIDTypeCache:
-    """Class-scoped holder for lazy UUID backend."""
-
-    uuid_utils_type: ClassVar[type[Any] | None | object] = _UNLOADED_UUID_TYPE
 
 
 def get_default_json_serializer() -> JSONSerializer:
@@ -155,25 +154,6 @@ def format_json(value: Any, *, indent: int = 2) -> str:
     return msgspec.json.format(encode_json_bytes(value), indent=indent).decode("utf-8")
 
 
-def _get_uuid_utils_type() -> type[Any] | None:
-    """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    cached = _UUIDTypeCache.uuid_utils_type
-    if cached is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", cached)
-    if not UUID_UTILS_INSTALLED:
-        _UUIDTypeCache.uuid_utils_type = None
-        return None
-    resolved = cast("type[Any] | None", import_optional_attr("uuid_utils", "UUID"))
-    _UUIDTypeCache.uuid_utils_type = resolved
-    return resolved
-
-
-def _is_uuid_utils_instance(value: Any) -> bool:
-    """Return True when value is an instance of uuid_utils.UUID."""
-    uuid_type = _get_uuid_utils_type()
-    return uuid_type is not None and isinstance(value, uuid_type)
-
-
 def _dump_pydantic_model(value: Any) -> Any:
     """Dump a Pydantic model instance to a dictionary."""
     if hasattr(value, "model_dump"):
@@ -187,7 +167,7 @@ def _normalize_supported_value(value: Any) -> Any:
         return convert_datetime_to_gmt_iso(value)
     if isinstance(value, datetime.date):
         return convert_date_to_iso(value)
-    if isinstance(value, _uuid_mod.UUID) or _is_uuid_utils_instance(value):
+    if is_uuid_instance(value):
         return str(value)
     if isinstance(value, Decimal):
         return float(value)

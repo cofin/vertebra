@@ -198,15 +198,23 @@ mod signal_hook {
         super::cleanup_all();
 
         let prev = match sig {
+            // SAFETY: `PREV_SIGINT` is populated by `libc::sigaction` before `install()` registers
+            // this handler and is never mutated afterward while `INSTALLED` remains true.
             libc::SIGINT => unsafe { (*core::ptr::addr_of!(PREV_SIGINT)).assume_init() },
+            // SAFETY: `PREV_SIGTERM` is populated by `libc::sigaction` before `install()` registers
+            // this handler and is never mutated afterward while `INSTALLED` remains true.
             libc::SIGTERM => unsafe { (*core::ptr::addr_of!(PREV_SIGTERM)).assume_init() },
             _ => {
+                // SAFETY: `libc::_exit` is async-signal-safe and avoids running non-signal-safe
+                // Rust destructors or stdio flushes inside a signal context.
                 unsafe { libc::_exit(128 + sig) };
             }
         };
 
         let handler_addr = prev.sa_sigaction;
         if (prev.sa_flags & libc::SA_SIGINFO) != 0 && handler_addr != 0 {
+            // SAFETY: `SA_SIGINFO` is set and `handler_addr` is non-null, so `sa_sigaction`
+            // holds a valid C `extern "C" fn(c_int, *mut siginfo_t, *mut c_void)` handler.
             let sigaction_fn: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
                 unsafe { core::mem::transmute(handler_addr) };
             sigaction_fn(sig, info, ucontext);
@@ -214,6 +222,8 @@ mod signal_hook {
         }
 
         if handler_addr != libc::SIG_DFL && handler_addr != libc::SIG_IGN {
+            // SAFETY: `SA_SIGINFO` is unset and `handler_addr` is neither `SIG_DFL` nor `SIG_IGN`,
+            // so `sa_sigaction` holds a valid C `extern "C" fn(c_int)` handler.
             let handler_fn: extern "C" fn(libc::c_int) =
                 unsafe { core::mem::transmute(handler_addr) };
             handler_fn(sig);
@@ -221,6 +231,8 @@ mod signal_hook {
         }
 
         if handler_addr == libc::SIG_DFL {
+            // SAFETY: `libc::sigaction` is POD valid when zeroed; `sigemptyset`, `sigaction`, and
+            // `raise` are async-signal-safe POSIX functions used to re-raise with `SIG_DFL`.
             unsafe {
                 let mut dfl: libc::sigaction = core::mem::zeroed();
                 dfl.sa_sigaction = libc::SIG_DFL;
@@ -239,7 +251,9 @@ mod signal_hook {
             return Ok(());
         }
 
-        // SAFETY: `sigaction` structs are initialized via `zeroed` + `sigemptyset` before registration.
+        // SAFETY: `INSTALLED` serializes one-time installation; `action` is zero-initialized and
+        // its mask is cleared with `sigemptyset` before `libc::sigaction` writes `PREV_SIGINT` and
+        // `PREV_SIGTERM` (`MaybeUninit<libc::sigaction>`) and activates `handle_termination_signal`.
         unsafe {
             let mut action: libc::sigaction = core::mem::zeroed();
             action.sa_sigaction = handle_termination_signal as *const () as usize;
@@ -329,7 +343,7 @@ mod tests {
     fn registration_handles_overflow_without_panicking() {
         let mut names = Vec::new();
         for idx in 0..(MAX_OWNED_SEGMENTS + 8) {
-            let name = format!("/vtb-reg-cap-{idx}-{}", std::process::id());
+            let name = crate::shm::unique_test_shm_name(&format!("/vtb-reg-cap-{idx}"));
             register_owned(&name);
             names.push(name);
         }

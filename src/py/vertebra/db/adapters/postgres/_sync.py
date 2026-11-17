@@ -19,7 +19,7 @@ from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
 from vertebra.db.adapters.postgres.events import EventSessionRegistry
 from vertebra.db.adapters.postgres.notify import PostgresNotifyConfig, SyncPostgresNotificationSource
-from vertebra.db.adapters.postgres.options import build_native_client_options
+from vertebra.db.adapters.postgres.options import build_native_client_options, is_postgres_auth_rejection
 from vertebra.db.adapters.postgres.pipeline import SyncPostgresPipeline
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG
@@ -64,6 +64,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         "_next_savepoint_token",
         "_owns_pool",
         "_pool",
+        "_pool_token",
         "_savepoint_tokens",
         "_session_context",
         "_tenant_conn",
@@ -88,6 +89,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         super().__init__(resolved, broker=broker)
         self._pool = pool
         self._owns_pool = pool is None
+        self._pool_token: str | None = None
         self._dialer = dialer
         self._client_factory = client_factory
         self._events = EventSessionRegistry()
@@ -154,7 +156,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             client = self._tenant_conn
             owns_conn = False
         else:
-            client = self._ensure_pool().acquire()
+            client = self._acquire_pool_client()
             owns_conn = True
         try:
             client.begin()
@@ -336,6 +338,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             finally:
                 if self._owns_pool:
                     self._pool = None
+                    self._pool_token = None
         first_error = tx_error or events_error or pool_error
         if first_error is not None:
             raise first_error
@@ -667,18 +670,52 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
         """Return the active ``PostgreSQLConfig``."""
         return self.config
 
-    def _ensure_pool(self) -> Any:
-        """Lazily construct and cache the native ``SyncPostgresPool`` when not injected."""
+    def _ensure_pool(self, *, force_refresh: bool = False) -> Any:
+        """Lazily construct and cache the native ``SyncPostgresPool``, rotating IAM tokens on expiry."""
         if self._pool is not None:
             if not callable(getattr(self._pool, "acquire", None)):
                 msg = "Injected PostgreSQL pool must provide an acquire() method"
                 raise ImproperConfigurationError(msg)
-            return self._pool
+            if self._owns_pool and self.config.token_provider is not None:
+                token = self.config.resolve_iam_password_sync(force_refresh=force_refresh)
+                if not force_refresh and token == self._pool_token:
+                    return self._pool
+                with contextlib.suppress(Exception):
+                    self._pool.close()
+                self._pool = None
+                self._pool_token = None
+            else:
+                return self._pool
+        else:
+            token = (
+                self.config.resolve_iam_password_sync(force_refresh=force_refresh)
+                if self.config.token_provider is not None
+                else None
+            )
         pg_mod = PostgreSQLCore.resolve_native_module()
-        pool_kwargs = build_native_client_options(self.config).to_pool_kwargs()
+        overrides: dict[str, Any] = {"password": token} if token is not None else {}
+        pool_kwargs = build_native_client_options(self.config, **overrides).to_pool_kwargs()
         self._pool = pg_mod.SyncPostgresPool(**pool_kwargs)
+        self._pool_token = token
         self._owns_pool = True
         return self._pool
+
+    def _acquire_pool_client(self) -> Any:
+        """Acquire a pooled client, refreshing IAM tokens once on authentication rejection."""
+        pool = self._ensure_pool()
+        try:
+            return pool.acquire()
+        except Exception as exc:
+            if self.config.token_provider is None or not is_postgres_auth_rejection(exc):
+                raise
+            invalidate_fn = getattr(self.config.token_provider, "invalidate", None)
+            if callable(invalidate_fn):
+                invalidate_fn()
+            if self._owns_pool:
+                refreshed_pool = self._ensure_pool(force_refresh=True)
+                return refreshed_pool.acquire()
+            self.config.resolve_iam_password_sync(force_refresh=True)
+            return pool.acquire()
 
     def _ensure_open(self) -> None:
         """Raise ``InterfaceError`` when an operation targets a closed driver."""
@@ -693,8 +730,7 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
             return self._tx_conn, False
         if self._tenant_conn is not None:
             return self._tenant_conn, False
-        pool = self._ensure_pool()
-        return pool.acquire(), True
+        return self._acquire_pool_client(), True
 
     def _release_pooled_client(self, client: Any, *, evict: bool = False) -> None:
         """Return ``client`` to the pool or evict it when state cannot be trusted."""
@@ -783,23 +819,62 @@ class SyncPostgreSQLDriver(SyncDatabaseDriver[PostgreSQLConfig]):
     async def _open_direct_async_client(self, *, feature: str) -> Any:
         """Dial and track a dedicated non-pooled ``AsyncPostgresClient`` for event streaming."""
         self._ensure_open()
-        client_kwargs = PostgreSQLCore.build_direct_client_kwargs(self.config, feature=feature)
-        if self._client_factory is not None:
-            client = self._client_factory(**client_kwargs)
-        else:
-            pg_mod = PostgreSQLCore.resolve_native_module()
-            client = pg_mod.AsyncPostgresClient(**client_kwargs)
-        await client.connect()
-        return client
+        direct_cfg = PostgreSQLCore.validate_direct_session_config(self.config, feature=feature)
+        for attempt in range(2):
+            token = (
+                await direct_cfg.resolve_iam_password_async(force_refresh=attempt > 0)
+                if direct_cfg.token_provider is not None
+                else None
+            )
+            overrides: dict[str, Any] = {"password": token} if token is not None else {}
+            client_kwargs = build_native_client_options(direct_cfg, **overrides).to_client_kwargs()
+            if self._client_factory is not None:
+                client = self._client_factory(**client_kwargs)
+            else:
+                pg_mod = PostgreSQLCore.resolve_native_module()
+                client = pg_mod.AsyncPostgresClient(**client_kwargs)
+            try:
+                await client.connect()
+                return client
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await client.close()
+                if attempt == 0 and direct_cfg.token_provider is not None and is_postgres_auth_rejection(exc):
+                    invalidate_fn = getattr(direct_cfg.token_provider, "invalidate", None)
+                    if callable(invalidate_fn):
+                        invalidate_fn()
+                    continue
+                raise
+        raise InterfaceError("Failed to open direct asynchronous PostgreSQL client")
 
     def _open_direct_sync_client(self, feature: str = "operation") -> SyncPostgresClient:
         """Open a dedicated non-pooled direct sync client."""
         self._ensure_open()
-        client_kwargs = PostgreSQLCore.build_direct_client_kwargs(self.config, feature=feature)
+        direct_cfg = PostgreSQLCore.validate_direct_session_config(self.config, feature=feature)
         pg_mod = PostgreSQLCore.resolve_native_module()
-        client: SyncPostgresClient = pg_mod.SyncPostgresClient(**client_kwargs)
-        client.connect()
-        return client
+        for attempt in range(2):
+            token = (
+                direct_cfg.resolve_iam_password_sync(force_refresh=attempt > 0)
+                if direct_cfg.token_provider is not None
+                else None
+            )
+            overrides: dict[str, Any] = {"password": token} if token is not None else {}
+            client_kwargs = build_native_client_options(direct_cfg, **overrides).to_client_kwargs()
+            client: SyncPostgresClient = pg_mod.SyncPostgresClient(**client_kwargs)
+            try:
+                client.connect()
+                return client
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    client.close()
+                if attempt == 0 and direct_cfg.token_provider is not None and is_postgres_auth_rejection(exc):
+                    invalidate_fn = getattr(direct_cfg.token_provider, "invalidate", None)
+                    if callable(invalidate_fn):
+                        invalidate_fn()
+                    continue
+                raise
+        raise InterfaceError("Failed to open direct asynchronous PostgreSQL client")
+        raise InterfaceError("Failed to open direct synchronous PostgreSQL client")
 
     def _open_sync_notification_listener(
         self,

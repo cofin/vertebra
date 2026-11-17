@@ -1,4 +1,4 @@
-"""Vertebra Store adapter for Litestar response caching and native KV stores."""
+"""Vertebra Store adapter for Litestar response caching and AsyncCacheStore-backed KV stores."""
 
 from __future__ import annotations
 
@@ -6,26 +6,21 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self, cast
 
-from vertebra.framework.stores import (
-    MemoryStore as _BaseMemoryStore,
-)
-from vertebra.framework.stores import (
-    RedisStore,
-    ValkeyStore,
-)
+from vertebra.cache import AsyncCacheStore
+from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig
+from vertebra.db.adapters.valkey import AsyncValkeyDriver, ValkeyConfig
 from vertebra.storage import AsyncObjectStore, AsyncReadableFile, StorageConfig
 from vertebra.typing import ImproperConfigurationError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
-    from litestar.stores.base import Store as _StoreBase
-else:
-    _base_store_mod = import_optional("litestar.stores.base")
-    _StoreBase = _base_store_mod.Store if _base_store_mod is not None else object
+    from collections.abc import Mapping, Sequence
+
+    from litestar.stores.base import Store as _LitestarStore
 
 __all__ = (
     "MemoryStore",
@@ -37,14 +32,332 @@ __all__ = (
     "swap_response_cache_store",
 )
 
+_CACHED_STORE_CLASSES: dict[str, type[Any]] = {}
 
-class MemoryStore(_BaseMemoryStore):
-    """Litestar store backed by Vertebra monotonic TTL cache with optional Valkey/Redis backing."""
+
+class _AsyncCacheStoreAdapter:
+    """Litestar Store adapter delegating key-value operations to ``AsyncCacheStore``."""
+
+    __slots__ = ("_cache", "_client_tracking", "_driver", "_key_prefix", "_l1_cache")
+
+    def __init__(
+        self,
+        *,
+        url: str = "memory://",
+        l1_url: str | None = None,
+        driver: Any = None,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+        capacity: int = 2048,
+    ) -> None:
+        self._key_prefix = validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)
+        self._client_tracking = client_tracking
+        self._l1_cache: dict[str, tuple[bytes, float | None]] = {}
+        self._cache = AsyncCacheStore(
+            url,
+            l1_url=l1_url,
+            capacity=capacity,
+            key_prefix=f"{self._key_prefix}:",
+        )
+        if driver is not None:
+            self._cache._state = None
+            self._cache._driver = driver
+            self._cache._scheme = "redis"
+            if self._cache._l1 is None:
+                self._cache._l1 = AsyncCacheStore(
+                    "memory://",
+                    capacity=capacity,
+                    key_prefix=f"{self._key_prefix}:",
+                )
+        active_driver = driver if driver is not None else self._cache._driver
+        self._driver = active_driver
+        if self._client_tracking and active_driver is not None and hasattr(active_driver, "add_invalidation_listener"):
+            active_driver.add_invalidation_listener(self._on_driver_invalidate)
+
+    @property
+    def driver(self) -> Any:
+        """Return the underlying Valkey or Redis driver when configured."""
+        return self._driver
+
+    @property
+    def key_prefix(self) -> str:
+        """Return the namespace prepended to every stored key."""
+        return self._key_prefix
+
+    @property
+    def _entries(self) -> dict[str, tuple[bytes, float | None]]:
+        """Return the underlying L1 cache entries mapping."""
+        return self._l1_cache
+
+    async def __aenter__(self) -> Any:
+        """Enter the async context manager and return the store instance."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc_val: object,
+        exc_tb: object,
+    ) -> None:
+        """Exit the async context manager and close underlying driver."""
+        _ = (exc_type, exc_val, exc_tb)
+        await self.close()
+
+    async def set(
+        self,
+        key: str,
+        value: str | bytes,
+        expires_in: int | timedelta | None = None,
+    ) -> None:
+        """Store value under key with an optional expiration duration."""
+        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        ttl_ms = self._ttl_milliseconds(expires_in)
+        ttl_s = None if ttl_ms is None else ttl_ms / 1000.0
+        expires_at = None if ttl_s is None else time.monotonic() + ttl_s
+        full_key = self._make_key(key)
+        self._l1_cache[full_key] = (raw, expires_at)
+        await self._cache.set(key, raw, ttl=ttl_s)
+
+    async def get(self, key: str, renew_for: int | timedelta | None = None) -> bytes | None:
+        """Retrieve bytes for key if present and unexpired, optionally renewing TTL."""
+        full_key = self._make_key(key)
+        entry = self._l1_cache.get(full_key)
+        now = time.monotonic()
+        if entry is not None and entry[1] is not None and now >= entry[1]:
+            self._l1_cache.pop(full_key, None)
+            if self._cache._l1 is not None:
+                await self._cache._l1.delete(key)
+
+        value = await self._cache.get(key)
+        if value is None:
+            self._l1_cache.pop(full_key, None)
+            return None
+
+        if renew_for is not None:
+            ttl_ms = self._ttl_milliseconds(renew_for)
+            ttl_s = None if ttl_ms is None else ttl_ms / 1000.0
+            remaining = await self._remaining_ttl_seconds(key)
+            if remaining is not None and ttl_s is not None:
+                await self._cache.touch(key, ttl=ttl_s)
+                self._l1_cache[full_key] = (value, time.monotonic() + ttl_s)
+        elif full_key not in self._l1_cache:
+            remaining = await self._remaining_ttl_seconds(key)
+            expires_at = None if remaining is None else time.monotonic() + remaining
+            self._l1_cache[full_key] = (value, expires_at)
+        return value
+
+    async def delete(self, key: str) -> None:
+        """Delete key from the store if present."""
+        self._l1_cache.pop(self._make_key(key), None)
+        await self._cache.delete(key)
+
+    async def delete_all(self) -> None:
+        """Delete every key under this store's key_prefix with prefix-scoped SCAN and UNLINK."""
+        self._l1_cache.clear()
+        await self._cache.clear()
+
+    async def exists(self, key: str) -> bool:
+        """Return True if key exists and has not expired."""
+        return await self._cache.has(key)
+
+    async def expires_in(self, key: str) -> int | None:
+        """Return remaining TTL in seconds, or None when missing or expired."""
+        remaining = await self._remaining_ttl_seconds(key)
+        if remaining is None:
+            return None
+        return max(0, int(remaining))
+
+    async def set_many(
+        self,
+        mapping: Mapping[str, str | bytes],
+        expires_in: int | timedelta | None = None,
+    ) -> None:
+        """Store multiple key-value pairs with an optional shared expiration duration."""
+        for key, value in mapping.items():
+            await self.set(key, value, expires_in=expires_in)
+
+    async def get_many(self, keys: Sequence[str]) -> dict[str, bytes | None]:
+        """Retrieve multiple keys in a single batch dictionary."""
+        return {key: await self.get(key) for key in keys}
+
+    async def close(self) -> None:
+        """Close the underlying cache store and driver connections."""
+        await self._cache.aclose()
+
+    def _make_key(self, key: str) -> str:
+        return f"{self._key_prefix}:{key}"
+
+    @staticmethod
+    def _ttl_milliseconds(expires_in: int | timedelta | None) -> int | None:
+        if expires_in is None:
+            return None
+        seconds = expires_in.total_seconds() if isinstance(expires_in, timedelta) else float(expires_in)
+        if seconds <= 0:
+            raise ValueError("expires_in must be a positive duration")
+        return math.ceil(seconds * 1000)
+
+    async def _remaining_ttl_seconds(self, key: str) -> float | None:
+        if self._cache._state is not None:
+            hit = self._cache._state.get_with_expiry(key, record_stats=False)
+            if hit is None or hit[1] is None:
+                return None
+            remaining = hit[1] - self._cache._clock()
+            return None if remaining <= 0 else remaining
+        if self._cache._l1 is not None and self._cache._l1._state is not None:
+            hit = self._cache._l1._state.get_with_expiry(key, record_stats=False)
+            if hit is not None:
+                if hit[1] is None:
+                    return None
+                remaining = hit[1] - self._cache._l1._clock()
+                if remaining > 0:
+                    return remaining
+                return None
+        if self._cache._driver is not None and hasattr(self._cache._driver, "pttl"):
+            pttl_ms = await self._cache._driver.pttl(self._make_key(key))
+            if pttl_ms in (-2, -1):
+                return None
+            return max(0.0, pttl_ms / 1000.0)
+        return None
+
+    def _on_driver_invalidate(self, keys: Any) -> None:
+        prefix = f"{self._key_prefix}:"
+        for key in keys:
+            str_key = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            self._l1_cache.pop(str_key, None)
+            if self._cache._l1 is not None and self._cache._l1._state is not None:
+                short_key = str_key[len(prefix) :] if str_key.startswith(prefix) else str_key
+                self._cache._l1._state.delete(short_key)
+
+
+class _MemoryStoreImpl(_AsyncCacheStoreAdapter):
+    """Litestar store backed by AsyncCacheStore with optional Valkey/Redis backing."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        *,
+        driver: Any = None,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = False,
+        capacity: int = 2048,
+    ) -> None:
+        super().__init__(
+            url="memory://",
+            driver=driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            capacity=capacity,
+        )
+
+    @classmethod
+    def from_valkey(
+        cls,
+        config_or_url: ValkeyConfig | str,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+    ) -> Self:
+        """Create a store backed by Valkey with client-side caching."""
+        cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+        return cls(
+            driver=AsyncValkeyDriver(cfg),
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+        )
+
+    @classmethod
+    def from_redis(
+        cls,
+        config_or_url: RedisConfig | str,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+    ) -> Self:
+        """Create a store backed by Redis."""
+        cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+        return cls(
+            driver=AsyncRedisDriver(cfg),
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+        )
+
+
+class _ValkeyStoreImpl(_AsyncCacheStoreAdapter):
+    """Litestar-compatible Store backed by AsyncCacheStore and native Valkey driver."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        driver: AsyncValkeyDriver | None = None,
+        config_or_url: ValkeyConfig | str | None = None,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+        capacity: int = 2048,
+    ) -> None:
+        if driver is not None:
+            resolved_driver = driver
+        elif config_or_url is not None:
+            cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+            resolved_driver = AsyncValkeyDriver(cfg)
+        else:
+            resolved_driver = AsyncValkeyDriver(ValkeyConfig())
+        super().__init__(
+            driver=resolved_driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            capacity=capacity,
+        )
+
+    @classmethod
+    def from_url(cls, url: str, *, key_prefix: str = "vertebra", client_tracking: bool = True) -> Self:
+        """Create a ValkeyStore from a valkey:// connection URL."""
+        return cls(config_or_url=url, key_prefix=key_prefix, client_tracking=client_tracking)
+
+
+class _RedisStoreImpl(_AsyncCacheStoreAdapter):
+    """Litestar-compatible Store backed by AsyncCacheStore and native Redis driver."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        driver: AsyncRedisDriver | None = None,
+        config_or_url: RedisConfig | str | None = None,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+        capacity: int = 2048,
+    ) -> None:
+        if driver is not None:
+            resolved_driver = driver
+        elif config_or_url is not None:
+            cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
+            resolved_driver = AsyncRedisDriver(cfg)
+        else:
+            resolved_driver = AsyncRedisDriver(RedisConfig())
+        super().__init__(
+            driver=resolved_driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            capacity=capacity,
+        )
+
+    @classmethod
+    def from_url(cls, url: str, *, key_prefix: str = "vertebra", client_tracking: bool = True) -> Self:
+        """Create a RedisStore from a redis:// connection URL."""
+        return cls(config_or_url=url, key_prefix=key_prefix, client_tracking=client_tracking)
+
+
+class _ResponseCacheStoreImpl(_MemoryStoreImpl):
+    """Litestar response cache store backed by AsyncCacheStore fast memory/SHM cache."""
 
     __slots__ = ()
 
 
-class ObjectStoreLitestarStore(_StoreBase):
+class _ObjectStoreLitestarStoreImpl:
     """Litestar key/value store with persistent, versioned wall-clock expiration."""
 
     __slots__ = ("_prefix", "_store")
@@ -59,7 +372,7 @@ class ObjectStoreLitestarStore(_StoreBase):
         """Return an isolated child sharing this store's backend."""
         child = type(self)(self._store, namespace=namespace)
         child._prefix = self._prefix + child._prefix.removeprefix("vertebra-store/")
-        return child
+        return cast("ObjectStoreLitestarStore", child)
 
     async def set(self, key: str, value: str | bytes, expires_in: int | timedelta | None = None) -> None:
         """Store bytes and their optional deadline in one authoritative envelope."""
@@ -143,6 +456,7 @@ class ObjectStoreFileSystemAdapter:
 
     async def info(self, path: str | os.PathLike[str], **kwargs: Any) -> dict[str, Any]:
         """Return stat information for a file or a populated directory prefix."""
+        _ = kwargs
         key = self._resolve_key(path)
         size = 0
         mtime = 0.0
@@ -177,6 +491,7 @@ class ObjectStoreFileSystemAdapter:
         self, file: str | os.PathLike[str], mode: str = "rb", buffering: int = -1, **kwargs: Any
     ) -> AsyncReadableFile:
         """Open a native asynchronous reader with nonblocking synchronous seek/tell."""
+        _ = (buffering, kwargs)
         if mode != "rb":
             raise ValueError("Object store files support only rb mode")
         key = self._resolve_key(file)
@@ -191,10 +506,75 @@ class ObjectStoreFileSystemAdapter:
         return "/".join(part for part in (self._base_path, relative) if part)
 
 
-class ResponseCacheStore(MemoryStore):
-    """Litestar response cache store backed by Vertebra fast memory/SHM cache."""
+if TYPE_CHECKING:
 
-    __slots__ = ()
+    class MemoryStore(_MemoryStoreImpl, _LitestarStore):
+        """Litestar store backed by AsyncCacheStore with optional Valkey/Redis backing."""
+
+    class ValkeyStore(_ValkeyStoreImpl, _LitestarStore):
+        """Litestar-compatible Store backed by AsyncCacheStore and native Valkey driver."""
+
+    class RedisStore(_RedisStoreImpl, _LitestarStore):
+        """Litestar-compatible Store backed by AsyncCacheStore and native Redis driver."""
+
+    class ResponseCacheStore(_ResponseCacheStoreImpl, MemoryStore):
+        """Litestar response cache store backed by AsyncCacheStore fast memory/SHM cache."""
+
+    class ObjectStoreLitestarStore(_ObjectStoreLitestarStoreImpl, _LitestarStore):
+        """Litestar key/value store with persistent, versioned wall-clock expiration."""
+
+
+def _get_store_class(name: str) -> type[Any]:
+    cached = _CACHED_STORE_CLASSES.get(name)
+    if cached is not None:
+        return cached
+
+    base_mod = ensure_module("litestar.stores.base", extra="litestar")
+    litestar_store = base_mod.Store
+
+    impl_map: dict[str, type[Any]] = {
+        "MemoryStore": _MemoryStoreImpl,
+        "ValkeyStore": _ValkeyStoreImpl,
+        "RedisStore": _RedisStoreImpl,
+        "ObjectStoreLitestarStore": _ObjectStoreLitestarStoreImpl,
+    }
+    if name == "ResponseCacheStore":
+        memory_cls = _get_store_class("MemoryStore")
+        created = type(
+            "ResponseCacheStore",
+            (_ResponseCacheStoreImpl, memory_cls),
+            {
+                "__module__": __name__,
+                "__doc__": _ResponseCacheStoreImpl.__doc__,
+                "__slots__": (),
+            },
+        )
+    else:
+        impl_cls = impl_map[name]
+        created = type(
+            name,
+            (impl_cls, litestar_store),
+            {
+                "__module__": __name__,
+                "__doc__": impl_cls.__doc__,
+                "__slots__": (),
+            },
+        )
+    _CACHED_STORE_CLASSES[name] = created
+    return created
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind Litestar Store subclasses to ``litestar.stores.base.Store``."""
+    if name in {"MemoryStore", "ValkeyStore", "RedisStore", "ResponseCacheStore", "ObjectStoreLitestarStore"}:
+        return _get_store_class(name)
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return module attributes including lazily bound Litestar Store subclasses."""
+    return sorted(set(globals()) | set(__all__))
 
 
 def swap_response_cache_store(
@@ -213,16 +593,20 @@ def swap_response_cache_store(
             internal_dict = stores
         else:
             return None
+
+    memory_store_cls = _get_store_class("MemoryStore")
+    mem_mod = import_optional("litestar.stores.memory")
+    litestar_mem_cls = getattr(mem_mod, "MemoryStore", None) if mem_mod is not None else None
     current = internal_dict.get(store_name)
-    is_memory_store = (_MemoryStoreCls is not None and isinstance(current, _MemoryStoreCls)) or (
-        type(current).__name__ == "MemoryStore" and not isinstance(current, MemoryStore)
+    is_memory_store = (litestar_mem_cls is not None and isinstance(current, litestar_mem_cls)) or (
+        type(current).__name__ == "MemoryStore" and not isinstance(current, memory_store_cls)
     )
     if is_memory_store or store is not None:
-        replacement = store if store is not None else MemoryStore()
+        replacement = store if store is not None else memory_store_cls()
         internal_dict[store_name] = replacement
-        return replacement
-    if isinstance(current, MemoryStore):
-        return current
+        return cast("MemoryStore", replacement)
+    if isinstance(current, memory_store_cls):
+        return cast("MemoryStore", current)
     return None
 
 
@@ -231,22 +615,3 @@ def _resolve_object_store(store: AsyncObjectStore | StorageConfig | str) -> Asyn
     if store is None or store == "":
         raise ImproperConfigurationError("An explicit object store configuration is required")
     return store if isinstance(store, AsyncObjectStore) else AsyncObjectStore(store)
-
-
-def _load_store_types() -> type[Any] | None:
-    """Load Litestar MemoryStore and register stores as Store virtual subclasses."""
-    base_mod = import_optional("litestar.stores.base")
-    mem_mod = import_optional("litestar.stores.memory")
-    if base_mod is None or mem_mod is None:
-        return None
-    register_fn = getattr(base_mod.Store, "register", None)
-    if callable(register_fn):
-        register_fn(MemoryStore)
-        register_fn(ValkeyStore)
-        register_fn(RedisStore)
-        register_fn(ResponseCacheStore)
-    memory_cls: type[Any] = mem_mod.MemoryStore
-    return memory_cls
-
-
-_MemoryStoreCls = _load_store_types()

@@ -23,6 +23,8 @@ from sqlspec.extensions.events import (
     fits_notify_payload,
     normalize_event_channel_name,
 )
+from sqlspec.extensions.litestar.store import CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.db.adapters.postgres.notify import AsyncPostgresNotificationSource, SyncPostgresNotificationSource
 from vertebra.extensions.sqlspec.adapters.postgres.core import (
@@ -33,6 +35,7 @@ from vertebra.extensions.sqlspec.adapters.postgres.core import (
     pg_row_value,
     pg_table_ref,
     postgres_storage_params_sql,
+    validate_pg_table_name,
 )
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -73,6 +76,8 @@ def _decode_spill_marker(raw_payload: Any) -> str | None:
 class PostgresEventQueueStore(BaseEventQueueStore["PostgresSyncConfig | PostgresAsyncConfig"]):
     """PostgreSQL durable event queue store using JSONB and TIMESTAMPTZ columns."""
 
+    __slots__ = ()
+
     extension_config_options = BaseEventQueueStore.extension_config_options | frozenset(
         {
             "autovacuum_analyze_scale_factor",
@@ -82,14 +87,34 @@ class PostgresEventQueueStore(BaseEventQueueStore["PostgresSyncConfig | Postgres
         }
     )
 
+    def _split_table_name(self) -> tuple[str | None, str]:
+        parts = validate_pg_table_name(self.table_name)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, parts[0]
+
     def _column_types(self) -> tuple[str, str, str]:
         return "JSONB", "JSONB", "TIMESTAMPTZ"
 
     def _string_type(self, length: int) -> str:
         return f"VARCHAR({length})"
 
-    def _wrap_create_statement(self, statement: str, statement_type: str) -> str:
-        if statement_type != "table":
+    def _index_name(self) -> str:
+        return pg_index_name("idx", self.table_name, "channel_status")
+
+    def _index_ddl(self) -> str:
+        table_ref = pg_table_ref(self.table_name)
+        idx_name = self._index_name()
+        return (
+            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_ref} (channel, status, available_at) "
+            "WHERE status = 'pending';"
+        )
+
+    def _index_existence_target(self) -> tuple[str | None, str]:
+        return self._split_table_name()
+
+    def _wrap_create_statement(self, statement: str, object_type: str) -> str:
+        if object_type != "table":
             return statement
         tuning = postgres_storage_params_sql(
             self.settings,
@@ -105,7 +130,6 @@ class PostgresEventQueueStore(BaseEventQueueStore["PostgresSyncConfig | Postgres
     def create_statements(self) -> list[str]:
         """Build idempotent PostgreSQL DDL for the event queue table and partial pending index."""
         table_ref = pg_table_ref(self.table_name)
-        idx_name = pg_index_name("idx", self.table_name, "channel_status")
         table_sql = self._wrap_create_statement(
             f"CREATE TABLE IF NOT EXISTS {table_ref} ("
             "event_id VARCHAR(64) PRIMARY KEY, "
@@ -120,21 +144,80 @@ class PostgresEventQueueStore(BaseEventQueueStore["PostgresSyncConfig | Postgres
             ");",
             "table",
         )
-        index_sql = (
-            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_ref} (channel, status, available_at) "
-            "WHERE status = 'pending';"
-        )
-        return [table_sql, index_sql]
+        return [table_sql, self._index_ddl()]
 
     def drop_statements(self) -> list[str]:
         """Return PostgreSQL DROP statements for queue index and table."""
         table_ref = pg_table_ref(self.table_name)
-        idx_name = pg_index_name("idx", self.table_name, "channel_status")
+        idx_name = self._index_name()
         return [f"DROP INDEX IF EXISTS {idx_name};", f"DROP TABLE IF EXISTS {table_ref};"]
+
+    def _schema_target(self) -> SchemaTarget:
+        schema_name, bare_table = self._split_table_name()
+        return SchemaTarget.from_ddl(
+            bare_table,
+            self.create_statements()[0],
+            schema=schema_name,
+            dialect="postgres",
+        )
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the PostgreSQL event queue table."""
+        return [self._schema_target()]
+
+    def companion_index_statement(self) -> str:
+        """Return PostgreSQL partial pending-index DDL for the event queue table."""
+        return self._index_ddl()
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return companion partial index descriptors for the PostgreSQL event queue table."""
+        schema_name, bare_table = self._split_table_name()
+        return [
+            CompanionIndex(
+                name=self._index_name(),
+                table=bare_table,
+                schema=schema_name,
+                ddl=self.companion_index_statement(),
+            )
+        ]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion partial index on a synchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                driver.execute_script(index.ddl)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion partial index on an asynchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                await driver.execute_script(index.ddl)
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return downgrade drop statements for the PostgreSQL event queue index and table."""
+        return [DropStatement(statement) for statement in self.drop_statements()]
 
 
 class PostgresSyncEventsBackend(SyncEventBackendProtocol):
     """Synchronous PostgreSQL event backend combining LISTEN/NOTIFY with `EventQueueStore` spill."""
+
+    __slots__ = (
+        "_closed",
+        "_cond",
+        "_config",
+        "_owns_source",
+        "_pump_done",
+        "_pump_error",
+        "_pump_thread",
+        "_queue",
+        "_raw_queues",
+        "_source",
+        "_spilled_buffers",
+        "_subscribed",
+        "_unacked",
+    )
 
     supports_sync: ClassVar[bool] = True
     backend_name: ClassVar[str] = "postgres_listen_notify"
@@ -394,6 +477,20 @@ class PostgresSyncEventsBackend(SyncEventBackendProtocol):
 
 class PostgresAsyncEventsBackend(AsyncEventBackendProtocol):
     """Asynchronous PostgreSQL event backend combining LISTEN/NOTIFY with `EventQueueStore` spill."""
+
+    __slots__ = (
+        "_channel_queues",
+        "_closed",
+        "_config",
+        "_owns_source",
+        "_pump_error",
+        "_pump_task",
+        "_queue",
+        "_source",
+        "_spilled_buffers",
+        "_subscribed",
+        "_unacked",
+    )
 
     supports_async: ClassVar[bool] = True
     backend_name: ClassVar[str] = "postgres_listen_notify"

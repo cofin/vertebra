@@ -1,11 +1,16 @@
 """Tests for route-driven TypeScript and bidirectional Protobuf v3 generation."""
 
 import asyncio
+import textwrap
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import msgspec
+import pytest
 
+from vertebra.build._config import BuildConfig
+from vertebra.build._orchestrator import BuildOrchestrator
 from vertebra.build.codegen._manifest import ManifestGenerator
 from vertebra.build.codegen._metadata import RouteCollector
 from vertebra.build.codegen._typescript import TypeScriptGenerator, format_typescript
@@ -139,7 +144,7 @@ def test_bidirectional_protobuf_routes_and_procedures() -> None:
     assert result.name == "Grace"
 
 
-def test_websocket_route_extraction_and_ws_url_codegen() -> None:
+def test_websocket_route_extraction_and_ws_url_codegen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = App()
 
     @app.get("/users/{user_id:int}")
@@ -165,7 +170,69 @@ def test_websocket_route_extraction_and_ws_url_codegen() -> None:
 
     ts_out = TypeScriptGenerator().generate(routes)
     assert 'export type WebSocketRouteName = "ws_rooms_by_room_id";' in ts_out
+    assert (
+        'export declare const websocketRoutes: Record<WebSocketRouteName, { readonly method: "WS"; readonly path: string }>;'
+        in ts_out
+    )
+    assert "export declare const routes: Record<string, { readonly method: string; readonly path: string }>;" in ts_out
     assert "export interface WebSocketRoutePathParams {" in ts_out
     assert "export interface WebSocketChannelPayloads {" in ts_out
     assert "receive: CreateUserInput; send: User" in ts_out
-    assert "export function wsUrl<K extends WebSocketRouteName>(" in ts_out
+    assert "export declare function wsUrl<K extends WebSocketRouteName>(" in ts_out
+    assert "export function wsUrl" not in ts_out
+    assert "export const websocketRoutes" not in ts_out
+
+    routes_ts = BuildOrchestrator._render_routes_ts(routes)
+    assert '"ws_rooms_by_room_id": { method: "WS", path: "/ws/rooms/{room_id:str}" }' in routes_ts
+    assert "export function wsUrl<K extends WebSocketRouteName>(" in routes_ts
+    assert "if (v === undefined || v === null) continue;" in routes_ts
+
+    app_module = tmp_path / "ws_codegen_sample_app.py"
+    app_module.write_text(
+        textwrap.dedent(
+            """
+            import msgspec
+            from vertebra.framework._app import App
+            from vertebra.framework._router import Route
+
+            class User(msgspec.Struct):
+                id: int
+                name: str
+
+            class ChatInput(msgspec.Struct):
+                text: str
+
+            app = App()
+
+            @app.get("/users/{user_id:int}")
+            def get_user(user_id: int) -> User:
+                return User(id=user_id, name="Ada")
+
+            async def chat_room(room_id: str, data: ChatInput) -> User:
+                return User(id=1, name=f"{room_id}:{data.text}")
+
+            app.add_route(Route(method="WEBSOCKET", path="/ws/rooms/{room_id:str}", handler=chat_room))
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    orch = BuildOrchestrator(
+        tmp_path,
+        config=BuildConfig(app="ws_codegen_sample_app:app", codegen=True, codegen_output="generated"),
+    )
+    output_dir = orch.codegen_only()
+    generated_types = (output_dir / "types.d.ts").read_text(encoding="utf-8")
+    generated_routes = (output_dir / "routes.ts").read_text(encoding="utf-8")
+
+    assert "export declare const routes:" in generated_types
+    assert "export declare const websocketRoutes:" in generated_types
+    assert "export declare function wsUrl<K extends WebSocketRouteName>(" in generated_types
+    assert "export function wsUrl" not in generated_types
+    assert "export const websocketRoutes" not in generated_types
+
+    assert "export const routes = {" in generated_routes
+    assert "export const websocketRoutes = {" in generated_routes
+    assert '"ws_rooms_by_room_id": { method: "WS", path: "/ws/rooms/{room_id:str}" }' in generated_routes
+    assert "export function wsUrl<K extends WebSocketRouteName>(" in generated_routes

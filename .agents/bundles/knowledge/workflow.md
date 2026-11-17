@@ -13,6 +13,9 @@ generated:
   by: flow/0.30.1
   at: "2026-11-06T18:28:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:15:00Z"
+    commit: 5a833832
   - by: agent:flow-archive
     at: "2026-11-16T15:16:00Z"
     commit: 11020d84
@@ -62,23 +65,24 @@ make clean                                                            # Remove P
 make release bump=patch                                               # Synchronize versions across manifests via bump-my-version
 
 # 2. Fast Chapter Gate (< 60s — run once per chapter batch) & Focused Suites
-make lint-all                                                         # Read-only CI lint, Ruff, Mypy (src/py/vertebra + src/py/tests/{unit,integration} + tools + docs/examples), stubtest, rustfmt --check, Clippy, review-check
-make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then Mypy (including tests & benchmarks) + stubtest + review-check
+make lint-all                                                         # Read-only CI lint (`uv run --no-sync`): Biome + tsc --noEmit, Ruff, Mypy, Pyright, check_extras.py, fail-loud 13-extension stubtest, rustfmt --check, Clippy, review-check
+make lint                                                             # Auto-fix Biome, Ruff, rustfmt + Clippy (--features tls,http3,compression,gcp), then tsc --noEmit + Mypy + Pyright + check_extras.py + fail-loud stubtest + review-check
 make review-check                                                     # Validate review capability manifests, skills, agents, OKF bundles, and privacy constraints
 make review-route                                                     # Route changed files to owning review areas and shards (BASE=origin/main)
 uv run --no-sync pytest src/py/tests/unit/server/test_runner.py -q    # Targeted Python unit test file
 cargo test --manifest-path src/rs/Cargo.toml -p vertebra-core         # Targeted Rust crate test suite
 make ts-test                                                          # Vitest suite with isolated --localstorage-file
 
-# 3. Scoped Engine & Documentation Gates
+# 3. Scoped Engine, Wheel & Documentation Gates
 make sqlite-test     # vertebra-sqlite Rust tests, stubtest, and Python unit/conformance suites (make sqlite-wheel-check verifies wheel isolation)
 make duckdb-test     # vertebra-duckdb Rust tests, stubtest, and Python unit/conformance suites (make duckdb-wheel-check verifies wheel isolation)
 make mysql-test      # vertebra-mysql Rust tests, stubtest, and Python MySQL suites (make mysql-wheel-check verifies wheel isolation)
 make mssql-test      # vertebra-mssql Rust tests, stubtest, and Python MSSQL suites (make mssql-wheel-check verifies wheel isolation)
-make oracle-test     # vertebra-oracle Rust tests, stubtest, and Python Oracle adapter + native suites (make oracle-wheel-check verifies wheel isolation)
+make oracle-test     # vertebra-oracle Rust tests, stubtest, test_oracle_adapter.py, test_oracle_context_notify_and_queues.py, and test_oracle_native.py (make oracle-wheel-check verifies wheel isolation)
 make postgres-test   # vertebra-postgres Rust tests and _postgres stubtest (make postgres-wheel-check runs verify_postgres_wheel.py)
-make redis-test      # vertebra-redis Rust tests, stubtest, and Python Redis suites (make redis-wheel-check verifies wheel isolation)
-make valkey-test     # vertebra-valkey Rust tests, stubtest, and Python Valkey suites (make valkey-wheel-check verifies wheel isolation)
+make redis-test      # vertebra-redis Rust tests, stubtest, test_redis_valkey_{driver,resp3}.py, and test_queue_backends_and_channels.py (make redis-wheel-check verifies wheel isolation)
+make valkey-test     # vertebra-valkey Rust tests, stubtest, test_redis_valkey_{driver,resp3}.py, and test_queue_backends_and_channels.py (make valkey-wheel-check verifies wheel isolation)
+make core-wheel-check # Build relocatable vertebra-server + vertebra-core wheel and smoke test vtb run (plus {storage,bigquery,spanner,bundler}-wheel-check for 13 total wheel checks)
 make db-conformance  # Live database conformance suite (ENGINE=<duckdb|mysql|mariadb|mssql|oracle|redis|sqlite|valkey> [VERSION=<v>] required; zero-skip ConformanceGate)
 make postgres-bench-check # PYTHONPATH="$(CURDIR)/src/py" cargo test -p vertebra-postgres --bench postgres_native --locked + Ruff/Mypy + comparator tests (make postgres-bench runs live + Criterion)
 make docs            # scan_public_docstrings + generate_cli_docs --check + zensical build --clean + postbuild + verify_docs_artifacts
@@ -96,11 +100,11 @@ make bench                                                            # make bui
 
 ## Polyglot Rebuild & Hygiene Rules
 
-1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed extras with `uv run --no-sync` when verifying an existing `.venv` or linked `git worktree`. After any `.rs` edit in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-sqlite`, `vertebra-redis`, or `vertebra-valkey`, rebuild the touched extension (or run `make dev`) before `pytest` or `mypy.stubtest`.
-2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` (`make core-wheel-check`) while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). Companion extensions build isolated PEP 420 wheels without `vertebra/*.py` files (`make {sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey}-wheel-check`).
+1. **Rust to Python FFI Rebuild (`make dev`)**: Preserve installed extras with `uv run --no-sync` when verifying an existing `.venv` or linked `git worktree`. After any `.rs` edit in `vertebra-core`, `vertebra-py`, `vertebra-bundler`, `vertebra-storage`, `vertebra-db`, `vertebra-mysql`, `vertebra-bigquery`, `vertebra-mssql`, `vertebra-spanner`, `vertebra-duckdb`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-sqlite`, `vertebra-redis`, or `vertebra-valkey`, rebuild the touched extension (or run `make dev`) before `pytest`, `pyright`, or `mypy.stubtest`.
+2. **PyPI Distribution vs. Import Namespace**: [`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml] publishes `vertebra-core` (`make core-wheel-check`) while exposing the `vertebra` import namespace (`module-name = "vertebra._vertebra"`). All 12 companion extensions pin `vertebra-core==<version>`, include only their own `.pyi` stub, and build isolated PEP 420 wheels without `vertebra/*.py` files (`make {sqlite,duckdb,mysql,mssql,oracle,postgres,redis,valkey,storage,bigquery,spanner,bundler}-wheel-check`). `.github/workflows/release.yaml` runs `validate_release_manifest` to fail releases while `[tool.uv.sources]` carries upstream `git`/`rev`/`branch`/`tag` pins, builds sdists for `core` plus all 12 companions (including `valkey`), and gates PyPI uploads to `release` events.
 3. **Codegen & Wheel-Bundled TypeScript Sync**: `make ts-build` compiles all 17 `@vertebra/client` entrypoints ([`package.json`](../../../src/ts/vertebra-client/package.json)[^src-package-json]) and copies `dist/` into `src/py/vertebra/server/_js/bundle/`.
 4. **Shared-Memory Cleanup**: `make rs-test` clears `/dev/shm/test-*` and `/dev/shm/*vertebra*`; parallel review or chapter agents must run targeted `cargo test -p <crate>` commands rather than `make rs-test` so concurrent SHM segments are not unlinked.
-5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.1.0; python_version < '3.14'` strictly inside `[dependency-groups].bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]).
+5. **Dependency Group Isolation**: Keep third-party `duckdb>=1.0; python_version < '3.14'` inside `[dependency-groups].duckdb` and `bench` (`make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb` or `--group bench`), HTTP benchmark harnesses in `bench`, `psycopg`/`asyncpg` PostgreSQL benchmark comparators in `postgres-bench` (`python_version < '3.14'`), and Zensical packages in `doc` ([`pyproject.toml`](../../../pyproject.toml)[^src-pyproject-toml]). `tools/scripts/check_extras.py` enforces bidirectional optional-import parity with `[project.optional-dependencies]`.
 6. **Documentation, Secret, & Git Hygiene**: Never enable `navigation.indexes` in `zensical.toml`; use `"mock-oauth-token"` in GCS/IAM tests (`git-secrets` blocks real OAuth2 prefixes); keep `extensions.worktreeConfig` and `core.hooksPath` unset in `.git/config`.
 
 ## Direct Markdown Continuity & Chapter-Batch Loop

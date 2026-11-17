@@ -13,6 +13,12 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:02:00Z"
+    commit: 5a833832
+  - by: agent:flow-executor
+    at: "2026-11-17T05:50:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -50,9 +56,15 @@ sources:
   - id: src-build-codegen-plugin-py
     resource: src/py/vertebra/build/codegen/plugin.py
     title: "Python implementation module (src/py/vertebra/build/codegen/plugin.py)"
+  - id: src-build-orchestrator-py
+    resource: src/py/vertebra/build/_orchestrator.py
+    title: "BuildOrchestrator runtime routes.ts codegen emitter"
   - id: src-framework-inertia-init-py
     resource: src/py/vertebra/framework/inertia/__init__.py
     title: "Python implementation module (src/py/vertebra/framework/inertia/__init__.py)"
+  - id: src-framework-ssr-init-py
+    resource: src/py/vertebra/framework/ssr/__init__.py
+    title: "SSR clients and render_page_shell HTML shell renderer"
   - id: src-framework-router-py
     resource: src/py/vertebra/framework/_router.py
     title: "Python implementation module (src/py/vertebra/framework/_router.py)"
@@ -65,17 +77,19 @@ sources:
 
 <!-- truth: start -->
 - `TypeExtractor` lowers `App` route signatures and `msgspec.Struct` schemas into a canonical `TypeNode` IR shared across TypeScript, Zod, Valibot, OpenAPI, Protobuf v3, and procedure generators.
-- `SyncInertiaMiddleware` and `AsyncInertiaMiddleware` implement Inertia v3 (`X-Inertia`, partial reloads, `303` redirect coercion on `PUT`/`PATCH`/`DELETE`, and `409 X-Inertia-Location` version mismatches).
+- `TypeScriptGenerator` emits ambient `types.d.ts` (`export declare const routes`, `export declare const websocketRoutes`, `export declare function wsUrl`), while `BuildOrchestrator._render_routes_ts` emits runtime `routes.ts` (`routes`, `websocketRoutes` with `{ method: "WS", path }`, and `wsUrl`).
+- `SyncInertiaMiddleware` and `AsyncInertiaMiddleware` implement Inertia v3 (`X-Inertia`, BLAKE2b `digest_size=4` manifest version, async prop/iterable resolution, `onceProps` and `X-Inertia-Reset` metadata, `409 X-Inertia-Location` version mismatches, `Link` early hints, and `render_page_shell` SSR/CSR shell injection).
 <!-- truth: end -->
 
-[`vertebra.build.codegen`](../../../../../src/py/vertebra/build/codegen/__init__.py)[^src-build-codegen-init-py] converts handler signatures on a Vertebra `App` into a msgspec-tagged IR, then renders client artifacts. `BuildOrchestrator` runs the TypeScript, Zod, and manifest generators (see [Bundler, HMR & SSR](bundler-hmr-and-ssr.md)); the remaining targets run through `CodegenPlugin.emit_all` or direct calls.
+[`vertebra.build.codegen`](../../../../../src/py/vertebra/build/codegen/__init__.py)[^src-build-codegen-init-py] converts handler signatures on a Vertebra `App` into a msgspec-tagged IR, then renders client artifacts. [`BuildOrchestrator`](../../../../../src/py/vertebra/build/_orchestrator.py)[^src-build-orchestrator-py] runs the TypeScript, Zod, manifest, and runtime `routes.ts` emitters (see [Bundler, HMR & SSR](bundler-hmr-and-ssr.md)); the remaining targets run through `CodegenPlugin.emit_all` or direct calls.
 
 ```mermaid
 flowchart LR
     App["App.routes (Route)"] --> Collector["RouteCollector (_extractor.py)"]
     Collector --> Extractor["TypeExtractor (_extractor.py)"]
     Extractor --> IR["TypeNode IR + RouteMetadata"]
-    IR --> TS["TypeScriptGenerator (types.d.ts)"]
+    IR --> TS["TypeScriptGenerator (types.d.ts ambient)"]
+    IR --> Routes["BuildOrchestrator._render_routes_ts (routes.ts runtime)"]
     IR --> Zod["ZodGenerator (schemas.zod.ts)"]
     IR --> Man["ManifestGenerator (manifest.json)"]
     IR --> Plugin["CodegenPlugin.emit_all (Valibot, OpenAPI, Protobuf, procedures)"]
@@ -99,9 +113,10 @@ flowchart LR
 
 | Generator | Module | Output |
 | --- | --- | --- |
-| `TypeScriptGenerator` | `_typescript.py` | `// DO NOT EDIT` header, `export interface <Name>` per named `ObjectType` (`?` for optional fields), and `export namespace Procedures { ... }` nested by `operation_id` segment, each leaf `export type <leaf> = (params: {...}) => Promise<Ret>;`. `format_typescript` trims trailing whitespace. |
+| `TypeScriptGenerator` | `_typescript.py` | `// DO NOT EDIT` header, `export interface <Name>` per named `ObjectType` (`?` for optional fields), `export namespace Procedures { ... }` nested by `operation_id` segment (`export type <leaf> = (params: {...}) => Promise<Ret>;`), ambient `export declare const routes: Record<string, { readonly method: string; readonly path: string }>;`, and (when WebSocket routes exist) `WebSocketRouteName`, ambient `export declare const websocketRoutes: Record<WebSocketRouteName, { readonly method: "WS"; readonly path: string }>;`, `WebSocketRoutePathParams`, `WebSocketChannelPayloads`, and ambient `export declare function wsUrl(...)`. `format_typescript` trims trailing whitespace. |
+| `BuildOrchestrator._render_routes_ts` | `_orchestrator.py` | Emits runtime `routes.ts` owning `export const routes = { ... } as const;` (`{ method, path }`), plus (when `protocol == "websocket"` routes exist) runtime `export const websocketRoutes = { ... } as const;` (`{ method: "WS", path }`), `export type WebSocketRouteName`, and runtime `export function wsUrl(...)`. |
 | `ZodGenerator` | `zod.py` | `import { z } from "zod";` then `export const <operation_id>Params = z.object({...})` using `z.union`, `z.literal`, and `.optional()`. Also `generate_from_node`, `generate_from_schema` (JSON Schema), `emit_schema`. |
-| `ManifestGenerator` | `_manifest.py` | `{"routes": {operation_id: {handlerName, method, paramsSchema, procedureId, responseSchema, route}}, "version": 1}`. |
+| `ManifestGenerator` | `_manifest.py` | `{"routes": {operation_id: {handlerName, method, paramsSchema, procedureId, protocol, responseSchema, route, channelKey?}}, "version": 1, "websocketRoutes"?: ...}`. |
 | `ValibotGenerator` | `valibot.py` | `import * as v from 'valibot';` schemas with the same entry points as `ZodGenerator`. |
 | `OpenAPIGenerator` | `openapi.py` | `generate` / `generate_json` producing an `"openapi": "3.1.0"` document. |
 | `ProtobufGenerator` / `ProtobufParser` | `protobuf.py` | Bidirectional `.proto` ↔ `TypeNode` IR + `RouteMetadata`: `ProtobufGenerator` emits `syntax = "proto3";` messages plus one `service` (`unary`, `server_streaming`, `client_streaming`, `bidi` RPCs and `google.api.http` annotations), while `ProtobufParser` parses `.proto` files into `ProtoFileSpec`, `msgspec.Struct` stubs (`generate_python_stubs`), and `RouteMetadata` (`to_routes`). |
@@ -117,15 +132,15 @@ flowchart LR
 
 ## Inertia v3 (`framework/inertia/__init__.py`)
 
-[`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py)[^src-framework-inertia-init-py] turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into a pure-Python `vertebra.framework._router.Response`.
+[`SyncInertiaMiddleware(config=None, ssr_client=None)` and `AsyncInertiaMiddleware(config=None, ssr_client=None)`](../../../../../src/py/vertebra/framework/inertia/__init__.py)[^src-framework-inertia-init-py] inherit `_BaseInertiaMiddleware` and turn an `InertiaResponse(component, props, encrypt_history, clear_history)` (helper `inertia()`) into an `InertiaHttpResponse(status, headers, body, early_hints)`. `AsyncInertiaMiddleware` awaits async prop callables and async iterables via `_resolve_async_value`, while `SyncInertiaMiddleware` resolves synchronous callables.
 
-- **Version**: `get_version()` returns `InertiaConfig.version`, else the first 8 hex chars of the MD5 of `manifest_path` (`dist/.vite/manifest.json`), else `"dev"`.
-- **Conflict**: an `X-Inertia: true` `GET` whose `X-Inertia-Version` differs returns `409` with `X-Inertia-Location: <request.path>`.
-- **XHR visit**: `200`, `Content-Type: application/json`, `X-Inertia: true`, `Vary: X-Inertia`, body is the page object.
-- **Initial visit**: `200` HTML with `<div id="app">`, optional SSR `head`/`body` from `ssr_client.render(page)` when `ssr_enabled` (CSR fallback on error), and the page in `<script data-page="app" type="application/json">`.
-- **Page object**: `component`, `props` (shared data merged first), `url`, `version`, optional `encryptHistory`/`clearHistory`, and metadata `deferredProps`, `mergeProps`, `prependProps`, `deepMergeProps`, `scrollProps`, `onceProps`, `resetProps`.
-- **Prop wrappers**: `defer` (`DeferredProp`), `merge` (`MergeProp`, `prepend`), `deep_merge`, `once` (`expires_in`), `scroll`, `optional`. Partial reloads honor `X-Inertia-Partial-Component`, `X-Inertia-Partial-Data`, `X-Inertia-Partial-Except`, `X-Inertia-Reset`, and `X-Inertia-Except-Once-Props`.
-- `should_redirect_303(method, status)` reports whether a `301`/`302` after `PUT`/`PATCH`/`DELETE` should become `303`.
+- **Version**: `get_version()` returns `InertiaConfig.version`, else the first 8 hex chars of the BLAKE2b digest (`digest_size=4`) of `manifest_path` (`dist/.vite/manifest.json`), else `"dev"`.
+- **Headers & URLs**: Header lookups (`_get_header`) are case-insensitive across mapping and sequence header formats, and `_build_request_url` preserves query strings on `page["url"]` and `409` conflict redirects.
+- **Conflict**: An `X-Inertia: true` `GET` whose `X-Inertia-Version` differs returns `409` with `X-Inertia-Location: <request.url>`.
+- **XHR visit**: `200`, `Content-Type: application/json`, `X-Inertia: true`, `Vary: X-Inertia`, body is the JSON page object.
+- **Initial visit & SSR shell**: `200` HTML rendered by [`render_page_shell`](../../../../../src/py/vertebra/framework/ssr/__init__.py)[^src-framework-ssr-init-py] with `<div id="app">`, optional SSR `head`/`body` from `ssr_client.render(page)` when `ssr_enabled` (CSR fallback on error), resolved `asset_manifest` tags (`early_hints` emitting HTTP `Link` headers and `csp_nonce_header` nonce propagation), `static_props`, and `<script data-page="app" type="application/json">`; templates containing only `<!--ssr-body-->` (without `<!--inertia-->` or `@inertia`) still receive the `<div id="app">` wrapper and `data-page` script.
+- **Page object & shared data**: `component`, `props` (configured `shared_data` merged first and preserved during partial reloads), `url`, `version`, optional `encryptHistory`/`clearHistory`, and metadata `deferredProps`, `mergeProps`, `prependProps`, `deepMergeProps`, `scrollProps`, and `onceProps`.
+- **Prop wrappers & reset**: `DeferredProp(once=..., expires_in=...)`, `MergeProp(prepend=...)`, `DeepMergeProp`, `OnceProp(expires_in=...)`, `ScrollProp`, and `OptionalProp`. `DeferredProp.once` emits `onceProps` metadata and honors `X-Inertia-Except-Once-Props`, while `X-Inertia-Reset` clears merge and `onceProps` metadata for named props without emitting non-standard fields. Partial reloads honor `X-Inertia-Partial-Component`, `X-Inertia-Partial-Data`, and `X-Inertia-Partial-Except`.
 
 `InertiaConfig` fields are listed in [Routing & App](../../domains/framework/routing-and-app.md).
 
@@ -142,6 +157,8 @@ Provenance sources: [^src-build-codegen-typescript-py], [^src-build-codegen-mani
 [^src-build-codegen-protobuf-py]: `src/py/vertebra/build/codegen/protobuf.py` — Python implementation module (src/py/vertebra/build/codegen/protobuf.py).
 [^src-build-codegen-procedures-py]: `src/py/vertebra/build/codegen/procedures.py` — Python implementation module (src/py/vertebra/build/codegen/procedures.py).
 [^src-build-codegen-plugin-py]: `src/py/vertebra/build/codegen/plugin.py` — Python implementation module (src/py/vertebra/build/codegen/plugin.py).
+[^src-build-orchestrator-py]: `src/py/vertebra/build/_orchestrator.py` — `BuildOrchestrator` runtime `routes.ts` codegen emitter.
 [^src-framework-inertia-init-py]: `src/py/vertebra/framework/inertia/__init__.py` — Python implementation module (src/py/vertebra/framework/inertia/__init__.py).
+[^src-framework-ssr-init-py]: `src/py/vertebra/framework/ssr/__init__.py` — SSR clients and `render_page_shell` HTML shell renderer.
 [^src-framework-router-py]: `src/py/vertebra/framework/_router.py` — Python implementation module (src/py/vertebra/framework/_router.py).
 [^src-tests-unit-codegen-test-codegen-extractor-py]: `src/py/tests/unit/codegen/test_codegen_extractor.py` — Python implementation module (src/py/tests/unit/codegen/test_codegen_extractor.py).

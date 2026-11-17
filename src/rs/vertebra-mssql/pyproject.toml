@@ -8,11 +8,15 @@ version = "0.3.0"
 description = "Native pure-Rust Microsoft SQL Server (TDS 7.3+) client extension for Vertebra."
 requires-python = ">=3.12"
 license = { text = "MIT" }
+dependencies = ["vertebra-core==0.3.0"]
 
 [tool.maturin]
 python-source = "../../py"
 module-name = "vertebra._mssql"
 features = ["extension-module"]
+include = [
+    { path = "vertebra/_mssql.pyi", format = ["sdist", "wheel"] },
+]
 exclude = [
     "**/py/vertebra/**/*.py",
     "**/py/vertebra/**/*.so",

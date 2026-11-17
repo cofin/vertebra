@@ -13,10 +13,16 @@ use vertebra_core::shm::ShmRegion;
 fn make_spsc_heap(slots: usize, slot_size: usize) -> (std::mem::ManuallyDrop<Vec<u8>>, SpscRing) {
     let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
     let alloc = std::alloc::Layout::from_size_align(layout.total_size, CACHELINE_BYTES).unwrap();
+    // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
     let raw_ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!raw_ptr.is_null());
+    // SAFETY: `raw_ptr` is non-null, `CACHELINE_BYTES`-aligned, valid for `layout.total_size` bytes,
+    // and outlives `region` via `ManuallyDrop` retention.
     let region = Arc::new(unsafe { ShmRegion::from_raw(raw_ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+    // SAFETY: `raw_ptr` is non-null with capacity `layout.total_size` and `len == 0`; `ManuallyDrop`
+    // prevents `Vec::drop` from deallocating a `CACHELINE_BYTES`-aligned buffer with `u8` alignment.
     let sentinel =
         std::mem::ManuallyDrop::new(unsafe { Vec::from_raw_parts(raw_ptr, 0, layout.total_size) });
     (sentinel, ring)

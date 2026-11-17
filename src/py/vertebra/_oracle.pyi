@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Mapping, Sequence
 from types import TracebackType
 from typing import Any, final
 
-from vertebra.db.arrow import ArrowCursor
+from vertebra._vertebra import ArrowCursor
 
 __version__: str
 FREE_THREADED: bool

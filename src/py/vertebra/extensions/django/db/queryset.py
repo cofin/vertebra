@@ -9,7 +9,7 @@ from vertebra.extensions.django.orm import _struct_fields, models_to_structs, ro
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 __all__ = (
     "ArrowQuerySet",
@@ -22,8 +22,9 @@ class ArrowQuerySetMixin:
 
     def _extract_records(self, fields: Sequence[str] | None = None) -> tuple[list[str], list[dict[str, Any]]]:
         """Extract column names and row dictionaries from this QuerySet."""
-        if hasattr(self, "values") and callable(self.values):
-            rows_iter = self.values(*fields) if fields else self.values()
+        values_fn = getattr(self, "values", None)
+        if callable(values_fn):
+            rows_iter = cast("Iterable[Mapping[str, Any]]", values_fn(*fields) if fields else values_fn())
             records = [dict(r) for r in rows_iter]
             if records:
                 cols = list(fields) if fields else list(records[0].keys())
@@ -62,8 +63,9 @@ class ArrowQuerySetMixin:
     def to_schema[T](self, schema_type: type[T], *, fields: Sequence[str] | None = None) -> list[T]:
         """Project QuerySet rows directly into ``schema_type`` bypassing Django Model instantiation."""
         target_fields = tuple(fields) if fields is not None else _struct_fields(schema_type)
-        if hasattr(self, "values_list") and callable(self.values_list) and target_fields:
-            raw_rows = list(self.values_list(*target_fields))
+        values_list_fn = getattr(self, "values_list", None)
+        if callable(values_list_fn) and target_fields:
+            raw_rows = list(cast("Iterable[Any]", values_list_fn(*target_fields)))
             return rows_to_structs(raw_rows, schema_type, columns=target_fields)
         cols, records = self._extract_records(fields=target_fields or None)
         if records:
@@ -85,11 +87,13 @@ class ArrowQuerySetMixin:
         model_cls = getattr(self, "model", None)
         if model_cls is not None and callable(model_cls):
             instances = [model_cls(**r) for r in rows]
-            if hasattr(self, "bulk_create") and callable(self.bulk_create):
-                return list(cast("Iterable[Any]", self.bulk_create(instances, batch_size=batch_size)))
+            bulk_create_fn = getattr(self, "bulk_create", None)
+            if callable(bulk_create_fn):
+                return list(cast("Iterable[Any]", bulk_create_fn(instances, batch_size=batch_size)))
             return instances
-        if hasattr(self, "_records") and isinstance(self._records, list):
-            self._records.extend(rows)
+        records_attr = getattr(self, "_records", None)
+        if isinstance(records_attr, list):
+            records_attr.extend(rows)
         return rows
 
 

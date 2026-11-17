@@ -5,11 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from urllib.parse import urlparse
 
+import msgspec
+
 from vertebra.db.adapters.redis.core import (
     ClusterRedirect,
     PubSubMessage,
 )
+from vertebra.db.driver._cloud_auth import (
+    AZURE_REDIS_SCOPE,
+    AzureEntraTokenProvider,
+    DatabaseTokenProvider,
+)
 from vertebra.db.driver._common import REDIS_DIALECT_TAG, BaseDatabaseConfig
+from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,13 +80,66 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     iam_auth_enabled: bool = False
     """Alias for `enable_gcp_iam_auth` enabling IAM token authentication."""
     token_provider: Any = None
-    """Optional zero-argument callable returning an ephemeral IAM access token."""
+    """Optional cloud `DatabaseTokenProvider` or zero-argument callable returning an ephemeral IAM access token."""
     iam_token_provider: Any = None
     """Alias for `token_provider` supplying IAM authentication tokens."""
     max_connections: int = 32
     """Maximum pooled sockets maintained per target node."""
     broker: Any = None
     """Optional shared-memory `DatabaseBroker`, `SyncSHMBrokerTransport`, or `AsyncSHMBrokerTransport` for cross-worker push fan-out."""
+
+    def __post_init__(self) -> None:
+        if (
+            self.token_provider is not None
+            and self.iam_token_provider is not None
+            and self.token_provider is not self.iam_token_provider
+        ):
+            msg = "Cannot configure both token_provider and iam_token_provider on RedisConfig"
+            raise ImproperConfigurationError(msg)
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        gcp_iam_flag = bool(self.enable_gcp_iam_auth or self.iam_auth_enabled)
+        if gcp_iam_flag and isinstance(provider, DatabaseTokenProvider):
+            msg = (
+                "Cannot combine GCP IAM authentication (enable_gcp_iam_auth=True) with a "
+                "DatabaseTokenProvider on RedisConfig; configure one credential mechanism"
+            )
+            raise ImproperConfigurationError(msg)
+        if isinstance(self.token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "token_provider",
+                self.token_provider.with_default_scope(AZURE_REDIS_SCOPE),
+            )
+        if isinstance(self.iam_token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "iam_token_provider",
+                self.iam_token_provider.with_default_scope(AZURE_REDIS_SCOPE),
+            )
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        """Return a URL representation with embedded userinfo passwords masked."""
+        if "://" in url:
+            scheme, rest = url.split("://", 1)
+            if "@" in rest:
+                userinfo, tail = rest.split("@", 1)
+                if ":" in userinfo:
+                    user, _ = userinfo.split(":", 1)
+                    return f"{scheme}://{user}:***@{tail}"
+        return url
+
+    def __repr__(self) -> str:
+        """Return a redacted representation that omits passwords and token secrets."""
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        provider_name = type(provider).__name__ if provider is not None else None
+        return (
+            f"RedisConfig(url={self._redact_url(self.url)!r}, username={self.username!r}, "
+            f"password={'***' if self.password is not None else None!r}, "
+            f"protocol={self.protocol!r}, topology={self.topology!r}, "
+            f"enable_gcp_iam_auth={self.enable_gcp_iam_auth!r}, "
+            f"token_provider={provider_name!r})"
+        )
 
     @property
     def uses_tls(self) -> bool:
@@ -110,6 +171,12 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         """Return the configured IAM token provider callable."""
         provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
         return provider if callable(provider) else None
+
+    @property
+    def effective_database_token_provider(self) -> DatabaseTokenProvider | None:
+        """Return the configured `DatabaseTokenProvider` instance when present."""
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        return provider if isinstance(provider, DatabaseTokenProvider) else None
 
     @property
     def effective_tracking_enabled(self) -> bool:
@@ -172,6 +239,7 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         """Return the canonical shared-pool fingerprint tuple."""
         memorystore_id = getattr(self, "memorystore_instance_id", None) or ""
         default_tracking = self.dialect == "valkey"
+        db_provider = self.effective_database_token_provider
         if (
             not self.username
             and self.protocol == 3
@@ -184,9 +252,10 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             and not self.client_tracking_prefixes
             and not self.effective_iam_enabled
             and not memorystore_id
+            and db_provider is None
         ):
             return (self.dialect, self.url)
-        return (
+        base_key = (
             self.dialect,
             self.url,
             self.username or "",
@@ -201,3 +270,10 @@ class RedisConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             self.effective_iam_enabled,
             memorystore_id,
         )
+        if db_provider is None:
+            return base_key
+        try:
+            provider_key: Any = hash(db_provider)
+        except TypeError:
+            provider_key = id(db_provider)
+        return (*base_key, type(db_provider).__qualname__, provider_key)

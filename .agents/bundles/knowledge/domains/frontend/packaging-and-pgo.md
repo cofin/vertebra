@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:02:00Z"
+    commit: 5a833832
   - by: agent:flow-learn
     at: "2026-11-14T17:15:00Z"
     commit: 1b191388
@@ -35,6 +38,21 @@ sources:
   - id: src-postgres-wheel-manifest
     resource: src/rs/vertebra-postgres/pyproject.toml
     title: "PostgreSQL wheel source ownership"
+  - id: src-sqlite-wheel-manifest
+    resource: src/rs/vertebra-sqlite/pyproject.toml
+    title: "SQLite wheel source ownership"
+  - id: src-redis-wheel-manifest
+    resource: src/rs/vertebra-redis/pyproject.toml
+    title: "Redis wheel source ownership"
+  - id: src-valkey-wheel-manifest
+    resource: src/rs/vertebra-valkey/pyproject.toml
+    title: "Valkey wheel source ownership"
+  - id: src-pyproject-toml
+    resource: pyproject.toml
+    title: "Root package manifest, optional extras, and maturin exclusions"
+  - id: src-check-extras-py
+    resource: tools/scripts/check_extras.py
+    title: "Bidirectional pyproject.toml optional extras verifier"
   - id: src-wheel-verify-py
     resource: tools/scripts/_wheel_verify.py
     title: "Shared wheel and sdist ownership verifier"
@@ -80,7 +98,8 @@ sources:
 
 <!-- truth: start -->
 - `vertebra.build.packaging` exports only user-facing production packaging (`BuildTarget`, `StandaloneBuilder`, `OnefileBuilder`) and stages project sources and lockfiles as-is, so pip/venv, uv, pdm, poetry, and conda projects package identically.
-- `StandaloneBuilder` writes `CHECKED_HASH` `.pyc` files with app-relative source paths and `OnefileBuilder` normalizes tar ownership and mtimes (`SOURCE_DATE_EPOCH` or `0`), so identical trees rebuild to byte-identical bundles; `OnefileBuilder` verifies a `VTB1FILE` SHA-256 trailer and extracts with `filter="data"`.
+- `StandaloneBuilder` writes `CHECKED_HASH` `.pyc` files with app-relative source paths and `OnefileBuilder` defaults to stdlib `zlib` compression (`--compression zstd` requires the `zstandard` extra), normalizing tar ownership and mtimes (`SOURCE_DATE_EPOCH` or `0`), verifying the `VTB1FILE` SHA-256 trailer, and extracting with `filter="data"`.
+- `release.yaml` builds `vertebra-core` plus all `12` companion wheels/sdists (including `sqlite`, `redis`, and `valkey`) gated by `validate_release_manifest` (blocking git source pins) and `github.event_name == 'release'` on `upload_pypi`; `check_extras.py` enforces bidirectional `[project.optional-dependencies]` parity in `make lint`.
 - Contributor PGO tooling lives only in `tools/pgo/` (`rust_pgo.py`, `python_pgo.py`, `make build-pgo`), discovering PyO3 extension crates from `src/rs/vertebra-*/pyproject.toml`.
 <!-- truth: end -->
 
@@ -92,22 +111,23 @@ sources:
 |---|---|---|
 | [`BuildTarget`](../../../../../src/py/vertebra/build/packaging/targets.py)[^src-build-packaging-targets-py] / `KNOWN_TARGETS` / `SUPPORTED_PYTHON_VERSIONS` | `vertebra.build.packaging.targets` | Frozen `msgspec.Struct(gc=False)` validating `SUPPORTED_PYTHON_VERSIONS` (`"3.12"`, `"3.13"`, `"3.14"`, `"3.14t"`, `"3.15"`, `"3.15t"`) in `detect_host` and `resolve`, resolving host or cross-target triples (`linux-x86_64`, `linux-aarch64`, `linux-x86_64-musl`, `linux-aarch64-musl`, `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`), and formatting `python-build-standalone` (`PBS_BASE_URL`, `PBS_RELEASE_TAG`) archive URLs. |
 | [`StandaloneBuilder`](../../../../../src/py/vertebra/build/packaging/standalone.py)[^src-build-packaging-standalone-py] | `vertebra.build.packaging.standalone` | Copies project sources and lockfiles (excluding VCS, `.venv*`, caches, `node_modules`, `dist`, `target`), precompiles `CHECKED_HASH` `.pyc` files with app-relative source paths via `py_compile`, optionally stages `server_binary` into `bin/<name>` (`0o755`) with `VERTEBRA_SERVER_BINARY` bootstrap injection in `__main__.py` (invoking zero-arg CLI callables directly and launching `vertebra-server` with `VERTEBRA_APP=<entrypoint>` for `App`, ASGI, RSGI, and WSGI targets), and writes `manifest.json` / `build-manifest.json` (`entrypoint`, `profile`, `target`, `compiled_modules`, optional `server_binary`). |
-| [`OnefileBuilder`](../../../../../src/py/vertebra/build/packaging/onefile.py)[^src-build-packaging-onefile-py] | `vertebra.build.packaging.onefile` | Packs a staged standalone directory into a tar archive with normalized headers (`uid`/`gid` `0`, empty owner names, `SOURCE_DATE_EPOCH` or `0` mtimes) compressed with `zstandard` (`b"ZSTD"`, level 19) or `zlib` (`b"ZLIB"`, level 9), prepends a POSIX `/bin/sh` self-extracting stub, and appends a 48-byte `ONEFILE_TRAILER_STRUCT` (`<8sQ32s`: `ONEFILE_MAGIC = b"VTB1FILE"`, 8-byte payload length, 32-byte SHA-256 digest). |
+| [`OnefileBuilder`](../../../../../src/py/vertebra/build/packaging/onefile.py)[^src-build-packaging-onefile-py] | `vertebra.build.packaging.onefile` | Packs a staged standalone directory into a tar archive with normalized headers (`uid`/`gid` `0`, empty owner names, `SOURCE_DATE_EPOCH` or `0` mtimes), defaults to stdlib `zlib` (`b"ZLIB"`, level 9; `--compression zstd` resolves optional `zstandard` for `b"ZSTD"`, level 19), prepends a POSIX `/bin/sh` self-extracting stub, and appends a 48-byte `ONEFILE_TRAILER_STRUCT` (`<8sQ32s`: `ONEFILE_MAGIC = b"VTB1FILE"`, 8-byte payload length, 32-byte SHA-256 digest). |
 
 - **Verification & Safe Extraction**: `OnefileBuilder.inspect_trailer(binary_path)` validates the `VTB1FILE` magic, payload bounds, and SHA-256 digest; `extract_to(binary_path, destination)` enforces path-traversal checks and extracts with `filter="data"`.
-- **Release Wheel Matrix & Cargo Profile ([`release.yaml`](../../../../../.github/workflows/release.yaml)[^src-release-yaml], [`pyproject.toml`](../../../../../pyproject.toml), [`Cargo.toml`](../../../../../src/rs/Cargo.toml)[^src-cargo-toml])**: `.github/workflows/release.yaml` installs `dtolnay/rust-toolchain@stable` and `oven-sh/setup-bun@v2`, builds `src/ts/vertebra-client` (`tsup` compiles 17 subpath entries and copies `dist/` recursively into `src/py/vertebra/server/_js/bundle/`), provisions Rust inside manylinux containers via `CIBW_BEFORE_ALL_LINUX` / `CIBW_ENVIRONMENT_LINUX`, and runs `pypa/cibuildwheel@v4.3.5` (`CIBW_BUILD: "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"`) and `uv build --sdist` across `vertebra-core` and all nine companion extension manifests (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-spanner`), while `src/rs/Cargo.toml` `[profile.release]` sets `lto = true`, `codegen-units = 1`, `opt-level = 3`, and `panic = "abort"`.
+- **Release Wheel Matrix & Manifest Guards ([`release.yaml`](../../../../../.github/workflows/release.yaml)[^src-release-yaml], [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject-toml], [`Cargo.toml`](../../../../../src/rs/Cargo.toml)[^src-cargo-toml])**: `.github/workflows/release.yaml` begins with `validate_release_manifest`, which rejects any `[tool.uv.sources]` entry in `pyproject.toml` containing `git`, `rev`, `branch`, or `tag` keys before `build_wheels` or `build_sdist` can start. `build_wheels` and `build_sdist` build `vertebra-core` (`tsup` compiles 17 `@vertebra/client` entries into `src/py/vertebra/server/_js/bundle/`) and all `12` companion distributions (`bigquery`, `bundler`, `duckdb`, `mssql`, `mysql`, `oracle`, `postgres`, `redis`, `spanner`, `sqlite`, `storage`, `valkey`) via `pypa/cibuildwheel@v4.3.5` (`cp312-*`..`cp315t-*`) and `uv build --sdist`. `upload_release` and `upload_pypi` are gated on `if: github.event_name == 'release'`, while `src/rs/Cargo.toml` `[profile.release]` sets `lto = true`, `codegen-units = 1`, `opt-level = 3`, and `panic = "abort"`.
 
 ## 2. Contributor Rust & CPython PGO Tooling (`tools/pgo/`, `Makefile`)
 
 - **Two-Phase Rust PGO Pipeline ([`tools/pgo/rust_pgo.py`](../../../../../tools/pgo/rust_pgo.py)[^src-tools-pgo-rust-pgo-py], `make build-pgo`)**: `python -m tools.pgo.rust_pgo` (`--profile-dir`, `--profdata`, `--baseline-profdata`, `--workload-cmd`, `--llvm-profdata`, `--no-extensions`, `--use-existing`) runs `run_pgo_pipeline` (`PGOPipelineResult`). It resolves `CARGO_TARGET_DIR` via `resolve_cargo_release_dir`, compiles `vertebra-http` (`build_instrumented`) and every PyO3 extension in `EXTENSION_MANIFESTS` (`discover_extension_manifests`: root-configured `vertebra-py` plus each `src/rs/vertebra-*` crate with its own maturin `pyproject.toml`, built via `-m`), runs `run_default_pgo_workload` (importing each discovered `extension_module_name`) or a custom workload, merges and validates `.profraw` counters via `merge_profiles` / `weighted_merge_profiles` + single-pass `validate_profdata`, and recompiles with `-Cprofile-use` (`build_optimized`, `build_optimized_extensions`), falling back to a standard release build when `.profdata` is missing or corrupt. `make build-pgo` runs the full pipeline (or reuses an existing profile via `PROFDATA=<path> make build-pgo`).
 - **CPython PGO/LTO/BOLT & 3.14/3.15 Runtime Detection ([`tools/pgo/python_pgo.py`](../../../../../tools/pgo/python_pgo.py)[^src-tools-pgo-python-pgo-py])**: `detect_python_build` and `check_pgo_availability` inspect `sysconfig` and `sys._jit` into `PythonBuildInfo`, reporting `--enable-optimizations` (PGO), `--with-lto`, `--enable-bolt`, `is_tail_call_interp` (`--with-tail-call-interp`), `is_jit_available` / `is_jit_enabled` (`sys._jit`), `is_free_threaded` (`Py_GIL_DISABLED`), and `has_frame_pointers` (`-fno-omit-frame-pointer` / `-mno-omit-leaf-frame-pointer` for `sys.monitoring` / Tachyon profiling).
 
+## Optional extension distributions & extras parity
 
-## Optional extension distributions
+The release workflow builds `vertebra-core` plus all `12` companion distributions (`vertebra-bigquery`, `vertebra-bundler`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, `vertebra-redis`, `vertebra-spanner`, `vertebra-sqlite`, `vertebra-storage`, and `vertebra-valkey`) as platform wheels and source distributions. Every companion manifest pins `dependencies = ["vertebra-core==0.3.0"]`, declares explicit Maturin `include = [{ path = "vertebra/_<name>.pyi", format = ["sdist", "wheel"] }]`, and declares Maturin `exclude` rules blocking `**/py/vertebra/**/*.py`, `**/py/vertebra/**/*.so`, `**/py/vertebra/py.typed`, and sibling `*.pyi` stubs; root `pyproject.toml` excludes all `12` companion `*.pyi` stubs from `vertebra-core` wheels. Fresh-environment installs pair `vertebra-core` with `[bigquery]`, `[bundler]`, `[duckdb]`, `[mssql]`, `[mysql]`, `[oracle]`, `[postgres]`, `[redis]`, `[spanner]`, `[sqlite]`, `[storage]`, or `[valkey]`.
 
-The release workflow builds `vertebra-core` plus all nine companion distributions (`vertebra-bundler`, `vertebra-storage`, `vertebra-bigquery`, `vertebra-duckdb`, `vertebra-mssql`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-postgres`, and `vertebra-spanner`) as platform wheels and source distributions. Every companion manifest declares Maturin `exclude` rules blocking `**/py/vertebra/**/*.py`, `**/py/vertebra/**/*.so`, `**/py/vertebra/py.typed`, and sibling `*.pyi` stubs during wheel and sdist builds, while `vertebra-postgres` and `vertebra-oracle` also declare explicit Maturin `include` rules for `vertebra/_postgres.pyi` and `vertebra/_oracle.pyi`. Fresh-environment installs pair `vertebra-core` with extras such as `[bundler]`, `[storage]`, `[bigquery]`, `[duckdb]`, `[mssql]`, `[mysql]`, `[oracle]`, `[postgres]`, or `[spanner]`.
+[`tools/scripts/check_extras.py`](../../../../../tools/scripts/check_extras.py)[^src-check-extras-py] runs inside `make lint` and `make lint-all` to enforce bidirectional parity between optional imports in `src/py/vertebra/**/*.py` (`try ... except ImportError/ModuleNotFoundError`, `importlib.import_module`, `dependency_flag`, `ensure_module`, `import_optional`, `import_optional_attr`, `MissingDependencyError`, `LoopBackendSpec`) and `[project.optional-dependencies]` in `pyproject.toml`. Every optional import must resolve to a declared extra (via `_MODULE_TO_EXTRA`, `vertebra._<slug>`, or normalized distribution name), and every declared extra must have at least one Python importer (retaining explicit extras such as `wasmtime`, `zstandard`, `uuid-utils`, `django-spanner`, `sqlalchemy-duckdb`, and `sqlalchemy-gcp`, while stale flags/extras such as `NANOID_INSTALLED` were removed once `nanoid()` bound directly to `vertebra._vertebra.nanoid_generate`).
 
-[`tools/scripts/_wheel_verify.py`](../../../../../tools/scripts/_wheel_verify.py)[^src-wheel-verify-py] powers `make {duckdb,mysql,mssql}-wheel-check` (building via `maturin build` and checking wheel archive layout/entries, with `--forbid-python-files` on MySQL and SQL Server) as well as `make postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel-py]), `make oracle-wheel-check`, and `make {storage,bigquery,spanner,bundler}-wheel-check` (which install each built wheel and sdist inside an isolated environment). Removing an optional wheel leaves core and sibling extensions intact; cross-platform validation runs in the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-postgres-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
+[`tools/scripts/_wheel_verify.py`](../../../../../tools/scripts/_wheel_verify.py)[^src-wheel-verify-py] powers `make {sqlite,duckdb,mysql,mssql,redis,valkey}-wheel-check` (building via `maturin build` and verifying isolated wheel archive layout with `--forbid-python-files`) as well as `make postgres-wheel-check` ([`verify_postgres_wheel.py`](../../../../../tools/scripts/verify_postgres_wheel.py)[^src-verify-postgres-wheel-py]), `make oracle-wheel-check`, and `make {storage,bigquery,spanner,bundler}-wheel-check` (which install each built wheel and sdist inside an isolated environment). Removing an optional wheel leaves core and sibling extensions intact; cross-platform validation runs in the hosted release workflow. [^src-release-yaml][^src-bundler-wheel-manifest][^src-bigquery-wheel-manifest][^src-postgres-wheel-manifest][^src-sqlite-wheel-manifest][^src-redis-wheel-manifest][^src-valkey-wheel-manifest][^src-spanner-wheel-manifest][^src-storage-wheel-manifest]
 
 Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefile].
 
@@ -125,6 +145,11 @@ Provenance sources: [^src-cli-build-py], [^src-tools-pgo-init-py], [^src-makefil
 
 [^src-bigquery-wheel-manifest]: `src/rs/vertebra-bigquery/pyproject.toml` — BigQuery wheel source ownership.
 [^src-postgres-wheel-manifest]: `src/rs/vertebra-postgres/pyproject.toml` — PostgreSQL wheel source ownership.
+[^src-sqlite-wheel-manifest]: `src/rs/vertebra-sqlite/pyproject.toml` — SQLite wheel source ownership.
+[^src-redis-wheel-manifest]: `src/rs/vertebra-redis/pyproject.toml` — Redis wheel source ownership.
+[^src-valkey-wheel-manifest]: `src/rs/vertebra-valkey/pyproject.toml` — Valkey wheel source ownership.
+[^src-pyproject-toml]: `pyproject.toml` — Root package manifest, optional extras, and maturin exclusions.
+[^src-check-extras-py]: `tools/scripts/check_extras.py` — Bidirectional `pyproject.toml` optional extras verifier.
 [^src-spanner-wheel-manifest]: `src/rs/vertebra-spanner/pyproject.toml` — Spanner wheel source ownership.
 
 [^src-storage-wheel-manifest]: `src/rs/vertebra-storage/pyproject.toml` — Storage wheel source ownership.

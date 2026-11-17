@@ -228,3 +228,51 @@ fn mpmc_padded_sequences_zero_copy_slot_views_and_dekker_wake() {
     assert_eq!(view.as_slice(), b"wake-mpmc");
     drop(view);
 }
+
+#[test]
+fn mpmc_attach_and_from_region_reject_short_and_misaligned_regions() {
+    use vertebra_core::buffer::{CACHELINE_BYTES, ChannelMode, RingLayout};
+    use vertebra_core::shm::ShmRegion;
+
+    let layout = RingLayout::new(256, 8, ChannelMode::Mpmc);
+    let alloc = std::alloc::Layout::from_size_align(layout.total_size + 64, CACHELINE_BYTES)
+        .expect("valid alloc layout");
+    // SAFETY: `alloc` has non-zero size (`layout.total_size + 64`).
+    let ptr = unsafe { std::alloc::alloc_zeroed(alloc) };
+    assert!(!ptr.is_null());
+
+    // SAFETY: `ptr` is valid for `layout.total_size - 8` bytes and outlives `short_region`.
+    let short_region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size - 8) });
+    // SAFETY: `MpmcRing::attach` validates region length before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { MpmcRing::attach(Arc::clone(&short_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `MpmcRing::from_region` validates region length before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { MpmcRing::from_region(Arc::clone(&short_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `ptr.add(1)` is within the `layout.total_size + 64` allocation and outlives `misaligned_region`.
+    let misaligned_region = Arc::new(unsafe { ShmRegion::from_raw(ptr.add(1), layout.total_size) });
+    // SAFETY: `MpmcRing::attach` validates pointer alignment before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { MpmcRing::attach(Arc::clone(&misaligned_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `MpmcRing::from_region` validates pointer alignment before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { MpmcRing::from_region(Arc::clone(&misaligned_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    drop(misaligned_region);
+    drop(short_region);
+    // SAFETY: `ptr` was allocated with `alloc` and all `ShmRegion` handles are dropped.
+    unsafe {
+        std::alloc::dealloc(ptr, alloc);
+    }
+}

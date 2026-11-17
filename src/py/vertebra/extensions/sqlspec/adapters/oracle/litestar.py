@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
     escape_oracle_literal,
@@ -15,6 +16,7 @@ from vertebra.extensions.sqlspec.adapters.oracle.core import (
     oracle_row_value,
     oracle_table_feature_clause,
     oracle_table_ref,
+    validate_oracle_table_name,
 )
 
 __all__ = ("OracleLitestarStore",)
@@ -38,12 +40,35 @@ class OracleLitestarStore(BaseSQLSpecStore[Any]):
         {"compression", "in_memory", "table_options"}
     )
 
+    @staticmethod
+    def _ensure_table_name(table_name: str) -> None:
+        validate_oracle_table_name(table_name)
+
+    def _split_table_name(self) -> tuple[str | None, str]:
+        parts = validate_oracle_table_name(self._table_name)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, parts[0]
+
     def _is_async_config(self) -> bool:
         return bool(getattr(self._config, "is_async", False))
 
-    def _table_ddl(self) -> str:
+    def _companion_index(self) -> CompanionIndex:
+        schema_name, bare_table = self._split_table_name()
         table_ref = oracle_table_ref(self._table_name)
         idx_name = oracle_index_name("idx", self._table_name, "exp")
+        create_idx_sql = escape_oracle_literal(f"CREATE INDEX {idx_name} ON {table_ref} (expires_at)")
+        ddl = (
+            "BEGIN\n"
+            f"    EXECUTE IMMEDIATE '{create_idx_sql}';\n"
+            "EXCEPTION\n"
+            "    WHEN OTHERS THEN IF SQLCODE NOT IN (-955, -1408) THEN RAISE; END IF;\n"
+            "END;"
+        )
+        return CompanionIndex(name=idx_name, table=bare_table, schema=schema_name, ddl=ddl)
+
+    def _table_ddl(self) -> str:
+        table_ref = oracle_table_ref(self._table_name)
         ext = getattr(self._config, "extension_config", None) or {}
         litestar_cfg = ext.get("litestar", {}) if isinstance(ext, dict) else {}
         feature_clause = oracle_table_feature_clause(litestar_cfg)
@@ -56,19 +81,45 @@ class OracleLitestarStore(BaseSQLSpecStore[Any]):
             "updated_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL"
             f"){feature_clause}"
         )
-        create_idx_sql = escape_oracle_literal(f"CREATE INDEX {idx_name} ON {table_ref} (expires_at)")
         return (
             "BEGIN\n"
             f"    EXECUTE IMMEDIATE '{create_table_sql}';\n"
             "EXCEPTION\n"
             "    WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;\n"
             "END;\n"
-            "BEGIN\n"
-            f"    EXECUTE IMMEDIATE '{create_idx_sql}';\n"
-            "EXCEPTION\n"
-            "    WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;\n"
-            "END;"
+            f"{self._companion_index().ddl}"
         )
+
+    def _schema_target(self) -> SchemaTarget:
+        schema_name, bare_table = self._split_table_name()
+        return SchemaTarget.from_ddl(
+            bare_table,
+            self._table_ddl(),
+            schema=schema_name,
+            dialect="oracle",
+        )
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the Oracle session store."""
+        return [self._schema_target()]
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return the Oracle session expiration companion index definition."""
+        return [self._companion_index()]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion index on a synchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                driver.execute_script(index.ddl)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion index on an asynchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                await driver.execute_script(index.ddl)
 
     def _drop_table_sql(self) -> list[str]:
         table_ref = escape_oracle_literal(oracle_table_ref(self._table_name))
@@ -87,6 +138,10 @@ class OracleLitestarStore(BaseSQLSpecStore[Any]):
                 "END;"
             ),
         ]
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return downgrade drop statements for the Oracle session index and table."""
+        return [DropStatement(statement) for statement in self._drop_table_sql()]
 
     def _merge_set_sql(self) -> str:
         table_ref = oracle_table_ref(self._table_name)

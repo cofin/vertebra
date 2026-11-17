@@ -8,8 +8,8 @@ dispatch to MCPCore.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Mapping
-from typing import Any
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
+from typing import Any, cast
 
 import anyio
 
@@ -150,7 +150,7 @@ class AsgiMcpApp:
             return
         raw_sender = getattr(send, "send_raw_response", None)
         if callable(raw_sender):
-            await raw_sender(resp.status, raw_headers, resp.body)
+            await cast("Awaitable[Any]", raw_sender(resp.status, raw_headers, resp.body))
             return
         await send({"type": "http.response.start", "status": resp.status, "headers": raw_headers})
         await send({"type": "http.response.body", "body": resp.body, "more_body": False})
@@ -174,12 +174,13 @@ class AsgiMcpApp:
             headers = {}
 
         body_fn = getattr(request, "body", None)
+        body_bytes_fn = getattr(scope, "body_bytes", None) if scope is not None else None
         if method in {"GET", "HEAD", "DELETE", "OPTIONS"}:
             raw_body = b""
         elif callable(body_fn):
-            raw_body = bytes(await body_fn())
-        elif scope is not None and hasattr(scope, "body_bytes"):
-            raw_body = bytes(scope.body_bytes())
+            raw_body = bytes(await cast("Awaitable[bytes]", body_fn()))
+        elif callable(body_bytes_fn):
+            raw_body = bytes(cast("bytes", body_bytes_fn()))
         else:
             raw_body = b""
 
@@ -227,7 +228,7 @@ class AsgiMcpApp:
         aclose = getattr(stream, "aclose", None)
         if callable(aclose):
             with contextlib.suppress(BaseException):
-                await aclose()
+                await cast("Awaitable[Any]", aclose())
 
     async def _send_streaming_response(
         self,
@@ -377,9 +378,10 @@ class WsgiMcpApp:
             method = str(getattr(request, "method", "POST") or "POST").upper()
             path = str(getattr(request, "path", self.config.path) or self.config.path)
             raw_headers = getattr(request, "headers", {})
+            as_dict_fn = getattr(raw_headers, "as_dict", None)
             headers = (
-                raw_headers.as_dict()
-                if hasattr(raw_headers, "as_dict")
+                cast("dict[str, str]", as_dict_fn())
+                if callable(as_dict_fn)
                 else {str(k): str(v) for k, v in dict(raw_headers).items()}
             )
             context = AgentContext.from_headers(headers, identity_source=self.config.identity_source)
@@ -507,7 +509,7 @@ class _WsgiStreamIterator:
         aclose = getattr(self._stream, "aclose", None)
         if callable(aclose):
             with contextlib.suppress(BaseException):
-                self._portal.call(aclose)
+                self._portal.call(cast("Callable[[], Coroutine[Any, Any, Any]]", aclose))
 
     async def _next_chunk(self) -> bytes | None:
         try:

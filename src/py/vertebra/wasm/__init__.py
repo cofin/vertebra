@@ -1,12 +1,13 @@
 """WebAssembly (WASI 0.2 Component Model) sandbox policy, module configuration, and plugin host."""
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import msgspec
 
-from vertebra.typing import MissingDependencyError
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import (
     ZeroCopyCodecRegistry,
@@ -103,12 +104,65 @@ class WASMModuleConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return raw
 
 
+def _has_runtime_attr(target: Any, attr: str, *, instantiate_if_missing: bool = False) -> bool:
+    """Return True if ``target`` (or a zero-arg instance when requested) exposes ``attr``."""
+    if target is None:
+        return False
+    if hasattr(target, attr):
+        return True
+    if instantiate_if_missing and callable(target):
+        try:
+            return hasattr(target(), attr)
+        except Exception:
+            return False
+    return False
+
+
+def _validate_policy_support(policy: WASMSandboxPolicy, *, exports_mode: bool = False) -> None:
+    """Fail closed with ImproperConfigurationError when the active runtime cannot enforce policy fields."""
+    wasi_cls = None if _wasmtime is None else getattr(_wasmtime, "WasiConfig", None)
+    linker_cls = None if _wasmtime is None else getattr(_wasmtime, "Linker", None)
+    store_cls = None if _wasmtime is None else getattr(_wasmtime, "Store", None)
+    config_cls = None if _wasmtime is None else getattr(_wasmtime, "Config", None)
+    engine_cls = None if _wasmtime is None else getattr(_wasmtime, "Engine", None)
+
+    has_wasi_link = _has_runtime_attr(linker_cls, "define_wasi") and _has_runtime_attr(store_cls, "set_wasi")
+
+    if policy.allow_network and (
+        exports_mode or not _has_runtime_attr(wasi_cls, "inherit_network") or not has_wasi_link
+    ):
+        msg = "Active WASM runtime cannot enforce WASMSandboxPolicy.allow_network=True"
+        raise ImproperConfigurationError(msg)
+
+    if policy.allowed_preopen_dirs and (
+        exports_mode or not _has_runtime_attr(wasi_cls, "preopen_dir") or not has_wasi_link
+    ):
+        msg = "Active WASM runtime cannot enforce WASMSandboxPolicy.allowed_preopen_dirs"
+        raise ImproperConfigurationError(msg)
+
+    if policy.env_vars and (exports_mode or not _has_runtime_attr(wasi_cls, "set_env") or not has_wasi_link):
+        msg = "Active WASM runtime cannot enforce WASMSandboxPolicy.env_vars"
+        raise ImproperConfigurationError(msg)
+
+    if policy.epoch_timeout_ms != 500 and (
+        exports_mode
+        or not _has_runtime_attr(config_cls, "epoch_interruption", instantiate_if_missing=True)
+        or not _has_runtime_attr(engine_cls, "increment_epoch")
+        or not _has_runtime_attr(store_cls, "set_epoch_deadline")
+    ):
+        msg = "Active WASM runtime cannot enforce custom WASMSandboxPolicy.epoch_timeout_ms"
+        raise ImproperConfigurationError(msg)
+
+
 class WASMPluginHost:
     """Host registry and sandboxed executor for WASI 0.2 WebAssembly guest modules."""
 
-    __slots__ = ("_compiled_modules", "_host_exports", "_modules")
+    __slots__ = ("_compiled_modules", "_default_policy", "_host_exports", "_modules")
 
-    def __init__(self) -> None:
+    def __init__(self, policy: WASMSandboxPolicy | None = None) -> None:
+        self._default_policy = policy if policy is not None else WASMSandboxPolicy()
+        if _wasmtime is not None:
+            _validate_policy_support(self._default_policy, exports_mode=False)
         self._modules: dict[str, WASMModuleConfig] = {}
         self._host_exports: dict[tuple[str, str], Callable[..., Any]] = {}
         self._compiled_modules: dict[str, tuple[Any, Any]] = {}
@@ -127,16 +181,20 @@ class WASMPluginHost:
         """Validate and register a WebAssembly module and its exported host/guest bindings."""
         raw = config.load_and_validate()
         if exports is not None:
+            _validate_policy_support(config.policy, exports_mode=True)
             self._modules[config.name] = config
             for export_name, fn in exports.items():
                 self._host_exports[(config.name, export_name)] = fn
             return
 
         if _wasmtime is None:
-            raise MissingDependencyError("wasmtime")
+            raise MissingDependencyError("wasmtime", extra="wasmtime")
 
+        _validate_policy_support(config.policy, exports_mode=False)
         wt_cfg = _wasmtime.Config()
         wt_cfg.consume_fuel = True
+        if hasattr(wt_cfg, "epoch_interruption"):
+            wt_cfg.epoch_interruption = True
         engine = _wasmtime.Engine(wt_cfg)
         try:
             module = _wasmtime.Module(engine, raw)
@@ -175,11 +233,33 @@ class WASMPluginHost:
             raise WASMExecutionError(msg)
 
         engine, module = compiled
+        timer: threading.Timer | None = None
         try:
             store = _wasmtime.Store(engine)
             store.set_fuel(cfg.policy.max_fuel)
             store.set_limits(memory_size=cfg.policy.max_memory_bytes)
-            instance = _wasmtime.Instance(store, module, [])
+            if hasattr(store, "set_epoch_deadline") and hasattr(engine, "increment_epoch"):
+                store.set_epoch_deadline(1)
+                timer = threading.Timer(cfg.policy.epoch_timeout_ms / 1000.0, engine.increment_epoch)
+                timer.daemon = True
+                timer.start()
+
+            needs_wasi = bool(cfg.policy.allowed_preopen_dirs or cfg.policy.env_vars or cfg.policy.allow_network)
+            if needs_wasi:
+                wasi_cfg = _wasmtime.WasiConfig()
+                if hasattr(wasi_cfg, "inherit_network"):
+                    wasi_cfg.inherit_network(cfg.policy.allow_network)
+                for env_key, env_val in cfg.policy.env_vars.items():
+                    wasi_cfg.set_env(env_key, env_val)
+                for preopen_dir in cfg.policy.allowed_preopen_dirs:
+                    wasi_cfg.preopen_dir(preopen_dir, preopen_dir)
+                store.set_wasi(wasi_cfg)
+                linker = _wasmtime.Linker(engine)
+                linker.define_wasi()
+                instance = linker.instantiate(store, module)
+            else:
+                instance = _wasmtime.Instance(store, module, [])
+
             exports_map = instance.exports(store)
             if export_name not in exports_map:
                 msg = f"Export {export_name!r} not found in Wasm module {module_name!r}"
@@ -191,6 +271,9 @@ class WASMPluginHost:
         except Exception as exc:
             msg = f"Wasm execution failed in {module_name!r}.{export_name!r}: {exc}"
             raise WASMExecutionError(msg) from exc
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     def call_json(
         self,

@@ -12,24 +12,17 @@ Construct a store from a URI or configuration: `SyncObjectStore(target, *, optio
     options:
       heading_level: 3
       show_bases: false
-      inherited_members: true
+      show_source: false
       members:
         - put
         - put_stream
-        - put_file
         - get
         - get_view
         - get_stream
-        - get_range
-        - get_file
         - head
         - exists
         - delete
-        - copy
-        - rename
-        - compose
         - list
-        - glob
         - open_reader
         - open_writer
         - write_arrow
@@ -173,7 +166,9 @@ Readers support `read`, `read_at`, `seek`, `tell`, and `close`; the async reader
 ::: vertebra.typing.IntegrityError
     options:
       heading_level: 4
+      members: false
 
 ::: vertebra.typing.PreconditionError
     options:
       heading_level: 4
+      members: false

@@ -1,5 +1,7 @@
 """MySQL and MariaDB synchronous and asynchronous SQLSpec data dictionaries."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, ClassVar
 
 from sqlspec.data_dictionary.dialects.mysql.dictionary import (
@@ -18,9 +20,11 @@ __all__ = ("MySQLAsyncDataDictionary", "MySQLSyncDataDictionary")
 class MySQLSyncDataDictionary(_UpstreamMySQLSyncDataDictionary):
     """Synchronous MySQL and MariaDB data dictionary supporting MySQL 8/9 and MariaDB catalog metadata."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "mysql"
 
-    def get_feature_flag(self, driver: "SyncDriverAdapterBase", feature: str) -> bool:
+    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
         """Return whether the connected MySQL or MariaDB version supports `feature`."""
         if feature == "supports_vector":
             engine_version = self._get_engine_version(driver)
@@ -35,9 +39,11 @@ class MySQLSyncDataDictionary(_UpstreamMySQLSyncDataDictionary):
 class MySQLAsyncDataDictionary(_UpstreamMySQLAsyncDataDictionary):
     """Asynchronous MySQL and MariaDB data dictionary supporting MySQL 8/9 and MariaDB catalog metadata."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "mysql"
 
-    async def get_feature_flag(self, driver: "AsyncDriverAdapterBase", feature: str) -> bool:
+    async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
         """Return whether the connected MySQL or MariaDB version supports `feature`."""
         if feature == "supports_vector":
             engine_version = await self._get_engine_version(driver)

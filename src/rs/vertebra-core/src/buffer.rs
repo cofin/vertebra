@@ -69,6 +69,15 @@ pub struct ShmHeader {
     pub active_flags: CacheLine<AtomicU32>,
 }
 
+const _: () = {
+    assert!(core::mem::offset_of!(ShmHeader, reserved1) + 32 == 96);
+    assert!(core::mem::align_of::<ShmHeader>() == core::mem::align_of::<CacheLine<AtomicU64>>());
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    assert!(core::mem::size_of::<ShmHeader>() == 1152);
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    assert!(core::mem::size_of::<ShmHeader>() == 640);
+};
+
 /// Channel configuration for the shared-memory ring.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ChannelMode {
@@ -96,18 +105,18 @@ pub struct RingLayout {
 }
 
 impl RingLayout {
-    pub fn new(slot_size: usize, slots: usize, mode: ChannelMode) -> Self {
+    pub fn try_new(slot_size: usize, slots: usize, mode: ChannelMode) -> Option<Self> {
         let seq_size = match mode {
             ChannelMode::Spsc => 0,
-            ChannelMode::Mpmc => slots * core::mem::size_of::<CacheLine<AtomicU64>>(),
+            ChannelMode::Mpmc => slots.checked_mul(core::mem::size_of::<CacheLine<AtomicU64>>())?,
         };
-        let ring_size = slot_size * slots;
+        let ring_size = slot_size.checked_mul(slots)?;
         let header_size = align_up(
             core::mem::size_of::<ShmHeader>(),
             CACHELINE_BYTES.max(SLOT_ALIGN),
         );
-        let total_size = header_size + seq_size + ring_size;
-        Self {
+        let total_size = header_size.checked_add(seq_size)?.checked_add(ring_size)?;
+        Some(Self {
             mode,
             slot_size,
             slots,
@@ -115,7 +124,11 @@ impl RingLayout {
             ring_size,
             header_size,
             total_size,
-        }
+        })
+    }
+
+    pub fn new(slot_size: usize, slots: usize, mode: ChannelMode) -> Self {
+        Self::try_new(slot_size, slots, mode).expect("ring layout overflow")
     }
 
     pub fn is_power_of_two(&self) -> bool {
@@ -135,7 +148,9 @@ impl RingLayout {
         let remaining = total_size.checked_sub(header_size)?;
         let per_slot = match mode {
             ChannelMode::Spsc => slot_size,
-            ChannelMode::Mpmc => slot_size + core::mem::size_of::<CacheLine<AtomicU64>>(),
+            ChannelMode::Mpmc => {
+                slot_size.checked_add(core::mem::size_of::<CacheLine<AtomicU64>>())?
+            }
         };
         if per_slot == 0 || !remaining.is_multiple_of(per_slot) {
             return None;
@@ -177,5 +192,12 @@ mod tests {
             layout.total_size,
             layout.header_size + expected_seq_size + (slot_size * slots)
         );
+    }
+
+    #[test]
+    fn ring_layout_try_new_rejects_overflow() {
+        assert!(RingLayout::try_new(usize::MAX, 16, ChannelMode::Mpmc).is_none());
+        assert!(RingLayout::try_new(usize::MAX, 16, ChannelMode::Spsc).is_none());
+        assert!(RingLayout::try_new(usize::MAX / 16, 16, ChannelMode::Spsc).is_none());
     }
 }

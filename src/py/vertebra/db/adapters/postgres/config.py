@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, Self
 
 import msgspec
 
-from vertebra.db.adapters.postgres.options import parse_postgres_dsn
+from vertebra.db.adapters.postgres.options import (
+    merge_postgres_options,
+    parse_postgres_dsn,
+    validate_cockroach_cluster,
+)
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
+from vertebra.db.driver._cloud_auth import AwsAuroraDsqlIamTokenProvider
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
@@ -66,8 +72,12 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """When True, authenticate using short-lived Google Cloud IAM OAuth2 tokens (on direct :5432 TCP/TLS or :3307/:5433 dialers)."""
     iam_auth_options: Mapping[str, str] = msgspec.field(default_factory=dict)
     """Optional `GcpTokenCache` options (`service_account_key`, `application_credentials_path`, `scopes`) for direct :5432 or dialer IAM token resolution."""
+    token_provider: Any = None
+    """Optional cloud database token provider (`DatabaseTokenProvider`) supplying dynamic IAM passwords."""
     enable_alloydb_columnar_engine: bool = False
     """When True, enable `google_columnar_engine.enabled = on` in session startup GUCs."""
+    cockroach_cluster: str | None = None
+    """Optional CockroachDB cluster routing identifier forwarded as `--cluster=<id>` in startup `options`."""
     application_name: str = "vertebra"
     """PostgreSQL `application_name` GUC reported in `pg_stat_activity`."""
     statement_timeout_ms: int | None = None
@@ -83,6 +93,8 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         if self.min_size < 0 or self.max_size < 1 or self.min_size > self.max_size:
             msg = f"Invalid pool bounds: min_size={self.min_size}, max_size={self.max_size}"
             raise ValueError(msg)
+        if self.cockroach_cluster is not None:
+            validate_cockroach_cluster(self.cockroach_cluster)
         has_csql = bool(self.enable_cloud_sql or self.cloud_sql_instance)
         has_alloy = bool(self.enable_alloydb or self.alloydb_instance_uri)
         if has_csql and has_alloy:
@@ -94,6 +106,41 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                 msgspec.structs.force_setattr(self, "pooler_mode", "transaction")
         msgspec.structs.force_setattr(self, "session_gucs", dict(self.session_gucs))
         msgspec.structs.force_setattr(self, "iam_auth_options", dict(self.iam_auth_options))
+        if isinstance(self.token_provider, AwsAuroraDsqlIamTokenProvider):
+            for candidate_dsn in (self.dsn, self.direct_dsn):
+                if not candidate_dsn:
+                    continue
+                parsed_candidate = parse_postgres_dsn(candidate_dsn)
+                sslmode = parsed_candidate.params.get("sslmode")
+                if sslmode is not None and sslmode.strip().lower() == "disable":
+                    msg = "AwsAuroraDsqlIamTokenProvider requires TLS and cannot be used with sslmode='disable'"
+                    raise ImproperConfigurationError(msg)
+
+    @staticmethod
+    def _redact_dsn(dsn: str) -> str:
+        """Return a DSN representation with embedded userinfo or libpq passwords masked."""
+        redacted = dsn
+        if "://" in redacted:
+            scheme, rest = redacted.split("://", 1)
+            if "@" in rest:
+                userinfo, tail = rest.split("@", 1)
+                if ":" in userinfo:
+                    user, _ = userinfo.split(":", 1)
+                    redacted = f"{scheme}://{user}:***@{tail}"
+        return re.sub(r"(?i)(password\s*=\s*)('[^']*'|\"[^\"]*\"|\S+)", r"\1***", redacted)
+
+    def __repr__(self) -> str:
+        """Return a redacted representation that omits DSN passwords, IAM options, and token secrets."""
+        redacted_dsn = self._redact_dsn(self.dsn)
+        redacted_direct = self._redact_dsn(self.direct_dsn) if self.direct_dsn is not None else None
+        provider_name = type(self.token_provider).__name__ if self.token_provider is not None else None
+        redacted_iam_keys = sorted(str(k) for k in self.iam_auth_options)
+        return (
+            f"PostgreSQLConfig(dsn={redacted_dsn!r}, direct_dsn={redacted_direct!r}, "
+            f"pooler_mode={self.pooler_mode!r}, min_size={self.min_size!r}, max_size={self.max_size!r}, "
+            f"enable_iam_auth={self.enable_iam_auth!r}, iam_auth_option_keys={redacted_iam_keys!r}, "
+            f"token_provider={provider_name!r})"
+        )
 
     @property
     def effective_statement_cache_size(self) -> int:
@@ -124,7 +171,9 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         return PostgreSQLConfig(**base)
 
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:
-        """Resolve a short-lived Google Cloud IAM OAuth2 access token via `SyncGcpTokenCache` when `enable_iam_auth=True`."""
+        """Resolve a short-lived cloud IAM token synchronously from `token_provider` or `SyncGcpTokenCache`."""
+        if self.token_provider is not None:
+            return str(self.token_provider.resolve_sync(force_refresh=force_refresh))
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -143,7 +192,9 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         return str(snap.access_token)
 
     async def resolve_iam_password_async(self, *, force_refresh: bool = False) -> str | None:
-        """Asynchronously resolve a short-lived Google Cloud IAM OAuth2 access token via `AsyncGcpTokenCache` when `enable_iam_auth=True`."""
+        """Resolve a short-lived cloud IAM token asynchronously from `token_provider` or `AsyncGcpTokenCache`."""
+        if self.token_provider is not None:
+            return str(await self.token_provider.resolve_async(force_refresh=force_refresh))
         if not self.enable_iam_auth:
             return None
         opts = dict(self.iam_auth_options)
@@ -187,6 +238,14 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         if self.idle_in_transaction_session_timeout_ms is not None:
             gucs["idle_in_transaction_session_timeout"] = str(self.idle_in_transaction_session_timeout_ms)
         gucs.update(self.session_gucs)
+        merged_options = merge_postgres_options(
+            gucs.get("options"),
+            cockroach_cluster=self.cockroach_cluster,
+        )
+        if merged_options is not None:
+            gucs["options"] = merged_options
+        else:
+            gucs.pop("options", None)
         return gucs
 
     def to_cloud_dialer_config(self) -> CloudSQLConfig | AlloyDBConfig | None:
@@ -238,6 +297,15 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             kwargs["alloydb_instance_uri"] = query_params["alloydb_instance_uri"]
         if "direct_dsn" in query_params and "direct_dsn" not in kwargs:
             kwargs["direct_dsn"] = query_params["direct_dsn"]
+        if "cockroach_cluster" in query_params and "cockroach_cluster" not in kwargs:
+            kwargs["cockroach_cluster"] = query_params["cockroach_cluster"]
+        if "enable_alloydb_columnar_engine" in query_params and "enable_alloydb_columnar_engine" not in kwargs:
+            kwargs["enable_alloydb_columnar_engine"] = query_params["enable_alloydb_columnar_engine"].lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         return cls(dsn=normalized_url, **kwargs)
 
     def pool_key(self) -> tuple[Any, ...]:
@@ -253,7 +321,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             if (self.pgbouncer or self.pgbouncer_mode or self.pooler_mode == "transaction")
             else str(self.pooler_mode)
         )
-        return (
+        base_key: tuple[Any, ...] = (
             "postgresql",
             host,
             port,
@@ -262,7 +330,15 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             pooler_mode,
             self.cloud_sql_instance or "",
             self.alloydb_instance_uri or "",
+            self.cockroach_cluster or "",
         )
+        if self.token_provider is None:
+            return base_key
+        try:
+            provider_key: Any = hash(self.token_provider)
+        except TypeError:
+            provider_key = id(self.token_provider)
+        return (*base_key, type(self.token_provider).__qualname__, provider_key)
 
     def build_sync_driver(self, registry: Any) -> Any:
         """Instantiate `SyncPostgreSQLDriver` with shared `LeaseBroker` and optional cloud dialer."""

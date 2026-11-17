@@ -10,17 +10,25 @@ from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
+from vertebra._vertebra import ArrowCursor as RustArrowCursor
+from vertebra._vertebra import Response as NativeResponse
+from vertebra.db.arrow import ArrowCursor
+from vertebra.server._routing import RouterTable
+from vertebra.storage._streaming import StreamingStorageResponse
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
+    "ARROW_STREAM_MEDIA_TYPE",
     "BODYLESS_HTTP_METHODS",
     "FASTPATH_ATTR",
     "UNSET_DEFAULT",
+    "CompiledRoute",
     "CompiledRouteBase",
     "DirectPlan",
     "FastPathProvider",
     "QueryParamSpec",
+    "RouteFastPathTable",
     "coerce_path_param",
     "get_attached_fastpath",
     "get_fastpath_providers",
@@ -32,6 +40,8 @@ __all__ = (
     "resolve_scalar_query_converter",
     "resolve_wsgi_relative_path",
     "scalar_query_converter",
+    "serialize_buffered_response",
+    "serialize_fastpath_special_result",
     "serialize_litestar_http_exception",
     "serialize_starlette_http_exception",
     "set_attached_fastpath",
@@ -39,9 +49,15 @@ __all__ = (
     "unregister_fastpath_provider",
 )
 
+ARROW_STREAM_MEDIA_TYPE: bytes = b"application/vnd.apache.arrow.stream"
 BODYLESS_HTTP_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "DELETE", "OPTIONS"})
 FASTPATH_ATTR: str = "__vertebra_fastpath__"
 UNSET_DEFAULT: object = object()
+_BUFFERED_RESPONSE_SPECS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("starlette.responses", ("Response", "HTMLResponse", "PlainTextResponse", "JSONResponse", "RedirectResponse")),
+    ("fastapi.responses", ("ORJSONResponse", "UJSONResponse")),
+    ("vertebra.extensions.fastapi.responses", ("MsgspecJSONResponse",)),
+)
 
 
 class CompiledRouteBase(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -58,6 +74,126 @@ class CompiledRouteBase(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
     param_converters: tuple[tuple[str, str], ...] = ()
     """Ordered ``(param_name, converter_name)`` pairs extracted from the route pattern."""
+
+
+class CompiledRoute(CompiledRouteBase, frozen=True, gc=False, kw_only=True):
+    """Framework-neutral compiled fastpath route descriptor."""
+
+    method: str = "GET"
+    """HTTP method associated with this compiled route."""
+
+    path_template: str = "/"
+    """Normalized route path template."""
+
+    handler: Any = None
+    """Target Python route handler callable."""
+
+    media_type: str = "application/json"
+    """Default response media type string."""
+
+    sync_to_thread: bool = False
+    """Whether synchronous execution should offload to an AnyIO worker thread."""
+
+    has_middleware: bool = False
+    """Whether outer framework middleware wraps this route."""
+
+    has_custom_exception_handlers: bool = False
+    """Whether custom user exception handlers apply to this route."""
+
+
+class RouteFastPathTable:
+    """Framework-neutral table indexing compiled fastpath routes by handler ID and segment path."""
+
+    __slots__ = ("_router_table", "_routes")
+
+    def __init__(self, routes: dict[int, Any] | None = None) -> None:
+        """Initialize the fastpath route table from optional pre-compiled routes."""
+        self._routes: dict[int, Any] = dict(routes) if routes is not None else {}
+        self._router_table = RouterTable(self._routes)
+
+    @property
+    def routes(self) -> dict[int, Any]:
+        """Return mapping from ``handler_id`` to compiled route entry."""
+        return self._routes
+
+    def register(self, route: Any) -> None:
+        """Register or replace a compiled route descriptor in the fastpath table."""
+        handler_id = int(route.handler_id)
+        self._routes[handler_id] = route
+        self._router_table = RouterTable(self._routes)
+
+    def get(self, handler_id: int) -> Any | None:
+        """Look up a compiled route by its handler ID."""
+        return self._routes.get(handler_id)
+
+    def match(self, method: str, path: str) -> tuple[Any, dict[str, Any]] | None:
+        """Match an HTTP method and path, returning the compiled route and converted path params."""
+        return self._router_table.match_with_params(method, path)
+
+
+def serialize_fastpath_special_result(
+    result: Any,
+    *,
+    default_status: int = 200,
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
+    """Serialize ``ArrowCursor`` or ``StreamingStorageResponse`` directly without JSON encoding."""
+    if result is None:
+        return None
+    if isinstance(result, ArrowCursor | RustArrowCursor):
+        raw_arrow: memoryview = result.buffer_view()
+        return (
+            default_status,
+            [
+                (b"content-type", ARROW_STREAM_MEDIA_TYPE),
+                (b"content-length", str(len(raw_arrow)).encode("ascii")),
+            ],
+            raw_arrow,
+        )
+    if isinstance(result, StreamingStorageResponse):
+        return result.to_fastpath_tuple()
+    return None
+
+
+def _loaded_buffered_response_types() -> frozenset[type]:
+    candidates: list[type] = []
+    for module_name, attr_names in _BUFFERED_RESPONSE_SPECS:
+        mod = sys.modules.get(module_name)
+        if mod is None:
+            continue
+        for attr_name in attr_names:
+            cls = getattr(mod, attr_name, None)
+            if isinstance(cls, type):
+                candidates.append(cls)
+    return frozenset(candidates)
+
+
+def serialize_buffered_response(
+    response: Any,
+    *,
+    default_status: int = 200,
+    buffered_types: frozenset[type] | None = None,
+) -> tuple[int, list[tuple[bytes, bytes]], bytes | memoryview] | None:
+    """Serialize an exact-type buffered response or native ``Response`` without loading host frameworks."""
+    if isinstance(response, NativeResponse):
+        native_headers: list[tuple[bytes, bytes]] = [
+            (
+                k.encode("latin-1") if isinstance(k, str) else bytes(k),
+                v.encode("latin-1") if isinstance(v, str) else bytes(v),
+            )
+            for k, v in response.headers
+        ]
+        return int(response.status), native_headers, bytes(response.body)
+    allowed_types = buffered_types if buffered_types is not None else _loaded_buffered_response_types()
+    if type(response) not in allowed_types:
+        return None
+    if getattr(response, "background", None) is not None:
+        return None
+    raw_headers: Any = getattr(response, "raw_headers", None)
+    resp_body = getattr(response, "body", None)
+    if isinstance(raw_headers, list) and isinstance(resp_body, (bytes, memoryview)):
+        status_code = int(getattr(response, "status_code", default_status))
+        return status_code, list(raw_headers), resp_body
+    return None
 
 
 def get_attached_fastpath(app: Any) -> Any:

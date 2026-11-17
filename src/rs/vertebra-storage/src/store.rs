@@ -951,6 +951,13 @@ pub enum BackendConfig {
     },
 }
 
+impl BackendConfig {
+    /// Return `true` when the backend executes `rename` atomically without a `copy + delete` fallback.
+    pub const fn supports_atomic_rename(&self) -> bool {
+        matches!(self, Self::Memory | Self::Local { .. } | Self::Oci { .. })
+    }
+}
+
 /// Collect outbound HTTP headers from the JSON `headers` option and `header.<name>` /
 /// `http_header.<name>` keys; every other option key is backend configuration, not a header.
 fn parse_http_headers_from_options(
@@ -1009,16 +1016,19 @@ struct GcsComposeResponse {
 pub struct ObjectStoreEngine {
     inner: Arc<dyn ObjectStore>,
     scheme: String,
+    supports_atomic_rename: bool,
     local_metadata: Option<LocalMetadataRegistry>,
     gcs_compose: Option<Arc<GcsComposeContext>>,
 }
 
 impl ObjectStoreEngine {
     pub fn new(config: BackendConfig) -> Result<Self, StorageError> {
+        let supports_atomic_rename = config.supports_atomic_rename();
         match config {
             BackendConfig::Memory => Ok(Self {
                 inner: Arc::new(InMemory::new()),
                 scheme: "memory".to_string(),
+                supports_atomic_rename,
                 local_metadata: None,
                 gcs_compose: None,
             }),
@@ -1033,6 +1043,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "file".to_string(),
+                    supports_atomic_rename,
                     local_metadata: Some(Arc::new(RwLock::new(HashMap::new()))),
                     gcs_compose: None,
                 })
@@ -1084,6 +1095,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "s3".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: None,
                 })
@@ -1195,6 +1207,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "gs".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: Some(Arc::new(compose)),
                 })
@@ -1224,6 +1237,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "az".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: None,
                 })
@@ -1239,6 +1253,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "oci".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: None,
                 })
@@ -1288,6 +1303,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
                     scheme: "r2".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: None,
                 })
@@ -1325,6 +1341,7 @@ impl ObjectStoreEngine {
                 Ok(Self {
                     inner: Arc::new(store),
                     scheme: "http".to_string(),
+                    supports_atomic_rename,
                     local_metadata: None,
                     gcs_compose: None,
                 })
@@ -1520,6 +1537,7 @@ impl ObjectStoreEngine {
 
     pub fn with_store(inner: Arc<dyn ObjectStore>, scheme: impl Into<String>) -> Self {
         let scheme = scheme.into();
+        let supports_atomic_rename = matches!(scheme.as_str(), "file" | "local" | "memory" | "oci");
         let local_metadata = if scheme == "file" {
             Some(Arc::new(RwLock::new(HashMap::new())))
         } else {
@@ -1528,6 +1546,7 @@ impl ObjectStoreEngine {
         Self {
             inner,
             scheme,
+            supports_atomic_rename,
             local_metadata,
             gcs_compose: None,
         }
@@ -1535,6 +1554,11 @@ impl ObjectStoreEngine {
 
     pub fn scheme(&self) -> &str {
         &self.scheme
+    }
+
+    /// Return `true` when the active backend executes `rename` atomically.
+    pub const fn supports_atomic_rename(&self) -> bool {
+        self.supports_atomic_rename
     }
 
     pub async fn put(&self, path: &str, data: Bytes) -> Result<StoredObjectMeta, StorageError> {
@@ -1743,9 +1767,10 @@ impl ObjectStoreEngine {
 
     /// Download an object to `file_path` atomically.
     ///
-    /// Chunks stream into a sibling `.{name}.{pid}.{seq}.part` file that is flushed and renamed
-    /// over `file_path` only after the full payload arrives, so readers never observe a partial
-    /// file. A drop guard unlinks the `.part` file on any error and when the future is cancelled
+    /// Chunks stream into a sibling `.{name}.{pid}.{seq}.part` file that is flushed, synced via
+    /// `sync_all`, and renamed over `file_path` only after the full payload arrives, so readers
+    /// never observe a partial file. On Unix, the destination parent directory is synced after the
+    /// rename. A drop guard unlinks the `.part` file on any error and when the future is cancelled
     /// mid-transfer. Parent directories are created.
     pub async fn get_file(
         &self,
@@ -1816,6 +1841,11 @@ impl ObjectStoreEngine {
         }
         tokio::fs::rename(&part.path, target).await?;
         part.armed = false;
+        #[cfg(unix)]
+        {
+            let dir = tokio::fs::File::open(&parent).await?;
+            dir.sync_all().await?;
+        }
         Ok(meta)
     }
 
@@ -2151,31 +2181,48 @@ impl ObjectStoreEngine {
         dst: &str,
         if_not_exists: bool,
     ) -> Result<(), ObjectStoreError> {
-        let from = validate_object_path(src)?;
-        let to = validate_object_path(dst)?;
+        self.rename_with_options(src, dst, if_not_exists, false)
+            .await
+    }
+
+    pub async fn rename_with_options(
+        &self,
+        from: &str,
+        to: &str,
+        if_not_exists: bool,
+        atomic_only: bool,
+    ) -> Result<(), StorageError> {
+        if atomic_only && !self.supports_atomic_rename() {
+            return Err(StorageError::InvalidInput(format!(
+                "atomic rename is not supported for '{}' backend (pass atomic_only=false to allow copy+delete fallback)",
+                self.scheme
+            )));
+        }
+        let from_path = validate_object_path(from)?;
+        let to_path = validate_object_path(to)?;
         if if_not_exists {
-            match self.inner.rename_if_not_exists(&from, &to).await {
+            match self.inner.rename_if_not_exists(&from_path, &to_path).await {
                 Ok(()) => {}
                 Err(
                     err @ (object_store::Error::AlreadyExists { .. }
                     | object_store::Error::Precondition { .. }),
                 ) => {
                     return Err(StorageError::AlreadyExists {
-                        path: dst.to_string(),
+                        path: to.to_string(),
                         message: err.to_string(),
                     });
                 }
                 Err(err) => return Err(err.into()),
             }
         } else {
-            self.inner.rename(&from, &to).await?;
+            self.inner.rename(&from_path, &to_path).await?;
         }
         if let Some(ref registry) = self.local_metadata {
             let mut guard = registry.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = guard.remove(from.as_ref()) {
-                guard.insert(to.to_string(), entry);
-            } else if from != to {
-                guard.remove(to.as_ref());
+            if let Some(entry) = guard.remove(from_path.as_ref()) {
+                guard.insert(to_path.to_string(), entry);
+            } else if from_path != to_path {
+                guard.remove(to_path.as_ref());
             }
         }
         Ok(())
@@ -2364,6 +2411,7 @@ impl ObjectStoreEngine {
             writer.write_all(&chunk).await?;
         }
         writer.flush().await?;
+        writer.get_ref().sync_all().await?;
         Ok(hasher.map(|h| hex::encode(h.finalize())))
     }
 

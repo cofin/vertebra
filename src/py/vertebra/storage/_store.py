@@ -627,6 +627,8 @@ class SigningConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Optional target service account email for keyless IAM `signBlob` impersonation."""
     private_key_pem: str | None = None
     """Optional PEM-encoded RSA private key for local zero-network GCS V4 signing."""
+    verify_key_pem: str | None = None
+    """Optional PEM-encoded RSA public key for offline GCS V4 signature verification."""
     iam_endpoint: str = "https://iamcredentials.googleapis.com"
     """Google Cloud IAM Credentials API base URL used for keyless GCS V4 signing."""
     access_token: str | None = None
@@ -791,6 +793,11 @@ class _BaseObjectStore:
         """Return True if a SigningConfig is attached to this ObjectStore."""
         return self._signing is not None
 
+    @property
+    def supports_atomic_rename(self) -> bool:
+        """Return True if the active backend executes rename atomically without copy+delete fallback."""
+        return bool(self._require_native().supports_atomic_rename)
+
     def close(self) -> None:
         """Close the object store handle and release resources."""
         self._native = None
@@ -801,15 +808,31 @@ class _BaseObjectStore:
         *,
         method: str = "GET",
         timestamp: int | None = None,
+        expires_at: int | None = None,
+        verify_key_pem: str | None = None,
+        object_path: str | None = None,
     ) -> bool:
-        """Verify an HMAC-SHA256 or S3 SigV4 presigned URL signature and expiration."""
+        """Verify an HMAC-SHA256, S3/R2 SigV4, GCS V4, Azure SAS, or OCI PAR presigned URL."""
         if self._signing is None:
             msg = "SigningConfig is required to verify presigned URLs"
             raise RuntimeError(msg)
         now_ts = int(time.time()) if timestamp is None else timestamp
-        if self._signing.provider in {"gcs", "azure", "oci"}:
-            msg = f"{self._signing.provider.upper()} presigned URL verification is not supported offline"
-            raise NotImplementedError(msg)
+        if self._signing.provider == "gcs":
+            return self._verify_gcs_v4(
+                signed_url,
+                method=method,
+                now_ts=now_ts,
+                verify_key_pem=verify_key_pem,
+            )
+        if self._signing.provider == "azure":
+            return self._verify_azure_sas(signed_url, method=method, now_ts=now_ts)
+        if self._signing.provider == "oci":
+            return self._verify_oci_par(
+                signed_url,
+                object_path=object_path,
+                expires_at=expires_at,
+                now_ts=now_ts,
+            )
         if self._signing.provider == "s3":
             return self._verify_s3_v4(signed_url, method=method, now_ts=now_ts)
         return self._verify_hmac(signed_url, method=method, now_ts=now_ts)
@@ -1249,9 +1272,8 @@ class _BaseObjectStore:
             )
         return self._presign(path, method=method, expires_in_secs=expires_in_secs, timestamp=now_ts)
 
-    def _sign_oci_par(self, key: str, *, expires_in_secs: int) -> str:
+    def _resolve_oci_par_params(self) -> tuple[str, str, str, str, str | None]:
         assert self._signing is not None
-        native_mod = self._ensure_native_module()
         bucket = self._signing.bucket
         namespace = self._signing.namespace
         region = self._signing.region
@@ -1267,6 +1289,11 @@ class _BaseObjectStore:
             namespace = namespace or unquote(raw_namespace)
             bucket = bucket or unquote(raw_bucket)
             endpoint = endpoint or origin
+        return bucket, namespace, region, par_token, endpoint
+
+    def _sign_oci_par(self, key: str, *, expires_in_secs: int) -> str:
+        bucket, namespace, region, par_token, endpoint = self._resolve_oci_par_params()
+        native_mod = self._ensure_native_module()
         return str(
             native_mod.sign_oci_par_url(
                 bucket,
@@ -1275,6 +1302,31 @@ class _BaseObjectStore:
                 par_token,
                 key,
                 expires_in_secs,
+                endpoint,
+            )
+        )
+
+    def _verify_oci_par(
+        self,
+        signed_url: str,
+        *,
+        object_path: str | None,
+        expires_at: int | None,
+        now_ts: int,
+    ) -> bool:
+        bucket, namespace, region, par_token, endpoint = self._resolve_oci_par_params()
+        native_mod = self._ensure_native_module()
+        norm_key = self._key(object_path) if object_path is not None else None
+        return bool(
+            native_mod.py_verify_oci_par_url(
+                bucket,
+                namespace,
+                region,
+                par_token,
+                signed_url,
+                norm_key,
+                expires_at,
+                now_ts,
                 endpoint,
             )
         )
@@ -1351,6 +1403,51 @@ class _BaseObjectStore:
                 now_ts,
                 self._signing.endpoint,
                 virtual_hosted_style=self._signing.virtual_hosted_style,
+            )
+        )
+
+    def _verify_gcs_v4(
+        self,
+        signed_url: str,
+        *,
+        method: str,
+        now_ts: int,
+        verify_key_pem: str | None,
+    ) -> bool:
+        assert self._signing is not None
+        native_mod = self._ensure_native_module()
+        effective_email = self._signing.target_service_account or self._signing.service_account_email
+        effective_pem = (
+            verify_key_pem
+            if verify_key_pem is not None
+            else (self._signing.verify_key_pem or self._signing.private_key_pem)
+        )
+        return bool(
+            native_mod.py_verify_gcs_v4_url(
+                self._signing.bucket,
+                effective_email,
+                method,
+                signed_url,
+                now_ts,
+                effective_pem,
+                self._signing.access_key_id or None,
+                self._signing.secret_access_key or None,
+                self._signing.endpoint,
+            )
+        )
+
+    def _verify_azure_sas(self, signed_url: str, *, method: str, now_ts: int) -> bool:
+        assert self._signing is not None
+        native_mod = self._ensure_native_module()
+        return bool(
+            native_mod.py_verify_azure_sas_url(
+                self._signing.account,
+                self._signing.container,
+                self._signing.azure_access_key,
+                method,
+                signed_url,
+                now_ts,
+                self._signing.endpoint,
             )
         )
 
@@ -1990,11 +2087,11 @@ class SyncObjectStore(_BaseObjectStore):
         dst_key = self._key(dst)
         self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
-    def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+    def rename(self, src: str, dst: str, *, overwrite: bool = True, atomic_only: bool = False) -> None:
         """Atomically rename or move an object from src to dst within the store."""
         src_key = self._key(src)
         dst_key = self._key(dst)
-        self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite)
+        self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite, atomic_only=atomic_only)
 
     def list_page(
         self,
@@ -2560,11 +2657,11 @@ class AsyncObjectStore(_BaseObjectStore):
         dst_key = self._key(dst)
         await self._require_native().copy(src_key, dst_key, if_not_exists=not overwrite)
 
-    async def rename(self, src: str, dst: str, *, overwrite: bool = True) -> None:
+    async def rename(self, src: str, dst: str, *, overwrite: bool = True, atomic_only: bool = False) -> None:
         """Asynchronously rename or move an object from src to dst within the store."""
         src_key = self._key(src)
         dst_key = self._key(dst)
-        await self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite)
+        await self._require_native().rename(src_key, dst_key, if_not_exists=not overwrite, atomic_only=atomic_only)
 
     async def list_page(
         self,

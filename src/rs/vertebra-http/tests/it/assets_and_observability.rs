@@ -135,7 +135,23 @@ async fn static_assets_etag_304_precompressed_sidecars_and_range_206() {
 
 #[test]
 fn compiled_access_logger_formats_and_background_channel() {
-    let logger = AccessLogger::new(AccessLogFormat::Json);
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let logger = AccessLogger::with_writer(AccessLogFormat::Json, SharedWriter(Arc::clone(&sink)));
     let entry = AccessLogEntry {
         remote_addr: "127.0.0.1",
         method: "GET",
@@ -148,15 +164,19 @@ fn compiled_access_logger_formats_and_background_channel() {
         user_agent: "vertebra-test/1.0",
     };
     let line = logger.format_entry(&entry);
+    assert!(line.contains("\"remote_addr\":\"127.0.0.1\""));
     assert!(line.contains("\"method\":\"GET\""));
     assert!(line.contains("\"path\":\"/api/health\""));
     assert!(line.contains("\"status\":200"));
     assert!(line.contains("\"duration_us\":420"));
 
-    logger.record(&entry);
-    let drained = logger.drain_buffered();
-    assert_eq!(drained.len(), 1);
-    assert_eq!(drained[0], line);
+    for _ in 0..10_000 {
+        logger.log(&entry);
+    }
+    assert!(logger.flush(Duration::from_secs(5)));
+    let output = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+    assert!(!output.is_empty());
+    assert!(output.lines().any(|logged| logged == line));
 }
 
 #[test]
@@ -181,8 +201,8 @@ fn response_compression_negotiation_and_threshold() {
     assert_eq!(roundtrip.as_slice(), payload);
 }
 
-#[test]
-fn profile_endpoint_bearer_token_guard() {
+#[tokio::test]
+async fn profile_endpoint_bearer_token_guard() {
     let endpoint = ProfileEndpoint::new(ProfileConfig {
         enabled: true,
         bearer_token: Some("secret-token-123".to_string()),
@@ -190,7 +210,8 @@ fn profile_endpoint_bearer_token_guard() {
 
     let no_auth = HeaderMap::new();
     let denied = endpoint
-        .try_handle("/debug/pprof/profile", &no_auth)
+        .try_handle_async("/debug/pprof/profile", &no_auth)
+        .await
         .expect("intercept pprof");
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 
@@ -199,13 +220,29 @@ fn profile_endpoint_bearer_token_guard() {
         "authorization",
         HeaderValue::from_static("Bearer secret-token-123"),
     );
-    let cpu_ok = endpoint
-        .try_handle("/debug/pprof/profile", &valid_auth)
-        .expect("intercept cpu pprof");
-    assert_eq!(cpu_ok.status(), StatusCode::OK);
 
-    let heap_ok = endpoint
-        .try_handle("/debug/pprof/heap", &valid_auth)
+    let heap_resp = endpoint
+        .try_handle_async("/debug/pprof/heap", &valid_auth)
+        .await
         .expect("intercept heap pprof");
-    assert_eq!(heap_ok.status(), StatusCode::OK);
+    assert_eq!(heap_resp.status(), StatusCode::NOT_FOUND);
+
+    let cpu_resp = endpoint
+        .try_handle_async("/debug/pprof/profile?duration_ms=25", &valid_auth)
+        .await
+        .expect("intercept cpu pprof");
+
+    #[cfg(not(all(unix, feature = "profiling")))]
+    {
+        assert_eq!(cpu_resp.status(), StatusCode::NOT_FOUND);
+        let body = cpu_resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"{\"error\":\"profiling feature disabled\"}");
+    }
+
+    #[cfg(all(unix, feature = "profiling"))]
+    {
+        assert_eq!(cpu_resp.status(), StatusCode::OK);
+        let body = cpu_resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(!body.is_empty());
+    }
 }

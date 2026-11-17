@@ -1,13 +1,17 @@
 """Tests for the native FFI bridge (Ch6)."""
 
 import asyncio
+import gc
 import runpy
 import sys
 import threading
 import time
+import weakref
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
+import msgspec
 import pytest
 
 from vertebra._vertebra import (
@@ -16,11 +20,24 @@ from vertebra._vertebra import (
     STREAM_FLAG_HEADERS_SENT,
     STREAM_FLAG_STREAMING,
     STREAM_FLAG_TRAILERS,
+    AsgiScopeIterator,
+    Headers,
+    HeadersIterator,
+    Request,
+    RequestBatch,
+    RequestBatchIterator,
     Response,
+    RsgiHttpProtocol,
+    RsgiTransport,
     RustDbTaskAwaitable,
     TaskPanicError,
+    WsgiEnviron,
+    WsgiEnvironIterator,
     _set_stream_sink,
+    _WsgiStartResponse,
     cancel_request_sleep,
+    drive_native_batch,
+    hydrate_one_vectorcall,
     init_transport,
     max_stream_frame_payload,
     prepare_request_sleep,
@@ -430,3 +447,135 @@ def test_submit_stream_frame_splits_payload_above_max_stream_frame_payload() -> 
         assert (delivered[-1][2] & STREAM_FLAG_FINAL) != 0
     finally:
         _set_stream_sink(None)
+
+
+def test_msgspec_decoder_cache_collects_dynamic_struct_class() -> None:
+    """Verify dynamic msgspec.Struct types cached by msgspec_bridge collect after gc.collect()."""
+
+    def _decode_dynamic() -> weakref.ref[type[Any]]:
+        class DynamicPayload(msgspec.Struct):
+            value: int
+
+        req = Request.from_parts("POST", "/dynamic", b'{"value": 42}')
+        decoded = req.decode_msgspec(DynamicPayload, "json")
+        assert decoded.value == 42
+        hydrated = hydrate_one_vectorcall(DynamicPayload, (7,))
+        assert hydrated.value == 7
+        return weakref.ref(DynamicPayload)
+
+    cls_ref = _decode_dynamic()
+    gc.collect()
+    assert cls_ref() is None
+
+    generic_req = Request.from_parts("POST", "/generic", b"[1, 2, 3]")
+    assert generic_req.decode_msgspec(list[int], "json") == [1, 2, 3]
+
+
+def test_stepped_coroutine_breaks_self_referential_cycle_on_gc() -> None:
+    """Verify SteppedCoroutine cyclic GC hooks collect unfinished self-referential tasks."""
+
+    class _CycleMarker:
+        coro: Any = None
+
+    def _spawn_cyclic_stepped_coroutine() -> weakref.ref[_CycleMarker]:
+        loop = asyncio.new_event_loop()
+        marker = _CycleMarker()
+        marker_ref = weakref.ref(marker)
+
+        async def _runner() -> None:
+            fut = loop.create_future()
+
+            async def _self_referential_handler() -> bytes:
+                _ = marker
+                await fut
+                return b"unreachable"
+
+            coro = _self_referential_handler()
+            marker.coro = coro
+            tasks_before = asyncio.all_tasks(loop)
+            drive_native_batch([(77, coro)])
+            for task in asyncio.all_tasks(loop) - tasks_before:
+                cast("Any", task)._log_destroy_pending = False
+
+        try:
+            loop.run_until_complete(_runner())
+        finally:
+            loop.close()
+        return marker_ref
+
+    marker_ref = _spawn_cyclic_stepped_coroutine()
+    gc.collect()
+    assert marker_ref() is None
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "expected_body"),
+    [
+        (2, 4, b"cdef"),
+        (2**64 - 4, 16, None),
+    ],
+)
+def test_response_from_file_checks_range_overflow(
+    tmp_path: Path,
+    offset: int,
+    length: int,
+    expected_body: bytes | None,
+) -> None:
+    """Verify Response.from_file reads valid ranges and raises OverflowError on u64 overflow."""
+    payload_path = tmp_path / "range_payload.bin"
+    payload_path.write_bytes(b"abcdefgh")
+    if expected_body is None:
+        with pytest.raises(OverflowError):
+            Response.from_file(str(payload_path), offset=offset, length=length)
+    else:
+        resp = Response.from_file(str(payload_path), offset=offset, length=length)
+        assert resp.body == expected_body
+
+
+@pytest.mark.parametrize("as_memoryview", [False, True])
+def test_submit_raw_response_copies_writable_buffer_before_mutation(as_memoryview: bool) -> None:
+    """Verify submit_raw_response copies writable bytearray payloads so post-submit edits cannot leak."""
+    init_transport()
+    mutable = bytearray(b"initial-mutable-body")
+    body_arg: bytearray | memoryview = memoryview(mutable) if as_memoryview else mutable
+    frames = submit_raw_response(901, 200, [("x-mode", "mutable")], body_arg)
+    mutable[:] = b"mutated-after-submit"
+    assert len(frames) == 1
+    assert b"initial-mutable-body" in frames[0]
+    assert b"mutated-after-submit" not in frames[0]
+
+
+@pytest.mark.parametrize(
+    "native_cls",
+    [
+        Request,
+        Headers,
+        HeadersIterator,
+        RequestBatch,
+        RequestBatchIterator,
+        AsgiScopeIterator,
+        WsgiEnviron,
+        WsgiEnvironIterator,
+        _WsgiStartResponse,
+        RsgiTransport,
+    ],
+)
+def test_internal_native_classes_reject_direct_instantiation(native_cls: type[Any]) -> None:
+    """Verify internal native classes without constructors raise TypeError on instantiation."""
+    with pytest.raises(TypeError):
+        native_cls()
+
+
+@pytest.mark.parametrize("as_memoryview", [False, True])
+def test_rsgi_protocol_response_bytes_accepts_buffer(as_memoryview: bool) -> None:
+    """Verify RsgiHttpProtocol.response_bytes accepts bytearray and memoryview buffers."""
+    mutable = bytearray(b"rsgi-buffer-payload")
+    body_arg: bytearray | memoryview = memoryview(mutable) if as_memoryview else mutable
+    proto = RsgiHttpProtocol(body=b"", request_id=915)
+    proto.response_bytes(200, [("content-type", "text/plain")], body_arg)
+    mutable[:] = b"mutated-rsgi-buffer"
+    resp = proto.take_response()
+    assert resp.status == 200
+    assert resp.request_id == 915
+    assert resp.body == b"rsgi-buffer-payload"
+    assert resp.headers == [(b"content-type", b"text/plain")]

@@ -9,9 +9,12 @@ use vertebra_core::shm::ShmRegion;
 fn make_spsc(slots: usize, slot_size: usize) -> (Arc<ShmRegion>, SpscRing) {
     let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
     let alloc = std::alloc::Layout::from_size_align(layout.total_size, CACHELINE_BYTES).unwrap();
+    // SAFETY: `alloc` has non-zero size (`layout.total_size`).
     let ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` points to a valid allocation of `layout.total_size` bytes for the process lifetime.
     let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
     (region, ring)
 }
@@ -141,6 +144,7 @@ fn read_slot_zero_copy_rejects_corrupted_shm_len() {
     ring.try_send(b"valid", 0).expect("send should succeed");
 
     // Corrupt the SlotHeader.len of the first slot in SHM to u32::MAX
+    // SAFETY: `region` was initialized with `ShmHeader` at offset 0 and slot 0 at `ring_offset`.
     unsafe {
         let shm_header = &*(region.as_ptr() as *const vertebra_core::buffer::ShmHeader);
         let slot_header = (region.as_ptr().add(shm_header.ring_offset as usize))
@@ -250,4 +254,83 @@ fn spsc_drain_with_zero_copy_and_cached_heads_fifo() {
         assert_eq!(drained_rest, 4);
     }
     assert_eq!(next_expected, 96);
+}
+
+#[test]
+fn spsc_corrupted_slot_len_rejected_by_read_slot_to_vec_and_batch() {
+    use vertebra_core::buffer::{ShmHeader, SlotHeader};
+
+    let (region, ring) = make_spsc(16, 256);
+    ring.try_send(b"slot-0", 1).expect("send 0");
+    ring.try_send(b"slot-1", 2).expect("send 1");
+
+    let bad_len = ring.payload_capacity() as u32 + 64;
+    // SAFETY: `region` was initialized with `ShmHeader` at offset 0 and slot 1 at `ring_offset + 256`.
+    unsafe {
+        let shm_header = &*(region.as_ptr() as *const ShmHeader);
+        let slot1 = region
+            .as_ptr()
+            .add(shm_header.ring_offset as usize + 256)
+            .cast::<SlotHeader>();
+        (*slot1).len = bad_len;
+    }
+
+    assert!(matches!(
+        ring.read_slot_to_vec(1),
+        Err(ChannelError::CorruptedSlot)
+    ));
+    assert!(matches!(
+        ring.try_recv_batch(4),
+        Err(ChannelError::CorruptedSlot)
+    ));
+    // Slot 0 was validated and consumed; read_head stopped at slot 1 and must not advance past it.
+    assert!(matches!(
+        ring.try_recv_batch(4),
+        Err(ChannelError::CorruptedSlot)
+    ));
+}
+
+#[test]
+fn spsc_attach_and_from_region_reject_short_and_misaligned_regions() {
+    let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+    let alloc = std::alloc::Layout::from_size_align(layout.total_size + 64, CACHELINE_BYTES)
+        .expect("valid alloc layout");
+    // SAFETY: `alloc` has non-zero size (`layout.total_size + 64`).
+    let ptr = unsafe { std::alloc::alloc_zeroed(alloc) };
+    assert!(!ptr.is_null());
+
+    // SAFETY: `ptr` is valid for `layout.total_size - 8` bytes and outlives `short_region`.
+    let short_region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size - 8) });
+    // SAFETY: `SpscRing::attach` validates region length before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { SpscRing::attach(Arc::clone(&short_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `SpscRing::from_region` validates region length before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { SpscRing::from_region(Arc::clone(&short_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `ptr.add(1)` is within the `layout.total_size + 64` allocation and outlives `misaligned_region`.
+    let misaligned_region = Arc::new(unsafe { ShmRegion::from_raw(ptr.add(1), layout.total_size) });
+    // SAFETY: `SpscRing::attach` validates pointer alignment before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { SpscRing::attach(Arc::clone(&misaligned_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    // SAFETY: `SpscRing::from_region` validates pointer alignment before dereferencing `ShmHeader`.
+    assert!(matches!(
+        unsafe { SpscRing::from_region(Arc::clone(&misaligned_region), layout) },
+        Err(ChannelError::CorruptedSegment(_))
+    ));
+
+    drop(misaligned_region);
+    drop(short_region);
+    // SAFETY: `ptr` was allocated with `alloc` and all `ShmRegion` handles are dropped.
+    unsafe {
+        std::alloc::dealloc(ptr, alloc);
+    }
 }

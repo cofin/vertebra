@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
 
+from anyio import CancelScope
+
 if TYPE_CHECKING:
     from vertebra.db.adapters.mysql.driver import AsyncMySQLDriver, SyncMySQLDriver
 
@@ -18,13 +20,14 @@ class SyncMySQLPipeline:
     """Synchronous batch pipeline for `SyncMySQLDriver`.
 
     Queues `execute()` and `select()` operations and runs them inside an outer
-    transaction or nested `SAVEPOINT` when `results()` is invoked, committing or
-    releasing the savepoint on clean context exit and rolling back on error.
+    transaction or nested `SAVEPOINT` when `results()` is invoked or on clean
+    context exit, committing or releasing the savepoint on clean exit and
+    discarding unexecuted ops and rolling back on error.
     """
 
     __slots__ = (
         "_driver",
-        "_executed_results",
+        "_failed",
         "_ops",
         "_owns_tx",
         "_savepoint_name",
@@ -34,12 +37,14 @@ class SyncMySQLPipeline:
     def __init__(self, driver: SyncMySQLDriver) -> None:
         self._driver = driver
         self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]] = []
-        self._executed_results: list[Any] | None = None
+        self._failed: bool = False
         self._owns_tx: bool = False
         self._savepoint_name: str | None = None
         self._settled: bool = False
 
     def __enter__(self) -> Self:
+        self._failed = False
+        self._settled = False
         return self
 
     def __exit__(
@@ -48,13 +53,16 @@ class SyncMySQLPipeline:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        if exc_type is not None:
+        _ = (exc_val, exc_tb)
+        if exc_type is not None or self._failed:
+            self._ops.clear()
             self._rollback_scope()
             return
-        if self._executed_results is None and self._ops:
+        if self._ops:
             try:
-                self._run_ops()
+                self.results()
             except BaseException:
+                self._ops.clear()
                 self._rollback_scope()
                 raise
         self._commit_scope()
@@ -77,13 +85,16 @@ class SyncMySQLPipeline:
 
     def results(self) -> list[Any]:
         """Execute all queued operations in order and return their results."""
-        if self._executed_results is None:
-            try:
-                self._run_ops()
-            except BaseException:
-                self._rollback_scope()
-                raise
-        return list(self._executed_results or ())
+        if not self._ops:
+            return []
+        queued = list(self._ops)
+        self._ops.clear()
+        try:
+            return self._run_ops(queued)
+        except BaseException:
+            self._failed = True
+            self._rollback_scope()
+            raise
 
     def _begin_scope(self) -> None:
         if self._owns_tx or self._savepoint_name is not None:
@@ -94,51 +105,57 @@ class SyncMySQLPipeline:
             self._driver.begin()
             self._owns_tx = True
 
-    def _run_ops(self) -> None:
+    def _run_ops(
+        self,
+        queued: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]],
+    ) -> list[Any]:
         self._begin_scope()
         out: list[Any] = []
-        for kind, sql, parameters in self._ops:
+        for kind, sql, parameters in queued:
             if kind == "execute":
                 out.append(self._driver.execute(sql, parameters))
             else:
                 out.append(self._driver.select(sql, parameters))
-        self._executed_results = out
+        return out
 
     def _commit_scope(self) -> None:
         if self._settled:
             return
         self._settled = True
         if self._savepoint_name is not None:
-            self._driver.release_savepoint(self._savepoint_name)
+            sp_name = self._savepoint_name
             self._savepoint_name = None
+            self._driver.release_savepoint(sp_name)
         elif self._owns_tx:
-            self._driver.commit()
             self._owns_tx = False
+            self._driver.commit()
 
     def _rollback_scope(self) -> None:
         if self._settled:
             return
         self._settled = True
         if self._savepoint_name is not None:
-            self._driver.rollback_to_savepoint(self._savepoint_name)
-            self._driver.release_savepoint(self._savepoint_name)
+            sp_name = self._savepoint_name
             self._savepoint_name = None
+            self._driver.rollback_to_savepoint(sp_name)
+            self._driver.release_savepoint(sp_name)
         elif self._owns_tx:
-            self._driver.rollback()
             self._owns_tx = False
+            self._driver.rollback()
 
 
 class AsyncMySQLPipeline:
     """Asynchronous batch pipeline for `AsyncMySQLDriver`.
 
     Queues `execute()` and `select()` operations and runs them inside an outer
-    transaction or nested `SAVEPOINT` when `await results()` is invoked,
-    committing or releasing the savepoint on clean context exit and rolling back on error.
+    transaction or nested `SAVEPOINT` when `await results()` is invoked or on
+    clean context exit, committing or releasing the savepoint on clean exit and
+    discarding unexecuted ops and rolling back on error.
     """
 
     __slots__ = (
         "_driver",
-        "_executed_results",
+        "_failed",
         "_ops",
         "_owns_tx",
         "_savepoint_name",
@@ -148,12 +165,14 @@ class AsyncMySQLPipeline:
     def __init__(self, driver: AsyncMySQLDriver) -> None:
         self._driver = driver
         self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]] = []
-        self._executed_results: list[Any] | None = None
+        self._failed: bool = False
         self._owns_tx: bool = False
         self._savepoint_name: str | None = None
         self._settled: bool = False
 
     async def __aenter__(self) -> Self:
+        self._failed = False
+        self._settled = False
         return self
 
     async def __aexit__(
@@ -162,14 +181,19 @@ class AsyncMySQLPipeline:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        if exc_type is not None:
-            await self._rollback_scope()
-            return
-        if self._executed_results is None and self._ops:
-            try:
-                await self._run_ops()
-            except BaseException:
+        _ = (exc_val, exc_tb)
+        if exc_type is not None or self._failed:
+            self._ops.clear()
+            with CancelScope(shield=True):
                 await self._rollback_scope()
+            return
+        if self._ops:
+            try:
+                await self.results()
+            except BaseException:
+                self._ops.clear()
+                with CancelScope(shield=True):
+                    await self._rollback_scope()
                 raise
         await self._commit_scope()
 
@@ -191,13 +215,17 @@ class AsyncMySQLPipeline:
 
     async def results(self) -> list[Any]:
         """Execute all queued operations in order and return their results."""
-        if self._executed_results is None:
-            try:
-                await self._run_ops()
-            except BaseException:
+        if not self._ops:
+            return []
+        queued = list(self._ops)
+        self._ops.clear()
+        try:
+            return await self._run_ops(queued)
+        except BaseException:
+            self._failed = True
+            with CancelScope(shield=True):
                 await self._rollback_scope()
-                raise
-        return list(self._executed_results or ())
+            raise
 
     async def _begin_scope(self) -> None:
         if self._owns_tx or self._savepoint_name is not None:
@@ -208,35 +236,40 @@ class AsyncMySQLPipeline:
             await self._driver.begin()
             self._owns_tx = True
 
-    async def _run_ops(self) -> None:
+    async def _run_ops(
+        self,
+        queued: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None]],
+    ) -> list[Any]:
         await self._begin_scope()
         out: list[Any] = []
-        for kind, sql, parameters in self._ops:
+        for kind, sql, parameters in queued:
             if kind == "execute":
                 out.append(await self._driver.execute(sql, parameters))
             else:
                 out.append(await self._driver.select(sql, parameters))
-        self._executed_results = out
+        return out
 
     async def _commit_scope(self) -> None:
         if self._settled:
             return
         self._settled = True
         if self._savepoint_name is not None:
-            await self._driver.release_savepoint(self._savepoint_name)
+            sp_name = self._savepoint_name
             self._savepoint_name = None
+            await self._driver.release_savepoint(sp_name)
         elif self._owns_tx:
-            await self._driver.commit()
             self._owns_tx = False
+            await self._driver.commit()
 
     async def _rollback_scope(self) -> None:
         if self._settled:
             return
         self._settled = True
         if self._savepoint_name is not None:
-            await self._driver.rollback_to_savepoint(self._savepoint_name)
-            await self._driver.release_savepoint(self._savepoint_name)
+            sp_name = self._savepoint_name
             self._savepoint_name = None
+            await self._driver.rollback_to_savepoint(sp_name)
+            await self._driver.release_savepoint(sp_name)
         elif self._owns_tx:
-            await self._driver.rollback()
             self._owns_tx = False
+            await self._driver.rollback()

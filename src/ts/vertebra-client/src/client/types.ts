@@ -24,7 +24,7 @@ export interface RetryConfig {
   retryableStatuses?: number[];
 }
 
-export interface RouteResponse<T = any> {
+export interface RouteResponse<T = unknown> {
   /** Response data. */
   data: T;
   /** HTTP status code. */

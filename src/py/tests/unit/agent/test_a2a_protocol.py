@@ -1,8 +1,11 @@
 """Comprehensive integration and unit tests for A2A 1.0 protocol, SSE streaming, signing, and bridges."""
 
-from collections.abc import AsyncIterable
-from typing import Any
+import socket
+from collections.abc import AsyncGenerator, AsyncIterable
+from typing import Any, cast
 
+import anyio
+import httpx
 import pytest
 
 from vertebra.agent.a2a import (
@@ -18,15 +21,21 @@ from vertebra.agent.a2a import (
     FileContent,
     FilePart,
     Message,
+    PushNotificationConfig,
+    PushNotificationDispatcher,
     Task,
     TaskStatus,
+    TaskStatusUpdateEvent,
     TextPart,
 )
+from vertebra.agent.a2a.service import CacheA2ATaskStore
 from vertebra.agent.bridges import A2aAgentBridge, McpToolBridge, mcp_service_to_a2a
 from vertebra.agent.core.context import AgentContext, CallerIdentity
 from vertebra.agent.core.schema import tool
+from vertebra.agent.core.sse import CacheSseStreamBroker
 from vertebra.agent.mcp import MCPConfig, MCPCore, ToolRegistry
 from vertebra.agent.plugin import AgentPlugin, AgentPluginConfig
+from vertebra.cache import SyncCacheStore
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenCamelizedStruct
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -472,8 +481,21 @@ async def test_a2a_message_stream_and_tasks_resubscribe_sse_replay() -> None:
 
 
 @pytest.mark.anyio
-async def test_a2a_push_notification_crud_delivery_and_ssrf_guard() -> None:
+async def test_a2a_push_notification_crud_delivery_and_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify push notification configuration CRUD and SSRF rejection."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *_args, **_kwargs: [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("169.254.169.254" if host == "169.254.169.254" else "93.184.216.34", port or 443),
+            )
+        ],
+    )
     card = _sample_card()
     service = A2AService(config=A2AConfig(agent_card=card, allow_insecure_webhooks=False))
     ctx = AgentContext(identity=CallerIdentity(tenant_id="tenant-a", user_id="alice"))
@@ -660,6 +682,173 @@ async def test_a2a_skill_card_projects_from_toolspec_exposure() -> None:
     assert "mcp_private_tool" not in plugin_skill_ids
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream_method", ["message/stream", "tasks/resubscribe"])
+@pytest.mark.parametrize("abort_mode", ["aclose", "exception"])
+async def test_a2a_stream_cleanup_releases_broker_subscriptions_on_abort(
+    stream_method: str,
+    abort_mode: str,
+) -> None:
+    """Verify interrupted stream_message and stream_resubscribe release broker state in finally."""
+    card = _sample_card()
+    released_gate = anyio.Event()
+
+    async def _slow_executor(
+        msg: Message,
+        context_id: str | None,
+        task_id: str,
+    ) -> tuple[TaskStatus, tuple[Artifact, ...]]:
+        await released_gate.wait()
+        reply = Message(
+            message_id="msg-late",
+            role="agent",
+            parts=(TextPart(text="done"),),
+            task_id=task_id,
+            context_id=context_id,
+        )
+        return TaskStatus(state="completed", message=reply), ()
+
+    service = A2AService(config=A2AConfig(agent_card=card), executor=_slow_executor)
+    ctx = AgentContext(identity=CallerIdentity(tenant_id="tenant-a", user_id="alice"))
+    task_id = f"task-abort-{stream_method.replace('/', '-')}-{abort_mode}"
+
+    if stream_method == "message/stream":
+        stream_iter = service.stream_message(
+            {
+                "taskId": task_id,
+                "message": {
+                    "messageId": "m-abort",
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "abort mid-stream"}],
+                },
+            },
+            context=ctx,
+        )
+    else:
+        working_task = Task(
+            task_id=task_id,
+            status=TaskStatus(state="working"),
+            owner_id="tenant-a:alice",
+        )
+        service.task_store.save(working_task, "tenant-a:alice")
+        first_published = service._publish_event(
+            task_id,
+            TaskStatusUpdateEvent(task_id=task_id, status=working_task.status, final=False),
+        )
+        service._publish_event(
+            task_id,
+            TaskStatusUpdateEvent(task_id=task_id, status=working_task.status, final=False),
+        )
+        stream_iter = service.stream_resubscribe(
+            {"taskId": task_id, "lastEventId": first_published.id},
+            context=ctx,
+        )
+
+    async_gen = cast("AsyncGenerator[Any, None]", stream_iter.__aiter__())
+    try:
+        first_frame = await async_gen.__anext__()
+        assert first_frame.event == "status"
+        assert task_id in service.stream_broker.active_stream_ids()
+
+        if abort_mode == "aclose":
+            await async_gen.aclose()
+        else:
+            with pytest.raises(RuntimeError, match="consumer boom"):
+                try:
+                    raise RuntimeError("consumer boom")
+                finally:
+                    await async_gen.aclose()
+    finally:
+        released_gate.set()
+
+    assert task_id not in service.stream_broker.active_stream_ids()
+    assert service.stream_broker.active_stream_ids() == ()
+
+
+@pytest.mark.parametrize(
+    ("webhook_url", "resolved_ips"),
+    [
+        ("https://rebind.example.com/hook", ["127.0.0.1"]),
+        ("https://rebind.example.com/hook", ["169.254.169.254"]),
+        ("https://rebind.example.com/hook", ["10.0.0.5"]),
+        ("https://rebind.example.com/hook", ["::1"]),
+        ("https://rebind.example.com/hook", ["93.184.216.34", "10.0.0.5"]),
+    ],
+    ids=["loopback-v4", "metadata-link-local", "rfc1918", "loopback-v6", "mixed-public-private"],
+)
+def test_a2a_push_dispatcher_rejects_internal_and_mixed_dns_records(
+    monkeypatch: pytest.MonkeyPatch,
+    webhook_url: str,
+    resolved_ips: list[str],
+) -> None:
+    """Verify validate_webhook_url resolves DNS and rejects any internal or mixed address."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *_args, **_kwargs: [
+            (
+                socket.AF_INET6 if ":" in ip else socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (ip, port or 443),
+            )
+            for ip in resolved_ips
+        ],
+    )
+    dispatcher = PushNotificationDispatcher(allow_insecure_webhooks=False)
+    with pytest.raises(ValueError):
+        dispatcher.validate_webhook_url(webhook_url)
+
+
+@pytest.mark.anyio
+async def test_a2a_push_dispatcher_pins_validated_ip_and_blocks_dns_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify dispatch pins outbound httpx requests to resolved IP with Host/SNI and blocks DNS swaps."""
+    current_ips = ["93.184.216.34"]
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 443)) for ip in current_ips
+        ],
+    )
+    recorded_requests: list[httpx.Request] = []
+
+    def _mock_handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        return httpx.Response(202, json={"ok": True})
+
+    transport = httpx.MockTransport(_mock_handler)
+    dispatcher = PushNotificationDispatcher(allow_insecure_webhooks=False, transport=transport)
+    dispatcher.set_config(
+        "task-pin-1",
+        PushNotificationConfig(url="https://webhook.example.com/hooks/a2a", token="test-token-placeholder"),
+        "tenant-a:alice",
+    )
+
+    event = TaskStatusUpdateEvent(
+        task_id="task-pin-1",
+        status=TaskStatus(state="completed"),
+        final=True,
+    )
+    await dispatcher.dispatch("task-pin-1", event)
+
+    assert len(recorded_requests) == 1
+    sent_req = recorded_requests[0]
+    assert sent_req.url.host == "93.184.216.34"
+    assert sent_req.url.path == "/hooks/a2a"
+    assert sent_req.headers["Host"] == "webhook.example.com"
+    assert sent_req.headers["Authorization"] == "Bearer test-token-placeholder"
+    assert sent_req.extensions.get("sni_hostname") == "webhook.example.com"
+
+    current_ips[:] = ["169.254.169.254"]
+    with pytest.raises(ValueError, match="disallowed IP"):
+        await dispatcher.dispatch("task-pin-1", event)
+    assert len(recorded_requests) == 1
+
+
 def _sample_card(route_path: str = "/a2a") -> AgentCard:
     interface = AgentInterface(
         url=f"http://localhost:8000{route_path}",
@@ -680,3 +869,168 @@ def _sample_card(route_path: str = "/a2a") -> AgentCard:
         supported_interfaces=(interface,),
         skills=(skill,),
     )
+
+
+@pytest.mark.parametrize("bad_url", ["sqlite:///local.db", "postgresql://user:pass@localhost/db", "not-a-url"])
+def test_a2a_config_rejects_invalid_and_sql_cache_urls(bad_url: str) -> None:
+    """Verify A2AConfig raises ValueError for unsupported or SQL cache URL schemes."""
+    with pytest.raises(ValueError, match="Unsupported cache URL scheme"):
+        A2AConfig(cache_url=bad_url)
+
+
+@pytest.mark.anyio
+async def test_a2a_distributed_cache_stores_cross_worker_resubscribe_and_close() -> None:
+    """Verify CacheA2ATaskStore, cache-backed PushNotificationDispatcher, and CacheSseStreamBroker across workers."""
+    shared_sync = SyncCacheStore("memory://")
+    card = _sample_card("/a2a")
+
+    worker1 = A2AService(
+        config=A2AConfig(agent_card=card, allow_insecure_webhooks=True),
+        task_store=CacheA2ATaskStore(shared_sync),
+        push_dispatcher=PushNotificationDispatcher(allow_insecure_webhooks=True, store=shared_sync),
+        stream_broker=CacheSseStreamBroker(shared_sync),
+    )
+    worker2 = A2AService(
+        config=A2AConfig(agent_card=card, allow_insecure_webhooks=True),
+        task_store=CacheA2ATaskStore(shared_sync),
+        push_dispatcher=PushNotificationDispatcher(allow_insecure_webhooks=True, store=shared_sync),
+        stream_broker=CacheSseStreamBroker(shared_sync),
+    )
+
+    alice = AgentContext(identity=CallerIdentity(user_id="alice", tenant_id="t1"))
+    bob = AgentContext(identity=CallerIdentity(user_id="bob", tenant_id="t2"))
+
+    send_resp = await worker1.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "message/send",
+                "params": {
+                    "taskId": "task-dist-001",
+                    "message": {
+                        "messageId": "m-dist-1",
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": "hello cross worker"}],
+                    },
+                },
+            }
+        ),
+        context=alice,
+    )
+    send_data = decode_json(send_resp)
+    assert send_data["result"]["taskId"] == "task-dist-001"
+    assert send_data["result"]["status"]["state"] == "completed"
+
+    push_set_resp = await worker1.handle_payload(
+        encode_json_bytes(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tasks/pushNotificationConfig/set",
+                "params": {
+                    "taskId": "task-dist-001",
+                    "config": {"url": "http://127.0.0.1:9999/webhook", "token": "test-token-placeholder"},
+                },
+            }
+        ),
+        context=alice,
+    )
+    assert decode_json(push_set_resp)["result"]["status"] == "configured"
+
+    get_w2 = decode_json(
+        await worker2.handle_payload(
+            encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 3, "method": "tasks/get", "params": {"taskId": "task-dist-001"}}
+            ),
+            context=alice,
+        )
+    )
+    assert get_w2["result"]["taskId"] == "task-dist-001"
+    assert get_w2["result"]["status"]["state"] == "completed"
+
+    push_get_w2 = decode_json(
+        await worker2.handle_payload(
+            encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tasks/pushNotificationConfig/get",
+                    "params": {"taskId": "task-dist-001"},
+                }
+            ),
+            context=alice,
+        )
+    )
+    assert push_get_w2["result"]["url"] == "http://127.0.0.1:9999/webhook"
+
+    tenant_reject = decode_json(
+        await worker2.handle_payload(
+            encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 5, "method": "tasks/get", "params": {"taskId": "task-dist-001"}}
+            ),
+            context=bob,
+        )
+    )
+    assert tenant_reject["error"]["code"] == -32001
+
+    replayed: list[dict[str, Any]] = []
+    async for frame in worker2.stream_resubscribe(
+        {"taskId": "task-dist-001", "lastEventId": "evt-1"},
+        context=alice,
+    ):
+        replayed.append(decode_json(frame.data))
+    assert len(replayed) == 1
+    assert replayed[0]["status"]["state"] == "completed"
+
+    worker1.task_store.save(
+        Task(
+            task_id="task-dist-001",
+            status=TaskStatus(state="working"),
+            owner_id="t1:alice",
+        ),
+        "t1:alice",
+    )
+    assert worker2.task_store.get("task-dist-001", "t1:alice").status.state == "completed"
+
+    stream_init = decode_json(
+        await worker1.handle_payload(
+            encode_json_bytes(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "message/stream",
+                    "params": {
+                        "taskId": "task-dist-002",
+                        "message": {
+                            "messageId": "m-dist-2",
+                            "role": "user",
+                            "parts": [{"kind": "text", "text": "cancel me"}],
+                        },
+                    },
+                }
+            ),
+            context=alice,
+        )
+    )
+    assert stream_init["result"]["status"]["state"] == "working"
+
+    cancel_w2 = decode_json(
+        await worker2.handle_payload(
+            encode_json_bytes(
+                {"jsonrpc": "2.0", "id": 7, "method": "tasks/cancel", "params": {"taskId": "task-dist-002"}}
+            ),
+            context=alice,
+        )
+    )
+    assert cancel_w2["result"]["status"]["state"] == "canceled"
+
+    auto_a2a = A2AService(config=A2AConfig(agent_card=card, cache_url="memory://"))
+    assert isinstance(auto_a2a.task_store, CacheA2ATaskStore)
+    assert isinstance(auto_a2a.stream_broker, CacheSseStreamBroker)
+    await auto_a2a.aclose()
+    assert auto_a2a._owned_sync_cache is None
+
+    worker1.close()
+    worker2.close()
+    shared_sync.close()

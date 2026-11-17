@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 
 from vertebra.extensions.sqlspec.adapters.postgres.core import (
     is_pg_table_missing,
@@ -14,6 +15,7 @@ from vertebra.extensions.sqlspec.adapters.postgres.core import (
     pg_row_value,
     pg_table_ref,
     postgres_storage_params_sql,
+    validate_pg_table_name,
 )
 
 __all__ = ("PostgresLitestarStore",)
@@ -37,12 +39,32 @@ class PostgresLitestarStore(BaseSQLSpecStore[Any]):
         {"autovacuum_analyze_scale_factor", "autovacuum_vacuum_scale_factor", "fillfactor"}
     )
 
+    @staticmethod
+    def _ensure_table_name(table_name: str) -> None:
+        validate_pg_table_name(table_name)
+
+    def _split_table_name(self) -> tuple[str | None, str]:
+        parts = validate_pg_table_name(self._table_name)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, parts[0]
+
     def _is_async_config(self) -> bool:
         return bool(getattr(self._config, "is_async", False))
 
-    def _table_ddl(self) -> str:
+    def _companion_index(self) -> CompanionIndex:
+        schema_name, bare_table = self._split_table_name()
         table_ref = pg_table_ref(self._table_name)
         idx_name = pg_index_name("idx", self._table_name, "expires_at")
+        return CompanionIndex(
+            name=idx_name,
+            table=bare_table,
+            schema=schema_name,
+            ddl=f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_ref} (expires_at) WHERE expires_at IS NOT NULL;",
+        )
+
+    def _table_ddl(self) -> str:
+        table_ref = pg_table_ref(self._table_name)
         ext = getattr(self._config, "extension_config", None) or {}
         litestar_cfg = ext.get("litestar", {}) if isinstance(ext, dict) else {}
         tuning = postgres_storage_params_sql(
@@ -60,9 +82,39 @@ class PostgresLitestarStore(BaseSQLSpecStore[Any]):
             "created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"
             f"){tuning};\n"
-            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_ref} (expires_at) "
-            "WHERE expires_at IS NOT NULL;"
+            f"{self._companion_index().ddl}"
         )
+
+    def _schema_target(self) -> SchemaTarget:
+        schema_name, bare_table = self._split_table_name()
+        return SchemaTarget.from_ddl(
+            bare_table,
+            self._table_ddl(),
+            schema=schema_name,
+            dialect="postgres",
+        )
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the PostgreSQL session store."""
+        return [self._schema_target()]
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return the partial PostgreSQL session expiration companion index."""
+        return [self._companion_index()]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion partial index on a synchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                driver.execute_script(index.ddl)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion partial index on an asynchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                await driver.execute_script(index.ddl)
 
     def _drop_table_sql(self) -> list[str]:
         table_ref = pg_table_ref(self._table_name)
@@ -71,6 +123,10 @@ class PostgresLitestarStore(BaseSQLSpecStore[Any]):
             f"DROP INDEX IF EXISTS {idx_name};",
             f"DROP TABLE IF EXISTS {table_ref};",
         ]
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return downgrade drop statements for the PostgreSQL session index and table."""
+        return [DropStatement(statement) for statement in self._drop_table_sql()]
 
     def _create_table_sync(self) -> None:
         with self._config.provide_session() as driver:

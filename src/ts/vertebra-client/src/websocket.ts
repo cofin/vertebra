@@ -21,7 +21,7 @@ export interface PubSubWireFrame<T = unknown> {
   data?: T;
 }
 
-type TopicCallback<T = any> = (data: T, frame: PubSubWireFrame<T>) => void;
+type TopicCallback<T = unknown> = (data: T, frame: PubSubWireFrame<T>) => void;
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
@@ -85,7 +85,10 @@ export class WebSocketClient {
       subs = new Set();
       this.subscriptions.set(topic, subs);
     }
-    subs.add(callback as TopicCallback);
+    const wrapped: TopicCallback = (data, frame) => {
+      callback(data as T, frame as PubSubWireFrame<T>);
+    };
+    subs.add(wrapped);
 
     if (!this.ws && typeof WebSocket !== "undefined") {
       this.connect();
@@ -96,7 +99,7 @@ export class WebSocketClient {
     return () => {
       const current = this.subscriptions.get(topic);
       if (!current) return;
-      current.delete(callback as TopicCallback);
+      current.delete(wrapped);
       if (current.size === 0) {
         this.subscriptions.delete(topic);
         if (this.connected) {

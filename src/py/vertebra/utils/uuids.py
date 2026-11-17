@@ -16,14 +16,13 @@ from vertebra._vertebra import (
 from vertebra._vertebra import (
     uuid7_u128 as _native_uuid7_u128,
 )
-from vertebra.typing import NANOID_INSTALLED, UUID_UTILS_INSTALLED
+from vertebra.typing import UUID_UTILS_INSTALLED
 
 __all__ = (
     "NAMESPACE_DNS",
     "NAMESPACE_OID",
     "NAMESPACE_URL",
     "NAMESPACE_X500",
-    "NANOID_INSTALLED",
     "UUID_UTILS_INSTALLED",
     "nanoid",
     "uuid3",

@@ -5,18 +5,34 @@ from __future__ import annotations
 import asyncio
 import collections
 import hashlib
+import importlib
 import os
+import socket
+import sys
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+import vertebra._redis as native_redis
+import vertebra._valkey as native_valkey
 import vertebra._vertebra as core_mod
+import vertebra.db.adapters.redis as redis_pkg
+import vertebra.db.adapters.redis._async as redis_async_mod
+import vertebra.db.adapters.redis._sync as redis_sync_mod
+import vertebra.db.adapters.redis.driver as redis_driver_barrel
 import vertebra.db.adapters.redis.notify as redis_notify_mod
+import vertebra.db.adapters.valkey as valkey_pkg
+import vertebra.db.adapters.valkey._async as valkey_async_mod
+import vertebra.db.adapters.valkey._sync as valkey_sync_mod
+import vertebra.db.adapters.valkey.core as valkey_core_mod
 import vertebra.db.adapters.valkey.driver as valkey_driver_mod
-from vertebra.db import DatabaseRegistry, ProgrammingError
+import vertebra.db.driver._resp_queue as resp_store_mod
+import vertebra.framework.queues._resp as resp_queue_mod
+from vertebra.db import DatabaseError, DatabaseRegistry, ProgrammingError
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     RedisConfig,
@@ -28,16 +44,41 @@ from vertebra.db.adapters.redis.notify import (
 )
 from vertebra.db.adapters.valkey import (
     AsyncValkeyDriver,
+    AsyncValkeyQueueStore,
     Resp3Error,
     Resp3Parser,
     SyncValkeyDriver,
+    SyncValkeyQueueStore,
     ValkeyConfig,
 )
-from vertebra.extensions.alchemy.cache import SQLAlchemyCacheBackend
+from vertebra.db.adapters.valkey.queue import (
+    AsyncValkeyQueueStore as DirectAsyncValkeyQueueStore,
+)
+from vertebra.db.adapters.valkey.queue import (
+    SyncValkeyQueueStore as DirectSyncValkeyQueueStore,
+)
+from vertebra.db.driver import (
+    AZURE_REDIS_SCOPE,
+    AsyncQueueStore,
+    AzureEntraTokenProvider,
+    QueueEntry,
+    QueueReservation,
+    SyncQueueStore,
+)
+from vertebra.db.driver import Resp3Error as DriverResp3Error
+from vertebra.db.driver._resp import ClusterRedirect as SharedClusterRedirect
+from vertebra.db.driver._resp import Resp3Error as SharedResp3Error
 from vertebra.extensions.litestar.store import MemoryStore
 from vertebra.extensions.starlette.store import CacheStore
+from vertebra.framework.queues import QueueConfig, ValkeyQueueBackend
 from vertebra.framework.stores import KeyValueStore
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import (
+    ImproperConfigurationError,
+    MissingDependencyError,
+    VertebraError,
+    reset_dependency_cache,
+)
+from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
     from tests.unit.conftest import Resp3FakeServer
@@ -658,8 +699,6 @@ async def test_redis_and_valkey_build_drivers_propagate_broker(
         pytest.param(lambda: MemoryStore.from_redis("memory://"), id="litestar-redis"),
         pytest.param(lambda: CacheStore.from_valkey("memory://"), id="starlette-valkey"),
         pytest.param(lambda: CacheStore.from_redis("memory://"), id="starlette-redis"),
-        pytest.param(lambda: SQLAlchemyCacheBackend.from_valkey("memory://"), id="alchemy-valkey"),
-        pytest.param(lambda: SQLAlchemyCacheBackend.from_redis("memory://"), id="alchemy-redis"),
     ],
 )
 def test_redis_drivers_and_store_factories_reject_memory_url(factory: Callable[[], object]) -> None:
@@ -926,7 +965,8 @@ async def test_valkey_discover_sentinel_master_passes_valkey_client_config(
         SyncValkeyClient = _FakeSyncValkeyClient
         AsyncValkeyClient = _FakeAsyncValkeyClient
 
-    monkeypatch.setattr(valkey_driver_mod, "ensure_module", lambda *_args, **_kwargs: _FakeValkeyModule)
+    monkeypatch.setattr(valkey_sync_mod, "ensure_module", lambda *_args, **_kwargs: _FakeValkeyModule)
+    monkeypatch.setattr(valkey_async_mod, "ensure_module", lambda *_args, **_kwargs: _FakeValkeyModule)
 
     valkey_cfg = ValkeyConfig(
         url="valkey://127.0.0.1:6379/0",
@@ -956,3 +996,1442 @@ async def test_valkey_discover_sentinel_master_passes_valkey_client_config(
     assert active_async_client.cfg.kwargs["username"] == "svc"
     assert active_async_client.cfg.kwargs["password"] == "secret"
     await async_driver.close()
+
+
+def test_shared_resp3_error_subclass_and_offset() -> None:
+    """Shared Resp3Error subclasses DatabaseError and VertebraError while preserving next_offset."""
+    assert DriverResp3Error is SharedResp3Error
+    assert valkey_core_mod.Resp3Error is DriverResp3Error
+    assert valkey_core_mod.ClusterRedirect is SharedClusterRedirect
+    assert issubclass(SharedResp3Error, DatabaseError)
+    assert issubclass(SharedResp3Error, VertebraError)
+    assert issubclass(valkey_core_mod.Resp3Error, DatabaseError)
+
+    err = SharedResp3Error("ERR boom", next_offset=17)
+    assert isinstance(err, DatabaseError)
+    assert isinstance(err, VertebraError)
+    assert str(err) == "ERR boom"
+    assert err.next_offset == 17
+    assert SharedResp3Error("ERR default").next_offset == 0
+
+
+@pytest.mark.parametrize(
+    ("pkg", "barrel", "symbol_name", "module_path"),
+    [
+        pytest.param(
+            redis_pkg,
+            redis_driver_barrel,
+            "SyncRedisDriver",
+            "vertebra.db.adapters.redis._sync",
+            id="sync-redis-driver",
+        ),
+        pytest.param(
+            redis_pkg,
+            redis_driver_barrel,
+            "AsyncRedisDriver",
+            "vertebra.db.adapters.redis._async",
+            id="async-redis-driver",
+        ),
+        pytest.param(
+            valkey_pkg,
+            valkey_driver_mod,
+            "SyncValkeyDriver",
+            "vertebra.db.adapters.valkey._sync",
+            id="sync-valkey-driver",
+        ),
+        pytest.param(
+            valkey_pkg,
+            valkey_driver_mod,
+            "AsyncValkeyDriver",
+            "vertebra.db.adapters.valkey._async",
+            id="async-valkey-driver",
+        ),
+    ],
+)
+def test_driver_split_preserves_import_identity(
+    pkg: Any,
+    barrel: Any,
+    symbol_name: str,
+    module_path: str,
+) -> None:
+    """Sync and Async Redis/Valkey drivers maintain object identity across package, barrel, and split modules."""
+    direct_mod = importlib.import_module(module_path)
+    pkg_obj = getattr(pkg, symbol_name)
+    barrel_obj = getattr(barrel, symbol_name)
+    direct_obj = getattr(direct_mod, symbol_name)
+    assert pkg_obj is barrel_obj
+    assert barrel_obj is direct_obj
+
+
+@pytest.mark.parametrize(
+    ("backend", "topology"),
+    [
+        pytest.param("redis", "standalone", id="redis-standalone"),
+        pytest.param("redis", "sentinel", id="redis-sentinel"),
+        pytest.param("valkey", "standalone", id="valkey-standalone"),
+        pytest.param("valkey", "sentinel", id="valkey-sentinel"),
+    ],
+)
+@pytest.mark.anyio
+async def test_native_non_cluster_clients_return_empty_slot_map(
+    backend: str,
+    topology: str,
+) -> None:
+    """Standalone and Sentinel native Redis/Valkey clients return empty slot maps without blocking."""
+    if backend == "redis":
+        sentinel_name = "mymaster" if topology == "sentinel" else None
+        sentinel_nodes = [("127.0.0.1", 26379)] if topology == "sentinel" else []
+        sync_client = native_redis.SyncRedisClient(
+            "redis://127.0.0.1:6379/0",
+            topology=topology,
+            sentinel_master_name=sentinel_name,
+            sentinel_nodes=sentinel_nodes,
+        )
+        async_client = native_redis.AsyncRedisClient(
+            "redis://127.0.0.1:6379/0",
+            topology=topology,
+            sentinel_master_name=sentinel_name,
+            sentinel_nodes=sentinel_nodes,
+        )
+        try:
+            assert sync_client.slot_map() == {}
+            assert async_client.slot_map() == {}
+        finally:
+            sync_client.close()
+            async_client.close()
+        return
+
+    cfg = native_valkey.ValkeyClientConfig(
+        url="valkey://127.0.0.1:6379/0",
+        sentinel_service_name="mymaster" if topology == "sentinel" else None,
+        sentinel_nodes=["127.0.0.1:26379"] if topology == "sentinel" else None,
+    )
+    sync_valkey = native_valkey.SyncValkeyClient(cfg)
+    async_valkey = native_valkey.AsyncValkeyClient(cfg)
+    try:
+        assert sync_valkey.slot_map() == {}
+        assert async_valkey.slot_map() == {}
+    finally:
+        sync_valkey.close()
+        await async_valkey.close()
+
+
+@pytest.mark.parametrize(
+    "driver_cls",
+    [
+        pytest.param(SyncRedisDriver, id="sync-redis"),
+        pytest.param(AsyncRedisDriver, id="async-redis"),
+        pytest.param(SyncValkeyDriver, id="sync-valkey"),
+        pytest.param(AsyncValkeyDriver, id="async-valkey"),
+    ],
+)
+def test_redis_and_valkey_drivers_reject_removed_socket_factory_and_client_cache(driver_cls: type[Any]) -> None:
+    """Removed socket_factory kwarg and _client_cache property must fail cleanly."""
+    assert hasattr(driver_cls, "_client_cache") is False
+    with pytest.raises(TypeError, match="socket_factory"):
+        driver_cls(socket_factory=lambda *_args, **_kwargs: None)
+
+
+@pytest.mark.parametrize(
+    ("backend", "is_async"),
+    [
+        pytest.param("redis", False, id="redis-sync"),
+        pytest.param("redis", True, id="redis-async"),
+        pytest.param("valkey", False, id="valkey-sync"),
+        pytest.param("valkey", True, id="valkey-async"),
+    ],
+)
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+@pytest.mark.anyio
+async def test_discover_sentinel_master_preserves_tls_tracking_and_iam(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    is_async: bool,
+    use_tls: bool,
+) -> None:
+    """discover_sentinel_master preserves TLS scheme, tracking, IAM, protocol, and pool size across reconnects."""
+    constructed_clients: list[Any] = []
+    probe_clients: list[Any] = []
+
+    def token_provider() -> str:
+        return "test-token-placeholder"
+
+    class _FakeRedisClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.url = kwargs["url"]
+            self.closed = False
+            constructed_clients.append(self)
+
+        def execute_command(self, cmd: Any) -> Any:
+            probe_clients.append(self)
+            assert cmd[:2] == ["SENTINEL", "get-master-addr-by-name"]
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            return [b"10.0.0.21", b"6382"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeAsyncRedisClient(_FakeRedisClient):
+        async def execute_command(self, cmd: Any) -> Any:
+            return super().execute_command(cmd)
+
+    class _FakeRedisModule:
+        SyncRedisClient = _FakeRedisClient
+        AsyncRedisClient = _FakeAsyncRedisClient
+
+    class _FakeValkeyClientConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.url = kwargs["url"]
+
+    class _FakeValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.cfg = cfg
+            self.url = cfg.url
+            self.closed = False
+            constructed_clients.append(self)
+
+        def execute_command(self, *parts: Any) -> Any:
+            probe_clients.append(self)
+            assert parts[:2] == ("SENTINEL", "get-master-addr-by-name")
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            return [b"10.0.0.22", b"6383"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeAsyncValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.cfg = cfg
+            self.url = cfg.url
+            self.closed = False
+            constructed_clients.append(self)
+
+        async def execute_command(self, *parts: Any) -> Any:
+            probe_clients.append(self)
+            assert parts[:2] == ("SENTINEL", "get-master-addr-by-name")
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            return [b"10.0.0.22", b"6383"]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FakeValkeyModule:
+        ValkeyClientConfig = _FakeValkeyClientConfig
+        SyncValkeyClient = _FakeValkeyClient
+        AsyncValkeyClient = _FakeAsyncValkeyClient
+
+    if backend == "redis":
+        monkeypatch.setattr(redis_sync_mod, "ensure_module", lambda *_a, **_kw: _FakeRedisModule)
+        monkeypatch.setattr(redis_async_mod, "ensure_module", lambda *_a, **_kw: _FakeRedisModule)
+        scheme = "rediss" if use_tls else "redis"
+        redis_cfg = RedisConfig(
+            url=f"{scheme}://127.0.0.1:6379/2",
+            username="svc",
+            password="test-token-placeholder",
+            client_name="vtb-sentinel-tls",
+            protocol=3,
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=(("127.0.0.1", 26379), ("127.0.0.1", 26380)),
+            enable_client_side_caching=True,
+            client_tracking_prefixes=("user:", "order:"),
+            client_cache_capacity=2048,
+            client_cache_ttl_seconds=12.5,
+            enable_gcp_iam_auth=True,
+            iam_token_provider=token_provider,
+            max_connections=64,
+        )
+        driver: Any = AsyncRedisDriver(redis_cfg) if is_async else SyncRedisDriver(redis_cfg)
+    else:
+        monkeypatch.setattr(valkey_sync_mod, "ensure_module", lambda *_a, **_kw: _FakeValkeyModule)
+        monkeypatch.setattr(valkey_async_mod, "ensure_module", lambda *_a, **_kw: _FakeValkeyModule)
+        scheme = "valkeys" if use_tls else "valkey"
+        valkey_cfg = ValkeyConfig(
+            url=f"{scheme}://127.0.0.1:6379/2",
+            username="svc",
+            password="test-token-placeholder",
+            client_name="vtb-sentinel-tls",
+            protocol=3,
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=(("127.0.0.1", 26379), ("127.0.0.1", 26380)),
+            enable_client_side_caching=True,
+            client_tracking_prefixes=("user:", "order:"),
+            client_cache_capacity=2048,
+            client_cache_ttl_seconds=12.5,
+            enable_gcp_iam_auth=True,
+            iam_token_provider=token_provider,
+            max_connections=64,
+        )
+        driver = AsyncValkeyDriver(valkey_cfg) if is_async else SyncValkeyDriver(valkey_cfg)
+
+    initial_client = driver._client
+    discovered = await driver.discover_sentinel_master() if is_async else driver.discover_sentinel_master()
+
+    expected_addr = ("10.0.0.21", 6382) if backend == "redis" else ("10.0.0.22", 6383)
+    assert discovered == expected_addr
+    assert initial_client.closed is True
+    assert all(probe.url.startswith(f"{scheme}://") for probe in probe_clients)
+    assert all(probe.closed is True for probe in probe_clients)
+    assert driver.config.url == f"{scheme}://{expected_addr[0]}:{expected_addr[1]}/2"
+    assert driver.config.uses_tls is use_tls
+
+    active_client = constructed_clients[-1]
+    assert driver._client is active_client
+    if backend == "redis":
+        kwargs = active_client.kwargs
+        assert kwargs["url"] == f"{scheme}://10.0.0.21:6382/2"
+        assert kwargs["username"] == "svc"
+        assert kwargs["password"] == "test-token-placeholder"
+        assert kwargs["protocol"] == 3
+        assert kwargs["enable_client_side_caching"] is True
+        assert kwargs["client_tracking_prefixes"] == ["user:", "order:"]
+        assert kwargs["client_cache_capacity"] == 2048
+        assert kwargs["client_cache_ttl_seconds"] == 12.5
+        assert kwargs["enable_gcp_iam_auth"] is True
+        assert kwargs["max_connections"] == 64
+        assert driver.config.iam_token_provider is token_provider
+    else:
+        kwargs = active_client.cfg.kwargs
+        assert kwargs["url"] == f"{scheme}://10.0.0.22:6383/2"
+        assert kwargs["username"] == "svc"
+        assert kwargs["password"] == "test-token-placeholder"
+        assert kwargs["protocol_resp3"] is True
+        assert kwargs["client_tracking_enabled"] is True
+        assert kwargs["client_tracking_prefixes"] == ["user:", "order:"]
+        assert kwargs["client_tracking_capacity"] == 2048
+        assert kwargs["client_tracking_ttl_ms"] == 12500
+        assert kwargs["enable_gcp_memorystore_iam"] is True
+        assert kwargs["token_provider"] is token_provider
+        assert kwargs["pool_max_size"] == 64
+
+    rediscovered = await driver.discover_sentinel_master() if is_async else driver.discover_sentinel_master()
+    assert rediscovered == expected_addr
+    if is_async:
+        await driver.close()
+    else:
+        driver.close()
+
+
+@pytest.mark.parametrize(
+    ("backend", "is_async"),
+    [
+        pytest.param("redis", False, id="redis-sync"),
+        pytest.param("redis", True, id="redis-async"),
+        pytest.param("valkey", False, id="valkey-sync"),
+        pytest.param("valkey", True, id="valkey-async"),
+    ],
+)
+@pytest.mark.parametrize("empty_nodes", [False, True], ids=["all-fail", "empty-nodes"])
+@pytest.mark.anyio
+async def test_discover_sentinel_master_raises_last_failure_and_preserves_client(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    is_async: bool,
+    empty_nodes: bool,
+) -> None:
+    """discover_sentinel_master chains ImproperConfigurationError from the last failure without closing _client."""
+    probe_clients: list[Any] = []
+
+    class _FailingRedisClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.url = kwargs["url"]
+            self.closed = False
+
+        def execute_command(self, _cmd: Any) -> Any:
+            probe_clients.append(self)
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            raise TimeoutError("seed 2 timed out")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FailingAsyncRedisClient(_FailingRedisClient):
+        async def execute_command(self, cmd: Any) -> Any:
+            return super().execute_command(cmd)
+
+    class _FailingRedisModule:
+        SyncRedisClient = _FailingRedisClient
+        AsyncRedisClient = _FailingAsyncRedisClient
+
+    class _FakeValkeyClientConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.url = kwargs["url"]
+
+    class _FailingValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.url = cfg.url
+            self.closed = False
+
+        def execute_command(self, *_parts: Any) -> Any:
+            probe_clients.append(self)
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            raise TimeoutError("seed 2 timed out")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FailingAsyncValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.url = cfg.url
+            self.closed = False
+
+        async def execute_command(self, *_parts: Any) -> Any:
+            probe_clients.append(self)
+            if "26379" in self.url:
+                raise ConnectionError("seed 1 down")
+            raise TimeoutError("seed 2 timed out")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FailingValkeyModule:
+        ValkeyClientConfig = _FakeValkeyClientConfig
+        SyncValkeyClient = _FailingValkeyClient
+        AsyncValkeyClient = _FailingAsyncValkeyClient
+
+    nodes: tuple[tuple[str, int], ...] = () if empty_nodes else (("127.0.0.1", 26379), ("127.0.0.1", 26380))
+    if backend == "redis":
+        monkeypatch.setattr(redis_sync_mod, "ensure_module", lambda *_a, **_kw: _FailingRedisModule)
+        monkeypatch.setattr(redis_async_mod, "ensure_module", lambda *_a, **_kw: _FailingRedisModule)
+        redis_cfg = RedisConfig(
+            url="rediss://127.0.0.1:6379/0",
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=nodes,
+        )
+        driver: Any = AsyncRedisDriver(redis_cfg) if is_async else SyncRedisDriver(redis_cfg)
+    else:
+        monkeypatch.setattr(valkey_sync_mod, "ensure_module", lambda *_a, **_kw: _FailingValkeyModule)
+        monkeypatch.setattr(valkey_async_mod, "ensure_module", lambda *_a, **_kw: _FailingValkeyModule)
+        valkey_cfg = ValkeyConfig(
+            url="valkeys://127.0.0.1:6379/0",
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=nodes,
+        )
+        driver = AsyncValkeyDriver(valkey_cfg) if is_async else SyncValkeyDriver(valkey_cfg)
+
+    initial_client = driver._client
+    with pytest.raises(ImproperConfigurationError, match="mymaster") as exc_info:
+        if is_async:
+            await driver.discover_sentinel_master()
+        else:
+            driver.discover_sentinel_master()
+
+    if empty_nodes:
+        assert exc_info.value.__cause__ is None
+        assert not probe_clients
+    else:
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert "seed 2 timed out" in str(exc_info.value.__cause__)
+        assert len(probe_clients) == 2
+        assert all(probe.closed is True for probe in probe_clients)
+
+    assert initial_client.closed is False
+    assert driver._client is initial_client
+    if is_async:
+        await driver.close()
+    else:
+        driver.close()
+
+
+@pytest.mark.parametrize(
+    ("cfg_cls", "scheme"),
+    [
+        pytest.param(RedisConfig, "redis", id="redis"),
+        pytest.param(ValkeyConfig, "valkey", id="valkey"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("explicit_scope", "expected_scope"),
+    [
+        (None, AZURE_REDIS_SCOPE),
+        ("https://custom.redis.example/.default", "https://custom.redis.example/.default"),
+    ],
+)
+def test_redis_and_valkey_azure_entra_config_scope_redaction_and_conflict(
+    cfg_cls: type[RedisConfig] | type[ValkeyConfig],
+    scheme: str,
+    explicit_scope: str | None,
+    expected_scope: str,
+) -> None:
+    """Configs auto-scope AzureEntraTokenProvider to AZURE_REDIS_SCOPE, redact secrets, and reject dual IAM setups."""
+    seen_scopes: list[str] = []
+
+    def _fetch(scope: str) -> tuple[str, float]:
+        seen_scopes.append(scope)
+        return ("test-token-placeholder", 5000.0)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="cache-client",
+        client_secret="test-client-secret-placeholder",
+        scope=explicit_scope,
+        fetcher=_fetch,
+        clock=lambda: 1000.0,
+    )
+    cfg = cfg_cls(
+        url=f"{scheme}://oid-123:test-url-secret-placeholder@cache.redis.azure.net:6380/0",
+        username="oid-123",
+        password="test-password-placeholder",
+        token_provider=provider,
+    )
+    assert cfg.token_provider is not None
+    assert cfg.token_provider.scope == expected_scope
+
+    rendered = repr(cfg)
+    assert "AzureEntraTokenProvider" in rendered
+    assert "test-client-secret-placeholder" not in rendered
+    assert "test-url-secret-placeholder" not in rendered
+    assert "test-password-placeholder" not in rendered
+
+    other_provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="other-cache-client",
+        client_secret="test-client-secret-placeholder",
+        fetcher=_fetch,
+        clock=lambda: 1000.0,
+    )
+    other_cfg = cfg_cls(url=f"{scheme}://localhost:6379/0", username="oid-123", token_provider=other_provider)
+    assert cfg.pool_key() != other_cfg.pool_key()
+
+    token = cfg.token_provider.resolve_sync()
+    assert token == "test-token-placeholder"
+    assert seen_scopes == [expected_scope]
+    assert "test-token-placeholder" not in repr(cfg)
+
+    with pytest.raises(ImproperConfigurationError, match="Cannot combine GCP IAM authentication"):
+        cfg_cls(
+            url=f"{scheme}://localhost:6379/0",
+            username="oid-123",
+            enable_gcp_iam_auth=True,
+            token_provider=provider,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match="Cannot combine GCP IAM authentication"):
+        cfg_cls(
+            url=f"{scheme}://localhost:6379/0",
+            username="oid-123",
+            iam_auth_enabled=True,
+            token_provider=provider,
+        )
+
+    with pytest.raises(ImproperConfigurationError, match="Cannot configure both token_provider and iam_token_provider"):
+        cfg_cls(
+            url=f"{scheme}://localhost:6379/0",
+            username="oid-123",
+            token_provider=provider,
+            iam_token_provider=other_provider,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["redis", "valkey"])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_redis_and_valkey_drivers_azure_entra_wire_auth_refresh_and_auth_retry(
+    backend: str,
+    mode: str,
+) -> None:
+    """Sync and Async Redis/Valkey drivers pass Entra bearer tokens on wire, refresh pre-expiry, and retry WRONGPASS."""
+    now = [1000.0]
+    seen_scopes: list[str] = []
+    issued: list[str] = []
+    revoked_tokens: set[str] = set()
+    auth_headers: list[tuple[str, str]] = []
+    store: dict[bytes, bytes] = {}
+    stop_event = threading.Event()
+    server_socks: list[socket.socket] = []
+
+    def _sync_fetch(scope: str) -> dict[str, Any]:
+        seen_scopes.append(scope)
+        tok = f"test-token-placeholder-{len(issued) + 1}"
+        issued.append(tok)
+        return {"access_token": tok, "expires_in": 600}
+
+    async def _async_fetch(scope: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return _sync_fetch(scope)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="cache-client",
+        client_secret="test-client-secret-placeholder",
+        refresh_margin_seconds=120.0,
+        clock=lambda: now[0],
+        fetcher=_async_fetch if mode == "async" else _sync_fetch,
+    )
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    srv.settimeout(0.2)
+    port = srv.getsockname()[1]
+
+    def _handle_conn(conn: socket.socket) -> None:
+        server_socks.append(conn)
+        buf = bytearray()
+        authed_token: str | None = None
+        try:
+            while not stop_event.is_set():
+                try:
+                    chunk = conn.recv(4096)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                while buf:
+                    try:
+                        frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                    except ValueError:
+                        break
+                    del buf[:next_offset]
+                    if not isinstance(frame, list) or not frame:
+                        continue
+                    parts = [p.decode("utf-8", errors="replace") if isinstance(p, bytes) else str(p) for p in frame]
+                    cmd = parts[0].upper()
+                    if cmd == "HELLO":
+                        if "AUTH" in parts:
+                            idx = parts.index("AUTH")
+                            auth_user = parts[idx + 1]
+                            auth_pass = parts[idx + 2]
+                            auth_headers.append((auth_user, auth_pass))
+                            authed_token = auth_pass
+                            if auth_pass in revoked_tokens:
+                                conn.sendall(b"-WRONGPASS invalid or revoked Entra token\r\n")
+                                continue
+                        conn.sendall(f"%2\r\n+server\r\n+{backend}\r\n+proto\r\n:3\r\n".encode("ascii"))
+                    elif cmd == "AUTH":
+                        auth_user = parts[1] if len(parts) > 2 else "default"
+                        auth_pass = parts[2] if len(parts) > 2 else parts[1]
+                        auth_headers.append((auth_user, auth_pass))
+                        authed_token = auth_pass
+                        if auth_pass in revoked_tokens:
+                            conn.sendall(b"-WRONGPASS invalid or revoked Entra token\r\n")
+                        else:
+                            conn.sendall(b"+OK\r\n")
+                    elif authed_token in revoked_tokens:
+                        conn.sendall(b"-WRONGPASS invalid or revoked Entra token\r\n")
+                    elif cmd == "CLIENT":
+                        conn.sendall(b"+OK\r\n")
+                    elif cmd == "PING":
+                        conn.sendall(b"+PONG\r\n")
+                    elif cmd == "SET":
+                        raw_k = frame[1] if isinstance(frame[1], bytes) else str(frame[1]).encode("utf-8")
+                        raw_v = frame[2] if isinstance(frame[2], bytes) else str(frame[2]).encode("utf-8")
+                        store[raw_k] = raw_v
+                        conn.sendall(b"+OK\r\n")
+                    elif cmd == "GET":
+                        raw_k = frame[1] if isinstance(frame[1], bytes) else str(frame[1]).encode("utf-8")
+                        val = store.get(raw_k)
+                        if val is None:
+                            conn.sendall(b"$-1\r\n")
+                        else:
+                            conn.sendall(f"${len(val)}\r\n".encode("ascii") + val + b"\r\n")
+                    else:
+                        conn.sendall(b"+OK\r\n")
+        finally:
+            conn.close()
+
+    def _accept_loop() -> None:
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            conn.settimeout(0.2)
+            threading.Thread(target=_handle_conn, args=(conn,), daemon=True).start()
+
+    accept_thread = threading.Thread(target=_accept_loop, daemon=True)
+    accept_thread.start()
+
+    try:
+        if backend == "redis":
+            cfg: Any = RedisConfig(
+                url=f"redis://127.0.0.1:{port}/0",
+                username="oid-123",
+                token_provider=provider,
+            )
+            driver: Any = AsyncRedisDriver(cfg) if mode == "async" else SyncRedisDriver(cfg)
+        else:
+            cfg = ValkeyConfig(
+                url=f"valkey://127.0.0.1:{port}/0",
+                username="oid-123",
+                token_provider=provider,
+                enable_client_side_caching=False,
+                enable_client_tracking=False,
+            )
+            driver = AsyncValkeyDriver(cfg) if mode == "async" else SyncValkeyDriver(cfg)
+
+        try:
+            assert driver.config.token_provider is not None
+            assert driver.config.token_provider.scope == AZURE_REDIS_SCOPE
+
+            if mode == "sync":
+                driver.set("k1", "v1")
+                assert driver.get("k1") == b"v1"
+                assert issued == ["test-token-placeholder-1"]
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-1")
+
+                now[0] = 1480.0
+                assert driver.get("k1") == b"v1"
+                assert len(issued) == 2
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-2")
+
+                now[0] = 1970.0
+                driver.reconnect()
+                assert len(issued) == 3
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-3")
+
+                revoked_tokens.add("test-token-placeholder-3")
+                assert driver.get("k1") == b"v1"
+                assert len(issued) == 4
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-4")
+            else:
+                await driver.set("k1", "v1")
+                assert await driver.get("k1") == b"v1"
+                assert issued == ["test-token-placeholder-1"]
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-1")
+
+                now[0] = 1480.0
+                assert await driver.get("k1") == b"v1"
+                assert len(issued) == 2
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-2")
+
+                now[0] = 1970.0
+                await driver.reconnect()
+                assert len(issued) == 3
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-3")
+
+                revoked_tokens.add("test-token-placeholder-3")
+                assert await driver.get("k1") == b"v1"
+                assert len(issued) == 4
+                assert auth_headers[-1] == ("oid-123", "test-token-placeholder-4")
+
+            assert seen_scopes == [AZURE_REDIS_SCOPE] * 4
+            for tok in issued:
+                assert tok not in repr(driver.config)
+            assert "test-client-secret-placeholder" not in repr(driver.config)
+        finally:
+            if mode == "async":
+                await driver.close()
+            else:
+                driver.close()
+    finally:
+        stop_event.set()
+        srv.close()
+        for sock in server_socks:
+            sock.close()
+        accept_thread.join(timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    ("backend", "is_async"),
+    [
+        pytest.param("redis", False, id="redis-sync"),
+        pytest.param("redis", True, id="redis-async"),
+        pytest.param("valkey", False, id="valkey-sync"),
+        pytest.param("valkey", True, id="valkey-async"),
+    ],
+)
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+@pytest.mark.anyio
+async def test_discover_sentinel_master_preserves_azure_entra_token_provider_and_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    is_async: bool,
+    use_tls: bool,
+) -> None:
+    """discover_sentinel_master preserves Entra token_provider on config and passes refreshed bearer passwords."""
+    now = [1000.0]
+    issued: list[str] = []
+    constructed_clients: list[Any] = []
+
+    def _sync_fetch(scope: str) -> dict[str, Any]:
+        assert scope == AZURE_REDIS_SCOPE
+        tok = f"test-token-placeholder-{len(issued) + 1}"
+        issued.append(tok)
+        return {"access_token": tok, "expires_in": 600}
+
+    async def _async_fetch(scope: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return _sync_fetch(scope)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="sentinel-client",
+        client_secret="test-client-secret-placeholder",
+        refresh_margin_seconds=120.0,
+        clock=lambda: now[0],
+        fetcher=_async_fetch if is_async else _sync_fetch,
+    )
+
+    class _FakeRedisClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.url = kwargs["url"]
+            self.closed = False
+            constructed_clients.append(self)
+
+        def execute_command(self, cmd: Any) -> Any:
+            assert cmd[:2] == ["SENTINEL", "get-master-addr-by-name"]
+            return [b"10.0.0.41", b"6384"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeAsyncRedisClient(_FakeRedisClient):
+        async def execute_command(self, cmd: Any) -> Any:
+            return super().execute_command(cmd)
+
+    class _FakeRedisModule:
+        SyncRedisClient = _FakeRedisClient
+        AsyncRedisClient = _FakeAsyncRedisClient
+
+    class _FakeValkeyClientConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.url = kwargs["url"]
+
+    class _FakeValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.cfg = cfg
+            self.url = cfg.url
+            self.closed = False
+            constructed_clients.append(self)
+
+        def execute_command(self, *_parts: Any) -> Any:
+            return [b"10.0.0.42", b"6385"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeAsyncValkeyClient:
+        def __init__(self, cfg: Any) -> None:
+            self.cfg = cfg
+            self.url = cfg.url
+            self.closed = False
+            constructed_clients.append(self)
+
+        async def execute_command(self, *_parts: Any) -> Any:
+            return [b"10.0.0.42", b"6385"]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FakeValkeyModule:
+        ValkeyClientConfig = _FakeValkeyClientConfig
+        SyncValkeyClient = _FakeValkeyClient
+        AsyncValkeyClient = _FakeAsyncValkeyClient
+
+    if backend == "redis":
+        monkeypatch.setattr(redis_sync_mod, "ensure_module", lambda *_a, **_kw: _FakeRedisModule)
+        monkeypatch.setattr(redis_async_mod, "ensure_module", lambda *_a, **_kw: _FakeRedisModule)
+        scheme = "rediss" if use_tls else "redis"
+        cfg: Any = RedisConfig(
+            url=f"{scheme}://127.0.0.1:6379/2",
+            username="oid-123",
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=(("127.0.0.1", 26379),),
+            token_provider=provider,
+        )
+        driver: Any = AsyncRedisDriver(cfg) if is_async else SyncRedisDriver(cfg)
+    else:
+        monkeypatch.setattr(valkey_sync_mod, "ensure_module", lambda *_a, **_kw: _FakeValkeyModule)
+        monkeypatch.setattr(valkey_async_mod, "ensure_module", lambda *_a, **_kw: _FakeValkeyModule)
+        scheme = "valkeys" if use_tls else "valkey"
+        cfg = ValkeyConfig(
+            url=f"{scheme}://127.0.0.1:6379/2",
+            username="oid-123",
+            topology="sentinel",
+            sentinel_master_name="mymaster",
+            sentinel_nodes=(("127.0.0.1", 26379),),
+            token_provider=provider,
+        )
+        driver = AsyncValkeyDriver(cfg) if is_async else SyncValkeyDriver(cfg)
+
+    discovered = await driver.discover_sentinel_master() if is_async else driver.discover_sentinel_master()
+    expected_addr = ("10.0.0.41", 6384) if backend == "redis" else ("10.0.0.42", 6385)
+    assert discovered == expected_addr
+    assert isinstance(driver.config.token_provider, AzureEntraTokenProvider)
+    assert driver.config.token_provider.scope == AZURE_REDIS_SCOPE
+
+    master_client = constructed_clients[-1]
+    if backend == "redis":
+        assert master_client.kwargs["username"] == "oid-123"
+        assert master_client.kwargs["password"] == "test-token-placeholder-1"
+        assert master_client.kwargs["enable_gcp_iam_auth"] is False
+    else:
+        assert master_client.cfg.kwargs["username"] == "oid-123"
+        assert master_client.cfg.kwargs["password"] == "test-token-placeholder-1"
+        assert master_client.cfg.kwargs["enable_gcp_memorystore_iam"] is False
+
+    now[0] = 1480.0
+    rediscovered = await driver.discover_sentinel_master() if is_async else driver.discover_sentinel_master()
+    assert rediscovered == expected_addr
+    refreshed_client = constructed_clients[-1]
+    if backend == "redis":
+        assert refreshed_client.kwargs["username"] == "oid-123"
+        assert refreshed_client.kwargs["password"] == "test-token-placeholder-2"
+    else:
+        assert refreshed_client.cfg.kwargs["username"] == "oid-123"
+        assert refreshed_client.cfg.kwargs["password"] == "test-token-placeholder-2"
+
+    if is_async:
+        await driver.close()
+    else:
+        driver.close()
+
+
+class _ValkeyInMemoryRESPDriver:
+    """In-memory RESP command and Lua test double for ValkeyQueueStore tests."""
+
+    def __init__(self) -> None:
+        self.hashes: dict[str, dict[str, str]] = collections.defaultdict(dict)
+        self.zsets: dict[str, dict[str, float]] = collections.defaultdict(dict)
+        self.kv: dict[str, tuple[str, float | None]] = {}
+        self.seq: int = 0
+        self.closed: bool = False
+
+    def _get_kv(self, key: str) -> str | None:
+        item = self.kv.get(key)
+        if item is None:
+            return None
+        val, exp = item
+        if exp is not None and exp <= time.time():
+            del self.kv[key]
+            return None
+        return val
+
+    def execute_command(self, *parts: Any) -> Any:
+        """Execute a simulated synchronous RESP command."""
+        cmd = str(parts[0]).upper()
+        if cmd == "HGET":
+            return self.hashes[str(parts[1])].get(str(parts[2]))
+        if cmd == "HMGET":
+            h = self.hashes[str(parts[1])]
+            return [h.get(str(f)) for f in parts[2:]]
+        if cmd == "GET":
+            return self._get_kv(str(parts[1]))
+        if cmd == "SET":
+            key, val = str(parts[1]), str(parts[2])
+            nx = "NX" in parts[3:]
+            px: int | None = None
+            for idx, token in enumerate(parts[3:], start=3):
+                if str(token).upper() == "PX" and idx + 1 < len(parts):
+                    px = int(parts[idx + 1])
+            if nx and self._get_kv(key) is not None:
+                return False
+            self.kv[key] = (val, time.time() + (px / 1000.0) if px is not None else None)
+            return True
+        if cmd == "DEL":
+            return 1 if self.kv.pop(str(parts[1]), None) is not None else 0
+        if cmd == "ZRANGE":
+            zset = self.zsets[str(parts[1])]
+            ordered = sorted(zset.items(), key=lambda pair: (pair[1], pair[0]))
+            if "WITHSCORES" in parts:
+                out: list[Any] = []
+                for member, score in ordered:
+                    out.extend((member, score))
+                return out
+            return [member for member, _ in ordered]
+        msg = f"Unsupported command {cmd}"
+        raise NotImplementedError(msg)
+
+    def eval_script(
+        self,
+        script: str,
+        keys: Sequence[str] = (),
+        args: Sequence[Any] = (),
+    ) -> Any:
+        """Execute a simulated Lua queue-store script atomically."""
+        if script is resp_store_mod._STORE_ENQUEUE_LUA:
+            jobs_key, order_key, _seq_key, sched_key, exp_key, by_key_hash, ready_key = keys
+            jid, queue, record_json, now_ms_s, sched_s, prio_s, exp_s, idem_key = (str(a) for a in args)
+            self.seq += 1
+            data = decode_json(record_json.encode("utf-8"))
+            data["seq"] = self.seq
+            self.hashes[jobs_key][jid] = encode_json(data)
+            self.zsets[order_key][jid] = float(self.seq)
+            if sched_s and int(sched_s) > int(now_ms_s):
+                self.zsets[sched_key][jid] = float(sched_s)
+            else:
+                self.zsets[ready_key][jid] = float((-int(prio_s) * 1_000_000) + self.seq)
+            if exp_s:
+                self.zsets[exp_key][jid] = float(exp_s)
+            if idem_key:
+                self.hashes[by_key_hash][f"any:{idem_key}"] = jid
+                self.hashes[by_key_hash][f"q:{queue}:{idem_key}"] = jid
+            return jid
+
+        if script is resp_store_mod._STORE_CLAIM_LUA:
+            jobs_key, claimed_key, *ready_keys = keys
+            limit, worker_id, lease_until_s, now_ms_val = (
+                int(args[0]),
+                str(args[1]),
+                int(args[2]),
+                int(args[3]),
+            )
+            claimed: list[str] = []
+            for rkey in ready_keys:
+                if len(claimed) >= limit:
+                    break
+                ordered = sorted(self.zsets[rkey].items(), key=lambda p: (p[1], p[0]))
+                for jid, _ in ordered[: limit - len(claimed)]:
+                    self.zsets[rkey].pop(jid, None)
+                    raw = self.hashes[jobs_key].get(jid)
+                    if not raw:
+                        continue
+                    data = decode_json(raw.encode("utf-8"))
+                    if data.get("status") == "ready":
+                        data["status"] = "claimed"
+                        data["worker_id"] = worker_id
+                        data["lease_until_ms"] = lease_until_s
+                        data["updated_at_ms"] = now_ms_val
+                        encoded = encode_json(data)
+                        self.hashes[jobs_key][jid] = encoded
+                        self.zsets[claimed_key][jid] = float(lease_until_s)
+                        claimed.append(encoded)
+            return claimed
+
+        if script is resp_store_mod._STORE_ACK_LUA:
+            jobs_key, claimed_key, terminal_key, exp_key = keys
+            jid, attempt, now_ms = str(args[0]), int(args[1]), int(args[2])
+            raw = self.hashes[jobs_key].get(jid)
+            if not raw:
+                return 0
+            data = decode_json(raw.encode("utf-8"))
+            if data.get("status") != "claimed" or int(data["attempt"]) != attempt:
+                return 0
+            comp_ms = data.get("completed_at_ms")
+            if comp_ms is None:
+                comp_ms = now_ms
+            data["status"] = "completed"
+            data["lease_until_ms"] = 0
+            data["completed_at_ms"] = comp_ms
+            data["updated_at_ms"] = now_ms
+            self.hashes[jobs_key][jid] = encode_json(data)
+            self.zsets[claimed_key].pop(jid, None)
+            self.zsets[exp_key].pop(jid, None)
+            self.zsets[terminal_key][jid] = float(comp_ms)
+            return 1
+
+        if script is resp_store_mod._STORE_NACK_LUA:
+            jobs_key, claimed_key, sched_key, terminal_key, exp_key = keys
+            jid, attempt, error_msg, delay_ms_s, now_ms, tag = (
+                str(args[0]),
+                int(args[1]),
+                str(args[2]),
+                str(args[3]),
+                int(args[4]),
+                str(args[5]),
+            )
+            raw = self.hashes[jobs_key].get(jid)
+            if not raw:
+                return 0
+            data = decode_json(raw.encode("utf-8"))
+            if data.get("status") != "claimed" or int(data["attempt"]) != attempt:
+                return 0
+            self.zsets[claimed_key].pop(jid, None)
+            data["error"] = error_msg
+            data["lease_until_ms"] = 0
+            data["worker_id"] = None
+            data["updated_at_ms"] = now_ms
+            if int(data["attempt"]) >= int(data["max_attempts"]) or delay_ms_s == "":
+                comp_ms = data.get("completed_at_ms") or now_ms
+                data["status"] = "dead_letter"
+                data["completed_at_ms"] = comp_ms
+                self.zsets[exp_key].pop(jid, None)
+                self.zsets[terminal_key][jid] = float(comp_ms)
+            else:
+                data["attempt"] = int(data["attempt"]) + 1
+                data["status"] = "ready"
+                delay_val = int(delay_ms_s)
+                if delay_val > 0:
+                    sched = now_ms + delay_val
+                    data["scheduled_at_ms"] = sched
+                    self.zsets[sched_key][jid] = float(sched)
+                else:
+                    data["scheduled_at_ms"] = None
+                    prio = int(data.get("priority") or 0)
+                    seq = int(data.get("seq") or 0)
+                    self.zsets[f"{tag}:ready:{data['queue']}"][jid] = float((-prio * 1_000_000) + seq)
+            self.hashes[jobs_key][jid] = encode_json(data)
+            return 1
+
+        if script is resp_store_mod._STORE_CLEANUP_TERMINAL_LUA:
+            jobs_key, order_key, terminal_key, exp_key, claimed_key, by_key_hash = keys
+            before_ms, limit = int(args[0]), int(args[1])
+            eligible = [
+                jid for jid, score in sorted(self.zsets[terminal_key].items(), key=lambda p: p[1]) if score < before_ms
+            ]
+            if limit >= 0:
+                eligible = eligible[:limit]
+            for jid in eligible:
+                raw = self.hashes[jobs_key].pop(jid, None)
+                if raw:
+                    data = decode_json(raw.encode("utf-8"))
+                    headers = data.get("headers") if isinstance(data.get("headers"), dict) else {}
+                    for hk in (headers.get("key"), headers.get("idempotency_key")):
+                        if hk:
+                            self.hashes[by_key_hash].pop(f"any:{hk}", None)
+                            self.hashes[by_key_hash].pop(f"q:{data['queue']}:{hk}", None)
+                self.zsets[order_key].pop(jid, None)
+                self.zsets[terminal_key].pop(jid, None)
+                self.zsets[exp_key].pop(jid, None)
+                self.zsets[claimed_key].pop(jid, None)
+            return len(eligible)
+
+        if script is resp_store_mod._STORE_RESERVE_IDENTITY_LUA:
+            res_key = keys[0]
+            key_name, jid, task_name, now_ms, ttl_ms = (
+                str(args[0]),
+                str(args[1]),
+                str(args[2]),
+                int(args[3]),
+                int(args[4]),
+            )
+            existing = self._get_kv(res_key)
+            if existing is not None:
+                data = decode_json(existing.encode("utf-8"))
+                exp = data.get("expires_at_ms")
+                if exp is None or int(exp) > now_ms:
+                    return existing
+            expires_at_ms = now_ms + ttl_ms if ttl_ms >= 0 else None
+            payload = encode_json(
+                {
+                    "key": key_name,
+                    "job_id": jid,
+                    "task_name": task_name,
+                    "created_at_ms": now_ms,
+                    "expires_at_ms": expires_at_ms,
+                }
+            )
+            if ttl_ms > 0:
+                self.kv[res_key] = (payload, time.time() + (ttl_ms / 1000.0))
+            elif ttl_ms < 0:
+                self.kv[res_key] = (payload, None)
+            return None
+
+        if script is resp_store_mod._STORE_RESET_IDENTITY_LUA:
+            res_key = keys[0]
+            expected_job_id = str(args[0])
+            existing = self._get_kv(res_key)
+            if existing is None:
+                return 0
+            if expected_job_id:
+                data = decode_json(existing.encode("utf-8"))
+                if data.get("job_id") != expected_job_id:
+                    return 0
+            self.kv.pop(res_key, None)
+            return 1
+
+        if script is resp_store_mod._STORE_EXPIRE_OVERDUE_LUA:
+            jobs_key, exp_key, sched_key, terminal_key = keys
+            now_ms, limit, tag = int(args[0]), int(args[1]), str(args[2])
+            eligible = [
+                jid for jid, score in sorted(self.zsets[exp_key].items(), key=lambda p: p[1]) if score <= now_ms
+            ]
+            if limit >= 0:
+                eligible = eligible[:limit]
+            expired = 0
+            for jid in eligible:
+                raw = self.hashes[jobs_key].get(jid)
+                if not raw:
+                    continue
+                data = decode_json(raw.encode("utf-8"))
+                if (
+                    data.get("status") == "ready"
+                    and data.get("expires_at_ms") is not None
+                    and int(data["expires_at_ms"]) <= now_ms
+                ):
+                    comp_ms = data.get("completed_at_ms") or now_ms
+                    data["status"] = "expired"
+                    data["lease_until_ms"] = 0
+                    data["worker_id"] = None
+                    data["completed_at_ms"] = comp_ms
+                    data["updated_at_ms"] = now_ms
+                    self.hashes[jobs_key][jid] = encode_json(data)
+                    self.zsets[f"{tag}:ready:{data['queue']}"].pop(jid, None)
+                    self.zsets[sched_key].pop(jid, None)
+                    self.zsets[exp_key].pop(jid, None)
+                    self.zsets[terminal_key][jid] = float(comp_ms)
+                    expired += 1
+            return expired
+
+        if script is resp_store_mod._STORE_ASSIGN_WORKER_LUA:
+            jobs_key = keys[0]
+            jid, worker_id, attempt, now_ms = str(args[0]), str(args[1]), int(args[2]), int(args[3])
+            raw = self.hashes[jobs_key].get(jid)
+            if not raw:
+                return 0
+            data = decode_json(raw.encode("utf-8"))
+            if data.get("status") != "claimed" or int(data["attempt"]) != attempt:
+                return 0
+            data["worker_id"] = worker_id
+            data["updated_at_ms"] = now_ms
+            self.hashes[jobs_key][jid] = encode_json(data)
+            return 1
+
+        if script is resp_store_mod._STORE_TOUCH_HEARTBEATS_LUA:
+            jobs_key = keys[0]
+            hb_ms, now_ms = int(args[0]), int(args[1])
+            touched = 0
+            for jid in args[2:]:
+                raw = self.hashes[jobs_key].get(str(jid))
+                if not raw:
+                    continue
+                data = decode_json(raw.encode("utf-8"))
+                if data.get("status") == "claimed":
+                    data["heartbeat_at_ms"] = hb_ms
+                    data["updated_at_ms"] = now_ms
+                    self.hashes[jobs_key][str(jid)] = encode_json(data)
+                    touched += 1
+            return touched
+
+        if script is resp_store_mod._STORE_NULL_HEARTBEATS_LUA:
+            jobs_key = keys[0]
+            now_ms = int(args[0])
+            cleared = 0
+            for jid in args[1:]:
+                raw = self.hashes[jobs_key].get(str(jid))
+                if not raw:
+                    continue
+                data = decode_json(raw.encode("utf-8"))
+                if data.get("heartbeat_at_ms") is not None:
+                    data["heartbeat_at_ms"] = None
+                    data["updated_at_ms"] = now_ms
+                    self.hashes[jobs_key][str(jid)] = encode_json(data)
+                    cleared += 1
+            return cleared
+
+        if script is resp_store_mod._STORE_INTERRUPT_TASK_LUA:
+            jobs_key, claimed_key, sched_key, terminal_key, exp_key = keys
+            jid, has_err, err_msg, now_ms, tag = (
+                str(args[0]),
+                str(args[1]),
+                str(args[2]),
+                int(args[3]),
+                str(args[4]),
+            )
+            raw = self.hashes[jobs_key].get(jid)
+            if not raw:
+                return 0
+            data = decode_json(raw.encode("utf-8"))
+            if data.get("status") not in ("ready", "claimed"):
+                return 0
+            comp_ms = data.get("completed_at_ms") or now_ms
+            data["status"] = "interrupted"
+            data["lease_until_ms"] = 0
+            data["worker_id"] = None
+            data["completed_at_ms"] = comp_ms
+            data["updated_at_ms"] = now_ms
+            if has_err == "1":
+                data["error"] = err_msg
+            self.hashes[jobs_key][jid] = encode_json(data)
+            self.zsets[f"{tag}:ready:{data['queue']}"].pop(jid, None)
+            self.zsets[claimed_key].pop(jid, None)
+            self.zsets[sched_key].pop(jid, None)
+            self.zsets[exp_key].pop(jid, None)
+            self.zsets[terminal_key][jid] = float(comp_ms)
+            return 1
+
+        if script is resp_store_mod._STORE_ACQUIRE_LEASE_LUA:
+            lease_key = keys[0]
+            owner_id, ttl_ms = str(args[0]), int(args[1])
+            cur = self._get_kv(lease_key)
+            if cur is None or cur == owner_id:
+                self.kv[lease_key] = (owner_id, time.time() + (ttl_ms / 1000.0))
+                return 1
+            return 0
+
+        if script is resp_store_mod._STORE_RELEASE_LEASE_LUA:
+            lease_key = keys[0]
+            owner_id = str(args[0])
+            if self._get_kv(lease_key) == owner_id:
+                self.kv.pop(lease_key, None)
+                return 1
+            return 0
+
+        msg = "Unknown Lua script"
+        raise NotImplementedError(msg)
+
+    def close(self) -> None:
+        """Mark driver closed."""
+        self.closed = True
+
+
+class _ValkeyInMemoryAsyncRESPDriver:
+    """Async adapter over _ValkeyInMemoryRESPDriver."""
+
+    def __init__(self) -> None:
+        self._sync = _ValkeyInMemoryRESPDriver()
+
+    async def execute_command(self, *parts: Any) -> Any:
+        """Execute a simulated async RESP command."""
+        return self._sync.execute_command(*parts)
+
+    async def eval_script(
+        self,
+        script: str,
+        keys: Sequence[str] = (),
+        args: Sequence[Any] = (),
+    ) -> Any:
+        """Execute a simulated async Lua script."""
+        return self._sync.eval_script(script, keys=keys, args=args)
+
+    async def close(self) -> None:
+        """Close the async driver."""
+        self._sync.close()
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_err"),
+    [
+        ("memory://", "does not support memory://"),
+        ("redis://localhost:6379/0", "redis:// URLs are not supported by ValkeyQueueBackend"),
+        ("rediss://localhost:6380/0", "redis:// URLs are not supported by ValkeyQueueBackend"),
+        ("valkey:///0", "has no host"),
+        ("unix:///", "has no socket path"),
+    ],
+)
+def test_valkey_queue_backend_scheme_validation_and_missing_dep(
+    url: str,
+    expected_err: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ValkeyQueueBackend delegates to RESPStreamQueueBackend and enforces scheme/missing-dep rules."""
+    assert issubclass(ValkeyQueueBackend, resp_queue_mod.RESPStreamQueueBackend)
+    with pytest.raises(ImproperConfigurationError, match=expected_err):
+        ValkeyQueueBackend(QueueConfig(backend_url=url))
+
+    monkeypatch.setitem(sys.modules, "vertebra._valkey", None)
+    reset_dependency_cache("vertebra._valkey")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            ValkeyQueueBackend(QueueConfig(backend_url="valkey://127.0.0.1:6379/0"))
+        assert exc_info.value.package == "vertebra-core[valkey]"
+    finally:
+        monkeypatch.delitem(sys.modules, "vertebra._valkey", raising=False)
+        reset_dependency_cache("vertebra._valkey")
+
+
+def test_sync_valkey_queue_store_full_lifecycle() -> None:
+    """Verify SyncValkeyQueueStore exports and full SyncQueueStore lifecycle."""
+    assert SyncValkeyQueueStore is DirectSyncValkeyQueueStore
+    assert issubclass(SyncValkeyQueueStore, resp_store_mod.RESPQueueStoreBase)
+    fake_driver = _ValkeyInMemoryRESPDriver()
+    store = SyncValkeyQueueStore(cast("Any", fake_driver), key_prefix="test:valkey")
+    assert isinstance(store, SyncQueueStore)
+    store.ensure_schema()
+
+    assert store.reserve_identity("idem-v1", job_id="vj-1", task_name="sync_job") is None
+    contender = store.reserve_identity("idem-v1", job_id="vj-2", task_name="other")
+    assert isinstance(contender, QueueReservation)
+    assert contender.job_id == "vj-1"
+    assert store.reset_identity("idem-v1", expected_job_id="wrong") is False
+
+    store.enqueue_many(
+        [
+            QueueEntry(
+                job_id="vj-done",
+                queue="v-alpha",
+                task_name="t1",
+                payload=b"{}",
+                completed_at_ms=100,
+                headers={"key": "vk-done"},
+            ),
+            QueueEntry(
+                job_id="vj-overdue",
+                queue="v-beta",
+                task_name="t2",
+                payload=b"{}",
+                expires_at_ms=500,
+            ),
+            QueueEntry(
+                job_id="vj-active",
+                queue="v-beta",
+                task_name="t3",
+                payload=b"{}",
+            ),
+        ]
+    )
+    assert [e.job_id for e in store.list_entries(queue=None)] == ["vj-done", "vj-overdue", "vj-active"]
+    assert store.expire_overdue(now_ms=600) == 1
+    assert store.claim(["v-alpha"], limit=1, worker_id="vw-0")[0].job_id == "vj-done"
+    assert store.ack("vj-done", attempt=1) is True
+    assert store.cleanup_terminal(before_ms=200) == 1
+    assert store.get_entry("vj-done") is None
+    assert store.get_reservation("idem-v1") == contender
+
+    claimed = store.claim(["v-beta"], limit=1, worker_id="vw-1")
+    assert len(claimed) == 1
+    assert store.assign_worker("vj-active", worker_id="vw-2", attempt=1) is True
+    assert store.touch_heartbeats(["vj-active"], heartbeat_at_ms=777) == 1
+    assert store.null_heartbeats(["vj-active"]) == 1
+    assert store.interrupt_task("vj-active", error="stop") is True
+    assert store.reset_identity("idem-v1", expected_job_id="vj-1") is True
+    assert store.acquire_lease("vcron", owner_id="vowner", ttl_seconds=10.0) is True
+    assert store.release_lease("vcron", owner_id="vowner") is True
+    store.close()
+    assert fake_driver.closed is True
+
+
+@pytest.mark.anyio
+async def test_async_valkey_queue_store_full_lifecycle() -> None:
+    """Verify AsyncValkeyQueueStore exports and full AsyncQueueStore lifecycle."""
+    assert AsyncValkeyQueueStore is DirectAsyncValkeyQueueStore
+    assert issubclass(AsyncValkeyQueueStore, resp_store_mod.RESPQueueStoreBase)
+    fake_driver = _ValkeyInMemoryAsyncRESPDriver()
+    store = AsyncValkeyQueueStore(cast("Any", fake_driver), key_prefix="test:avalkey")
+    assert isinstance(store, AsyncQueueStore)
+    await store.ensure_schema()
+
+    assert await store.reserve_identity("idem-av1", job_id="avj-1", task_name="async_job") is None
+    contender = await store.reserve_identity("idem-av1", job_id="avj-2", task_name="other")
+    assert isinstance(contender, QueueReservation)
+    assert contender.job_id == "avj-1"
+
+    await store.enqueue(
+        QueueEntry(
+            job_id="avj-done",
+            queue="av-alpha",
+            task_name="t1",
+            payload=b"{}",
+            completed_at_ms=100,
+        )
+    )
+    await store.enqueue(
+        QueueEntry(
+            job_id="avj-overdue",
+            queue="av-beta",
+            task_name="t2",
+            payload=b"{}",
+            expires_at_ms=500,
+        )
+    )
+    assert [e.job_id for e in await store.list_entries(queue=None)] == ["avj-done", "avj-overdue"]
+    assert await store.expire_overdue(now_ms=600) == 1
+    claimed = await store.claim(["av-alpha"], limit=1, worker_id="vw-1")
+    assert len(claimed) == 1
+    assert await store.ack("avj-done", attempt=1) is True
+    assert await store.cleanup_terminal(before_ms=200) == 1
+    assert await store.get_entry("avj-done") is None
+    assert await store.get_reservation("idem-av1") == contender
+    assert await store.reset_identity("idem-av1", expected_job_id="avj-1") is True
+    await store.aclose()
+    assert fake_driver._sync.closed is True

@@ -2,46 +2,62 @@
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing as mp
 import os
 import signal
 import time
+import warnings
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from vertebra._vertebra import LeaseBroker, StatementCache
+from vertebra.db.driver import InterfaceError
+from vertebra.extensions import alchemy as alchemy_pkg
+from vertebra.extensions.alchemy import broker as alchemy_broker
+from vertebra.extensions.alchemy.broker import AsyncSHMSessionBroker, SyncSHMSessionBroker
 from vertebra.extensions.broker import (
+    AsyncSHMBrokerTransport,
     BrokerAttachError,
     BrokerConfig,
     BrokerSegmentInUseError,
     LeaseQuarantinedError,
     SyncSHMBrokerTransport,
 )
+from vertebra.extensions.broker.transport import AsyncBrokerLeaseSource, SyncBrokerLeaseSource
+from vertebra.utils.module_loader import import_optional
 
 
-def _worker_contention_loop(name: str, iterations: int) -> None:
+def _worker_contention_loop(name: str, iterations: int, start_barrier: mp.synchronize.Barrier) -> None:
     """Worker process contending for connection leases from a shared named broker.
 
     Args:
         name: Name of the POSIX shared-memory segment.
         iterations: Number of acquire-release cycles to perform.
+        start_barrier: Barrier synchronizing worker start for contention.
     """
     broker = LeaseBroker.open_named(name, pool_size=3, max_overflow=1)
     pid = os.getpid()
+    start_barrier.wait()
     for _ in range(iterations):
         grant = broker.acquire(worker_pid=pid, ttl_ns=0, timeout_ms=2000, bind_key_hash=0)
         if grant is not None:
-            time.sleep(0.001)
             broker.release(grant.slot_index, grant.generation)
 
 
-def _worker_hold_and_pause(name: str, ready_event: mp.synchronize.Event) -> None:
+def _worker_hold_and_pause(
+    name: str,
+    ready_event: mp.synchronize.Event,
+    stop_event: mp.synchronize.Event,
+) -> None:
     """Worker process acquiring leases and pausing until killed.
 
     Args:
         name: Name of the POSIX shared-memory segment.
         ready_event: Event to notify parent when leases are held.
+        stop_event: Event waited on until parent terminates the worker.
     """
     broker = LeaseBroker.open_named(name, pool_size=4, max_overflow=2)
     pid = os.getpid()
@@ -49,8 +65,7 @@ def _worker_hold_and_pause(name: str, ready_event: mp.synchronize.Event) -> None
     g2 = broker.acquire(worker_pid=pid, ttl_ns=0, timeout_ms=2000, bind_key_hash=0)
     if g1 is not None and g2 is not None:
         ready_event.set()
-        while True:
-            time.sleep(1)
+        stop_event.wait()
 
 
 def test_native_lease_broker_named_cross_process_cap() -> None:
@@ -58,8 +73,9 @@ def test_native_lease_broker_named_cross_process_cap() -> None:
     name = f"/vtb-test-py-contention-{os.getpid()}-{int(time.time())}"
     broker = LeaseBroker.create_named(name, pool_size=3, max_overflow=1)
     ctx = mp.get_context("spawn")
+    start_barrier = ctx.Barrier(4)
 
-    workers = [ctx.Process(target=_worker_contention_loop, args=(name, 40)) for _ in range(4)]
+    workers = [ctx.Process(target=_worker_contention_loop, args=(name, 40, start_barrier)) for _ in range(4)]
     for w in workers:
         w.start()
     for w in workers:
@@ -78,7 +94,8 @@ def test_native_lease_broker_sigkill_worker_reclamation() -> None:
     ctx = mp.get_context("spawn")
 
     ready_event = ctx.Event()
-    proc = ctx.Process(target=_worker_hold_and_pause, args=(name, ready_event))
+    stop_event = ctx.Event()
+    proc = ctx.Process(target=_worker_hold_and_pause, args=(name, ready_event, stop_event))
     proc.start()
 
     assert ready_event.wait(timeout=10)
@@ -226,3 +243,213 @@ def test_reclaim_worker_leases_isolates_dead_pid_without_disturbing_live_worker(
     assert broker.quarantined_count() == 0
     assert broker.release(live_grant.slot_index, live_grant.generation) is True
     assert broker.stats().active_leases == 0
+
+
+def test_alchemy_broker_uses_shared_lease_source_protocols() -> None:
+    """Verify duplicate transport protocols are removed and shared lease source protocols are imported."""
+    assert not hasattr(alchemy_broker, "SyncBrokerTransport")
+    assert not hasattr(alchemy_broker, "AsyncBrokerTransport")
+    assert not hasattr(alchemy_pkg, "SyncBrokerTransport")
+    assert not hasattr(alchemy_pkg, "AsyncBrokerTransport")
+    assert alchemy_broker.SyncBrokerLeaseSource is SyncBrokerLeaseSource
+    assert alchemy_broker.AsyncBrokerLeaseSource is AsyncBrokerLeaseSource
+
+
+class _MinimalSyncLease:
+    def __init__(self, key: str) -> None:
+        self.lease_id = key
+        self.released = False
+
+    def release(self) -> None:
+        self.released = True
+
+
+class _MinimalSyncLeaseSource:
+    def __init__(self) -> None:
+        self.leases: list[_MinimalSyncLease] = []
+        self.quarantined: list[Any] = []
+
+    def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> _MinimalSyncLease:
+        _ = (bind_key, worker_id)
+        lease = _MinimalSyncLease(f"min-sync-{len(self.leases)}")
+        self.leases.append(lease)
+        return lease
+
+    def quarantine(self, lease: Any) -> None:
+        self.quarantined.append(lease)
+
+
+class _MinimalAsyncLease:
+    def __init__(self, key: str) -> None:
+        self.lease_id = key
+        self.released = False
+
+    async def release(self) -> None:
+        self.released = True
+
+
+class _MinimalAsyncLeaseSource:
+    def __init__(self) -> None:
+        self.leases: list[_MinimalAsyncLease] = []
+        self.quarantined: list[Any] = []
+
+    async def acquire(self, *, bind_key: str | None = "default", worker_id: int | None = None) -> _MinimalAsyncLease:
+        _ = (bind_key, worker_id)
+        lease = _MinimalAsyncLease(f"min-async-{len(self.leases)}")
+        self.leases.append(lease)
+        return lease
+
+    async def quarantine(self, lease: Any) -> None:
+        self.quarantined.append(lease)
+
+
+@pytest.mark.parametrize("use_minimal_source", [False, True])
+def test_sync_session_broker_transport_delegation_and_non_underflow(use_minimal_source: bool) -> None:
+    """Verify SyncSHMSessionBroker delegates acquire/release/in_use without underflowing or requiring transport.release."""
+    if use_minimal_source:
+        source = _MinimalSyncLeaseSource()
+        assert isinstance(source, SyncBrokerLeaseSource)
+        broker = SyncSHMSessionBroker(transport=source, capacity=2)
+        assert broker.in_use == 0
+        assert broker.acquire() is True
+        assert broker.in_use == 1
+        broker.release()
+        assert source.leases[0].released is True
+        assert broker.in_use == 0
+        broker.release()
+        assert broker.in_use == 0
+
+        lease = broker.acquire_lease()
+        assert broker.in_use == 1
+        assert broker.release_lease(lease) is True
+        assert lease.released is True
+        assert broker.in_use == 0
+        return
+
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    broker = SyncSHMSessionBroker(transport=transport, capacity=1)
+    assert broker.in_use == 0
+    assert broker.acquire() is True
+    assert transport.metrics().active_leases == 1
+    assert broker.in_use == 1
+    assert broker.acquire(timeout=0.01) is False
+    assert broker.in_use == 1
+    broker.release()
+    assert transport.metrics().active_leases == 0
+    assert broker.in_use == 0
+    broker.release()
+    assert transport.metrics().active_leases == 0
+    assert broker.in_use == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_minimal_source", [False, True])
+async def test_async_session_broker_transport_delegation_and_sync_hook_error(use_minimal_source: bool) -> None:
+    """Verify AsyncSHMSessionBroker delegates async acquire/release/in_use and rejects sync pool hooks."""
+    if use_minimal_source:
+        source = _MinimalAsyncLeaseSource()
+        assert isinstance(source, AsyncBrokerLeaseSource)
+        broker = AsyncSHMSessionBroker(transport=source, capacity=2)
+        assert broker.in_use == 0
+        assert await broker.acquire() is True
+        assert broker.in_use == 1
+        await broker.release()
+        assert source.leases[0].released is True
+        assert broker.in_use == 0
+        await broker.release()
+        assert broker.in_use == 0
+
+        lease = await broker.acquire_lease()
+        assert broker.in_use == 1
+        assert await broker.release_lease(lease) is True
+        assert lease.released is True
+        assert broker.in_use == 0
+    else:
+        transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+        broker = AsyncSHMSessionBroker(transport=transport, capacity=1)
+        assert broker.in_use == 0
+        assert await broker.acquire() is True
+        assert transport.metrics().active_leases == 1
+        assert broker.in_use == 1
+        assert await broker.acquire(timeout=0.01) is False
+        assert broker.in_use == 1
+        await broker.release()
+        assert transport.metrics().active_leases == 0
+        assert broker.in_use == 0
+        await broker.release()
+        assert transport.metrics().active_leases == 0
+        assert broker.in_use == 0
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        with pytest.raises(InterfaceError):
+            broker.on_checkout(object())
+        with pytest.raises(InterfaceError):
+            broker.on_checkin(object())
+
+    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert runtime_warnings == []
+
+
+def test_sync_session_broker_single_index_checkout_and_checkin() -> None:
+    """Verify on_checkout indexes each lease once in _active_leases and on_checkin clears both maps."""
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    broker = SyncSHMSessionBroker(transport=transport, capacity=2)
+    conn = object()
+
+    broker.on_checkout(conn)
+    assert len(broker._active_leases) == 1
+    assert len(broker._conn_leases) == 1
+    assert id(conn) in broker._conn_leases
+    assert transport.metrics().active_leases == 1
+
+    broker.on_checkin(conn)
+    assert broker._active_leases == {}
+    assert broker._conn_leases == {}
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_released == 1
+
+
+@pytest.mark.anyio
+async def test_session_broker_attach_and_acquire_avoid_placeholder_compile_and_signature_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify attach_to_engine never compiles placeholder SQL and acquire_lease avoids inspect.signature."""
+    sync_transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    compile_calls = 0
+
+    def _fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal compile_calls
+        compile_calls += 1
+        raise AssertionError("get_or_compile_statement must not be invoked by attach_to_engine")
+
+    monkeypatch.setattr(sync_transport, "get_or_compile_statement", _fail_if_called)
+
+    sync_broker = SyncSHMSessionBroker(transport=sync_transport, capacity=2)
+    assert not hasattr(sync_broker, "on_before_cursor_execute")
+
+    sa_mod = import_optional("sqlalchemy")
+    if sa_mod is not None:
+        engine = sa_mod.create_engine("sqlite:///:memory:")
+        try:
+            sync_broker.attach_to_engine(engine)
+            with engine.connect() as conn:
+                assert conn.execute(sa_mod.text("SELECT 1")).scalar() == 1
+        finally:
+            engine.dispose()
+    assert compile_calls == 0
+
+    def _forbid_signature(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("inspect.signature must not be called during lease acquisition")
+
+    monkeypatch.setattr(inspect, "signature", _forbid_signature)
+
+    sync_lease = sync_broker.acquire_lease()
+    assert sync_broker.release_lease(sync_lease) is True
+
+    async_broker = AsyncSHMSessionBroker(
+        transport=AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0)),
+        capacity=2,
+    )
+    async_lease = await async_broker.acquire_lease()
+    assert await async_broker.release_lease(async_lease) is True

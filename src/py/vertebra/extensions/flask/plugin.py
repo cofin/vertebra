@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra._vertebra import Request, Response, WsgiEnviron, run_wsgi_callable
 from vertebra.extensions.flask.config import VertebraConfig
@@ -14,9 +14,12 @@ from vertebra.extensions.flask.openapi import attach_openapi_docs, extract_opena
 from vertebra.extensions.flask.router import RouteCompiler
 from vertebra.extensions.flask.vite import ViteAssetBridge, attach_vite
 from vertebra.server._fastpath_core import set_attached_fastpath
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+    from flask import Flask
 
     from vertebra.extensions.flask.offload import OffloadPlan
     from vertebra.extensions.flask.router import CompiledRouter
@@ -42,7 +45,7 @@ class VertebraPlugin:
 
     def __init__(
         self,
-        app: Any = None,
+        app: Flask | Any = None,
         config: VertebraConfig | None = None,
     ) -> None:
         self._config = config or VertebraConfig()
@@ -98,8 +101,9 @@ class VertebraPlugin:
         """Return the ``ViteAssetBridge`` if Vite is configured."""
         return self._vite_bridge
 
-    def init_app(self, app: Any) -> VertebraPlugin:
+    def init_app(self, app: Flask | Any) -> VertebraPlugin:
         """Bind this ``VertebraPlugin`` to a Flask application and compile routes and fastpaths."""
+        ensure_module("flask", extra="flask")
         self._app = app
         if self._config.vite is not None:
             self._vite_bridge = attach_vite(app, self._config.vite)
@@ -130,8 +134,9 @@ class VertebraPlugin:
 
         orig_wsgi = getattr(app, "wsgi_app", None)
         if callable(orig_wsgi):
-            self._original_wsgi_app = orig_wsgi
-            app.wsgi_app = self._wrap_wsgi_app(orig_wsgi)
+            typed_wsgi = cast("Callable[..., Iterable[bytes]]", orig_wsgi)
+            self._original_wsgi_app = typed_wsgi
+            cast("Any", app).wsgi_app = self._wrap_wsgi_app(typed_wsgi)
 
         setattr(app, self._config.app_attribute, self)
         extensions = getattr(app, "extensions", None)

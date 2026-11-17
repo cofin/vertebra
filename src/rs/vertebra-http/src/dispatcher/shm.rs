@@ -14,7 +14,7 @@ use vertebra_core::buffer::CacheLine;
 use vertebra_core::transport::ring_pair::RingPair;
 use vertebra_core::transport::{ShmBatchWriter, TransportNode};
 
-use super::streams::ResponseStreamRegistry;
+use super::streams::{DEFAULT_STREAM_QUEUE_DEPTH, ResponseStreamRegistry};
 use super::types::{
     TransportRequestView, WorkerState, batch_snapshot_serialized_size, request_slab_size,
     service_unavailable_response, worker_ring_has_capacity,
@@ -51,6 +51,15 @@ pub struct ShmDispatcher {
 impl ShmDispatcher {
     /// Create a new SHM dispatcher without spawning background tasks.
     pub fn new(ring_pairs: Vec<Arc<RingPair>>, max_inflight: usize) -> Arc<Self> {
+        Self::new_with_queue_depth(ring_pairs, max_inflight, DEFAULT_STREAM_QUEUE_DEPTH)
+    }
+
+    /// Create a new SHM dispatcher with a configured per-stream frame queue depth.
+    pub fn new_with_queue_depth(
+        ring_pairs: Vec<Arc<RingPair>>,
+        max_inflight: usize,
+        stream_queue_depth: usize,
+    ) -> Arc<Self> {
         let workers: Vec<WorkerState> = ring_pairs
             .into_iter()
             .map(|rp| WorkerState {
@@ -71,7 +80,7 @@ impl ShmDispatcher {
             next_batch: AtomicUsize::new(0),
             active_requests: CacheLine(AtomicUsize::new(0)),
             correlation_shards,
-            streams: ResponseStreamRegistry::default(),
+            streams: ResponseStreamRegistry::with_capacity(stream_queue_depth),
             lease_table: Mutex::new(None),
         })
     }

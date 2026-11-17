@@ -1,4 +1,4 @@
-//! AlloyDB Admin `v1alpha` (`connectionInfo` and `:generateClientCertificate`) discovery client.
+//! AlloyDB Admin `v1beta` (with `v1alpha` fallback on HTTP 404/501) discovery client.
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -56,7 +56,29 @@ pub(crate) struct AlloyDbDiscovery {
     pub client_identity: ValidatedClientIdentity,
 }
 
-/// Discover an AlloyDB instance via `v1alpha` `connectionInfo` and `:generateClientCertificate`.
+fn is_api_version_fallback_status(err: &PostgresError) -> bool {
+    matches!(
+        err,
+        PostgresError::Transport(msg)
+            if msg == "Admin HTTP request failed with status 404"
+                || msg == "Admin HTTP request failed with status 501"
+    )
+}
+
+fn alloydb_cluster_path(
+    base: &str,
+    api_version: &str,
+    enc_project: &str,
+    enc_location: &str,
+    enc_cluster: &str,
+) -> String {
+    format!(
+        "{base}/{api_version}/projects/{enc_project}/locations/{enc_location}/clusters/{enc_cluster}"
+    )
+}
+
+/// Discover an AlloyDB instance via `v1beta` `connectionInfo` and `:generateClientCertificate`,
+/// falling back to `v1alpha` on HTTP 404 or 501.
 pub(crate) async fn fetch_alloydb_discovery(
     connector: &CloudConnector,
     uri: &AlloyDbClusterUri,
@@ -71,14 +93,27 @@ pub(crate) async fn fetch_alloydb_discovery(
     let enc_cluster = encode_uri_segment(&uri.cluster)?;
     let enc_instance = encode_uri_segment(&uri.instance)?;
 
-    let cluster_path = format!(
-        "{base}/v1alpha/projects/{enc_project}/locations/{enc_location}/clusters/{enc_cluster}"
-    );
-    let conn_info_url = format!("{cluster_path}/instances/{enc_instance}/connectionInfo");
+    let v1beta_cluster_path =
+        alloydb_cluster_path(base, "v1beta", &enc_project, &enc_location, &enc_cluster);
+    let v1alpha_cluster_path =
+        alloydb_cluster_path(base, "v1alpha", &enc_project, &enc_location, &enc_cluster);
 
-    let info: ConnectionInfoResponse = connector
-        .get_json(&conn_info_url, admin_token, absolute_deadline)
-        .await?;
+    let v1beta_info_url = format!("{v1beta_cluster_path}/instances/{enc_instance}/connectionInfo");
+    let (api_version_is_beta, info): (bool, ConnectionInfoResponse) = match connector
+        .get_json(&v1beta_info_url, admin_token, absolute_deadline)
+        .await
+    {
+        Ok(resp) => (true, resp),
+        Err(err) if is_api_version_fallback_status(&err) => {
+            let v1alpha_info_url =
+                format!("{v1alpha_cluster_path}/instances/{enc_instance}/connectionInfo");
+            let resp = connector
+                .get_json(&v1alpha_info_url, admin_token, absolute_deadline)
+                .await?;
+            (false, resp)
+        }
+        Err(err) => return Err(err),
+    };
 
     let (host, peer_dns_name) = match ip_type {
         IpType::Private => {
@@ -113,9 +148,14 @@ pub(crate) async fn fetch_alloydb_discovery(
             let dns = info
                 .psc_dns_name
                 .as_deref()
-                .or(info.psc_auto_dns_name.as_deref())
                 .map(|s| s.trim().trim_end_matches('.'))
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    info.psc_auto_dns_name
+                        .as_deref()
+                        .map(|s| s.trim().trim_end_matches('.'))
+                        .filter(|s| !s.is_empty())
+                })
                 .map(str::to_string)
                 .ok_or_else(|| {
                     PostgresError::Transport(
@@ -127,15 +167,35 @@ pub(crate) async fn fetch_alloydb_discovery(
     };
 
     let keypair = generate_ephemeral_rsa_keypair(absolute_deadline).await?;
-    let cert_url = format!("{cluster_path}:generateClientCertificate");
     let req_body = GenerateClientCertificateRequest {
         public_key: keypair.public_key_pem(),
         cert_duration: "3600s",
         use_metadata_exchange: true,
     };
-    let cert_resp: GenerateClientCertificateResponse = connector
+    let primary_cluster_path = if api_version_is_beta {
+        &v1beta_cluster_path
+    } else {
+        &v1alpha_cluster_path
+    };
+    let cert_url = format!("{primary_cluster_path}:generateClientCertificate");
+    let cert_resp: GenerateClientCertificateResponse = match connector
         .post_json(&cert_url, admin_token, &req_body, absolute_deadline)
-        .await?;
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) if api_version_is_beta && is_api_version_fallback_status(&err) => {
+            let fallback_cert_url = format!("{v1alpha_cluster_path}:generateClientCertificate");
+            connector
+                .post_json(
+                    &fallback_cert_url,
+                    admin_token,
+                    &req_body,
+                    absolute_deadline,
+                )
+                .await?
+        }
+        Err(err) => return Err(err),
+    };
 
     if cert_resp.ca_cert.trim().is_empty() {
         return Err(PostgresError::Transport(

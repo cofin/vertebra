@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
-import contextlib
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from vertebra.typing import FrozenBaseStruct, VertebraError
-from vertebra.utils.module_loader import import_optional
+from vertebra.db.driver._resp import (
+    HASH_SLOT_COUNT,
+    NON_KEY_COMMANDS,
+    ClusterRedirect,
+    PubSubMessage,
+    Resp3Error,
+)
+from vertebra.db.driver._resp import (
+    crc16_xmodem as _shared_crc16_xmodem,
+)
+from vertebra.db.driver._resp import (
+    hash_slot as _shared_hash_slot,
+)
+from vertebra.db.driver._resp import (
+    parse_cluster_redirect as _shared_parse_cluster_redirect,
+)
+from vertebra.typing import ImproperConfigurationError
+
+if TYPE_CHECKING:
+    from vertebra.db.adapters.valkey.config import ValkeyConfig
 
 __all__ = (
     "HASH_SLOT_COUNT",
@@ -26,67 +43,64 @@ __all__ = (
     "valkey_hash_slot",
 )
 
-HASH_SLOT_COUNT = 16384
-NON_KEY_COMMANDS = frozenset(
-    {
-        "ASKING",
-        "AUTH",
-        "CLIENT",
-        "CLUSTER",
-        "COMMAND",
-        "ECHO",
-        "EXEC",
-        "FLUSHALL",
-        "FLUSHDB",
-        "HELLO",
-        "INFO",
-        "MULTI",
-        "PING",
-        "PSUBSCRIBE",
-        "PUNSUBSCRIBE",
-        "QUIT",
-        "READONLY",
-        "READWRITE",
-        "ROLE",
-        "SELECT",
-        "SENTINEL",
-        "SSUBSCRIBE",
-        "SUBSCRIBE",
-        "SUNSUBSCRIBE",
-        "UNSUBSCRIBE",
-    }
-)
+
+def _reject_valkey_url(url: str) -> None:
+    """Validate that the given URL is a supported Valkey scheme.
+
+    Args:
+        url: URL string to inspect.
+
+    Raises:
+        ImproperConfigurationError: When the URL begins with an unsupported scheme.
+    """
+    lower = url.lower()
+    if lower.startswith("memory://"):
+        msg = "Valkey driver does not support memory:// URLs"
+        raise ImproperConfigurationError(msg)
+    if lower.startswith("redis://") or lower.startswith("rediss://"):
+        msg = "redis:// URLs are not supported by the Valkey driver; use vertebra.db.adapters.redis instead."
+        raise ImproperConfigurationError(msg)
 
 
-class ClusterRedirect(FrozenBaseStruct, frozen=True, gc=False):
-    """Parsed Valkey Cluster MOVED or ASK redirection directive."""
+def _build_valkey_client_config(mod: Any, config: ValkeyConfig) -> Any:
+    """Construct a native ValkeyClientConfig from a ValkeyConfig instance."""
+    sentinel_nodes_list = [
+        f"{node[0]}:{node[1]}" if isinstance(node, (tuple, list)) else str(node) for node in config.sentinel_nodes
+    ]
+    cluster_nodes_list = [
+        f"{node[0]}:{node[1]}" if isinstance(node, (tuple, list)) else str(node) for node in config.cluster_nodes
+    ]
+    return mod.ValkeyClientConfig(
+        url=config.url,
+        username=config.username,
+        password=config.password,
+        client_name=config.client_name,
+        max_redirections=config.max_redirections,
+        client_tracking_enabled=(config.enable_client_side_caching or config.enable_client_tracking),
+        client_tracking_prefixes=list(config.client_tracking_prefixes),
+        client_tracking_capacity=config.effective_cache_capacity,
+        client_tracking_ttl_ms=int(config.client_cache_ttl_seconds * 1000) if config.client_cache_ttl_seconds else None,
+        enable_gcp_memorystore_iam=config.effective_iam_enabled,
+        token_provider=config.token_provider or config.iam_token_provider,
+        cluster_enabled=(config.topology == "cluster" or config.cluster_enabled),
+        cluster_nodes=cluster_nodes_list if cluster_nodes_list else None,
+        sentinel_service_name=config.effective_sentinel_master_name,
+        sentinel_nodes=sentinel_nodes_list if sentinel_nodes_list else None,
+        pool_max_size=config.max_connections,
+        protocol_resp3=(config.protocol == 3),
+        enable_capa_redirect=(config.topology == "cluster" or config.cluster_enabled),
+    )
 
-    kind: Literal["MOVED", "ASK"]
-    slot: int
-    host: str
-    port: int
 
-    @classmethod
-    def parse(cls, error_message: str | bytes) -> ClusterRedirect | None:
-        """Parse a MOVED or ASK error string into a ClusterRedirect struct."""
-        return ValkeyCore.parse_cluster_redirect(error_message)
-
-
-class PubSubMessage(FrozenBaseStruct, frozen=True, gc=False):
-    """RESP3 multiplexed Pub/Sub push message."""
-
-    kind: str
-    channel: str
-    payload: bytes
-    pattern: str | None = None
-
-
-class Resp3Error(VertebraError):
-    """Exception raised when a Valkey server returns a RESP3 error frame."""
-
-    def __init__(self, message: str, *, next_offset: int = 0) -> None:
-        super().__init__(message)
-        self.next_offset = next_offset
+def _decode_pubsub_item(item: dict[str, Any]) -> PubSubMessage:
+    """Convert a native listener message dictionary into a PubSubMessage struct."""
+    kind = str(item.get("type", "message"))
+    ch = str(item.get("channel", ""))
+    raw_payload = item.get("data", b"")
+    payload = raw_payload if isinstance(raw_payload, bytes) else str(raw_payload).encode("utf-8")
+    pat = item.get("pattern")
+    pat_str = str(pat) if pat is not None else None
+    return PubSubMessage(kind=kind, channel=ch, payload=payload, pattern=pat_str)
 
 
 class Resp3Parser:
@@ -253,36 +267,12 @@ class ValkeyCore:
     @staticmethod
     def crc16_xmodem(data: bytes | bytearray | memoryview | str) -> int:
         """Compute CRC16-XMODEM (polynomial 0x1021, initial value 0x0000) for Valkey Cluster."""
-        raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        native = import_optional("vertebra._valkey")
-        if native is not None:
-            native_fn = getattr(native, "crc16_xmodem", None)
-            if callable(native_fn):
-                with contextlib.suppress(TypeError):
-                    return int(native_fn(raw))
-        crc = 0x0000
-        for byte in raw:
-            crc ^= byte << 8
-            for _ in range(8):
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
-        return crc
+        return _shared_crc16_xmodem(data, native_module="vertebra._valkey")
 
     @staticmethod
     def hash_slot(key: str | bytes) -> int:
         """Compute the Valkey Cluster hash slot (0..16383) for a given key string or bytes."""
-        raw = key if isinstance(key, bytes) else key.encode("utf-8")
-        native = import_optional("vertebra._valkey")
-        if native is not None:
-            native_fn = getattr(native, "valkey_hash_slot", None) or getattr(native, "hash_slot", None)
-            if callable(native_fn):
-                with contextlib.suppress(TypeError):
-                    return int(native_fn(raw))
-        start = raw.find(b"{")
-        if start != -1:
-            end = raw.find(b"}", start + 1)
-            if end != -1 and end > start + 1:
-                raw = raw[start + 1 : end]
-        return ValkeyCore.crc16_xmodem(raw) % HASH_SLOT_COUNT
+        return _shared_hash_slot(key, native_module="vertebra._valkey")
 
     @classmethod
     def redis_hash_slot(cls, key: str | bytes) -> int:
@@ -328,41 +318,7 @@ class ValkeyCore:
     @staticmethod
     def parse_cluster_redirect(error_message: str | bytes) -> ClusterRedirect | None:
         """Parse a Valkey Cluster MOVED or ASK redirection error."""
-        native = import_optional("vertebra._valkey")
-        if native is not None:
-            native_fn = getattr(native, "parse_cluster_redirect", None)
-            if callable(native_fn):
-                msg_str = (
-                    error_message.decode("utf-8", errors="replace")
-                    if isinstance(error_message, bytes)
-                    else str(error_message)
-                )
-                with contextlib.suppress(TypeError):
-                    parsed_native = native_fn(msg_str)
-                    if parsed_native is not None:
-                        kind, slot, host, port = parsed_native
-                        return ClusterRedirect(
-                            kind="MOVED" if kind == "MOVED" else "ASK", slot=slot, host=host, port=port
-                        )
-        text = error_message.decode("utf-8", errors="replace") if isinstance(error_message, bytes) else error_message
-        text = text.strip()
-        if text.startswith("-"):
-            text = text[1:].strip()
-        parts = text.split()
-        if len(parts) >= 3 and parts[0] in ("MOVED", "ASK"):
-            redirect_kind: Literal["MOVED", "ASK"] = "MOVED" if parts[0] == "MOVED" else "ASK"
-            with contextlib.suppress(ValueError):
-                slot = int(parts[1])
-                target = parts[2]
-                parsed = urlparse(f"//{target}")
-                if parsed.hostname and parsed.port:
-                    return ClusterRedirect(
-                        kind=redirect_kind,
-                        slot=slot,
-                        host=parsed.hostname,
-                        port=parsed.port,
-                    )
-        return None
+        return _shared_parse_cluster_redirect(error_message, native_module="vertebra._valkey")
 
     @staticmethod
     def decode_part(part: str | bytes | int) -> str:

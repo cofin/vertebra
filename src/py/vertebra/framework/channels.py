@@ -9,7 +9,7 @@ from vertebra.db.driver import (
     AsyncNotificationSource,
     SyncNotificationSource,
 )
-from vertebra.server._channels import ChannelBus, ChannelEnvelope
+from vertebra.server._channels import ChannelBus, ChannelEnvelope, ChannelMessage
 from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 __all__ = (
     "ChannelBus",
     "ChannelEnvelope",
+    "ChannelMessage",
     "ChannelsBackend",
     "create_channels_backend",
 )
@@ -41,7 +42,7 @@ class ChannelsBackend(ChannelBus):
     ) -> Self:
         """Create a ChannelsBackend instance automatically selected from a backend connection URL."""
         return cast(
-            Self,
+            "Self",
             create_channels_backend(
                 url=url,
                 history=history,

@@ -1,5 +1,7 @@
 """BigQuery SQLSpec core statement compilation, parameter codecs, connection shim, and error mapping."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, date, datetime, time

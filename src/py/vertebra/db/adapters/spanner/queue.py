@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import time
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
-from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
+from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, QueueReservation, SyncQueueStore
 from vertebra.utils.serializers import decode_json, encode_json
 from vertebra.utils.text import validate_identifier
 from vertebra.utils.uuids import uuid4
@@ -28,11 +27,16 @@ __all__ = (
     "SPANNER_QUEUE_STORE_DDL_SPANGRES",
     "SyncSpannerQueueStore",
     "compute_spanner_shard_id",
+    "farm_fingerprint64",
     "format_spanner_receipt_handle",
     "parse_spanner_receipt_handle",
 )
 
 _BINARY_PAYLOAD_PREFIX: Final[str] = "vtb-b64:"
+_FARMHASH_MASK64: Final[int] = 0xFFFFFFFFFFFFFFFF
+_FARMHASH_K0: Final[int] = 0xC3A5C85C97CB3127
+_FARMHASH_K1: Final[int] = 0xB492B66FBE98F273
+_FARMHASH_K2: Final[int] = 0x9AE16A3B2F90404F
 
 SPANNER_QUEUE_STORE_DDL_GOOGLESQL: Final[tuple[str, ...]] = (
     """
@@ -54,6 +58,13 @@ SPANNER_QUEUE_STORE_DDL_GOOGLESQL: Final[tuple[str, ...]] = (
         traceparent STRING(256),
         headers STRING(MAX),
         last_error STRING(MAX),
+        priority INT64,
+        expires_at_ms INT64,
+        completed_at_ms INT64,
+        worker_id STRING(128),
+        heartbeat_at_ms INT64,
+        result STRING(MAX),
+        error STRING(MAX),
         expires_at TIMESTAMP
     ) PRIMARY KEY (shard_id, task_id),
     ROW DELETION POLICY (OLDER_THAN(expires_at, INTERVAL 0 DAY))
@@ -72,7 +83,14 @@ SPANNER_QUEUE_STORE_DDL_GOOGLESQL: Final[tuple[str, ...]] = (
         idempotency_key,
         traceparent,
         headers,
-        last_error
+        last_error,
+        priority,
+        expires_at_ms,
+        completed_at_ms,
+        worker_id,
+        heartbeat_at_ms,
+        result,
+        error
     )
     """,
     """
@@ -101,7 +119,10 @@ SPANNER_QUEUE_STORE_DDL_GOOGLESQL: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS vertebra_queue_unique_keys (
         unique_key STRING(256) NOT NULL,
-        expires_at FLOAT64 NOT NULL
+        expires_at FLOAT64,
+        job_id STRING(64),
+        task_name STRING(256),
+        created_at_ms INT64
     ) PRIMARY KEY (unique_key)
     """,
 )
@@ -126,6 +147,13 @@ SPANNER_QUEUE_STORE_DDL_SPANGRES: Final[tuple[str, ...]] = (
         traceparent VARCHAR(256),
         headers TEXT,
         last_error TEXT,
+        priority BIGINT,
+        expires_at_ms BIGINT,
+        completed_at_ms BIGINT,
+        worker_id VARCHAR(128),
+        heartbeat_at_ms BIGINT,
+        result TEXT,
+        error TEXT,
         expires_at TIMESTAMPTZ,
         PRIMARY KEY (shard_id, task_id)
     ) TTL INTERVAL '0 days' ON expires_at
@@ -144,7 +172,14 @@ SPANNER_QUEUE_STORE_DDL_SPANGRES: Final[tuple[str, ...]] = (
         idempotency_key,
         traceparent,
         headers,
-        last_error
+        last_error,
+        priority,
+        expires_at_ms,
+        completed_at_ms,
+        worker_id,
+        heartbeat_at_ms,
+        result,
+        error
     )
     WHERE status IS NOT NULL
     """,
@@ -173,17 +208,196 @@ SPANNER_QUEUE_STORE_DDL_SPANGRES: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS vertebra_queue_unique_keys (
         unique_key VARCHAR(256) NOT NULL PRIMARY KEY,
-        expires_at DOUBLE PRECISION NOT NULL
+        expires_at DOUBLE PRECISION,
+        job_id VARCHAR(64),
+        task_name VARCHAR(256),
+        created_at_ms BIGINT
     )
     """,
 )
 
 
+def _farmhash_rot64(val: int, shift: int) -> int:
+    val &= _FARMHASH_MASK64
+    return val if shift == 0 else (((val >> shift) | (val << (64 - shift))) & _FARMHASH_MASK64)
+
+
+def _farmhash_shift_mix(val: int) -> int:
+    val &= _FARMHASH_MASK64
+    return (val ^ (val >> 47)) & _FARMHASH_MASK64
+
+
+def _farmhash_len_16(u: int, v: int, mul: int) -> int:
+    a = ((u ^ v) * mul) & _FARMHASH_MASK64
+    a ^= a >> 47
+    b = ((v ^ a) * mul) & _FARMHASH_MASK64
+    b ^= b >> 47
+    return (b * mul) & _FARMHASH_MASK64
+
+
+def _farmhash_fetch64(buf: bytes, offset: int) -> int:
+    return int.from_bytes(buf[offset : offset + 8], "little", signed=False)
+
+
+def _farmhash_fetch32(buf: bytes, offset: int) -> int:
+    return int.from_bytes(buf[offset : offset + 4], "little", signed=False)
+
+
+def _farmhash_weak_len_32(buf: bytes, offset: int, a: int, b: int) -> tuple[int, int]:
+    w = _farmhash_fetch64(buf, offset)
+    x = _farmhash_fetch64(buf, offset + 8)
+    y = _farmhash_fetch64(buf, offset + 16)
+    z = _farmhash_fetch64(buf, offset + 24)
+    a = (a + w) & _FARMHASH_MASK64
+    b = _farmhash_rot64((b + a + z) & _FARMHASH_MASK64, 21)
+    c = a
+    a = (a + x) & _FARMHASH_MASK64
+    a = (a + y) & _FARMHASH_MASK64
+    b = (b + _farmhash_rot64(a, 44)) & _FARMHASH_MASK64
+    return (a + z) & _FARMHASH_MASK64, (b + c) & _FARMHASH_MASK64
+
+
+def _farmhash_len_0_to_16(buf: bytes) -> int:
+    length = len(buf)
+    if length >= 8:
+        mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+        a = (_farmhash_fetch64(buf, 0) + _FARMHASH_K2) & _FARMHASH_MASK64
+        b = _farmhash_fetch64(buf, length - 8)
+        c = (_farmhash_rot64(b, 37) * mul + a) & _FARMHASH_MASK64
+        d = ((_farmhash_rot64(a, 25) + b) * mul) & _FARMHASH_MASK64
+        return _farmhash_len_16(c, d, mul)
+    if length >= 4:
+        mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+        a = _farmhash_fetch32(buf, 0)
+        return _farmhash_len_16((length + (a << 3)) & _FARMHASH_MASK64, _farmhash_fetch32(buf, length - 4), mul)
+    if length > 0:
+        a = buf[0]
+        b = buf[length >> 1]
+        c = buf[length - 1]
+        y = (a + (b << 8)) & 0xFFFFFFFF
+        z = (length + (c << 2)) & 0xFFFFFFFF
+        return (_farmhash_shift_mix(((y * _FARMHASH_K2) ^ (z * _FARMHASH_K0)) & _FARMHASH_MASK64) * _FARMHASH_K2) & (
+            _FARMHASH_MASK64
+        )
+    return _FARMHASH_K2
+
+
+def _farmhash_len_17_to_32(buf: bytes) -> int:
+    length = len(buf)
+    mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+    a = (_farmhash_fetch64(buf, 0) * _FARMHASH_K1) & _FARMHASH_MASK64
+    b = _farmhash_fetch64(buf, 8)
+    c = (_farmhash_fetch64(buf, length - 8) * mul) & _FARMHASH_MASK64
+    d = (_farmhash_fetch64(buf, length - 16) * _FARMHASH_K2) & _FARMHASH_MASK64
+    return _farmhash_len_16(
+        (_farmhash_rot64((a + b) & _FARMHASH_MASK64, 43) + _farmhash_rot64(c, 30) + d) & _FARMHASH_MASK64,
+        (a + _farmhash_rot64((b + _FARMHASH_K2) & _FARMHASH_MASK64, 18) + c) & _FARMHASH_MASK64,
+        mul,
+    )
+
+
+def _farmhash_len_33_to_64(buf: bytes) -> int:
+    length = len(buf)
+    mul = (_FARMHASH_K2 + length * 2) & _FARMHASH_MASK64
+    a = (_farmhash_fetch64(buf, 0) * _FARMHASH_K2) & _FARMHASH_MASK64
+    b = _farmhash_fetch64(buf, 8)
+    c = (_farmhash_fetch64(buf, length - 8) * mul) & _FARMHASH_MASK64
+    d = (_farmhash_fetch64(buf, length - 16) * _FARMHASH_K2) & _FARMHASH_MASK64
+    y = (_farmhash_rot64((a + b) & _FARMHASH_MASK64, 43) + _farmhash_rot64(c, 30) + d) & _FARMHASH_MASK64
+    z = _farmhash_len_16(
+        y, (a + _farmhash_rot64((b + _FARMHASH_K2) & _FARMHASH_MASK64, 18) + c) & _FARMHASH_MASK64, mul
+    )
+    e = (_farmhash_fetch64(buf, 16) * mul) & _FARMHASH_MASK64
+    f = _farmhash_fetch64(buf, 24)
+    g = ((y + _farmhash_fetch64(buf, length - 32)) * mul) & _FARMHASH_MASK64
+    h = ((z + _farmhash_fetch64(buf, length - 24)) * mul) & _FARMHASH_MASK64
+    return _farmhash_len_16(
+        (_farmhash_rot64((e + f) & _FARMHASH_MASK64, 43) + _farmhash_rot64(g, 30) + h) & _FARMHASH_MASK64,
+        (e + _farmhash_rot64((f + a) & _FARMHASH_MASK64, 18) + g) & _FARMHASH_MASK64,
+        mul,
+    )
+
+
+def farm_fingerprint64(data: bytes | str) -> int:
+    """Compute Google FarmHash ``Fingerprint64`` as a signed 64-bit integer matching Spanner ``FARM_FINGERPRINT``."""
+    buf = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+    length = len(buf)
+    if length <= 16:
+        u64 = _farmhash_len_0_to_16(buf)
+    elif length <= 32:
+        u64 = _farmhash_len_17_to_32(buf)
+    elif length <= 64:
+        u64 = _farmhash_len_33_to_64(buf)
+    else:
+        seed = 81
+        x = seed
+        y = (seed * _FARMHASH_K1 + 113) & _FARMHASH_MASK64
+        z = (_farmhash_shift_mix((y * _FARMHASH_K2 + 113) & _FARMHASH_MASK64) * _FARMHASH_K2) & _FARMHASH_MASK64
+        v0, v1 = 0, 0
+        w0, w1 = 0, 0
+        x = (x * _FARMHASH_K2 + _farmhash_fetch64(buf, 0)) & _FARMHASH_MASK64
+        end = ((length - 1) // 64) * 64
+        last64 = end + ((length - 1) & 63) - 63
+        offset = 0
+        while True:
+            x = (
+                _farmhash_rot64((x + y + v0 + _farmhash_fetch64(buf, offset + 8)) & _FARMHASH_MASK64, 37) * _FARMHASH_K1
+            ) & _FARMHASH_MASK64
+            y = (
+                _farmhash_rot64((y + v1 + _farmhash_fetch64(buf, offset + 48)) & _FARMHASH_MASK64, 42) * _FARMHASH_K1
+            ) & _FARMHASH_MASK64
+            x ^= w1
+            y = (y + v0 + _farmhash_fetch64(buf, offset + 40)) & _FARMHASH_MASK64
+            z = (_farmhash_rot64((z + w0) & _FARMHASH_MASK64, 33) * _FARMHASH_K1) & _FARMHASH_MASK64
+            v0, v1 = _farmhash_weak_len_32(
+                buf,
+                offset,
+                (v1 * _FARMHASH_K1) & _FARMHASH_MASK64,
+                (x + w0) & _FARMHASH_MASK64,
+            )
+            w0, w1 = _farmhash_weak_len_32(
+                buf,
+                offset + 32,
+                (z + w1) & _FARMHASH_MASK64,
+                (y + _farmhash_fetch64(buf, offset + 16)) & _FARMHASH_MASK64,
+            )
+            z, x = x, z
+            offset += 64
+            if offset == end:
+                break
+        mul = (_FARMHASH_K1 + ((z & 0xFF) << 1)) & _FARMHASH_MASK64
+        offset = last64
+        w0 = (w0 + ((length - 1) & 63)) & _FARMHASH_MASK64
+        v0 = (v0 + w0) & _FARMHASH_MASK64
+        w0 = (w0 + v0) & _FARMHASH_MASK64
+        x = (
+            _farmhash_rot64((x + y + v0 + _farmhash_fetch64(buf, offset + 8)) & _FARMHASH_MASK64, 37) * mul
+        ) & _FARMHASH_MASK64
+        y = (
+            _farmhash_rot64((y + v1 + _farmhash_fetch64(buf, offset + 48)) & _FARMHASH_MASK64, 42) * mul
+        ) & _FARMHASH_MASK64
+        x ^= w1
+        y = (y + v0 + _farmhash_fetch64(buf, offset + 40)) & _FARMHASH_MASK64
+        z = (_farmhash_rot64((z + w0) & _FARMHASH_MASK64, 33) * mul) & _FARMHASH_MASK64
+        v0, v1 = _farmhash_weak_len_32(buf, offset, (v1 * mul) & _FARMHASH_MASK64, (x + w0) & _FARMHASH_MASK64)
+        w0, w1 = _farmhash_weak_len_32(
+            buf,
+            offset + 32,
+            (z + w1) & _FARMHASH_MASK64,
+            (y + _farmhash_fetch64(buf, offset + 16)) & _FARMHASH_MASK64,
+        )
+        z, x = x, z
+        u64 = _farmhash_len_16(
+            (_farmhash_len_16(v0, w0, mul) + _farmhash_shift_mix(y) * _FARMHASH_K0 + z) & _FARMHASH_MASK64,
+            (_farmhash_len_16(v1, w1, mul) + x) & _FARMHASH_MASK64,
+            mul,
+        )
+    return int.from_bytes(u64.to_bytes(8, "little", signed=False), "little", signed=True)
+
+
 def compute_spanner_shard_id(task_id: str, shard_count: int = 16) -> int:
-    """Compute a deterministic hash shard prefix to prevent monotonic primary-key hotspots."""
-    digest = hashlib.blake2b(task_id.encode("utf-8"), digest_size=8).digest()
-    raw = int.from_bytes(digest, "little", signed=False)
-    return raw % max(1, shard_count)
+    """Compute a deterministic FarmHash shard prefix matching ``MOD(ABS(FARM_FINGERPRINT(task_id)), shard_count)``."""
+    return abs(farm_fingerprint64(task_id)) % max(1, shard_count)
 
 
 def format_spanner_receipt_handle(shard_id: int, task_id: str, attempt: int) -> str:
@@ -292,6 +506,13 @@ class SyncSpannerQueueStore(SyncQueueStore):
                 idempotency_key=idem_key,
                 traceparent=traceparent,
                 headers=headers_str,
+                priority=int(entry.priority),
+                expires_at_ms=entry.expires_at_ms,
+                completed_at_ms=entry.completed_at_ms,
+                worker_id=entry.worker_id,
+                heartbeat_at_ms=entry.heartbeat_at_ms,
+                result=_encode_payload(entry.result) if entry.result is not None else None,
+                error=entry.error,
                 is_pg=is_pg,
             )
             tx.execute(ins_sql, ins_params)
@@ -334,6 +555,13 @@ class SyncSpannerQueueStore(SyncQueueStore):
                     idempotency_key=idem_key,
                     traceparent=entry.headers.get("traceparent"),
                     headers=_serialize_headers(entry.headers),
+                    priority=int(entry.priority),
+                    expires_at_ms=entry.expires_at_ms,
+                    completed_at_ms=entry.completed_at_ms,
+                    worker_id=entry.worker_id,
+                    heartbeat_at_ms=entry.heartbeat_at_ms,
+                    result=_encode_payload(entry.result) if entry.result is not None else None,
+                    error=entry.error,
                     is_pg=is_pg,
                 )
                 batch_statements.append((ins_sql, ins_params))
@@ -457,6 +685,7 @@ class SyncSpannerQueueStore(SyncQueueStore):
             task_id=job_id,
             attempt=attempt,
             cleanup=self._cleanup_on_ack,
+            completed_at_ms=int(time.time() * 1000),
             is_pg=self._dialect == "spangres",
         )
         return self._driver.execute(sql, params) > 0
@@ -528,6 +757,7 @@ class SyncSpannerQueueStore(SyncQueueStore):
                     task_id=job_id,
                     attempt=attempt,
                     last_error=combined_error,
+                    completed_at_ms=int(now * 1000),
                     is_pg=is_pg,
                 )
                 tx.execute(dead_sql, dead_params)
@@ -627,6 +857,7 @@ class SyncSpannerQueueStore(SyncQueueStore):
             self._table_name,
             shard_id=shard_id,
             task_id=job_id,
+            completed_at_ms=int(time.time() * 1000),
             is_pg=self._dialect == "spangres",
         )
         return self._driver.execute(sql, params) > 0
@@ -659,12 +890,12 @@ class SyncSpannerQueueStore(SyncQueueStore):
 
     def list_entries(
         self,
-        queue: str,
+        queue: str | None = None,
         *,
         status: str | None = None,
         limit: int = 100,
     ) -> list[QueueEntry]:
-        """List queue entries in ``queue`` matching optional ``status``."""
+        """List queue entries matching optional ``queue`` and ``status`` up to ``limit``."""
         sql, params = _build_list_jobs(
             self._table_name,
             lane=queue,
@@ -674,6 +905,214 @@ class SyncSpannerQueueStore(SyncQueueStore):
         )
         rows = self._driver.select(sql, params)
         return [_row_to_entry(r) for r in rows]
+
+    def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
+        """Delete terminal queue records completed before ``before_ms`` while preserving forever reservations."""
+        is_pg = self._dialect == "spangres"
+        if limit is not None and limit <= 0:
+            return 0
+
+        def _tx_cleanup(tx: SyncSpannerTransaction) -> int:
+            if limit is not None:
+                sel_sql, sel_params = _build_cleanup_terminal_select(
+                    self._table_name,
+                    before_ms=before_ms,
+                    limit=limit,
+                    is_pg=is_pg,
+                )
+                rows = tx.select(sel_sql, sel_params)
+                if rows:
+                    stmts = [
+                        _build_delete_by_pk_dml(
+                            self._table_name,
+                            shard_id=int(r["shard_id"]),
+                            task_id=str(r["task_id"]),
+                            is_pg=is_pg,
+                        )
+                        for r in rows
+                    ]
+                    deleted = sum(tx.execute_batch_dml(stmts))
+                else:
+                    deleted = 0
+            else:
+                del_sql, del_params = _build_cleanup_terminal_dml(
+                    self._table_name,
+                    before_ms=before_ms,
+                    is_pg=is_pg,
+                )
+                deleted = tx.execute(del_sql, del_params)
+            uk_sql, uk_params = _build_cleanup_expired_unique_keys(before_ms=before_ms, is_pg=is_pg)
+            tx.execute(uk_sql, uk_params)
+            return deleted
+
+        return int(self._driver.run_in_transaction(_tx_cleanup))
+
+    def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
+        """Retrieve a queue entry matching idempotency or reservation ``key`` and optional ``queue``."""
+        sql, params = _build_get_entry_by_key(
+            self._table_name,
+            key=key,
+            lane=queue,
+            is_pg=self._dialect == "spangres",
+        )
+        row = self._driver.select_one_or_none(sql, params)
+        return _row_to_entry(row) if row is not None else None
+
+    def reserve_identity(
+        self,
+        key: str,
+        *,
+        job_id: str,
+        task_name: str,
+        ttl_seconds: float | None = None,
+    ) -> QueueReservation | None:
+        """Acquire a single-winner reservation, returning ``None`` when acquired or the existing owner."""
+        is_pg = self._dialect == "spangres"
+
+        def _tx_reserve_identity(tx: SyncSpannerTransaction) -> QueueReservation | None:
+            now_tx = time.time()
+            now_ms = int(now_tx * 1000)
+            expires_tx = (now_tx + float(ttl_seconds)) if ttl_seconds is not None else None
+            sel_sql, sel_params = _build_reservation_for_update(key=key, is_pg=is_pg)
+            existing = tx.select_one_or_none(sel_sql, sel_params)
+            if existing is not None:
+                exp = existing.get("expires_at")
+                if exp is None or float(exp) > now_tx:
+                    return _row_to_reservation(existing)
+                upd_sql, upd_params = _build_update_reservation(
+                    key=key,
+                    expires_at=expires_tx,
+                    job_id=job_id,
+                    task_name=task_name,
+                    created_at_ms=now_ms,
+                    is_pg=is_pg,
+                )
+                tx.execute(upd_sql, upd_params)
+            else:
+                ins_sql, ins_params = _build_insert_reservation(
+                    key=key,
+                    expires_at=expires_tx,
+                    job_id=job_id,
+                    task_name=task_name,
+                    created_at_ms=now_ms,
+                    is_pg=is_pg,
+                )
+                tx.execute(ins_sql, ins_params)
+            return None
+
+        return cast("QueueReservation | None", self._driver.run_in_transaction(_tx_reserve_identity))
+
+    def get_reservation(self, key: str) -> QueueReservation | None:
+        """Retrieve an active identity reservation for ``key``, or ``None``."""
+        now_ts = time.time()
+        sql, params = _build_get_reservation(key=key, now_ts=now_ts, is_pg=self._dialect == "spangres")
+        row = self._driver.select_one_or_none(sql, params)
+        return _row_to_reservation(row) if row is not None else None
+
+    def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
+        """Release an identity reservation, optionally fenced by ``expected_job_id``."""
+        sql, params = _build_reset_identity(
+            key=key,
+            expected_job_id=expected_job_id,
+            is_pg=self._dialect == "spangres",
+        )
+        return self._driver.execute(sql, params) > 0
+
+    def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
+        """Record ``worker_id`` assignment for an active fenced claim."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_assign_worker_dml(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            worker_id=worker_id,
+            attempt=attempt,
+            is_pg=self._dialect == "spangres",
+        )
+        return self._driver.execute(sql, params) > 0
+
+    def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
+        """Update ``heartbeat_at_ms`` for active claimed jobs and return updated count."""
+        if not job_ids:
+            return 0
+        is_pg = self._dialect == "spangres"
+        statements = [
+            _build_touch_heartbeat_dml(
+                self._table_name,
+                shard_id=compute_spanner_shard_id(jid, self._shard_count),
+                task_id=jid,
+                heartbeat_at_ms=heartbeat_at_ms,
+                is_pg=is_pg,
+            )
+            for jid in job_ids
+        ]
+        return sum(self._driver.execute_batch_dml(statements))
+
+    def null_heartbeats(self, job_ids: Sequence[str]) -> int:
+        """Clear ``heartbeat_at_ms`` for the given ``job_ids`` and return updated count."""
+        if not job_ids:
+            return 0
+        is_pg = self._dialect == "spangres"
+        statements = [
+            _build_null_heartbeat_dml(
+                self._table_name,
+                shard_id=compute_spanner_shard_id(jid, self._shard_count),
+                task_id=jid,
+                is_pg=is_pg,
+            )
+            for jid in job_ids
+        ]
+        return sum(self._driver.execute_batch_dml(statements))
+
+    def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
+        """Interrupt a pending or running job with optional error detail."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_interrupt_task_dml(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            error=error,
+            completed_at_ms=int(time.time() * 1000),
+            is_pg=self._dialect == "spangres",
+        )
+        return self._driver.execute(sql, params) > 0
+
+    def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
+        """Mark overdue jobs with ``expires_at_ms <= now_ms`` as expired up to ``limit``."""
+        is_pg = self._dialect == "spangres"
+        if limit is not None and limit <= 0:
+            return 0
+
+        def _tx_expire(tx: SyncSpannerTransaction) -> int:
+            if limit is not None:
+                sel_sql, sel_params = _build_overdue_select(
+                    self._table_name,
+                    now_ms=now_ms,
+                    limit=limit,
+                    is_pg=is_pg,
+                )
+                rows = tx.select(sel_sql, sel_params)
+                if not rows:
+                    return 0
+                stmts = [
+                    _build_expire_by_pk_dml(
+                        self._table_name,
+                        shard_id=int(r["shard_id"]),
+                        task_id=str(r["task_id"]),
+                        now_ms=now_ms,
+                        is_pg=is_pg,
+                    )
+                    for r in rows
+                ]
+                return sum(tx.execute_batch_dml(stmts))
+            upd_sql, upd_params = _build_expire_overdue_dml(
+                self._table_name,
+                now_ms=now_ms,
+                is_pg=is_pg,
+            )
+            return tx.execute(upd_sql, upd_params)
+
+        return int(self._driver.run_in_transaction(_tx_expire))
 
     def next_due_delay(self, queues: Sequence[str]) -> float | None:
         """Return seconds until the earliest scheduled job in ``queues`` is due, or ``None``."""
@@ -958,6 +1397,13 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
                 idempotency_key=idem_key,
                 traceparent=traceparent,
                 headers=headers_str,
+                priority=int(entry.priority),
+                expires_at_ms=entry.expires_at_ms,
+                completed_at_ms=entry.completed_at_ms,
+                worker_id=entry.worker_id,
+                heartbeat_at_ms=entry.heartbeat_at_ms,
+                result=_encode_payload(entry.result) if entry.result is not None else None,
+                error=entry.error,
                 is_pg=is_pg,
             )
             await tx.execute(ins_sql, ins_params)
@@ -1000,6 +1446,13 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
                     idempotency_key=idem_key,
                     traceparent=entry.headers.get("traceparent"),
                     headers=_serialize_headers(entry.headers),
+                    priority=int(entry.priority),
+                    expires_at_ms=entry.expires_at_ms,
+                    completed_at_ms=entry.completed_at_ms,
+                    worker_id=entry.worker_id,
+                    heartbeat_at_ms=entry.heartbeat_at_ms,
+                    result=_encode_payload(entry.result) if entry.result is not None else None,
+                    error=entry.error,
                     is_pg=is_pg,
                 )
                 batch_statements.append((ins_sql, ins_params))
@@ -1123,6 +1576,7 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
             task_id=job_id,
             attempt=attempt,
             cleanup=self._cleanup_on_ack,
+            completed_at_ms=int(time.time() * 1000),
             is_pg=self._dialect == "spangres",
         )
         return (await self._driver.execute(sql, params)) > 0
@@ -1194,6 +1648,7 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
                     task_id=job_id,
                     attempt=attempt,
                     last_error=combined_error,
+                    completed_at_ms=int(now * 1000),
                     is_pg=is_pg,
                 )
                 await tx.execute(dead_sql, dead_params)
@@ -1293,6 +1748,7 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
             self._table_name,
             shard_id=shard_id,
             task_id=job_id,
+            completed_at_ms=int(time.time() * 1000),
             is_pg=self._dialect == "spangres",
         )
         return (await self._driver.execute(sql, params)) > 0
@@ -1325,12 +1781,12 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
 
     async def list_entries(
         self,
-        queue: str,
+        queue: str | None = None,
         *,
         status: str | None = None,
         limit: int = 100,
     ) -> list[QueueEntry]:
-        """List queue entries asynchronously in ``queue`` matching optional ``status``."""
+        """List queue entries asynchronously matching optional ``queue`` and ``status`` up to ``limit``."""
         sql, params = _build_list_jobs(
             self._table_name,
             lane=queue,
@@ -1340,6 +1796,214 @@ class AsyncSpannerQueueStore(AsyncQueueStore):
         )
         rows = await self._driver.select(sql, params)
         return [_row_to_entry(r) for r in rows]
+
+    async def cleanup_terminal(self, *, before_ms: int, limit: int | None = None) -> int:
+        """Delete terminal queue records completed before ``before_ms`` while preserving forever reservations."""
+        is_pg = self._dialect == "spangres"
+        if limit is not None and limit <= 0:
+            return 0
+
+        async def _tx_cleanup(tx: AsyncSpannerTransaction) -> int:
+            if limit is not None:
+                sel_sql, sel_params = _build_cleanup_terminal_select(
+                    self._table_name,
+                    before_ms=before_ms,
+                    limit=limit,
+                    is_pg=is_pg,
+                )
+                rows = await tx.select(sel_sql, sel_params)
+                if rows:
+                    stmts = [
+                        _build_delete_by_pk_dml(
+                            self._table_name,
+                            shard_id=int(r["shard_id"]),
+                            task_id=str(r["task_id"]),
+                            is_pg=is_pg,
+                        )
+                        for r in rows
+                    ]
+                    deleted = sum(await tx.execute_batch_dml(stmts))
+                else:
+                    deleted = 0
+            else:
+                del_sql, del_params = _build_cleanup_terminal_dml(
+                    self._table_name,
+                    before_ms=before_ms,
+                    is_pg=is_pg,
+                )
+                deleted = await tx.execute(del_sql, del_params)
+            uk_sql, uk_params = _build_cleanup_expired_unique_keys(before_ms=before_ms, is_pg=is_pg)
+            await tx.execute(uk_sql, uk_params)
+            return deleted
+
+        return int(await self._driver.run_in_transaction(_tx_cleanup))
+
+    async def get_entry_by_key(self, key: str, *, queue: str | None = None) -> QueueEntry | None:
+        """Retrieve a queue entry matching idempotency or reservation ``key`` and optional ``queue`` asynchronously."""
+        sql, params = _build_get_entry_by_key(
+            self._table_name,
+            key=key,
+            lane=queue,
+            is_pg=self._dialect == "spangres",
+        )
+        row = await self._driver.select_one_or_none(sql, params)
+        return _row_to_entry(row) if row is not None else None
+
+    async def reserve_identity(
+        self,
+        key: str,
+        *,
+        job_id: str,
+        task_name: str,
+        ttl_seconds: float | None = None,
+    ) -> QueueReservation | None:
+        """Acquire a single-winner reservation asynchronously, returning ``None`` when acquired or existing owner."""
+        is_pg = self._dialect == "spangres"
+
+        async def _tx_reserve_identity(tx: AsyncSpannerTransaction) -> QueueReservation | None:
+            now_tx = time.time()
+            now_ms = int(now_tx * 1000)
+            expires_tx = (now_tx + float(ttl_seconds)) if ttl_seconds is not None else None
+            sel_sql, sel_params = _build_reservation_for_update(key=key, is_pg=is_pg)
+            existing = await tx.select_one_or_none(sel_sql, sel_params)
+            if existing is not None:
+                exp = existing.get("expires_at")
+                if exp is None or float(exp) > now_tx:
+                    return _row_to_reservation(existing)
+                upd_sql, upd_params = _build_update_reservation(
+                    key=key,
+                    expires_at=expires_tx,
+                    job_id=job_id,
+                    task_name=task_name,
+                    created_at_ms=now_ms,
+                    is_pg=is_pg,
+                )
+                await tx.execute(upd_sql, upd_params)
+            else:
+                ins_sql, ins_params = _build_insert_reservation(
+                    key=key,
+                    expires_at=expires_tx,
+                    job_id=job_id,
+                    task_name=task_name,
+                    created_at_ms=now_ms,
+                    is_pg=is_pg,
+                )
+                await tx.execute(ins_sql, ins_params)
+            return None
+
+        return cast("QueueReservation | None", await self._driver.run_in_transaction(_tx_reserve_identity))
+
+    async def get_reservation(self, key: str) -> QueueReservation | None:
+        """Retrieve an active identity reservation for ``key`` asynchronously, or ``None``."""
+        now_ts = time.time()
+        sql, params = _build_get_reservation(key=key, now_ts=now_ts, is_pg=self._dialect == "spangres")
+        row = await self._driver.select_one_or_none(sql, params)
+        return _row_to_reservation(row) if row is not None else None
+
+    async def reset_identity(self, key: str, *, expected_job_id: str | None = None) -> bool:
+        """Release an identity reservation asynchronously, optionally fenced by ``expected_job_id``."""
+        sql, params = _build_reset_identity(
+            key=key,
+            expected_job_id=expected_job_id,
+            is_pg=self._dialect == "spangres",
+        )
+        return (await self._driver.execute(sql, params)) > 0
+
+    async def assign_worker(self, job_id: str, *, worker_id: str, attempt: int) -> bool:
+        """Record ``worker_id`` assignment for an active fenced claim asynchronously."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_assign_worker_dml(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            worker_id=worker_id,
+            attempt=attempt,
+            is_pg=self._dialect == "spangres",
+        )
+        return (await self._driver.execute(sql, params)) > 0
+
+    async def touch_heartbeats(self, job_ids: Sequence[str], *, heartbeat_at_ms: int) -> int:
+        """Update ``heartbeat_at_ms`` for active claimed jobs asynchronously and return updated count."""
+        if not job_ids:
+            return 0
+        is_pg = self._dialect == "spangres"
+        statements = [
+            _build_touch_heartbeat_dml(
+                self._table_name,
+                shard_id=compute_spanner_shard_id(jid, self._shard_count),
+                task_id=jid,
+                heartbeat_at_ms=heartbeat_at_ms,
+                is_pg=is_pg,
+            )
+            for jid in job_ids
+        ]
+        return sum(await self._driver.execute_batch_dml(statements))
+
+    async def null_heartbeats(self, job_ids: Sequence[str]) -> int:
+        """Clear ``heartbeat_at_ms`` for the given ``job_ids`` asynchronously and return updated count."""
+        if not job_ids:
+            return 0
+        is_pg = self._dialect == "spangres"
+        statements = [
+            _build_null_heartbeat_dml(
+                self._table_name,
+                shard_id=compute_spanner_shard_id(jid, self._shard_count),
+                task_id=jid,
+                is_pg=is_pg,
+            )
+            for jid in job_ids
+        ]
+        return sum(await self._driver.execute_batch_dml(statements))
+
+    async def interrupt_task(self, job_id: str, *, error: str | None = None) -> bool:
+        """Interrupt a pending or running job asynchronously with optional error detail."""
+        shard_id = compute_spanner_shard_id(job_id, self._shard_count)
+        sql, params = _build_interrupt_task_dml(
+            self._table_name,
+            shard_id=shard_id,
+            task_id=job_id,
+            error=error,
+            completed_at_ms=int(time.time() * 1000),
+            is_pg=self._dialect == "spangres",
+        )
+        return (await self._driver.execute(sql, params)) > 0
+
+    async def expire_overdue(self, *, now_ms: int, limit: int | None = None) -> int:
+        """Mark overdue jobs with ``expires_at_ms <= now_ms`` as expired asynchronously up to ``limit``."""
+        is_pg = self._dialect == "spangres"
+        if limit is not None and limit <= 0:
+            return 0
+
+        async def _tx_expire(tx: AsyncSpannerTransaction) -> int:
+            if limit is not None:
+                sel_sql, sel_params = _build_overdue_select(
+                    self._table_name,
+                    now_ms=now_ms,
+                    limit=limit,
+                    is_pg=is_pg,
+                )
+                rows = await tx.select(sel_sql, sel_params)
+                if not rows:
+                    return 0
+                stmts = [
+                    _build_expire_by_pk_dml(
+                        self._table_name,
+                        shard_id=int(r["shard_id"]),
+                        task_id=str(r["task_id"]),
+                        now_ms=now_ms,
+                        is_pg=is_pg,
+                    )
+                    for r in rows
+                ]
+                return sum(await tx.execute_batch_dml(stmts))
+            upd_sql, upd_params = _build_expire_overdue_dml(
+                self._table_name,
+                now_ms=now_ms,
+                is_pg=is_pg,
+            )
+            return await tx.execute(upd_sql, upd_params)
+
+        return int(await self._driver.run_in_transaction(_tx_expire))
 
     async def next_due_delay(self, queues: Sequence[str]) -> float | None:
         """Return seconds until the earliest scheduled job in ``queues`` is due, or ``None``."""
@@ -1612,6 +2276,13 @@ def _row_to_entry(row: dict[str, Any]) -> QueueEntry:
         headers["idempotency_key"] = str(row["idempotency_key"])
     if row.get("traceparent") and "traceparent" not in headers:
         headers["traceparent"] = str(row["traceparent"])
+    raw_worker = row.get("worker_id")
+    if raw_worker is None:
+        raw_worker = row.get("consumer_name")
+    raw_error = row.get("error")
+    if raw_error is None:
+        raw_error = row.get("last_error")
+    raw_result = row.get("result")
     return QueueEntry(
         job_id=str(row["task_id"]),
         queue=str(row["lane"]),
@@ -1622,6 +2293,22 @@ def _row_to_entry(row: dict[str, Any]) -> QueueEntry:
         lease_until_ms=int(float(locked_s) * 1000) if locked_s is not None else 0,
         scheduled_at_ms=int(float(sched_s) * 1000) if sched_s is not None else None,
         headers=headers,
+        priority=int(row.get("priority") or 0),
+        expires_at_ms=int(row["expires_at_ms"]) if row.get("expires_at_ms") is not None else None,
+        completed_at_ms=int(row["completed_at_ms"]) if row.get("completed_at_ms") is not None else None,
+        worker_id=str(raw_worker) if raw_worker is not None else None,
+        heartbeat_at_ms=int(row["heartbeat_at_ms"]) if row.get("heartbeat_at_ms") is not None else None,
+        result=_decode_payload(raw_result) if raw_result is not None else None,
+        error=str(raw_error) if raw_error is not None else None,
+    )
+
+
+def _row_to_reservation(row: dict[str, Any]) -> QueueReservation:
+    return QueueReservation(
+        key=str(row["unique_key"]),
+        job_id=str(row.get("job_id") or ""),
+        task_name=str(row.get("task_name") or ""),
+        created_at_ms=int(row.get("created_at_ms") or 0),
     )
 
 
@@ -1654,6 +2341,13 @@ def _build_insert_job(
     idempotency_key: str | None,
     traceparent: str | None,
     headers: str | None,
+    priority: int,
+    expires_at_ms: int | None,
+    completed_at_ms: int | None,
+    worker_id: str | None,
+    heartbeat_at_ms: int | None,
+    result: str | None,
+    error: str | None,
     is_pg: bool,
 ) -> tuple[str, Any]:
     if is_pg:
@@ -1661,8 +2355,9 @@ def _build_insert_job(
         INSERT INTO {table_name} (
             shard_id, task_id, task_name, lane, payload, status,
             attempt, max_retries, scheduled_at, enqueued_at, locked_until,
-            consumer_name, receipt_handle, idempotency_key, traceparent, headers
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            consumer_name, receipt_handle, idempotency_key, traceparent, headers,
+            priority, expires_at_ms, completed_at_ms, worker_id, heartbeat_at_ms, result, error
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
         """
         return sql, (
             shard_id,
@@ -1676,21 +2371,30 @@ def _build_insert_job(
             scheduled_at,
             enqueued_at,
             None,
-            None,
+            worker_id,
             None,
             idempotency_key,
             traceparent,
             headers,
+            priority,
+            expires_at_ms,
+            completed_at_ms,
+            worker_id,
+            heartbeat_at_ms,
+            result,
+            error,
         )
     sql = f"""
     INSERT INTO {table_name} (
         shard_id, task_id, task_name, lane, payload, status,
         attempt, max_retries, scheduled_at, enqueued_at, locked_until,
-        consumer_name, receipt_handle, idempotency_key, traceparent, headers
+        consumer_name, receipt_handle, idempotency_key, traceparent, headers,
+        priority, expires_at_ms, completed_at_ms, worker_id, heartbeat_at_ms, result, error
     ) VALUES (
         @shard_id, @task_id, @task_name, @lane, @payload, @status,
         @attempt, @max_retries, @scheduled_at, @enqueued_at, @locked_until,
-        @consumer_name, @receipt_handle, @idempotency_key, @traceparent, @headers
+        @consumer_name, @receipt_handle, @idempotency_key, @traceparent, @headers,
+        @priority, @expires_at_ms, @completed_at_ms, @worker_id, @heartbeat_at_ms, @result, @error
     )
     """
     return sql, {
@@ -1705,11 +2409,18 @@ def _build_insert_job(
         "scheduled_at": scheduled_at,
         "enqueued_at": enqueued_at,
         "locked_until": None,
-        "consumer_name": None,
+        "consumer_name": worker_id,
         "receipt_handle": None,
         "idempotency_key": idempotency_key,
         "traceparent": traceparent,
         "headers": headers,
+        "priority": priority,
+        "expires_at_ms": expires_at_ms,
+        "completed_at_ms": completed_at_ms,
+        "worker_id": worker_id,
+        "heartbeat_at_ms": heartbeat_at_ms,
+        "result": result,
+        "error": error,
     }
 
 
@@ -1730,7 +2441,7 @@ def _build_claim_select(
               (status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= $2))
               OR (status = 'running' AND locked_until <= $2)
           )
-        ORDER BY COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
+        ORDER BY COALESCE(priority, 0) DESC, COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
         LIMIT $3
         FOR UPDATE
         """
@@ -1748,7 +2459,7 @@ def _build_claim_select(
           (status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= @now_ts))
           OR (status = 'running' AND locked_until <= @now_ts)
       )
-    ORDER BY COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
+    ORDER BY COALESCE(priority, 0) DESC, COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
     LIMIT @batch_size
     FOR UPDATE
     """
@@ -1772,6 +2483,7 @@ def _build_claim_update(
             attempt = attempt + 1,
             locked_until = $1,
             consumer_name = $2,
+            worker_id = $2,
             receipt_handle = $3
         WHERE shard_id = $4 AND task_id = $5
         RETURNING *
@@ -1783,6 +2495,7 @@ def _build_claim_update(
         attempt = attempt + 1,
         locked_until = @locked_until,
         consumer_name = @consumer_name,
+        worker_id = @consumer_name,
         receipt_handle = @receipt_handle
     WHERE shard_id = @shard_id AND task_id = @task_id
     THEN RETURN *
@@ -1803,6 +2516,7 @@ def _build_ack_dml(
     task_id: str,
     attempt: int,
     cleanup: bool,
+    completed_at_ms: int,
     is_pg: bool,
 ) -> tuple[str, Any]:
     if is_pg:
@@ -1810,23 +2524,31 @@ def _build_ack_dml(
             sql = (
                 f"DELETE FROM {table_name} WHERE shard_id = $1 AND task_id = $2 AND attempt = $3 AND status = 'running'"
             )
-        else:
-            sql = (
-                f"UPDATE {table_name} SET status = 'acked', locked_until = NULL "
-                "WHERE shard_id = $1 AND task_id = $2 AND attempt = $3 AND status = 'running'"
-            )
-        return sql, (shard_id, task_id, attempt)
+            return sql, (shard_id, task_id, attempt)
+        sql = (
+            f"UPDATE {table_name} SET status = 'acked', locked_until = NULL, "
+            "worker_id = NULL, consumer_name = NULL, completed_at_ms = $4 "
+            "WHERE shard_id = $1 AND task_id = $2 AND attempt = $3 AND status = 'running'"
+        )
+        return sql, (shard_id, task_id, attempt, completed_at_ms)
     if cleanup:
         sql = (
             f"DELETE FROM {table_name} "
             "WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt AND status = @status"
         )
-    else:
-        sql = (
-            f"UPDATE {table_name} SET status = 'acked', locked_until = NULL "
-            "WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt AND status = @status"
-        )
-    return sql, {"shard_id": shard_id, "task_id": task_id, "attempt": attempt, "status": "running"}
+        return sql, {"shard_id": shard_id, "task_id": task_id, "attempt": attempt, "status": "running"}
+    sql = (
+        f"UPDATE {table_name} SET status = 'acked', locked_until = NULL, "
+        "worker_id = NULL, consumer_name = NULL, completed_at_ms = @completed_at_ms "
+        "WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt AND status = @status"
+    )
+    return sql, {
+        "shard_id": shard_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "status": "running",
+        "completed_at_ms": completed_at_ms,
+    }
 
 
 def _build_job_for_update(table_name: str, *, shard_id: int, task_id: str, is_pg: bool) -> tuple[str, Any]:
@@ -1886,21 +2608,30 @@ def _build_mark_dead_letter(
     task_id: str,
     attempt: int,
     last_error: str,
+    completed_at_ms: int,
     is_pg: bool,
 ) -> tuple[str, Any]:
     if is_pg:
         sql = f"""
         UPDATE {table_name}
-        SET status = 'dead_letter', locked_until = NULL, receipt_handle = NULL, last_error = $1
+        SET status = 'dead_letter', locked_until = NULL, worker_id = NULL, consumer_name = NULL,
+            receipt_handle = NULL, last_error = $1, error = $1, completed_at_ms = $5
         WHERE shard_id = $2 AND task_id = $3 AND attempt = $4
         """
-        return sql, (last_error, shard_id, task_id, attempt)
+        return sql, (last_error, shard_id, task_id, attempt, completed_at_ms)
     sql = f"""
     UPDATE {table_name}
-    SET status = 'dead_letter', locked_until = NULL, receipt_handle = NULL, last_error = @last_error
+    SET status = 'dead_letter', locked_until = NULL, worker_id = NULL, consumer_name = NULL,
+        receipt_handle = NULL, last_error = @last_error, error = @last_error, completed_at_ms = @completed_at_ms
     WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt
     """
-    return sql, {"last_error": last_error, "shard_id": shard_id, "task_id": task_id, "attempt": attempt}
+    return sql, {
+        "last_error": last_error,
+        "shard_id": shard_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "completed_at_ms": completed_at_ms,
+    }
 
 
 def _build_reschedule_job(
@@ -1920,8 +2651,10 @@ def _build_reschedule_job(
             scheduled_at = $1,
             locked_until = NULL,
             consumer_name = NULL,
+            worker_id = NULL,
             receipt_handle = NULL,
-            last_error = $2
+            last_error = $2,
+            error = $2
         WHERE shard_id = $3 AND task_id = $4 AND attempt = $5
         """
         return sql, (scheduled_at, last_error, shard_id, task_id, attempt)
@@ -1931,8 +2664,10 @@ def _build_reschedule_job(
         scheduled_at = @scheduled_at,
         locked_until = NULL,
         consumer_name = NULL,
+        worker_id = NULL,
         receipt_handle = NULL,
-        last_error = @last_error
+        last_error = @last_error,
+        error = @last_error
     WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt
     """
     return sql, {
@@ -1977,13 +2712,13 @@ def _build_reap_stale_dml(table_name: str, *, now_ts: float, is_pg: bool) -> tup
     if is_pg:
         sql = f"""
         UPDATE {table_name}
-        SET status = 'pending', locked_until = NULL, consumer_name = NULL, receipt_handle = NULL
+        SET status = 'pending', locked_until = NULL, consumer_name = NULL, worker_id = NULL, receipt_handle = NULL
         WHERE status = 'running' AND locked_until <= $1
         """
         return sql, (now_ts,)
     sql = f"""
     UPDATE {table_name}
-    SET status = 'pending', locked_until = NULL, consumer_name = NULL, receipt_handle = NULL
+    SET status = 'pending', locked_until = NULL, consumer_name = NULL, worker_id = NULL, receipt_handle = NULL
     WHERE status = 'running' AND locked_until <= @now_ts
     """
     return sql, {"now_ts": now_ts}
@@ -2040,19 +2775,22 @@ def _build_cancel_dml(
     *,
     shard_id: int,
     task_id: str,
+    completed_at_ms: int,
     is_pg: bool,
 ) -> tuple[str, Any]:
     if is_pg:
         sql = (
-            f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL "
+            f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL, "
+            "worker_id = NULL, consumer_name = NULL, completed_at_ms = $3 "
             "WHERE shard_id = $1 AND task_id = $2 AND status IN ('pending', 'running')"
         )
-        return sql, (shard_id, task_id)
+        return sql, (shard_id, task_id, completed_at_ms)
     sql = (
-        f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL "
+        f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL, "
+        "worker_id = NULL, consumer_name = NULL, completed_at_ms = @completed_at_ms "
         "WHERE shard_id = @shard_id AND task_id = @task_id AND status IN ('pending', 'running')"
     )
-    return sql, {"shard_id": shard_id, "task_id": task_id}
+    return sql, {"shard_id": shard_id, "task_id": task_id, "completed_at_ms": completed_at_ms}
 
 
 def _build_get_job(
@@ -2073,24 +2811,434 @@ def _build_get_job(
 def _build_list_jobs(
     table_name: str,
     *,
-    lane: str,
+    lane: str | None,
     status: str | None,
     limit: int,
     is_pg: bool,
 ) -> tuple[str, Any]:
     if is_pg:
-        if status is not None:
+        if lane is not None and status is not None:
             sql = f"SELECT * FROM {table_name} WHERE lane = $1 AND status = $2 ORDER BY enqueued_at ASC LIMIT $3"
             return sql, (lane, status, limit)
-        sql = f"SELECT * FROM {table_name} WHERE lane = $1 ORDER BY enqueued_at ASC LIMIT $2"
-        return sql, (lane, limit)
+        if lane is not None:
+            sql = f"SELECT * FROM {table_name} WHERE lane = $1 ORDER BY enqueued_at ASC LIMIT $2"
+            return sql, (lane, limit)
+        if status is not None:
+            sql = f"SELECT * FROM {table_name} WHERE status = $1 ORDER BY enqueued_at ASC LIMIT $2"
+            return sql, (status, limit)
+        sql = f"SELECT * FROM {table_name} ORDER BY enqueued_at ASC LIMIT $1"
+        return sql, (limit,)
+    conditions: list[str] = []
+    params: dict[str, Any] = {"limit": limit}
+    if lane is not None:
+        conditions.append("lane = @lane")
+        params["lane"] = lane
     if status is not None:
-        sql = (
-            f"SELECT * FROM {table_name} WHERE lane = @lane AND status = @status ORDER BY enqueued_at ASC LIMIT @limit"
+        conditions.append("status = @status")
+        params["status"] = status
+    where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"SELECT * FROM {table_name}{where_clause} ORDER BY enqueued_at ASC LIMIT @limit"
+    return sql, params
+
+
+def _build_cleanup_terminal_select(
+    table_name: str,
+    *,
+    before_ms: int,
+    limit: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = f"""
+        SELECT shard_id, task_id
+        FROM {table_name}
+        WHERE status IN ('acked', 'completed', 'cancelled', 'dead_letter', 'expired')
+          AND COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS BIGINT)) < $1
+        ORDER BY COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS BIGINT)) ASC
+        LIMIT $2
+        FOR UPDATE
+        """
+        return sql, (before_ms, limit)
+    sql = f"""
+    SELECT shard_id, task_id
+    FROM {table_name}
+    WHERE status IN ('acked', 'completed', 'cancelled', 'dead_letter', 'expired')
+      AND COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS INT64)) < @before_ms
+    ORDER BY COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS INT64)) ASC
+    LIMIT @limit
+    FOR UPDATE
+    """
+    return sql, {"before_ms": before_ms, "limit": limit}
+
+
+def _build_delete_by_pk_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        return f"DELETE FROM {table_name} WHERE shard_id = $1 AND task_id = $2", (shard_id, task_id)
+    return (
+        f"DELETE FROM {table_name} WHERE shard_id = @shard_id AND task_id = @task_id",
+        {"shard_id": shard_id, "task_id": task_id},
+    )
+
+
+def _build_cleanup_terminal_dml(
+    table_name: str,
+    *,
+    before_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = f"""
+        DELETE FROM {table_name}
+        WHERE status IN ('acked', 'completed', 'cancelled', 'dead_letter', 'expired')
+          AND COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS BIGINT)) < $1
+        """
+        return sql, (before_ms,)
+    sql = f"""
+    DELETE FROM {table_name}
+    WHERE status IN ('acked', 'completed', 'cancelled', 'dead_letter', 'expired')
+      AND COALESCE(completed_at_ms, CAST(ROUND(enqueued_at * 1000) AS INT64)) < @before_ms
+    """
+    return sql, {"before_ms": before_ms}
+
+
+def _build_cleanup_expired_unique_keys(*, before_ms: int, is_pg: bool) -> tuple[str, Any]:
+    before_s = before_ms / 1000.0
+    if is_pg:
+        return (
+            "DELETE FROM vertebra_queue_unique_keys WHERE expires_at IS NOT NULL AND expires_at <= $1",
+            (before_s,),
         )
-        return sql, {"lane": lane, "status": status, "limit": limit}
-    sql = f"SELECT * FROM {table_name} WHERE lane = @lane ORDER BY enqueued_at ASC LIMIT @limit"
-    return sql, {"lane": lane, "limit": limit}
+    return (
+        "DELETE FROM vertebra_queue_unique_keys WHERE expires_at IS NOT NULL AND expires_at <= @before_s",
+        {"before_s": before_s},
+    )
+
+
+def _build_get_entry_by_key(
+    table_name: str,
+    *,
+    key: str,
+    lane: str | None,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        if lane is not None:
+            sql = f"""
+            SELECT j.*
+            FROM {table_name} j
+            LEFT JOIN vertebra_queue_unique_keys u ON u.job_id = j.task_id
+            WHERE (u.unique_key = $1 OR j.idempotency_key = $1) AND j.lane = $2
+            ORDER BY j.enqueued_at DESC
+            LIMIT 1
+            """
+            return sql, (key, lane)
+        sql = f"""
+        SELECT j.*
+        FROM {table_name} j
+        LEFT JOIN vertebra_queue_unique_keys u ON u.job_id = j.task_id
+        WHERE (u.unique_key = $1 OR j.idempotency_key = $1)
+        ORDER BY j.enqueued_at DESC
+        LIMIT 1
+        """
+        return sql, (key,)
+    params: dict[str, Any] = {"key": key}
+    lane_filter = ""
+    if lane is not None:
+        lane_filter = "AND j.lane = @lane"
+        params["lane"] = lane
+    sql = f"""
+    SELECT j.*
+    FROM {table_name} j
+    LEFT JOIN vertebra_queue_unique_keys u ON u.job_id = j.task_id
+    WHERE (u.unique_key = @key OR j.idempotency_key = @key)
+    {lane_filter}
+    ORDER BY j.enqueued_at DESC
+    LIMIT 1
+    """
+    return sql, params
+
+
+def _build_reservation_for_update(*, key: str, is_pg: bool) -> tuple[str, Any]:
+    if is_pg:
+        return (
+            "SELECT unique_key, expires_at, job_id, task_name, created_at_ms "
+            "FROM vertebra_queue_unique_keys WHERE unique_key = $1 FOR UPDATE",
+            (key,),
+        )
+    return (
+        "SELECT unique_key, expires_at, job_id, task_name, created_at_ms "
+        "FROM vertebra_queue_unique_keys WHERE unique_key = @key FOR UPDATE",
+        {"key": key},
+    )
+
+
+def _build_insert_reservation(
+    *,
+    key: str,
+    expires_at: float | None,
+    job_id: str,
+    task_name: str,
+    created_at_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            "INSERT INTO vertebra_queue_unique_keys (unique_key, expires_at, job_id, task_name, created_at_ms) "
+            "VALUES ($1, $2, $3, $4, $5)"
+        )
+        return sql, (key, expires_at, job_id, task_name, created_at_ms)
+    sql = (
+        "INSERT INTO vertebra_queue_unique_keys (unique_key, expires_at, job_id, task_name, created_at_ms) "
+        "VALUES (@key, @expires_at, @job_id, @task_name, @created_at_ms)"
+    )
+    return sql, {
+        "key": key,
+        "expires_at": expires_at,
+        "job_id": job_id,
+        "task_name": task_name,
+        "created_at_ms": created_at_ms,
+    }
+
+
+def _build_update_reservation(
+    *,
+    key: str,
+    expires_at: float | None,
+    job_id: str,
+    task_name: str,
+    created_at_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            "UPDATE vertebra_queue_unique_keys "
+            "SET expires_at = $2, job_id = $3, task_name = $4, created_at_ms = $5 "
+            "WHERE unique_key = $1"
+        )
+        return sql, (key, expires_at, job_id, task_name, created_at_ms)
+    sql = (
+        "UPDATE vertebra_queue_unique_keys "
+        "SET expires_at = @expires_at, job_id = @job_id, task_name = @task_name, created_at_ms = @created_at_ms "
+        "WHERE unique_key = @key"
+    )
+    return sql, {
+        "key": key,
+        "expires_at": expires_at,
+        "job_id": job_id,
+        "task_name": task_name,
+        "created_at_ms": created_at_ms,
+    }
+
+
+def _build_get_reservation(*, key: str, now_ts: float, is_pg: bool) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            "SELECT unique_key, job_id, task_name, created_at_ms "
+            "FROM vertebra_queue_unique_keys "
+            "WHERE unique_key = $1 AND (expires_at IS NULL OR expires_at > $2)"
+        )
+        return sql, (key, now_ts)
+    sql = (
+        "SELECT unique_key, job_id, task_name, created_at_ms "
+        "FROM vertebra_queue_unique_keys "
+        "WHERE unique_key = @key AND (expires_at IS NULL OR expires_at > @now_ts)"
+    )
+    return sql, {"key": key, "now_ts": now_ts}
+
+
+def _build_reset_identity(*, key: str, expected_job_id: str | None, is_pg: bool) -> tuple[str, Any]:
+    if is_pg:
+        if expected_job_id is not None:
+            return (
+                "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1 AND job_id = $2",
+                (key, expected_job_id),
+            )
+        return "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1", (key,)
+    if expected_job_id is not None:
+        return (
+            "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = @key AND job_id = @expected_job_id",
+            {"key": key, "expected_job_id": expected_job_id},
+        )
+    return "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = @key", {"key": key}
+
+
+def _build_assign_worker_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    worker_id: str,
+    attempt: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            f"UPDATE {table_name} SET worker_id = $1, consumer_name = $1 "
+            "WHERE shard_id = $2 AND task_id = $3 AND attempt = $4 AND status = 'running'"
+        )
+        return sql, (worker_id, shard_id, task_id, attempt)
+    sql = (
+        f"UPDATE {table_name} SET worker_id = @worker_id, consumer_name = @worker_id "
+        "WHERE shard_id = @shard_id AND task_id = @task_id AND attempt = @attempt AND status = 'running'"
+    )
+    return sql, {"worker_id": worker_id, "shard_id": shard_id, "task_id": task_id, "attempt": attempt}
+
+
+def _build_touch_heartbeat_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    heartbeat_at_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            f"UPDATE {table_name} SET heartbeat_at_ms = $1 WHERE shard_id = $2 AND task_id = $3 AND status = 'running'"
+        )
+        return sql, (heartbeat_at_ms, shard_id, task_id)
+    sql = (
+        f"UPDATE {table_name} SET heartbeat_at_ms = @heartbeat_at_ms "
+        "WHERE shard_id = @shard_id AND task_id = @task_id AND status = 'running'"
+    )
+    return sql, {"heartbeat_at_ms": heartbeat_at_ms, "shard_id": shard_id, "task_id": task_id}
+
+
+def _build_null_heartbeat_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        return f"UPDATE {table_name} SET heartbeat_at_ms = NULL WHERE shard_id = $1 AND task_id = $2", (
+            shard_id,
+            task_id,
+        )
+    return (
+        f"UPDATE {table_name} SET heartbeat_at_ms = NULL WHERE shard_id = @shard_id AND task_id = @task_id",
+        {"shard_id": shard_id, "task_id": task_id},
+    )
+
+
+def _build_interrupt_task_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    error: str | None,
+    completed_at_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        if error is not None:
+            sql = (
+                f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL, "
+                "worker_id = NULL, consumer_name = NULL, completed_at_ms = $3, "
+                "error = $4, last_error = $4 "
+                "WHERE shard_id = $1 AND task_id = $2 AND status IN ('pending', 'running')"
+            )
+            return sql, (shard_id, task_id, completed_at_ms, error)
+        sql = (
+            f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL, "
+            "worker_id = NULL, consumer_name = NULL, completed_at_ms = $3 "
+            "WHERE shard_id = $1 AND task_id = $2 AND status IN ('pending', 'running')"
+        )
+        return sql, (shard_id, task_id, completed_at_ms)
+    params: dict[str, Any] = {
+        "shard_id": shard_id,
+        "task_id": task_id,
+        "completed_at_ms": completed_at_ms,
+    }
+    error_set = ""
+    if error is not None:
+        params["error"] = error
+        error_set = ", error = @error, last_error = @error"
+    sql = (
+        f"UPDATE {table_name} SET status = 'cancelled', locked_until = NULL, "
+        f"worker_id = NULL, consumer_name = NULL, completed_at_ms = @completed_at_ms{error_set} "
+        "WHERE shard_id = @shard_id AND task_id = @task_id AND status IN ('pending', 'running')"
+    )
+    return sql, params
+
+
+def _build_overdue_select(
+    table_name: str,
+    *,
+    now_ms: int,
+    limit: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = f"""
+        SELECT shard_id, task_id
+        FROM {table_name}
+        WHERE status IN ('pending', 'running') AND expires_at_ms IS NOT NULL AND expires_at_ms <= $1
+        ORDER BY expires_at_ms ASC
+        LIMIT $2
+        FOR UPDATE
+        """
+        return sql, (now_ms, limit)
+    sql = f"""
+    SELECT shard_id, task_id
+    FROM {table_name}
+    WHERE status IN ('pending', 'running') AND expires_at_ms IS NOT NULL AND expires_at_ms <= @now_ms
+    ORDER BY expires_at_ms ASC
+    LIMIT @limit
+    FOR UPDATE
+    """
+    return sql, {"now_ms": now_ms, "limit": limit}
+
+
+def _build_expire_by_pk_dml(
+    table_name: str,
+    *,
+    shard_id: int,
+    task_id: str,
+    now_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            f"UPDATE {table_name} SET status = 'expired', locked_until = NULL, "
+            "worker_id = NULL, consumer_name = NULL, completed_at_ms = $3 "
+            "WHERE shard_id = $1 AND task_id = $2"
+        )
+        return sql, (shard_id, task_id, now_ms)
+    sql = (
+        f"UPDATE {table_name} SET status = 'expired', locked_until = NULL, "
+        "worker_id = NULL, consumer_name = NULL, completed_at_ms = @now_ms "
+        "WHERE shard_id = @shard_id AND task_id = @task_id"
+    )
+    return sql, {"shard_id": shard_id, "task_id": task_id, "now_ms": now_ms}
+
+
+def _build_expire_overdue_dml(
+    table_name: str,
+    *,
+    now_ms: int,
+    is_pg: bool,
+) -> tuple[str, Any]:
+    if is_pg:
+        sql = (
+            f"UPDATE {table_name} SET status = 'expired', locked_until = NULL, "
+            "worker_id = NULL, consumer_name = NULL, completed_at_ms = $1 "
+            "WHERE status IN ('pending', 'running') AND expires_at_ms IS NOT NULL AND expires_at_ms <= $1"
+        )
+        return sql, (now_ms,)
+    sql = (
+        f"UPDATE {table_name} SET status = 'expired', locked_until = NULL, "
+        "worker_id = NULL, consumer_name = NULL, completed_at_ms = @now_ms "
+        "WHERE status IN ('pending', 'running') AND expires_at_ms IS NOT NULL AND expires_at_ms <= @now_ms"
+    )
+    return sql, {"now_ms": now_ms}
 
 
 def _build_next_due_query(

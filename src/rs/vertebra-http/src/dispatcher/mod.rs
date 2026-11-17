@@ -56,7 +56,15 @@ impl Default for Dispatcher {
 impl Dispatcher {
     /// Create a new dispatcher in bridge mode (default) and register its direct `ResponseSink`.
     pub fn new() -> Self {
-        let corr = Arc::new(BridgeCorrelation::default());
+        Self::new_with_queue_depth(streams::DEFAULT_STREAM_QUEUE_DEPTH)
+    }
+
+    /// Create a new dispatcher in bridge mode with a configured per-stream frame queue depth.
+    pub fn new_with_queue_depth(stream_queue_depth: usize) -> Self {
+        let corr = Arc::new(BridgeCorrelation::with_capacity_and_queue_depth(
+            bridge::DEFAULT_BRIDGE_MAX_INFLIGHT,
+            stream_queue_depth,
+        ));
         if let Some(bridge) = vertebra_core::bridge::BatchBridge::get() {
             corr.ensure_sink_registered(bridge);
         }
@@ -81,7 +89,20 @@ impl Dispatcher {
         ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>>,
         max_inflight: usize,
     ) -> Self {
-        let shm = ShmDispatcher::new(ring_pairs, max_inflight);
+        Self::new_shm_with_queue_depth(
+            ring_pairs,
+            max_inflight,
+            streams::DEFAULT_STREAM_QUEUE_DEPTH,
+        )
+    }
+
+    /// Create a new dispatcher in SharedMemory mode with a configured per-stream frame queue depth.
+    pub fn new_shm_with_queue_depth(
+        ring_pairs: Vec<Arc<vertebra_core::transport::ring_pair::RingPair>>,
+        max_inflight: usize,
+        stream_queue_depth: usize,
+    ) -> Self {
+        let shm = ShmDispatcher::new_with_queue_depth(ring_pairs, max_inflight, stream_queue_depth);
         Self {
             backend: DispatchBackend::Shm(shm),
             backpressure: None,

@@ -1,5 +1,6 @@
 //! Core Redis connection management, command dispatch, and pipeline execution.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,7 +14,9 @@ use tokio::task::AbortHandle;
 use crate::caching::ClientLruCache;
 use crate::config::{RedisClientConfig, RedisTopologyMode};
 use crate::errors::{RedisDriverError, classify_redis_error};
-use crate::topology::{ClusterSlotMap, parse_sentinel_master_addr};
+use crate::topology::{
+    ClusterRedirectAction, ClusterSlotMap, check_cluster_redirect, parse_sentinel_master_addr,
+};
 
 enum CoreConnection {
     Standalone(redis::aio::ConnectionManager),
@@ -263,12 +266,45 @@ fn infer_command_timeout(args: &[Vec<u8>]) -> Option<Duration> {
     }
 }
 
+fn extract_cluster_redirect(err: &redis::RedisError) -> Option<ClusterRedirectAction> {
+    if let (Some(code), Some(detail)) = (err.code(), err.detail()) {
+        let formatted = format!("{code} {detail}");
+        if let Some(action) = check_cluster_redirect(&formatted) {
+            return Some(action);
+        }
+    }
+    let msg = err.to_string();
+    if let Some(action) = check_cluster_redirect(&msg) {
+        return Some(action);
+    }
+    for marker in ["MOVED ", "Moved: ", "ASK ", "Ask: "] {
+        if let Some(idx) = msg.find(marker) {
+            let candidate = msg[idx..].trim_end_matches([')', ']']);
+            if let Some(action) = check_cluster_redirect(candidate) {
+                return Some(action);
+            }
+        }
+    }
+    None
+}
+
+fn is_transient_cluster_redis_error(err: &redis::RedisError) -> bool {
+    if err.is_connection_dropped() {
+        return true;
+    }
+    matches!(
+        err.code(),
+        Some("TRYAGAIN" | "CLUSTERDOWN" | "LOADING" | "READONLY")
+    )
+}
+
 /// Core thread-safe Redis client supporting Standalone, Sentinel, and Cluster topologies.
 pub struct RedisCoreClient {
     pub config: RedisClientConfig,
     pub client_cache: Arc<ClientLruCache>,
     pub slot_map: Arc<ClusterSlotMap>,
     conn: Arc<TokioMutex<Option<CoreConnection>>>,
+    cluster_node_conns: Arc<TokioMutex<HashMap<(String, u16), redis::aio::MultiplexedConnection>>>,
     closed: AtomicBool,
     tracking_enabled: AtomicBool,
     active_password: RwLock<Option<String>>,
@@ -287,6 +323,7 @@ impl RedisCoreClient {
             client_cache,
             slot_map,
             conn: Arc::new(TokioMutex::new(None)),
+            cluster_node_conns: Arc::new(TokioMutex::new(HashMap::new())),
             closed: AtomicBool::new(false),
             tracking_enabled: AtomicBool::new(false),
             active_password,
@@ -330,6 +367,15 @@ impl RedisCoreClient {
                 *guard = None;
             });
         }
+        if let Ok(mut guard) = self.cluster_node_conns.try_lock() {
+            guard.clear();
+        } else {
+            let node_conns_arc = Arc::clone(&self.cluster_node_conns);
+            vertebra_db::py_async::db_runtime_handle().spawn(async move {
+                let mut guard = node_conns_arc.lock().await;
+                guard.clear();
+            });
+        }
     }
 
     /// Update dynamic credentials (e.g. IAM token) and force reconnect.
@@ -346,6 +392,10 @@ impl RedisCoreClient {
         {
             let mut guard = self.conn.lock().await;
             *guard = None;
+        }
+        {
+            let mut node_conns = self.cluster_node_conns.lock().await;
+            node_conns.clear();
         }
         self.tracking_enabled.store(false, Ordering::Release);
         self.ensure_connected().await?;
@@ -494,13 +544,13 @@ impl RedisCoreClient {
                     vec![self.config.normalized_url.clone()]
                 };
 
-                let mut builder = redis::cluster::ClusterClient::builder(nodes).use_protocol(
-                    if self.config.protocol == 3 {
+                let mut builder = redis::cluster::ClusterClient::builder(nodes)
+                    .retries(0)
+                    .use_protocol(if self.config.protocol == 3 {
                         redis::ProtocolVersion::RESP3
                     } else {
                         redis::ProtocolVersion::RESP2
-                    },
-                );
+                    });
                 if let Some(ref u) = effective_username {
                     builder = builder.username(u);
                 }
@@ -517,6 +567,20 @@ impl RedisCoreClient {
                     .get_async_connection()
                     .await
                     .map_err(|e| classify_redis_error(&e))?;
+
+                let mut slots_cmd = redis::cmd("CLUSTER");
+                slots_cmd.arg("SLOTS");
+                if let Ok(Ok(slots_val)) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    slots_cmd.query_async::<Value>(&mut cluster_conn),
+                )
+                .await
+                {
+                    let fallback_host = self.cluster_fallback_host();
+                    let _ = self
+                        .slot_map
+                        .populate_from_cluster_slots(&slots_val, fallback_host.as_deref());
+                }
 
                 if self.config.enable_client_side_caching && self.config.protocol == 3 {
                     let track_cmd = self.build_client_tracking_cmd();
@@ -544,6 +608,206 @@ impl RedisCoreClient {
         Ok(())
     }
 
+    fn cluster_fallback_host(&self) -> Option<String> {
+        self.config
+            .cluster_nodes
+            .first()
+            .map(|(h, _)| h.clone())
+            .filter(|h| !h.is_empty())
+            .or_else(|| {
+                url::Url::parse(&self.config.normalized_url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .filter(|h| !h.is_empty())
+            })
+    }
+
+    async fn get_cluster_node_conn(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<redis::aio::MultiplexedConnection, RedisDriverError> {
+        let key = (host.to_string(), port);
+        {
+            let guard = self.cluster_node_conns.lock().await;
+            if let Some(conn) = guard.get(&key) {
+                return Ok(conn.clone());
+            }
+        }
+
+        let current_pw = self.active_password.read().clone();
+        let (effective_username, effective_password, _) =
+            resolve_effective_credentials(&self.config, current_pw).await?;
+        let scheme = if self.config.uses_tls() {
+            "rediss"
+        } else {
+            "redis"
+        };
+        let node_url = if host.contains(':') && !host.starts_with('[') {
+            format!("{scheme}://[{host}]:{port}")
+        } else {
+            format!("{scheme}://{host}:{port}")
+        };
+        let conn_info = redis::IntoConnectionInfo::into_connection_info(node_url.as_str())
+            .map_err(|e| classify_redis_error(&e))?;
+        let conn_info = apply_redis_settings(
+            conn_info,
+            self.config.protocol,
+            effective_username.as_deref(),
+            effective_password.as_deref(),
+        );
+        let client = redis::Client::open(conn_info).map_err(|e| classify_redis_error(&e))?;
+        let conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| classify_redis_error(&e))?;
+
+        let mut guard = self.cluster_node_conns.lock().await;
+        guard.insert(key, conn.clone());
+        Ok(conn)
+    }
+
+    async fn evict_cluster_node_conn(&self, host: &str, port: u16) {
+        let mut guard = self.cluster_node_conns.lock().await;
+        guard.remove(&(host.to_string(), port));
+    }
+
+    async fn next_cluster_retry(
+        &self,
+        err: &redis::RedisError,
+        attempt: usize,
+        max_redirs: usize,
+        current_node: Option<&(String, u16)>,
+    ) -> Result<Option<(String, u16, bool)>, RedisDriverError> {
+        if let Some(action) = extract_cluster_redirect(err) {
+            match action {
+                ClusterRedirectAction::Moved { slot, host, port } => {
+                    self.slot_map.update_slot(slot, host.clone(), port);
+                    if attempt < max_redirs {
+                        return Ok(Some((host, port, false)));
+                    }
+                }
+                ClusterRedirectAction::Ask { host, port, .. } => {
+                    if attempt < max_redirs {
+                        return Ok(Some((host, port, true)));
+                    }
+                }
+            }
+            return Err(RedisDriverError::operational(
+                format!("Redis Cluster redirection limit ({max_redirs}) exceeded: {err}"),
+                true,
+            ));
+        }
+
+        if let Some((host, port)) = current_node
+            && err.is_connection_dropped()
+        {
+            self.evict_cluster_node_conn(host, *port).await;
+        }
+
+        if is_transient_cluster_redis_error(err) && attempt < max_redirs {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            return Ok(None);
+        }
+
+        Err(classify_redis_error(err))
+    }
+
+    async fn execute_cluster_cmd(
+        &self,
+        mut cluster_conn: redis::cluster_async::ClusterConnection,
+        cmd: &Cmd,
+    ) -> Result<Value, RedisDriverError> {
+        let mut override_target: Option<(String, u16, bool)> = None;
+        let max_redirs = self.config.max_redirections;
+
+        for attempt in 0..=max_redirs {
+            let current_node = override_target.as_ref().map(|(h, p, _)| (h.clone(), *p));
+            let raw_res: Result<Value, redis::RedisError> =
+                if let Some((host, port, is_ask)) = override_target.take() {
+                    let mut node_conn = self.get_cluster_node_conn(&host, port).await?;
+                    if is_ask {
+                        let mut pipe = redis::Pipeline::new();
+                        pipe.cmd("ASKING").add_command(cmd.clone());
+                        pipe.query_async::<Vec<Value>>(&mut node_conn)
+                            .await
+                            .and_then(|mut replies| {
+                                if replies.len() == 2 {
+                                    Ok(replies.pop().expect("second reply exists"))
+                                } else {
+                                    Err(redis::RedisError::from((
+                                        redis::ErrorKind::UnexpectedReturnType,
+                                        "Unexpected ASK batch reply count",
+                                    )))
+                                }
+                            })
+                    } else {
+                        cmd.query_async::<Value>(&mut node_conn).await
+                    }
+                } else {
+                    cmd.query_async::<Value>(&mut cluster_conn).await
+                };
+
+            match raw_res {
+                Ok(val) => return Ok(val),
+                Err(err) => {
+                    override_target = self
+                        .next_cluster_retry(&err, attempt, max_redirs, current_node.as_ref())
+                        .await?;
+                }
+            }
+        }
+
+        Err(RedisDriverError::operational(
+            "Redis Cluster command exceeded maximum redirections",
+            true,
+        ))
+    }
+
+    async fn execute_cluster_pipe(
+        &self,
+        mut cluster_conn: redis::cluster_async::ClusterConnection,
+        pipe: &Pipeline,
+    ) -> Result<Vec<Value>, RedisDriverError> {
+        let mut override_target: Option<(String, u16, bool)> = None;
+        let max_redirs = self.config.max_redirections;
+
+        for attempt in 0..=max_redirs {
+            let current_node = override_target.as_ref().map(|(h, p, _)| (h.clone(), *p));
+            let raw_res: Result<Vec<Value>, redis::RedisError> =
+                if let Some((host, port, is_ask)) = override_target.take() {
+                    let mut node_conn = self.get_cluster_node_conn(&host, port).await?;
+                    if is_ask {
+                        let asking_res = redis::cmd("ASKING")
+                            .query_async::<Value>(&mut node_conn)
+                            .await;
+                        match asking_res {
+                            Ok(_) => pipe.query_async::<Vec<Value>>(&mut node_conn).await,
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        pipe.query_async::<Vec<Value>>(&mut node_conn).await
+                    }
+                } else {
+                    pipe.query_async::<Vec<Value>>(&mut cluster_conn).await
+                };
+
+            match raw_res {
+                Ok(vals) => return Ok(vals),
+                Err(err) => {
+                    override_target = self
+                        .next_cluster_retry(&err, attempt, max_redirs, current_node.as_ref())
+                        .await?;
+                }
+            }
+        }
+
+        Err(RedisDriverError::operational(
+            "Redis Cluster pipeline exceeded maximum redirections",
+            true,
+        ))
+    }
+
     /// Execute a command asynchronously on the active connection with an explicit optional timeout.
     pub async fn execute_cmd_with_timeout(
         &self,
@@ -556,6 +820,20 @@ impl RedisCoreClient {
             *guard = None;
             return Err(RedisDriverError::interface("Redis client is closed", false));
         }
+        let cluster_conn_opt = match guard.as_ref() {
+            Some(CoreConnection::Cluster(c)) => Some(c.clone()),
+            _ => None,
+        };
+        if let Some(cluster_conn) = cluster_conn_opt {
+            drop(guard);
+            return match timeout {
+                Some(dur) => tokio::time::timeout(dur, self.execute_cluster_cmd(cluster_conn, cmd))
+                    .await
+                    .map_err(|_| RedisDriverError::operational("command timed out", true))?,
+                None => self.execute_cluster_cmd(cluster_conn, cmd).await,
+            };
+        }
+
         let conn = guard
             .as_mut()
             .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
@@ -571,16 +849,7 @@ impl RedisCoreClient {
                 .query_async(c)
                 .await
                 .map_err(|e| classify_redis_error(&e)),
-            (CoreConnection::Cluster(c), Some(dur)) => {
-                tokio::time::timeout(dur, cmd.query_async(c))
-                    .await
-                    .map_err(|_| RedisDriverError::operational("command timed out", true))?
-                    .map_err(|e| classify_redis_error(&e))
-            }
-            (CoreConnection::Cluster(c), None) => cmd
-                .query_async(c)
-                .await
-                .map_err(|e| classify_redis_error(&e)),
+            (CoreConnection::Cluster(_), _) => unreachable!(),
         }
     }
 
@@ -598,6 +867,15 @@ impl RedisCoreClient {
             *guard = None;
             return Err(RedisDriverError::interface("Redis client is closed", false));
         }
+        let cluster_conn_opt = match guard.as_ref() {
+            Some(CoreConnection::Cluster(c)) => Some(c.clone()),
+            _ => None,
+        };
+        if let Some(cluster_conn) = cluster_conn_opt {
+            drop(guard);
+            return self.execute_cluster_pipe(cluster_conn, pipe).await;
+        }
+
         let conn = guard
             .as_mut()
             .ok_or_else(|| RedisDriverError::operational("Redis connection unavailable", true))?;
@@ -607,10 +885,7 @@ impl RedisCoreClient {
                 .query_async(c)
                 .await
                 .map_err(|e| classify_redis_error(&e)),
-            CoreConnection::Cluster(c) => pipe
-                .query_async(c)
-                .await
-                .map_err(|e| classify_redis_error(&e)),
+            CoreConnection::Cluster(_) => unreachable!(),
         }
     }
 

@@ -1,14 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use http::{HeaderMap, HeaderValue};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
-use vertebra_http::h2c::{
-    CleartextProtocol, H2C_PREFACE, PrependStream, build_h2c_switching_protocols_response,
-    detect_cleartext_protocol, parse_h2c_upgrade_headers,
-};
+use vertebra_http::h2c::{CleartextProtocol, H2C_PREFACE, detect_cleartext_protocol};
 use vertebra_http::tls::{
     ClientAuthMode, IpCidr, MtlsConfig, TrustedProxyConfig, extract_client_identity_from_der,
     normalize_trusted_proxy_headers,
@@ -43,42 +39,6 @@ async fn test_detect_cleartext_protocol_prior_knowledge_and_http1() {
     let _client_stream_h1 = client_h1.await.unwrap();
     let proto_h1 = detect_cleartext_protocol(&server_stream_h1).await.unwrap();
     assert_eq!(proto_h1, CleartextProtocol::Http1);
-}
-
-#[test]
-fn test_parse_h2c_upgrade_headers_and_switching_protocols_response() {
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("/items")
-        .header("connection", "Upgrade, HTTP2-Settings")
-        .header("upgrade", "h2c")
-        .header("http2-settings", "AAMAAABkAAQCAAAAAAIAAAAA")
-        .body(())
-        .unwrap();
-
-    let params = parse_h2c_upgrade_headers(req.headers())
-        .expect("valid h2c upgrade should parse")
-        .expect("upgrade parameters should be present");
-    assert_eq!(params.max_concurrent_streams, Some(100));
-    assert_eq!(params.initial_window_size, Some(33_554_432));
-    assert_eq!(params.enable_push, Some(false));
-
-    let resp = build_h2c_switching_protocols_response();
-    assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
-    assert_eq!(resp.headers().get("upgrade").unwrap(), "h2c");
-    assert_eq!(resp.headers().get("connection").unwrap(), "Upgrade");
-}
-
-#[tokio::test]
-async fn test_prepend_stream_reads_prefix_then_inner_bytes() {
-    let (mut client, server) = tokio::io::duplex(256);
-    client.write_all(b"WORLD").await.unwrap();
-    drop(client);
-
-    let mut prepended = PrependStream::new(Bytes::from_static(b"HELLO "), server);
-    let mut out = Vec::new();
-    prepended.read_to_end(&mut out).await.unwrap();
-    assert_eq!(out, b"HELLO WORLD");
 }
 
 #[test]

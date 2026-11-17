@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, Final
+import re
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from vertebra.db.adapters.datafusion.config import DataFusionConfig, TableRegistration
-from vertebra.db.arrow import ArrowCursor
+from vertebra.db.adapters.datafusion.core import ARROW_STREAM_MEDIA_TYPE, DataFusionCore
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 
 if TYPE_CHECKING:
@@ -15,8 +17,6 @@ __all__ = (
     "ARROW_STREAM_MEDIA_TYPE",
     "DataFusionEngine",
 )
-
-ARROW_STREAM_MEDIA_TYPE: Final[str] = "application/vnd.apache.arrow.stream"
 
 
 class DataFusionEngine:
@@ -33,7 +33,11 @@ class DataFusionEngine:
             self._ctx: Any = ctx
         else:
             datafusion_mod = import_optional("datafusion")
-            self._ctx = datafusion_mod.SessionContext() if datafusion_mod is not None else None
+            self._ctx = (
+                DataFusionCore.build_session_context(self._config, datafusion_mod=datafusion_mod)
+                if datafusion_mod is not None
+                else None
+            )
 
     @property
     def config(self) -> DataFusionConfig:
@@ -51,18 +55,30 @@ class DataFusionEngine:
         return self._config.mode == "in_process"
 
     def register_table(self, registration: TableRegistration) -> TableRegistration:
-        """Register an ObjectStore dataset or live relational table descriptor."""
+        """Register an ObjectStore dataset, file source, or registered Arrow table."""
+        if registration.format == "arrow":
+            if registration.name not in self._arrow_tables:
+                msg = f"Table {registration.name!r} uses format='arrow' without registered Arrow data"
+                raise ImproperConfigurationError(msg)
+            if self._ctx is not None:
+                self._ctx.register_table(registration.name, self._arrow_tables[registration.name])
+            self._tables[registration.name] = registration
+            return registration
+
+        if self._ctx is not None:
+            DataFusionCore.register_file_source(self._ctx, registration)
         self._tables[registration.name] = registration
         return registration
 
     def register_arrow_table(self, name: str, table: Any) -> TableRegistration:
         """Normalize and register an in-memory PyArrow table or ArrowCursor on the session context."""
-        arrow_table = self._coerce_arrow_table(table)
+        arrow_table = DataFusionCore.coerce_arrow_table(table)
         self._arrow_tables[name] = arrow_table
         if self._ctx is not None:
             self._ctx.register_table(name, arrow_table)
         reg = TableRegistration(name=name, uri=f"arrow://{name}", format="arrow")
-        return self.register_table(reg)
+        self._tables[name] = reg
+        return reg
 
     def register_parquet_from_store(
         self,
@@ -71,16 +87,29 @@ class DataFusionEngine:
         key: str,
     ) -> TableRegistration:
         """Register a Parquet dataset located in an ObjectStore."""
-        uri = f"{store.url.rstrip('/')}/{key.lstrip('/')}"
-        reg = TableRegistration(name=name, uri=uri, format="parquet")
-        return self.register_table(reg)
+        reg, arrow_table = DataFusionCore.register_store_parquet(self._ctx, name, store, key)
+        if arrow_table is not None:
+            self._arrow_tables[name] = arrow_table
+        self._tables[name] = reg
+        return reg
 
     def explain_plan(self, sql: str) -> dict[str, Any]:
         """Return a federated execution plan descriptor for ``sql``."""
-        referenced = [name for name in self._tables if name in sql]
+        if self._ctx is not None:
+            return DataFusionCore.format_explain_plan(
+                self._ctx,
+                sql,
+                mode=self._config.mode,
+                media_type=ARROW_STREAM_MEDIA_TYPE,
+                registered_tables=self._tables,
+            )
+        referenced = [name for name in self._tables if re.search(rf"\b{re.escape(name)}\b", sql)]
         return {
             "mode": self._config.mode,
             "media_type": ARROW_STREAM_MEDIA_TYPE,
+            "logical_plan": "",
+            "physical_plan": "",
+            "plan": "",
             "referenced_tables": referenced,
             "sql": sql,
         }
@@ -100,7 +129,7 @@ class DataFusionEngine:
         """Execute ``sql`` and serialize the resulting PyArrow table as Arrow IPC stream bytes."""
         pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-        arrow_table = self._coerce_arrow_table(self.execute_arrow(sql))
+        arrow_table = DataFusionCore.coerce_arrow_table(self.execute_arrow(sql))
         sink = pa.BufferOutputStream()
         with ipc.new_stream(sink, arrow_table.schema) as writer:
             writer.write_table(arrow_table)
@@ -113,32 +142,17 @@ class DataFusionEngine:
     def _ensure_context(self) -> Any:
         """Resolve or lazily initialize the underlying DataFusion SessionContext."""
         if self._ctx is None:
-            datafusion_mod = ensure_module("datafusion", package="datafusion")
-            ctx = datafusion_mod.SessionContext()
+            datafusion_mod = ensure_module("datafusion", package="datafusion", extra="datafusion")
+            ctx = DataFusionCore.build_session_context(self._config, datafusion_mod=datafusion_mod)
             for tbl_name, tbl_obj in self._arrow_tables.items():
                 ctx.register_table(tbl_name, tbl_obj)
+            for tbl_name, reg in self._tables.items():
+                if tbl_name not in self._arrow_tables:
+                    DataFusionCore.register_file_source(ctx, reg)
             self._ctx = ctx
         return self._ctx
 
     @staticmethod
     def _coerce_arrow_table(table: Any) -> Any:
         """Normalize an ArrowCursor, PyArrow Table/RecordBatch, or `.to_pylist()` table into a `pyarrow.Table`."""
-        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
-        if isinstance(table, pa.Table):
-            return table
-        if isinstance(table, pa.RecordBatch):
-            return pa.Table.from_batches([table])
-        if isinstance(table, ArrowCursor) or callable(getattr(table, "to_pyarrow", None)):
-            converted = table.to_pyarrow()
-            if isinstance(converted, pa.Table):
-                return converted
-            if callable(getattr(converted, "to_pylist", None)):
-                return pa.Table.from_pylist(list(converted.to_pylist()))
-        if callable(getattr(table, "to_arrow", None)):
-            converted_arrow = table.to_arrow()
-            if isinstance(converted_arrow, pa.Table):
-                return converted_arrow
-        if callable(getattr(table, "to_pylist", None)):
-            return pa.Table.from_pylist(list(table.to_pylist()))
-        msg = f"Unsupported table input for DataFusion registration: {type(table)!r}"
-        raise TypeError(msg)
+        return DataFusionCore.coerce_arrow_table(table)

@@ -8,6 +8,9 @@
   "workflow_preferences": {
     "ignore_policy": "shared",
     "model_routing": "auto",
-    "sha_tracking": "strict"
-  }
+    "sha_tracking": "strict",
+    "chapter_gate": "targeted",
+    "stop_gate": "enforce"
+  },
+  "schema_version": "0.2"
 }

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 
+from vertebra.cache._sync import _parse_url_scheme
 from vertebra.typing import FrozenBaseStruct
 
 if TYPE_CHECKING:
@@ -61,7 +62,6 @@ LEGACY_ONLY_METHODS: frozenset[str] = frozenset(
         "logging/setLevel",
         "resources/subscribe",
         "resources/unsubscribe",
-        "tasks/result",
     }
 )
 SESSION_CAPACITY_EXHAUSTED: int = -32000
@@ -159,8 +159,18 @@ class MCPConfig(FrozenBaseStruct, frozen=True, kw_only=True):
     """Allowed MIME types for SEP-1865 ``ui://`` app resources; empty disables the UI extension."""
     hide_app_only_tools: bool = True
     """Hide app-only tools from ``tools/list`` when caller capabilities lack the UI extension."""
+    cache_url: str | None = None
+    """Optional `vertebra.cache` backend URL for distributed sessions, tasks, and SSE replay."""
+    session_store: Any | None = None
+    """Optional pre-configured MCP session store overriding `cache_url` and in-memory defaults."""
+    task_store: Any | None = None
+    """Optional pre-configured MCP task store overriding `cache_url` and in-memory defaults."""
+    stream_broker: Any | None = None
+    """Optional pre-configured SSE stream broker overriding `cache_url` and in-memory defaults."""
 
     def __post_init__(self) -> None:
+        if self.cache_url is not None:
+            _parse_url_scheme(self.cache_url)
         if self.trust_proxy_identity and self.identity_source is None:
             raise ValueError(
                 "MCPConfig.trust_proxy_identity=True requires identity_source (IapIdentitySource, MtlsIdentitySource, or CallableIdentitySource)"

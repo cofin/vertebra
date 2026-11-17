@@ -271,7 +271,9 @@ impl PySyncSpannerClient {
         self.inner.config().max_commit_delay_ms
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.inner.close();
+    }
 
     #[pyo3(signature = (sql, params_json=None, staleness_mode="strong", staleness_ms=0))]
     fn query(
@@ -282,6 +284,9 @@ impl PySyncSpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
@@ -300,6 +305,9 @@ impl PySyncSpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<i64> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         py.detach(|| {
@@ -321,6 +329,9 @@ impl PySyncSpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<Vec<i64>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let stmts = parse_batch_dml_statements_json(statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         py.detach(|| {
@@ -341,6 +352,9 @@ impl PySyncSpannerClient {
         params_json: Option<&str>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<i64> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         py.detach(|| {
@@ -367,6 +381,9 @@ impl PySyncSpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let mutations =
             parse_mutations_json(mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
         let res = py
@@ -389,6 +406,9 @@ impl PySyncSpannerClient {
         mutation_groups_json: &str,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let groups = parse_mutation_groups_json(mutation_groups_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let res = py
@@ -403,6 +423,9 @@ impl PySyncSpannerClient {
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<String> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         py.detach(|| block_on_db(self.inner.update_database_ddl(&statements)))
             .map_err(|e| spanner_error_to_py(py, e))
     }
@@ -426,6 +449,9 @@ impl PySyncSpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params =
             parse_spanner_parameters_json(params_json).map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
@@ -457,6 +483,9 @@ impl PySyncSpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> PyResult<PySyncSpannerReadWriteTransaction> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let options = SpannerBeginTransactionOptions {
             transaction_tag,
             previous_transaction_id,
@@ -576,7 +605,9 @@ impl PyAsyncSpannerClient {
         self.inner.config().max_commit_delay_ms
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.inner.close();
+    }
 
     #[pyo3(signature = (sql, params_json=None, staleness_mode="strong", staleness_ms=0))]
     fn query(
@@ -587,6 +618,9 @@ impl PyAsyncSpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
@@ -609,6 +643,9 @@ impl PyAsyncSpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -638,6 +675,9 @@ impl PyAsyncSpannerClient {
         request_tag: Option<String>,
         transaction_tag: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let stmts = parse_batch_dml_statements_json(&statements_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -666,6 +706,9 @@ impl PyAsyncSpannerClient {
         params_json: Option<String>,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -696,6 +739,9 @@ impl PyAsyncSpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let mutations =
             parse_mutations_json(&mutations_json).map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -724,6 +770,9 @@ impl PyAsyncSpannerClient {
         mutation_groups_json: String,
         exclude_txn_from_change_streams: bool,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let groups = parse_mutation_groups_json(&mutation_groups_json)
             .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -741,6 +790,9 @@ impl PyAsyncSpannerClient {
     }
 
     fn update_ddl(&self, py: Python<'_>, statements: Vec<String>) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
         spawn_rust_db_task_with_attr(
             py,
@@ -770,6 +822,9 @@ impl PyAsyncSpannerClient {
         staleness_mode: &str,
         staleness_ms: i64,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let params = parse_spanner_parameters_json(params_json.as_deref())
             .map_err(|e| spanner_error_to_py(py, e))?;
         let staleness = parse_staleness(staleness_mode, staleness_ms);
@@ -807,6 +862,9 @@ impl PyAsyncSpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| spanner_error_to_py(py, e))?;
         let options = SpannerBeginTransactionOptions {
             transaction_tag,
             previous_transaction_id,

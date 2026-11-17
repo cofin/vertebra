@@ -4,21 +4,33 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from django.db.backends.sqlite3.base import (
-    DatabaseWrapper as DjangoSQLiteDatabaseWrapper,
-)
-
 from vertebra.db.adapters.sqlite import SQLiteConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
 from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
-from vertebra.utils.module_loader import import_optional_attr
+from vertebra.utils.module_loader import ensure_module, import_optional_attr
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from django.db.backends.sqlite3.base import (
+        DatabaseWrapper as DjangoSQLiteDatabaseWrapper,
+    )
+
     from vertebra.db.dbapi import SyncDBAPICursor
+else:
+    DjangoSQLiteDatabaseWrapper = ensure_module(
+        "django.db.backends.sqlite3.base", package="django", extra="django"
+    ).DatabaseWrapper
 
 __all__ = ("DatabaseWrapper",)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve optional Django SQLite3 backend classes on demand."""
+    if name == "DjangoSQLiteDatabaseWrapper":
+        return ensure_module("django.db.backends.sqlite3.base", package="django", extra="django").DatabaseWrapper
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 
 class DatabaseWrapper(DatabaseWrapperMixin, DjangoSQLiteDatabaseWrapper):
@@ -26,7 +38,7 @@ class DatabaseWrapper(DatabaseWrapperMixin, DjangoSQLiteDatabaseWrapper):
 
     vendor: str = "sqlite"
     display_name: str = "SQLite (Vertebra)"
-    Database: Any = SyncDBAPIModule(paramstyle="qmark")
+    Database: Any = SyncDBAPIModule(paramstyle="qmark", dialect="sqlite")
 
     def __init__(self, settings_dict: dict[str, Any], alias: str = "default") -> None:
         """Initialize SQLite DatabaseWrapper with settings dictionary and alias."""

@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 import msgspec
 
+from vertebra.db.adapters.mysql.core import MySQLCore
 from vertebra.db.dialer import CloudSQLConfig
 from vertebra.db.driver._common import MYSQL_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
 
+if TYPE_CHECKING:
+    from vertebra.db.driver import DatabaseTokenProvider
+
 __all__ = (
     "MySQLConfig",
     "MySQLPoolConfig",
     "MySQLStatementConfig",
+    "build_mysql_client_kwargs",
+    "is_mysql_auth_rejection",
 )
 
 _vertebra = import_optional("vertebra._vertebra")
@@ -131,6 +137,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     credentials_path: str | None = None
     credentials_json: str | None = None
     target_service_account: str | None = None
+    token_provider: Any = None
     pool: MySQLPoolConfig = msgspec.field(default_factory=MySQLPoolConfig)
     statement: MySQLStatementConfig = msgspec.field(default_factory=MySQLStatementConfig)
     broker: Any = None
@@ -213,6 +220,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 msg = f"Invalid Cloud SQL instance '{self.cloud_sql_instance}'; expected 'project:region:instance'"
                 raise ImproperConfigurationError(msg)
 
+        has_explicit_dsn_ssl = False
         if "://" in trimmed_dsn and not lower_dsn.startswith("cloudsql://"):
             parsed = urlsplit(trimmed_dsn)
             try:
@@ -226,17 +234,23 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             query_params = parse_qs(parsed.query)
             for ssl_param in ("ssl_mode", "ssl-mode", "sslmode", "ssl"):
                 if ssl_param in query_params:
+                    has_explicit_dsn_ssl = True
                     q_mode = query_params[ssl_param][0].strip().lower()
                     if q_mode not in _ALLOWED_SSL_MODES:
                         msg = f"Unsupported MySQL {ssl_param} '{query_params[ssl_param][0]}'"
                         raise ImproperConfigurationError(msg)
 
+        if self.token_provider is not None and self.canonical_ssl_mode == "prefer" and not has_explicit_dsn_ssl:
+            msgspec.structs.force_setattr(self, "ssl_mode", "require")
+
     def __repr__(self) -> str:
         """Return a redacted representation that omits credentials and tokens."""
+        provider_name = type(self.token_provider).__name__ if self.token_provider is not None else None
         return (
             f"MySQLConfig(host={self.host!r}, port={self.port}, "
             f"user={self.user!r}, database={self.database!r}, "
-            f"ssl_mode={self.canonical_ssl_mode!r}, password='***')"
+            f"ssl_mode={self.canonical_ssl_mode!r}, password='***', "
+            f"token_provider={provider_name!r})"
         )
 
     @property
@@ -292,7 +306,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         port = (parsed.port or self.port) if has_dsn else self.port
         db = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
         user = (unquote(parsed.username) if parsed.username else self.user) if has_dsn else self.user
-        return (
+        base_key = (
             self.dialect,
             host,
             port,
@@ -301,21 +315,28 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             self.canonical_ssl_mode,
             self.cloud_sql_instance or "",
         )
+        if self.token_provider is None:
+            return base_key
+        try:
+            provider_key: Any = hash(self.token_provider)
+        except TypeError:
+            provider_key = id(self.token_provider)
+        return (*base_key, type(self.token_provider).__qualname__, provider_key)
 
-    def parse_dsn_params(self) -> dict[str, Any]:
+    def parse_dsn_params(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Extract normalized connection parameters from `dsn` and fields."""
         params = self._parse_dsn_fields()
-        if self.enable_iam_auth:
-            iam_token = self.resolve_iam_password_sync()
+        if self.token_provider is not None or self.enable_iam_auth:
+            iam_token = self.resolve_iam_password_sync(force_refresh=force_refresh)
             if iam_token:
                 params["password"] = iam_token
         return params
 
-    async def parse_dsn_params_async(self) -> dict[str, Any]:
+    async def parse_dsn_params_async(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Extract normalized connection parameters asynchronously, refreshing IAM tokens if enabled."""
         params = self._parse_dsn_fields()
-        if self.enable_iam_auth:
-            iam_token = await self.resolve_iam_password_async()
+        if self.token_provider is not None or self.enable_iam_auth:
+            iam_token = await self.resolve_iam_password_async(force_refresh=force_refresh)
             if iam_token:
                 params["password"] = iam_token
         return params
@@ -371,7 +392,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         )
 
     def resolve_iam_password_sync(self, *, force_refresh: bool = False) -> str | None:
-        """Resolve a Cloud SQL IAM OAuth2 token synchronously via `SyncGcpTokenCache`."""
+        """Resolve a short-lived cloud IAM token synchronously from `token_provider` or `SyncGcpTokenCache`."""
+        provider: DatabaseTokenProvider | None = self.token_provider
+        if provider is not None:
+            return str(provider.resolve_sync(force_refresh=force_refresh))
         if not self.enable_iam_auth:
             return None
         opts = self._build_iam_options()
@@ -383,7 +407,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return str(snap.access_token)
 
     async def resolve_iam_password_async(self, *, force_refresh: bool = False) -> str | None:
-        """Resolve a Cloud SQL IAM OAuth2 token asynchronously via `AsyncGcpTokenCache`."""
+        """Resolve a short-lived cloud IAM token asynchronously from `token_provider` or `AsyncGcpTokenCache`."""
+        provider: DatabaseTokenProvider | None = self.token_provider
+        if provider is not None:
+            return str(await provider.resolve_async(force_refresh=force_refresh))
         if not self.enable_iam_auth:
             return None
         opts = self._build_iam_options()
@@ -431,3 +458,40 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
         )
         return opts
+
+
+def build_mysql_client_kwargs(
+    config: MySQLConfig,
+    token: str | None = None,
+    *,
+    skip_iam_sync: bool = False,
+) -> dict[str, Any]:
+    """Build native MySQL client kwargs, injecting a pre-resolved IAM `token` when present."""
+    if config.token_provider is not None or token is not None or skip_iam_sync:
+        connect_kwargs = MySQLCore.build_connect_kwargs(
+            msgspec.structs.replace(config, token_provider=None, enable_iam_auth=False)
+        )
+        connect_kwargs["enable_iam_auth"] = bool(config.enable_iam_auth)
+        if token is not None:
+            connect_kwargs["password"] = token or None
+        return connect_kwargs
+    return MySQLCore.build_connect_kwargs(config)
+
+
+def is_mysql_auth_rejection(exc: BaseException) -> bool:
+    """Return True when `exc` represents a MySQL authentication or IAM token rejection."""
+    vendor_code = getattr(exc, "vendor_code", None)
+    errno = getattr(exc, "errno", None)
+    if vendor_code == 1045 or errno == 1045:
+        return True
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate == "28000":
+        return True
+    detail = str(exc).lower()
+    return (
+        "error 1045" in detail
+        or "28000" in detail
+        or "access denied for user" in detail
+        or "rsa full authentication failed" in detail
+        or "authentication failed" in detail
+    )

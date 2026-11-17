@@ -9,6 +9,8 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol, Self, runtime_checkable
 from uuid import UUID
 
+from anyio import CancelScope
+
 from vertebra.db.adapters.postgres.types import (
     PgArray,
     PgBitString,
@@ -170,13 +172,26 @@ class SyncPostgresPipeline:
             raise
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Commit/release or roll back the retained scope before invoking ``release`` once."""
+        """Flush queued operations on clean exit, commit/release or roll back, and invoke ``release`` once."""
+        _ = tb
         if self._closed:
             return
+        flush_err: BaseException | None = None
+        if exc_type is None and exc is None and not self._failed:
+            if not self._submitted and self._operations:
+                try:
+                    self.results()
+                except BaseException as err:
+                    self._failed = True
+                    flush_err = err
+        else:
+            self._operations.clear()
+
         self._closed = True
         scope_id = self._scope_id
         self._scope_id = None
-        commit_ok = exc_type is None and exc is None and not self._failed
+        commit_ok = exc_type is None and exc is None and not self._failed and flush_err is None
+        active_exc: BaseException | None = exc if exc is not None else flush_err
         finish_err: Exception | None = None
         release_err: Exception | None = None
 
@@ -184,21 +199,23 @@ class SyncPostgresPipeline:
             try:
                 self._client.pipeline_finish(scope_id, commit_ok)
             except Exception as err:
-                if exc is not None:
-                    exc.add_note(f"pipeline_finish cleanup failed: {err!r}")
+                if active_exc is not None:
+                    active_exc.add_note(f"pipeline_finish cleanup failed: {err!r}")
                 else:
                     finish_err = err
 
         try:
             self._run_release_once()
         except Exception as err:
-            if exc is not None:
-                exc.add_note(f"pipeline release cleanup failed: {err!r}")
+            if active_exc is not None:
+                active_exc.add_note(f"pipeline release cleanup failed: {err!r}")
             else:
                 release_err = err
 
         if exc is not None:
             return
+        if flush_err is not None:
+            raise flush_err
         if finish_err is not None and release_err is not None:
             finish_err.add_note(f"pipeline release cleanup failed: {release_err!r}")
             raise finish_err from release_err
@@ -320,35 +337,58 @@ class AsyncPostgresPipeline:
             raise
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Commit/release or roll back the retained scope asynchronously before invoking ``release`` once."""
+        """Flush queued operations asynchronously on clean exit, finish scope, and invoke ``release`` once."""
+        _ = tb
         if self._closed:
             return
+        flush_err: BaseException | None = None
+        if exc_type is None and exc is None and not self._failed:
+            if not self._submitted and self._operations:
+                try:
+                    await self.results()
+                except BaseException as err:
+                    self._failed = True
+                    flush_err = err
+        else:
+            self._operations.clear()
+
         self._closed = True
         scope_id = self._scope_id
         self._scope_id = None
-        commit_ok = exc_type is None and exc is None and not self._failed
+        commit_ok = exc_type is None and exc is None and not self._failed and flush_err is None
+        active_exc: BaseException | None = exc if exc is not None else flush_err
         finish_err: Exception | None = None
         release_err: Exception | None = None
 
         if scope_id is not None:
             try:
-                await self._client.pipeline_finish(scope_id, commit_ok)
+                if commit_ok:
+                    await self._client.pipeline_finish(scope_id, True)
+                else:
+                    with CancelScope(shield=True):
+                        await self._client.pipeline_finish(scope_id, False)
             except Exception as err:
-                if exc is not None:
-                    exc.add_note(f"pipeline_finish cleanup failed: {err!r}")
+                if active_exc is not None:
+                    active_exc.add_note(f"pipeline_finish cleanup failed: {err!r}")
                 else:
                     finish_err = err
 
         try:
-            await self._run_release_once()
+            if commit_ok:
+                await self._run_release_once()
+            else:
+                with CancelScope(shield=True):
+                    await self._run_release_once()
         except Exception as err:
-            if exc is not None:
-                exc.add_note(f"pipeline release cleanup failed: {err!r}")
+            if active_exc is not None:
+                active_exc.add_note(f"pipeline release cleanup failed: {err!r}")
             else:
                 release_err = err
 
         if exc is not None:
             return
+        if flush_err is not None:
+            raise flush_err
         if finish_err is not None and release_err is not None:
             finish_err.add_note(f"pipeline release cleanup failed: {release_err!r}")
             raise finish_err from release_err

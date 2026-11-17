@@ -63,7 +63,7 @@ class SyncSpannerReadWriteTxProtocol(Protocol):
         sql: str,
         params_json: str | None = None,
         request_tag: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Execute a SQL query inside this transaction."""
         ...
 
@@ -84,7 +84,7 @@ class SyncSpannerReadWriteTxProtocol(Protocol):
         """Execute a batch of DML statements inside this transaction."""
         ...
 
-    def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+    def commit(self, mutations_json: str | None = None) -> Mapping[str, Any]:
         """Commit this transaction and optional buffered mutations."""
         ...
 
@@ -102,7 +102,7 @@ class SyncSpannerClientProtocol(Protocol):
         params_json: str | None = None,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Execute a streaming SQL read."""
         ...
 
@@ -140,7 +140,7 @@ class SyncSpannerClientProtocol(Protocol):
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
         max_commit_delay_ms: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Commit a JSON-encoded list of Spanner mutations."""
         ...
 
@@ -148,7 +148,7 @@ class SyncSpannerClientProtocol(Protocol):
         self,
         mutation_groups_json: str,
         exclude_txn_from_change_streams: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> Sequence[Mapping[str, Any]]:
         """Commit independent mutation groups via ``BatchWrite``."""
         ...
 
@@ -164,7 +164,7 @@ class SyncSpannerClientProtocol(Protocol):
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Execute a parallel ``PartitionQuery`` read."""
         ...
 
@@ -278,12 +278,18 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         return self
 
     def close(self) -> None:
-        """Release the underlying Rust client reference and roll back any active transaction."""
-        if self._active_transaction is not None:
-            with contextlib.suppress(Exception):
-                self.rollback()
-        self._client = None
-        self._closed = True
+        """Roll back any active transaction, close the Rust client, and release references."""
+        client = self._client
+        try:
+            if self._active_transaction is not None:
+                with contextlib.suppress(Exception):
+                    self.rollback()
+            if client is not None:
+                client.close()
+        finally:
+            self._active_transaction = None
+            self._client = None
+            self._closed = True
 
     def _open_rw_transaction(
         self,
@@ -750,7 +756,7 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
         groups = [MutationGroup.coerce(g) for g in mutation_groups]
         client = self._ensure_client()
         groups_json = encode_json([g.to_dict() for g in groups])
-        return list(client.batch_write(groups_json, exclude_txn_from_change_streams))
+        return [dict(item) for item in client.batch_write(groups_json, exclude_txn_from_change_streams)]
 
     def update_ddl(self, statements: Sequence[str] | str) -> str:
         """Execute one or more DDL statements via `DatabaseAdmin/UpdateDatabaseDdl`."""
@@ -897,7 +903,9 @@ class SyncSpannerDriver(SyncDatabaseDriver[SpannerConfig]):
 
     def _ensure_client(self) -> SyncSpannerClientProtocol:
         if self._client is None:
-            self._client = SpannerCore.create_sync_rust_client(self.config)
+            created: SyncSpannerClientProtocol = SpannerCore.create_sync_rust_client(self.config)
+            self._client = created
+            return created
         return self._client
 
     def _prepare_sql_and_params(

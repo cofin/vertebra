@@ -1,6 +1,7 @@
 """Unit tests for Vertebra SQLSpec BigQuery modular adapter package."""
 
 import asyncio
+import subprocess
 import sys
 from datetime import timedelta
 from importlib import import_module
@@ -21,6 +22,7 @@ from sqlspec.exceptions import (
     QueryTimeoutError,
     SQLParsingError,
 )
+from sqlspec.exceptions import ImproperConfigurationError as SQLSpecImproperConfigurationError
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
 
 from vertebra._vertebra import (
@@ -33,21 +35,25 @@ from vertebra.db.adapters.bigquery import BigQueryDryRunResult, ObjectRef, Objec
 from vertebra.db.arrow import ArrowCursor
 from vertebra.extensions.sqlspec.adapters.bigquery import (
     BigQueryAsyncADKArtifactStore,
-    BigQueryAsyncADKStore,
     BigQueryAsyncConfig,
+    BigQueryAsyncConnectionContext,
     BigQueryAsyncDataDictionary,
     BigQueryAsyncDriver,
+    BigQueryAsyncSessionContext,
+    BigQueryConnectionParams,
     BigQueryConnectionQueryJob,
     BigQueryConnectionShim,
+    BigQueryDriverFeatures,
     BigQueryEventQueueStore,
     BigQueryLitestarStore,
     BigQueryMetadataScope,
+    BigQueryPoolParams,
     BigQuerySyncADKArtifactStore,
-    BigQuerySyncADKMemoryStore,
-    BigQuerySyncADKStore,
     BigQuerySyncConfig,
+    BigQuerySyncConnectionContext,
     BigQuerySyncDataDictionary,
     BigQuerySyncDriver,
+    BigQuerySyncSessionContext,
     default_statement_config,
     map_bigquery_exception,
 )
@@ -59,6 +65,7 @@ from vertebra.extensions.sqlspec.adapters.bigquery.core import (
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 
 
 class _RecordingBigQuerySyncNative:
@@ -80,6 +87,9 @@ class _RecordingBigQuerySyncNative:
             "num_dml_affected_rows": 2,
         }
         self.closed = False
+        self._session_id: str | None = None
+        self._in_transaction: bool = False
+        self._client: Any = None
 
     def connect(self) -> None:
         self.closed = False
@@ -157,6 +167,9 @@ class _RecordingBigQueryAsyncNative:
         self.description_cols: list[str] = []
         self.select_rows: list[dict[str, Any]] = []
         self.closed = False
+        self._session_id: str | None = None
+        self._in_transaction: bool = False
+        self._client: Any = None
 
     async def close(self) -> None:
         self.closed = True
@@ -206,17 +219,40 @@ class _HttpStatusError(Exception):
 
 
 def test_bigquery_pep562_exports_and_zero_sdk_import_isolation() -> None:
-    """Verify PEP 562 lazy export loading without eagerly importing `google.adk`."""
+    """Verify PEP 562 lazy exports and zero eager import of `pyarrow` or `google.adk`."""
+    probe = (
+        "import sys; "
+        "import vertebra.extensions.sqlspec.adapters.bigquery as bq; "
+        "cfg = bq.BigQuerySyncConfig(project_id='p', dataset_id='d'); "
+        "assert cfg.project_id == 'p'; "
+        "assert 'pyarrow' not in sys.modules; "
+        "assert 'google.adk' not in sys.modules"
+    )
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+
     pkg = import_module("vertebra.extensions.sqlspec.adapters.bigquery")
     assert pkg.BigQuerySyncConfig is BigQuerySyncConfig
+    assert pkg.BigQuerySyncConnectionContext is BigQuerySyncConnectionContext
+    assert pkg.BigQueryAsyncConnectionContext is BigQueryAsyncConnectionContext
+    assert pkg.BigQuerySyncSessionContext is BigQuerySyncSessionContext
+    assert pkg.BigQueryAsyncSessionContext is BigQueryAsyncSessionContext
+    assert pkg.BigQueryConnectionParams is BigQueryConnectionParams
+    assert pkg.BigQueryPoolParams is BigQueryPoolParams
+    assert pkg.BigQueryDriverFeatures is BigQueryDriverFeatures
     assert pkg.BigQueryAsyncADKArtifactStore is BigQueryAsyncADKArtifactStore
-    assert "google.adk" not in sys.modules
     with pytest.raises(AttributeError):
         _ = pkg.NonExistentBigQueryExport
 
 
 def test_bigquery_config_identity_connection_instance_and_tenant_rejection() -> None:
     """Verify adapter registration, `connection_instance` preservation, and tenant rejection."""
+    from vertebra.extensions.sqlspec.adapters.bigquery.adk import (
+        BigQueryAsyncADKStore,
+        BigQuerySyncADKMemoryStore,
+        BigQuerySyncADKStore,
+    )
+
     native = _RecordingBigQuerySyncNative()
     sync_cfg = BigQuerySyncConfig(
         project_id="proj-test",
@@ -246,6 +282,24 @@ def test_bigquery_config_identity_connection_instance_and_tenant_rejection() -> 
             sync_cfg, extension="adk", store_attr="adk_memory_store_class", store_suffix="ADKMemoryStore"
         )
         is BigQuerySyncADKMemoryStore
+    )
+    assert (
+        resolve_extension_store_class(
+            sync_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is BigQuerySyncADKArtifactStore
+    )
+    assert (
+        resolve_extension_store_class(
+            async_cfg,
+            extension="adk",
+            store_attr="adk_artifact_store_class",
+            store_suffix="ADKArtifactStore",
+        )
+        is BigQueryAsyncADKArtifactStore
     )
     assert (
         resolve_extension_store_class(
@@ -415,6 +469,11 @@ def test_bigquery_data_dictionary_metadata_scope_and_feature_flags() -> None:
 
 def test_bigquery_stores_adk_artifacts_events_and_litestar() -> None:
     """Verify BigQuery ADK, Artifact (`ArtifactReference`), EventQueue, and Litestar DDL & store flows."""
+    from vertebra.extensions.sqlspec.adapters.bigquery.adk import (
+        BigQuerySyncADKMemoryStore,
+        BigQuerySyncADKStore,
+    )
+
     native = _RecordingBigQuerySyncNative()
     backend = ObjectStoreBackend("memory://")
     cfg = BigQuerySyncConfig(
@@ -422,7 +481,7 @@ def test_bigquery_stores_adk_artifacts_events_and_litestar() -> None:
         dataset_id="ds_test",
         connection_instance=native,
         extension_config={
-            "adk": {"with_partitioning": True, "partition_expiration_days": 30},
+            "adk": {"enable_memory": True, "memory_use_fts": True},
             "events": {"with_partitioning": True, "require_partition_filter": True},
             "litestar": {"with_partitioning": True, "partition_expiration_days": 7},
         },
@@ -504,3 +563,243 @@ def test_bigquery_exception_mapping(exc: BaseException, expected_cls: type[Excep
     """Verify deterministic mapping of Vertebra BigQuery and HTTP status exceptions."""
     mapped = map_bigquery_exception(exc)
     assert isinstance(mapped, expected_cls)
+
+
+@pytest.mark.parametrize("method_name", ["select_to_arrow", "load_from_arrow"])
+def test_bigquery_missing_pyarrow_raises_missing_dependency_error(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    """Verify Arrow methods raise `MissingDependencyError` naming `extra='arrow'` when `pyarrow` is absent."""
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    sync_cfg = BigQuerySyncConfig(
+        project_id="proj-test",
+        dataset_id="ds_test",
+        connection_instance=_RecordingBigQuerySyncNative(),
+    )
+    async_cfg = BigQueryAsyncConfig(
+        project_id="proj-async",
+        dataset_id="ds_async",
+        connection_instance=_RecordingBigQueryAsyncNative(),
+    )
+
+    with sync_cfg.provide_session() as sync_driver, pytest.raises(MissingDependencyError, match="arrow"):
+        if method_name == "select_to_arrow":
+            sync_driver.select_to_arrow("SELECT 1")
+        else:
+            sync_driver.load_from_arrow("items", b"arrow-bytes")
+
+    async def _run_async() -> None:
+        async with async_cfg.provide_session() as async_driver:
+            with pytest.raises(MissingDependencyError, match="arrow"):
+                if method_name == "select_to_arrow":
+                    await async_driver.select_to_arrow("SELECT 1")
+                else:
+                    await async_driver.load_from_arrow("items", b"arrow-bytes")
+
+    asyncio.run(_run_async())
+
+
+def test_bigquery_sessions_create_distinct_drivers_and_mark_closed() -> None:
+    """Verify repeated `provide_session` entries yield fresh drivers and mark exited drivers closed."""
+    sync_native = _RecordingBigQuerySyncNative()
+    sync_cfg = BigQuerySyncConfig(
+        project_id="proj-test",
+        dataset_id="ds_test",
+        connection_instance=sync_native,
+        driver_features={"reset_session_on_release": True},
+    )
+    assert not hasattr(sync_cfg, "_driver_instance")
+
+    with sync_cfg.provide_session(statement_config=default_statement_config()) as driver_one:
+        assert driver_one.connection is sync_native
+    assert not driver_one.connection
+    assert repr(driver_one.connection) == "<ClosedConnection>"
+
+    with sync_cfg.provide_session() as driver_two:
+        assert driver_two is not driver_one
+        assert driver_two.connection is sync_native
+    assert not driver_two.connection
+    assert repr(driver_two.connection) == "<ClosedConnection>"
+    assert sync_native.calls == []
+
+    with sync_cfg.provide_connection("ignored-arg", custom_flag=True) as conn:
+        assert conn is sync_native
+
+    async_native = _RecordingBigQueryAsyncNative()
+    async_cfg = BigQueryAsyncConfig(
+        project_id="proj-async",
+        dataset_id="ds_async",
+        connection_instance=async_native,
+        reset_session_on_release=True,
+    )
+    assert not hasattr(async_cfg, "_driver_instance")
+
+    async def _verify_async() -> None:
+        async with async_cfg.provide_session(statement_config=default_statement_config()) as a_one:
+            assert a_one.connection is async_native
+        assert not a_one.connection
+        assert repr(a_one.connection) == "<ClosedConnection>"
+
+        async with async_cfg.provide_session() as a_two:
+            assert a_two is not a_one
+            assert a_two.connection is async_native
+        assert not a_two.connection
+        assert repr(a_two.connection) == "<ClosedConnection>"
+        assert async_native.calls == []
+
+        async with async_cfg.provide_connection("ignored-arg", custom_flag=True) as a_conn:
+            assert a_conn is async_native
+
+    asyncio.run(_verify_async())
+
+
+def test_bigquery_reset_session_on_release_clears_active_session() -> None:
+    """Verify `reset_session_on_release=True` resets active session state without failing on stateless REST."""
+    sync_native = _RecordingBigQuerySyncNative()
+    sync_native._session_id = "sess-sync-1"
+    sync_native._in_transaction = True
+    sync_native._client = object()
+    sync_cfg = BigQuerySyncConfig(
+        project_id="proj-test",
+        dataset_id="ds_test",
+        connection_instance=sync_native,
+        reset_session_on_release=True,
+    )
+    with sync_cfg.provide_session():
+        pass
+    assert sync_native._session_id is None
+    assert sync_native._in_transaction is False
+    assert any("ABORT_SESSION" in call[1][0] for call in sync_native.calls if call[0] == "execute")
+
+
+@pytest.mark.parametrize(
+    ("replica_spec", "expected_project", "expected_dataset"),
+    [
+        ("bigquery://reader-proj/ds_ro", "reader-proj", "ds_ro"),
+        ({"project": "reader-dict", "dataset_id": "ds_dict"}, "reader-dict", "ds_dict"),
+        ("reader-plain-project", "reader-plain-project", "ds_primary"),
+    ],
+)
+def test_bigquery_replicas_routing_and_validation(
+    replica_spec: str | dict[str, Any],
+    expected_project: str,
+    expected_dataset: str | None,
+) -> None:
+    """Verify `replicas=` configures derived replica pools and rejects boolean `replicas=True`."""
+    sync_primary = BigQuerySyncConfig(
+        project_id="primary-proj",
+        dataset_id="ds_primary",
+        replicas=[replica_spec],
+    )
+    assert "default" in sync_primary.replica_groups
+    replica_cfg = sync_primary.replica_groups["default"].specs[0].config
+    assert isinstance(replica_cfg, BigQuerySyncConfig)
+    assert replica_cfg.is_replica is True
+    assert replica_cfg.project_id == expected_project
+    assert replica_cfg.dataset_id == expected_dataset
+
+    async_primary = BigQueryAsyncConfig(
+        project_id="primary-proj",
+        dataset_id="ds_primary",
+        replicas=[replica_spec],
+    )
+    assert "default" in async_primary.replica_groups
+    async_replica = async_primary.replica_groups["default"].specs[0].config
+    assert isinstance(async_replica, BigQueryAsyncConfig)
+    assert async_replica.is_replica is True
+    assert async_replica.project_id == expected_project
+    assert async_replica.dataset_id == expected_dataset
+
+    with pytest.raises((ImproperConfigurationError, SQLSpecImproperConfigurationError)):
+        BigQuerySyncConfig(project_id="primary-proj", dataset_id="ds_primary", replicas=True)
+
+
+def test_bigquery_select_to_storage_native_export_and_streaming() -> None:
+    """Verify `select_to_storage` uses native `EXPORT DATA` for GCS and streams local destinations."""
+    native = _RecordingBigQuerySyncNative()
+    native.select_rows = [{"id": 1, "label": "row-1"}]
+    native.description_rows = [{"id": 1, "label": "row-1"}]
+    native.description_cols = ["id", "label"]
+    cfg = BigQuerySyncConfig(
+        project_id="proj-test",
+        dataset_id="ds_test",
+        connection_instance=native,
+        driver_features={"native_export_connection": "proj-test.us.conn1"},
+    )
+    with cfg.provide_session() as driver:
+        gcs_job = driver.select_to_storage("SELECT id, label FROM items", "gs://my-bucket/out/*.parquet")
+        assert gcs_job.telemetry is not None
+        assert gcs_job.telemetry["extra"] == {"native_export": True}
+        assert native.calls[-1][0] == "execute"
+        assert "EXPORT DATA" in native.calls[-1][1][0]
+        assert "gs://my-bucket/out/*.parquet" in native.calls[-1][1][0]
+
+        s3_job = driver.select_to_storage(
+            "SELECT id, label FROM items",
+            "s3://my-bucket/out/*.csv",
+            format_hint="csv",
+        )
+        assert s3_job.telemetry is not None
+        assert "WITH CONNECTION `proj-test.us.conn1`" in native.calls[-1][1][0]
+
+        local_backend = ObjectStoreBackend("memory://")
+        stream_job = driver.select_to_storage(
+            "SELECT id, label FROM items",
+            "memory://local-export/items.parquet",
+            format_hint="parquet",
+        )
+        assert stream_job.telemetry is not None
+        assert local_backend is not None
+
+    async_native = _RecordingBigQueryAsyncNative()
+    async_native.select_rows = [{"id": 2, "label": "async-row"}]
+    async_native.description_rows = [{"id": 2, "label": "async-row"}]
+    async_native.description_cols = ["id", "label"]
+    async_cfg = BigQueryAsyncConfig(
+        project_id="proj-async",
+        dataset_id="ds_async",
+        connection_instance=async_native,
+    )
+
+    async def _run_async_storage() -> None:
+        async with async_cfg.provide_session() as a_driver:
+            a_gcs = await a_driver.select_to_storage("SELECT id FROM items", "gcs://bkt/part-*.parquet")
+            assert a_gcs.telemetry is not None
+            assert a_gcs.telemetry["extra"] == {"native_export": True}
+            assert "gs://bkt/part-*.parquet" in async_native.calls[-1][1][0]
+
+            a_local = await a_driver.select_to_storage(
+                "SELECT id, label FROM items",
+                "memory://async-export/items.parquet",
+                format_hint="parquet",
+            )
+            assert a_local.telemetry is not None
+
+    asyncio.run(_run_async_storage())
+
+
+def test_bigquery_module_invariants_slots_and_no_top_level_pyarrow() -> None:
+    """Verify `from __future__ import annotations`, `__slots__`, and absence of top-level `pyarrow`."""
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parents[3] / "vertebra" / "extensions" / "sqlspec" / "adapters" / "bigquery"
+    for filename in ("__init__.py", "_typing.py", "config.py", "driver.py"):
+        text = (pkg_dir / filename).read_text(encoding="utf-8")
+        assert "from __future__ import annotations" in text
+    driver_text = (pkg_dir / "driver.py").read_text(encoding="utf-8")
+    assert "import pyarrow" not in driver_text
+    config_text = (pkg_dir / "config.py").read_text(encoding="utf-8")
+    assert "_driver_instance" not in config_text
+
+    for cls in (
+        BigQuerySyncConnectionContext,
+        BigQueryAsyncConnectionContext,
+        BigQuerySyncSessionContext,
+        BigQueryAsyncSessionContext,
+        BigQuerySyncConfig,
+        BigQueryAsyncConfig,
+        BigQuerySyncDriver,
+        BigQueryAsyncDriver,
+    ):
+        assert "__slots__" in cls.__dict__

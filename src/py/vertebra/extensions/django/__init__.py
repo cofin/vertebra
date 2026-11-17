@@ -68,7 +68,14 @@ if TYPE_CHECKING:
         RouteEntry,
         convert_django_pattern,
     )
-    from vertebra.extensions.django.security import JWTAuthGuard, RateLimitGuard, SecurityBridge
+    from vertebra.extensions.django.security import (
+        AuthenticatedPrincipal,
+        JWKSConfig,
+        JWKSVerifier,
+        JWTAuthGuard,
+        RateLimitGuard,
+        SecurityBridge,
+    )
     from vertebra.extensions.django.storage import AsyncStorageRegistry, DjangoStorage, SyncStorageRegistry
     from vertebra.extensions.django.tasks import TaskBackend
     from vertebra.extensions.django.templates import TemplateBridge
@@ -81,6 +88,7 @@ __all__ = (
     "ArrowQuerySetMixin",
     "AsyncAPIDocsConfig",
     "AsyncStorageRegistry",
+    "AuthenticatedPrincipal",
     "BackendPoolerConfig",
     "CacheBackend",
     "ChannelLayer",
@@ -89,6 +97,8 @@ __all__ = (
     "DjangoStorage",
     "EmailBackend",
     "FastPath",
+    "JWKSConfig",
+    "JWKSVerifier",
     "JWTAuthGuard",
     "MCPConfig",
     "MCPRegistry",
@@ -143,6 +153,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ArrowQuerySetMixin": ("vertebra.extensions.django.db", "ArrowQuerySetMixin"),
     "AsyncAPIDocsConfig": ("vertebra.extensions.django.openapi", "AsyncAPIDocsConfig"),
     "AsyncStorageRegistry": ("vertebra.extensions.django.storage", "AsyncStorageRegistry"),
+    "AuthenticatedPrincipal": ("vertebra.extensions.django.security", "AuthenticatedPrincipal"),
     "BackendPoolerConfig": ("vertebra.extensions.django.db", "BackendPoolerConfig"),
     "CacheBackend": ("vertebra.extensions.django.cache", "CacheBackend"),
     "ChannelLayer": ("vertebra.extensions.django.channels", "ChannelLayer"),
@@ -151,6 +162,8 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "DjangoStorage": ("vertebra.extensions.django.storage", "DjangoStorage"),
     "EmailBackend": ("vertebra.extensions.django.mail", "EmailBackend"),
     "FastPath": ("vertebra.extensions.django.fastpath", "FastPath"),
+    "JWKSConfig": ("vertebra.extensions.django.security", "JWKSConfig"),
+    "JWKSVerifier": ("vertebra.extensions.django.security", "JWKSVerifier"),
     "JWTAuthGuard": ("vertebra.extensions.django.security", "JWTAuthGuard"),
     "MCPConfig": ("vertebra.extensions.django.mcp", "MCPConfig"),
     "MCPRegistry": ("vertebra.extensions.django.mcp", "MCPRegistry"),

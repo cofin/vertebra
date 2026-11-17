@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import smtplib
 from email.message import EmailMessage as StdlibEmailMessage
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import msgspec
+
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 __all__ = (
     "MailBackend",
@@ -94,9 +99,10 @@ class MailBackend:
             return
         await anyio.to_thread.run_sync(self.send, message)
 
-    def init_app(self, app: Any) -> None:
+    def init_app(self, app: Flask | Any) -> None:
         """Attach this ``MailBackend`` to a Flask application."""
-        app.mail = self
+        ensure_module("flask", extra="flask")
+        cast("Any", app).mail = self
         extensions = getattr(app, "extensions", None)
         if isinstance(extensions, dict):
             extensions["vertebra_mail"] = self

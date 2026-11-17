@@ -10,6 +10,7 @@ from vertebra.framework.ssr import (
     SyncEmbeddedSSRClient,
     SyncSidecarSSRClient,
     create_ssr_client,
+    render_page_shell,
 )
 
 
@@ -131,3 +132,38 @@ def test_native_ssr_client_with_real_pool(tmp_path: Path) -> None:
         client.invalidate(["ssr.js"])
     finally:
         client.stop()
+
+
+@pytest.mark.parametrize(
+    ("template", "expect_head"),
+    [
+        ("<html><head><!--ssr-head--></head><body><!--ssr-body--></body></html>", True),
+        ("<html><head></head><body></body></html>", True),
+        ("<html><head></head><body>", True),
+        ("<html><head>@inertiaHead</head><body>@inertia</body></html>", True),
+        ("<html><head><!--ssr-head--></head><body><!--ssr-body--><!--inertia--></body></html>", True),
+    ],
+    ids=[
+        "ssr-body-marker-only",
+        "plain-head-and-body-without-markers",
+        "body-open-tag-without-closing-tag",
+        "inertia-directive-markers",
+        "both-ssr-body-and-inertia-markers",
+    ],
+)
+def test_render_page_shell_always_emits_escaped_data_page_once(template: str, expect_head: bool) -> None:
+    """Verify render_page_shell emits a single escaped data-page script across all template layouts."""
+    page = {
+        "component": "Pages/Home",
+        "props": {"xss": "</script><script>alert(1)</script>"},
+        "url": "/?q=1",
+        "version": "v1",
+    }
+    ssr_res = SSRResult(head=["<title>SSR Title</title>"], body="<h1>Rendered</h1>")
+    html = render_page_shell(page, ssr_res, template)
+    assert html.count('<script data-page="app"') == 1
+    assert "</script><script>alert(1)</script>" not in html
+    assert "\\u003c/script\\u003e" in html
+    assert "<h1>Rendered</h1>" in html
+    if expect_head:
+        assert "<title>SSR Title</title>" in html

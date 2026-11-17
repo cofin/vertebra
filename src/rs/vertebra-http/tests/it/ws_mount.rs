@@ -124,12 +124,10 @@ async fn ws_connection_registry_and_watchdog_manage_full_lifecycle() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(15)).await;
-    assert_eq!(registry.active_count(), 1);
-
     client_ws.send(Message::Text("hello".into())).await.unwrap();
     let reply = client_ws.next().await.unwrap().unwrap();
     assert_eq!(reply, Message::Text("echo:hello".into()));
+    assert_eq!(registry.active_count(), 1);
 
     registry.close_all(1001, "server shutdown").await;
     let _ = server_task.await;
@@ -144,4 +142,158 @@ fn hmr_event_serialize_includes_type_and_event_fields() {
     assert_eq!(json["event"], "css-update");
     assert_eq!(json["path"], "/static/app.css");
     assert_eq!(json["generation"], 7);
+}
+
+#[tokio::test]
+async fn ws_mount_upgrades_forwards_pubsub_and_closes_on_server_shutdown() {
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use vertebra_http::batcher::{BatchLimit, RequestBatcher};
+    use vertebra_http::config::ServerConfig;
+    use vertebra_http::dispatcher::Dispatcher;
+    use vertebra_http::routing::{RouteTable, Router};
+    use vertebra_http::server::{self, ServerState, WsMount};
+
+    for enable_h2c_prior_knowledge in [false, true] {
+        let router = Arc::new(Router::from_entries(RouteTable::new().into_entries()).unwrap());
+        let (dispatcher, _direct_rx) = Dispatcher::new_direct(8);
+        let dispatcher = Arc::new(dispatcher);
+        let (_collector, collector_tx) =
+            RequestBatcher::new(Arc::clone(&dispatcher), BatchLimit::default(), 16);
+
+        let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = Arc::new(ServerConfig {
+            bind: addr,
+            enable_h2c_prior_knowledge,
+            drain_timeout: Duration::from_millis(200),
+            ..ServerConfig::default()
+        });
+
+        let mut custom_mount = WsMount::new("/ws");
+        custom_mount.allowed_origins = vec!["https://app.example.com".to_string()];
+        custom_mount.supported_subprotocols = vec!["json.v1".to_string()];
+
+        let state = ServerState::new(router, dispatcher, config, vec![collector_tx])
+            .with_ws_allowed_origins(vec!["https://app.example.com".to_string()])
+            .with_ws_supported_subprotocols(vec!["json.v1".to_string(), "chat.v1".to_string()])
+            .with_ws_mount(custom_mount);
+
+        let pubsub = Arc::clone(&state.pubsub_broker);
+        let ws_registry = Arc::clone(&state.ws_registry);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let server_handle = tokio::spawn(async move {
+            server::run_with_listener_state(listener, state, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+        });
+
+        let mut bad_origin_req = format!("ws://{addr}/__vertebra/ws/alerts")
+            .into_client_request()
+            .unwrap();
+        bad_origin_req
+            .headers_mut()
+            .insert("Origin", "https://evil.example.com".parse().unwrap());
+        let bad_err = tokio_tungstenite::connect_async(bad_origin_req)
+            .await
+            .unwrap_err();
+        match bad_err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            }
+            other => panic!("expected HTTP 403 rejection, got: {other:?}"),
+        }
+
+        let mut req = format!("ws://{addr}/__vertebra/ws/alerts")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("Origin", "https://app.example.com".parse().unwrap());
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "chat.v2, json.v1".parse().unwrap(),
+        );
+
+        let (mut client_ws, upgrade_resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+        assert_eq!(upgrade_resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            upgrade_resp
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some("json.v1")
+        );
+
+        let mut custom_req = format!("ws://{addr}/ws/alerts")
+            .into_client_request()
+            .unwrap();
+        custom_req
+            .headers_mut()
+            .insert("Origin", "https://app.example.com".parse().unwrap());
+        let (mut custom_ws, custom_resp) =
+            tokio_tungstenite::connect_async(custom_req).await.unwrap();
+        assert_eq!(custom_resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let event_id = pubsub
+            .pubsub_publish("alerts", Bytes::from_static(br#"{"ok":true}"#), None)
+            .expect("published event id");
+        assert_eq!(event_id, 1);
+
+        let msg1 = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+            .await
+            .expect("timed out waiting for ws pubsub message")
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg1, Message::Text(r#"{"ok":true}"#.into()));
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(2), custom_ws.next())
+            .await
+            .expect("timed out waiting for custom ws mount message")
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg2, Message::Text(r#"{"ok":true}"#.into()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ws_registry.active_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both upgraded connections registered in ws_registry");
+
+        let _ = shutdown_tx.send(());
+        server_handle.await.unwrap();
+
+        let close1 = tokio::time::timeout(Duration::from_secs(2), client_ws.next())
+            .await
+            .expect("timed out waiting for close frame")
+            .unwrap()
+            .unwrap();
+        match close1 {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, CloseCode::Away);
+                assert_eq!(frame.reason, "Server shutting down");
+            }
+            other => panic!("expected Close(1001) frame, got: {other:?}"),
+        }
+
+        let close2 = tokio::time::timeout(Duration::from_secs(2), custom_ws.next())
+            .await
+            .expect("timed out waiting for custom mount close frame")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(close2, Message::Close(Some(_))));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ws_registry.active_count() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ws_registry drained to zero on shutdown");
+    }
 }

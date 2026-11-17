@@ -1,9 +1,9 @@
 """Tests for codegen watch and HMR notification helpers."""
 
 import threading
-import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,12 +49,37 @@ def test_hmr_notifier_swallows_delivery_errors(monkeypatch: pytest.MonkeyPatch) 
     notifier.notify()
 
 
-def test_codegen_watcher_native_detects_changes(tmp_path: Path) -> None:
+def test_codegen_watcher_native_detects_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """CodegenWatcher with native SourceWatcher should detect file modification and invoke callback."""
     src_file = tmp_path / "app.py"
     src_file.write_text("x = 1\n", encoding="utf-8")
 
+    ready = threading.Event()
     event = threading.Event()
+    orig_try_create = CodegenWatcher._try_create_native_watcher
+
+    class _NativeWatcherProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def poll_events(self, timeout_ms: int) -> Any:
+            ready.set()
+            return self._inner.poll_events(timeout_ms)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    def wrapped_try_create(self: CodegenWatcher) -> Any:
+        native = orig_try_create(self)
+        if native is not None:
+            return _NativeWatcherProxy(native)
+        ready.set()
+        return None
+
+    monkeypatch.setattr(CodegenWatcher, "_try_create_native_watcher", wrapped_try_create)
 
     def on_change() -> None:
         event.set()
@@ -62,7 +87,7 @@ def test_codegen_watcher_native_detects_changes(tmp_path: Path) -> None:
     watcher = CodegenWatcher(tmp_path, on_change, poll_interval=0.05)
     watcher.start()
     try:
-        time.sleep(0.1)
+        assert ready.wait(timeout=2.0)
         src_file.write_text("x = 2\n", encoding="utf-8")
         assert event.wait(timeout=2.0)
     finally:

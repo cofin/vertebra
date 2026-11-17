@@ -31,6 +31,8 @@ pub mod routing;
 pub mod server;
 pub mod sse;
 pub mod tls;
+#[cfg(feature = "http3")]
+pub mod webtransport;
 pub mod workers;
 pub mod ws_mount;
 

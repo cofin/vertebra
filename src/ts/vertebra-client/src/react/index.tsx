@@ -41,7 +41,7 @@ export function useQueryCache(): QueryCache {
  * Uses Suspense-ready `use()` for data fetching. Cached results avoid
  * redundant fetches for the same key. In-flight requests are deduplicated.
  */
-export function useQuery<TInput = any, TOutput = any>(
+export function useQuery<TInput = unknown, TOutput = unknown>(
   method: string,
   path: string,
   input?: TInput,
@@ -59,16 +59,18 @@ export function useQuery<TInput = any, TOutput = any>(
     () => cache.version,
   );
 
-  const promise = useMemo(() => {
+  const promise = useMemo((): Promise<TOutput | null> => {
     if (!enabled) return Promise.resolve(null);
     const key = QueryCache.stableKey(method, path, input);
     const callOptions = timeout !== undefined ? { timeout } : undefined;
-    return cache.getOrCreate(key, staleTime, () => client.call<TInput, TOutput>(method, path, input, callOptions));
+    return cache.getOrCreate<TOutput>(key, staleTime, () =>
+      client.call<TInput, TOutput>(method, path, input, callOptions),
+    );
   }, [client, cache, method, path, enabled, staleTime, timeout, input, version]);
 
   const data = use(promise);
 
-  return { data } as { data: TOutput | null };
+  return { data };
 }
 
 /**
@@ -77,7 +79,7 @@ export function useQuery<TInput = any, TOutput = any>(
  * After a successful mutation, invalidates all query cache entries
  * to ensure fresh data on next render.
  */
-export function useMutation<TInput = any, TOutput = any>(method: string, path: string) {
+export function useMutation<TInput = unknown, TOutput = unknown>(method: string, path: string) {
   const client = useClient();
   const cache = useQueryCache();
   const [loading, setLoading] = useState(false);
@@ -90,8 +92,8 @@ export function useMutation<TInput = any, TOutput = any>(method: string, path: s
       const result = await client.call<TInput, TOutput>(method, path, input);
       cache.invalidate();
       return result;
-    } catch (err: any) {
-      setError(err);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err : new Error(String(err)));
       throw err;
     } finally {
       setLoading(false);

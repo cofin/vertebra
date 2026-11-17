@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import os
-import sqlite3
 import threading
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 from vertebra.db.arrow import ArrowCursor
-from vertebra.db.driver import CommonDriverMixin
+from vertebra.db.driver import CommonDriverMixin, InterfaceError, NotFoundError
 from vertebra.extensions.broker import (
     AsyncBrokerLeaseSource,
     AsyncSHMBrokerTransport,
@@ -58,6 +57,8 @@ class BrokerRpcRequest(msgspec.Struct, frozen=True):
     many_params: list[list[Any] | dict[str, Any]] = msgspec.field(default_factory=list)
     in_tx: bool = False
     arrow_shm_name: str = ""
+    stream_id: str = ""
+    chunk_rows: int = 0
 
 
 class BrokerRpcResponse(msgspec.Struct, frozen=True):
@@ -77,6 +78,8 @@ class BrokerRpcResponse(msgspec.Struct, frozen=True):
     arrow_byte_len: int = 0
     error_type: str = ""
     error_message: str = ""
+    stream_id: str = ""
+    has_more: bool = False
 
 
 def _coerce_dict_rows(
@@ -90,8 +93,9 @@ def _coerce_dict_rows(
         if not cols and py_rows:
             cols = list(py_rows[0].keys())
         return py_rows, cols
-    if hasattr(data, "to_pylist") and callable(data.to_pylist):
-        py_rows = list(data.to_pylist())
+    to_pylist_fn = getattr(data, "to_pylist", None)
+    if callable(to_pylist_fn):
+        py_rows = list(cast("Iterable[Any]", to_pylist_fn()))
         raw_cols = getattr(data, "column_names", getattr(data, "columns", columns))
         cols = [str(c) for c in raw_cols] if isinstance(raw_cols, (list, tuple)) else []
         if not cols and py_rows and isinstance(py_rows[0], dict):
@@ -205,17 +209,63 @@ def _unlink_arrow_shm(shm_name: str, cursor: ArrowCursor | None = None) -> bool:
     return released
 
 
+class _ProviderStream:
+    """Active paged stream state held by SQLSpecSyncProvider or SQLSpecAsyncProvider."""
+
+    __slots__ = (
+        "chunk_rows",
+        "closed",
+        "columns",
+        "cursor",
+        "iterator",
+        "kind",
+        "lease_key",
+        "rows_buffer",
+        "rows_offset",
+        "stream_id",
+        "stream_obj",
+    )
+
+    def __init__(
+        self,
+        *,
+        stream_id: str,
+        lease_key: tuple[int, int],
+        chunk_rows: int,
+        kind: str,
+        columns: list[str] | None = None,
+        stream_obj: Any = None,
+        iterator: Any = None,
+        cursor: Any = None,
+        rows_buffer: list[dict[str, Any] | list[Any]] | None = None,
+    ) -> None:
+        self.stream_id = stream_id
+        self.lease_key = lease_key
+        self.chunk_rows = chunk_rows
+        self.kind = kind
+        self.columns: list[str] = list(columns) if columns else []
+        self.stream_obj = stream_obj
+        self.iterator = iterator
+        self.cursor = cursor
+        self.rows_buffer: list[dict[str, Any] | list[Any]] = rows_buffer if rows_buffer is not None else []
+        self.rows_offset: int = 0
+        self.closed: bool = False
+
+
 class _BaseSQLSpecProvider:
     """Host provider base executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
 
     __slots__ = (
         "_active_arrow_buffers",
+        "_active_streams",
         "_broker_leases",
         "_lease_arrow_buffers",
+        "_lease_streams",
         "_leased_contexts",
         "_leased_sessions",
         "_lock",
         "_next_generation",
+        "_next_stream_seq",
         "_tx_states",
         "_upstreams",
         "arrow_threshold_bytes",
@@ -245,7 +295,10 @@ class _BaseSQLSpecProvider:
         self._tx_states: dict[tuple[int, int], bool] = {}
         self._active_arrow_buffers: dict[str, ArrowCursor] = {}
         self._lease_arrow_buffers: dict[tuple[int, int], set[str]] = {}
+        self._active_streams: dict[str, _ProviderStream] = {}
+        self._lease_streams: dict[tuple[int, int], set[str]] = {}
         self._next_generation: int = 1
+        self._next_stream_seq: int = 1
         self._lock = threading.RLock()
 
         if isinstance(upstream, dict):
@@ -268,6 +321,12 @@ class _BaseSQLSpecProvider:
         """Return the set of currently active shared-memory Arrow buffer names."""
         with self._lock:
             return frozenset(self._active_arrow_buffers)
+
+    @property
+    def active_streams(self) -> frozenset[str]:
+        """Return the set of currently active stream identifiers."""
+        with self._lock:
+            return frozenset(self._active_streams)
 
     def register_pool(self, pool_name: str, upstream: Any) -> None:
         """Register an upstream configuration, driver, or session factory under pool_name."""
@@ -372,6 +431,7 @@ class _BaseSQLSpecProvider:
                 )
 
             if op == "rollback":
+                self._close_lease_streams_sync(key)
                 session = self.get_leased_session(key[0], key[1])
                 if session is None:
                     with self._lock:
@@ -391,6 +451,37 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     in_tx=False,
                 )
+
+            if op == "stream_close":
+                self._close_stream_by_id_sync(key, request.stream_id)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=request.stream_id,
+                    has_more=False,
+                )
+
+            if op == "stream_fetch":
+                rows, columns, has_more = self._exec_stream_fetch_sync(key, request.stream_id, request.chunk_rows)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    rows=rows,
+                    columns=columns,
+                    rowcount=len(rows),
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=request.stream_id,
+                    has_more=has_more,
+                )
+
+            if op == "stream_open" and request.chunk_rows <= 0:
+                msg = "chunk_rows must be greater than 0"
+                raise ValueError(msg)
 
             session = self._ensure_session_sync(key, request.pool_name)
 
@@ -476,6 +567,23 @@ class _BaseSQLSpecProvider:
             if op == "select_to_arrow":
                 return self._exec_select_to_arrow_sync(session, request, key)
 
+            if op == "stream_open":
+                stream_id, rows, columns, has_more = self._exec_stream_open_sync(
+                    session, key, request.sql, request.params, request.chunk_rows
+                )
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    rows=rows,
+                    columns=columns,
+                    rowcount=len(rows),
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=stream_id,
+                    has_more=has_more,
+                )
+
             msg = f"Unsupported BrokerRpcRequest operation: {op!r}"
             raise VertebraError(msg)
         except Exception as exc:
@@ -552,6 +660,7 @@ class _BaseSQLSpecProvider:
                 )
 
             if op == "rollback":
+                await self._close_lease_streams_async(key)
                 session = self.get_leased_session(key[0], key[1])
                 if session is None:
                     with self._lock:
@@ -571,6 +680,39 @@ class _BaseSQLSpecProvider:
                     generation=request.generation,
                     in_tx=False,
                 )
+
+            if op == "stream_close":
+                await self._close_stream_by_id_async(key, request.stream_id)
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=request.stream_id,
+                    has_more=False,
+                )
+
+            if op == "stream_fetch":
+                rows, columns, has_more = await self._exec_stream_fetch_async(
+                    key, request.stream_id, request.chunk_rows
+                )
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    rows=rows,
+                    columns=columns,
+                    rowcount=len(rows),
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=request.stream_id,
+                    has_more=has_more,
+                )
+
+            if op == "stream_open" and request.chunk_rows <= 0:
+                msg = "chunk_rows must be greater than 0"
+                raise ValueError(msg)
 
             session = await self._ensure_session_async(key, request.pool_name)
 
@@ -658,6 +800,23 @@ class _BaseSQLSpecProvider:
             if op == "select_to_arrow":
                 return await self._exec_select_to_arrow_async(session, request, key)
 
+            if op == "stream_open":
+                stream_id, rows, columns, has_more = await self._exec_stream_open_async(
+                    session, key, request.sql, request.params, request.chunk_rows
+                )
+                return BrokerRpcResponse(
+                    request_id=request.request_id,
+                    ok=True,
+                    slot_idx=request.slot_idx,
+                    generation=request.generation,
+                    rows=rows,
+                    columns=columns,
+                    rowcount=len(rows),
+                    in_tx=self._tx_state_for(key, request.in_tx),
+                    stream_id=stream_id,
+                    has_more=has_more,
+                )
+
             msg = f"Unsupported BrokerRpcRequest operation: {op!r}"
             raise VertebraError(msg)
         except Exception as exc:
@@ -700,24 +859,34 @@ class _BaseSQLSpecProvider:
         return encode_msgpack_bytes(resp)
 
     def _close_sync(self) -> None:
-        """Release all leased sessions and unlink any remaining shared-memory Arrow buffers."""
+        """Release all leased sessions, close open streams, and unlink remaining Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
             arrow_items = list(self._active_arrow_buffers.items())
             self._active_arrow_buffers.clear()
             self._lease_arrow_buffers.clear()
+            remaining_streams = list(self._active_streams.values())
+            self._active_streams.clear()
+            self._lease_streams.clear()
+        for stream in remaining_streams:
+            self._close_stream_handle_sync(stream)
         for key in keys:
             self._release_session_sync(key, in_tx=self._tx_states.get(key, False))
         for name, cursor in arrow_items:
             _unlink_arrow_shm(name, cursor)
 
     async def _close_async(self) -> None:
-        """Asynchronously release all leased sessions and unlink remaining Arrow buffers."""
+        """Asynchronously release all leased sessions, close open streams, and unlink Arrow buffers."""
         with self._lock:
             keys = list(self._leased_sessions.keys())
             arrow_items = list(self._active_arrow_buffers.items())
             self._active_arrow_buffers.clear()
             self._lease_arrow_buffers.clear()
+            remaining_streams = list(self._active_streams.values())
+            self._active_streams.clear()
+            self._lease_streams.clear()
+        for stream in remaining_streams:
+            await self._close_stream_handle_async(stream)
         for key in keys:
             await self._release_session_async(key, in_tx=self._tx_state_for(key, False))
         for name, cursor in arrow_items:
@@ -775,7 +944,9 @@ class _BaseSQLSpecProvider:
         if isinstance(target, SyncSHMBrokerTransport):
             return target.acquire(bind_key=pool_name, worker_id=pid)
         if isinstance(target, AsyncSHMBrokerTransport):
-            return target.acquire_sync(bind_key=pool_name, worker_id=pid)
+            raise InterfaceError(
+                "AsyncSHMBrokerTransport cannot acquire leases synchronously; use SyncSHMBrokerTransport"
+            )
         acquire_lease_fn = getattr(self.broker, "acquire_lease", None)
         if callable(acquire_lease_fn):
             return acquire_lease_fn(pool_name=pool_name, worker_pid=pid)
@@ -826,9 +997,10 @@ class _BaseSQLSpecProvider:
             else (upstream() if callable(upstream) else upstream)
         )
         ctx_mgr = None
-        if hasattr(candidate, "__enter__") and candidate is not upstream:
+        enter_fn = getattr(candidate, "__enter__", None)
+        if callable(enter_fn) and candidate is not upstream:
             ctx_mgr = candidate
-            session = ctx_mgr.__enter__()
+            session = enter_fn()
         else:
             session = candidate
 
@@ -858,12 +1030,14 @@ class _BaseSQLSpecProvider:
             candidate = await candidate
 
         ctx_mgr = None
-        if hasattr(candidate, "__aenter__") and candidate is not upstream:
+        aenter_fn = getattr(candidate, "__aenter__", None)
+        enter_fn = getattr(candidate, "__enter__", None)
+        if callable(aenter_fn) and candidate is not upstream:
             ctx_mgr = candidate
-            session = await ctx_mgr.__aenter__()
-        elif hasattr(candidate, "__enter__") and candidate is not upstream:
+            session = await cast("Awaitable[Any]", aenter_fn())
+        elif callable(enter_fn) and candidate is not upstream:
             ctx_mgr = candidate
-            session = await SyncPool.default().submit_async(ctx_mgr.__enter__)
+            session = await SyncPool.default().submit_async(cast("Callable[[], Any]", enter_fn))
         else:
             session = candidate
 
@@ -880,12 +1054,12 @@ class _BaseSQLSpecProvider:
             return
         target = getattr(self.broker, "transport", self.broker)
         lease_arg = lease if lease is not None else key
-        quarantine_sync_fn = getattr(self.broker, "quarantine_sync", None) or getattr(target, "quarantine_sync", None)
-        if callable(quarantine_sync_fn):
-            quarantine_sync_fn(lease_arg)
-            return
+        if isinstance(target, AsyncSHMBrokerTransport):
+            raise InterfaceError(
+                "AsyncSHMBrokerTransport cannot quarantine leases synchronously; use SyncSHMBrokerTransport"
+            )
         quarantine_fn = getattr(self.broker, "quarantine", None) or getattr(target, "quarantine", None)
-        if callable(quarantine_fn):
+        if callable(quarantine_fn) and not is_coroutine_callable(quarantine_fn):
             quarantine_fn(lease_arg)
 
     async def _quarantine_broker_lease_async(self, lease: Any, key: tuple[int, int]) -> None:
@@ -941,6 +1115,7 @@ class _BaseSQLSpecProvider:
 
     def _release_session_sync(self, key: tuple[int, int], in_tx: bool) -> None:
         """Release a pinned session synchronously, quarantining on rollback or context-exit error."""
+        self._close_lease_streams_sync(key)
         self._release_lease_arrow_buffers_sync(key)
         with self._lock:
             session = self._leased_sessions.pop(key, None)
@@ -982,6 +1157,7 @@ class _BaseSQLSpecProvider:
 
     async def _release_session_async(self, key: tuple[int, int], in_tx: bool) -> None:
         """Release a pinned session asynchronously, quarantining on rollback or context-exit error."""
+        await self._close_lease_streams_async(key)
         await self._release_lease_arrow_buffers_async(key)
         with self._lock:
             session = self._leased_sessions.pop(key, None)
@@ -1040,12 +1216,12 @@ class _BaseSQLSpecProvider:
             release_lease_fn(key[0], key[1], in_tx=in_tx)
             return
         target = getattr(self.broker, "transport", self.broker)
-        release_sync_fn = getattr(self.broker, "release_sync", None) or getattr(target, "release_sync", None)
-        if callable(release_sync_fn):
-            release_sync_fn(f"{key[0]}:{key[1]}")
-            return
+        if isinstance(target, AsyncSHMBrokerTransport):
+            raise InterfaceError(
+                "AsyncSHMBrokerTransport cannot release leases synchronously without a lease.release_sync() handle"
+            )
         release_fn = getattr(target, "release", None)
-        if callable(release_fn):
+        if callable(release_fn) and not is_coroutine_callable(release_fn):
             release_fn(f"{key[0]}:{key[1]}")
 
     async def _release_broker_lease_async(self, lease: Any, key: tuple[int, int], *, in_tx: bool = False) -> None:
@@ -1116,6 +1292,7 @@ class _BaseSQLSpecProvider:
 
     def _exec_rollback_sync(self, session: Any, key: tuple[int, int]) -> None:
         """Roll back an active transaction on session synchronously and clear transaction state."""
+        self._close_lease_streams_sync(key)
         rollback_fn = getattr(session, "rollback", None)
         if callable(rollback_fn):
             rollback_fn()
@@ -1127,6 +1304,7 @@ class _BaseSQLSpecProvider:
 
     async def _exec_rollback_async(self, session: Any, key: tuple[int, int]) -> None:
         """Roll back an active transaction on session asynchronously and clear transaction state."""
+        await self._close_lease_streams_async(key)
         rollback_fn = getattr(session, "rollback", None)
         if callable(rollback_fn):
             res = rollback_fn()
@@ -1519,6 +1697,21 @@ class _BaseSQLSpecProvider:
         msg = f"Upstream session {type(session).__name__!r} does not implement any of {method_names}"
         raise AttributeError(msg)
 
+    @classmethod
+    def _native_sqlite_driver_types(cls) -> tuple[type[Any], ...]:
+        """Resolve native SQLite driver classes when available without importing stdlib sqlite3."""
+        sqlite_mod = import_optional("vertebra.db.adapters.sqlite")
+        if sqlite_mod is None:
+            return ()
+        return tuple(
+            candidate
+            for candidate in (
+                getattr(sqlite_mod, "SyncSQLiteDriver", None),
+                getattr(sqlite_mod, "AsyncSQLiteDriver", None),
+            )
+            if isinstance(candidate, type)
+        )
+
     @staticmethod
     def _dispatch_sql(session: Any, fn: Any, sql: str, params: Any) -> Any:
         """Dispatch SQL execution across None, empty sequence, Mapping, and Sequence parameter forms."""
@@ -1529,9 +1722,12 @@ class _BaseSQLSpecProvider:
         if isinstance(params, Sequence) and not isinstance(params, str | bytes | bytearray):
             if isinstance(session, CommonDriverMixin):
                 return fn(sql, params)
+            sqlite_types = _BaseSQLSpecProvider._native_sqlite_driver_types()
+            if sqlite_types and isinstance(session, sqlite_types):
+                return fn(sql, params)
             if isinstance(session, (SyncDriverAdapterBase, AsyncDriverAdapterBase)):
                 return fn(sql, *params)
-            if isinstance(session, (sqlite3.Connection, sqlite3.Cursor)) or hasattr(session, "cursor"):
+            if hasattr(session, "cursor") or hasattr(session, "fetchmany"):
                 return fn(sql, params)
             if getattr(type(session), "dialect", None) is not None and not hasattr(session, "execute_many"):
                 return fn(sql, params)
@@ -1540,6 +1736,480 @@ class _BaseSQLSpecProvider:
             except TypeError:
                 return fn(sql, params)
         return fn(sql, params)
+
+    @classmethod
+    def _dispatch_select_stream(
+        cls,
+        session: Any,
+        select_stream_fn: Any,
+        sql: str,
+        params: Any,
+        chunk_rows: int,
+    ) -> Any:
+        """Dispatch session.select_stream with chunk_size when supported."""
+
+        def _call_with_chunk_size(*call_args: Any) -> Any:
+            try:
+                return select_stream_fn(*call_args, chunk_size=chunk_rows)
+            except TypeError as exc:
+                if "chunk_size" in str(exc):
+                    return select_stream_fn(*call_args)
+                raise
+
+        return cls._dispatch_sql(session, _call_with_chunk_size, sql, params)
+
+    def _allocate_stream_id(self) -> str:
+        """Allocate a unique provider stream identifier."""
+        with self._lock:
+            seq = self._next_stream_seq
+            self._next_stream_seq += 1
+            return f"stream-{seq}"
+
+    def _register_stream(self, stream: _ProviderStream) -> None:
+        """Register an active stream under self._lock scoped to its lease key."""
+        with self._lock:
+            self._active_streams[stream.stream_id] = stream
+            self._lease_streams.setdefault(stream.lease_key, set()).add(stream.stream_id)
+
+    def _get_stream(self, lease_key: tuple[int, int], stream_id: str) -> _ProviderStream:
+        """Return an active stream for (lease_key, stream_id) or raise NotFoundError."""
+        if not stream_id:
+            msg = "Stream identifier is required"
+            raise NotFoundError(msg)
+        with self._lock:
+            stream = self._active_streams.get(stream_id)
+            if stream is None or stream.lease_key != lease_key or stream.closed:
+                msg = f"Unknown or closed stream {stream_id!r} for slot {lease_key}"
+                raise NotFoundError(msg)
+            return stream
+
+    def _remove_stream(self, lease_key: tuple[int, int], stream_id: str) -> _ProviderStream | None:
+        """Detach and return an active stream for (lease_key, stream_id) if registered."""
+        if not stream_id:
+            return None
+        with self._lock:
+            stream = self._active_streams.get(stream_id)
+            if stream is None or stream.lease_key != lease_key:
+                return None
+            self._active_streams.pop(stream_id, None)
+            lease_ids = self._lease_streams.get(lease_key)
+            if lease_ids is not None:
+                lease_ids.discard(stream_id)
+                if not lease_ids:
+                    self._lease_streams.pop(lease_key, None)
+            return stream
+
+    def _pop_lease_streams(self, lease_key: tuple[int, int]) -> list[_ProviderStream]:
+        """Detach and return all active streams registered for lease_key."""
+        with self._lock:
+            stream_ids = self._lease_streams.pop(lease_key, None)
+            if not stream_ids:
+                return []
+            streams: list[_ProviderStream] = []
+            for sid in stream_ids:
+                stream = self._active_streams.pop(sid, None)
+                if stream is not None:
+                    streams.append(stream)
+            return streams
+
+    @staticmethod
+    def _close_stream_handle_sync(stream: _ProviderStream) -> None:
+        """Close underlying stream or cursor handles synchronously without raising."""
+        stream.closed = True
+        for handle in (stream.stream_obj, stream.cursor):
+            if handle is None:
+                continue
+            close_fn = getattr(handle, "close", None)
+            if callable(close_fn):
+                with contextlib.suppress(Exception):
+                    close_fn()
+
+    @staticmethod
+    async def _close_stream_handle_async(stream: _ProviderStream) -> None:
+        """Close underlying stream or cursor handles asynchronously without raising."""
+        stream.closed = True
+        for handle in (stream.stream_obj, stream.cursor):
+            if handle is None:
+                continue
+            aclose_fn = getattr(handle, "aclose", None)
+            if callable(aclose_fn):
+                with contextlib.suppress(Exception):
+                    res = aclose_fn()
+                    if isinstance(res, Awaitable):
+                        await res
+                continue
+            close_fn = getattr(handle, "close", None)
+            if callable(close_fn):
+                with contextlib.suppress(Exception):
+                    res = close_fn()
+                    if isinstance(res, Awaitable):
+                        await res
+
+    def _close_stream_by_id_sync(self, lease_key: tuple[int, int], stream_id: str) -> None:
+        """Close and remove a specific stream for lease_key synchronously."""
+        stream = self._remove_stream(lease_key, stream_id)
+        if stream is not None:
+            self._close_stream_handle_sync(stream)
+
+    async def _close_stream_by_id_async(self, lease_key: tuple[int, int], stream_id: str) -> None:
+        """Close and remove a specific stream for lease_key asynchronously."""
+        stream = self._remove_stream(lease_key, stream_id)
+        if stream is not None:
+            await self._close_stream_handle_async(stream)
+
+    def _close_lease_streams_sync(self, lease_key: tuple[int, int]) -> None:
+        """Close and remove every active stream registered for lease_key synchronously."""
+        for stream in self._pop_lease_streams(lease_key):
+            self._close_stream_handle_sync(stream)
+
+    async def _close_lease_streams_async(self, lease_key: tuple[int, int]) -> None:
+        """Close and remove every active stream registered for lease_key asynchronously."""
+        for stream in self._pop_lease_streams(lease_key):
+            await self._close_stream_handle_async(stream)
+
+    @staticmethod
+    def _consume_sync_iterator_chunk(iterator: Any, batch_size: int) -> tuple[list[Any], bool]:
+        """Pull up to batch_size items from a synchronous iterator and report exhaustion."""
+        raw_rows: list[Any] = []
+        exhausted = False
+        for _ in range(batch_size):
+            try:
+                raw_rows.append(next(iterator))
+            except StopIteration:
+                exhausted = True
+                break
+        return raw_rows, exhausted
+
+    def _finalize_stream_rows(
+        self,
+        stream: _ProviderStream,
+        raw_rows: list[Any],
+        *,
+        exhausted: bool,
+        batch_size: int,
+    ) -> tuple[list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Normalize streamed row objects and compute column names and has_more."""
+        if raw_rows:
+            rows, columns, _ = self._normalize_collection_result(raw_rows)
+            if not stream.columns and columns:
+                stream.columns = list(columns)
+        else:
+            rows = []
+            columns = list(stream.columns)
+        if not stream.columns:
+            col_types = getattr(stream.stream_obj, "column_types", None)
+            if isinstance(col_types, Mapping):
+                stream.columns = [str(col) for col in col_types]
+        resolved_cols = list(stream.columns) if stream.columns else columns
+        has_more = (not exhausted) and (len(rows) >= batch_size)
+        return rows, resolved_cols, has_more
+
+    def _read_stream_chunk_sync(
+        self,
+        stream: _ProviderStream,
+        batch_size: int,
+    ) -> tuple[list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Read the next batch_size chunk from an open synchronous stream."""
+        if stream.kind == "buffered":
+            start = stream.rows_offset
+            end = start + batch_size
+            chunk = list(stream.rows_buffer[start:end])
+            stream.rows_offset = min(end, len(stream.rows_buffer))
+            has_more = stream.rows_offset < len(stream.rows_buffer)
+            return chunk, list(stream.columns), has_more
+
+        if stream.kind == "cursor":
+            fetched = stream.cursor.fetchmany(batch_size)
+            desc = getattr(stream.cursor, "description", None)
+            if desc is not None and not stream.columns:
+                stream.columns = [str(col[0]) for col in desc]
+            rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, stream.columns) for row in fetched]
+            if not stream.columns and rows and isinstance(rows[0], dict):
+                stream.columns = list(rows[0].keys())
+            has_more = len(rows) >= batch_size
+            return rows, list(stream.columns), has_more
+
+        raw_rows, exhausted = self._consume_sync_iterator_chunk(stream.iterator, batch_size)
+        return self._finalize_stream_rows(stream, raw_rows, exhausted=exhausted, batch_size=batch_size)
+
+    async def _read_stream_chunk_async(
+        self,
+        stream: _ProviderStream,
+        batch_size: int,
+    ) -> tuple[list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Read the next batch_size chunk from an open asynchronous stream."""
+        if stream.kind == "buffered":
+            start = stream.rows_offset
+            end = start + batch_size
+            chunk = list(stream.rows_buffer[start:end])
+            stream.rows_offset = min(end, len(stream.rows_buffer))
+            has_more = stream.rows_offset < len(stream.rows_buffer)
+            return chunk, list(stream.columns), has_more
+
+        if stream.kind == "cursor":
+            fetched = stream.cursor.fetchmany(batch_size)
+            if isinstance(fetched, Awaitable):
+                fetched = await fetched
+            desc = getattr(stream.cursor, "description", None)
+            if desc is not None and not stream.columns:
+                stream.columns = [str(col[0]) for col in desc]
+            rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, stream.columns) for row in fetched]
+            if not stream.columns and rows and isinstance(rows[0], dict):
+                stream.columns = list(rows[0].keys())
+            has_more = len(rows) >= batch_size
+            return rows, list(stream.columns), has_more
+
+        if hasattr(stream.iterator, "__anext__"):
+            raw_rows: list[Any] = []
+            exhausted = False
+            for _ in range(batch_size):
+                try:
+                    raw_rows.append(await stream.iterator.__anext__())
+                except StopAsyncIteration:
+                    exhausted = True
+                    break
+        else:
+            raw_rows, exhausted = await SyncPool.default().submit_async(
+                self._consume_sync_iterator_chunk, stream.iterator, batch_size
+            )
+        return self._finalize_stream_rows(stream, raw_rows, exhausted=exhausted, batch_size=batch_size)
+
+    def _exec_stream_open_sync(
+        self,
+        session: Any,
+        key: tuple[int, int],
+        sql: str,
+        params: Any,
+        chunk_rows: int,
+    ) -> tuple[str, list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Open a paged synchronous row stream or native cursor and return the first chunk."""
+        stream_id = self._allocate_stream_id()
+        select_stream_fn = getattr(session, "select_stream", None)
+        if callable(select_stream_fn):
+            stream_obj = self._dispatch_select_stream(session, select_stream_fn, sql, params, chunk_rows)
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="stream",
+                stream_obj=stream_obj,
+                iterator=iter(stream_obj),
+            )
+            try:
+                rows, columns, has_more = self._read_stream_chunk_sync(stream, chunk_rows)
+            except BaseException:
+                self._close_stream_handle_sync(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                self._close_stream_handle_sync(stream)
+            return stream_id, rows, columns, has_more
+
+        cursor_fn = getattr(session, "cursor", None)
+        if callable(cursor_fn):
+            cur: Any = cursor_fn()
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="cursor",
+                cursor=cur,
+            )
+            try:
+                exec_res = self._dispatch_sql(cur, cur.execute, sql, params)
+                if exec_res is not None and hasattr(exec_res, "fetchmany"):
+                    stream.cursor = exec_res
+                rows, columns, has_more = self._read_stream_chunk_sync(stream, chunk_rows)
+            except BaseException:
+                self._close_stream_handle_sync(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                self._close_stream_handle_sync(stream)
+            return stream_id, rows, columns, has_more
+
+        raw_res = self._invoke_sync(session, ("select", "fetch", "execute"), sql, params)
+        if hasattr(raw_res, "fetchmany") and callable(raw_res.fetchmany):
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="cursor",
+                cursor=raw_res,
+            )
+            try:
+                rows, columns, has_more = self._read_stream_chunk_sync(stream, chunk_rows)
+            except BaseException:
+                self._close_stream_handle_sync(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                self._close_stream_handle_sync(stream)
+            return stream_id, rows, columns, has_more
+
+        all_rows, columns, _ = self._extract_result_sync(raw_res)
+        stream = _ProviderStream(
+            stream_id=stream_id,
+            lease_key=key,
+            chunk_rows=chunk_rows,
+            kind="buffered",
+            columns=columns,
+            rows_buffer=all_rows,
+        )
+        rows, resolved_cols, has_more = self._read_stream_chunk_sync(stream, chunk_rows)
+        if has_more:
+            self._register_stream(stream)
+        return stream_id, rows, resolved_cols, has_more
+
+    async def _exec_stream_open_async(
+        self,
+        session: Any,
+        key: tuple[int, int],
+        sql: str,
+        params: Any,
+        chunk_rows: int,
+    ) -> tuple[str, list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Open a paged asynchronous row stream or native cursor and return the first chunk."""
+        stream_id = self._allocate_stream_id()
+        select_stream_fn = getattr(session, "select_stream", None)
+        if callable(select_stream_fn):
+            stream_obj = self._dispatch_select_stream(session, select_stream_fn, sql, params, chunk_rows)
+            if isinstance(stream_obj, Awaitable):
+                stream_obj = await stream_obj
+            iterator = stream_obj.__aiter__() if hasattr(stream_obj, "__aiter__") else iter(stream_obj)
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="stream",
+                stream_obj=stream_obj,
+                iterator=iterator,
+            )
+            try:
+                rows, columns, has_more = await self._read_stream_chunk_async(stream, chunk_rows)
+            except BaseException:
+                await self._close_stream_handle_async(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                await self._close_stream_handle_async(stream)
+            return stream_id, rows, columns, has_more
+
+        cursor_fn = getattr(session, "cursor", None)
+        if callable(cursor_fn):
+            cur: Any = cursor_fn()
+            if isinstance(cur, Awaitable):
+                cur = await cur
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="cursor",
+                cursor=cur,
+            )
+            try:
+                exec_res = self._dispatch_sql(cur, cur.execute, sql, params)
+                if isinstance(exec_res, Awaitable):
+                    exec_res = await exec_res
+                if exec_res is not None and hasattr(exec_res, "fetchmany"):
+                    stream.cursor = exec_res
+                rows, columns, has_more = await self._read_stream_chunk_async(stream, chunk_rows)
+            except BaseException:
+                await self._close_stream_handle_async(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                await self._close_stream_handle_async(stream)
+            return stream_id, rows, columns, has_more
+
+        raw_res = await self._invoke_async(session, ("select", "fetch", "execute"), sql, params)
+        if hasattr(raw_res, "fetchmany") and callable(raw_res.fetchmany):
+            stream = _ProviderStream(
+                stream_id=stream_id,
+                lease_key=key,
+                chunk_rows=chunk_rows,
+                kind="cursor",
+                cursor=raw_res,
+            )
+            try:
+                rows, columns, has_more = await self._read_stream_chunk_async(stream, chunk_rows)
+            except BaseException:
+                await self._close_stream_handle_async(stream)
+                raise
+            if has_more:
+                self._register_stream(stream)
+            else:
+                await self._close_stream_handle_async(stream)
+            return stream_id, rows, columns, has_more
+
+        all_rows, columns, _ = await self._extract_result_async(raw_res)
+        stream = _ProviderStream(
+            stream_id=stream_id,
+            lease_key=key,
+            chunk_rows=chunk_rows,
+            kind="buffered",
+            columns=columns,
+            rows_buffer=all_rows,
+        )
+        rows, resolved_cols, has_more = await self._read_stream_chunk_async(stream, chunk_rows)
+        if has_more:
+            self._register_stream(stream)
+        return stream_id, rows, resolved_cols, has_more
+
+    def _exec_stream_fetch_sync(
+        self,
+        key: tuple[int, int],
+        stream_id: str,
+        requested_chunk_rows: int,
+    ) -> tuple[list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Fetch the next chunk from an active synchronous stream, closing on exhaustion."""
+        if requested_chunk_rows < 0:
+            msg = "chunk_rows must be greater than 0"
+            raise ValueError(msg)
+        stream = self._get_stream(key, stream_id)
+        batch_size = requested_chunk_rows if requested_chunk_rows > 0 else stream.chunk_rows
+        try:
+            rows, columns, has_more = self._read_stream_chunk_sync(stream, batch_size)
+        except BaseException:
+            removed = self._remove_stream(key, stream_id)
+            if removed is not None:
+                self._close_stream_handle_sync(removed)
+            raise
+        if not has_more:
+            removed = self._remove_stream(key, stream_id)
+            if removed is not None:
+                self._close_stream_handle_sync(removed)
+        return rows, columns, has_more
+
+    async def _exec_stream_fetch_async(
+        self,
+        key: tuple[int, int],
+        stream_id: str,
+        requested_chunk_rows: int,
+    ) -> tuple[list[dict[str, Any] | list[Any]], list[str], bool]:
+        """Fetch the next chunk from an active asynchronous stream, closing on exhaustion."""
+        if requested_chunk_rows < 0:
+            msg = "chunk_rows must be greater than 0"
+            raise ValueError(msg)
+        stream = self._get_stream(key, stream_id)
+        batch_size = requested_chunk_rows if requested_chunk_rows > 0 else stream.chunk_rows
+        try:
+            rows, columns, has_more = await self._read_stream_chunk_async(stream, batch_size)
+        except BaseException:
+            removed = self._remove_stream(key, stream_id)
+            if removed is not None:
+                await self._close_stream_handle_async(removed)
+            raise
+        if not has_more:
+            removed = self._remove_stream(key, stream_id)
+            if removed is not None:
+                await self._close_stream_handle_async(removed)
+        return rows, columns, has_more
 
     def _extract_result_sync(
         self,
@@ -1550,12 +2220,15 @@ class _BaseSQLSpecProvider:
             return [], [], 0
         if isinstance(raw_res, int) and not isinstance(raw_res, bool):
             return [], [], raw_res
-        if hasattr(raw_res, "fetchall") and callable(raw_res.fetchall):
-            desc = getattr(raw_res, "description", None)
+        fetchall_fn = getattr(raw_res, "fetchall", None)
+        if callable(fetchall_fn):
+            desc: Any = getattr(raw_res, "description", None)
             if desc is not None:
-                columns = [str(col[0]) for col in desc]
-                fetched = raw_res.fetchall()
-                rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, columns) for row in fetched]
+                columns = [str(col[0]) for col in cast("Iterable[Any]", desc)]
+                fetched: Any = fetchall_fn()
+                rows: list[dict[str, Any] | list[Any]] = [
+                    self._coerce_single_row(row, columns) for row in cast("Iterable[Any]", fetched)
+                ]
                 return rows, columns, len(rows)
             rc = getattr(raw_res, "rowcount", 0)
             return [], [], max(0, int(rc)) if isinstance(rc, int) else 0
@@ -1570,14 +2243,17 @@ class _BaseSQLSpecProvider:
             return [], [], 0
         if isinstance(raw_res, int) and not isinstance(raw_res, bool):
             return [], [], raw_res
-        if hasattr(raw_res, "fetchall") and callable(raw_res.fetchall):
-            desc = getattr(raw_res, "description", None)
+        fetchall_fn = getattr(raw_res, "fetchall", None)
+        if callable(fetchall_fn):
+            desc: Any = getattr(raw_res, "description", None)
             if desc is not None:
-                columns = [str(col[0]) for col in desc]
-                fetched = raw_res.fetchall()
+                columns = [str(col[0]) for col in cast("Iterable[Any]", desc)]
+                fetched: Any = fetchall_fn()
                 if isinstance(fetched, Awaitable):
                     fetched = await fetched
-                rows: list[dict[str, Any] | list[Any]] = [self._coerce_single_row(row, columns) for row in fetched]
+                rows: list[dict[str, Any] | list[Any]] = [
+                    self._coerce_single_row(row, columns) for row in cast("Iterable[Any]", fetched)
+                ]
                 return rows, columns, len(rows)
             rc = getattr(raw_res, "rowcount", 0)
             return [], [], max(0, int(rc)) if isinstance(rc, int) else 0
@@ -1588,8 +2264,9 @@ class _BaseSQLSpecProvider:
         raw_res: Any,
     ) -> tuple[list[dict[str, Any] | list[Any]], list[str], int]:
         """Normalize a SQLResult, list of dicts, or list of tuples into (rows, columns, rowcount)."""
-        if hasattr(raw_res, "to_dicts") and callable(raw_res.to_dicts):
-            items = list(raw_res.to_dicts())
+        to_dicts_fn = getattr(raw_res, "to_dicts", None)
+        if callable(to_dicts_fn):
+            items = list(cast("Iterable[Any]", to_dicts_fn()))
         elif hasattr(raw_res, "data") and isinstance(raw_res.data, list):
             items = list(raw_res.data)
         elif hasattr(raw_res, "rows") and isinstance(raw_res.rows, list):
@@ -1660,6 +2337,8 @@ class _BaseSQLSpecProvider:
 class SQLSpecSyncProvider(_BaseSQLSpecProvider):
     """Synchronous host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
 
+    __slots__ = ()
+
     def handle_request(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute a synchronous BrokerRpcRequest and return a BrokerRpcResponse."""
         return self._handle_request_sync(request)
@@ -1675,6 +2354,8 @@ class SQLSpecSyncProvider(_BaseSQLSpecProvider):
 
 class SQLSpecAsyncProvider(_BaseSQLSpecProvider):
     """Asynchronous host provider executing SQLSpec driver operations over pinned broker leases and Arrow SHM."""
+
+    __slots__ = ()
 
     async def handle_request(self, request: BrokerRpcRequest) -> BrokerRpcResponse:
         """Execute an asynchronous BrokerRpcRequest without event-loop thread blocking."""

@@ -1839,3 +1839,431 @@ def test_spanner_encode_batch_dml_json() -> None:
         {"sql": "UPDATE users SET active = @active WHERE id = @id", "params": {"active": True, "id": 7}},
         {"sql": "DELETE FROM temp_rows WHERE id = $1", "params": {"p1": 9}},
     ]
+
+
+@pytest.mark.parametrize(
+    ("with_tx", "fail_rollback", "fail_close"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+def test_sync_spanner_driver_close_invokes_client_close_and_clears_state(
+    with_tx: bool,
+    fail_rollback: bool,
+    fail_close: bool,
+) -> None:
+    """Verify SyncSpannerDriver.close rolls back active tx before client.close and clears client state."""
+    events: list[tuple[str, bool]] = []
+    driver_ref: list[SyncSpannerDriver] = []
+
+    class _SpySyncTx:
+        @property
+        def transaction_id(self) -> bytes:
+            return b"spy-tx"
+
+        def query(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> dict[str, Any]:
+            _ = (sql, params_json, request_tag)
+            return {}
+
+        def execute_dml(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> int:
+            _ = (sql, params_json, request_tag)
+            return 0
+
+        def execute_batch_dml(self, statements_json: str, request_tag: str | None = None) -> list[int]:
+            _ = (statements_json, request_tag)
+            return []
+
+        def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+            _ = mutations_json
+            return {}
+
+        def rollback(self) -> None:
+            events.append(("rollback", driver_ref[0]._client is not None))
+            if fail_rollback:
+                msg = "rollback boom"
+                raise RuntimeError(msg)
+
+    class _SpySyncSpannerClient:
+        def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            _ = (sql, params_json, staleness_mode, staleness_ms)
+            return {}
+
+        def execute_dml(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            request_tag: str | None = None,
+            transaction_tag: str | None = None,
+        ) -> int:
+            _ = (sql, params_json, request_tag, transaction_tag)
+            return 0
+
+        def execute_batch_dml(
+            self,
+            statements_json: str,
+            request_tag: str | None = None,
+            transaction_tag: str | None = None,
+        ) -> list[int]:
+            _ = (statements_json, request_tag, transaction_tag)
+            return []
+
+        def execute_partitioned_dml(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            exclude_txn_from_change_streams: bool = False,
+        ) -> int:
+            _ = (sql, params_json, exclude_txn_from_change_streams)
+            return 0
+
+        def apply_mutations(
+            self,
+            mutations_json: str,
+            transaction_tag: str | None = None,
+            exclude_txn_from_change_streams: bool = False,
+            max_commit_delay_ms: int | None = None,
+        ) -> dict[str, Any]:
+            _ = (mutations_json, transaction_tag, exclude_txn_from_change_streams, max_commit_delay_ms)
+            return {}
+
+        def batch_write(
+            self,
+            mutation_groups_json: str,
+            exclude_txn_from_change_streams: bool = False,
+        ) -> list[dict[str, Any]]:
+            _ = (mutation_groups_json, exclude_txn_from_change_streams)
+            return []
+
+        def update_ddl(self, statements: Sequence[str]) -> str:
+            _ = statements
+            return ""
+
+        def partitioned_query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            max_partitions: int = 4,
+            data_boost_enabled: bool = False,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            _ = (sql, params_json, max_partitions, data_boost_enabled, staleness_mode, staleness_ms)
+            return {}
+
+        def begin_read_write_transaction(
+            self,
+            transaction_tag: str | None = None,
+            previous_transaction_id: bytes | None = None,
+            exclude_txn_from_change_streams: bool = False,
+            max_commit_delay_ms: int | None = None,
+        ) -> _SpySyncTx:
+            _ = (transaction_tag, previous_transaction_id, exclude_txn_from_change_streams, max_commit_delay_ms)
+            return _SpySyncTx()
+
+        def close(self) -> None:
+            events.append(("close", driver_ref[0]._client is not None))
+            if fail_close:
+                msg = "close boom"
+                raise RuntimeError(msg)
+
+    spy: Any = _SpySyncSpannerClient()
+    driver = SyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="test-db"),
+        client=spy,
+    )
+    driver_ref.append(driver)
+    if with_tx:
+        driver.begin()
+
+    if fail_close:
+        with pytest.raises(RuntimeError, match="close boom"):
+            driver.close()
+    else:
+        driver.close()
+
+    expected: list[tuple[str, bool]] = []
+    if with_tx:
+        expected.append(("rollback", True))
+    expected.append(("close", True))
+    assert events == expected
+    assert driver._client is None
+    assert driver._active_transaction is None
+    assert driver._closed is True
+
+    driver.close()
+    assert events == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("awaitable_close", [False, True])
+@pytest.mark.parametrize(
+    ("with_tx", "fail_rollback", "fail_close"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+async def test_async_spanner_driver_close_invokes_and_awaits_client_close(
+    awaitable_close: bool,
+    with_tx: bool,
+    fail_rollback: bool,
+    fail_close: bool,
+) -> None:
+    """Verify AsyncSpannerDriver.close handles sync and async client.close and clears state in finally."""
+    events: list[tuple[str, bool]] = []
+    driver_ref: list[AsyncSpannerDriver] = []
+
+    class _SpyAsyncTx:
+        @property
+        def transaction_id(self) -> bytes:
+            return b"spy-async-tx"
+
+        async def query(
+            self, sql: str, params_json: str | None = None, request_tag: str | None = None
+        ) -> dict[str, Any]:
+            _ = (sql, params_json, request_tag)
+            return {}
+
+        async def execute_dml(self, sql: str, params_json: str | None = None, request_tag: str | None = None) -> int:
+            _ = (sql, params_json, request_tag)
+            return 0
+
+        async def execute_batch_dml(self, statements_json: str, request_tag: str | None = None) -> list[int]:
+            _ = (statements_json, request_tag)
+            return []
+
+        async def commit(self, mutations_json: str | None = None) -> dict[str, Any]:
+            _ = mutations_json
+            return {}
+
+        async def rollback(self) -> None:
+            events.append(("rollback", driver_ref[0]._client is not None))
+            if fail_rollback:
+                msg = "rollback boom"
+                raise RuntimeError(msg)
+
+    class _SpyAsyncSpannerClient:
+        async def query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            _ = (sql, params_json, staleness_mode, staleness_ms)
+            return {}
+
+        async def execute_dml(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            request_tag: str | None = None,
+            transaction_tag: str | None = None,
+        ) -> int:
+            _ = (sql, params_json, request_tag, transaction_tag)
+            return 0
+
+        async def execute_batch_dml(
+            self,
+            statements_json: str,
+            request_tag: str | None = None,
+            transaction_tag: str | None = None,
+        ) -> list[int]:
+            _ = (statements_json, request_tag, transaction_tag)
+            return []
+
+        async def execute_partitioned_dml(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            exclude_txn_from_change_streams: bool = False,
+        ) -> int:
+            _ = (sql, params_json, exclude_txn_from_change_streams)
+            return 0
+
+        async def apply_mutations(
+            self,
+            mutations_json: str,
+            transaction_tag: str | None = None,
+            exclude_txn_from_change_streams: bool = False,
+            max_commit_delay_ms: int | None = None,
+        ) -> dict[str, Any]:
+            _ = (mutations_json, transaction_tag, exclude_txn_from_change_streams, max_commit_delay_ms)
+            return {}
+
+        async def batch_write(
+            self,
+            mutation_groups_json: str,
+            exclude_txn_from_change_streams: bool = False,
+        ) -> list[dict[str, Any]]:
+            _ = (mutation_groups_json, exclude_txn_from_change_streams)
+            return []
+
+        async def update_ddl(self, statements: Sequence[str]) -> str:
+            _ = statements
+            return ""
+
+        async def partitioned_query(
+            self,
+            sql: str,
+            params_json: str | None = None,
+            max_partitions: int = 4,
+            data_boost_enabled: bool = False,
+            staleness_mode: str = "strong",
+            staleness_ms: int = 0,
+        ) -> dict[str, Any]:
+            _ = (sql, params_json, max_partitions, data_boost_enabled, staleness_mode, staleness_ms)
+            return {}
+
+        async def begin_read_write_transaction(
+            self,
+            transaction_tag: str | None = None,
+            previous_transaction_id: bytes | None = None,
+            exclude_txn_from_change_streams: bool = False,
+            max_commit_delay_ms: int | None = None,
+        ) -> _SpyAsyncTx:
+            _ = (transaction_tag, previous_transaction_id, exclude_txn_from_change_streams, max_commit_delay_ms)
+            return _SpyAsyncTx()
+
+        def close(self) -> Any:
+            if awaitable_close:
+
+                async def _finish() -> None:
+                    events.append(("close", driver_ref[0]._client is not None))
+                    if fail_close:
+                        msg = "close boom"
+                        raise RuntimeError(msg)
+
+                return _finish()
+            events.append(("close", driver_ref[0]._client is not None))
+            if fail_close:
+                msg = "close boom"
+                raise RuntimeError(msg)
+            return None
+
+    spy: Any = _SpyAsyncSpannerClient()
+    driver = AsyncSpannerDriver(
+        SpannerConfig(project_id="test-proj", instance_id="test-inst", database_id="test-db"),
+        client=spy,
+    )
+    driver_ref.append(driver)
+    if with_tx:
+        await driver.begin()
+
+    if fail_close:
+        with pytest.raises(RuntimeError, match="close boom"):
+            await driver.close()
+    else:
+        await driver.close()
+
+    expected: list[tuple[str, bool]] = []
+    if with_tx:
+        expected.append(("rollback", True))
+    expected.append(("close", True))
+    assert events == expected
+    assert driver._client is None
+    assert driver._active_transaction is None
+    assert driver._closed is True
+
+    await driver.close()
+    assert events == expected
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "query",
+        "execute_dml",
+        "execute_batch_dml",
+        "execute_partitioned_dml",
+        "apply_mutations",
+        "batch_write",
+        "update_ddl",
+        "partitioned_query",
+        "begin_read_write_transaction",
+    ],
+)
+def test_sync_spanner_native_client_close_is_idempotent_and_rejects_operations(method_name: str) -> None:
+    """Verify SyncSpannerClient.close is idempotent and subsequent operations raise SpannerError."""
+    client = SyncSpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    client.close()
+    client.close()
+
+    with pytest.raises(SpannerError) as excinfo:
+        if method_name == "query":
+            client.query("SELECT 1")
+        elif method_name == "execute_dml":
+            client.execute_dml("DELETE FROM t WHERE true")
+        elif method_name == "execute_batch_dml":
+            client.execute_batch_dml("[]")
+        elif method_name == "execute_partitioned_dml":
+            client.execute_partitioned_dml("DELETE FROM t WHERE true")
+        elif method_name == "apply_mutations":
+            client.apply_mutations("[]")
+        elif method_name == "batch_write":
+            client.batch_write("[]")
+        elif method_name == "update_ddl":
+            client.update_ddl([])
+        elif method_name == "partitioned_query":
+            client.partitioned_query("SELECT 1")
+        else:
+            client.begin_read_write_transaction()
+    assert excinfo.value.code == 9
+    assert "Spanner client is closed" in str(excinfo.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "query",
+        "execute_dml",
+        "execute_batch_dml",
+        "execute_partitioned_dml",
+        "apply_mutations",
+        "batch_write",
+        "update_ddl",
+        "partitioned_query",
+        "begin_read_write_transaction",
+    ],
+)
+async def test_async_spanner_native_client_close_is_idempotent_and_rejects_operations(method_name: str) -> None:
+    """Verify AsyncSpannerClient.close is idempotent and subsequent operations raise SpannerError."""
+    client = AsyncSpannerClient(database="projects/p/instances/i/databases/d", endpoint="http://127.0.0.1:9")
+    client.close()
+    client.close()
+
+    with pytest.raises(SpannerError) as excinfo:
+        if method_name == "query":
+            await client.query("SELECT 1")
+        elif method_name == "execute_dml":
+            await client.execute_dml("DELETE FROM t WHERE true")
+        elif method_name == "execute_batch_dml":
+            await client.execute_batch_dml("[]")
+        elif method_name == "execute_partitioned_dml":
+            await client.execute_partitioned_dml("DELETE FROM t WHERE true")
+        elif method_name == "apply_mutations":
+            await client.apply_mutations("[]")
+        elif method_name == "batch_write":
+            await client.batch_write("[]")
+        elif method_name == "update_ddl":
+            await client.update_ddl([])
+        elif method_name == "partitioned_query":
+            await client.partitioned_query("SELECT 1")
+        else:
+            await client.begin_read_write_transaction()
+    assert excinfo.value.code == 9
+    assert "Spanner client is closed" in str(excinfo.value)

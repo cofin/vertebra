@@ -392,6 +392,8 @@ pub enum TransportError {
     ResponseTooLarge,
     #[error("batch deserialization failed: {0}")]
     DeserializeFailed(&'static str),
+    #[error("corrupt transport segment: {0}")]
+    CorruptSegment(&'static str),
 }
 
 /// Compact request descriptor with slab offsets (no raw pointers).
@@ -595,6 +597,7 @@ impl TransportArena {
 
     /// Snapshot exactly `len` nodes into an owned `Vec`.
     pub fn snapshot_len(&self, len: usize) -> Vec<TransportNode> {
+        // SAFETY: no concurrent writes after seal_batch() publishes the length via Acquire/Release.
         let nodes = unsafe { &*self.nodes.get() };
         nodes[..len].to_vec()
     }
@@ -687,7 +690,7 @@ impl BufferPool {
         unsafe {
             slab.set_len(self.slab_capacity.min(slab.capacity()));
         }
-        // TransportNode is Copy + has no Drop, so restoring length is safe.
+        // SAFETY: TransportNode is Copy + has no Drop, and capacity was previously initialized.
         unsafe {
             nodes.set_len(self.arena_capacity.min(nodes.capacity()));
         }
@@ -777,7 +780,11 @@ impl ShmSlotHolder {
             Self::Mpmc(view) => view.as_slice(),
             Self::Spsc(view) => view.as_slice(),
             #[cfg(unix)]
-            Self::Overflow { region, len } => unsafe { &region.as_slice()[..*len] },
+            Self::Overflow { region, len } => {
+                // SAFETY: this process owns the unlinked one-shot overflow mapping with no concurrent writers.
+                let slice = unsafe { region.as_slice() };
+                slice.get(..*len).unwrap_or(slice)
+            }
         }
     }
 }
@@ -788,7 +795,7 @@ enum SnapshotBacking {
         nodes: Vec<TransportNode>,
         pool: Option<std::sync::Arc<BufferPool>>,
         #[cfg(feature = "compression")]
-        decompressed_slab: std::sync::OnceLock<Vec<u8>>,
+        decompressed_slab: Option<Vec<u8>>,
     },
     InProcess {
         requests: Vec<InProcessRequest>,
@@ -798,8 +805,6 @@ enum SnapshotBacking {
         node_count: usize,
         slab_start: usize,
         slab_len: usize,
-        #[cfg(feature = "compression")]
-        decompressed_slab: std::sync::OnceLock<Vec<u8>>,
     },
 }
 
@@ -875,13 +880,15 @@ impl BatchSnapshot {
 
     /// Create a new snapshot with protocol flags (no pool).
     pub fn new_with_flags(slab: Vec<u8>, nodes: Vec<TransportNode>, flags: u32) -> Self {
+        #[cfg(feature = "compression")]
+        let decompressed_slab = Self::try_decompress_slab_opt(&slab, flags);
         Self {
             backing: SnapshotBacking::Slab {
                 slab,
                 nodes,
                 pool: None,
                 #[cfg(feature = "compression")]
-                decompressed_slab: std::sync::OnceLock::new(),
+                decompressed_slab,
             },
             flags,
         }
@@ -903,15 +910,27 @@ impl BatchSnapshot {
         pool: std::sync::Arc<BufferPool>,
         flags: u32,
     ) -> Self {
+        #[cfg(feature = "compression")]
+        let decompressed_slab = Self::try_decompress_slab_opt(&slab, flags);
         Self {
             backing: SnapshotBacking::Slab {
                 slab,
                 nodes,
                 pool: Some(pool),
                 #[cfg(feature = "compression")]
-                decompressed_slab: std::sync::OnceLock::new(),
+                decompressed_slab,
             },
             flags,
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    fn try_decompress_slab_opt(raw_slab: &[u8], flags: u32) -> Option<Vec<u8>> {
+        if flags & crate::protocol::flags::COMPRESSED != 0 {
+            let codec = crate::protocol::codec::CompressionCodec::from_flags(flags);
+            crate::protocol::codec::decompress(raw_slab, codec).ok()
+        } else {
+            None
         }
     }
 
@@ -930,45 +949,125 @@ impl BatchSnapshot {
 
     /// Create a zero-copy snapshot backed directly by an [`MpmcSlotView`].
     pub fn from_mpmc_slot(view: MpmcSlotView) -> Result<Arc<Self>, TransportError> {
-        Self::from_shm_slot_holder(ShmSlotHolder::Mpmc(view))
+        Self::from_shm_slot_holder_with_depth(ShmSlotHolder::Mpmc(view), 0)
     }
 
     /// Create a zero-copy snapshot backed directly by an SPSC [`SlotView`].
     pub fn from_spsc_slot(view: SlotView) -> Result<Arc<Self>, TransportError> {
-        Self::from_shm_slot_holder(ShmSlotHolder::Spsc(view))
+        Self::from_shm_slot_holder_with_depth(ShmSlotHolder::Spsc(view), 0)
     }
 
-    fn from_shm_slot_holder(slot: ShmSlotHolder) -> Result<Arc<Self>, TransportError> {
+    fn parse_overflow_header(
+        raw: &[u8],
+        depth: u8,
+    ) -> Result<Option<(usize, String)>, TransportError> {
+        let flags = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+        if flags != REQUEST_OVERFLOW_MAGIC {
+            return Ok(None);
+        }
+        if depth >= 1 {
+            return Err(TransportError::CorruptSegment(
+                "nested SHM overflow envelope",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let total_len = usize::try_from(u64::from_le_bytes(raw[4..12].try_into().unwrap()))
+                .map_err(|_| TransportError::CorruptSegment("overflow length overflow"))?;
+            let name_len = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
+            let expected_len =
+                16usize
+                    .checked_add(name_len)
+                    .ok_or(TransportError::CorruptSegment(
+                        "overflow header offset overflow",
+                    ))?;
+            if !(5..=128).contains(&name_len)
+                || raw.len() != expected_len
+                || !(raw[16..expected_len].starts_with(b"/vtb-")
+                    || raw[16..expected_len].starts_with(b"/tmp/vtb-"))
+            {
+                return Err(TransportError::CorruptSegment("invalid overflow envelope"));
+            }
+            let name = std::str::from_utf8(&raw[16..expected_len])
+                .map_err(|_| TransportError::CorruptSegment("invalid overflow region name"))?
+                .to_owned();
+            Ok(Some((total_len, name)))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(TransportError::CorruptSegment(
+                "overflow envelope unsupported",
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_overflow_region(
+        name: &str,
+        total_len: usize,
+    ) -> Result<crate::shm::ShmRegion, TransportError> {
+        let region_res = crate::shm::ShmRegion::open_named(name, total_len);
+        let _ = crate::shm::shm_unlink_named(name);
+        let region = region_res.map_err(|err| match err {
+            crate::shm::ShmError::InvalidSize => {
+                TransportError::CorruptSegment("overflow region truncated")
+            }
+            _ => TransportError::CorruptSegment("failed to open overflow region"),
+        })?;
+        if total_len > region.len() {
+            return Err(TransportError::CorruptSegment("overflow region truncated"));
+        }
+        Ok(region)
+    }
+
+    fn decompress_slab(raw_slab: &[u8], flags: u32) -> Result<Vec<u8>, TransportError> {
+        #[cfg(feature = "compression")]
+        {
+            let codec = crate::protocol::codec::CompressionCodec::from_flags(flags);
+            crate::protocol::codec::decompress(raw_slab, codec)
+                .map_err(|_| TransportError::CorruptSegment("corrupt compressed slab"))
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            let _ = (raw_slab, flags);
+            Err(TransportError::CorruptSegment(
+                "compressed slab unsupported",
+            ))
+        }
+    }
+
+    fn from_shm_slot_holder_with_depth(
+        slot: ShmSlotHolder,
+        depth: u8,
+    ) -> Result<Arc<Self>, TransportError> {
         let data = slot.as_slice();
         if data.len() < BATCH_HEADER_SIZE {
             return Err(TransportError::DeserializeFailed("too short"));
         }
 
-        let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
-        #[cfg(unix)]
-        if flags == REQUEST_OVERFLOW_MAGIC {
-            let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
-            let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-            if (5..=128).contains(&name_len)
-                && data.len() == 16 + name_len
-                && (data[16..16 + name_len].starts_with(b"/vtb-")
-                    || data[16..16 + name_len].starts_with(b"/tmp/vtb-"))
+        if let Some((total_len, name)) = Self::parse_overflow_header(data, depth)? {
+            #[cfg(unix)]
             {
-                let name = std::str::from_utf8(&data[16..16 + name_len])
-                    .map_err(|_| TransportError::DeserializeFailed("invalid overflow region name"))?
-                    .to_owned();
                 drop(slot);
-                let region = crate::shm::ShmRegion::open_named(&name, total_len).map_err(|_| {
-                    TransportError::DeserializeFailed("failed to open overflow region")
-                })?;
-                let _ = crate::shm::shm_unlink_named(&name);
-                return Self::from_shm_slot_holder(ShmSlotHolder::Overflow {
-                    region,
-                    len: total_len,
-                });
+                let region = Self::open_overflow_region(&name, total_len)?;
+                return Self::from_shm_slot_holder_with_depth(
+                    ShmSlotHolder::Overflow {
+                        region,
+                        len: total_len,
+                    },
+                    depth + 1,
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (total_len, name);
+                return Err(TransportError::CorruptSegment(
+                    "overflow envelope unsupported",
+                ));
             }
         }
 
+        let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
         let node_count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
         let slab_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
 
@@ -982,19 +1081,36 @@ impl BatchSnapshot {
         let expected = slab_start
             .checked_add(slab_len)
             .ok_or(TransportError::DeserializeFailed("length overflow"))?;
-        if data.len() < expected {
+        if expected > data.len() {
             return Err(TransportError::DeserializeFailed("truncated"));
         }
 
         let nodes_ptr = data[BATCH_HEADER_SIZE..].as_ptr();
         if !(nodes_ptr as usize).is_multiple_of(core::mem::align_of::<TransportNode>()) {
-            return Self::deserialize_from(data);
+            return Self::deserialize_from_with_depth(data, depth);
         }
 
         // SAFETY: alignment and bounds (`BATCH_HEADER_SIZE + node_bytes <= data.len()`) were
         // verified above, and `TransportNode` is `#[repr(C)]` with primitive integer fields only.
         let nodes =
             unsafe { core::slice::from_raw_parts(nodes_ptr.cast::<TransportNode>(), node_count) };
+
+        if flags & crate::protocol::flags::COMPRESSED != 0 {
+            let raw_slab = &data[slab_start..expected];
+            let slab = Self::decompress_slab(raw_slab, flags)?;
+            Self::validate_nodes(nodes, slab.len())?;
+            return Ok(Arc::new(Self {
+                backing: SnapshotBacking::Slab {
+                    slab,
+                    nodes: nodes.to_vec(),
+                    pool: None,
+                    #[cfg(feature = "compression")]
+                    decompressed_slab: None,
+                },
+                flags,
+            }));
+        }
+
         Self::validate_nodes(nodes, slab_len)?;
 
         Ok(Arc::new(Self {
@@ -1003,8 +1119,6 @@ impl BatchSnapshot {
                 node_count,
                 slab_start,
                 slab_len,
-                #[cfg(feature = "compression")]
-                decompressed_slab: std::sync::OnceLock::new(),
             },
             flags,
         }))
@@ -1016,36 +1130,36 @@ impl BatchSnapshot {
             let path_len = node.path_len as usize;
             let path_end = path_offset
                 .checked_add(path_len)
-                .ok_or(TransportError::DeserializeFailed("path offset overflow"))?;
+                .ok_or(TransportError::CorruptSegment("path offset overflow"))?;
             if path_end > slab_len {
-                return Err(TransportError::DeserializeFailed("path out of bounds"));
+                return Err(TransportError::CorruptSegment("path out of bounds"));
             }
 
             let query_offset = node.query_offset as usize;
             let query_len = node.query_len as usize;
             let query_end = query_offset
                 .checked_add(query_len)
-                .ok_or(TransportError::DeserializeFailed("query offset overflow"))?;
+                .ok_or(TransportError::CorruptSegment("query offset overflow"))?;
             if query_end > slab_len {
-                return Err(TransportError::DeserializeFailed("query out of bounds"));
+                return Err(TransportError::CorruptSegment("query out of bounds"));
             }
 
             let headers_offset = node.headers_offset as usize;
             let headers_len = node.headers_len as usize;
             let headers_end = headers_offset
                 .checked_add(headers_len)
-                .ok_or(TransportError::DeserializeFailed("headers offset overflow"))?;
+                .ok_or(TransportError::CorruptSegment("headers offset overflow"))?;
             if headers_end > slab_len {
-                return Err(TransportError::DeserializeFailed("headers out of bounds"));
+                return Err(TransportError::CorruptSegment("headers out of bounds"));
             }
 
             let body_offset = node.body_offset as usize;
             let body_len = node.body_len as usize;
             let body_end = body_offset
                 .checked_add(body_len)
-                .ok_or(TransportError::DeserializeFailed("body offset overflow"))?;
+                .ok_or(TransportError::CorruptSegment("body offset overflow"))?;
             if body_end > slab_len {
-                return Err(TransportError::DeserializeFailed("body out of bounds"));
+                return Err(TransportError::CorruptSegment("body out of bounds"));
             }
         }
         Ok(())
@@ -1083,26 +1197,22 @@ impl BatchSnapshot {
         self.flags
     }
 
-    /// Get the effective slab bytes for slab-backed snapshots, decompressing lazily if needed.
-    fn slab_bytes<'a>(
-        &'a self,
-        slab: &'a [u8],
-        #[cfg(feature = "compression")] decompressed_slab: &'a std::sync::OnceLock<Vec<u8>>,
-    ) -> &'a [u8] {
-        #[cfg(feature = "compression")]
-        {
-            use crate::protocol::codec::CompressionCodec;
-            use crate::protocol::flags;
-
-            if self.flags & flags::COMPRESSED != 0 {
-                return decompressed_slab.get_or_init(|| {
-                    let codec = CompressionCodec::from_flags(self.flags);
-                    crate::protocol::codec::decompress(slab, codec)
-                        .expect("batch slab decompression should not fail")
-                });
-            }
+    #[inline]
+    fn slice_range(slab: &[u8], offset: u32, len: u32) -> Option<&[u8]> {
+        if len == 0 {
+            return None;
         }
-        slab
+        let start = offset as usize;
+        let end = start.checked_add(len as usize)?;
+        slab.get(start..end)
+    }
+
+    #[inline]
+    fn shm_slab_slice(slot: &ShmSlotHolder, slab_start: usize, slab_len: usize) -> &[u8] {
+        let Some(end) = slab_start.checked_add(slab_len) else {
+            return b"";
+        };
+        slot.as_slice().get(slab_start..end).unwrap_or(b"")
     }
 
     /// Get the transport node at the given index.
@@ -1127,14 +1237,11 @@ impl BatchSnapshot {
                 ..
             } => {
                 let n = &nodes[index];
-                if n.path_len == 0 {
-                    return &[];
-                }
                 #[cfg(feature = "compression")]
-                let s = self.slab_bytes(slab, decompressed_slab);
+                let s = decompressed_slab.as_deref().unwrap_or(slab);
                 #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(slab);
-                &s[n.path_offset as usize..(n.path_offset + n.path_len) as usize]
+                let s = slab;
+                Self::slice_range(s, n.path_offset, n.path_len).unwrap_or(b"")
             }
             SnapshotBacking::InProcess { requests } => &requests[index].path,
             SnapshotBacking::ShmSlot {
@@ -1142,21 +1249,10 @@ impl BatchSnapshot {
                 node_count,
                 slab_start,
                 slab_len,
-                #[cfg(feature = "compression")]
-                decompressed_slab,
             } => {
                 let n = &Self::shm_nodes(slot, *node_count)[index];
-                let off = n.path_offset as usize;
-                let len = n.path_len as usize;
-                if len == 0 {
-                    return &[];
-                }
-                let raw_slab = &slot.as_slice()[*slab_start..*slab_start + *slab_len];
-                #[cfg(feature = "compression")]
-                let s = self.slab_bytes(raw_slab, decompressed_slab);
-                #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(raw_slab);
-                s.get(off..off.saturating_add(len)).unwrap_or(&[])
+                let s = Self::shm_slab_slice(slot, *slab_start, *slab_len);
+                Self::slice_range(s, n.path_offset, n.path_len).unwrap_or(b"")
             }
         }
     }
@@ -1177,14 +1273,11 @@ impl BatchSnapshot {
                 ..
             } => {
                 let n = &nodes[index];
-                if n.query_len == 0 {
-                    return None;
-                }
                 #[cfg(feature = "compression")]
-                let s = self.slab_bytes(slab, decompressed_slab);
+                let s = decompressed_slab.as_deref().unwrap_or(slab);
                 #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(slab);
-                Some(&s[n.query_offset as usize..(n.query_offset + n.query_len) as usize])
+                let s = slab;
+                Self::slice_range(s, n.query_offset, n.query_len)
             }
             SnapshotBacking::InProcess { requests } => {
                 let q = &requests[index].query;
@@ -1195,21 +1288,10 @@ impl BatchSnapshot {
                 node_count,
                 slab_start,
                 slab_len,
-                #[cfg(feature = "compression")]
-                decompressed_slab,
             } => {
                 let n = &Self::shm_nodes(slot, *node_count)[index];
-                let off = n.query_offset as usize;
-                let len = n.query_len as usize;
-                if len == 0 {
-                    return None;
-                }
-                let raw_slab = &slot.as_slice()[*slab_start..*slab_start + *slab_len];
-                #[cfg(feature = "compression")]
-                let s = self.slab_bytes(raw_slab, decompressed_slab);
-                #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(raw_slab);
-                s.get(off..off.saturating_add(len))
+                let s = Self::shm_slab_slice(slot, *slab_start, *slab_len);
+                Self::slice_range(s, n.query_offset, n.query_len)
             }
         }
     }
@@ -1231,14 +1313,11 @@ impl BatchSnapshot {
                 ..
             } => {
                 let n = &nodes[index];
-                if n.headers_len == 0 {
-                    return &[];
-                }
                 #[cfg(feature = "compression")]
-                let s = self.slab_bytes(slab, decompressed_slab);
+                let s = decompressed_slab.as_deref().unwrap_or(slab);
                 #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(slab);
-                &s[n.headers_offset as usize..(n.headers_offset + n.headers_len) as usize]
+                let s = slab;
+                Self::slice_range(s, n.headers_offset, n.headers_len).unwrap_or(b"")
             }
             SnapshotBacking::InProcess { requests } => &requests[index].headers_raw,
             SnapshotBacking::ShmSlot {
@@ -1246,21 +1325,10 @@ impl BatchSnapshot {
                 node_count,
                 slab_start,
                 slab_len,
-                #[cfg(feature = "compression")]
-                decompressed_slab,
             } => {
                 let n = &Self::shm_nodes(slot, *node_count)[index];
-                let off = n.headers_offset as usize;
-                let len = n.headers_len as usize;
-                if len == 0 {
-                    return &[];
-                }
-                let raw_slab = &slot.as_slice()[*slab_start..*slab_start + *slab_len];
-                #[cfg(feature = "compression")]
-                let s = self.slab_bytes(raw_slab, decompressed_slab);
-                #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(raw_slab);
-                s.get(off..off.saturating_add(len)).unwrap_or(&[])
+                let s = Self::shm_slab_slice(slot, *slab_start, *slab_len);
+                Self::slice_range(s, n.headers_offset, n.headers_len).unwrap_or(b"")
             }
         }
     }
@@ -1276,14 +1344,11 @@ impl BatchSnapshot {
                 ..
             } => {
                 let n = &nodes[index];
-                if n.body_len == 0 {
-                    return &[];
-                }
                 #[cfg(feature = "compression")]
-                let s = self.slab_bytes(slab, decompressed_slab);
+                let s = decompressed_slab.as_deref().unwrap_or(slab);
                 #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(slab);
-                &s[n.body_offset as usize..(n.body_offset + n.body_len) as usize]
+                let s = slab;
+                Self::slice_range(s, n.body_offset, n.body_len).unwrap_or(b"")
             }
             SnapshotBacking::InProcess { requests } => &requests[index].body,
             SnapshotBacking::ShmSlot {
@@ -1291,21 +1356,10 @@ impl BatchSnapshot {
                 node_count,
                 slab_start,
                 slab_len,
-                #[cfg(feature = "compression")]
-                decompressed_slab,
             } => {
                 let n = &Self::shm_nodes(slot, *node_count)[index];
-                let off = n.body_offset as usize;
-                let len = n.body_len as usize;
-                if len == 0 {
-                    return &[];
-                }
-                let raw_slab = &slot.as_slice()[*slab_start..*slab_start + *slab_len];
-                #[cfg(feature = "compression")]
-                let s = self.slab_bytes(raw_slab, decompressed_slab);
-                #[cfg(not(feature = "compression"))]
-                let s = self.slab_bytes(raw_slab);
-                s.get(off..off.saturating_add(len)).unwrap_or(&[])
+                let s = Self::shm_slab_slice(slot, *slab_start, *slab_len);
+                Self::slice_range(s, n.body_offset, n.body_len).unwrap_or(b"")
             }
         }
     }
@@ -1428,66 +1482,82 @@ impl BatchSnapshot {
     /// Deserialize a batch snapshot from ring slot data.
     ///
     /// Copies nodes and slab from the slot into owned `Vec`s.
-    pub fn deserialize_from(data: &[u8]) -> Result<Arc<Self>, TransportError> {
-        if data.len() < BATCH_HEADER_SIZE {
+    pub fn deserialize_from(raw: &[u8]) -> Result<Arc<Self>, TransportError> {
+        Self::deserialize_from_with_depth(raw, 0)
+    }
+
+    fn deserialize_from_with_depth(raw: &[u8], depth: u8) -> Result<Arc<Self>, TransportError> {
+        if raw.len() < BATCH_HEADER_SIZE {
             return Err(TransportError::DeserializeFailed("too short"));
         }
 
-        let flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
-        #[cfg(unix)]
-        if flags == REQUEST_OVERFLOW_MAGIC {
-            let total_len = u64::from_le_bytes(data[4..12].try_into().unwrap()) as usize;
-            let name_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-            if (5..=128).contains(&name_len)
-                && data.len() == 16 + name_len
-                && (data[16..16 + name_len].starts_with(b"/vtb-")
-                    || data[16..16 + name_len].starts_with(b"/tmp/vtb-"))
+        if let Some((total_len, name)) = Self::parse_overflow_header(raw, depth)? {
+            #[cfg(unix)]
             {
-                let name = std::str::from_utf8(&data[16..16 + name_len]).map_err(|_| {
-                    TransportError::DeserializeFailed("invalid overflow region name")
-                })?;
-                let region = crate::shm::ShmRegion::open_named(name, total_len).map_err(|_| {
-                    TransportError::DeserializeFailed("failed to open overflow region")
-                })?;
-                let _ = crate::shm::shm_unlink_named(name);
-                return Self::deserialize_from(unsafe { &region.as_slice()[..total_len] });
+                let region = Self::open_overflow_region(&name, total_len)?;
+                // SAFETY: `open_overflow_region` verified `total_len <= region.len()` for this unlinked one-shot region.
+                return Self::deserialize_from_with_depth(
+                    unsafe { &region.as_slice()[..total_len] },
+                    depth + 1,
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (total_len, name);
+                return Err(TransportError::CorruptSegment(
+                    "overflow envelope unsupported",
+                ));
             }
         }
 
-        let node_count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
-        let slab_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
-        // data[12..16] is padding
+        let flags = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+        let node_count = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+        let slab_len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+        // raw[12..16] is padding
 
         let node_size = core::mem::size_of::<TransportNode>();
         let node_bytes = node_count
             .checked_mul(node_size)
             .ok_or(TransportError::DeserializeFailed("node_count overflow"))?;
-        let expected = BATCH_HEADER_SIZE
+        let slab_offset = BATCH_HEADER_SIZE
             .checked_add(node_bytes)
-            .and_then(|sum| sum.checked_add(slab_len))
             .ok_or(TransportError::DeserializeFailed("length overflow"))?;
-        if data.len() < expected {
+        let expected = slab_offset
+            .checked_add(slab_len)
+            .ok_or(TransportError::DeserializeFailed("length overflow"))?;
+        if expected > raw.len() {
             return Err(TransportError::DeserializeFailed("truncated"));
         }
 
-        // Read nodes via memcpy
         let mut nodes = vec![TransportNode::default(); node_count];
         if node_count > 0 {
             // SAFETY: TransportNode is #[repr(C)], all-primitive fields.
             // Source data was written by serialize_into with the same layout.
             let dst = nodes.as_mut_ptr() as *mut u8;
             unsafe {
-                core::ptr::copy_nonoverlapping(data[BATCH_HEADER_SIZE..].as_ptr(), dst, node_bytes);
+                core::ptr::copy_nonoverlapping(raw[BATCH_HEADER_SIZE..].as_ptr(), dst, node_bytes);
             }
         }
 
-        Self::validate_nodes(&nodes, slab_len)?;
+        let raw_slab = &raw[slab_offset..expected];
+        let slab = if flags & crate::protocol::flags::COMPRESSED != 0 {
+            Self::decompress_slab(raw_slab, flags)?
+        } else {
+            raw_slab.to_vec()
+        };
 
-        // Read slab
-        let slab_start = BATCH_HEADER_SIZE + node_bytes;
-        let slab = data[slab_start..slab_start + slab_len].to_vec();
+        Self::validate_nodes(&nodes, slab.len())?;
 
-        Ok(Arc::new(Self::new_with_flags(slab, nodes, flags)))
+        Ok(Arc::new(Self {
+            backing: SnapshotBacking::Slab {
+                slab,
+                nodes,
+                pool: None,
+                #[cfg(feature = "compression")]
+                decompressed_slab: None,
+            },
+            flags,
+        }))
     }
 }
 
@@ -1547,6 +1617,7 @@ impl<'a> ShmBatchWriter<'a> {
             slab_offset += node.body_len as usize;
         }
 
+        // SAFETY: `TransportNode` is `#[repr(C)]`, `Copy`, and contains only primitive integers.
         let nodes_bytes = unsafe {
             core::slice::from_raw_parts(
                 self.nodes.as_ptr().cast::<u8>(),
@@ -1568,6 +1639,7 @@ impl<'a> ShmBatchWriter<'a> {
     pub fn write_overflow_envelope(self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
         let total_len = self.serialized_size();
         let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
+        // SAFETY: `region` was freshly created exclusively with at least `total_len` bytes.
         let written = self.serialize_into(unsafe { &mut region.as_mut_slice()[..total_len] });
         debug_assert_eq!(written, total_len);
         let name_bytes = name.as_bytes();
@@ -1586,6 +1658,7 @@ impl BatchSnapshot {
     pub fn write_overflow_envelope(&self) -> Result<(String, Vec<u8>), crate::shm::ShmError> {
         let total_len = self.serialized_size();
         let (name, mut region) = crate::shm::ShmRegion::create_overflow_region("rq", total_len)?;
+        // SAFETY: `region` was freshly created exclusively with at least `total_len` bytes.
         let written = self.serialize_into(unsafe { &mut region.as_mut_slice()[..total_len] });
         debug_assert_eq!(written, total_len);
         let name_bytes = name.as_bytes();
@@ -1696,6 +1769,7 @@ mod tests {
             body_len: 800,
         };
 
+        // SAFETY: `TransportNode` is a 56-byte `#[repr(C)]` struct of plain integer fields.
         let bytes: [u8; 56] = unsafe { std::mem::transmute::<TransportNode, [u8; 56]>(node) };
 
         // method_tag at offset 0
@@ -2023,12 +2097,12 @@ mod tests {
 
     #[test]
     fn batch_snapshot_serialize_with_flags() {
-        let snap = BatchSnapshot::new_with_flags(vec![0; 10], vec![], 0x42);
+        let snap = BatchSnapshot::new_with_flags(vec![0; 10], vec![], 0x41);
         let mut buf = vec![0u8; snap.serialized_size()];
         snap.serialize_into(&mut buf);
 
         let deserialized = BatchSnapshot::deserialize_from(&buf).expect("deserialize");
-        assert_eq!(deserialized.flags(), 0x42);
+        assert_eq!(deserialized.flags(), 0x41);
     }
 
     #[test]
@@ -2094,7 +2168,130 @@ mod tests {
 
         let err =
             BatchSnapshot::deserialize_from(&buf).expect_err("should reject out of range offset");
-        assert!(matches!(err, TransportError::DeserializeFailed(_)));
+        assert!(matches!(err, TransportError::CorruptSegment(_)));
+    }
+
+    #[cfg(unix)]
+    fn build_overflow_envelope(name: &str, total_len: usize) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let mut envelope = Vec::with_capacity(16 + name_bytes.len());
+        envelope.extend_from_slice(&REQUEST_OVERFLOW_MAGIC.to_le_bytes());
+        envelope.extend_from_slice(&(total_len as u64).to_le_bytes());
+        envelope.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        envelope.extend_from_slice(name_bytes);
+        envelope
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_snapshot_rejects_nested_overflow_envelope() {
+        let inner_env = build_overflow_envelope("/vtb-inner-fake", 64);
+        let (outer_name, mut outer_region) =
+            crate::shm::ShmRegion::create_overflow_region("rq-nested", inner_env.len())
+                .expect("create outer overflow region");
+        // SAFETY: `outer_region` was freshly created exclusively with at least `inner_env.len()` bytes.
+        unsafe {
+            outer_region.as_mut_slice()[..inner_env.len()].copy_from_slice(&inner_env);
+        }
+        let outer_env = build_overflow_envelope(&outer_name, inner_env.len());
+
+        let err = BatchSnapshot::deserialize_from(&outer_env)
+            .expect_err("nested overflow envelope must fail");
+        assert!(matches!(err, TransportError::CorruptSegment(_)));
+        let _ = crate::shm::shm_unlink_named(&outer_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_snapshot_rejects_truncated_overflow_region() {
+        let (name, region) =
+            crate::shm::ShmRegion::create_overflow_region("rq-trunc", 64).expect("create region");
+        let oversize_len = region.len() + 4096;
+        let envelope = build_overflow_envelope(&name, oversize_len);
+
+        let err = BatchSnapshot::deserialize_from(&envelope)
+            .expect_err("total_len > region.len() must fail");
+        assert!(matches!(err, TransportError::CorruptSegment(_)));
+        let _ = crate::shm::shm_unlink_named(&name);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn batch_snapshot_rejects_corrupt_compressed_slab_and_oversized_node() {
+        use crate::protocol::codec::{CompressionCodec, compress};
+
+        let zstd_flags = CompressionCodec::Zstd.to_flags();
+        let corrupt_buf = {
+            let mut buf = vec![0u8; BATCH_HEADER_SIZE + 8];
+            buf[0..4].copy_from_slice(&zstd_flags.to_le_bytes());
+            buf[4..8].copy_from_slice(&0u32.to_le_bytes());
+            buf[8..12].copy_from_slice(&8u32.to_le_bytes());
+            buf[BATCH_HEADER_SIZE..].copy_from_slice(b"not-zstd");
+            buf
+        };
+        let err =
+            BatchSnapshot::deserialize_from(&corrupt_buf).expect_err("corrupt zstd slab must fail");
+        assert!(matches!(err, TransportError::CorruptSegment(_)));
+
+        let compressed = compress(b"short", CompressionCodec::Zstd);
+        let overlong_node = TransportNode {
+            path_offset: 0,
+            path_len: 128,
+            ..Default::default()
+        };
+        let node_size = core::mem::size_of::<TransportNode>();
+        let mut bad_node_buf = vec![0u8; BATCH_HEADER_SIZE + node_size + compressed.len()];
+        bad_node_buf[0..4].copy_from_slice(&zstd_flags.to_le_bytes());
+        bad_node_buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bad_node_buf[8..12].copy_from_slice(&(compressed.len() as u32).to_le_bytes());
+        // SAFETY: `overlong_node` is `#[repr(C)]` and `bad_node_buf` has `node_size` bytes reserved.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (&raw const overlong_node).cast::<u8>(),
+                bad_node_buf[BATCH_HEADER_SIZE..].as_mut_ptr(),
+                node_size,
+            );
+        }
+        bad_node_buf[BATCH_HEADER_SIZE + node_size..].copy_from_slice(&compressed);
+
+        let err = BatchSnapshot::deserialize_from(&bad_node_buf)
+            .expect_err("over-long node slice on compressed slab must fail");
+        assert!(matches!(err, TransportError::CorruptSegment(_)));
+
+        let layout = crate::buffer::RingLayout::new(4096, 4, crate::buffer::ChannelMode::Spsc);
+        let region = std::sync::Arc::new(
+            crate::shm::ShmRegion::create(layout.total_size).expect("create spsc shm"),
+        );
+        // SAFETY: `region` was freshly created with `layout.total_size` bytes for exclusive init.
+        let ring = Arc::new(unsafe {
+            crate::channel::SpscRing::initialize(region, layout, std::process::id(), 1)
+                .expect("init spsc ring")
+        });
+        ring.try_send(&corrupt_buf, 0).expect("send corrupt buf");
+        let view = ring.try_recv_view().expect("recv corrupt slot view");
+        let slot_err = BatchSnapshot::from_spsc_slot(view)
+            .expect_err("from_spsc_slot must reject corrupt compressed slab");
+        assert!(matches!(slot_err, TransportError::CorruptSegment(_)));
+    }
+
+    #[test]
+    fn snapshot_backing_accessors_never_panic_on_out_of_bounds_ranges() {
+        let bad_node = TransportNode {
+            path_offset: 5,
+            path_len: 50,
+            query_offset: u32::MAX,
+            query_len: 10,
+            headers_offset: 2,
+            headers_len: 100,
+            body_offset: 10,
+            body_len: 1,
+            ..Default::default()
+        };
+        let snap = BatchSnapshot::new(vec![b'a'; 4], vec![bad_node]);
+        assert_eq!(snap.path_bytes(0), b"");
+        assert_eq!(snap.query_bytes(0), None);
+        assert_eq!(snap.headers_raw(0), b"");
+        assert_eq!(snap.body(0), b"");
     }
 
     #[test]

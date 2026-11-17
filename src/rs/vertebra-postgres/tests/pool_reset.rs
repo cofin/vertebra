@@ -127,3 +127,206 @@ async fn dirty_transaction_rolls_back_discards_all_and_restores_startup_gucs_on_
     pool.close(Duration::from_secs(2)).await.unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn cockroachdb_startup_forwards_cluster_option_and_pool_reset_emits_reset_all() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let recorded_queries: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let rq_bg = Arc::clone(&recorded_queries);
+    let captured_startup: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let cs_bg = Arc::clone(&captured_startup);
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut len_buf = [0u8; 4];
+        sock.read_exact(&mut len_buf).await.unwrap();
+        let len = i32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; len - 4];
+        sock.read_exact(&mut body).await.unwrap();
+        *cs_bg.lock().unwrap() = String::from_utf8_lossy(&body).into_owned();
+
+        let mut greeting = Vec::new();
+        greeting.extend_from_slice(&frame(b'R', &0i32.to_be_bytes()));
+        greeting.extend_from_slice(&frame(b'S', b"client_encoding\0UTF8\0"));
+        greeting.extend_from_slice(&frame(b'S', b"crdb_version\0CCL v24.1.0\0"));
+        greeting.extend_from_slice(&frame(b'S', b"application_name\0mutated_app\0"));
+        greeting.extend_from_slice(&frame(b'K', &[0, 0, 0, 1, 0, 0, 0, 2]));
+        greeting.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&greeting).await.unwrap();
+
+        loop {
+            let mut hdr = [0u8; 5];
+            if sock.read_exact(&mut hdr).await.is_err() {
+                break;
+            }
+            let tag = hdr[0];
+            let flen = i32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+            let mut fbody = vec![0u8; flen - 4];
+            sock.read_exact(&mut fbody).await.unwrap();
+            if tag == b'X' {
+                break;
+            }
+            assert_eq!(tag, b'Q');
+            fbody.pop();
+            let q = String::from_utf8(fbody).unwrap();
+            rq_bg.lock().unwrap().push(q.clone());
+
+            let (cmd_tag, status) = if q == "BEGIN" {
+                ("BEGIN\0".as_bytes(), b'T')
+            } else if q == "ROLLBACK" {
+                ("ROLLBACK\0".as_bytes(), b'I')
+            } else if q == "RESET ALL" {
+                ("RESET ALL\0".as_bytes(), b'I')
+            } else {
+                ("SET\0".as_bytes(), b'I')
+            };
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&frame(b'C', cmd_tag));
+            resp.extend_from_slice(&frame(b'Z', &[status]));
+            sock.write_all(&resp).await.unwrap();
+        }
+    });
+
+    let mut raw = RawPostgresOptions::new("127.0.0.1", "postgres", "appdb");
+    raw.port = i64::from(port);
+    raw.sslmode = "disable".to_string();
+    raw.application_name = "crdb_app".to_string();
+    raw.cockroach_cluster = Some("my-cluster".to_string());
+    raw.session_gucs
+        .insert("options".to_string(), "-c work_mem=4MB".to_string());
+    raw.session_gucs
+        .insert("search_path".to_string(), "tenant_a".to_string());
+    let cfg = PostgresConfig::validate(raw).unwrap();
+
+    let opts = PostgresPoolOptions {
+        pooler_mode: PoolerMode::Direct,
+        protocol_level_pooler_cache: false,
+        statement_cache_size: 32,
+        min_size: 1,
+        max_size: 1,
+        acquire_timeout: Duration::from_secs(2),
+        reset_timeout: Duration::from_secs(2),
+        close_timeout: Duration::from_secs(2),
+        max_idle_lifetime: None,
+        max_lifetime: None,
+    };
+
+    let pool = PostgresPool::new(cfg, opts).unwrap();
+    let lease = pool.acquire().await.unwrap();
+    let mut session = SessionHandle::from_pooled(lease);
+    assert!(session.is_cockroachdb());
+
+    let owner = TransactionOwner::new(1, session.generation());
+    session.begin_as(owner).await.unwrap();
+    session.close().await.unwrap();
+    assert_eq!(pool.stats().idle, 1);
+
+    let startup = captured_startup.lock().unwrap().clone();
+    assert!(startup.contains("options\0-c work_mem=4MB --cluster=my-cluster\0"));
+
+    let qs = recorded_queries.lock().unwrap().clone();
+    assert_eq!(qs[0], "BEGIN");
+    assert_eq!(qs[1], "ROLLBACK");
+    assert_eq!(qs[2], "RESET ALL");
+    assert!(!qs.iter().any(|q| q.contains("DISCARD ALL")));
+    assert!(qs[3].contains("SET \"application_name\" = 'crdb_app'"));
+    assert!(qs[3].contains("SET \"search_path\" = 'tenant_a'"));
+    assert!(!qs[3].contains("\"options\""));
+
+    pool.close(Duration::from_secs(2)).await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn alloydb_columnar_engine_gucs_preserved_across_pool_reset() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let recorded_queries: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let rq_bg = Arc::clone(&recorded_queries);
+    let captured_startup: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let cs_bg = Arc::clone(&captured_startup);
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut len_buf = [0u8; 4];
+        sock.read_exact(&mut len_buf).await.unwrap();
+        let len = i32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; len - 4];
+        sock.read_exact(&mut body).await.unwrap();
+        *cs_bg.lock().unwrap() = String::from_utf8_lossy(&body).into_owned();
+        sock.write_all(&auth_ok_and_ready()).await.unwrap();
+
+        loop {
+            let mut hdr = [0u8; 5];
+            if sock.read_exact(&mut hdr).await.is_err() {
+                break;
+            }
+            let tag = hdr[0];
+            let flen = i32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+            let mut fbody = vec![0u8; flen - 4];
+            sock.read_exact(&mut fbody).await.unwrap();
+            if tag == b'X' {
+                break;
+            }
+            assert_eq!(tag, b'Q');
+            fbody.pop();
+            let q = String::from_utf8(fbody).unwrap();
+            rq_bg.lock().unwrap().push(q.clone());
+
+            let (cmd_tag, status) = if q == "DISCARD ALL" {
+                ("DISCARD ALL\0".as_bytes(), b'I')
+            } else {
+                ("SET\0".as_bytes(), b'I')
+            };
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&frame(b'C', cmd_tag));
+            resp.extend_from_slice(&frame(b'Z', &[status]));
+            sock.write_all(&resp).await.unwrap();
+        }
+    });
+
+    let mut raw = RawPostgresOptions::new("127.0.0.1", "postgres", "appdb");
+    raw.port = i64::from(port);
+    raw.sslmode = "disable".to_string();
+    raw.application_name = "alloy_app".to_string();
+    raw.session_gucs.insert(
+        "google_columnar_engine.enabled".to_string(),
+        "on".to_string(),
+    );
+    raw.session_gucs.insert(
+        "alloydb.enable_columnar_engine".to_string(),
+        "on".to_string(),
+    );
+    let cfg = PostgresConfig::validate(raw).unwrap();
+
+    let opts = PostgresPoolOptions {
+        pooler_mode: PoolerMode::Direct,
+        protocol_level_pooler_cache: false,
+        statement_cache_size: 32,
+        min_size: 1,
+        max_size: 1,
+        acquire_timeout: Duration::from_secs(2),
+        reset_timeout: Duration::from_secs(2),
+        close_timeout: Duration::from_secs(2),
+        max_idle_lifetime: None,
+        max_lifetime: None,
+    };
+
+    let pool = PostgresPool::new(cfg, opts).unwrap();
+    let lease = pool.acquire().await.unwrap();
+    let mut session = SessionHandle::from_pooled(lease);
+    assert!(!session.is_cockroachdb());
+    session.close().await.unwrap();
+
+    let startup = captured_startup.lock().unwrap().clone();
+    assert!(startup.contains("google_columnar_engine.enabled\0on\0"));
+
+    let qs = recorded_queries.lock().unwrap().clone();
+    assert_eq!(qs[0], "DISCARD ALL");
+    assert!(qs[1].contains("SET \"google_columnar_engine.enabled\" = 'on'"));
+    assert!(qs[1].contains("SET \"alloydb.enable_columnar_engine\" = 'on'"));
+
+    pool.close(Duration::from_secs(2)).await.unwrap();
+    server.await.unwrap();
+}

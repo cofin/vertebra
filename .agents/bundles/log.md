@@ -1,5 +1,55 @@
 # Bundle Activity Log
 
+- **2026-11-17 (`flow-archive`: `stack-alignment`)**: Completed and archived `stack-alignment` (7 chapters, 146 tasks closed across data drivers/broker, Alchemy/config, SQLAlchemy dialects/DBAPI, SQLSpec adapters, framework extensions/protocols, Rust runtime/ingress, TypeScript client/packaging/CI, and OKF knowledge resynchronization), and contracted `.agents/bundles/specs/` back to lazy mode.
+
+- 2026-11-17 `setup`: Aligned OKF v0.2 bundle (verified).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 1 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 1 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 29 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-17 `learn`: Reconciled 0 completed, 0 stamped, 0 stale claims, synced 1 spec(s).
+
+- 2026-11-16 `setup`: Aligned OKF v0.2 bundle (normalized_setup_state, cleaned_markdown:.agents/bundles/knowledge/domains/extensions/litestar.md, cleaned_markdown:.agents/bundles/knowledge/domains/frontend/packaging-and-pgo.md, cleaned_markdown:.agents/bundles/knowledge/patterns/python/hot-path-and-async-dispatch.md, cleaned_markdown:.agents/bundles/knowledge/patterns/rust/ffi-and-gil-discipline.md, cleaned_markdown:.agents/bundles/specs/stack-alignment/chapters/ch02-alchemy-cache-and-config/spec.md, cleaned_markdown:.agents/bundles/specs/stack-alignment/spec.md, updated_bundle_index).
+
+## [2026-11-17T08:15:00Z] chapter-complete | stack-alignment ch01-ch07
+
+- Completed `stack-alignment` implementation across `ch01`–`ch07` (`ch01` data drivers and broker, `ch02` Alchemy cache and config, `ch03` SQLAlchemy dialects and DBAPI, `ch04` SQLSpec adapters, `ch05` framework extensions and MCP/A2A/gRPC/APEX protocols, `ch06` Rust runtime/HTTP ingress and Python server fastpaths, and `ch07` TypeScript client/codegen/WebMCP, packaging/extras/WASM/telemetry locks, test suite splits and sleep removal, Pyright/CI/release gates, and full OKF knowledge resynchronization across architecture, domain, pattern, testing, ADR, `workflow.md`, and `AGENTS.md` chapters).
+
 ## [2026-11-16T06:50:00Z] archive | strict-typing-hygiene & integration-remediation
 
 - Archived completed specification `strict-typing-hygiene` (`t01`–`t04`, `4/4` tasks at `f34c45c0`) and completed Master PRD `integration-remediation` (`t01`–`t15`, `15/15` child flows complete across framework, ORM, SQLSpec, native caching, distributed queues, Spanner interactive ReadWrite transactions, MCP/WebMCP, HTTP/3, and strict typing) into permanent OKF chapters (`tech-stack.md`, `polyglot-test-matrix.md`, `workflow.md`), promoted `audit-findings_20261103.md` and `google-cloud-rust_20261103.md` into `.agents/bundles/research/`, contracted `.agents/bundles/specs/` to its lazy empty state, and synchronized `index.md` and `research/index.md`.

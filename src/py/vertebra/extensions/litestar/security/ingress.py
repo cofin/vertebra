@@ -3,34 +3,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from litestar.openapi.spec import SecurityScheme
-
-from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
-
-try:
-    from litestar_security import (
-        Authenticated,
-        AuthenticationEvidence,
-        AuthenticationMechanism,
-        InvalidCredentials,
-        NoCredentials,
-        PresentedCredential,
-        Principal,
-    )
-except ImportError as exc:
-    raise MissingDependencyError(
-        "litestar-security",
-        install_package="litestar-security",
-        extra="security",
-    ) from exc
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from litestar.connection import ASGIConnection
+    from litestar.openapi.spec import SecurityScheme
+    from litestar_security import AuthenticationMechanism
+
+__all__ = (
+    "IngressIdentityAuthenticator",
+    "IngressIdentityMechanism",
+    "IngressIdentityResolver",
+    "IngressIdentitySlot",
+    "create_ingress_identity_mechanism",
+)
+
+_CACHED_MECHANISM_CLS: type[Any] | None = None
 
 
 class IngressIdentitySlot:
@@ -49,16 +41,18 @@ class IngressIdentitySlot:
         ),
     ) -> None:
         """Initialize the ingress identity slot with target header names."""
+        ensure_module("litestar_security", extra="security")
         self.name = name
         self._header_names = tuple(h.lower() for h in header_names)
 
     def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> Any:
         """Extract ingress identity header from connection headers."""
+        sec_mod = ensure_module("litestar_security", extra="security")
         for header_name in self._header_names:
             val = connection.headers.get(header_name)
             if val:
-                return PresentedCredential({"header": header_name, "raw": val})
-        return NoCredentials()
+                return sec_mod.PresentedCredential({"header": header_name, "raw": val})
+        return sec_mod.NoCredentials()
 
 
 class IngressIdentityAuthenticator:
@@ -88,9 +82,10 @@ class IngressIdentityAuthenticator:
     ) -> Any:
         """Verify the presented ingress certificate or XFCC headers."""
         _ = connection
+        sec_mod = ensure_module("litestar_security", extra="security")
         payload = getattr(credential, "value", credential)
         if not isinstance(payload, dict):
-            return InvalidCredentials("Malformed ingress credential")
+            return sec_mod.InvalidCredentials("Malformed ingress credential")
 
         raw = payload.get("raw", "")
         header_name = payload.get("header", "x-forwarded-client-cert")
@@ -105,17 +100,17 @@ class IngressIdentityAuthenticator:
 
         identity = claims.get("uri") or claims.get("subject") or claims.get("identity")
         if not identity:
-            return InvalidCredentials("No identity found in ingress credentials")
+            return sec_mod.InvalidCredentials("No identity found in ingress credentials")
 
         if self._trusted_san_prefixes and not any(identity.startswith(prefix) for prefix in self._trusted_san_prefixes):
-            return InvalidCredentials(f"Ingress identity '{identity}' does not match any trusted prefix")
+            return sec_mod.InvalidCredentials(f"Ingress identity '{identity}' does not match any trusted prefix")
 
-        evidence = AuthenticationEvidence(
+        evidence = sec_mod.AuthenticationEvidence(
             mechanism=self.name,
             slot=self.slot,
             authenticated_at=datetime.now(UTC),
         )
-        return Authenticated(claims=claims, evidence=evidence)
+        return sec_mod.Authenticated(claims=claims, evidence=evidence)
 
     def _parse_xfcc(self, header: str) -> dict[str, str]:
         """Parse Envoy / Istio XFCC header fields."""
@@ -138,24 +133,26 @@ class IngressIdentityResolver:
         principal_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         """Initialize the identity resolver with an optional principal factory."""
+        ensure_module("litestar_security", extra="security")
         self._principal_factory = principal_factory
 
     async def resolve(self, claims: dict[str, Any]) -> Any:
         """Resolve verified ingress claims to a Principal."""
+        sec_mod = ensure_module("litestar_security", extra="security")
         identity = claims.get("uri") or claims.get("subject") or claims.get("identity")
         if not identity:
-            return InvalidCredentials("Missing identity in ingress claims")
+            return sec_mod.InvalidCredentials("Missing identity in ingress claims")
 
         user = self._principal_factory(claims) if self._principal_factory is not None else claims
 
-        return Principal(
+        return sec_mod.Principal(
             id=str(identity),
             display_name=claims.get("subject", identity),
             user=user,
         )
 
 
-class IngressIdentityMechanism(AuthenticationMechanism[Any, dict[str, Any], Any]):
+class _IngressIdentityMechanismImpl:
     """Pair an ingress identity authenticator with an identity resolver and OpenAPI scheme."""
 
     def __init__(
@@ -169,7 +166,8 @@ class IngressIdentityMechanism(AuthenticationMechanism[Any, dict[str, Any], Any]
         session_capable: bool = False,
     ) -> None:
         """Initialize the ingress identity mechanism."""
-        ensure_module("litestar_security", extra="security")
+        sec_mod = ensure_module("litestar_security", extra="security")
+        spec_mod = ensure_module("litestar.openapi.spec", extra="litestar")
         authenticator = IngressIdentityAuthenticator(
             trusted_san_prefixes=trusted_san_prefixes,
             slot=slot,
@@ -178,20 +176,56 @@ class IngressIdentityMechanism(AuthenticationMechanism[Any, dict[str, Any], Any]
         resolved_scheme = (
             security_scheme
             if security_scheme is not None
-            else SecurityScheme(
+            else spec_mod.SecurityScheme(
                 type="apiKey",
                 name="x-forwarded-client-cert",
                 security_scheme_in="header",
                 description="Trusted mTLS ingress client certificate identity",
             )
         )
-        super().__init__(
+        sec_mod.AuthenticationMechanism.__init__(
+            self,
             authenticator=authenticator,
             resolver=resolver,
             scheme_name=scheme_name,
             security_scheme=resolved_scheme,
             session_capable=session_capable,
         )
+
+
+if TYPE_CHECKING:
+
+    class IngressIdentityMechanism(_IngressIdentityMechanismImpl, AuthenticationMechanism[Any, dict[str, Any], Any]):
+        """Pair an ingress identity authenticator with an identity resolver and OpenAPI scheme."""
+
+
+def _get_mechanism_cls() -> type[IngressIdentityMechanism]:
+    global _CACHED_MECHANISM_CLS
+    if _CACHED_MECHANISM_CLS is None:
+        sec_mod = ensure_module("litestar_security", extra="security")
+        base_cls = sec_mod.AuthenticationMechanism
+        _CACHED_MECHANISM_CLS = type(
+            "IngressIdentityMechanism",
+            (_IngressIdentityMechanismImpl, base_cls),
+            {
+                "__module__": __name__,
+                "__doc__": _IngressIdentityMechanismImpl.__doc__,
+            },
+        )
+    return cast("type[IngressIdentityMechanism]", _CACHED_MECHANISM_CLS)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind ``IngressIdentityMechanism`` to ``litestar_security.AuthenticationMechanism``."""
+    if name == "IngressIdentityMechanism":
+        return _get_mechanism_cls()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return module attributes including lazily bound ``IngressIdentityMechanism``."""
+    return sorted(set(globals()) | set(__all__))
 
 
 def create_ingress_identity_mechanism(
@@ -204,7 +238,8 @@ def create_ingress_identity_mechanism(
     session_capable: bool = False,
 ) -> AuthenticationMechanism[Any, Any, Any]:
     """Create an IngressIdentityMechanism for trusted mTLS/XFCC proxy ingress."""
-    return IngressIdentityMechanism(
+    mechanism_cls = _get_mechanism_cls()
+    return mechanism_cls(
         trusted_san_prefixes=trusted_san_prefixes,
         scheme_name=scheme_name,
         security_scheme=security_scheme,

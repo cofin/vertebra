@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use vertebra_postgres::codecs::INT4_OID;
 use vertebra_postgres::config::RawPostgresOptions;
-use vertebra_postgres::extended::Parameter;
+use vertebra_postgres::extended::{Parameter, PreparedDescription};
 use vertebra_postgres::result::PgValue;
 use vertebra_postgres::session::{
     SessionHandle,
@@ -279,4 +279,145 @@ async fn named_statement_cache_hit_skips_parse_and_evicts_lru_with_close_frame()
     assert_eq!(res4.rows[0][0], PgValue::Int4(100));
 
     server.await.unwrap();
+}
+
+fn empty_description(param_oids: &[u32]) -> PreparedDescription {
+    PreparedDescription {
+        parameter_oids: param_oids.to_vec(),
+        result_columns: Vec::new(),
+    }
+}
+
+#[test]
+fn statement_cache_disabled_zero_capacity_behaviour() {
+    let mut cache = StatementCache::new(0);
+    assert_eq!(cache.capacity(), 0);
+    assert_eq!(cache.len(), 0);
+    assert!(cache.is_empty());
+    assert!(!cache.contains("SELECT 1", &[]));
+    assert!(cache.get("SELECT 1", &[]).is_none());
+    assert!(
+        cache
+            .insert("SELECT 1".to_string(), vec![], empty_description(&[]))
+            .is_none()
+    );
+    assert!(cache.take_evicted_names().is_empty());
+    assert_eq!(cache.len(), 0);
+}
+
+#[test]
+fn statement_cache_o1_lru_eviction_promotion_and_slot_recycling() {
+    let mut cache = StatementCache::new(3);
+    let s1 = cache
+        .insert("SELECT 1".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let s2 = cache
+        .insert(
+            "SELECT $1::int4".to_string(),
+            vec![INT4_OID],
+            empty_description(&[INT4_OID]),
+        )
+        .unwrap();
+    let s3 = cache
+        .insert("SELECT 3".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    assert_eq!(cache.len(), 3);
+    assert!(cache.contains("SELECT 1", &[]));
+
+    // Promote s1 (head) to MRU tail, making s2 the LRU head.
+    assert_eq!(cache.get("SELECT 1", &[]).unwrap().name, s1.name);
+    // Re-inserting s2 updates it and promotes it to MRU tail, making s3 the LRU head.
+    let s2_updated = cache
+        .insert_named(
+            "vtb_s_custom".to_string(),
+            "SELECT $1::int4".to_string(),
+            vec![INT4_OID],
+            empty_description(&[INT4_OID]),
+        )
+        .unwrap();
+    assert_eq!(s2_updated.name, "vtb_s_custom");
+    assert_eq!(cache.take_evicted_names(), vec![s2.name.clone()]);
+    assert_eq!(cache.len(), 3);
+
+    // Inserting s4 must evict s3 (now LRU head).
+    let s4 = cache
+        .insert("SELECT 4".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    assert_eq!(cache.take_evicted_names(), vec![s3.name]);
+    assert!(!cache.contains("SELECT 3", &[]));
+    assert!(cache.contains("SELECT 1", &[]));
+    assert!(cache.contains("SELECT $1::int4", &[INT4_OID]));
+    assert!(cache.contains("SELECT 4", &[]));
+    assert_eq!(cache.get("SELECT 4", &[]).unwrap().name, s4.name);
+}
+
+#[test]
+fn statement_cache_unlink_head_middle_tail_and_clear() {
+    let mut cache = StatementCache::new(4);
+    let generation = cache.schema_generation();
+    let s1 = cache
+        .insert("Q1".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let s2 = cache
+        .insert("Q2".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let s3 = cache
+        .insert("Q3".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let s4 = cache
+        .insert("Q4".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    assert_eq!(cache.len(), 4);
+
+    // Unlink middle node (Q2).
+    let k2 = StatementKey::new("Q2", vec![], generation);
+    assert_eq!(cache.invalidate_key(&k2).unwrap().name, s2.name);
+    assert!(cache.invalidate_key(&k2).is_none());
+    assert_eq!(cache.len(), 3);
+
+    // Unlink head node (Q1).
+    assert_eq!(cache.remove("Q1", &[]).unwrap().name, s1.name);
+    assert_eq!(cache.len(), 2);
+
+    // Unlink tail node (Q4).
+    let k4 = StatementKey::new("Q4", vec![], generation);
+    assert_eq!(cache.invalidate_key(&k4).unwrap().name, s4.name);
+    assert_eq!(cache.len(), 1);
+    assert!(cache.contains("Q3", &[]));
+
+    // Re-insert into recycled slots and verify eviction order still starts at Q3.
+    let s5 = cache
+        .insert("Q5".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let s6 = cache
+        .insert("Q6".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    let _s7 = cache
+        .insert("Q7".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    assert_eq!(cache.len(), 4);
+    let _s8 = cache
+        .insert("Q8".to_string(), vec![], empty_description(&[]))
+        .unwrap();
+    assert_eq!(cache.take_evicted_names(), vec![s3.name]);
+
+    // Evict by name from interior.
+    cache.evict_by_name(&s6.name, true);
+    assert_eq!(cache.take_evicted_names(), vec![s6.name]);
+    assert!(!cache.contains("Q6", &[]));
+    assert!(cache.contains("Q5", &[]));
+
+    // Clear resets cache and advances generation.
+    cache.clear();
+    assert_eq!(cache.len(), 0);
+    assert!(cache.is_empty());
+    assert_ne!(cache.schema_generation(), generation);
+    assert!(!cache.contains("Q5", &[]));
+    assert!(
+        cache
+            .get_by_key(&StatementKey::new("Q5", vec![], generation))
+            .is_none()
+    );
+    assert!(cache.get("Q5", &[]).is_none());
+    let _ = s5;
 }

@@ -281,17 +281,19 @@ class App:
                     self.add_route(route)
                 return target
 
-        if hasattr(target, "provide_session") or hasattr(target, "provide_connection"):
+        provide_session = getattr(target, "provide_session", None)
+        provide_connection = getattr(target, "provide_connection", None)
+        if provide_session is not None or provide_connection is not None:
             self._databases.append(target)
             bind_key = getattr(target, "bind_key", None)
             session_key = f"{bind_key}_session" if bind_key and bind_key != "default" else "db_session"
             conn_key = f"{bind_key}_connection" if bind_key and bind_key != "default" else "db_connection"
-            if session_key not in self._dependencies and hasattr(target, "provide_session"):
-                self._dependencies[session_key] = target.provide_session
-                self._container.graph.register(session_key, target.provide_session)
-            if conn_key not in self._dependencies and hasattr(target, "provide_connection"):
-                self._dependencies[conn_key] = target.provide_connection
-                self._container.graph.register(conn_key, target.provide_connection)
+            if session_key not in self._dependencies and provide_session is not None:
+                self._dependencies[session_key] = provide_session
+                self._container.graph.register(session_key, provide_session)
+            if conn_key not in self._dependencies and provide_connection is not None:
+                self._dependencies[conn_key] = provide_connection
+                self._container.graph.register(conn_key, provide_connection)
             return target
 
         if hasattr(target, "on_app_init") or hasattr(target, "on_cli_init") or hasattr(target, "server_lifespan"):
@@ -315,7 +317,7 @@ class App:
                 if callable(lifespan_fn):
                     cm = lifespan_fn(self)
                     if hasattr(cm, "__enter__"):
-                        stack.enter_context(cm)
+                        stack.enter_context(cast("contextlib.AbstractContextManager[Any]", cm))
             yield
 
     async def call_procedure(self, name: str, payload: Any = None, *, request: Any = None) -> Any:

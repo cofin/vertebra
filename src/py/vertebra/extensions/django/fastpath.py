@@ -230,15 +230,15 @@ class FastPath:
         return wrap_asgi_fastpath(self, fallback_app or _default_fallback)
 
 
-def vertebra_view[F: Callable[..., Any]](
-    fn: F | None = None,
+def vertebra_view(
+    fn: Callable[..., Any] | None = None,
     *,
     methods: tuple[str, ...] | list[str] = ("GET", "POST", "PUT", "PATCH", "DELETE"),
     status_code: int = 200,
 ) -> Any:
     """Mark a Django view function as eligible for the zero-copy Vertebra fastpath."""
 
-    def _decorate(target: F) -> F:
+    def _decorate(target: Callable[..., Any]) -> Callable[..., Any]:
         dyn = cast("Any", target)
         dyn.__vertebra_fastpath__ = True
         dyn.__vertebra_methods__ = tuple(m.upper() for m in methods)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -13,13 +11,13 @@ import msgspec
 from vertebra.agent.a2a.models import AgentCard, AgentInterface, AgentSkill
 from vertebra.agent.core.schema import Tool
 from vertebra.agent.mcp.registry import MCPRegistry
+from vertebra.agent.runtime import ConfirmationGate
 from vertebra.extensions.apex.session import (
     ApexSessionContext,
     OraclePoolLike,
     OracleSessionManager,
 )
 from vertebra.typing import UnsupportedBackendError
-from vertebra.utils.serializers import encode_json
 
 __all__ = (
     "ApexAccessPolicy",
@@ -144,61 +142,6 @@ class ApexPolicyEvaluator:
             requires_confirmation=needs_confirm,
             reason="Permitted by APEX access policy",
         )
-
-
-class ConfirmationGate:
-    """Human-in-the-loop single-use confirmation gate for mutating Oracle APEX/ORDS tool invocations."""
-
-    __slots__ = ("_approved_digests",)
-
-    def __init__(self) -> None:
-        self._approved_digests: dict[str, str] = {}
-
-    @staticmethod
-    def _compute_digest(target: str, payload: dict[str, Any]) -> str:
-        serialized = encode_json({"target": target.upper(), "payload": payload})
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    def approve(
-        self,
-        confirmation_token: str,
-        *,
-        target: str = "*",
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        """Record human-in-the-loop approval for ``confirmation_token`` bound to ``target`` and ``payload``."""
-        digest = "*" if target == "*" and payload is None else self._compute_digest(target, payload or {})
-        self._approved_digests[confirmation_token] = digest
-
-    def is_approved(
-        self,
-        confirmation_token: str | None,
-        *,
-        target: str = "*",
-        payload: dict[str, Any] | None = None,
-    ) -> bool:
-        """Return True if ``confirmation_token`` has been approved for ``target`` and ``payload``."""
-        if not confirmation_token or confirmation_token not in self._approved_digests:
-            return False
-        stored = self._approved_digests[confirmation_token]
-        if stored == "*":
-            return True
-        expected = self._compute_digest(target, payload or {})
-        return hmac.compare_digest(stored, expected)
-
-    def consume(
-        self,
-        confirmation_token: str | None,
-        *,
-        target: str = "*",
-        payload: dict[str, Any] | None = None,
-    ) -> bool:
-        """Atomically verify and consume a single-use ``confirmation_token``."""
-        if not self.is_approved(confirmation_token, target=target, payload=payload):
-            return False
-        assert confirmation_token is not None
-        self._approved_digests.pop(confirmation_token, None)
-        return True
 
 
 type OrdsRestTransport = Callable[

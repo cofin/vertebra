@@ -95,14 +95,21 @@ def test_model_catalog_and_gemma2_fp16_guard() -> None:
     with pytest.raises(ValueError, match="float16"):
         GemmaEmbedder("embeddinggemma-2-270m", precision="float16")
 
-    for allowed in ("int8", "q4", "bf16", "fp32"):
-        emb = GemmaEmbedder(
-            "embeddinggemma-2-270m",
-            precision=allowed,
-            dimensions=8,
-            backend_fn=lambda texts, dims: [[1.0] * dims for _ in texts],
-        )
-        assert emb.precision == allowed
+
+@pytest.mark.parametrize(
+    "allowed",
+    ["int8", "q4", "bf16", "fp32"],
+    ids=["int8", "q4", "bf16", "fp32"],
+)
+def test_gemma_embedder_accepts_allowed_precision(allowed: str) -> None:
+    """Verify GemmaEmbedder accepts non-fp16 precisions."""
+    emb = GemmaEmbedder(
+        "embeddinggemma-2-270m",
+        precision=allowed,
+        dimensions=8,
+        backend_fn=lambda texts, dims: [[1.0] * dims for _ in texts],
+    )
+    assert emb.precision == allowed
 
 
 @pytest.mark.anyio
@@ -155,8 +162,17 @@ async def test_embedding_broker_token_budgeted_and_length_sorted_dynamic_batchin
 async def test_embedding_broker_bulk_preemption_for_interactive_query() -> None:
     """Verify bulk submit_batch yields between chunks so an interactive submit_single completes first."""
     completion_order: list[str] = []
+    loop = asyncio.get_running_loop()
+    first_chunk_entered = asyncio.Event()
+    interactive_queued = threading.Event()
+    blocked_once = False
 
     def slow_backend(texts: list[str], dims: int) -> list[list[float]]:
+        nonlocal blocked_once
+        if texts != ["interactive-query"] and not blocked_once:
+            blocked_once = True
+            loop.call_soon_threadsafe(first_chunk_entered.set)
+            interactive_queued.wait(timeout=2.0)
         return [[float(i + 1), 1.0, 0.0, 0.0][:dims] for i in range(len(texts))]
 
     broker = EmbeddingBroker(
@@ -177,7 +193,8 @@ async def test_embedding_broker_bulk_preemption_for_interactive_query() -> None:
         return res
 
     async def run_interactive() -> None:
-        await asyncio.sleep(0.001)
+        await first_chunk_entered.wait()
+        loop.call_soon(interactive_queued.set)
         v = await broker.submit_single("interactive-query")
         assert v.dimensions == 4
         completion_order.append("interactive")
@@ -185,6 +202,51 @@ async def test_embedding_broker_bulk_preemption_for_interactive_query() -> None:
     bulk_batch, _ = await asyncio.gather(run_bulk(), run_interactive())
     assert bulk_batch.count == 8
     assert completion_order[0] == "interactive"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("coalesce_ms", [5000.0, 1000.0])
+async def test_embedding_broker_concurrent_batches_and_close_wakes_waiters(coalesce_ms: float) -> None:
+    """Concurrent batches synchronize via asyncio.Event barriers and close() wakes blocked waiters immediately."""
+    loop = asyncio.get_running_loop()
+    batch_entered = asyncio.Event()
+    release_batch = threading.Event()
+
+    def barrier_backend(texts: list[str], dims: int) -> list[list[float]]:
+        if any(t.startswith("batch-a-") for t in texts):
+            loop.call_soon_threadsafe(batch_entered.set)
+            release_batch.wait(timeout=2.0)
+        return [[float(len(t)), 1.0, 0.0, 0.0][:dims] for t in texts]
+
+    broker = EmbeddingBroker(
+        backend_fn=barrier_backend,
+        dimensions=4,
+        config=EmbeddingBrokerConfig(
+            max_batch_requests=8,
+            max_batch_tokens=4096,
+            coalesce_window_ms=coalesce_ms,
+            bulk_chunk_size=2,
+            isolate_gil_subprocess=False,
+        ),
+    )
+
+    async def run_batch_a() -> VectorBatchView:
+        return await broker.submit_batch(["batch-a-1", "batch-a-2"])
+
+    async def run_batch_b() -> VectorBatchView:
+        await batch_entered.wait()
+        release_batch.set()
+        return await broker.submit_batch(["batch-b-1", "batch-b-2"])
+
+    res_a, res_b = await asyncio.gather(run_batch_a(), run_batch_b())
+    assert res_a.count == 2
+    assert res_b.count == 2
+
+    waiter_task = asyncio.create_task(broker.submit_single("blocked-waiter"))
+    await asyncio.sleep(0)
+    await asyncio.wait_for(broker.close(), timeout=0.5)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(waiter_task, timeout=0.5)
 
 
 @pytest.mark.anyio

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 from vertebra import _typing
 from vertebra._typing import (
     ATTRS_INSTALLED,
-    NANOID_INSTALLED,
     NUMPY_INSTALLED,
     PYDANTIC_INSTALLED,
     UNSET,
@@ -61,7 +60,6 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ATTRS_INSTALLED",
-    "NANOID_INSTALLED",
     "NUMPY_INSTALLED",
     "PYDANTIC_INSTALLED",
     "UNSET",
@@ -137,19 +135,19 @@ def __getattr__(name: str) -> Any:
     if name == "BaseModel":
         pydantic_mod = import_optional("pydantic")
         if pydantic_mod is None:
-            raise MissingDependencyError("pydantic", install_package="pydantic")
+            raise MissingDependencyError("pydantic", extra="pydantic")
         val = pydantic_mod.BaseModel
 
     elif name in {"ndarray", "NDArray"}:
         np_mod = import_optional("numpy")
         if np_mod is None:
-            raise MissingDependencyError("numpy", install_package="numpy")
+            raise MissingDependencyError("numpy", extra="numpy")
         val = np_mod.typing.NDArray if name == "NDArray" else np_mod.ndarray
 
     elif name in {"Table", "RecordBatch"}:
         pa_mod = import_optional("pyarrow")
         if pa_mod is None:
-            raise MissingDependencyError("pyarrow", install_package="pyarrow")
+            raise MissingDependencyError("pyarrow", extra="arrow")
         val = getattr(pa_mod, name)
 
     globals()[name] = val

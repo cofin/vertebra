@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Annotated, Any
-
-from litestar import get
-from litestar.params import Dependency
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.agent.mcp.models import MCPConfig as VertebraMCPConfig
 from vertebra.agent.mcp.routes import build_well_known_mcp_document
@@ -14,14 +11,8 @@ from vertebra.extensions.litestar.mcp.tasks import create_shm_mcp_task_config
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
-try:
+if TYPE_CHECKING:
     from litestar_mcp import LitestarMCP, MCPConfig
-except ImportError as exc:
-    raise MissingDependencyError(
-        "litestar-mcp",
-        install_package="litestar-mcp>=0.20.0",
-        extra="mcp",
-    ) from exc
 
 __all__ = ["create_mcp_plugin"]
 
@@ -49,21 +40,24 @@ def create_mcp_plugin(
         resolved_config = config
     else:
         tasks_cfg = create_shm_mcp_task_config() if enable_tasks else False
-        resolved_config = MCPConfig(
+        resolved_config = litestar_mcp_mod.MCPConfig(
             name=name,
             tasks=tasks_cfg,
             **kwargs,
         )
 
-    plugin = LitestarMCP(resolved_config)
+    plugin = litestar_mcp_mod.LitestarMCP(resolved_config)
     if expose_well_known:
+        litestar_mod = ensure_module("litestar", extra="litestar")
+        params_mod = ensure_module("litestar.params", extra="litestar")
         server_name = getattr(resolved_config, "name", None) or name
         server_version = getattr(resolved_config, "version", None) or "1.0.0"
         endpoint_path = getattr(resolved_config, "base_path", None) or "/mcp"
 
-        @get(well_known_path, include_in_schema=False, opt={"exclude_from_auth": True})
+        skill_catalog_dep = params_mod.Dependency(default=None, skip_validation=True)
+
         async def _vertebra_mcp_well_known(
-            skill_catalog: Annotated[Any, Dependency(default=None, skip_validation=True)] = None,
+            skill_catalog: Any = skill_catalog_dep,
         ) -> dict[str, Any]:
             discovered_names = list(plugin.discovered_tools.keys())
             if registry is not None and hasattr(registry, "list_specs"):
@@ -87,6 +81,11 @@ def create_mcp_plugin(
                 skill_names=skill_names,
             )
 
-        plugin.register_dynamic_handler(_vertebra_mcp_well_known)
+        well_known_handler = litestar_mod.get(
+            well_known_path,
+            include_in_schema=False,
+            opt={"exclude_from_auth": True},
+        )(_vertebra_mcp_well_known)
+        plugin.register_dynamic_handler(well_known_handler)
 
-    return plugin
+    return cast("LitestarMCP", plugin)

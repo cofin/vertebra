@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import struct
+import time
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import jwt as pyjwt
 import msgspec
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 import vertebra.wasm as wasm_mod
+from vertebra.agent.core.context import AgentContext
 from vertebra.extensions.grpc import (
     GrpcContext,
     GrpcError,
@@ -21,7 +28,9 @@ from vertebra.extensions.grpc import (
     encode_lpm_frame,
     grpc_method,
 )
+from vertebra.framework.security import JWKSConfig, JWKSVerifier
 from vertebra.typing import MissingDependencyError
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 from vertebra.wasm import (
     WASM_MAGIC_HEADER,
@@ -272,8 +281,8 @@ def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.M
     with pytest.raises(MissingDependencyError, match="wasmtime") as wasm_exc:
         host.register_module(WASMModuleConfig(name="guest_missing", wasm_source=wasm_add_bytes))
     assert wasm_exc.value.package == "wasmtime"
-    assert wasm_exc.value.install_package == "wasmtime"
-    assert wasm_exc.value.hint == "Install it with: uv add wasmtime"
+    assert wasm_exc.value.install_package == "vertebra-core[wasmtime]"
+    assert wasm_exc.value.hint == "Install it with: uv add vertebra-core[wasmtime]"
 
     class _FakeStore:
         def __init__(self, _engine: Any) -> None:
@@ -321,15 +330,302 @@ def test_wasm_plugin_host_execution_and_missing_dependency(monkeypatch: pytest.M
         host.call_export("starved", "add", 1, 2)
 
 
+class _ProtoStringValue:
+    """Protobuf wire message backed by google.protobuf.wrappers_pb2.StringValue."""
+
+    _pb_cls: Any = ensure_module("google.protobuf.wrappers_pb2").StringValue
+
+    def __init__(self, value: str = "") -> None:
+        self._inner = self._pb_cls(value=value)
+
+    @property
+    def value(self) -> str:
+        return str(self._inner.value)
+
+    def SerializeToString(self) -> bytes:
+        return bytes(self._inner.SerializeToString())
+
+    @classmethod
+    def FromString(cls, data: bytes) -> _ProtoStringValue:
+        parsed = cls._pb_cls.FromString(data)
+        return cls(value=str(parsed.value))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("inbound_ct", "expected_response_ct"),
+    [
+        (b"application/grpc+proto", b"application/grpc+proto"),
+        (b"application/grpc", b"application/grpc+proto"),
+    ],
+    ids=["explicit-proto", "default-grpc-on-proto"],
+)
+async def test_grpc_protobuf_codec_unary_and_streaming(
+    inbound_ct: bytes,
+    expected_response_ct: bytes,
+) -> None:
+    """Verify GrpcServiceRegistry dispatches protobuf-typed unary and streaming RPCs with +proto content-type."""
+
+    @grpc_method(service="ProtoService", package="vertebra.proto")
+    async def proto_unary(req: _ProtoStringValue) -> _ProtoStringValue:
+        return _ProtoStringValue(value=f"proto:{req.value}")
+
+    @grpc_method(service="ProtoService", package="vertebra.proto")
+    async def proto_bidi(
+        stream: AsyncIterator[_ProtoStringValue],
+    ) -> AsyncIterator[_ProtoStringValue]:
+        async for item in stream:
+            yield _ProtoStringValue(value=item.value.upper())
+
+    registry = GrpcServiceRegistry()
+    registry.register(proto_unary)
+    registry.register(proto_bidi)
+
+    req_wire = _ProtoStringValue(value="hello").SerializeToString()
+    unary_events = await _invoke_asgi(
+        registry,
+        path="/vertebra.proto.ProtoService/ProtoUnary",
+        body=encode_lpm_frame(req_wire),
+        content_type=inbound_ct,
+    )
+    start_headers = dict(unary_events[0]["headers"])
+    assert start_headers[b"content-type"] == expected_response_ct
+    assert dict(unary_events[-1]["headers"])[b"grpc-status"] == b"0"
+    unary_frames = decode_lpm_frames(
+        b"".join(e.get("body", b"") for e in unary_events if e["type"] == "http.response.body")
+    )
+    assert _ProtoStringValue.FromString(unary_frames[0]).value == "proto:hello"
+
+    bidi_body = b"".join(
+        [
+            encode_lpm_frame(_ProtoStringValue(value="one").SerializeToString()),
+            encode_lpm_frame(_ProtoStringValue(value="two").SerializeToString()),
+        ]
+    )
+    bidi_events = await _invoke_asgi(
+        registry,
+        path="/vertebra.proto.ProtoService/ProtoBidi",
+        body=bidi_body,
+        content_type=inbound_ct,
+    )
+    assert dict(bidi_events[0]["headers"])[b"content-type"] == expected_response_ct
+    assert dict(bidi_events[-1]["headers"])[b"grpc-status"] == b"0"
+    bidi_frames = decode_lpm_frames(
+        b"".join(e.get("body", b"") for e in bidi_events if e["type"] == "http.response.body")
+    )
+    assert [_ProtoStringValue.FromString(f).value for f in bidi_frames] == ["ONE", "TWO"]
+
+
+@pytest.mark.anyio
+async def test_grpc_content_type_alignment_and_unimplemented_proto_on_msgpack() -> None:
+    """Verify MsgPack handlers emit +msgpack on default application/grpc and return UNIMPLEMENTED for +proto."""
+    called = False
+
+    @grpc_method(service="EchoService", package="vertebra.echo")
+    async def guarded_echo(req: EchoRequest) -> EchoResponse:
+        nonlocal called
+        called = True
+        return EchoResponse(reply=req.message, sequence=req.count)
+
+    registry = GrpcServiceRegistry()
+    registry.register(guarded_echo)
+
+    payload = encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="hi", count=1)))
+
+    default_events = await _invoke_asgi(
+        registry,
+        path="/vertebra.echo.EchoService/GuardedEcho",
+        body=payload,
+        content_type=b"application/grpc",
+    )
+    assert dict(default_events[0]["headers"])[b"content-type"] == b"application/grpc+msgpack"
+    assert dict(default_events[-1]["headers"])[b"grpc-status"] == b"0"
+    assert called is True
+
+    called = False
+    proto_events = await _invoke_asgi(
+        registry,
+        path="/vertebra.echo.EchoService/GuardedEcho",
+        body=payload,
+        content_type=b"application/grpc+proto",
+    )
+    assert dict(proto_events[-1]["headers"])[b"grpc-status"] == b"12"
+    assert called is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("method_path", "oversized_body", "expect_handler_called"),
+    [
+        (
+            "/vertebra.echo.EchoService/StreamClient",
+            encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="x" * 200, count=1))),
+            False,
+        ),
+        (
+            "/vertebra.echo.EchoService/StreamBidi",
+            encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="x" * 200, count=1))),
+            False,
+        ),
+        (
+            "/vertebra.echo.EchoService/StreamClient",
+            struct.pack(">BI", 0, 10_000_000) + b"tiny",
+            False,
+        ),
+        (
+            "/vertebra.echo.EchoService/StreamBidi",
+            encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="ok", count=1)))
+            + encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="x" * 200, count=1))),
+            True,
+        ),
+    ],
+    ids=["client-oversized", "bidi-oversized", "client-declared-huge-header", "bidi-second-frame-oversized"],
+)
+async def test_grpc_streaming_frame_size_cap_returns_resource_exhausted(
+    method_path: str,
+    oversized_body: bytes,
+    expect_handler_called: bool,
+) -> None:
+    """Verify streaming LPM frames exceeding max_message_bytes reject with grpc-status 8."""
+    invoked = False
+
+    @grpc_method(service="EchoService", package="vertebra.echo")
+    async def stream_client(stream: AsyncIterator[EchoRequest]) -> EchoResponse:
+        nonlocal invoked
+        invoked = True
+        total = 0
+        async for item in stream:
+            total += item.count
+        return EchoResponse(reply="ok", sequence=total)
+
+    @grpc_method(service="EchoService", package="vertebra.echo")
+    async def stream_bidi(stream: AsyncIterator[EchoRequest]) -> AsyncIterator[EchoResponse]:
+        nonlocal invoked
+        invoked = True
+        async for item in stream:
+            yield EchoResponse(reply=item.message, sequence=item.count)
+
+    registry = GrpcServiceRegistry(max_message_bytes=128)
+    registry.register(stream_client)
+    registry.register(stream_bidi)
+
+    events = await _invoke_asgi(
+        registry,
+        path=method_path,
+        body=oversized_body,
+        content_type=b"application/grpc+msgpack",
+    )
+    assert dict(events[-1]["headers"])[b"grpc-status"] == b"8"
+    assert invoked is expect_handler_called
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("token_case", "expected_status"),
+    [
+        ("valid", b"0"),
+        ("missing", b"16"),
+        ("expired", b"16"),
+        ("tampered", b"16"),
+        ("wrong_audience", b"16"),
+    ],
+)
+async def test_grpc_jwks_bearer_enforcement_and_agent_context_propagation(
+    token_case: str,
+    expected_status: bytes,
+) -> None:
+    """Verify GrpcServiceRegistry validates RSA JWKS Bearer JWTs and propagates claims to AgentContext."""
+    rsa_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk_doc = json.loads(pyjwt.algorithms.RSAAlgorithm.to_jwk(rsa_priv.public_key()))
+    jwk_doc["kid"] = "grpc-rsa-1"
+    jwk_doc["alg"] = "RS256"
+    jwk_doc["use"] = "sig"
+
+    async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _req: httpx.Response(200, json={"keys": [jwk_doc]}))
+    )
+    verifier = JWKSVerifier(
+        JWKSConfig(
+            jwks_url="https://idp.example.com/.well-known/jwks.json",
+            issuer="https://idp.example.com",
+            audience="grpc-api",
+        ),
+        async_client=async_client,
+    )
+    observed_identities: list[tuple[str | None, str, tuple[str, ...]]] = []
+
+    @grpc_method(service="AuthEchoService", package="vertebra.auth")
+    async def auth_echo(req: EchoRequest, ctx: GrpcContext) -> EchoResponse:
+        current = AgentContext.current()
+        assert current is not None
+        assert ctx.agent_context is current
+        observed_identities.append((current.identity.user_id, current.identity.tenant_id, current.identity.scopes))
+        return EchoResponse(
+            reply=f"{req.message}:{current.identity.user_id}",
+            sequence=req.count,
+            metadata={"tenant": current.identity.tenant_id},
+        )
+
+    registry = GrpcServiceRegistry(jwks_verifier=verifier)
+    registry.register(auth_echo)
+
+    try:
+        now = int(time.time())
+        extra_headers: list[tuple[bytes, bytes]] = []
+        if token_case != "missing":
+            signing_key = other_priv if token_case == "tampered" else rsa_priv
+            exp = now - 60 if token_case == "expired" else now + 300
+            aud = "wrong-aud" if token_case == "wrong_audience" else "grpc-api"
+            jwt_token = pyjwt.encode(
+                {
+                    "sub": "svc-user-9",
+                    "tenant_id": "tenant-z",
+                    "scope": "rpc:read rpc:write",
+                    "iss": "https://idp.example.com",
+                    "aud": aud,
+                    "exp": exp,
+                },
+                signing_key,
+                algorithm="RS256",
+                headers={"kid": "grpc-rsa-1"},
+            )
+            extra_headers.append((b"authorization", f"Bearer {jwt_token}".encode("ascii")))
+
+        events = await _invoke_asgi(
+            registry,
+            path="/vertebra.auth.AuthEchoService/AuthEcho",
+            body=encode_lpm_frame(encode_msgpack_bytes(EchoRequest(message="ping", count=3))),
+            extra_headers=extra_headers,
+        )
+        assert dict(events[-1]["headers"])[b"grpc-status"] == expected_status
+        if expected_status == b"0":
+            assert observed_identities == [("svc-user-9", "tenant-z", ("rpc:read", "rpc:write"))]
+            frames = decode_lpm_frames(
+                b"".join(e.get("body", b"") for e in events if e["type"] == "http.response.body")
+            )
+            decoded = decode_msgpack(frames[0], type=EchoResponse)
+            assert decoded.reply == "ping:svc-user-9"
+            assert decoded.metadata["tenant"] == "tenant-z"
+        else:
+            assert observed_identities == []
+    finally:
+        await verifier.aclose()
+        await async_client.aclose()
+
+
 async def _invoke_asgi(
     registry: GrpcServiceRegistry,
     *,
     path: str,
     body: bytes,
     extra_headers: list[tuple[bytes, bytes]] | None = None,
+    content_type: bytes | None = b"application/grpc+msgpack",
 ) -> list[dict[str, Any]]:
     """Invoke GrpcServiceRegistry as an ASGI app and collect emitted send events."""
-    headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/grpc+msgpack")]
+    headers: list[tuple[bytes, bytes]] = []
+    if content_type is not None:
+        headers.append((b"content-type", content_type))
     if extra_headers:
         headers.extend(extra_headers)
     scope: dict[str, Any] = {

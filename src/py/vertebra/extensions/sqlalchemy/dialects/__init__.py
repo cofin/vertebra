@@ -10,6 +10,7 @@ from sqlalchemy.pool import NullPool
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    DIALECT_DESCRIPTORS: dict[str, type[Any]]
     from vertebra.extensions.sqlalchemy.dialects._base import (
         AsyncExecutionContext,
         SyncExecutionContext,
@@ -50,11 +51,6 @@ if TYPE_CHECKING:
         AsyncSQLiteDialect,
         SyncSQLiteDialect,
     )
-    from vertebra.extensions.sqlalchemy.engine import (
-        SyncEngineAdapter,
-        attach_serverless_disconnect_guard,
-        is_free_threaded,
-    )
 
 __all__ = (
     "ALL_DIALECT_SCHEMES",
@@ -73,7 +69,6 @@ __all__ = (
     "NullPool",
     "SyncBigQueryDialect",
     "SyncDuckDBDialect",
-    "SyncEngineAdapter",
     "SyncExecutionContext",
     "SyncMSSQLDialect",
     "SyncMySQLDialect",
@@ -84,8 +79,6 @@ __all__ = (
     "SyncSpannerDialect",
     "_AsyncDialectMixin",
     "_SyncDialectMixin",
-    "attach_serverless_disconnect_guard",
-    "is_free_threaded",
     "register_sqlalchemy_dialects",
 )
 
@@ -145,7 +138,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "AsyncSpannerDialect": ("vertebra.extensions.sqlalchemy.dialects.spanner", "AsyncSpannerDialect"),
     "SyncBigQueryDialect": ("vertebra.extensions.sqlalchemy.dialects.bigquery", "SyncBigQueryDialect"),
     "SyncDuckDBDialect": ("vertebra.extensions.sqlalchemy.dialects.duckdb", "SyncDuckDBDialect"),
-    "SyncEngineAdapter": ("vertebra.extensions.sqlalchemy.engine", "SyncEngineAdapter"),
     "SyncExecutionContext": ("vertebra.extensions.sqlalchemy.dialects._base", "SyncExecutionContext"),
     "SyncMSSQLDialect": ("vertebra.extensions.sqlalchemy.dialects.mssql", "SyncMSSQLDialect"),
     "SyncMySQLDialect": ("vertebra.extensions.sqlalchemy.dialects.mysql", "SyncMySQLDialect"),
@@ -156,11 +148,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "SyncSpannerDialect": ("vertebra.extensions.sqlalchemy.dialects.spanner", "SyncSpannerDialect"),
     "_AsyncDialectMixin": ("vertebra.extensions.sqlalchemy.dialects._base", "_AsyncDialectMixin"),
     "_SyncDialectMixin": ("vertebra.extensions.sqlalchemy.dialects._base", "_SyncDialectMixin"),
-    "attach_serverless_disconnect_guard": (
-        "vertebra.extensions.sqlalchemy.engine",
-        "attach_serverless_disconnect_guard",
-    ),
-    "is_free_threaded": ("vertebra.extensions.sqlalchemy.engine", "is_free_threaded"),
 }
 
 _DIALECT_REGISTRATIONS: tuple[tuple[str, str, str], ...] = (

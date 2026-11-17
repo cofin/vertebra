@@ -1,13 +1,24 @@
 """Litestar v2 and v3 route extraction and typed path parameter conversion for Rust matchit 0.9."""
 
-import re
+from __future__ import annotations
+
 from typing import Any
 
-import msgspec
-
-from vertebra.server._routing import PARAM_CONVERTERS, make_handler_id
+from vertebra.server._routing import (
+    BaseRouteCompiler,
+    RouterTable,
+    _compile_match_regex,
+    _extract_param_types_from_path,
+    convert_path_params,
+    make_handler_id,
+    normalize_path_for_matchit,
+)
+from vertebra.server._routing import (
+    ExtractedRoute as _BaseExtractedRoute,
+)
 
 __all__ = (
+    "BaseRouteCompiler",
     "ExtractedRoute",
     "RouteCompiler",
     "RouterTable",
@@ -19,73 +30,15 @@ __all__ = (
 )
 
 
-class ExtractedRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+class ExtractedRoute(_BaseExtractedRoute, frozen=True, gc=False, kw_only=True):
     """Pre-compiled Litestar route entry indexed by stable uint64 handler_id."""
 
-    handler_id: int
-    method: str
-    path_template: str
-    matchit_path: str
-    route: Any
-    route_handler: Any
-    kwargs_model: Any
-    param_types: dict[str, str]
-    regex_pattern: re.Pattern[str]
+    route: Any = None
+    route_handler: Any = None
+    kwargs_model: Any = None
 
 
-class RouterTable:
-    """Lookup table mapping Rust handler_id and (method, path) to ExtractedRoute."""
-
-    __slots__ = ("_by_method", "routes")
-
-    def __init__(self, routes: dict[int, ExtractedRoute]) -> None:
-        self.routes = routes
-        by_method: dict[str, list[ExtractedRoute]] = {}
-        for entry in routes.values():
-            by_method.setdefault(entry.method, []).append(entry)
-        self._by_method = by_method
-
-    def get_by_handler_id(self, handler_id: int) -> ExtractedRoute | None:
-        """Look up an extracted route by its stable uint64 handler_id."""
-        return self.routes.get(handler_id)
-
-    def match(self, method: str, path: str) -> ExtractedRoute | None:
-        """Match a request method and path to an ExtractedRoute."""
-        for entry in self._by_method.get(method.upper(), ()):
-            if entry.regex_pattern.match(path) is not None:
-                return entry
-        return None
-
-    def match_with_params(self, method: str, path: str) -> tuple[ExtractedRoute, dict[str, Any]] | None:
-        """Match a request method and path and return the route entry with converted path parameters."""
-        for entry in self._by_method.get(method.upper(), ()):
-            matched = entry.regex_pattern.match(path)
-            if matched is not None:
-                raw_groups = matched.groupdict()
-                params = convert_path_params(raw_groups, entry.param_types) if raw_groups else {}
-                return entry, params
-        return None
-
-    def allowed_methods(self, path: str) -> list[str]:
-        """Return a sorted list of HTTP methods matching path for 405 Allow generation."""
-        allowed: set[str] = set()
-        for method, entries in self._by_method.items():
-            for entry in entries:
-                if entry.regex_pattern.match(path) is not None:
-                    allowed.add(method)
-                    break
-        return sorted(allowed)
-
-    def convert_params(
-        self,
-        route_entry: ExtractedRoute,
-        raw_params: dict[str, str],
-    ) -> dict[str, Any]:
-        """Convert raw string path parameters using the route's pre-compiled converters."""
-        return convert_path_params(raw_params, route_entry.param_types)
-
-
-class RouteCompiler:
+class RouteCompiler(BaseRouteCompiler):
     """Compiler extracting Litestar v2 and v3 route handlers into a RouterTable."""
 
     __slots__ = ()
@@ -104,37 +57,6 @@ class RouteCompiler:
     def extract_entries(self, app: Any) -> list[ExtractedRoute]:
         """Return all extracted route descriptors as a list."""
         return extract_route_entries(app)
-
-
-def normalize_path_for_matchit(path: str) -> str:
-    """Convert a Litestar path template into a matchit 0.9 route pattern."""
-    if "{" not in path:
-        return path
-    segments: list[str] = []
-    for segment in path.split("/"):
-        matched = _SEGMENT_PARAM_RE.match(segment)
-        if matched is None:
-            segments.append(segment)
-            continue
-        param_name, param_type = matched.group(1), matched.group(2) or "str"
-        if param_type == "path":
-            segments.append(f"{{*{param_name}}}")
-        else:
-            segments.append(f"{{{param_name}}}")
-    return "/".join(segments)
-
-
-def convert_path_params(
-    raw_params: dict[str, str],
-    param_types: dict[str, str],
-) -> dict[str, Any]:
-    """Convert raw string path parameters extracted by matchit into typed Python objects."""
-    converted: dict[str, Any] = {}
-    for name, raw_val in raw_params.items():
-        type_name = param_types.get(name, "str")
-        converter = PARAM_CONVERTERS.get(type_name, str)
-        converted[name] = converter(raw_val)
-    return converted
 
 
 def extract_routes(app: Any) -> RouterTable:
@@ -175,33 +97,5 @@ def extract_route_entries(app: Any) -> list[ExtractedRoute]:
     return list(extract_routes(app).routes.values())
 
 
-_SEGMENT_PARAM_RE = re.compile(r"^\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-zA-Z0-9_]+))?\}$")
-
-
 def _unpack_route_handler_map_entry(entry: Any) -> tuple[Any, Any]:
     return entry if isinstance(entry, tuple) else (entry, None)
-
-
-def _extract_param_types_from_path(path: str) -> dict[str, str]:
-    param_types: dict[str, str] = {}
-    for segment in path.split("/"):
-        matched = _SEGMENT_PARAM_RE.match(segment)
-        if matched is not None:
-            param_types[matched.group(1)] = matched.group(2) or "str"
-    return param_types
-
-
-def _compile_match_regex(path_template: str) -> re.Pattern[str]:
-    parts: list[str] = []
-    for segment in path_template.split("/"):
-        matched = _SEGMENT_PARAM_RE.match(segment)
-        if matched is None:
-            parts.append(re.escape(segment))
-            continue
-        param_name, param_type = matched.group(1), matched.group(2) or "str"
-        if param_type == "path":
-            parts.append(f"(?P<{param_name}>.+)")
-        else:
-            parts.append(f"(?P<{param_name}>[^/]+)")
-    pattern = "/".join(parts) or "/"
-    return re.compile(f"^{pattern}$")

@@ -1,10 +1,21 @@
 """DuckDB SQLSpec adapter package exports with PEP 562 lazy loading for optional stores."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.duckdb._typing import (
+        DuckDBAsyncConnectionContext,
+        DuckDBAsyncSessionContext,
+        DuckDBConnectionParams,
+        DuckDBDriverFeatures,
+        DuckDBPoolParams,
+        DuckDBSyncConnectionContext,
+        DuckDBSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.duckdb.adk import (
         DuckDBAsyncADKArtifactStore,
         DuckDBAsyncADKMemoryStore,
@@ -44,16 +55,23 @@ __all__ = (
     "DuckDBAsyncADKMemoryStore",
     "DuckDBAsyncADKStore",
     "DuckDBAsyncConfig",
+    "DuckDBAsyncConnectionContext",
     "DuckDBAsyncDataDictionary",
     "DuckDBAsyncDriver",
+    "DuckDBAsyncSessionContext",
+    "DuckDBConnectionParams",
+    "DuckDBDriverFeatures",
     "DuckDBEventQueueStore",
     "DuckDBLitestarStore",
+    "DuckDBPoolParams",
     "DuckDBSyncADKArtifactStore",
     "DuckDBSyncADKMemoryStore",
     "DuckDBSyncADKStore",
     "DuckDBSyncConfig",
+    "DuckDBSyncConnectionContext",
     "DuckDBSyncDataDictionary",
     "DuckDBSyncDriver",
+    "DuckDBSyncSessionContext",
     "build_connection_config",
     "build_duckdb_copy_sql",
     "build_profile",
@@ -83,13 +101,24 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     ),
     "DuckDBAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.duckdb.adk", "DuckDBAsyncADKStore"),
     "DuckDBAsyncConfig": ("vertebra.extensions.sqlspec.adapters.duckdb.config", "DuckDBAsyncConfig"),
+    "DuckDBAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.duckdb._typing",
+        "DuckDBAsyncConnectionContext",
+    ),
     "DuckDBAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.duckdb.data_dictionary",
         "DuckDBAsyncDataDictionary",
     ),
     "DuckDBAsyncDriver": ("vertebra.extensions.sqlspec.adapters.duckdb.driver", "DuckDBAsyncDriver"),
+    "DuckDBAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.duckdb._typing",
+        "DuckDBAsyncSessionContext",
+    ),
+    "DuckDBConnectionParams": ("vertebra.extensions.sqlspec.adapters.duckdb._typing", "DuckDBConnectionParams"),
+    "DuckDBDriverFeatures": ("vertebra.extensions.sqlspec.adapters.duckdb._typing", "DuckDBDriverFeatures"),
     "DuckDBEventQueueStore": ("vertebra.extensions.sqlspec.adapters.duckdb.events", "DuckDBEventQueueStore"),
     "DuckDBLitestarStore": ("vertebra.extensions.sqlspec.adapters.duckdb.litestar", "DuckDBLitestarStore"),
+    "DuckDBPoolParams": ("vertebra.extensions.sqlspec.adapters.duckdb._typing", "DuckDBPoolParams"),
     "DuckDBSyncADKArtifactStore": (
         "vertebra.extensions.sqlspec.adapters.duckdb.adk",
         "DuckDBSyncADKArtifactStore",
@@ -100,11 +129,19 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     ),
     "DuckDBSyncADKStore": ("vertebra.extensions.sqlspec.adapters.duckdb.adk", "DuckDBSyncADKStore"),
     "DuckDBSyncConfig": ("vertebra.extensions.sqlspec.adapters.duckdb.config", "DuckDBSyncConfig"),
+    "DuckDBSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.duckdb._typing",
+        "DuckDBSyncConnectionContext",
+    ),
     "DuckDBSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.duckdb.data_dictionary",
         "DuckDBSyncDataDictionary",
     ),
     "DuckDBSyncDriver": ("vertebra.extensions.sqlspec.adapters.duckdb.driver", "DuckDBSyncDriver"),
+    "DuckDBSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.duckdb._typing",
+        "DuckDBSyncSessionContext",
+    ),
     "build_connection_config": ("vertebra.extensions.sqlspec.adapters.duckdb.core", "build_connection_config"),
     "build_duckdb_copy_sql": ("vertebra.extensions.sqlspec.adapters.duckdb.core", "build_duckdb_copy_sql"),
     "build_profile": ("vertebra.extensions.sqlspec.adapters.duckdb.core", "build_profile"),

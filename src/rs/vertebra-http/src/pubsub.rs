@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+use vertebra_core::bridge::{SHM_PUBSUB_CHANNEL, decode_shm_pubsub_frame};
+use vertebra_core::broker::ShmLeaseTable;
 
 use crate::sse::{SseEvent, SseHub};
 
@@ -431,5 +434,42 @@ impl PubSubBroker {
             }
         }
         delivered
+    }
+
+    /// Spawn an adaptive-polling background task draining `b"__vtb_pubsub__"` channel
+    /// frames from `lease_table` and publishing them locally until `shutdown` fires.
+    pub fn spawn_shm_channel_forwarder(
+        self: &Arc<Self>,
+        lease_table: Arc<ShmLeaseTable>,
+        shutdown: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let broker = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_millis(1);
+            let max_backoff = std::time::Duration::from_millis(20);
+            loop {
+                let frames = lease_table.drain_channel(SHM_PUBSUB_CHANNEL);
+                if frames.is_empty() {
+                    backoff = (backoff * 2).min(max_backoff);
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                } else {
+                    backoff = std::time::Duration::from_millis(1);
+                    for frame in frames {
+                        if let Some((topic, payload, key)) = decode_shm_pubsub_frame(&frame.payload)
+                        {
+                            broker.pubsub_publish(topic, Bytes::copy_from_slice(payload), key);
+                        }
+                    }
+                    if shutdown.is_cancelled() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
     }
 }

@@ -11,7 +11,7 @@ import tempfile
 import time
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast
 
 import msgspec
 
@@ -95,7 +95,8 @@ class CgroupQuota(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         sched_getaffinity = getattr(os, "sched_getaffinity", None)
         if callable(sched_getaffinity):
             try:
-                affinity_cpus = max(1, len(sched_getaffinity(0)))
+                get_affinity = cast("collections.abc.Callable[[int], set[int]]", sched_getaffinity)
+                affinity_cpus = max(1, len(get_affinity(0)))
             except OSError:
                 affinity_cpus = os.cpu_count() or 1
         else:
@@ -184,7 +185,8 @@ class SHMAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             raise ValueError(msg)
         memfd_fn = getattr(os, "memfd_create", None)
         if self.prefer_memfd and callable(memfd_fn):
-            fd = int(memfd_fn(f"vertebra-{name}", os.MFD_CLOEXEC))
+            create_memfd = cast("collections.abc.Callable[[str, int], int]", memfd_fn)
+            fd = int(create_memfd(f"vertebra-{name}", os.MFD_CLOEXEC))
             backend = "memfd"
         else:
             with tempfile.TemporaryFile() as tmp:
@@ -259,7 +261,11 @@ class ZPagesRegistry:
         adapters: list[PlatformAdapter] = []
         for ep in entry_points(group=group):
             loaded = ep.load()
-            instance = loaded() if callable(loaded) else loaded
+            instance = (
+                cast("collections.abc.Callable[[], PlatformAdapter]", loaded)()
+                if callable(loaded)
+                else cast("PlatformAdapter", loaded)
+            )
             adapters.append(instance)
         return adapters
 

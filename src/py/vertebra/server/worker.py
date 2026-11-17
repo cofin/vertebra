@@ -7,7 +7,7 @@ import concurrent.futures
 import logging
 import os
 import signal
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
 from typing import TYPE_CHECKING, Any, Literal
@@ -48,6 +48,7 @@ from vertebra.server._dispatch import (
     compile_handler_table,
     dispatch_batch,
     partition_batch,
+    shutdown_worker_executor,
 )
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._gil_audit import GilAuditReport
@@ -93,6 +94,29 @@ class WorkerStartupError(VertebraError, RuntimeError):
         self.prefix = prefix
         self.phase = phase
         super().__init__(f"Worker startup failed during {phase} for mount {prefix!r}")
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    """Retrieve unhandled task exceptions so cancelled or failed timed-out tasks emit zero warnings."""
+    if not task.cancelled():
+        with suppress(BaseException):
+            task.exception()
+
+
+async def _cancel_and_await_task(task: asyncio.Task[Any]) -> None:
+    """Cancel a scheduled asyncio task on its owning loop and await its completion."""
+    if not task.done():
+        task.cancel()
+        with suppress(BaseException):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
+    if task.done() and not task.cancelled():
+        with suppress(BaseException):
+            task.exception()
+
+
+async def _drain_loop_tick() -> None:
+    """Yield one event-loop turn so queued call_soon_threadsafe cancellations run."""
+    return None
 
 
 class _AsgiMountRunner:
@@ -147,11 +171,44 @@ class _AsgiMountRunner:
         """Run a batch across the sharded loop pool, answering 504 for requests past ``batch_timeout``."""
         if not requests:
             return []
-        coros = [self._runner.run_single(req) for req in requests]
+        tasks: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[AsgiResponse]] | None] = [None] * len(requests)
+
+        async def _run_tracked(idx: int, req: Any) -> AsgiResponse:
+            task = asyncio.current_task()
+            if task is not None:
+                tasks[idx] = (asyncio.get_running_loop(), task)
+            return await self._runner.run_single(req)
+
+        coros: list[Coroutine[Any, Any, AsgiResponse]] = [_run_tracked(idx, req) for idx, req in enumerate(requests)]
         futures = self._pool.schedule_batch(coros)
         _done, not_done = concurrent.futures.wait(futures, timeout=self._batch_timeout)
-        for fut in not_done:
-            fut.cancel()
+        if not_done:
+            cancel_waits: list[concurrent.futures.Future[None]] = []
+            has_unstarted = False
+            for idx, fut in enumerate(futures):
+                if fut not in not_done:
+                    continue
+                fut.cancel()
+                entry = tasks[idx]
+                if entry is None:
+                    has_unstarted = True
+                    continue
+                owner_loop, task = entry
+                if not task.done() and not owner_loop.is_closed():
+                    task.add_done_callback(_consume_task_exception)
+                    with suppress(RuntimeError):
+                        cancel_waits.append(asyncio.run_coroutine_threadsafe(_cancel_and_await_task(task), owner_loop))
+                elif task.done() and not task.cancelled():
+                    with suppress(BaseException):
+                        task.exception()
+            if has_unstarted and hasattr(self._pool, "loops"):
+                for loop in self._pool.loops:
+                    if loop.is_running() and not loop.is_closed():
+                        with suppress(RuntimeError):
+                            cancel_waits.append(asyncio.run_coroutine_threadsafe(_drain_loop_tick(), loop))
+            for cancel_fut in cancel_waits:
+                with suppress(Exception):
+                    cancel_fut.result(timeout=0.5)
         results: list[AsgiResponse] = []
         for req, fut in zip(requests, futures, strict=True):
             req_id = getattr(req, "request_id", 0)
@@ -556,13 +613,18 @@ class Worker:
                     else:
                         loop_pool.schedule(colocated_runner.stop()).result(timeout=5.0)
                         if colocated_future is not None:
-                            colocated_future.result(timeout=2.0)
+                            try:
+                                colocated_future.result(timeout=2.0)
+                            except TimeoutError:
+                                colocated_future.cancel()
+                                raise
             try:
                 lifespan_stack.close()
             except Exception:
                 logger.exception("ASGI lifespan shutdown error")
             if executor is not None:
-                executor.shutdown(wait=False)
+                executor.shutdown(wait=True)
+            shutdown_worker_executor(wait=True)
             loop_pool.stop()
 
     def _resolve_colocated_queue_service(

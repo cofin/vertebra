@@ -1,10 +1,12 @@
 """SQLite Litestar session store backed by Vertebra native drivers."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime, timedelta
-from typing import Any, NotRequired
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired
 
 from sqlspec.config import LitestarConfig
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
 
 from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     apply_pragmas_async,
@@ -13,6 +15,9 @@ from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     extension_pragma_statements,
     julian_to_datetime,
 )
+
+if TYPE_CHECKING:
+    from sqlspec.migrations.schema import DropStatement, SchemaTarget
 
 __all__ = ("SQLiteLitestarConfig", "SQLiteLitestarStore")
 
@@ -33,6 +38,7 @@ class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
     __slots__ = ("_configured_driver_ids", "_pragma_statements")
 
     adapter_name = "vertebra_sqlite"
+    _dialect: ClassVar[str] = "sqlite"
     extension_config_options = BaseSQLSpecStore.extension_config_options | frozenset(
         {
             "pragma_overrides",
@@ -85,6 +91,28 @@ class SQLiteLitestarStore(BaseSQLSpecStore[Any]):
     async def prepare_schema_async(self, driver: Any) -> None:
         """Apply configured SQLite PRAGMAs asynchronously before migration DDL generation."""
         await self._ensure_pragmas_async(driver)
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the SQLite session table."""
+        return super().get_schema_targets()
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return the SQLite partial expiration index companion definition."""
+        return super().get_companion_indexes()
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Apply PRAGMAs and ensure the SQLite partial expiration index exists."""
+        self._ensure_pragmas_sync(driver)
+        super().reconcile_companion_objects_sync(driver)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Apply PRAGMAs and ensure the SQLite partial expiration index exists asynchronously."""
+        await self._ensure_pragmas_async(driver)
+        await super().reconcile_companion_objects_async(driver)
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return ordered downgrade drop statements for the SQLite session index and table."""
+        return super().downgrade_drops()
 
     async def create_table(self) -> None:
         """Create the Litestar session table if enabled by `create_schema_enabled`."""

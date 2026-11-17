@@ -64,7 +64,6 @@ def test_zensical_css_and_attribute_templates_enforce_left_bars_and_non_empty_ro
     """Verify extra.css overrides div.doc-contents:not(.first) and attribute templates filter blank rows."""
     repo_root = Path(__file__).resolve().parents[5]
     css_text = (repo_root / "docs" / "stylesheets" / "extra.css").read_text(encoding="utf-8")
-    agent_ref_text = (repo_root / "docs" / "reference" / "agent.md").read_text(encoding="utf-8")
     tpl_dir = repo_root / "tools" / "docs" / "templates" / "python" / "material"
     summary_tpl = (tpl_dir / "summary" / "attributes.html.jinja").read_text(encoding="utf-8")
     docstring_tpl = (tpl_dir / "docstring" / "attributes.html.jinja").read_text(encoding="utf-8")
@@ -75,10 +74,20 @@ def test_zensical_css_and_attribute_templates_enforce_left_bars_and_non_empty_ro
     assert ".md-typeset > .doc-object > h4.doc-heading" in css_text
     assert "attribute.annotation or attribute.description" in summary_tpl
     assert "attribute.annotation or attribute.description" in docstring_tpl
-    for store_cls in ("SQLSpecSessionStore", "AlchemySessionStore", "ObjectStoreSessionStore"):
-        assert f"::: vertebra.agent.sessions.{store_cls}\n    options:\n      heading_level: 4\n      members:" in (
-            agent_ref_text
-        )
+
+
+@pytest.mark.parametrize(
+    "store_cls",
+    ["SQLSpecSessionStore", "AlchemySessionStore", "ObjectStoreSessionStore"],
+    ids=["sqlspec", "alchemy", "object-store"],
+)
+def test_agent_reference_documents_session_store_members(store_cls: str) -> None:
+    """Verify agent.md documents each session store class at heading level 4 with members."""
+    repo_root = Path(__file__).resolve().parents[5]
+    agent_ref_text = (repo_root / "docs" / "reference" / "agent.md").read_text(encoding="utf-8")
+    assert f"::: vertebra.agent.sessions.{store_cls}\n    options:\n      heading_level: 4\n      members:" in (
+        agent_ref_text
+    )
 
 
 def test_zensical_config_branding_uses_cofin_vertebra() -> None:

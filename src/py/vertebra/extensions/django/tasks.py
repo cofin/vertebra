@@ -12,28 +12,48 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 
 from vertebra.framework.queues import QueueConfig, QueueService, TaskDef
-from vertebra.typing import MissingDependencyError
+from vertebra.utils.module_loader import ensure_module, import_optional
 
-try:
-    from django.tasks import TaskResult, TaskResultStatus
-    from django.tasks.backends.base import BaseTaskBackend
-    from django.tasks.base import Task as DjangoTask
-    from django.tasks.base import TaskError
-    from django.tasks.exceptions import TaskResultDoesNotExist
-except ImportError as exc:
-    raise MissingDependencyError(
-        "django",
-        install_package="django",
-        extra="django",
-    ) from exc
+_tasks_backend_mod = import_optional("django.tasks.backends.base")
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from django.tasks import TaskResult, TaskResultStatus
+    from django.tasks.backends.base import BaseTaskBackend as _BaseTaskBackend
+    from django.tasks.base import TaskError
+
     from vertebra.framework.di import Container
     from vertebra.framework.queues.base import TaskLane
+else:
+    _BaseTaskBackend = _tasks_backend_mod.BaseTaskBackend if _tasks_backend_mod is not None else object
 
 __all__ = ("TaskBackend",)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve optional Django task base classes on demand."""
+    if name == "BaseTaskBackend":
+        return ensure_module("django.tasks.backends.base", package="django", extra="django").BaseTaskBackend
+    if name in {"TaskResult", "TaskResultStatus"}:
+        return getattr(ensure_module("django.tasks", package="django", extra="django"), name)
+    if name in {"DjangoTask", "TaskError"}:
+        attr = "Task" if name == "DjangoTask" else name
+        return getattr(ensure_module("django.tasks.base", package="django", extra="django"), attr)
+    if name == "TaskResultDoesNotExist":
+        return ensure_module("django.tasks.exceptions", package="django", extra="django").TaskResultDoesNotExist
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def _ensure_django_tasks() -> tuple[Any, Any, Any]:
+    """Import and return ``(django.tasks, django.tasks.base, django.tasks.exceptions)``."""
+    return (
+        ensure_module("django.tasks", package="django", extra="django"),
+        ensure_module("django.tasks.base", package="django", extra="django"),
+        ensure_module("django.tasks.exceptions", package="django", extra="django"),
+    )
+
 
 _SHARED_RESULTS: dict[str, dict[str, _TaskRecord]] = {}
 _RESULTS_LOCK = threading.Lock()
@@ -56,7 +76,7 @@ class _TaskRecord(msgspec.Struct, kw_only=True):
     return_value: Any = None
 
 
-class TaskBackend(BaseTaskBackend):
+class TaskBackend(_BaseTaskBackend):
     """Vertebra background task backend for Django 6.0+."""
 
     supports_defer = True
@@ -66,6 +86,8 @@ class TaskBackend(BaseTaskBackend):
 
     def __init__(self, alias: str = "default", params: dict[str, Any] | None = None) -> None:
         """Initialize the task backend."""
+        if _tasks_backend_mod is None:
+            ensure_module("django.tasks.backends.base", package="django", extra="django")
         params_dict = dict(params or {})
         super().__init__(alias=alias, params=params_dict)
         self._container: Container | None = self.options.get("container")
@@ -107,11 +129,12 @@ class TaskBackend(BaseTaskBackend):
         **kwargs: Any,
     ) -> TaskResult[Any, Any]:
         """Queue up a task to be executed synchronously."""
+        tasks_mod, tasks_base_mod, _ = _ensure_django_tasks()
         if hasattr(task, "validate_task") or hasattr(task, "func"):
             self.validate_task(task)
 
         if (
-            isinstance(task, DjangoTask)
+            isinstance(task, tasks_base_mod.Task)
             and len(args) == 2
             and isinstance(args[0], (tuple, list))
             and isinstance(args[1], dict)
@@ -146,7 +169,7 @@ class TaskBackend(BaseTaskBackend):
         record = _TaskRecord(
             task=task,
             id=task_id,
-            status=TaskResultStatus.READY,
+            status=tasks_mod.TaskResultStatus.READY,
             enqueued_at=now,
             args=resolved_args,
             kwargs=resolved_kwargs,
@@ -165,11 +188,12 @@ class TaskBackend(BaseTaskBackend):
         **kwargs: Any,
     ) -> TaskResult[Any, Any]:
         """Queue up a task to be executed asynchronously."""
+        tasks_mod, tasks_base_mod, _ = _ensure_django_tasks()
         if hasattr(task, "validate_task") or hasattr(task, "func"):
             self.validate_task(task)
 
         if (
-            isinstance(task, DjangoTask)
+            isinstance(task, tasks_base_mod.Task)
             and len(args) == 2
             and isinstance(args[0], (tuple, list))
             and isinstance(args[1], dict)
@@ -204,7 +228,7 @@ class TaskBackend(BaseTaskBackend):
         record = _TaskRecord(
             task=task,
             id=task_id,
-            status=TaskResultStatus.READY,
+            status=tasks_mod.TaskResultStatus.READY,
             enqueued_at=now,
             args=resolved_args,
             kwargs=resolved_kwargs,
@@ -218,11 +242,12 @@ class TaskBackend(BaseTaskBackend):
 
     def get_result(self, result_id: str) -> TaskResult[Any, Any]:
         """Retrieve a task result by id."""
+        _, _, tasks_exc_mod = _ensure_django_tasks()
         with _RESULTS_LOCK:
             record = self._results.get(result_id)
         if record is None:
             msg = f"Task result {result_id!r} does not exist."
-            raise TaskResultDoesNotExist(msg)
+            raise tasks_exc_mod.TaskResultDoesNotExist(msg)
         return self._build_result(record)
 
     def get_task_queue_name(self, task_id: str) -> str | None:
@@ -237,10 +262,11 @@ class TaskBackend(BaseTaskBackend):
 
     def update_task_running(self, task_id: str, *, worker_id: str = "worker") -> None:
         """Mark task as running with tracking metadata."""
+        tasks_mod, _, _ = _ensure_django_tasks()
         with _RESULTS_LOCK:
             record = self._results.get(task_id)
             if record is not None:
-                record.status = TaskResultStatus.RUNNING
+                record.status = tasks_mod.TaskResultStatus.RUNNING
                 now = datetime.now(UTC)
                 record.started_at = record.started_at or now
                 record.last_attempted_at = now
@@ -249,10 +275,11 @@ class TaskBackend(BaseTaskBackend):
 
     def update_task_success(self, task_id: str, *, result: Any, worker_id: str = "worker") -> None:
         """Mark task as successfully finished with return value."""
+        tasks_mod, _, _ = _ensure_django_tasks()
         with _RESULTS_LOCK:
             record = self._results.get(task_id)
             if record is not None:
-                record.status = TaskResultStatus.SUCCESSFUL
+                record.status = tasks_mod.TaskResultStatus.SUCCESSFUL
                 now = datetime.now(UTC)
                 record.finished_at = now
                 record.last_attempted_at = now
@@ -269,15 +296,16 @@ class TaskBackend(BaseTaskBackend):
         worker_id: str = "worker",
     ) -> None:
         """Mark task as failed with error details."""
+        tasks_mod, tasks_base_mod, _ = _ensure_django_tasks()
         with _RESULTS_LOCK:
             record = self._results.get(task_id)
             if record is not None:
-                record.status = TaskResultStatus.FAILED
+                record.status = tasks_mod.TaskResultStatus.FAILED
                 now = datetime.now(UTC)
                 record.finished_at = now
                 record.last_attempted_at = now
                 exc_path = f"{type(error).__module__}.{type(error).__qualname__}"
-                record.errors.append(TaskError(exception_class_path=exc_path, traceback=traceback_str))
+                record.errors.append(tasks_base_mod.TaskError(exception_class_path=exc_path, traceback=traceback_str))
                 if worker_id not in record.worker_ids:
                     record.worker_ids.append(worker_id)
 
@@ -338,7 +366,8 @@ class TaskBackend(BaseTaskBackend):
         return (task_name, func, "default", 0, None)
 
     def _build_result(self, record: _TaskRecord) -> TaskResult[Any, Any]:
-        result: TaskResult[Any, Any] = TaskResult(
+        tasks_mod, _, _ = _ensure_django_tasks()
+        result: TaskResult[Any, Any] = tasks_mod.TaskResult(
             task=record.task,
             id=record.id,
             status=record.status,
@@ -352,6 +381,6 @@ class TaskBackend(BaseTaskBackend):
             errors=record.errors,
             worker_ids=record.worker_ids,
         )
-        if record.status == TaskResultStatus.SUCCESSFUL:
+        if record.status == tasks_mod.TaskResultStatus.SUCCESSFUL:
             object.__setattr__(result, "_return_value", record.return_value)
         return result

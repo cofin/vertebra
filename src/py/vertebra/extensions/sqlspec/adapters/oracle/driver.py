@@ -2,28 +2,45 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+from sqlspec import SQLResult
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import validate_savepoint_name
+from sqlspec.exceptions import DialectNotSupportedError
 from sqlspec.storage import StorageBridgeJob
 
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.rls import TenantPredicate
 from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
+from vertebra.extensions.sqlspec.adapters.oracle._typing import (
+    OracleAsyncSessionlessTransactionContext,
+    OracleSyncSessionlessTransactionContext,
+)
 from vertebra.extensions.sqlspec.adapters.oracle.core import (
+    apply_oracle_transaction_priority,
     build_oracle_statement_config,
     map_oracle_exception,
     normalize_oracle_many_parameters,
     normalize_oracle_parameters,
+    validate_sessionless_execution_options,
+    validate_sessionless_transaction_args,
 )
 from vertebra.extensions.sqlspec.adapters.oracle.data_dictionary import (
     OracleAsyncDataDictionary,
     OracleSyncDataDictionary,
 )
 
+if TYPE_CHECKING:
+    from sqlspec.driver import ExecutionResult
+
 __all__ = ("OracleAsyncDriver", "OracleSyncDriver")
+
+_SESSIONLESS_UNSUPPORTED_MSG = (
+    "Oracle 26ai sessionless transactions are not supported by the underlying native Oracle driver"
+)
 
 
 def _extract_oracle_features(connection: Any) -> Any:
@@ -40,8 +57,33 @@ def _extract_tenant_context_args(connection: Any) -> tuple[str, str | None]:
     return str(namespace), str(proc) if proc is not None else None
 
 
+def _execute_accepts_suspend_on_success(connection: Any) -> bool:
+    """Return True when `connection.execute` explicitly declares a `suspend_on_success` parameter."""
+    execute_fn = getattr(connection, "execute", None)
+    if not callable(execute_fn):
+        return False
+    try:
+        params = inspect.signature(execute_fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "suspend_on_success" in params
+
+
+def _normalize_sessionless_txid(txid: Any, fallback: bytes | None = None) -> bytes:
+    """Coerce a native sessionless transaction identifier into `bytes`."""
+    if isinstance(txid, (bytes, bytearray)):
+        return bytes(txid)
+    if isinstance(txid, str):
+        return txid.encode("utf-8")
+    if fallback is not None:
+        return fallback
+    return b""
+
+
 class OracleSyncDriver(BaseSyncDriver):
     """Synchronous Oracle SQLSpec driver supporting `:name` and `:1` binds with `OracleCore` codecs."""
+
+    __slots__ = ("_data_dictionary", "_sessionless_cleanup_error", "_sessionless_transaction_id")
 
     dialect: str = "oracle"
     _execution_parameter_style = ParameterStyle.NAMED_COLON
@@ -64,6 +106,13 @@ class OracleSyncDriver(BaseSyncDriver):
             shared_pool=shared_pool,
         )
         self._data_dictionary: OracleSyncDataDictionary | None = None
+        self._sessionless_transaction_id: bytes | None = None
+        self._sessionless_cleanup_error: BaseException | None = None
+
+    @property
+    def sessionless_transaction_id(self) -> bytes | None:
+        """Return the active Oracle 26ai sessionless transaction identifier, if any."""
+        return self._sessionless_transaction_id
 
     @property
     def data_dictionary(self) -> OracleSyncDataDictionary:
@@ -71,6 +120,176 @@ class OracleSyncDriver(BaseSyncDriver):
         if self._data_dictionary is None:
             self._data_dictionary = OracleSyncDataDictionary()
         return self._data_dictionary
+
+    def set_transaction_priority(self, priority: Any) -> None:
+        """Set Oracle 26ai transaction priority (`DEFAULT`, `LOW`, `MEDIUM`, `HIGH`)."""
+        apply_oracle_transaction_priority(self.connection, priority)
+
+    def begin_sessionless_transaction(
+        self,
+        transaction_id: str | bytes | None = None,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+    ) -> bytes:
+        """Begin an Oracle 26ai sessionless transaction on the underlying connection."""
+        resolved = validate_sessionless_transaction_args(
+            transaction_id,
+            timeout=timeout,
+            defer_round_trip=defer_round_trip,
+        )
+        method = getattr(self.connection, "begin_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            txid = method(resolved, timeout=timeout, defer_round_trip=defer_round_trip)
+        except Exception as exc:
+            mapped = map_oracle_exception(exc)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = _normalize_sessionless_txid(txid, resolved)
+        return self._sessionless_transaction_id
+
+    def resume_sessionless_transaction(
+        self,
+        transaction_id: str | bytes,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+    ) -> bytes:
+        """Resume a suspended Oracle 26ai sessionless transaction on this connection."""
+        resolved = validate_sessionless_transaction_args(
+            transaction_id,
+            timeout=timeout,
+            is_resume=True,
+            defer_round_trip=defer_round_trip,
+        )
+        method = getattr(self.connection, "resume_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            txid = method(resolved, timeout=timeout, defer_round_trip=defer_round_trip)
+        except Exception as exc:
+            mapped = map_oracle_exception(exc)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = _normalize_sessionless_txid(txid, resolved)
+        return self._sessionless_transaction_id
+
+    def suspend_sessionless_transaction(self) -> None:
+        """Suspend the active Oracle 26ai sessionless transaction for another pooled session."""
+        method = getattr(self.connection, "suspend_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            method()
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    def sessionless_transaction(
+        self,
+        transaction_id: str | bytes | None = None,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+        resume: bool = False,
+        rollback_on_error: bool = True,
+    ) -> OracleSyncSessionlessTransactionContext:
+        """Scope a synchronous Oracle 26ai sessionless transaction and suspend on clean exit."""
+        return OracleSyncSessionlessTransactionContext(
+            self,
+            transaction_id=transaction_id,
+            timeout=timeout,
+            defer_round_trip=defer_round_trip,
+            resume=resume,
+            rollback_on_error=rollback_on_error,
+        )
+
+    def commit(self) -> None:
+        """Commit the active transaction and clear any attached sessionless transaction ID."""
+        try:
+            super().commit()
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    def rollback(self) -> None:
+        """Roll back the active transaction and clear any attached sessionless transaction ID."""
+        try:
+            super().rollback()
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: StatementConfig | None = None,
+        suspend_on_success: bool = False,
+        **kwargs: Any,
+    ) -> SQLResult:
+        """Execute a statement with optional Oracle 26ai `suspend_on_success` sessionless detachment."""
+        validate_sessionless_execution_options(suspend_on_success=suspend_on_success)
+        if not suspend_on_success:
+            return super().execute(statement, *parameters, statement_config=statement_config, **kwargs)
+        accepts_native = _execute_accepts_suspend_on_success(self.connection)
+        suspend_fn = getattr(self.connection, "suspend_sessionless_transaction", None)
+        if not accepts_native and not callable(suspend_fn):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        config = statement_config or self.statement_config
+        args = dict(config.execution_args or {})
+        args["oracle_suspend_on_success"] = True
+        effective_config = config.replace(execution_args=args)
+        prepared = self.prepare_statement(statement, parameters, statement_config=effective_config, kwargs=kwargs)
+        prepared = prepared.copy(statement_config=effective_config)
+        result = self.dispatch_statement_execution(prepared, self.connection)
+        if not accepts_native and callable(suspend_fn):
+            self.suspend_sessionless_transaction()
+        else:
+            self._sessionless_transaction_id = None
+        return result
+
+    def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Execute a single compiled Oracle statement, forwarding `suspend_on_success` when supported."""
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        exec_args = getattr(effective_config, "execution_args", None) or {}
+        if (
+            exec_args.get("oracle_suspend_on_success")
+            and not statement.returns_rows()
+            and _execute_accepts_suspend_on_success(cursor)
+        ):
+            sql, params = self._compile_for_native(statement)
+            raw = (
+                cursor.execute(sql, params, suspend_on_success=True)
+                if params is not None
+                else cursor.execute(sql, suspend_on_success=True)
+            )
+            rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
+            return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return super().dispatch_execute(cursor, statement)
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
@@ -197,6 +416,8 @@ class OracleSyncDriver(BaseSyncDriver):
 class OracleAsyncDriver(BaseAsyncDriver):
     """Asynchronous Oracle SQLSpec driver supporting `:name` and `:1` binds with `OracleCore` codecs."""
 
+    __slots__ = ("_data_dictionary", "_sessionless_cleanup_error", "_sessionless_transaction_id")
+
     dialect: str = "oracle"
     _execution_parameter_style = ParameterStyle.NAMED_COLON
 
@@ -218,6 +439,13 @@ class OracleAsyncDriver(BaseAsyncDriver):
             shared_pool=shared_pool,
         )
         self._data_dictionary: OracleAsyncDataDictionary | None = None
+        self._sessionless_transaction_id: bytes | None = None
+        self._sessionless_cleanup_error: BaseException | None = None
+
+    @property
+    def sessionless_transaction_id(self) -> bytes | None:
+        """Return the active Oracle 26ai sessionless transaction identifier, if any."""
+        return self._sessionless_transaction_id
 
     @property
     def data_dictionary(self) -> OracleAsyncDataDictionary:
@@ -225,6 +453,180 @@ class OracleAsyncDriver(BaseAsyncDriver):
         if self._data_dictionary is None:
             self._data_dictionary = OracleAsyncDataDictionary()
         return self._data_dictionary
+
+    def set_transaction_priority(self, priority: Any) -> None:
+        """Set Oracle 26ai transaction priority (`DEFAULT`, `LOW`, `MEDIUM`, `HIGH`)."""
+        apply_oracle_transaction_priority(self.connection, priority)
+
+    async def begin_sessionless_transaction(
+        self,
+        transaction_id: str | bytes | None = None,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+    ) -> bytes:
+        """Asynchronously begin an Oracle 26ai sessionless transaction on the underlying connection."""
+        resolved = validate_sessionless_transaction_args(
+            transaction_id,
+            timeout=timeout,
+            defer_round_trip=defer_round_trip,
+        )
+        method = getattr(self.connection, "begin_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            res = method(resolved, timeout=timeout, defer_round_trip=defer_round_trip)
+            txid = await res if inspect.isawaitable(res) else res
+        except Exception as exc:
+            mapped = map_oracle_exception(exc)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = _normalize_sessionless_txid(txid, resolved)
+        return self._sessionless_transaction_id
+
+    async def resume_sessionless_transaction(
+        self,
+        transaction_id: str | bytes,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+    ) -> bytes:
+        """Asynchronously resume a suspended Oracle 26ai sessionless transaction."""
+        resolved = validate_sessionless_transaction_args(
+            transaction_id,
+            timeout=timeout,
+            is_resume=True,
+            defer_round_trip=defer_round_trip,
+        )
+        method = getattr(self.connection, "resume_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            res = method(resolved, timeout=timeout, defer_round_trip=defer_round_trip)
+            txid = await res if inspect.isawaitable(res) else res
+        except Exception as exc:
+            mapped = map_oracle_exception(exc)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = _normalize_sessionless_txid(txid, resolved)
+        return self._sessionless_transaction_id
+
+    async def suspend_sessionless_transaction(self) -> None:
+        """Asynchronously suspend the active Oracle 26ai sessionless transaction."""
+        method = getattr(self.connection, "suspend_sessionless_transaction", None)
+        if not callable(method):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        try:
+            res = method()
+            if inspect.isawaitable(res):
+                await res
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    def sessionless_transaction(
+        self,
+        transaction_id: str | bytes | None = None,
+        *,
+        timeout: int = 60,
+        defer_round_trip: bool = True,
+        resume: bool = False,
+        rollback_on_error: bool = True,
+    ) -> OracleAsyncSessionlessTransactionContext:
+        """Scope an asynchronous Oracle 26ai sessionless transaction and suspend on clean exit."""
+        return OracleAsyncSessionlessTransactionContext(
+            self,
+            transaction_id=transaction_id,
+            timeout=timeout,
+            defer_round_trip=defer_round_trip,
+            resume=resume,
+            rollback_on_error=rollback_on_error,
+        )
+
+    async def commit(self) -> None:
+        """Commit the active async transaction and clear any attached sessionless transaction ID."""
+        try:
+            await super().commit()
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    async def rollback(self) -> None:
+        """Roll back the active async transaction and clear any attached sessionless transaction ID."""
+        try:
+            await super().rollback()
+        except BaseException as exc:
+            mapped = map_oracle_exception(exc)
+            pending = mapped if mapped is not None else exc
+            if self._sessionless_transaction_id is not None:
+                self._sessionless_cleanup_error = pending
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        self._sessionless_transaction_id = None
+
+    async def execute(
+        self,
+        statement: Any,
+        /,
+        *parameters: Any,
+        statement_config: StatementConfig | None = None,
+        suspend_on_success: bool = False,
+        **kwargs: Any,
+    ) -> SQLResult:
+        """Asynchronously execute a statement with optional Oracle 26ai `suspend_on_success`."""
+        validate_sessionless_execution_options(suspend_on_success=suspend_on_success)
+        if not suspend_on_success:
+            return await super().execute(statement, *parameters, statement_config=statement_config, **kwargs)
+        accepts_native = _execute_accepts_suspend_on_success(self.connection)
+        suspend_fn = getattr(self.connection, "suspend_sessionless_transaction", None)
+        if not accepts_native and not callable(suspend_fn):
+            raise DialectNotSupportedError(_SESSIONLESS_UNSUPPORTED_MSG)
+        config = statement_config or self.statement_config
+        args = dict(config.execution_args or {})
+        args["oracle_suspend_on_success"] = True
+        effective_config = config.replace(execution_args=args)
+        prepared = self.prepare_statement(statement, parameters, statement_config=effective_config, kwargs=kwargs)
+        prepared = prepared.copy(statement_config=effective_config)
+        result = await self.dispatch_statement_execution(prepared, self.connection)
+        if not accepts_native and callable(suspend_fn):
+            await self.suspend_sessionless_transaction()
+        else:
+            self._sessionless_transaction_id = None
+        return result
+
+    async def dispatch_execute(self, cursor: Any, statement: SQL) -> ExecutionResult:
+        """Asynchronously execute a compiled Oracle statement, forwarding `suspend_on_success`."""
+        effective_config = getattr(statement, "statement_config", None) or self.statement_config
+        exec_args = getattr(effective_config, "execution_args", None) or {}
+        if (
+            exec_args.get("oracle_suspend_on_success")
+            and not statement.returns_rows()
+            and _execute_accepts_suspend_on_success(cursor)
+        ):
+            sql, params = self._compile_for_native(statement)
+            raw = (
+                await cursor.execute(sql, params, suspend_on_success=True)
+                if params is not None
+                else await cursor.execute(sql, suspend_on_success=True)
+            )
+            rowcount = len(raw) if isinstance(raw, list) else (int(raw) if raw is not None else 0)
+            return self.create_execution_result(cursor, rowcount_override=rowcount)
+        return await super().dispatch_execute(cursor, statement)
 
     @classmethod
     def _default_statement_config(cls) -> StatementConfig:
@@ -298,7 +700,7 @@ class OracleAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         savepoint_fn = getattr(self.connection, "savepoint", None)
         if callable(savepoint_fn):
-            await savepoint_fn(valid)
+            await cast("Any", savepoint_fn)(valid)
             return
         await self.connection.execute(f"SAVEPOINT {valid}")
 
@@ -307,14 +709,14 @@ class OracleAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         release_fn = getattr(self.connection, "release_savepoint", None)
         if callable(release_fn):
-            await release_fn(valid)
+            await cast("Any", release_fn)(valid)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Asynchronously roll back to an Oracle savepoint."""
         valid = validate_savepoint_name(name)
         rollback_fn = getattr(self.connection, "rollback_to_savepoint", None)
         if callable(rollback_fn):
-            await rollback_fn(valid)
+            await cast("Any", rollback_fn)(valid)
             return
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
@@ -327,7 +729,7 @@ class OracleAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            rows_affected = await exec_many_fn(sql, param_sets)
+            rows_affected = await cast("Any", exec_many_fn)(sql, param_sets)
             return self.create_execution_result(
                 cursor,
                 rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),

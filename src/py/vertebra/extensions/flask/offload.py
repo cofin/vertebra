@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from vertebra.extensions.litestar.offload import (
+from vertebra.server._offload import (
     CompressionOffloadSpec,
     CorsOffloadSpec,
     OffloadPlan,

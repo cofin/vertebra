@@ -89,8 +89,14 @@ pub struct ServerConfig {
     pub h2_max_concurrent_streams: Option<u32>,
     /// HTTP/2 PING keep-alive interval in milliseconds.
     pub h2_keep_alive_interval_ms: Option<u64>,
-    /// Enable RFC 9113 HTTP/1.1 `Upgrade: h2c` negotiation on cleartext sockets.
-    pub enable_h2c_upgrade: bool,
+    /// Maximum size of received HTTP/2 header blocks in bytes (`SETTINGS_MAX_HEADER_LIST_SIZE`).
+    pub h2_max_header_list_size: Option<u32>,
+    /// Timeout for reading complete HTTP/1 request headers.
+    pub header_read_timeout: Duration,
+    /// Maximum duration to wait for active connections to drain on shutdown.
+    pub drain_timeout: Duration,
+    /// Bounded streaming queue depth per streaming response.
+    pub stream_queue_depth: usize,
     /// Enable cleartext HTTP/2 prior-knowledge `MSG_PEEK` detection (disabled by default for zero-peek HTTP/1.1 fastpath).
     pub enable_h2c_prior_knowledge: bool,
     /// CIDR-verified reverse proxies permitted to supply identity headers.
@@ -203,7 +209,10 @@ impl Default for ServerConfig {
             h2_initial_connection_window_size: None,
             h2_max_concurrent_streams: None,
             h2_keep_alive_interval_ms: None,
-            enable_h2c_upgrade: true,
+            h2_max_header_list_size: Some(65_536),
+            header_read_timeout: Duration::from_secs(10),
+            drain_timeout: Duration::from_secs(15),
+            stream_queue_depth: 64,
             enable_h2c_prior_knowledge: false,
             trusted_proxies: TrustedProxyConfig::default(),
             http3: Http3Config::default(),
@@ -295,6 +304,16 @@ impl ServerConfig {
             && let Ok(n) = raw.trim().parse::<u64>()
         {
             self.http3.keep_alive_interval_ms = n;
+        }
+        if let Some(raw) = get_env("VERTEBRA_WEBTRANSPORT") {
+            self.http3.enable_webtransport =
+                matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true");
+        }
+        if let Some(raw) = get_env("VERTEBRA_WEBTRANSPORT_MAX_SESSIONS")
+            && let Ok(n) = raw.trim().parse::<u64>()
+            && n > 0
+        {
+            self.http3.max_webtransport_sessions = n;
         }
     }
 
@@ -524,7 +543,36 @@ impl ServerConfig {
         }
 
         config.apply_http3_env(|key| std::env::var(key).ok());
+        config.apply_limits_env(|key| std::env::var(key).ok());
         config
+    }
+
+    fn apply_limits_env<F>(&mut self, get_env: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(raw) = get_env("VERTEBRA_H2_MAX_HEADER_LIST_SIZE")
+            && let Ok(n) = raw.trim().parse::<u32>()
+            && n > 0
+        {
+            self.h2_max_header_list_size = Some(n);
+        }
+        if let Some(raw) = get_env("VERTEBRA_HEADER_READ_TIMEOUT_MS")
+            && let Ok(n) = raw.trim().parse::<u64>()
+        {
+            self.header_read_timeout = Duration::from_millis(n);
+        }
+        if let Some(raw) = get_env("VERTEBRA_DRAIN_TIMEOUT_MS")
+            && let Ok(n) = raw.trim().parse::<u64>()
+        {
+            self.drain_timeout = Duration::from_millis(n);
+        }
+        if let Some(raw) = get_env("VERTEBRA_STREAM_QUEUE_DEPTH")
+            && let Ok(n) = raw.trim().parse::<usize>()
+            && n > 0
+        {
+            self.stream_queue_depth = n;
+        }
     }
 }
 
@@ -621,6 +669,8 @@ mod tests {
     fn http3_env_parsing_and_validation() {
         let mut cfg = ServerConfig::default();
         assert!(!cfg.enable_http3());
+        assert!(cfg.http3.enable_webtransport);
+        assert_eq!(cfg.http3.max_webtransport_sessions, 64);
         assert!(cfg.validate_http3().is_ok());
 
         cfg.apply_http3_env(|key| match key {
@@ -628,24 +678,32 @@ mod tests {
             "VERTEBRA_HTTP3_ALT_SVC_MAX_AGE" => Some("3600".to_string()),
             "VERTEBRA_HTTP3_MAX_STREAMS" => Some("512".to_string()),
             "VERTEBRA_HTTP3_KEEP_ALIVE_MS" => Some("2500".to_string()),
+            "VERTEBRA_WEBTRANSPORT" => Some("false".to_string()),
+            "VERTEBRA_WEBTRANSPORT_MAX_SESSIONS" => Some("128".to_string()),
             _ => None,
         });
         assert!(cfg.enable_http3());
         assert_eq!(cfg.http3.alt_svc_max_age, 3600);
         assert_eq!(cfg.http3.max_concurrent_bidi_streams, 512);
         assert_eq!(cfg.http3.keep_alive_interval_ms, 2500);
+        assert!(!cfg.http3.enable_webtransport);
+        assert_eq!(cfg.http3.max_webtransport_sessions, 128);
 
         cfg.apply_http3_env(|key| match key {
             "VERTEBRA_HTTP3" => Some("1".to_string()),
             "VERTEBRA_HTTP3_ALT_SVC_MAX_AGE" => Some("not-a-number".to_string()),
             "VERTEBRA_HTTP3_MAX_STREAMS" => Some("0".to_string()),
             "VERTEBRA_HTTP3_KEEP_ALIVE_MS" => Some("invalid".to_string()),
+            "VERTEBRA_WEBTRANSPORT" => Some("1".to_string()),
+            "VERTEBRA_WEBTRANSPORT_MAX_SESSIONS" => Some("0".to_string()),
             _ => None,
         });
         assert!(cfg.enable_http3());
         assert_eq!(cfg.http3.alt_svc_max_age, 3600);
         assert_eq!(cfg.http3.max_concurrent_bidi_streams, 512);
         assert_eq!(cfg.http3.keep_alive_interval_ms, 2500);
+        assert!(cfg.http3.enable_webtransport);
+        assert_eq!(cfg.http3.max_webtransport_sessions, 128);
 
         cfg.apply_http3_env(|key| match key {
             "VERTEBRA_HTTP3" => Some("false".to_string()),
@@ -675,5 +733,38 @@ mod tests {
                 .expect_err("http3 without feature must fail loud")
                 .contains("http3")
         );
+    }
+
+    #[test]
+    fn limits_and_drain_defaults_and_env_parsing() {
+        let mut cfg = ServerConfig::default();
+        assert_eq!(cfg.h2_max_header_list_size, Some(65_536));
+        assert_eq!(cfg.header_read_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.drain_timeout, Duration::from_secs(15));
+        assert_eq!(cfg.stream_queue_depth, 64);
+
+        cfg.apply_limits_env(|key| match key {
+            "VERTEBRA_H2_MAX_HEADER_LIST_SIZE" => Some("131072".to_string()),
+            "VERTEBRA_HEADER_READ_TIMEOUT_MS" => Some("2500".to_string()),
+            "VERTEBRA_DRAIN_TIMEOUT_MS" => Some("4500".to_string()),
+            "VERTEBRA_STREAM_QUEUE_DEPTH" => Some("128".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.h2_max_header_list_size, Some(131_072));
+        assert_eq!(cfg.header_read_timeout, Duration::from_millis(2500));
+        assert_eq!(cfg.drain_timeout, Duration::from_millis(4500));
+        assert_eq!(cfg.stream_queue_depth, 128);
+
+        cfg.apply_limits_env(|key| match key {
+            "VERTEBRA_H2_MAX_HEADER_LIST_SIZE" => Some("0".to_string()),
+            "VERTEBRA_HEADER_READ_TIMEOUT_MS" => Some("invalid".to_string()),
+            "VERTEBRA_DRAIN_TIMEOUT_MS" => Some("invalid".to_string()),
+            "VERTEBRA_STREAM_QUEUE_DEPTH" => Some("0".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.h2_max_header_list_size, Some(131_072));
+        assert_eq!(cfg.header_read_timeout, Duration::from_millis(2500));
+        assert_eq!(cfg.drain_timeout, Duration::from_millis(4500));
+        assert_eq!(cfg.stream_queue_depth, 128);
     }
 }

@@ -128,6 +128,7 @@ vtb build [OPTIONS]
 | `--output` | `path` | - | Output directory (for --standalone) or binary path (for --onefile) |
 | `--project-dir` | `directory` | - | Project directory containing pyproject.toml and any frontend workspace |
 | `--include-agent-skills` | `flag` | `False` | Stage .agents/skills into the standalone bundle (application repositories only) |
+| `--compression` | `choice(zlib | zstd)` | `"zlib"` | Compression algorithm for --onefile payloads |
 
 ## JavaScript & Frontend Tooling
 

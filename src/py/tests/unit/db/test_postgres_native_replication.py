@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
-import select
 import socket
 import struct
 import threading
-import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -34,8 +32,10 @@ from vertebra.db.adapters.postgres.types import (
 )
 
 
-async def _as_coro(awaitable: Awaitable[Any]) -> Any:
+async def _as_coro(awaitable: Awaitable[Any], started: asyncio.Event | None = None) -> Any:
     """Wrap a native RustDbTaskAwaitable inside a Python coroutine for asyncio.create_task."""
+    if started is not None:
+        started.set()
     return await awaitable
 
 
@@ -266,7 +266,7 @@ class _DrainerController:
         orig_add_reader = loop.add_reader
 
         def _wrapped_add_reader(fd: Any, callback: Callable[..., Any], *args: Any) -> None:
-            if type(callback).__name__ == "_DbCompletionDrainer" and self._fd is None:
+            if type(callback).__name__ in ("_DbCompletionDrainer", "_RustCompletionDrainer") and self._fd is None:
                 self._fd = int(fd)
                 self._callback = callback
                 self._args = args
@@ -295,15 +295,24 @@ class _DrainerController:
         self._callback(*self._args)
 
     async def wait_until_signaled(self, *, timeout: float) -> bool:
-        """Poll readability of the paused completion eventfd without consuming it."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self._fd is not None:
-                readable, _, _ = select.select([self._fd], [], [], 0.0)
-                if readable:
-                    return True
-            await asyncio.sleep(0.005)
-        return False
+        """Await readability of the paused completion eventfd without consuming it."""
+        if self._fd is None:
+            return False
+        ready = asyncio.Event()
+        fd = self._fd
+
+        def _on_readable() -> None:
+            self._loop.remove_reader(fd)
+            ready.set()
+
+        self._orig_add_reader(fd, _on_readable)
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+        finally:
+            self._loop.remove_reader(fd)
 
 
 @dataclass
@@ -330,13 +339,21 @@ class _ReplicationPeerSpec:
 class _ReplicationSession:
     """Single accepted backend TCP connection on _ScriptedReplicationServer."""
 
-    def __init__(self, conn: socket.socket, startup_params: dict[str, str]) -> None:
+    def __init__(
+        self,
+        conn: socket.socket,
+        startup_params: dict[str, str],
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         """Store startup parameters and initialize synchronization primitives."""
         self._conn = conn
         self.startup_params = startup_params
+        self._on_close = on_close
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._closed = False
+        self._ack_waiters: list[tuple[asyncio.AbstractEventLoop, int, asyncio.Event]] = []
+        self._close_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
         self.simple_queries: list[str] = []
         self.standby_acks: list[int] = []
         self.saw_copy_done = False
@@ -364,21 +381,61 @@ class _ReplicationSession:
             with contextlib.suppress(OSError):
                 self._conn.close()
 
+    def _record_standby_ack(self, flush_lsn: int) -> None:
+        """Record one StandbyStatusUpdate ack and wake matching async waiters."""
+        with self._state_lock:
+            self.standby_acks.append(flush_lsn)
+            ack_count = len(self.standby_acks)
+            if self._ack_waiters:
+                remaining: list[tuple[asyncio.AbstractEventLoop, int, asyncio.Event]] = []
+                for loop, target, ev in self._ack_waiters:
+                    if ack_count >= target:
+                        loop.call_soon_threadsafe(ev.set)
+                    else:
+                        remaining.append((loop, target, ev))
+                self._ack_waiters = remaining
+
     async def wait_for_ack_count_async(self, count: int, *, timeout: float) -> bool:
         """Await at least count StandbyStatusUpdate acks on this session."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._state_lock:
-                if len(self.standby_acks) >= count:
-                    return True
-            await asyncio.sleep(0.005)
+        loop = asyncio.get_running_loop()
+        ev = asyncio.Event()
         with self._state_lock:
-            return len(self.standby_acks) >= count
+            if len(self.standby_acks) >= count:
+                return True
+            self._ack_waiters.append((loop, count, ev))
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            with self._state_lock:
+                self._ack_waiters = [item for item in self._ack_waiters if item[2] is not ev]
+                return len(self.standby_acks) >= count
+
+    async def wait_closed_async(self, *, timeout: float) -> bool:
+        """Await session closure on the server without polling."""
+        loop = asyncio.get_running_loop()
+        ev = asyncio.Event()
+        with self._state_lock:
+            if self._closed:
+                return True
+            self._close_waiters.append((loop, ev))
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            with self._state_lock:
+                self._close_waiters = [item for item in self._close_waiters if item[1] is not ev]
+                return self._closed
 
     def _mark_closed(self) -> None:
         """Mark session closed after reader exit."""
         with self._state_lock:
             self._closed = True
+            for loop, ev in self._close_waiters:
+                loop.call_soon_threadsafe(ev.set)
+            self._close_waiters.clear()
+        if self._on_close is not None:
+            self._on_close()
 
 
 class _ScriptedReplicationServer:
@@ -396,52 +453,73 @@ class _ScriptedReplicationServer:
         self._sock.settimeout(0.05)
         self.port: int = self._sock.getsockname()[1]
         self._spec_factory = spec_factory
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self._stop = threading.Event()
         self._accept_count = 0
         self._sessions: list[_ReplicationSession] = []
         self._workers: list[threading.Thread] = []
+        self._accept_waiters: list[tuple[asyncio.AbstractEventLoop, int, asyncio.Event]] = []
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._accept_thread.start()
 
     @property
     def accept_count(self) -> int:
         """Return total accepted TCP connections."""
-        with self._lock:
+        with self._cond:
             return self._accept_count
 
     def session(self, index: int) -> _ReplicationSession:
         """Return accepted session by index."""
-        with self._lock:
+        with self._cond:
             return self._sessions[index]
+
+    def _notify_state_locked(self) -> None:
+        """Notify Condition and async waiters under self._cond."""
+        self._cond.notify_all()
+        if self._accept_waiters:
+            remaining: list[tuple[asyncio.AbstractEventLoop, int, asyncio.Event]] = []
+            for loop, count, ev in self._accept_waiters:
+                if self._accept_count >= count:
+                    loop.call_soon_threadsafe(ev.set)
+                else:
+                    remaining.append((loop, count, ev))
+            self._accept_waiters = remaining
+
+    def _on_session_closed(self) -> None:
+        """Wake live-connection waiters when a backend session terminates."""
+        with self._cond:
+            self._notify_state_locked()
 
     async def wait_for_accept_count_async(self, count: int, *, timeout: float) -> bool:
         """Wait asynchronously until at least count TCP sockets have been accepted."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.accept_count >= count:
+        loop = asyncio.get_running_loop()
+        ev = asyncio.Event()
+        with self._cond:
+            if self._accept_count >= count:
                 return True
-            await asyncio.sleep(0.005)
-        return self.accept_count >= count
+            self._accept_waiters.append((loop, count, ev))
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            with self._cond:
+                self._accept_waiters = [item for item in self._accept_waiters if item[2] is not ev]
+                return self._accept_count >= count
 
     def wait_for_live_connections(self, expected: int, *, timeout: float) -> bool:
         """Wait synchronously until live connection count matches expected."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._lock:
-                live = sum(0 if s.is_closed else 1 for s in self._sessions)
-            if live == expected:
-                return True
-            time.sleep(0.005)
-        with self._lock:
-            return sum(0 if s.is_closed else 1 for s in self._sessions) == expected
+        with self._cond:
+            return self._cond.wait_for(
+                lambda: sum(0 if s.is_closed else 1 for s in self._sessions) == expected,
+                timeout=timeout,
+            )
 
     def stop(self) -> None:
         """Stop listener socket and close active backend connections."""
         self._stop.set()
         with contextlib.suppress(OSError):
             self._sock.close()
-        with self._lock:
+        with self._cond:
             sessions = list(self._sessions)
             workers = list(self._workers)
         for sess in sessions:
@@ -460,11 +538,12 @@ class _ScriptedReplicationServer:
             except OSError:
                 break
             conn.settimeout(0.2)
-            with self._lock:
+            with self._cond:
                 self._accept_count += 1
                 idx = self._accept_count
+                self._notify_state_locked()
             t = threading.Thread(target=self._serve, args=(conn, idx), daemon=True)
-            with self._lock:
+            with self._cond:
                 self._workers.append(t)
             t.start()
 
@@ -532,9 +611,10 @@ class _ScriptedReplicationServer:
                 conn.close()
             return
         spec = self._spec_factory(idx, params)
-        sess = _ReplicationSession(conn, params)
-        with self._lock:
+        sess = _ReplicationSession(conn, params, on_close=self._on_session_closed)
+        with self._cond:
             self._sessions.append(sess)
+            self._notify_state_locked()
         try:
             sess.send_raw(_pg_auth_ready(9000 + idx))
             pending_ext: list[tuple[bytes, bytes]] = []
@@ -564,8 +644,7 @@ class _ScriptedReplicationServer:
                     continue
                 if tag == b"d" and body[:1] == b"r" and len(body) >= 34:
                     (_, _, flush_lsn, _) = struct.unpack_from("!BQQQ", body, 0)
-                    with sess._state_lock:
-                        sess.standby_acks.append(flush_lsn)
+                    sess._record_standby_ack(flush_lsn)
                     continue
                 if tag == b"c":
                     with sess._state_lock:
@@ -860,7 +939,9 @@ def test_replication_identity_and_unawaited_open_drop() -> None:
                 del pending
                 gc.collect()
                 gate.set()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0)
+                if srv.accept_count >= 3:
+                    assert await srv.session(2).wait_closed_async(timeout=2.0)
             finally:
                 await client.close()
 
@@ -1047,8 +1128,9 @@ def test_replication_cancelled_next_and_overlap_fencing(cancel_mode: str) -> Non
 
                     repl_sess = srv.session(1)
                     drainer_ctl.pause()
-                    first_next = asyncio.create_task(_as_coro(stream.next()))
-                    await asyncio.sleep(0.02)
+                    first_started = asyncio.Event()
+                    first_next = asyncio.create_task(_as_coro(stream.next(), first_started))
+                    await asyncio.wait_for(first_started.wait(), timeout=2.0)
 
                     repl_sess.send_raw(tx_bytes)
                     assert await drainer_ctl.wait_until_signaled(timeout=2.0)
@@ -1069,8 +1151,9 @@ def test_replication_cancelled_next_and_overlap_fencing(cancel_mode: str) -> Non
                     else:
                         with pytest.raises(asyncio.CancelledError):
                             await first_next
-                        second_next = asyncio.create_task(_as_coro(stream.next()))
-                        await asyncio.sleep(0.01)
+                        second_started = asyncio.Event()
+                        second_next = asyncio.create_task(_as_coro(stream.next(), second_started))
+                        await asyncio.wait_for(second_started.wait(), timeout=2.0)
                         drainer_ctl.resume()
                         r_begin = await second_next
 

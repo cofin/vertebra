@@ -206,7 +206,8 @@ class PromptController:
         for attr_name in dir(self):
             val = getattr(self, attr_name)
             if callable(val) and hasattr(val, "_mcp_prompt"):
-                meta = val._mcp_prompt
+                target_val: Any = val
+                meta = target_val._mcp_prompt
                 base_name = meta["name"]
                 full_name = f"{self.prefix}_{base_name}" if self.prefix else base_name
                 desc = meta["description"]
@@ -317,7 +318,8 @@ class SkillController(PromptController):
         for attr_name in dir(self):
             val = getattr(self, attr_name)
             if callable(val) and hasattr(val, "_mcp_resource_template"):
-                meta = val._mcp_resource_template
+                target_val: Any = val
+                meta = target_val._mcp_resource_template
                 entries.append(
                     ResourceTemplateEntry(
                         uriTemplate=meta["uriTemplate"],

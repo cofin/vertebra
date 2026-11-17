@@ -1,12 +1,20 @@
 """SQL Server (T-SQL) SQLSpec core statement compilation, coercion, and error helpers."""
 
+from __future__ import annotations
+
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
-from sqlspec.core import DriverParameterProfile, ParameterStyle, StatementConfig, build_statement_config_from_profile
+from sqlspec.core import (
+    DriverParameterProfile,
+    ParameterStyle,
+    StatementConfig,
+    TypedParameter,
+    build_statement_config_from_profile,
+)
 from sqlspec.exceptions import (
     CheckViolationError,
     ConnectionTimeoutError,
@@ -32,7 +40,6 @@ from sqlspec.utils.type_converters import build_uuid_coercions
 
 from vertebra.db.adapters.mssql.config import MSSQLConfig
 from vertebra.db.adapters.mssql.core import MSSQLCore
-from vertebra.extensions.sqlspec._driver import unwrap_typed_parameters
 from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
@@ -59,6 +66,7 @@ __all__ = (
     "quote_bracket_identifier",
     "rewrite_mssql_placeholders",
     "split_schema_and_table",
+    "unwrap_typed_parameters",
 )
 
 MSSQL_TABLE_NOT_FOUND_ERROR: Final[int] = 208
@@ -165,6 +173,19 @@ def default_statement_config() -> StatementConfig:
 def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]:
     """Rewrite `?` and `$1..$n` placeholders into T-SQL `@P1..@Pn` via `MSSQLCore`."""
     return MSSQLCore.rewrite_placeholders(sql)
+
+
+def unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
+    if isinstance(bound, dict):
+        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(unwrap_typed_parameters(value) for value in bound)
+    if isinstance(bound, list):
+        return [unwrap_typed_parameters(value) for value in bound]
+    if isinstance(bound, TypedParameter):
+        return unwrap_typed_parameters(bound.value)
+    return bound
 
 
 def normalize_mssql_parameters(params: Any) -> Any:

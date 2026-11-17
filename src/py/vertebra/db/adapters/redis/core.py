@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
-import contextlib
-from typing import Literal
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Any
 
-from vertebra.typing import FrozenBaseStruct
-from vertebra.utils.module_loader import import_optional
+from vertebra.db.driver._resp import (
+    HASH_SLOT_COUNT,
+    NON_KEY_COMMANDS,
+    ClusterRedirect,
+    PubSubMessage,
+)
+from vertebra.db.driver._resp import (
+    crc16_xmodem as _shared_crc16_xmodem,
+)
+from vertebra.db.driver._resp import (
+    hash_slot as _shared_hash_slot,
+)
+from vertebra.db.driver._resp import (
+    parse_cluster_redirect as _shared_parse_cluster_redirect,
+)
+from vertebra.typing import ImproperConfigurationError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from vertebra.db.adapters.redis.config import RedisConfig
 
 __all__ = (
     "HASH_SLOT_COUNT",
@@ -15,65 +32,31 @@ __all__ = (
     "ClusterRedirect",
     "PubSubMessage",
     "RedisCore",
+    "build_redis_client_kwargs",
     "crc16_xmodem",
     "hash_slot",
+    "is_redis_auth_rejection",
     "parse_cluster_redirect",
     "redis_hash_slot",
 )
 
-HASH_SLOT_COUNT = 16384
-NON_KEY_COMMANDS = frozenset(
-    {
-        "ASKING",
-        "AUTH",
-        "CLIENT",
-        "CLUSTER",
-        "COMMAND",
-        "ECHO",
-        "EXEC",
-        "FLUSHALL",
-        "FLUSHDB",
-        "HELLO",
-        "INFO",
-        "MULTI",
-        "PING",
-        "PSUBSCRIBE",
-        "PUNSUBSCRIBE",
-        "QUIT",
-        "READONLY",
-        "READWRITE",
-        "ROLE",
-        "SELECT",
-        "SENTINEL",
-        "SSUBSCRIBE",
-        "SUBSCRIBE",
-        "SUNSUBSCRIBE",
-        "UNSUBSCRIBE",
-    }
-)
+
+def _reject_memory_url(url: str) -> None:
+    """Validate that the given URL is a supported Redis scheme."""
+    if url.startswith("memory://"):
+        msg = "Redis driver does not support memory:// URLs"
+        raise ImproperConfigurationError(msg)
+    if url.startswith("valkey://") or url.startswith("valkeys://"):
+        msg = "valkey:// URLs are not supported by the Redis driver; use vertebra.db.adapters.valkey instead."
+        raise ImproperConfigurationError(msg)
 
 
-class ClusterRedirect(FrozenBaseStruct, frozen=True, gc=False):
-    """Parsed Redis Cluster MOVED or ASK redirection directive."""
-
-    kind: Literal["MOVED", "ASK"]
-    slot: int
-    host: str
-    port: int
-
-    @classmethod
-    def parse(cls, error_message: str | bytes) -> ClusterRedirect | None:
-        """Parse a MOVED or ASK error string into a ClusterRedirect struct."""
-        return RedisCore.parse_cluster_redirect(error_message)
-
-
-class PubSubMessage(FrozenBaseStruct, frozen=True, gc=False):
-    """RESP3 multiplexed Pub/Sub push message."""
-
-    kind: str
-    channel: str
-    payload: bytes
-    pattern: str | None = None
+def _normalize_nodes(nodes: Sequence[tuple[str, int] | str]) -> list[tuple[str, int]]:
+    """Normalize (host, port) or 'host:port' node descriptors into (host, port) pairs."""
+    return [
+        (node[0], int(node[1])) if isinstance(node, (tuple, list)) else (node.split(":")[0], int(node.split(":")[1]))
+        for node in nodes
+    ]
 
 
 class RedisCore:
@@ -82,35 +65,12 @@ class RedisCore:
     @staticmethod
     def crc16_xmodem(data: bytes | bytearray | memoryview | str) -> int:
         """Compute CRC16-XMODEM (polynomial 0x1021, initial value 0x0000) for Redis Cluster."""
-        native = import_optional("vertebra._redis")
-        if native is not None:
-            fn = getattr(native, "crc16_xmodem", None)
-            if callable(fn):
-                raw = bytes(data) if not isinstance(data, (bytes, str)) else data
-                return int(fn(raw))
-        raw_b = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        crc = 0x0000
-        for byte in raw_b:
-            crc ^= byte << 8
-            for _ in range(8):
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
-        return crc
+        return _shared_crc16_xmodem(data, native_module="vertebra._redis")
 
     @staticmethod
     def hash_slot(key: str | bytes) -> int:
         """Compute the Redis Cluster hash slot (0..16383) for a given key string or bytes."""
-        native = import_optional("vertebra._redis")
-        if native is not None:
-            fn = getattr(native, "hash_slot", None) or getattr(native, "redis_hash_slot", None)
-            if callable(fn):
-                return int(fn(key))
-        raw = key if isinstance(key, bytes) else key.encode("utf-8")
-        start = raw.find(b"{")
-        if start != -1:
-            end = raw.find(b"}", start + 1)
-            if end != -1 and end > start + 1:
-                raw = raw[start + 1 : end]
-        return RedisCore.crc16_xmodem(raw) % HASH_SLOT_COUNT
+        return _shared_hash_slot(key, native_module="vertebra._redis")
 
     @classmethod
     def redis_hash_slot(cls, key: str | bytes) -> int:
@@ -120,38 +80,51 @@ class RedisCore:
     @staticmethod
     def parse_cluster_redirect(error_message: str | bytes) -> ClusterRedirect | None:
         """Parse a Redis Cluster MOVED or ASK redirection error."""
-        native = import_optional("vertebra._redis")
-        if native is not None:
-            fn = getattr(native, "parse_cluster_redirect", None)
-            if callable(fn):
-                parsed = fn(error_message)
-                if parsed is not None:
-                    parsed_kind, slot, host, port = parsed
-                    return ClusterRedirect(
-                        kind="MOVED" if parsed_kind == "MOVED" else "ASK",
-                        slot=slot,
-                        host=host,
-                        port=port,
-                    )
-        text = error_message.decode("utf-8", errors="replace") if isinstance(error_message, bytes) else error_message
-        text = text.strip()
-        if text.startswith("-"):
-            text = text[1:].strip()
-        parts = text.split()
-        if len(parts) >= 3 and parts[0] in ("MOVED", "ASK"):
-            kind: Literal["MOVED", "ASK"] = "MOVED" if parts[0] == "MOVED" else "ASK"
-            with contextlib.suppress(ValueError):
-                slot = int(parts[1])
-                target = parts[2]
-                parsed_url = urlparse(f"//{target}")
-                if parsed_url.hostname and parsed_url.port:
-                    return ClusterRedirect(
-                        kind=kind,
-                        slot=slot,
-                        host=parsed_url.hostname,
-                        port=parsed_url.port,
-                    )
-        return None
+        return _shared_parse_cluster_redirect(error_message, native_module="vertebra._redis")
+
+
+def is_redis_auth_rejection(exc: BaseException) -> bool:
+    """Return True when `exc` represents a Redis authentication rejection."""
+    detail = str(exc).upper()
+    return (
+        "WRONGPASS" in detail
+        or "NOAUTH" in detail
+        or "UNAUTH" in detail
+        or "ERRAUTH" in detail
+        or "AUTHENTICATIONFAILED" in detail
+        or "AUTHENTICATION FAILED" in detail
+        or "INVALID USERNAME-PASSWORD PAIR" in detail
+        or "AUTH FAILED" in detail
+    )
+
+
+def build_redis_client_kwargs(
+    config: RedisConfig,
+    *,
+    resolved_password: str | None = None,
+) -> dict[str, Any]:
+    """Construct native `SyncRedisClient` / `AsyncRedisClient` keyword arguments."""
+    uses_db_provider = config.effective_database_token_provider is not None
+    effective_password = resolved_password if resolved_password is not None else config.password
+    return {
+        "url": config.url,
+        "username": config.username,
+        "password": effective_password,
+        "client_name": config.client_name,
+        "protocol": config.protocol,
+        "topology": config.topology,
+        "sentinel_master_name": config.effective_sentinel_master_name,
+        "sentinel_nodes": _normalize_nodes(config.sentinel_nodes),
+        "cluster_nodes": _normalize_nodes(config.cluster_nodes),
+        "max_redirections": config.max_redirections,
+        "enable_client_side_caching": config.enable_client_side_caching,
+        "client_tracking_prefixes": list(config.client_tracking_prefixes),
+        "client_cache_capacity": config.effective_cache_capacity,
+        "client_cache_ttl_seconds": config.client_cache_ttl_seconds,
+        "enable_gcp_iam_auth": False if uses_db_provider else config.effective_iam_enabled,
+        "token_cache_capsule": None,
+        "max_connections": config.max_connections,
+    }
 
 
 crc16_xmodem = RedisCore.crc16_xmodem

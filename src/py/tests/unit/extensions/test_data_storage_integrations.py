@@ -18,7 +18,7 @@ from typing import Any, cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject
+from advanced_alchemy.types.file_object import FileObject, StorageBackend, StoredObject, storages
 from advanced_alchemy.types.file_object.registry import StorageRegistry as AlchemyStorageRegistry
 from advanced_alchemy.types.file_object.session_tracker import FileObjectSessionTracker
 from django.core.files.base import ContentFile
@@ -33,6 +33,7 @@ from vertebra.db.adapters.duckdb import DuckDBSecretConfig
 from vertebra.db.arrow import ArrowCursor
 from vertebra.db.cdc import CDCConfig
 from vertebra.db.driver.capabilities import NotificationEvent
+from vertebra.extensions.alchemy.plugin import create_async_alchemy_config
 from vertebra.extensions.alchemy.storage import ObjectStoreBackend as AlchemyObjectStoreBackend
 from vertebra.extensions.alchemy.storage import register_storage_backend
 from vertebra.extensions.django import DjangoStorage
@@ -922,7 +923,7 @@ def test_sqlspec_rejects_auth_options_with_prebuilt_store(async_handle: bool, au
     assert store.supports_signing is False
 
 
-def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None:
+def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline(tmp_path: Path) -> None:
     """SQLSpec ObjectStoreBackend satisfies ObjectStoreProtocol and drives SyncStoragePipeline + PyArrow."""
     store = SyncObjectStore(
         "memory://",
@@ -932,13 +933,19 @@ def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None
             endpoint="https://exports.example.com",
         ),
     )
-    registry = SQLSpecStorageRegistry()
-    register_storage_alias("lake", store, registry=registry, base_path="warehouse")
-
-    backend = registry.get("lake")
+    backend = SQLSpecObjectStoreBackend(store=store, base_path="warehouse")
     assert isinstance(backend, SQLSpecObjectStoreBackend)
     assert isinstance(backend, ObjectStoreProtocol)
     assert backend.supports_signing is True
+    assert backend.supports_direct_arrow_write("parquet") is True
+    assert backend.supports_direct_arrow_write("arrow-ipc") is True
+    assert backend.supports_direct_arrow_write("csv") is True
+    assert backend.supports_direct_arrow_write("jsonl") is False
+
+    registry = SQLSpecStorageRegistry()
+    register_storage_alias("lake", tmp_path.as_uri(), registry=registry, base_path="warehouse")
+    alias_backend = registry.get("lake")
+    assert isinstance(alias_backend, ObjectStoreProtocol)
 
     pipeline = SyncStoragePipeline(registry=registry)
     rows = [
@@ -947,7 +954,7 @@ def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None
     ]
     row_telemetry = pipeline.write_rows(rows, "alias://lake/exports/metrics.jsonl")
     assert row_telemetry["rows_processed"] == 2
-    assert row_telemetry["backend"] == "vertebra"
+    assert row_telemetry["backend"] == alias_backend.backend_type
     raw_jsonl = b"".join(pipeline.stream_read("alias://lake/exports/metrics.jsonl", chunk_size=16))
     decoded_rows = [decode_json(line) for line in raw_jsonl.splitlines() if line]
     assert decoded_rows == rows
@@ -955,12 +962,40 @@ def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None
     table = pa.Table.from_pylist(rows)
     arrow_telemetry = pipeline.write_arrow(table, "alias://lake/exports/pipeline_metrics.parquet")
     assert arrow_telemetry["rows_processed"] == 2
+    assert arrow_telemetry["backend"] == alias_backend.backend_type
     pipeline_table, read_telemetry = pipeline.read_arrow(
         "alias://lake/exports/pipeline_metrics.parquet",
         file_format="parquet",
     )
     assert read_telemetry["rows_processed"] == 2
     assert pipeline_table.to_pylist() == rows
+
+    backend.write_bytes_sync("exports/raw.bin", b"v1")
+    with pytest.raises(FileExistsError):
+        backend.write_bytes_sync("exports/raw.bin", b"v2", overwrite=False)
+    assert backend.read_bytes_sync("exports/raw.bin") == b"v1"
+    backend.write_text_sync("exports/note.txt", "first")
+    with pytest.raises(FileExistsError):
+        backend.write_text_sync("exports/note.txt", "second", overwrite=False)
+    assert backend.read_text_sync("exports/note.txt") == "first"
+
+    with backend.open_write_stream_sync("exports/streamed.bin") as stream:
+        stream.write(b"part-a-")
+        stream.write(b"part-b")
+    assert backend.read_bytes_sync("exports/streamed.bin") == b"part-a-part-b"
+    with (
+        pytest.raises(FileExistsError),
+        backend.open_write_stream_sync("exports/streamed.bin", overwrite=False) as stream,
+    ):
+        stream.write(b"blocked")
+
+    backend.write_bytes_sync("nested/a.txt", b"a")
+    backend.write_bytes_sync("nested/sub/b.txt", b"b")
+    with pytest.raises(IsADirectoryError):
+        backend.delete_sync("nested", recursive=False)
+    assert backend.exists_sync("nested/a.txt") is True
+    backend.delete_sync("nested", recursive=True)
+    assert backend.list_objects_sync("nested") == []
 
     backend.write_arrow_sync("exports/metrics.parquet", table)
     parquet_raw = backend.read_bytes_sync("exports/metrics.parquet")
@@ -1001,8 +1036,18 @@ def test_sqlspec_object_store_backend_protocol_arrow_and_sync_pipeline() -> None
 async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(tmp_path: Path) -> None:
     """AsyncStoragePipeline streams bytes, Arrow tables, and copy/move/delete over ObjectStoreBackend."""
     local_store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=local_store, base_path="stage")
     registry = SQLSpecStorageRegistry()
-    register_storage_alias("async_lake", local_store, registry=registry, base_path="stage")
+    expected_registry = SQLSpecStorageRegistry()
+    expected_registry.register_alias("async_lake", tmp_path.as_uri(), base_path="stage")
+
+    register_storage_alias("async_lake", tmp_path.as_uri(), registry=registry, base_path="stage")
+    assert registry.is_alias_registered("async_lake")
+    assert registry._alias_configs == expected_registry._alias_configs
+    assert "_alias_configs" not in Path(sqlspec_storage_mod.__file__).read_text(encoding="utf-8")
+    alias_backend = registry.get("async_lake")
+    assert isinstance(alias_backend, ObjectStoreProtocol)
+
     pipeline = AsyncStoragePipeline(registry=registry)
 
     resolved_target = pipeline.resolve_destination("alias://async_lake/notes/readme.jsonl")
@@ -1015,34 +1060,63 @@ async def test_sqlspec_object_store_backend_async_pipeline_and_arrow_streaming(t
         chunks.append(chunk)
     assert decode_json(b"".join(chunks).strip()) == {"note": "hello-sqlspec-async"}
 
-    backend = registry.get("async_lake")
-    assert isinstance(backend, SQLSpecObjectStoreBackend)
     table = pa.Table.from_pylist([{"k": "a", "v": 10}, {"k": "b", "v": 20}, {"k": "c", "v": 30}])
     await pipeline.write_arrow(table, "alias://async_lake/tables/events.parquet")
     read_back, telemetry = await pipeline.read_arrow_async(
         "alias://async_lake/tables/events.parquet",
         file_format="parquet",
     )
-    assert telemetry["backend"] == "vertebra"
+    assert telemetry["backend"] == alias_backend.backend_type
     assert read_back.to_pylist() == table.to_pylist()
 
+    await backend.write_arrow_async("tables/native.parquet", table)
     async_rows: list[dict[str, object]] = []
-    async for batch in backend.stream_arrow_async("tables/*.parquet", batch_size=2):
+    async for batch in backend.stream_arrow_async("tables/native.parquet", batch_size=2):
         async_rows.extend(batch.to_pylist())
     assert async_rows == [{"k": "a", "v": 10}, {"k": "b", "v": 20}, {"k": "c", "v": 30}]
 
+    await backend.write_bytes_async("notes/raw.bin", b"v1")
+    with pytest.raises(FileExistsError):
+        await backend.write_bytes_async("notes/raw.bin", b"v2", overwrite=False)
+    assert await backend.read_bytes_async("notes/raw.bin") == b"v1"
+
     await backend.write_text_async("notes/plain.txt", "alpha-beta")
+    with pytest.raises(FileExistsError):
+        await backend.write_text_async("notes/plain.txt", "gamma", overwrite=False)
     assert await backend.read_text_async("notes/plain.txt") == "alpha-beta"
+
+    async with backend.open_write_stream_async("notes/streamed.bin") as stream:
+        await stream.write(b"async-a-")
+        await stream.write(b"async-b")
+    assert await backend.read_bytes_async("notes/streamed.bin") == b"async-a-async-b"
+    with pytest.raises(FileExistsError):
+        async with backend.open_write_stream_async("notes/streamed.bin", overwrite=False) as stream:
+            await stream.write(b"blocked")
+
     await backend.copy_async("notes/plain.txt", "notes/plain_copy.txt")
     await backend.move_async("notes/plain_copy.txt", "notes/plain_moved.txt")
     listed = await backend.list_objects_async("notes")
-    assert sorted(listed) == ["notes/plain.txt", "notes/plain_moved.txt", "notes/readme.jsonl"]
+    assert sorted(listed) == [
+        "notes/plain.txt",
+        "notes/plain_moved.txt",
+        "notes/raw.bin",
+        "notes/readme.jsonl",
+        "notes/streamed.bin",
+    ]
 
     meta = await backend.get_metadata_async("notes/plain_moved.txt")
     assert meta["size"] == len(b"alpha-beta")
 
     await backend.delete_async("notes/plain_moved.txt")
     assert not await backend.exists_async("notes/plain_moved.txt")
+
+    await backend.write_bytes_async("folder/one.txt", b"1")
+    await backend.write_bytes_async("folder/sub/two.txt", b"2")
+    with pytest.raises(IsADirectoryError):
+        await backend.delete_async("folder", recursive=False)
+    assert await backend.exists_async("folder/one.txt") is True
+    await backend.delete_async("folder", recursive=True)
+    assert await backend.list_objects_async("folder") == []
 
 
 def test_duckdb_secret_config_sql_builder() -> None:
@@ -1459,9 +1533,11 @@ _RFC3720_SEQ32_CRC32C = "46dd794e"
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_sqlspec_integrity_read_write_and_stream_options(asynchronous: bool) -> None:
     """SQLSpec ObjectStoreBackend advertises direct Arrow writes and enforces integrity options."""
-    assert SQLSpecObjectStoreBackend.supports_direct_arrow_write is True
     backend = SQLSpecObjectStoreBackend("memory://")
-    assert backend.supports_direct_arrow_write is True
+    assert backend.supports_direct_arrow_write("parquet") is True
+    assert backend.supports_direct_arrow_write("arrow-ipc") is True
+    assert backend.supports_direct_arrow_write("csv") is True
+    assert backend.supports_direct_arrow_write("jsonl") is False
 
     payload = _RFC3720_DIGITS
     exp_sha = hashlib.sha256(payload).hexdigest()
@@ -1703,6 +1779,98 @@ async def test_alchemy_save_object_integrity_options(tmp_path: Path, asynchronou
             backend.save_object(file_obj, make_source(payload), expected_sha256="0" * 64)
 
     assert bytes(backend.sync_store.get(key)) == payload
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("mode", ["buffer", "file", "stream"])
+@pytest.mark.parametrize("use_multipart", [None, False])
+async def test_alchemy_save_object_forwards_content_type_and_metadata(
+    tmp_path: Path, asynchronous: bool, mode: str, use_multipart: bool | None
+) -> None:
+    """ObjectStoreBackend forwards content_type and metadata attributes across sync and async upload modes."""
+    backend = AlchemyObjectStoreBackend(key="alchemy-meta", fs="memory://")
+    payload = b"id,name\n1,alice\n2,bob\n"
+    key = f"exports/{mode}-{use_multipart}.csv"
+    chunk_size = 64 if use_multipart is False else 8
+
+    def make_source(raw: bytes) -> Any:
+        if mode == "buffer":
+            return raw
+        if mode == "file":
+            src = tmp_path / f"{mode}-{use_multipart}.csv"
+            src.write_bytes(raw)
+            return src
+        return iter((raw[:8], raw[8:]))
+
+    file_obj = FileObject(
+        backend="alchemy-meta",
+        filename=key,
+        content_type="text/csv",
+        metadata={"owner": "team-a", "trace": "123"},
+    )
+    if asynchronous:
+        saved = await backend.save_object_async(
+            file_obj,
+            make_source(payload),
+            use_multipart=use_multipart,
+            chunk_size=chunk_size,
+        )
+        meta = await backend.get_metadata_async(key)
+    else:
+        saved = backend.save_object(
+            file_obj,
+            make_source(payload),
+            use_multipart=use_multipart,
+            chunk_size=chunk_size,
+        )
+        meta = backend.get_metadata(key)
+
+    assert saved.size == len(payload)
+    assert bytes(backend.sync_store.get(key)) == payload
+    assert meta.content_type == "text/csv"
+    assert meta.attributes == {"owner": "team-a", "trace": "123"}
+
+
+def test_alchemy_plugin_storage_key_override_for_unregistered_backend() -> None:
+    """Passing an unregistered ObjectStoreBackend applies storage_key before registering in storages."""
+    backend = AlchemyObjectStoreBackend(fs="memory://")
+    try:
+        create_async_alchemy_config(
+            "sqlite+aiosqlite:///:memory:",
+            storage_backend=backend,
+            storage_key="reports",
+        )
+        assert backend.key == "reports"
+        assert storages.get_backend("reports") is backend
+    finally:
+        storages.unregister_backend("reports")
+
+
+def test_alchemy_plugin_storage_key_enforcement_for_registered_backend() -> None:
+    """Re-registering an ObjectStoreBackend with the same key succeeds and a mismatched key raises ValueError."""
+    backend = AlchemyObjectStoreBackend(key="primary", fs="memory://")
+    storages.register_backend(backend)
+    try:
+        create_async_alchemy_config(
+            "sqlite+aiosqlite:///:memory:",
+            storage_backend=backend,
+            storage_key="primary",
+        )
+        assert storages.get_backend("primary") is backend
+
+        with pytest.raises(ValueError, match="already registered"):
+            create_async_alchemy_config(
+                "sqlite+aiosqlite:///:memory:",
+                storage_backend=backend,
+                storage_key="secondary",
+            )
+        assert backend.key == "primary"
+        assert storages.get_backend("primary") is backend
+        assert not storages.is_registered("secondary")
+    finally:
+        storages.unregister_backend("primary")
+        storages.unregister_backend("secondary")
 
 
 @pytest.mark.anyio

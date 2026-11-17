@@ -9,8 +9,40 @@ permissions:
   contents: read
 
 jobs:
+  validate_release_manifest:
+    name: Validate release manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Reject upstream git pins in pyproject.toml
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+          git_keys = {"git", "rev", "branch", "tag"}
+          pinned: list[str] = []
+          for name, spec in sources.items():
+              entries = spec if isinstance(spec, list) else [spec]
+              if any(isinstance(entry, dict) and any(key in entry for key in git_keys) for entry in entries):
+                  pinned.append(name)
+          if pinned:
+              print(f"Release blocked: [tool.uv.sources] contains upstream git pins: {pinned}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
   build_wheels:
     name: Build ${{ matrix.package.name }} on ${{ matrix.platform.os }} (${{ matrix.platform.arch }})
+    needs: validate_release_manifest
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -153,6 +185,7 @@ jobs:
 
   build_sdist:
     name: Build source distribution
+    needs: validate_release_manifest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -168,7 +201,7 @@ jobs:
       - name: Build source distributions
         run: |
           uv build --sdist --out-dir dist
-          for package in bigquery bundler duckdb mssql mysql oracle postgres redis spanner sqlite storage; do
+          for package in bigquery bundler duckdb mssql mysql oracle postgres redis spanner sqlite storage valkey; do
             uv build "src/rs/vertebra-$package" --sdist --out-dir dist
           done
       - uses: actions/upload-artifact@v7
@@ -332,6 +365,7 @@ jobs:
 
   upload_pypi:
     needs: [build_wheels, build_sdist, test_wheels]
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:
       name: pypi

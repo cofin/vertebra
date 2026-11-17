@@ -17,18 +17,38 @@ from tools.docs.generate_cli_docs import (
 __all__ = (
     "test_cli_docs_main_writes_and_checks_staleness",
     "test_ensure_native_stub_module_supports_mandatory_utils_imports_without_compiled_extension",
+    "test_render_cli_reference_includes_command_heading",
     "test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cleanly",
 )
 
 
 def test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cleanly() -> None:
-    """Verify render_cli_reference emits all 18 vtb leaf commands without Sentinel or Rich leaks."""
+    """Verify render_cli_reference emits vtb arguments, options, and headings without Sentinel or Rich leaks."""
     markdown = render_cli_reference()
 
     assert markdown.startswith("# CLI Reference\n")
     assert "## Global Usage" in markdown
 
-    expected_commands = (
+    assert "| `app` |" in markdown
+    assert "| `packages` |" in markdown
+    assert "| `--host` |" in markdown
+    assert "| `--port` |" in markdown
+    assert "| `--workers` |" in markdown
+
+    assert "Sentinel.UNSET" not in markdown
+    assert "--help" not in markdown
+    assert "[dim]" not in markdown
+    assert "[/]" not in markdown
+
+    h2_headings = [line for line in markdown.splitlines() if line.startswith("## ")]
+    h3_headings = [line for line in markdown.splitlines() if line.startswith("### ")]
+    assert 2 <= len(h2_headings) <= 6
+    assert len(h2_headings) + len(h3_headings) <= 12
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
         "#### `vtb run`",
         "#### `vtb dev`",
         "#### `vtb init`",
@@ -47,25 +67,32 @@ def test_render_cli_reference_renders_all_vtb_commands_arguments_and_options_cle
         "#### `vtb ai mcp bridge`",
         "#### `vtb ai mcp serve`",
         "#### `vtb workers run`",
-    )
-    for heading in expected_commands:
-        assert heading in markdown
-
-    assert "| `app` |" in markdown
-    assert "| `packages` |" in markdown
-    assert "| `--host` |" in markdown
-    assert "| `--port` |" in markdown
-    assert "| `--workers` |" in markdown
-
-    assert "Sentinel.UNSET" not in markdown
-    assert "--help" not in markdown
-    assert "[dim]" not in markdown
-    assert "[/]" not in markdown
-
-    h2_headings = [line for line in markdown.splitlines() if line.startswith("## ")]
-    h3_headings = [line for line in markdown.splitlines() if line.startswith("### ")]
-    assert 2 <= len(h2_headings) <= 6
-    assert len(h2_headings) + len(h3_headings) <= 12
+    ],
+    ids=[
+        "vtb-run",
+        "vtb-dev",
+        "vtb-init",
+        "vtb-build",
+        "vtb-js-add",
+        "vtb-js-remove",
+        "vtb-js-list",
+        "vtb-js-install",
+        "vtb-js-build",
+        "vtb-js-generate-types",
+        "vtb-js-exec",
+        "vtb-ai-models-list",
+        "vtb-ai-models-pull",
+        "vtb-ai-models-stage",
+        "vtb-ai-models-warm",
+        "vtb-ai-mcp-bridge",
+        "vtb-ai-mcp-serve",
+        "vtb-workers-run",
+    ],
+)
+def test_render_cli_reference_includes_command_heading(heading: str) -> None:
+    """Verify render_cli_reference emits each expected vtb leaf command heading."""
+    markdown = render_cli_reference()
+    assert heading in markdown
 
 
 def test_cli_docs_main_writes_and_checks_staleness(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -89,8 +116,14 @@ def test_cli_docs_main_writes_and_checks_staleness(tmp_path: Path, capsys: pytes
     assert "out of date" in capsys.readouterr().err.lower()
 
 
+@pytest.mark.parametrize(
+    "mod_name",
+    ["vertebra.utils.text", "vertebra.utils.humanize", "vertebra.utils.uuids"],
+    ids=["text", "humanize", "uuids"],
+)
 def test_ensure_native_stub_module_supports_mandatory_utils_imports_without_compiled_extension(
     monkeypatch: pytest.MonkeyPatch,
+    mod_name: str,
 ) -> None:
     """Verify ensure_native_stub_module satisfies vertebra.utils.{text,humanize,uuids} and hides dunder attributes."""
     orig_find_spec = importlib.util.find_spec
@@ -103,17 +136,17 @@ def test_ensure_native_stub_module_supports_mandatory_utils_imports_without_comp
     monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
     monkeypatch.delitem(sys.modules, "vertebra._vertebra", raising=False)
     monkeypatch.delitem(sys.modules, "vertebra._bundler", raising=False)
-    for mod_name in ("vertebra.utils.text", "vertebra.utils.humanize", "vertebra.utils.uuids"):
-        monkeypatch.delitem(sys.modules, mod_name, raising=False)
+    monkeypatch.delitem(sys.modules, "vertebra.utils.text", raising=False)
+    monkeypatch.delitem(sys.modules, "vertebra.utils.humanize", raising=False)
+    monkeypatch.delitem(sys.modules, "vertebra.utils.uuids", raising=False)
 
     ensure_native_stub_module()
     stub_mod = sys.modules["vertebra._vertebra"]
     assert not hasattr(stub_mod, "__path__")
     assert getattr(stub_mod, "AsyncObjectStore", None) is None
 
-    for mod_name in ("vertebra.utils.text", "vertebra.utils.humanize", "vertebra.utils.uuids"):
-        mod = importlib.import_module(mod_name)
-        assert mod is not None
+    mod = importlib.import_module(mod_name)
+    assert mod is not None
 
     markdown = render_cli_reference()
     assert "#### `vtb run`" in markdown

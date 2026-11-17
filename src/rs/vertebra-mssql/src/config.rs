@@ -2,6 +2,7 @@
 //! transaction isolation levels, and Cloud SQL for SQL Server (`:3307`) mTLS dialing.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tiberius::{AuthMethod, Config as TiberiusConfig, EncryptionLevel, IsolationLevel};
@@ -153,7 +154,6 @@ impl MssqlCloudSqlConfig {
 }
 
 /// Validated configuration for a native `vertebra._mssql` client.
-#[derive(Clone)]
 pub struct MssqlClientConfig {
     pub dsn: String,
     pub host: String,
@@ -161,6 +161,7 @@ pub struct MssqlClientConfig {
     pub database: String,
     pub user: String,
     pub password: String,
+    pub aad_token: Option<String>,
     pub application_name: String,
     pub encryption: MssqlEncryptionMode,
     pub trust_server_certificate: bool,
@@ -175,16 +176,53 @@ pub struct MssqlClientConfig {
     pub statement_cache_capacity: u32,
     pub read_only_intent: bool,
     pub cloudsql: Option<MssqlCloudSqlConfig>,
+    aad_token_override: Arc<RwLock<Option<Option<String>>>>,
+}
+
+impl Clone for MssqlClientConfig {
+    fn clone(&self) -> Self {
+        let override_snapshot = self
+            .aad_token_override
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or(None);
+        Self {
+            dsn: self.dsn.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            database: self.database.clone(),
+            user: self.user.clone(),
+            password: self.password.clone(),
+            aad_token: self.aad_token.clone(),
+            application_name: self.application_name.clone(),
+            encryption: self.encryption,
+            trust_server_certificate: self.trust_server_certificate,
+            ca_pem: self.ca_pem.clone(),
+            client_cert_pem: self.client_cert_pem.clone(),
+            client_key_pem: self.client_key_pem.clone(),
+            server_name: self.server_name.clone(),
+            connect_timeout: self.connect_timeout,
+            query_timeout: self.query_timeout,
+            pool_size: self.pool_size,
+            max_overflow: self.max_overflow,
+            statement_cache_capacity: self.statement_cache_capacity,
+            read_only_intent: self.read_only_intent,
+            cloudsql: self.cloudsql.clone(),
+            aad_token_override: Arc::new(RwLock::new(override_snapshot)),
+        }
+    }
 }
 
 impl std::fmt::Debug for MssqlClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_aad_token = self.effective_aad_token().is_some();
         f.debug_struct("MssqlClientConfig")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("database", &self.database)
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
+            .field("aad_token", &has_aad_token.then_some("[REDACTED]"))
             .field("application_name", &self.application_name)
             .field("encryption", &self.encryption)
             .field("trust_server_certificate", &self.trust_server_certificate)
@@ -219,6 +257,7 @@ impl Default for MssqlClientConfig {
             database: "master".to_string(),
             user: "sa".to_string(),
             password: String::new(),
+            aad_token: None,
             application_name: "vertebra-mssql".to_string(),
             encryption: MssqlEncryptionMode::Required,
             trust_server_certificate: false,
@@ -233,12 +272,53 @@ impl Default for MssqlClientConfig {
             statement_cache_capacity: 128,
             read_only_intent: false,
             cloudsql: None,
+            aad_token_override: Arc::new(RwLock::new(None)),
         }
     }
 }
 
 impl MssqlClientConfig {
-    /// Validate port bounds (`1..=65535`), NUL-byte invariants, and PEM inputs.
+    /// Validate an optional Azure Entra ID bearer token, rejecting NUL bytes and blank strings.
+    pub fn validate_aad_token(token: Option<&str>) -> Result<Option<String>, MssqlError> {
+        match token {
+            None => Ok(None),
+            Some(raw) => {
+                if raw.contains('\0') {
+                    return Err(MssqlError::config(
+                        "MSSQL `aad_token` must not contain NUL bytes",
+                    ));
+                }
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(MssqlError::config(
+                        "MSSQL `aad_token` must not be empty or whitespace",
+                    ));
+                }
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+    }
+
+    /// Update the stored Azure Entra ID bearer token for future reconnects without rebuilding the client.
+    pub fn set_aad_token(&self, aad_token: Option<String>) -> Result<(), MssqlError> {
+        let validated = Self::validate_aad_token(aad_token.as_deref())?;
+        if let Ok(mut guard) = self.aad_token_override.write() {
+            *guard = Some(validated);
+        }
+        Ok(())
+    }
+
+    /// Return the active Azure Entra ID bearer token (runtime override if set, otherwise `self.aad_token`).
+    pub fn effective_aad_token(&self) -> Option<String> {
+        if let Ok(guard) = self.aad_token_override.read()
+            && let Some(ref overridden) = *guard
+        {
+            return overridden.clone();
+        }
+        self.aad_token.clone()
+    }
+
+    /// Validate port bounds (`1..=65535`), NUL-byte invariants, `aad_token`, and PEM inputs.
     pub fn validate(&self) -> Result<(), MssqlError> {
         if self.port == 0 {
             return Err(MssqlError::config(
@@ -262,6 +342,7 @@ impl MssqlClientConfig {
         if self.host.trim().is_empty() {
             return Err(MssqlError::config("MSSQL host must not be empty"));
         }
+        Self::validate_aad_token(self.effective_aad_token().as_deref())?;
         if let Some(ref ca) = self.ca_pem {
             validate_pem_bytes("ca_pem", ca)?;
         }
@@ -291,7 +372,11 @@ impl MssqlClientConfig {
         cfg.port(port);
         cfg.database(&self.database);
         cfg.application_name(&self.application_name);
-        cfg.authentication(AuthMethod::sql_server(&self.user, &self.password));
+        if let Some(ref token) = self.effective_aad_token() {
+            cfg.authentication(AuthMethod::aad_token(token));
+        } else {
+            cfg.authentication(AuthMethod::sql_server(&self.user, &self.password));
+        }
         cfg.encryption(self.encryption.to_tiberius_level(pre_encrypted_stream));
         if self.trust_server_certificate {
             cfg.trust_cert();

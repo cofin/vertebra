@@ -16,6 +16,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-17T05:50:00Z"
+    commit: 5a833832
+  - by: agent:flow-executor
     at: "2026-11-13T05:25:00Z"
     commit: 93d7fb1f
   - by: agent:flow-sync
@@ -82,6 +85,9 @@ sources:
   - id: src-embeddings-local-py
     resource: src/py/vertebra/embeddings/_local.py
     title: "Python implementation module (src/py/vertebra/embeddings/_local.py)"
+  - id: src-framework-security-py
+    resource: src/py/vertebra/framework/security.py::JWKSVerifier
+    title: "Shared JWKSVerifier inbound JWT verification with key rotation"
   - id: src-cli-ai-py
     resource: src/py/vertebra/cli/ai.py
     title: "Python implementation module (src/py/vertebra/cli/ai.py)"
@@ -100,9 +106,9 @@ sources:
 
 <!-- truth: start -->
 - **Shared-Memory Vector Arena (`vertebra-core::vector`, `vertebra-py::vector`)**: [`VectorSlab`](../../../../../src/rs/vertebra-core/src/vector.rs)[^src-vertebra-core-src-vector-rs] (`VECTOR_SLAB_MAGIC = *b"VTBVSLAB"`) stores 64-byte-aligned dense vectors (`Float32`, `Float64`, `Float16`, `Int8`, `Binary`) in a POSIX `ShmRegion`. [`VectorView`](../../../../../src/rs/vertebra-py/src/vector.rs)[^src-vertebra-py-src-vector-rs] and [`VectorBatchView`](../../../../../src/rs/vertebra-py/src/vector.rs) expose zero-copy PEP 3118 buffers, Arrow `FixedSizeListArray` streams (`to_arrow_shm`), and database wire frames (`to_pgvector_bytes`, `to_oracle_bytes`, `to_sqlite_blob`).
-- **Cloud and SQL Embeddings**: `Embedder()` defaults to `VertexEmbedder` (`gemini-embedding-001`, 768 dims) over Rust HTTP/2 REST (`gcp_http2_post` / `gcp_http2_post_async` in [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs]): `gemini-embedding-001` (`1` instance/call) and `text-embedding-005` / `text-multilingual-embedding-002` (`250` instances/call) call Vertex v1 `:predict`, while `gemini-embedding-2` and `embed_multimodal` call `:embedContent` (`autoTruncate=False` default), using `SyncGcpTokenCache` / `AsyncGcpTokenCache` and per-loop `_GoogleEmbedder` queue isolation. `GeminiEmbedder` targets `generativelanguage.googleapis.com` gRPC (`BatchEmbedContents`); `embed_multimodal` calls `encode_gemini_embed_contents_grpc_frame` with protobuf `Part` fields `2` (`text`), `3` (`inline_data`), and `6` (`file_data`). `RemoteEmbedder` accepts `id_token_cache` (`SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` from [`gcp_identity.rs`](../../../../../src/rs/vertebra-py/src/gcp_identity.rs)[^src-vertebra-py-src-gcp-identity-rs]) and `audience` with single-flight `401` refresh. `PushdownEmbedder` wraps engine-owned `EmbeddingPushdown` (`embed_documents` / `embed_batch` / `embed_query`).
+- **Cloud and SQL Embeddings**: `Embedder()` delegates via `Embedder.__new__` to `VertexEmbedder` (`gemini-embedding-001`, 768 dims) with single-initialization (`_initialized` guard in `Embedder.__init__`) over Rust HTTP/2 REST (`gcp_http2_post` / `gcp_http2_post_async` in [`gcp_auth.rs`](../../../../../src/rs/vertebra-py/src/gcp_auth.rs)[^src-vertebra-py-src-gcp-auth-rs]): `gemini-embedding-001` (`1` instance/call) and `text-embedding-005` / `text-multilingual-embedding-002` (`250` instances/call) call Vertex v1 `:predict`, while `gemini-embedding-2` and `embed_multimodal` call `:embedContent` (`autoTruncate=False` default), using `SyncGcpTokenCache` / `AsyncGcpTokenCache` and per-loop `_GoogleEmbedder` queue isolation. `GeminiEmbedder` targets `generativelanguage.googleapis.com` gRPC (`BatchEmbedContents`); `embed_multimodal` sends protobuf `Part` fields `2`, `3`, and `6`. `RemoteEmbedder` accepts `id_token_cache` (`SyncGcpIdTokenCache` / `AsyncGcpIdTokenCache` from [`gcp_identity.rs`](../../../../../src/rs/vertebra-py/src/gcp_identity.rs)[^src-vertebra-py-src-gcp-identity-rs]) and `audience` with single-flight `401` refresh, while inbound HTTP/gRPC verification is handled by [`JWKSVerifier`](../../../../../src/py/vertebra/framework/security.py)[^src-framework-security-py]. `PushdownEmbedder` wraps engine-owned `EmbeddingPushdown`.
 - **Engine-Owned Pushdown**: `db/adapters/{bigquery,spanner,postgres,oracle}/embeddings.py` implements `EmbeddingPushdown` without importing `vertebra.embeddings`, validating identifiers, rejecting boolean numeric arguments, preserving order, and mapping inference `DataError` to `EmbeddingError`. Spanner `use_ai_function=True` binds `@task_type` and `@output_dimensionality`; PostgreSQL binds model values; Oracle batches through `DBMS_VECTOR.UTL_TO_EMBEDDINGS` (`VECTOR_ARRAY_T`), checks 128-byte URLs, and rotates credentials from explicit `token_cache` over `SyncOracleDriver` / `AsyncOracleDriver` (`vertebra._oracle`).[^src-adapters-oracle-driver-py]
-- **Single-Copy `1x` RAM Local Model Broker (`_broker.py`, `_local.py`)**: [`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py)[^src-embeddings-broker-py] loads `GemmaEmbedder` / `FastEmbedder` weights once across workers, isolates async state per event loop, batches by token budget (`max_batch_tokens = 16_384`, `max_pending_requests = 1024`), forwards validated `GemmaEmbedder` `precision` into `BackendFactory` options, and isolates `onnxruntime` / `ctranslate2` in child processes on free-threaded Python `3.14t`/`3.15t`.
+- **Single-Copy `1x` RAM Local Model Broker (`_broker.py`, `_local.py`)**: [`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py)[^src-embeddings-broker-py] loads `GemmaEmbedder` / `FastEmbedder` weights once across workers, isolates async state per event loop, schedules flushes via `asyncio.Event` (`wakeup_event`) + `asyncio.wait_for` without polling sleeps (`max_batch_tokens = 16_384`, `max_pending_requests = 1024`), forwards validated `GemmaEmbedder` `precision` into `BackendFactory` options, and isolates `onnxruntime` / `ctranslate2` in child processes on free-threaded Python `3.14t`/`3.15t`.
 <!-- truth: end -->
 
 ## 1. Architecture Overview
@@ -153,7 +159,7 @@ SQL embedding execution stays adapter-owned (`%s` / `$N` binds in PostgreSQL); g
 
 ## 5. `EmbeddingBroker`, Loop Isolation & Quarantine (`_broker.py`)
 
-[`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py) caches weights once per worker group, enforces `max_pending_requests = 1024`, collects items over `batch_window_ms = 2.0`, sorts by `estimate_gemma_token_count` within `max_batch_tokens = 16_384` / `max_batch_items = 64`, and restores caller order. Async `_GoogleEmbedder` and broker instances partition state per running event loop, offload in-process `backend_fn` via `asyncio.to_thread`, and quarantine `BackendFactory` into subprocesses (`submit_batch_in_subprocess`) on free-threaded Python `3.14t`/`3.15t`. Missing both `backend_fn` and `backend_factory` raises `ImproperConfigurationError`.
+[`EmbeddingBroker`](../../../../../src/py/vertebra/embeddings/_broker.py) caches weights once per worker group, enforces `max_pending_requests = 1024`, waits for the coalesce window via `asyncio.Event` (`wakeup_event`) and `asyncio.wait_for` (`coalesce_window_ms`) without fixed `asyncio.sleep` delays, sorts by `estimate_gemma_token_count` within `max_batch_tokens = 16_384` / `max_batch_items = 64`, and restores caller order. Async `_GoogleEmbedder` and broker instances partition state per running event loop, offload in-process `backend_fn` via `asyncio.to_thread`, and quarantine `BackendFactory` into subprocesses (`submit_batch_in_subprocess`) on free-threaded Python `3.14t`/`3.15t`. Missing both `backend_fn` and `backend_factory` raises `ImproperConfigurationError`.
 
 Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embeddings-py], [^src-adapters-spanner-embeddings-py], [^src-adapters-postgres-embeddings-py], [^src-adapters-oracle-embeddings-py], [^src-adapters-oracle-driver-py], [^src-embeddings-init-py], [^src-embeddings-models-py], [^src-cli-ai-py], [^src-tests-unit-embeddings-test-vector-views-py], [^src-tests-unit-embeddings-test-google-embedders-py], [^src-tests-unit-embeddings-test-embedding-broker-py].
 
@@ -169,6 +175,7 @@ Provenance sources: [^src-embeddings-pushdown-py], [^src-adapters-bigquery-embed
 [^src-embeddings-models-py]: `src/py/vertebra/embeddings/_models.py` — Local model metadata and cache helpers.
 [^src-embeddings-broker-py]: `src/py/vertebra/embeddings/_broker.py` — Per-loop `EmbeddingBroker` dynamic batching and quarantine.
 [^src-embeddings-local-py]: `src/py/vertebra/embeddings/_local.py` — `GemmaEmbedder`, `FastEmbedder`, and `StaticEmbedder`.
+[^src-framework-security-py]: `src/py/vertebra/framework/security.py::JWKSVerifier` — Shared `JWKSVerifier` inbound JWT verification with key rotation.
 [^src-cli-ai-py]: `src/py/vertebra/cli/ai.py` — `vtb ai` CLI model management commands.
 [^src-tests-unit-embeddings-test-vector-views-py]: `src/py/tests/unit/embeddings/test_vector_views.py` — Vector slab and codec tests.
 [^src-tests-unit-embeddings-test-google-embedders-py]: `src/py/tests/unit/embeddings/test_google_embedders.py` — Cloud embedder wire tests.

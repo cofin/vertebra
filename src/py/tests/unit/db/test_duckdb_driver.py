@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import importlib
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import msgspec
@@ -388,7 +388,9 @@ def test_duckdb_database_error_attributes(
 
 
 @pytest.mark.anyio
-async def test_duckdb_arrow_c_stream_ipc_bytes_and_dynamic_secret_provider_rotation() -> None:
+async def test_duckdb_arrow_c_stream_ipc_bytes_and_dynamic_secret_provider_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`select_to_arrow` exposes `__arrow_c_stream__`, `load_from_arrow` accepts raw IPC bytes, and `value_provider` rotates secrets."""
     token_state = {"generation": 1}
 
@@ -472,11 +474,13 @@ async def test_duckdb_arrow_c_stream_ipc_bytes_and_dynamic_secret_provider_rotat
         value_provider=_async_secret_provider,
         refresh_interval_seconds=0.001,
     )
+    fake_clock = {"now": 100.0}
+    monkeypatch.setattr(duckdb_async_mod, "time", SimpleNamespace(monotonic=lambda: fake_clock["now"]))
     async_driver = AsyncDuckDBDriver(DuckDBConfig(secrets=(async_secret,)))
     try:
         await async_driver.select("SELECT 1 AS ok")
         assert async_calls == 1
-        await asyncio.sleep(0.005)
+        fake_clock["now"] += 0.005
         await async_driver.select("SELECT 2 AS ok")
         assert async_calls == 2
     finally:

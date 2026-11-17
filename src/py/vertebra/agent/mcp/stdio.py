@@ -11,7 +11,7 @@ import contextlib
 import sys
 import uuid
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import anyio.lowlevel
@@ -69,13 +69,14 @@ async def run_stdio_server(
                 with contextlib.suppress(BaseException):
                     aclose = getattr(stream, "aclose", None)
                     if callable(aclose):
-                        await aclose()
+                        await cast("Awaitable[Any]", aclose())
 
     async with anyio.create_task_group() as session_tg:
 
         async def _dispatch_frame(line: bytes, decoded: Any) -> None:
             nonlocal relay_started, created_session_id, created_owner_id
             req_key = _extract_request_key(decoded)
+            resp: bytes | None = None
             with anyio.CancelScope() as scope:
                 if req_key is not None:
                     active_scopes[req_key] = scope

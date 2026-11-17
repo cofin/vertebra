@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from typing import Any, get_type_hints
 
 import msgspec
 
 from vertebra._vertebra import Response
 from vertebra.extensions.django.router import RouteCompiler
-from vertebra.extensions.litestar.openapi import (
+from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
     DocsBackendType,
     ElementsDocsConfig,
@@ -20,7 +21,7 @@ from vertebra.extensions.litestar.openapi import (
     ScalarSpecSource,
     SwaggerDocsConfig,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import encode_json_bytes, schema_components
 
 __all__ = (
     "AsyncAPIDocsConfig",
@@ -48,13 +49,16 @@ def _schema_for_type(tp: Any) -> dict[str, Any]:
     if tp is str:
         return {"type": "string"}
     if isinstance(tp, type) and issubclass(tp, msgspec.Struct):
-        schemas, defs = msgspec.json.schema_components((tp,))
+        schemas, defs = schema_components((tp,))
         out = dict(schemas[0])
         if defs:
             out["$defs"] = defs
         return out
-    if isinstance(tp, type) and hasattr(tp, "model_json_schema"):
-        return dict(tp.model_json_schema())
+    model_json_schema = getattr(tp, "model_json_schema", None)
+    if isinstance(tp, type) and callable(model_json_schema):
+        schema = model_json_schema()
+        if isinstance(schema, Mapping):
+            return dict(schema)
     return {"type": "object"}
 
 

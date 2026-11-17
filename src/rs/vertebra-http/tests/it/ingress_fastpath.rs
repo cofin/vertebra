@@ -232,8 +232,8 @@ async fn lockfree_backpressure_multithreaded_cap_and_sliding_window_recovery() {
     assert_eq!(controller.snapshot().in_flight, 0);
     assert_eq!(controller.snapshot().circuit_state, CircuitState::Closed);
 
-    // Wait for prior success window to expire, then trip circuit with failures.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Advance past prior success window, then trip circuit with failures.
+    controller.advance_circuit_clock_for_test(Duration::from_millis(150));
     for _ in 0..3 {
         controller.record_success();
     }
@@ -246,8 +246,8 @@ async fn lockfree_backpressure_multithreaded_cap_and_sliding_window_recovery() {
         RejectionReason::CircuitOpen
     );
 
-    // Wait for cooldown -> HalfOpen, admit exactly 3 probes across concurrent tasks.
-    tokio::time::sleep(Duration::from_millis(140)).await;
+    // Advance past cooldown -> HalfOpen, admit exactly 3 probes across concurrent tasks.
+    controller.advance_circuit_clock_for_test(Duration::from_millis(140));
     let mut probes = Vec::new();
     for _ in 0..3 {
         probes.push(controller.try_acquire().await.expect("probe permit"));
@@ -459,4 +459,102 @@ async fn backpressure_queued_waiters_wake_without_lost_notifications() {
         h.await.unwrap();
     }
     assert_eq!(controller.snapshot().in_flight, 0);
+}
+
+#[tokio::test]
+async fn valid_multipart_upload_dispatches_intact_to_worker() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use vertebra_http::batcher::{BatchLimit, PendingResponse, RequestBatcher};
+    use vertebra_http::config::ServerConfig;
+    use vertebra_http::dispatcher::Dispatcher;
+    use vertebra_http::multipart::MultipartLimits;
+    use vertebra_http::routing::{RouteTable, Router};
+    use vertebra_http::server;
+
+    let mut table = RouteTable::new();
+    table.insert("POST", "/upload");
+    let router = Arc::new(Router::from_entries(table.into_entries()).unwrap());
+    let (dispatcher, mut direct_rx) = Dispatcher::new_direct(8);
+    let dispatcher = Arc::new(dispatcher);
+    let (collector, collector_tx) =
+        RequestBatcher::new(Arc::clone(&dispatcher), BatchLimit::default(), 16);
+    let collector_handle = tokio::spawn(collector.run());
+
+    let boundary = "----VertebraFastpathBoundary";
+    let multipart_body = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"title\"\r\n\r\n\
+         spec-report\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"data.bin\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n\
+         PAYLOAD_INTACT_BYTES\r\n\
+         --{boundary}--\r\n"
+    );
+    let expected_body = Bytes::from(multipart_body.clone());
+
+    let worker_handle = tokio::spawn(async move {
+        let mut batch = direct_rx.recv().await.expect("worker batch");
+        assert_eq!(batch.requests.len(), 1);
+        let req = batch.requests.pop().unwrap();
+        let body = req.body.clone();
+        let _ = req.reply.send(PendingResponse {
+            status: 200,
+            headers_mp: Bytes::new(),
+            body,
+            stream_rx: None,
+        });
+    });
+
+    let listener = server::bind_listener("127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        multipart_limits: MultipartLimits {
+            max_fields: 4,
+            max_file_size: 1024,
+            max_total_size: 4096,
+        },
+        drain_timeout: Duration::from_millis(200),
+        ..ServerConfig::default()
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let resp = client
+        .post(format!("http://{addr}/upload"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(multipart_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let echoed = resp.bytes().await.unwrap();
+    assert_eq!(echoed, expected_body);
+
+    worker_handle.await.unwrap();
+    let _ = shutdown_tx.send(());
+    server_handle.await.unwrap();
+    collector_handle.abort();
 }

@@ -1,12 +1,13 @@
 """SQL Server (MSSQL) synchronous and asynchronous data dictionaries."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sqlspec.data_dictionary import (
     ColumnMetadata,
     DDLResult,
-    DialectConfig,
     ForeignKeyMetadata,
     IndexMetadata,
     MetadataCapabilityProfile,
@@ -17,8 +18,6 @@ from sqlspec.data_dictionary import (
     SystemMetadataResult,
     TableMetadata,
     ensure_system_metadata_request,
-    get_data_dictionary_loader,
-    get_dialect_config,
     system_metadata_gated_result,
 )
 from sqlspec.data_dictionary.dialects.mssql import (
@@ -38,10 +37,9 @@ from sqlspec.data_dictionary.dialects.mssql import (
 )
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 from sqlspec.utils.logging import get_logger
-from sqlspec.utils.text import normalize_identifier
 
 if TYPE_CHECKING:
-    from sqlspec.core import SQL
+    from sqlspec.data_dictionary import DialectConfig
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 __all__ = (
@@ -75,20 +73,17 @@ def _extract_row_field(row: object, *names: str) -> Any:
 class _MSSQLDataDictionaryMixin:
     """Shared T-SQL catalog helpers, version parsing, and capability configuration."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "mssql"
 
-    def get_dialect_config(self) -> DialectConfig:
-        """Return the registered SQLSpec dialect configuration for `mssql`."""
-        return get_dialect_config(type(self).dialect)
+    if TYPE_CHECKING:
+
+        def get_dialect_config(self) -> DialectConfig: ...
 
     def list_available_features(self) -> list[str]:
         """List static and dynamic feature flags supported by SQL Server."""
         return list_mssql_available_features(self.get_dialect_config())
-
-    def get_domain_query(self, domain: str, name: str) -> "SQL":
-        """Load the parameterized SQL catalog query for `(domain, name)`."""
-        query = get_data_dictionary_loader().get_domain_query(type(self).dialect, domain, name)
-        return cast("SQL", query.sql)
 
     def _build_version_info(
         self,
@@ -117,30 +112,29 @@ class _MSSQLDataDictionaryMixin:
 class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase):
     """Synchronous SQL Server data dictionary executing bundled SQLSpec `mssql/sql/*.sql` catalog queries."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "mssql"
 
-    def __init__(self) -> None:
-        super().__init__()
-
-    def resolve_connection_schema(self, driver: "SyncDriverAdapterBase", schema: str | None) -> str | None:
+    def resolve_connection_schema(self, driver: SyncDriverAdapterBase, schema: str | None) -> str | None:
         """Resolve explicit schema name or query SQL Server's current `SCHEMA_NAME()`."""
         if schema is not None:
             return schema
-        current_schema = driver.select_value_or_none(self.get_domain_query("schemas", "current"))
+        current_schema = driver.select_value_or_none(self.get_query("schemas", "current"))
         return str(current_schema) if current_schema else self.get_dialect_config().default_schema
 
     def resolve_ddl_object_name(
-        self, driver: "SyncDriverAdapterBase", object_name: str, schema: str | None
+        self, driver: SyncDriverAdapterBase, object_name: str, schema: str | None
     ) -> tuple[str, str | None]:
         """Normalize an object identifier and resolve its target schema."""
         return (
-            normalize_identifier(object_name, self.get_dialect_config().name),
+            self.resolve_identifier(object_name),
             self.resolve_connection_schema(driver, schema),
         )
 
     def get_metadata_capabilities(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> MetadataCapabilityProfile:
         """Return SQL Server data dictionary metadata capability disclosures."""
@@ -149,7 +143,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 
     def get_system_metadata_capabilities(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> tuple[SystemMetadataCapability, ...]:
         """Return SQL Server opt-in DMV and Query Store system metadata disclosures."""
@@ -157,13 +151,13 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         requested_domains = ("dmv_exec_requests", "query_store_runtime") if domains is None else tuple(domains)
         return tuple(build_mssql_system_metadata_capability(domain) for domain in requested_domains)
 
-    def get_version(self, driver: "SyncDriverAdapterBase") -> MssqlVersionInfo | None:
+    def get_version(self, driver: SyncDriverAdapterBase) -> MssqlVersionInfo | None:
         """Query and cache SQL Server version and edition metadata for `driver`."""
         driver_id = id(driver)
         if driver_id in self._version_fetch_attempted:
             return cast("MssqlVersionInfo | None", self._version_cache.get(driver_id))
 
-        row = driver.select_one_or_none(self.get_domain_query("version", "current"))
+        row = driver.select_one_or_none(self.get_query("version", "current"))
         if not row:
             self._log_version_unavailable(type(self).dialect, "missing")
             self.cache_version(driver_id, None)
@@ -184,7 +178,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         self.cache_version(driver_id, version_info)
         return version_info
 
-    def get_feature_flag(self, driver: "SyncDriverAdapterBase", feature: str) -> bool:
+    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
         """Evaluate whether the connected SQL Server instance supports `feature`."""
         version_info = self.get_version(driver)
         return resolve_mssql_feature_flag(
@@ -195,18 +189,18 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
             version_info=version_info,
         )
 
-    def get_optimal_type(self, driver: "SyncDriverAdapterBase", type_category: str) -> str:
+    def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
         """Return the optimal T-SQL type name for `type_category` given server capabilities."""
         return self._get_optimal_type_from_version(self.get_version(driver), type_category)
 
-    def get_tables(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> list[TableMetadata]:
+    def get_tables(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """List SQL Server tables ordered topologically by foreign keys with flat catalog fallback."""
         schema_name = self.resolve_connection_schema(driver, schema)
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="tables")
         ordered = cast(
             "list[TableMetadata]",
             driver.select(
-                self.get_domain_query("tables", "by_schema"),
+                self.get_query("tables", "by_schema"),
                 schema_name=schema_name,
                 schema_type=TableMetadata,
             ),
@@ -214,7 +208,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         all_rows = cast(
             "list[TableMetadata]",
             driver.select(
-                self.get_domain_query("tables", "all_by_schema"),
+                self.get_query("tables", "all_by_schema"),
                 schema_name=schema_name,
                 schema_type=TableMetadata,
             ),
@@ -223,7 +217,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 
     def get_columns(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ColumnMetadata]:
@@ -234,7 +228,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
             return cast(
                 "list[ColumnMetadata]",
                 driver.select(
-                    self.get_domain_query("columns", "by_schema"),
+                    self.get_query("columns", "by_schema"),
                     schema_name=schema_name,
                     schema_type=ColumnMetadata,
                 ),
@@ -243,7 +237,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         return cast(
             "list[ColumnMetadata]",
             driver.select(
-                self.get_domain_query("columns", "by_table"),
+                self.get_query("columns", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=ColumnMetadata,
@@ -252,7 +246,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 
     def get_indexes(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[IndexMetadata]:
@@ -263,7 +257,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
             return cast(
                 "list[IndexMetadata]",
                 driver.select(
-                    self.get_domain_query("indexes", "by_schema"),
+                    self.get_query("indexes", "by_schema"),
                     schema_name=schema_name,
                     schema_type=IndexMetadata,
                 ),
@@ -272,7 +266,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         return cast(
             "list[IndexMetadata]",
             driver.select(
-                self.get_domain_query("indexes", "by_table"),
+                self.get_query("indexes", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=IndexMetadata,
@@ -281,7 +275,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 
     def get_foreign_keys(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ForeignKeyMetadata]:
@@ -292,7 +286,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
             return cast(
                 "list[ForeignKeyMetadata]",
                 driver.select(
-                    self.get_domain_query("foreign_keys", "by_schema"),
+                    self.get_query("foreign_keys", "by_schema"),
                     schema_name=schema_name,
                     schema_type=ForeignKeyMetadata,
                 ),
@@ -301,7 +295,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         return cast(
             "list[ForeignKeyMetadata]",
             driver.select(
-                self.get_domain_query("foreign_keys", "by_table"),
+                self.get_query("foreign_keys", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=ForeignKeyMetadata,
@@ -310,7 +304,7 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 
     def get_constraints(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -319,34 +313,34 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         capability = self.get_metadata_capabilities(driver, ("constraints",)).get("constraints")
         if table is None:
             self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="constraints")
-            rows = driver.select(self.get_domain_query("constraints", "by_schema"), schema_name=schema_name)
+            rows = driver.select(self.get_query("constraints", "by_schema"), schema_name=schema_name)
         else:
             self._log_table_describe(driver, schema_name=schema_name, table_name=table, operation="constraints")
             rows = driver.select(
-                self.get_domain_query("constraints", "by_table"),
+                self.get_query("constraints", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
             )
         return MetadataResult("constraints", capability=capability, items=tuple(rows))
 
-    def get_schemas(self, driver: "SyncDriverAdapterBase") -> MetadataResult:
+    def get_schemas(self, driver: SyncDriverAdapterBase) -> MetadataResult:
         """List accessible SQL Server database schemas."""
         capability = self.get_metadata_capabilities(driver, ("schemas",)).get("schemas")
         self._log_schema_introspect(driver, schema_name=None, table_name=None, operation="schemas")
-        rows = driver.select(self.get_domain_query("schemas", "list"))
+        rows = driver.select(self.get_query("schemas", "list"))
         return MetadataResult("schemas", capability=capability, items=tuple(rows))
 
-    def get_objects(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    def get_objects(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """List database objects in `schema`."""
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("objects",)).get("objects")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="objects")
-        rows = driver.select(self.get_domain_query("objects", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("objects", "by_schema"), schema_name=schema_name)
         return MetadataResult("objects", capability=capability, items=tuple(rows))
 
     def get_table_details(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         table: str,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -355,23 +349,23 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         capability = self.get_metadata_capabilities(driver, ("tables",)).get("tables")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=table, operation="table_details")
         rows = driver.select(
-            self.get_domain_query("tables", "details_by_table"),
+            self.get_query("tables", "details_by_table"),
             schema_name=schema_name,
             table_name=table,
         )
         return MetadataResult("tables", capability=capability, items=tuple(rows))
 
-    def get_routines(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    def get_routines(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """List stored procedures and user-defined functions in `schema`."""
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("routines",)).get("routines")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="routines")
-        rows = driver.select(self.get_domain_query("routines", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("routines", "by_schema"), schema_name=schema_name)
         return MetadataResult("routines", capability=capability, items=tuple(rows))
 
     def get_privileges(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         object_name: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -379,30 +373,30 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("privileges",)).get("privileges")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=object_name, operation="privileges")
-        rows = driver.select(self.get_domain_query("permissions", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("permissions", "by_schema"), schema_name=schema_name)
         if object_name is not None:
             rows = [r for r in rows if _extract_row_field(r, "object_name") == object_name]
         return MetadataResult("privileges", capability=capability, items=tuple(rows))
 
-    def get_views(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    def get_views(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """List SQL Server views in `schema`."""
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("views",)).get("views")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="views")
-        rows = driver.select(self.get_domain_query("views", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("views", "by_schema"), schema_name=schema_name)
         return MetadataResult("views", capability=capability, items=tuple(rows))
 
-    def get_sequences(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    def get_sequences(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """List SQL Server sequences in `schema`."""
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("sequences",)).get("sequences")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="sequences")
-        rows = driver.select(self.get_domain_query("sequences", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("sequences", "by_schema"), schema_name=schema_name)
         return MetadataResult("sequences", capability=capability, items=tuple(rows))
 
     def get_dependencies(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         object_name: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -410,14 +404,14 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         schema_name = self.resolve_connection_schema(driver, schema)
         capability = self.get_metadata_capabilities(driver, ("dependencies",)).get("dependencies")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=object_name, operation="dependencies")
-        rows = driver.select(self.get_domain_query("dependencies", "by_schema"), schema_name=schema_name)
+        rows = driver.select(self.get_query("dependencies", "by_schema"), schema_name=schema_name)
         if object_name is not None:
             rows = [r for r in rows if _extract_row_field(r, "referencing_object_name") == object_name]
         return MetadataResult("dependencies", capability=capability, items=tuple(rows))
 
     def get_system_metadata(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         request: SystemMetadataRequest | str | None = None,
         **kwargs: Any,
     ) -> SystemMetadataResult:
@@ -431,13 +425,13 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         denied = validate_mssql_system_metadata_options(metadata_request, options)
         if denied is not None:
             return denied
-        query = self.get_domain_query("system", metadata_request.domain)
+        query = self.get_query("system", metadata_request.domain)
         rows = driver.select(query)
         return build_mssql_system_metadata_result(metadata_request, rows)
 
     def _get_native_object_ddl(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         object_name: str,
         *,
         schema: str | None,
@@ -449,19 +443,19 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
         if object_type.lower() != "table":
             return None
         columns = driver.select(
-            self.get_domain_query("ddl", "table_inputs_by_table"),
+            self.get_query("ddl", "table_inputs_by_table"),
             schema_name=schema,
             table_name=object_name,
         )
         if not columns:
             return build_mssql_table_ddl_result(schema, object_name, columns, object_type=object_type)
         indexes = driver.select(
-            self.get_domain_query("ddl", "index_inputs_by_table"),
+            self.get_query("ddl", "index_inputs_by_table"),
             schema_name=schema,
             table_name=object_name,
         )
         constraints = driver.select(
-            self.get_domain_query("constraints", "by_table"),
+            self.get_query("constraints", "by_table"),
             schema_name=schema,
             table_name=object_name,
         )
@@ -480,31 +474,20 @@ class MSSQLSyncDataDictionary(_MSSQLDataDictionaryMixin, SyncDataDictionaryBase)
 class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBase):
     """Asynchronous SQL Server data dictionary executing bundled SQLSpec `mssql/sql/*.sql` catalog queries."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "mssql"
 
-    def __init__(self) -> None:
-        super().__init__()
-
-    async def resolve_connection_schema(self, driver: "AsyncDriverAdapterBase", schema: str | None) -> str | None:
+    async def resolve_connection_schema(self, driver: AsyncDriverAdapterBase, schema: str | None) -> str | None:
         """Resolve explicit schema name or asynchronously query SQL Server's `SCHEMA_NAME()`."""
         if schema is not None:
             return schema
-        current_schema = await driver.select_value_or_none(self.get_domain_query("schemas", "current"))
+        current_schema = await driver.select_value_or_none(self.get_query("schemas", "current"))
         return str(current_schema) if current_schema else self.get_dialect_config().default_schema
-
-    def resolve_ddl_object_name(
-        self, driver: "AsyncDriverAdapterBase", object_name: str, schema: str | None
-    ) -> tuple[str, str | None]:
-        """Normalize an object identifier and resolve its target schema."""
-        _ = driver
-        return (
-            normalize_identifier(object_name, self.get_dialect_config().name),
-            self.resolve_schema(schema),
-        )
 
     async def get_metadata_capabilities(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> MetadataCapabilityProfile:
         """Return SQL Server data dictionary metadata capability disclosures asynchronously."""
@@ -513,7 +496,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
 
     async def get_system_metadata_capabilities(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         domains: Sequence[str] | None = None,
     ) -> tuple[SystemMetadataCapability, ...]:
         """Return SQL Server opt-in DMV and Query Store system metadata disclosures asynchronously."""
@@ -521,13 +504,13 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         requested_domains = ("dmv_exec_requests", "query_store_runtime") if domains is None else tuple(domains)
         return tuple(build_mssql_system_metadata_capability(domain) for domain in requested_domains)
 
-    async def get_version(self, driver: "AsyncDriverAdapterBase") -> MssqlVersionInfo | None:
+    async def get_version(self, driver: AsyncDriverAdapterBase) -> MssqlVersionInfo | None:
         """Asynchronously query and cache SQL Server version and edition metadata for `driver`."""
         driver_id = id(driver)
         if driver_id in self._version_fetch_attempted:
             return cast("MssqlVersionInfo | None", self._version_cache.get(driver_id))
 
-        row = await driver.select_one_or_none(self.get_domain_query("version", "current"))
+        row = await driver.select_one_or_none(self.get_query("version", "current"))
         if not row:
             self._log_version_unavailable(type(self).dialect, "missing")
             self.cache_version(driver_id, None)
@@ -548,7 +531,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         self.cache_version(driver_id, version_info)
         return version_info
 
-    async def get_feature_flag(self, driver: "AsyncDriverAdapterBase", feature: str) -> bool:
+    async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
         """Evaluate asynchronously whether the connected SQL Server instance supports `feature`."""
         version_info = await self.get_version(driver)
         return resolve_mssql_feature_flag(
@@ -559,18 +542,18 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
             version_info=version_info,
         )
 
-    async def get_optimal_type(self, driver: "AsyncDriverAdapterBase", type_category: str) -> str:
+    async def get_optimal_type(self, driver: AsyncDriverAdapterBase, type_category: str) -> str:
         """Return the optimal T-SQL type name for `type_category` asynchronously."""
         return self._get_optimal_type_from_version(await self.get_version(driver), type_category)
 
-    async def get_tables(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> list[TableMetadata]:
+    async def get_tables(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """Asynchronously list SQL Server tables ordered topologically by foreign keys."""
         schema_name = await self.resolve_connection_schema(driver, schema)
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="tables")
         ordered = cast(
             "list[TableMetadata]",
             await driver.select(
-                self.get_domain_query("tables", "by_schema"),
+                self.get_query("tables", "by_schema"),
                 schema_name=schema_name,
                 schema_type=TableMetadata,
             ),
@@ -578,7 +561,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         all_rows = cast(
             "list[TableMetadata]",
             await driver.select(
-                self.get_domain_query("tables", "all_by_schema"),
+                self.get_query("tables", "all_by_schema"),
                 schema_name=schema_name,
                 schema_type=TableMetadata,
             ),
@@ -587,7 +570,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
 
     async def get_columns(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ColumnMetadata]:
@@ -598,7 +581,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
             return cast(
                 "list[ColumnMetadata]",
                 await driver.select(
-                    self.get_domain_query("columns", "by_schema"),
+                    self.get_query("columns", "by_schema"),
                     schema_name=schema_name,
                     schema_type=ColumnMetadata,
                 ),
@@ -607,7 +590,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         return cast(
             "list[ColumnMetadata]",
             await driver.select(
-                self.get_domain_query("columns", "by_table"),
+                self.get_query("columns", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=ColumnMetadata,
@@ -616,7 +599,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
 
     async def get_indexes(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[IndexMetadata]:
@@ -627,7 +610,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
             return cast(
                 "list[IndexMetadata]",
                 await driver.select(
-                    self.get_domain_query("indexes", "by_schema"),
+                    self.get_query("indexes", "by_schema"),
                     schema_name=schema_name,
                     schema_type=IndexMetadata,
                 ),
@@ -636,7 +619,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         return cast(
             "list[IndexMetadata]",
             await driver.select(
-                self.get_domain_query("indexes", "by_table"),
+                self.get_query("indexes", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=IndexMetadata,
@@ -645,7 +628,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
 
     async def get_foreign_keys(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> list[ForeignKeyMetadata]:
@@ -656,7 +639,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
             return cast(
                 "list[ForeignKeyMetadata]",
                 await driver.select(
-                    self.get_domain_query("foreign_keys", "by_schema"),
+                    self.get_query("foreign_keys", "by_schema"),
                     schema_name=schema_name,
                     schema_type=ForeignKeyMetadata,
                 ),
@@ -665,7 +648,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         return cast(
             "list[ForeignKeyMetadata]",
             await driver.select(
-                self.get_domain_query("foreign_keys", "by_table"),
+                self.get_query("foreign_keys", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
                 schema_type=ForeignKeyMetadata,
@@ -674,7 +657,7 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
 
     async def get_constraints(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -683,34 +666,34 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         capability = (await self.get_metadata_capabilities(driver, ("constraints",))).get("constraints")
         if table is None:
             self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="constraints")
-            rows = await driver.select(self.get_domain_query("constraints", "by_schema"), schema_name=schema_name)
+            rows = await driver.select(self.get_query("constraints", "by_schema"), schema_name=schema_name)
         else:
             self._log_table_describe(driver, schema_name=schema_name, table_name=table, operation="constraints")
             rows = await driver.select(
-                self.get_domain_query("constraints", "by_table"),
+                self.get_query("constraints", "by_table"),
                 schema_name=schema_name,
                 table_name=table,
             )
         return MetadataResult("constraints", capability=capability, items=tuple(rows))
 
-    async def get_schemas(self, driver: "AsyncDriverAdapterBase") -> MetadataResult:
+    async def get_schemas(self, driver: AsyncDriverAdapterBase) -> MetadataResult:
         """Asynchronously list accessible SQL Server database schemas."""
         capability = (await self.get_metadata_capabilities(driver, ("schemas",))).get("schemas")
         self._log_schema_introspect(driver, schema_name=None, table_name=None, operation="schemas")
-        rows = await driver.select(self.get_domain_query("schemas", "list"))
+        rows = await driver.select(self.get_query("schemas", "list"))
         return MetadataResult("schemas", capability=capability, items=tuple(rows))
 
-    async def get_objects(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    async def get_objects(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """Asynchronously list database objects in `schema`."""
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("objects",))).get("objects")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="objects")
-        rows = await driver.select(self.get_domain_query("objects", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("objects", "by_schema"), schema_name=schema_name)
         return MetadataResult("objects", capability=capability, items=tuple(rows))
 
     async def get_table_details(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         table: str,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -719,23 +702,23 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         capability = (await self.get_metadata_capabilities(driver, ("tables",))).get("tables")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=table, operation="table_details")
         rows = await driver.select(
-            self.get_domain_query("tables", "details_by_table"),
+            self.get_query("tables", "details_by_table"),
             schema_name=schema_name,
             table_name=table,
         )
         return MetadataResult("tables", capability=capability, items=tuple(rows))
 
-    async def get_routines(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    async def get_routines(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """Asynchronously list stored procedures and user-defined functions in `schema`."""
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("routines",))).get("routines")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="routines")
-        rows = await driver.select(self.get_domain_query("routines", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("routines", "by_schema"), schema_name=schema_name)
         return MetadataResult("routines", capability=capability, items=tuple(rows))
 
     async def get_privileges(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         object_name: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -743,30 +726,30 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("privileges",))).get("privileges")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=object_name, operation="privileges")
-        rows = await driver.select(self.get_domain_query("permissions", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("permissions", "by_schema"), schema_name=schema_name)
         if object_name is not None:
             rows = [r for r in rows if _extract_row_field(r, "object_name") == object_name]
         return MetadataResult("privileges", capability=capability, items=tuple(rows))
 
-    async def get_views(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    async def get_views(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """Asynchronously list SQL Server views in `schema`."""
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("views",))).get("views")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="views")
-        rows = await driver.select(self.get_domain_query("views", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("views", "by_schema"), schema_name=schema_name)
         return MetadataResult("views", capability=capability, items=tuple(rows))
 
-    async def get_sequences(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> MetadataResult:
+    async def get_sequences(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> MetadataResult:
         """Asynchronously list SQL Server sequences in `schema`."""
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("sequences",))).get("sequences")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=None, operation="sequences")
-        rows = await driver.select(self.get_domain_query("sequences", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("sequences", "by_schema"), schema_name=schema_name)
         return MetadataResult("sequences", capability=capability, items=tuple(rows))
 
     async def get_dependencies(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         object_name: str | None = None,
         schema: str | None = None,
     ) -> MetadataResult:
@@ -774,14 +757,14 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         schema_name = await self.resolve_connection_schema(driver, schema)
         capability = (await self.get_metadata_capabilities(driver, ("dependencies",))).get("dependencies")
         self._log_schema_introspect(driver, schema_name=schema_name, table_name=object_name, operation="dependencies")
-        rows = await driver.select(self.get_domain_query("dependencies", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(self.get_query("dependencies", "by_schema"), schema_name=schema_name)
         if object_name is not None:
             rows = [r for r in rows if _extract_row_field(r, "referencing_object_name") == object_name]
         return MetadataResult("dependencies", capability=capability, items=tuple(rows))
 
     async def get_system_metadata(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         request: SystemMetadataRequest | str | None = None,
         **kwargs: Any,
     ) -> SystemMetadataResult:
@@ -795,13 +778,13 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         denied = validate_mssql_system_metadata_options(metadata_request, options)
         if denied is not None:
             return denied
-        query = self.get_domain_query("system", metadata_request.domain)
+        query = self.get_query("system", metadata_request.domain)
         rows = await driver.select(query)
         return build_mssql_system_metadata_result(metadata_request, rows)
 
     async def _get_native_object_ddl(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         object_name: str,
         *,
         schema: str | None,
@@ -813,19 +796,19 @@ class MSSQLAsyncDataDictionary(_MSSQLDataDictionaryMixin, AsyncDataDictionaryBas
         if object_type.lower() != "table":
             return None
         columns = await driver.select(
-            self.get_domain_query("ddl", "table_inputs_by_table"),
+            self.get_query("ddl", "table_inputs_by_table"),
             schema_name=schema,
             table_name=object_name,
         )
         if not columns:
             return build_mssql_table_ddl_result(schema, object_name, columns, object_type=object_type)
         indexes = await driver.select(
-            self.get_domain_query("ddl", "index_inputs_by_table"),
+            self.get_query("ddl", "index_inputs_by_table"),
             schema_name=schema,
             table_name=object_name,
         )
         constraints = await driver.select(
-            self.get_domain_query("constraints", "by_table"),
+            self.get_query("constraints", "by_table"),
             schema_name=schema,
             table_name=object_name,
         )

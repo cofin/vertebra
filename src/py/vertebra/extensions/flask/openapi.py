@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, get_type_hints
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, get_type_hints
 
 import msgspec
 
 from vertebra.extensions.flask.router import convert_werkzeug_rule
-from vertebra.extensions.litestar.openapi import (
+from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
     DocsBackendType,
     ElementsDocsConfig,
@@ -19,7 +20,11 @@ from vertebra.extensions.litestar.openapi import (
     ScalarSpecSource,
     SwaggerDocsConfig,
 )
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.module_loader import ensure_module
+from vertebra.utils.serializers import encode_json_bytes, schema_components
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 __all__ = (
     "AsyncAPIDocsConfig",
@@ -47,13 +52,16 @@ def _schema_for_type(tp: Any) -> dict[str, Any]:
     if tp is str:
         return {"type": "string"}
     if isinstance(tp, type) and issubclass(tp, msgspec.Struct):
-        schemas, defs = msgspec.json.schema_components((tp,))
+        schemas, defs = schema_components((tp,))
         out = dict(schemas[0])
         if defs:
             out["$defs"] = defs
         return out
-    if isinstance(tp, type) and hasattr(tp, "model_json_schema"):
-        return dict(tp.model_json_schema())
+    model_json_schema = getattr(tp, "model_json_schema", None)
+    if isinstance(tp, type) and callable(model_json_schema):
+        schema = model_json_schema()
+        if isinstance(schema, Mapping):
+            return dict(schema)
     return {"type": "object"}
 
 
@@ -137,12 +145,13 @@ def extract_openapi_schema(
 
 
 def attach_openapi_docs(
-    app: Any,
+    app: Flask | Any,
     config: OpenAPIConfig | None = None,
     *,
     openapi_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Attach `/openapi.json` and configurable Scalar, Swagger, and AsyncAPI routes to a Flask app."""
+    ensure_module("flask", extra="flask")
     resolved = config or OpenAPIConfig()
     schema = openapi_schema or extract_openapi_schema(app, title=resolved.title, version=resolved.version)
     schema_bytes = encode_json_bytes(schema)

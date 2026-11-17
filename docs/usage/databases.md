@@ -27,6 +27,8 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     uv add "vertebra-core[sqlite]"
     uv add "vertebra-core[redis]"
     uv add "vertebra-core[valkey]"
+    uv add "vertebra-core[sqlalchemy-duckdb]"
+    uv add "vertebra-core[sqlalchemy-gcp]"
     ```
 
 === "pip"
@@ -42,6 +44,8 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pip install "vertebra-core[sqlite]"
     pip install "vertebra-core[redis]"
     pip install "vertebra-core[valkey]"
+    pip install "vertebra-core[sqlalchemy-duckdb]"
+    pip install "vertebra-core[sqlalchemy-gcp]"
     ```
 
 === "pdm"
@@ -57,6 +61,8 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     pdm add "vertebra-core[sqlite]"
     pdm add "vertebra-core[redis]"
     pdm add "vertebra-core[valkey]"
+    pdm add "vertebra-core[sqlalchemy-duckdb]"
+    pdm add "vertebra-core[sqlalchemy-gcp]"
     ```
 
 === "poetry"
@@ -72,9 +78,11 @@ Core SQL and RESP3 configuration contracts ship in `vertebra-core`, while standa
     poetry add "vertebra-core[sqlite]"
     poetry add "vertebra-core[redis]"
     poetry add "vertebra-core[valkey]"
+    poetry add "vertebra-core[sqlalchemy-duckdb]"
+    poetry add "vertebra-core[sqlalchemy-gcp]"
     ```
 
-Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`). Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Redis (`vertebra-core[redis]`, backed by `vertebra._redis`), Valkey (`vertebra-core[valkey]`, backed by `vertebra._valkey`), Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent.
+Installing `vertebra-core[postgres]` provides the standalone pure-Rust `vertebra-postgres` (`vertebra._postgres`) wheel with zero `libpq` or `libecpg` C dependency and `GIL_USED = False` compatibility across Python `3.12`–`3.15` (`3.14t`/`3.15t`); without it, `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` raise `MissingDependencyError`. Installing `vertebra-core[duckdb]` provides `vertebra-duckdb` (`vertebra._duckdb`), and `vertebra-core[sqlalchemy-duckdb]` adds `duckdb-engine` for SQLAlchemy `duckdb+vtb://` dialects. Installing `vertebra-core[sqlite]` provides the standalone pure-Rust `vertebra-sqlite` (`vertebra._sqlite`) wheel with bundled SQLite 3.45+, `GIL_USED = False`, and WAL pooling. Redis (`vertebra-core[redis]`, backed by `vertebra._redis`), Valkey (`vertebra-core[valkey]`, backed by `vertebra._valkey`), Oracle (`vertebra-core[oracle]`), MySQL (`vertebra-core[mysql]`), SQL Server (`vertebra-core[mssql]`), BigQuery (`vertebra-core[bigquery]`), and Spanner (`vertebra-core[spanner]`) drivers execute through their standalone native wheels and raise `MissingDependencyError` when absent, while `vertebra-core[sqlalchemy-gcp]` installs `sqlalchemy-bigquery` and `sqlalchemy-spanner` for BigQuery and Spanner SQLAlchemy dialects.
 
 ## Unified Driver Contract & `provide_driver`
 
@@ -456,4 +464,4 @@ SQLSpec `execute_stack` uses the capability when the stack contains multiple `ex
 | --- | --- |
 | **[Cloud SQL & AlloyDB Dialers](cloud-dialers.md)** | Connect directly to Cloud SQL (`:3307`) and AlloyDB (`:5433`) with ephemeral mTLS and IAM auth without sidecars. |
 | **[RLS, CDC & Arrow Analytics](analytics-and-cdc.md)** | Enforce `TenantPredicate` Row-Level Security, stream `ChangeFeed` events, and query zero-copy `ArrowCursor` tables. |
-| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.0+ `+vtb` dialects, `Vector`, and `BinaryJSON` column types. |
+| **[SQLSpec, SQLAlchemy & Extensions](extensions.md)** | Configure `SQLSpecPlugin`, Advanced Alchemy, SQLAlchemy 2.1+ `+vtb` dialects, `Vector`, and `MsgspecJSON` column types. |

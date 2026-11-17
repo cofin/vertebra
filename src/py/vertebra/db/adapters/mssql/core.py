@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -41,10 +40,12 @@ class MSSQLCore:
         config: MSSQLConfig,
         *,
         dialer: Any = None,
+        aad_token: str | None = None,
     ) -> SyncMSSQLClient:
         """Instantiate the native Rust `SyncMSSQLClient` from `config` and optional `dialer`."""
         mssql_mod = cls.require_native_module()
-        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer)
+        resolved_token = aad_token if aad_token is not None else config.resolve_aad_token_sync()
+        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer, aad_token=resolved_token)
         client: SyncMSSQLClient = mssql_mod.SyncMSSQLClient(config.dsn, **kwargs)
         return client
 
@@ -54,57 +55,20 @@ class MSSQLCore:
         config: MSSQLConfig,
         *,
         dialer: Any = None,
+        aad_token: str | None = None,
+        resolve_token: bool = True,
     ) -> AsyncMSSQLClient:
         """Instantiate the native Rust `AsyncMSSQLClient` from `config` and optional `dialer`."""
         mssql_mod = cls.require_native_module()
-        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer)
+        if aad_token is not None:
+            resolved_token: str | None = aad_token
+        elif resolve_token:
+            resolved_token = config.resolve_aad_token_sync()
+        else:
+            resolved_token = None
+        kwargs = cls._build_rust_client_kwargs(config, dialer=dialer, aad_token=resolved_token)
         client: AsyncMSSQLClient = mssql_mod.AsyncMSSQLClient(config.dsn, **kwargs)
         return client
-
-    @staticmethod
-    def prepare_and_lease(broker: Any, sql: str) -> tuple[str, Any]:
-        """Compile T-SQL `@P1` placeholders (caching via broker if enabled) and acquire a lease grant."""
-        sc_attr = getattr(broker, "statement_cache", None) if broker is not None else None
-        sc = sc_attr() if callable(sc_attr) else sc_attr
-        if sc is not None and hasattr(sc, "lookup") and hasattr(sc, "insert"):
-            sql_bytes = sql.encode("utf-8")
-            try:
-                cached = sc.lookup(MSSQL_DIALECT_TAG, sql)
-                use_bytes_key = False
-            except TypeError:
-                cached = sc.lookup(MSSQL_DIALECT_TAG, sql_bytes)
-                use_bytes_key = True
-            if cached is not None and cached.compiled_sql:
-                rewritten = cached.compiled_sql.decode("utf-8")
-            else:
-                rewritten, count = MSSQLCore.rewrite_placeholders(sql)
-                sc.insert(
-                    MSSQL_DIALECT_TAG,
-                    sql_bytes if use_bytes_key else sql,
-                    count,
-                    rewritten.encode("utf-8"),
-                    b"",
-                )
-        else:
-            rewritten, _ = MSSQLCore.rewrite_placeholders(sql)
-
-        if broker is not None and hasattr(broker, "lease_table") and broker.lease_table is not None:
-            return rewritten, broker.lease_table.acquire(os.getpid())
-        if broker is not None and hasattr(broker, "acquire"):
-            try:
-                return rewritten, broker.acquire(os.getpid())
-            except TypeError:
-                return rewritten, broker.acquire(bind_key="mssql")
-        return rewritten, None
-
-    @staticmethod
-    def release_broker_lease(broker: Any, grant: Any) -> None:
-        """Release a previously acquired SQL Server broker lease grant."""
-        if grant is not None and broker is not None:
-            if hasattr(broker, "lease_table") and broker.lease_table is not None:
-                broker.lease_table.release(grant.slot_index, grant.generation)
-            elif hasattr(broker, "release") and hasattr(grant, "slot_index"):
-                broker.release(grant.slot_index, grant.generation)
 
     @classmethod
     def _build_rust_client_kwargs(
@@ -112,6 +76,7 @@ class MSSQLCore:
         config: MSSQLConfig,
         *,
         dialer: Any = None,
+        aad_token: str | None = None,
     ) -> dict[str, Any]:
         max_overflow = max(0, int(config.pool_max_size) - max(1, int(config.pool_min_size)))
         (
@@ -145,7 +110,20 @@ class MSSQLCore:
             "cloudsql_ip_type": cloudsql_ip_type,
             "cloudsql_auth_type": cloudsql_auth_type,
             "cloudsql_proxy_addr": config.cloudsql_proxy_addr,
+            "aad_token": aad_token,
         }
+
+    @staticmethod
+    def is_auth_rejection(exc: BaseException) -> bool:
+        """Return True when `exc` represents a SQL Server login or FEDAUTH rejection."""
+        vendor_code = getattr(exc, "vendor_code", None)
+        if vendor_code == 18456:
+            return True
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate == "28000":
+            return True
+        detail = str(exc).lower()
+        return "login failed" in detail or "fedauth" in detail or "18456" in detail
 
     @staticmethod
     def coerce_arrow_source(

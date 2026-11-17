@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import vertebra._redis as native_redis
+import vertebra._valkey as native_valkey
+import vertebra.db.adapters.redis.core as redis_core_mod
+import vertebra.db.adapters.valkey.core as valkey_core_mod
+import vertebra.db.driver._resp as shared_resp_mod
 from vertebra.db.adapters.redis import (
     AsyncRedisDriver,
     AsyncRedisNotificationSource,
@@ -249,7 +254,9 @@ def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
     )
     driver = SyncValkeyDriver(cfg, broker=broker)
     try:
-        assert isinstance(driver._client_cache, collections.OrderedDict)
+        assert hasattr(driver, "_client_cache") is False
+        assert isinstance(driver.cached_keys, tuple)
+        assert not driver.cached_keys
 
         driver.set("user:1", b"v1")
         driver.set("user:2", b"v2")
@@ -260,7 +267,7 @@ def test_bounded_lru_client_cache_and_live_socket_push_invalidation() -> None:
 
         driver.set("user:3", b"v3")
         assert driver.cached_keys == ("user:1", "user:3")
-        assert "user:2" not in driver._client_cache
+        assert "user:2" not in driver.cached_keys
 
         assert driver.execute_command("PING") == "PONG"
         assert "user:1" not in driver.cached_keys
@@ -795,3 +802,466 @@ async def test_async_redis_notification_source_loopback_and_channelbus(resp3_ser
 
     await source.aclose()
     await driver.close()
+
+
+def test_redis_and_valkey_core_reexport_shared_resp_types_and_constants() -> None:
+    """redis.core and valkey.core must re-export shared _resp types and constants."""
+    assert redis_core_mod.ClusterRedirect is valkey_core_mod.ClusterRedirect is shared_resp_mod.ClusterRedirect
+    assert redis_core_mod.PubSubMessage is valkey_core_mod.PubSubMessage is shared_resp_mod.PubSubMessage
+    assert redis_core_mod.HASH_SLOT_COUNT == valkey_core_mod.HASH_SLOT_COUNT == shared_resp_mod.HASH_SLOT_COUNT == 16384
+    assert redis_core_mod.NON_KEY_COMMANDS is valkey_core_mod.NON_KEY_COMMANDS is shared_resp_mod.NON_KEY_COMMANDS
+    assert valkey_core_mod.Resp3Error is shared_resp_mod.Resp3Error
+
+
+@pytest.mark.parametrize(
+    ("native_module", "key", "redirect_msg", "expected_redirect"),
+    [
+        pytest.param(
+            None,
+            "user:{42}:profile",
+            "MOVED 3999 127.0.0.1:6381",
+            ClusterRedirect(kind="MOVED", slot=3999, host="127.0.0.1", port=6381),
+            id="pure-python-moved",
+        ),
+        pytest.param(
+            "vertebra._redis",
+            "user:{42}:orders",
+            "-ASK 12739 10.0.0.12:7002\r\n",
+            ClusterRedirect(kind="ASK", slot=12739, host="10.0.0.12", port=7002),
+            id="native-redis-ask",
+        ),
+        pytest.param(
+            "vertebra._valkey",
+            "user:{42}:cart",
+            "-ASK 12739 10.0.0.12:7002\r\n",
+            ClusterRedirect(kind="ASK", slot=12739, host="10.0.0.12", port=7002),
+            id="native-valkey-ask",
+        ),
+    ],
+)
+def test_shared_resp_helpers_match_pure_python_and_native_paths(
+    native_module: str | None,
+    key: str,
+    redirect_msg: str,
+    expected_redirect: ClusterRedirect,
+) -> None:
+    """Shared _resp helpers must match across pure-Python and native module dispatch."""
+    assert shared_resp_mod.crc16_xmodem(b"123456789", native_module=native_module) == 0x31C3
+    assert shared_resp_mod.hash_slot(key, native_module=native_module) == hash_slot(b"42")
+    parsed = shared_resp_mod.parse_cluster_redirect(redirect_msg, native_module=native_module)
+    assert parsed == expected_redirect
+    assert isinstance(parsed, ClusterRedirect)
+    assert ClusterRedirect.parse(redirect_msg) == expected_redirect
+
+
+async def _start_mock_cluster_nodes(
+    moved_key: str,
+    ask_key: str,
+) -> tuple[
+    tuple[asyncio.AbstractServer, asyncio.AbstractServer, asyncio.AbstractServer],
+    tuple[int, int, int],
+    list[list[str]],
+]:
+    moved_slot = hash_slot(moved_key)
+    ask_slot = hash_slot(ask_key)
+    node1_port = 0
+    node2_port = 0
+    node3_port = 0
+    node3_commands: list[list[str]] = []
+
+    def encode_slots_reply() -> bytes:
+        host = b"127.0.0.1"
+        return (f"*1\r\n*3\r\n:0\r\n:16383\r\n*2\r\n${len(host)}\r\n127.0.0.1\r\n:{node1_port}\r\n").encode("ascii")
+
+    async def handle_node1(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        buf = bytearray()
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            while buf:
+                try:
+                    frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                except ValueError:
+                    break
+                del buf[:next_offset]
+                if isinstance(frame, list) and frame:
+                    decoded = [p.decode("utf-8") if isinstance(p, bytes) else str(p) for p in frame]
+                    cmd = decoded[0].upper()
+                    if cmd == "HELLO":
+                        writer.write(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                    elif cmd == "CLUSTER" and len(decoded) > 1 and decoded[1].upper() == "SLOTS":
+                        writer.write(encode_slots_reply())
+                    elif cmd == "CLUSTER" and len(decoded) > 1 and decoded[1].upper() == "SHARDS":
+                        writer.write(b"-ERR unknown subcommand 'SHARDS'\r\n")
+                    elif cmd == "GET" and len(decoded) > 1:
+                        key = decoded[1]
+                        if key == moved_key:
+                            writer.write(f"-MOVED {moved_slot} 127.0.0.1:{node2_port}\r\n".encode("ascii"))
+                        elif key == ask_key:
+                            writer.write(f"-ASK {ask_slot} 127.0.0.1:{node3_port}\r\n".encode("ascii"))
+                        else:
+                            writer.write(b"$5\r\nnode1\r\n")
+                    else:
+                        writer.write(b"+OK\r\n")
+                    await writer.drain()
+        writer.close()
+
+    async def handle_node2(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        buf = bytearray()
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            while buf:
+                try:
+                    frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                except ValueError:
+                    break
+                del buf[:next_offset]
+                if isinstance(frame, list) and frame:
+                    decoded = [p.decode("utf-8") if isinstance(p, bytes) else str(p) for p in frame]
+                    cmd = decoded[0].upper()
+                    if cmd == "HELLO":
+                        writer.write(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                    elif cmd == "CLUSTER" and len(decoded) > 1 and decoded[1].upper() == "SLOTS":
+                        writer.write(encode_slots_reply())
+                    elif cmd == "CLUSTER" and len(decoded) > 1 and decoded[1].upper() == "SHARDS":
+                        writer.write(b"-ERR unknown subcommand 'SHARDS'\r\n")
+                    elif cmd == "GET":
+                        writer.write(b"$10\r\nfrom-node2\r\n")
+                    else:
+                        writer.write(b"+OK\r\n")
+                    await writer.drain()
+        writer.close()
+
+    async def handle_node3(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        buf = bytearray()
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            while buf:
+                try:
+                    frame, next_offset = Resp3Parser.parse_frame(buf, 0)
+                except ValueError:
+                    break
+                del buf[:next_offset]
+                if isinstance(frame, list) and frame:
+                    decoded = [p.decode("utf-8") if isinstance(p, bytes) else str(p) for p in frame]
+                    node3_commands.append(decoded)
+                    cmd = decoded[0].upper()
+                    if cmd == "HELLO":
+                        writer.write(b"%2\r\n+server\r\n+redis\r\n+proto\r\n:3\r\n")
+                    elif cmd == "ASKING":
+                        writer.write(b"+OK\r\n")
+                    elif cmd == "GET":
+                        writer.write(b"$10\r\nfrom-node3\r\n")
+                    else:
+                        writer.write(b"+OK\r\n")
+                    await writer.drain()
+        writer.close()
+
+    srv1 = await asyncio.start_server(handle_node1, "127.0.0.1", 0)
+    srv2 = await asyncio.start_server(handle_node2, "127.0.0.1", 0)
+    srv3 = await asyncio.start_server(handle_node3, "127.0.0.1", 0)
+    node1_port = srv1.sockets[0].getsockname()[1]
+    node2_port = srv2.sockets[0].getsockname()[1]
+    node3_port = srv3.sockets[0].getsockname()[1]
+    return (srv1, srv2, srv3), (node1_port, node2_port, node3_port), node3_commands
+
+
+@pytest.mark.parametrize("backend", ["redis", "valkey"])
+@pytest.mark.anyio
+async def test_async_native_cluster_slot_map_and_moved_redirection(backend: str) -> None:
+    """AsyncRedisClient and AsyncValkeyClient expose non-blocking slot_map() updated on MOVED."""
+    plain_key = "plain:{1}"
+    moved_key = "order:{42}"
+    ask_key = "cart:{99}"
+    plain_slot = hash_slot(plain_key)
+    moved_slot = hash_slot(moved_key)
+    ask_slot = hash_slot(ask_key)
+
+    servers, ports, node3_commands = await _start_mock_cluster_nodes(moved_key, ask_key)
+    node1_port, node2_port, _node3_port = ports
+
+    try:
+        if backend == "redis":
+            redis_client = native_redis.AsyncRedisClient(
+                f"redis://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_nodes=[("127.0.0.1", node1_port)],
+                max_redirections=3,
+            )
+            try:
+                await redis_client.connect()
+                initial_slots = redis_client.slot_map()
+                assert len(initial_slots) == 16384
+                assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+                assert initial_slots[moved_slot] == ("127.0.0.1", node1_port)
+
+                assert await redis_client.get(plain_key) == b"node1"
+                assert await redis_client.get(moved_key) == b"from-node2"
+                after_moved = redis_client.slot_map()
+                assert after_moved[moved_slot] == ("127.0.0.1", node2_port)
+
+                assert await redis_client.get(ask_key) == b"from-node3"
+                after_ask = redis_client.slot_map()
+                assert after_ask[ask_slot] == ("127.0.0.1", node1_port)
+                assert ["ASKING"] in node3_commands
+            finally:
+                redis_client.close()
+        else:
+            cfg = native_valkey.ValkeyClientConfig(
+                url=f"valkey://127.0.0.1:{node1_port}/0",
+                cluster_enabled=True,
+                cluster_nodes=[f"127.0.0.1:{node1_port}"],
+                max_redirections=3,
+            )
+            valkey_client = native_valkey.AsyncValkeyClient(cfg)
+            try:
+                assert await valkey_client.get(plain_key) == b"node1"
+                initial_slots = valkey_client.slot_map()
+                assert len(initial_slots) == 16384
+                assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+
+                assert await valkey_client.get(moved_key) == b"from-node2"
+                after_moved = valkey_client.slot_map()
+                assert after_moved[moved_slot] == ("127.0.0.1", node2_port)
+
+                assert await valkey_client.get(ask_key) == b"from-node3"
+                after_ask = valkey_client.slot_map()
+                assert after_ask[ask_slot] == ("127.0.0.1", node1_port)
+                assert ["ASKING"] in node3_commands
+            finally:
+                await valkey_client.close()
+    finally:
+        for srv in servers:
+            srv.close()
+            await srv.wait_closed()
+
+
+@pytest.mark.parametrize("backend", ["redis", "valkey"])
+def test_sync_native_cluster_slot_map_and_moved_redirection(backend: str) -> None:
+    """SyncRedisClient and SyncValkeyClient expose slot_map() populated by CLUSTER SLOTS and updated on MOVED."""
+    plain_key = "plain:{1}"
+    moved_key = "order:{42}"
+    ask_key = "cart:{99}"
+    plain_slot = hash_slot(plain_key)
+    moved_slot = hash_slot(moved_key)
+    ask_slot = hash_slot(ask_key)
+
+    ready = threading.Event()
+    stop_event: asyncio.Event | None = None
+    loop_holder: list[asyncio.AbstractEventLoop] = []
+    ports_holder: list[tuple[int, int, int]] = []
+    node3_cmds_holder: list[list[list[str]]] = []
+
+    def run_servers() -> None:
+        async def main() -> None:
+            nonlocal stop_event
+            stop_event = asyncio.Event()
+            loop_holder.append(asyncio.get_running_loop())
+            servers, ports, node3_commands = await _start_mock_cluster_nodes(moved_key, ask_key)
+            ports_holder.append(ports)
+            node3_cmds_holder.append(node3_commands)
+            ready.set()
+            await stop_event.wait()
+            for srv in servers:
+                srv.close()
+                await srv.wait_closed()
+
+        asyncio.run(main())
+
+    thread = threading.Thread(target=run_servers, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5.0)
+    node1_port, node2_port, _node3_port = ports_holder[0]
+    node3_commands = node3_cmds_holder[0]
+
+    try:
+        if backend == "redis":
+            redis_client = native_redis.SyncRedisClient(
+                f"redis://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_nodes=[("127.0.0.1", node1_port)],
+                max_redirections=3,
+            )
+            try:
+                redis_client.connect()
+                initial_slots = redis_client.slot_map()
+                assert len(initial_slots) == 16384
+                assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+
+                assert redis_client.get(plain_key) == b"node1"
+                assert redis_client.get(moved_key) == b"from-node2"
+                assert redis_client.slot_map()[moved_slot] == ("127.0.0.1", node2_port)
+
+                assert redis_client.get(ask_key) == b"from-node3"
+                assert redis_client.slot_map()[ask_slot] == ("127.0.0.1", node1_port)
+                assert ["ASKING"] in node3_commands
+            finally:
+                redis_client.close()
+        else:
+            cfg = native_valkey.ValkeyClientConfig(
+                url=f"valkey://127.0.0.1:{node1_port}/0",
+                cluster_enabled=True,
+                cluster_nodes=[f"127.0.0.1:{node1_port}"],
+                max_redirections=3,
+            )
+            valkey_client = native_valkey.SyncValkeyClient(cfg)
+            try:
+                assert valkey_client.get(plain_key) == b"node1"
+                initial_slots = valkey_client.slot_map()
+                assert len(initial_slots) == 16384
+                assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+
+                assert valkey_client.get(moved_key) == b"from-node2"
+                assert valkey_client.slot_map()[moved_slot] == ("127.0.0.1", node2_port)
+
+                assert valkey_client.get(ask_key) == b"from-node3"
+                assert valkey_client.slot_map()[ask_slot] == ("127.0.0.1", node1_port)
+                assert ["ASKING"] in node3_commands
+            finally:
+                valkey_client.close()
+    finally:
+        if stop_event is not None and loop_holder:
+            loop_holder[0].call_soon_threadsafe(stop_event.set)
+        thread.join(timeout=5.0)
+
+
+@pytest.mark.parametrize("backend", ["redis", "valkey"])
+@pytest.mark.anyio
+async def test_async_driver_slot_map_delegates_cluster_slots_and_moved(backend: str) -> None:
+    """AsyncRedisDriver and AsyncValkeyDriver expose live cluster slot_map updated on MOVED."""
+    plain_key = "plain:{1}"
+    moved_key = "order:{42}"
+    ask_key = "cart:{99}"
+    plain_slot = hash_slot(plain_key)
+    moved_slot = hash_slot(moved_key)
+    ask_slot = hash_slot(ask_key)
+
+    servers, ports, node3_commands = await _start_mock_cluster_nodes(moved_key, ask_key)
+    node1_port, node2_port, _node3_port = ports
+
+    driver: AsyncRedisDriver | AsyncValkeyDriver
+    if backend == "redis":
+        driver = AsyncRedisDriver(
+            RedisConfig(
+                url=f"redis://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_enabled=True,
+                cluster_nodes=(("127.0.0.1", node1_port),),
+                max_redirections=3,
+            )
+        )
+    else:
+        driver = AsyncValkeyDriver(
+            ValkeyConfig(
+                url=f"valkey://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_enabled=True,
+                cluster_nodes=(("127.0.0.1", node1_port),),
+                max_redirections=3,
+            )
+        )
+
+    try:
+        assert await driver.get(plain_key) == b"node1"
+        initial_slots = driver.slot_map
+        assert len(initial_slots) == 16384
+        assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+
+        assert await driver.get(moved_key) == b"from-node2"
+        assert driver.slot_map[moved_slot] == ("127.0.0.1", node2_port)
+
+        assert await driver.get(ask_key) == b"from-node3"
+        assert driver.slot_map[ask_slot] == ("127.0.0.1", node1_port)
+        assert ["ASKING"] in node3_commands
+    finally:
+        await driver.close()
+        for srv in servers:
+            srv.close()
+            await srv.wait_closed()
+
+
+@pytest.mark.parametrize("backend", ["redis", "valkey"])
+def test_sync_driver_slot_map_delegates_cluster_slots_and_moved(backend: str) -> None:
+    """SyncRedisDriver and SyncValkeyDriver expose live cluster slot_map updated on MOVED."""
+    plain_key = "plain:{1}"
+    moved_key = "order:{42}"
+    ask_key = "cart:{99}"
+    plain_slot = hash_slot(plain_key)
+    moved_slot = hash_slot(moved_key)
+    ask_slot = hash_slot(ask_key)
+
+    ready = threading.Event()
+    stop_event: asyncio.Event | None = None
+    loop_holder: list[asyncio.AbstractEventLoop] = []
+    ports_holder: list[tuple[int, int, int]] = []
+    node3_cmds_holder: list[list[list[str]]] = []
+
+    def run_servers() -> None:
+        async def main() -> None:
+            nonlocal stop_event
+            stop_event = asyncio.Event()
+            loop_holder.append(asyncio.get_running_loop())
+            servers, ports, node3_commands = await _start_mock_cluster_nodes(moved_key, ask_key)
+            ports_holder.append(ports)
+            node3_cmds_holder.append(node3_commands)
+            ready.set()
+            await stop_event.wait()
+            for srv in servers:
+                srv.close()
+                await srv.wait_closed()
+
+        asyncio.run(main())
+
+    thread = threading.Thread(target=run_servers, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5.0)
+    node1_port, node2_port, _node3_port = ports_holder[0]
+    node3_commands = node3_cmds_holder[0]
+
+    driver: SyncRedisDriver | SyncValkeyDriver
+    if backend == "redis":
+        driver = SyncRedisDriver(
+            RedisConfig(
+                url=f"redis://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_enabled=True,
+                cluster_nodes=(("127.0.0.1", node1_port),),
+                max_redirections=3,
+            )
+        )
+    else:
+        driver = SyncValkeyDriver(
+            ValkeyConfig(
+                url=f"valkey://127.0.0.1:{node1_port}/0",
+                topology="cluster",
+                cluster_enabled=True,
+                cluster_nodes=(("127.0.0.1", node1_port),),
+                max_redirections=3,
+            )
+        )
+
+    try:
+        assert driver.get(plain_key) == b"node1"
+        initial_slots = driver.slot_map
+        assert len(initial_slots) == 16384
+        assert initial_slots[plain_slot] == ("127.0.0.1", node1_port)
+
+        assert driver.get(moved_key) == b"from-node2"
+        assert driver.slot_map[moved_slot] == ("127.0.0.1", node2_port)
+
+        assert driver.get(ask_key) == b"from-node3"
+        assert driver.slot_map[ask_slot] == ("127.0.0.1", node1_port)
+        assert ["ASKING"] in node3_commands
+    finally:
+        driver.close()
+        if stop_event is not None and loop_holder:
+            loop_holder[0].call_soon_threadsafe(stop_event.set)
+        thread.join(timeout=5.0)

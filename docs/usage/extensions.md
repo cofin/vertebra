@@ -152,19 +152,49 @@ pg_cfg = PostgresAsyncConfig(dsn="postgresql://app_user:secret@localhost:5432/ap
 sqlspec_plugin = create_sqlspec_plugin(sqlite_cfg, pg_cfg)
 ```
 
-## SQLAlchemy 2.0+, Advanced Alchemy 1.12+, Native Caching & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
+## SQLAlchemy 2.1+, Advanced Alchemy 1.12+, Native Caching & `+vtb` Dialects (`vertebra.extensions.alchemy`, `vertebra.extensions.sqlalchemy`)
 
-`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.0.36+ and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers, connection leasing, and multi-tier caching:
+`vertebra.extensions.alchemy` and `vertebra.extensions.sqlalchemy` provide drop-in SQLAlchemy 2.1+, Alembic 1.18+, and Advanced Alchemy 1.12+ support backed by Vertebra's native drivers, connection leasing, and multi-tier caching. Install optional dialect extras when using DuckDB (`duckdb-engine`) or Google Cloud BigQuery / Spanner (`sqlalchemy-bigquery`, `sqlalchemy-spanner`) dialects:
 
-- **Dialects & Broker Pooling**: Registers all 36 `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`Sync<Engine>Dialect` / `Async<Engine>Dialect` across `postgresql`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, and `spangres`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `AsyncDBAPIModule`, adapted for async SQLAlchemy by `SQLAlchemyAsyncDBAPI`). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` use `NullPool`, `?shm_broker=true` selects `NullPool` on relational dialects, `:memory:` SQLite uses `StaticPool`, and relational file/TCP URLs default to `QueuePool` / `AsyncAdaptedQueuePool`, while `create_sync_alchemy_config` / `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a shared-memory broker is attached.
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[sqlalchemy-duckdb]"
+    uv add "vertebra-core[sqlalchemy-gcp]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[sqlalchemy-duckdb]"
+    pip install "vertebra-core[sqlalchemy-gcp]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[sqlalchemy-duckdb]"
+    pdm add "vertebra-core[sqlalchemy-gcp]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[sqlalchemy-duckdb]"
+    poetry add "vertebra-core[sqlalchemy-gcp]"
+    ```
+
+- **Dialects & Broker Pooling**: Registers all 36 `+vertebra`, `+vtb`, `+vertebra_async`, and `+vtb_async` URL schemes (`Sync<Engine>Dialect` / `Async<Engine>Dialect` across `postgresql`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, and `spangres`) over standalone [`vertebra.db.dbapi`](../reference/db.md) PEP 249 interfaces (`SyncDBAPIModule` and `AsyncDBAPIModule`, adapted for async SQLAlchemy by `SQLAlchemyAsyncDBAPI` and `AsyncAdapt_vertebra_connection` with `AsyncAdapt_terminate` and `async_creator` support). `bigquery+vtb://`, `spanner+vtb://`, and `spangres+vtb://` default to `NullPool` and select `BrokerPool` / `AsyncBrokerPool` when `?broker=true` is set; `?shm_broker=true` selects `NullPool`; `:memory:` SQLite uses `StaticPool`; relational file/TCP URLs default to `QueuePool` / `AsyncAdaptedQueuePool`, and `?broker=true` resolves `DatabaseRegistry.default_broker()` (raising `ImproperConfigurationError` when unregistered). `create_sync_alchemy_config` and `create_async_alchemy_config` wire `BrokerPool` / `AsyncBrokerPool` when a shared-memory broker is attached.
 - **Native Caching (`SyncCacheBackend`, `AsyncCacheBackend`, `ShmCache`)**: `SyncCacheBackend` (implementing Advanced Alchemy's `SyncCacheRegionProtocol`) and `AsyncCacheBackend` support `shm://<segment>` (`vertebra._vertebra.ShmCache` seqlock POSIX shared memory + `ShmLeaseTable` ring-buffer L1 invalidation on `b"vtb:cache:inv"`), `valkey://` (`vertebra._valkey`), `redis://` (`vertebra._redis`), `s3://`/`gs://`/`az://`/`r2://`/`oci://`/`file://` (`vertebra._storage` `VTBSTORE\x01`), and `memory://`. `create_cache_config(use_dogpile=False)` wires Advanced Alchemy `CacheConfig(region_factory=...)` and `AsyncCacheManager` directly without third-party dependencies, while `use_dogpile=True` (`vertebra-core[dogpile]`) registers optional `dogpile.cache` backend plugins (`vertebra.shm`, `vertebra.memory`, `vertebra.valkey`, `vertebra.redis`, `vertebra.storage`). SQLAlchemy `CompiledCache` and `ResultCache` reuse the same backends.
-- **Type System**: Native `Vector(dimensions)` for vector embeddings and `BinaryJSON` for PostgreSQL `JSONB`, SQLite `JSONB`, and Oracle `OSON`.
+- **Type System**: Native `Vector(dimensions)` (and `PgVector`, `HalfVector`, `SparseVector`, `OracleVector`, `SpannerVector`) exposes `Vector.Comparator` (`cosine_distance`, `l2_distance`, `l1_distance`, `inner_product`, `max_inner_product`, `approx_cosine_distance`) producing dialect-compiled `_VectorDistance` expressions, alongside `MsgspecJSON` mapping PostgreSQL, CockroachDB, Spangres, and SQLite to `JSONB`, MSSQL to `NVARCHAR(MAX)`, and Oracle to `JSON`.
 - **Object Storage Attachments**: `ObjectStoreBackend` implements Advanced Alchemy's `advanced_alchemy.types.file_object.StorageBackend`, enabling transactional file attachments on models via `FileObject` and `StoredObject`.
-- **Alembic Custom Operations & Autogenerate**: Registers `+vertebra`/`+vtb` `DefaultImpl` subclasses (`PostgreSQLAlembicImpl`, `MySQLAlembicImpl`, `SQLiteAlembicImpl`, `OracleAlembicImpl`, `MSSQLAlembicImpl`, `DuckDBAlembicImpl`, `BigQueryAlembicImpl`, `SpannerAlembicImpl` batching `UpdateDatabaseDdl` LROs) and autogenerate hooks for `Vector`, `BinaryJSON`, `CreateVectorIndexOp`, `DropVectorIndexOp`, `CreateViewOp`, and `DropViewOp`.
+- **Alembic 1.18+ Custom Operations & Autogenerate**: Registers `DuckDBAlembicImpl`, `BigQueryAlembicImpl` (`transactional_ddl = False`), `SpannerAlembicImpl`, and `SpangresAlembicImpl` via `__dialect__` (while PostgreSQL, MySQL, SQLite, Oracle, and MSSQL use built-in `DefaultImpl` classes), batches online `DDLElement` statements in `SpannerAlembicImpl._exec()` and `SpangresAlembicImpl._exec()` via `update_ddl` while emitting per-statement SQL in offline `--sql` mode, registers 7-arg `"column"` comparators (`PriorityDispatchResult`) and `render_item` for `Vector` and `MsgspecJSON`, and registers `CreateVectorIndexOp`, `DropVectorIndexOp`, `CreateViewOp`, and `DropViewOp` via `Operations.register_operation`.
 
 BigQuery, Spanner, and Spangres DBAPI connections use statement autocommit. Their
 `commit()` and `rollback()` calls do not group or undo completed statements;
-setting `autocommit=False` raises `NotSupportedError`.
+setting `autocommit=False` raises `NotSupportedError`. Spangres dialects also set
+`supports_twophase = False` and raise `NotSupportedError` on two-phase commit
+operations.
 
 ```python
 from vertebra.extensions.alchemy import (

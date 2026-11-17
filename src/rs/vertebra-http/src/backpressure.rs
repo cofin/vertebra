@@ -218,6 +218,7 @@ pub struct BackpressureController {
     resume_notify: Notify,
     metrics: Arc<BackpressureMetrics>,
     clock_origin: Instant,
+    clock_offset_ms: AtomicU64,
     window_ms: u64,
     bucket_ms: u64,
     half_open_probes: u32,
@@ -257,6 +258,7 @@ impl BackpressureController {
             resume_notify: Notify::new(),
             metrics: Arc::new(BackpressureMetrics::default()),
             clock_origin: Instant::now(),
+            clock_offset_ms: AtomicU64::new(0),
             window_ms,
             bucket_ms,
             half_open_probes,
@@ -267,7 +269,15 @@ impl BackpressureController {
 
     #[inline]
     fn elapsed_ms(&self) -> u64 {
-        self.clock_origin.elapsed().as_millis() as u64
+        (self.clock_origin.elapsed().as_millis() as u64)
+            .saturating_add(self.clock_offset_ms.load(Ordering::Acquire))
+    }
+
+    /// Advance the circuit-breaker clock by `delta` for deterministic testing.
+    #[doc(hidden)]
+    pub fn advance_circuit_clock_for_test(&self, delta: Duration) {
+        self.clock_offset_ms
+            .fetch_add(delta.as_millis() as u64, Ordering::Release);
     }
 
     fn clear_buckets(&self) {
@@ -760,7 +770,7 @@ mod tests {
         assert_eq!(c.snapshot().saturated_rejected, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn times_out_in_queue() {
         let c = BackpressureController::new(cfg(1, 4));
         let _p = c.try_acquire().await.expect("first permit");
@@ -787,7 +797,7 @@ mod tests {
         for _ in 0..4 {
             c.record_failure();
         }
-        tokio::time::sleep(Duration::from_millis(220)).await;
+        c.advance_circuit_clock_for_test(Duration::from_millis(220));
         assert_eq!(c.snapshot().circuit_state, CircuitState::HalfOpen);
         c.record_success();
         c.record_success();
@@ -800,7 +810,7 @@ mod tests {
         for _ in 0..4 {
             c.record_failure();
         }
-        tokio::time::sleep(Duration::from_millis(220)).await;
+        c.advance_circuit_clock_for_test(Duration::from_millis(220));
         assert_eq!(c.snapshot().circuit_state, CircuitState::HalfOpen);
         c.record_failure();
         assert_eq!(c.snapshot().circuit_state, CircuitState::Open);

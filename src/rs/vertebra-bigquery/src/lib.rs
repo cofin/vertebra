@@ -295,7 +295,9 @@ impl PySyncBigQueryClient {
         self.inner.config().pool_size
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.inner.close();
+    }
 
     #[pyo3(signature = (
         sql,
@@ -324,6 +326,9 @@ impl PySyncBigQueryClient {
         priority: Option<String>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let params =
             parse_query_parameters_json(params_json).map_err(|e| bigquery_error_to_py(py, e))?;
         let opts = BigQueryQueryOptions {
@@ -346,6 +351,9 @@ impl PySyncBigQueryClient {
 
     #[pyo3(signature = (sql, params_json=None))]
     fn dry_run(&self, py: Python<'_>, sql: &str, params_json: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let params =
             parse_query_parameters_json(params_json).map_err(|e| bigquery_error_to_py(py, e))?;
         let res = py
@@ -375,6 +383,9 @@ impl PySyncBigQueryClient {
         max_streams: i32,
         compression: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let codec = BigQueryArrowCompression::from_str_opt(Some(compression));
         let fields = selected_fields.unwrap_or_default();
         let (shm_name, byte_len, row_count, region) = py
@@ -401,6 +412,9 @@ impl PySyncBigQueryClient {
         arrow_ipc_bytes: &Bound<'_, PyAny>,
         mode: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let payload = extract_arrow_ipc_bytes(arrow_ipc_bytes)?;
         let res = py
             .detach(|| {
@@ -531,7 +545,9 @@ impl PyAsyncBigQueryClient {
         self.inner.config().pool_size
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.inner.close();
+    }
 
     #[pyo3(signature = (
         sql,
@@ -560,6 +576,9 @@ impl PyAsyncBigQueryClient {
         priority: Option<String>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let params = parse_query_parameters_json(params_json.as_deref())
             .map_err(|e| bigquery_error_to_py(py, e))?;
         let opts = BigQueryQueryOptions {
@@ -591,6 +610,9 @@ impl PyAsyncBigQueryClient {
         sql: String,
         params_json: Option<String>,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let params = parse_query_parameters_json(params_json.as_deref())
             .map_err(|e| bigquery_error_to_py(py, e))?;
         let client = Arc::clone(&self.inner);
@@ -624,6 +646,9 @@ impl PyAsyncBigQueryClient {
         max_streams: i32,
         compression: &str,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let codec = BigQueryArrowCompression::from_str_opt(Some(compression));
         let fields = selected_fields.unwrap_or_default();
         let client = Arc::clone(&self.inner);
@@ -658,6 +683,9 @@ impl PyAsyncBigQueryClient {
         arrow_ipc_bytes: &Bound<'_, PyAny>,
         mode: &str,
     ) -> PyResult<RustDbTaskAwaitable> {
+        self.inner
+            .ensure_open()
+            .map_err(|e| bigquery_error_to_py(py, e))?;
         let payload = extract_arrow_ipc_bytes(arrow_ipc_bytes)?;
         let client = Arc::clone(&self.inner);
         let mode_owned = mode.to_string();

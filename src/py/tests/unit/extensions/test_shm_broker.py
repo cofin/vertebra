@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
 import signal
@@ -29,6 +30,7 @@ from vertebra._vertebra import (
 from vertebra.cli import _build_cli
 from vertebra.extensions.broker import (
     DBRPC_VERSION,
+    BrokerAttachError,
     BrokerAuthenticationError,
     BrokerConfig,
     BrokerEngineDiscovery,
@@ -39,6 +41,7 @@ from vertebra.extensions.broker import (
     ShutdownReport,
     SyncSHMBrokerTransport,
 )
+from vertebra.extensions.broker import host as broker_host_mod
 from vertebra.extensions.broker.dbrpc import (
     decode_dbrpc_response,
     encode_dbrpc_request,
@@ -769,3 +772,186 @@ def test_broker_plugin_multiprocess_sigkill_reclaim_metrics_parity() -> None:
             proc.join(timeout=5)
         plugin.transport.unlink()
         plugin.transport.close()
+
+
+def test_broker_host_on_dispose_failure_surfaces_error_and_still_disposes_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify rollback + on_dispose failure increments disposal_errors, notifies callback, and still disposes slot."""
+    captured_errors: list[tuple[int, int, Exception]] = []
+    host = BrokerHost(
+        BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50),
+        on_disposal_error=lambda lease, exc: captured_errors.append((lease.slot_index, lease.generation, exc)),
+    )
+    host.start()
+    try:
+
+        def _rollback_fail(_lease: Any) -> None:
+            raise RuntimeError("simulated rollback failure")
+
+        def _dispose_fail(_lease: Any) -> None:
+            raise RuntimeError("simulated on_dispose failure")
+
+        host.register_session_hooks(on_rollback=_rollback_fail, on_dispose=_dispose_fail)
+        lease = host.transport.acquire(worker_id=82001)
+
+        with caplog.at_level(logging.WARNING, logger="vertebra.extensions.broker.host"):
+            reclaimed = host.on_worker_exit(82001)
+
+        assert reclaimed == 1
+        assert host.rollback_errors == 1
+        assert host.disposal_errors == 1
+        assert host.last_disposal_error is not None
+        assert "on_dispose" in host.last_disposal_error
+        assert "simulated on_dispose failure" in host.last_disposal_error
+        assert len(captured_errors) == 1
+        assert captured_errors[0][0] == lease.slot_index
+        assert isinstance(captured_errors[0][2], RuntimeError)
+        assert host.transport.quarantined_count() == 0
+        assert any(
+            "simulated on_dispose failure" in rec.message or "simulated on_dispose failure" in str(rec.args)
+            for rec in caplog.records
+        )
+
+        host_status = host.status()
+        assert host_status["rollback_errors"] == 1
+        assert host_status["disposal_errors"] == 1
+        assert host_status["disposed_leases"] == 1
+        assert host_status["last_disposal_error"] == host.last_disposal_error
+
+        report = host.stop(timeout=2.0)
+        assert isinstance(report, ShutdownReport)
+        assert report.completed is True
+        assert report.rollback_errors == 1
+        assert report.disposal_errors == 1
+        assert report.disposed_leases == 1
+        assert report.last_disposal_error is not None
+        assert "simulated on_dispose failure" in report.last_disposal_error
+    finally:
+        if host.started:
+            host.stop(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_error_name"),
+    [
+        (lambda: BrokerAttachError("simulated broker dispose error"), "BrokerAttachError"),
+        (lambda: RuntimeError("simulated runtime dispose error"), "RuntimeError"),
+    ],
+)
+def test_broker_host_dispose_quarantined_failure_isolated_across_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exc_factory: Any,
+    expected_error_name: str,
+) -> None:
+    """Verify dispose_quarantined failure surfaces without incrementing disposed_leases or blocking batch recovery."""
+    captured_errors: list[tuple[int, int, str]] = []
+    host = BrokerHost(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=50))
+    host.start()
+    try:
+        lease_first = host.transport.acquire(worker_id=83001)
+        lease_second = host.transport.acquire(worker_id=83001)
+        failed_slot = lease_first.slot_index
+        healthy_slot = lease_second.slot_index
+
+        def _on_error(lease: Any, exc: Exception) -> None:
+            captured_errors.append((lease.slot_index, lease.generation, type(exc).__name__))
+            raise ValueError("callback failure must not abort batch recovery")
+
+        host.register_session_hooks(
+            on_rollback=lambda _lease: None,
+            on_disposal_error=_on_error,
+        )
+
+        orig_dispose = host.transport.dispose_quarantined
+
+        def _flaky_dispose(slot_index: int, generation: int) -> None:
+            if slot_index == failed_slot:
+                raise exc_factory()
+            orig_dispose(slot_index, generation)
+
+        monkeypatch.setattr(host.transport, "dispose_quarantined", _flaky_dispose)
+
+        with caplog.at_level(logging.WARNING, logger="vertebra.extensions.broker.host"):
+            reclaimed = host.on_worker_exit(83001)
+
+        assert reclaimed == 2
+        assert host.disposal_errors == 1
+        assert host.last_disposal_error is not None
+        assert expected_error_name in host.last_disposal_error
+        assert "dispose_quarantined" in host.last_disposal_error
+        assert len(captured_errors) == 1
+        assert captured_errors[0][0] == failed_slot
+        assert captured_errors[0][2] == expected_error_name
+        assert any(rec.levelname == "WARNING" for rec in caplog.records)
+
+        host_status = host.status()
+        assert host_status["rolled_back_leases"] == 2
+        assert host_status["disposed_leases"] == 1
+        assert host_status["disposal_errors"] == 1
+        assert host_status["last_disposal_error"] == host.last_disposal_error
+
+        orig_dispose(failed_slot, lease_first.generation + 1)
+        reacquired = host.transport.acquire(worker_id=83002)
+        assert reacquired.slot_index in (failed_slot, healthy_slot)
+        reacquired.release()
+
+        report = host.stop(timeout=2.0)
+        assert report.completed is True
+        assert report.rolled_back_leases == 2
+        assert report.disposed_leases == 1
+        assert report.disposal_errors == 1
+        assert report.last_disposal_error is not None
+        assert expected_error_name in report.last_disposal_error
+    finally:
+        if host.started:
+            host.stop(timeout=1.0)
+
+
+def test_broker_host_pool_shutdown_continues_and_records_close_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify _close_registered_pools continues closing remaining pools and records close errors."""
+    host = BrokerHost(BrokerConfig(pool_size=1, max_overflow=0, acquire_timeout_ms=50))
+    host.start()
+    closed_calls: list[tuple[int, int]] = []
+    try:
+        host.register_engine_pool(pool_id=101, dialect_tag=6, engine_pool_id=9001)
+        host.register_engine_pool(pool_id=102, dialect_tag=6, engine_pool_id=9002)
+
+        def _fake_close_pool(dialect_tag: int, engine_pool_id: int) -> None:
+            closed_calls.append((dialect_tag, engine_pool_id))
+            if engine_pool_id == 9001:
+                raise RuntimeError("simulated pool close failure")
+
+        monkeypatch.setattr(
+            broker_host_mod,
+            "BrokerEngineRegistry",
+            types.SimpleNamespace(
+                close_pool=_fake_close_pool,
+                open_pool=BrokerEngineRegistry.open_pool,
+                execute=BrokerEngineRegistry.execute,
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="vertebra.extensions.broker.host"):
+            report = host.stop(timeout=2.0)
+
+        assert closed_calls == [(6, 9001), (6, 9002)]
+        assert report.completed is True
+        assert report.closed_pools == 1
+        assert report.pool_close_errors == 1
+        assert report.last_pool_close_error is not None
+        assert "simulated pool close failure" in report.last_pool_close_error
+        assert host.pool_close_errors == 1
+        assert host.last_pool_close_error == report.last_pool_close_error
+        assert host.status()["pool_close_errors"] == 1
+        assert any(
+            "simulated pool close failure" in rec.message or "simulated pool close failure" in str(rec.args)
+            for rec in caplog.records
+        )
+    finally:
+        if host.started:
+            host.stop(timeout=1.0)

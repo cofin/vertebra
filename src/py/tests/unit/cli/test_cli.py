@@ -34,20 +34,28 @@ def test_cli_version(runner: CliRunner) -> None:
     assert any(ch.isdigit() for ch in result.output)
 
 
-def test_run_help_shows_options(runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    "option",
+    ["--host", "--port", "--workers", "--asgi", "--no-banner"],
+    ids=["host", "port", "workers", "asgi", "no-banner"],
+)
+def test_run_help_shows_options(runner: CliRunner, option: str) -> None:
     """Verify ``vtb run --help`` displays key options."""
     result = runner.invoke(cli, ["run", "--help"])
     assert result.exit_code == 0, result.output
-    for option in ("--host", "--port", "--workers", "--asgi", "--no-banner"):
-        assert option in result.output, f"Expected {option!r} in help output"
+    assert option in result.output, f"Expected {option!r} in help output"
 
 
-def test_dev_help_shows_options(runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    "option",
+    ["--host", "--port", "--no-reload", "--no-banner", "--no-tui", "--verbose"],
+    ids=["host", "port", "no-reload", "no-banner", "no-tui", "verbose"],
+)
+def test_dev_help_shows_options(runner: CliRunner, option: str) -> None:
     """Verify ``vtb dev --help`` displays dev-specific options."""
     result = runner.invoke(cli, ["dev", "--help"])
     assert result.exit_code == 0, result.output
-    for option in ("--host", "--port", "--no-reload", "--no-banner", "--no-tui", "--verbose"):
-        assert option in result.output, f"Expected {option!r} in help output"
+    assert option in result.output, f"Expected {option!r} in help output"
 
 
 def test_run_sets_topology_env(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:

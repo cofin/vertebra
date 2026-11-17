@@ -11,7 +11,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from vertebra.agent.core.schema import (
     SchemaDigestCache,
@@ -254,17 +254,21 @@ class ToolRegistry:
     def register_controller(self, controller: Any) -> None:
         """Discover and register all tools, prompts, and resources from a controller."""
         inst = controller() if isinstance(controller, type) else controller
-        if hasattr(inst, "get_tools") and callable(inst.get_tools):
-            for t in inst.get_tools():
+        get_tools = getattr(inst, "get_tools", None)
+        if callable(get_tools):
+            for t in cast("Iterable[Tool]", get_tools()):
                 self.register_tool(t)
-        if hasattr(inst, "get_resources") and callable(inst.get_resources):
-            for r in inst.get_resources():
+        get_resources = getattr(inst, "get_resources", None)
+        if callable(get_resources):
+            for r in cast("Iterable[ResourceEntry]", get_resources()):
                 self.register_resource(r)
-        if hasattr(inst, "get_resource_templates") and callable(inst.get_resource_templates):
-            for rt in inst.get_resource_templates():
+        get_resource_templates = getattr(inst, "get_resource_templates", None)
+        if callable(get_resource_templates):
+            for rt in cast("Iterable[ResourceTemplateEntry]", get_resource_templates()):
                 self.register_resource_template(rt)
-        if hasattr(inst, "get_prompts") and callable(inst.get_prompts):
-            for p in inst.get_prompts():
+        get_prompts = getattr(inst, "get_prompts", None)
+        if callable(get_prompts):
+            for p in cast("Iterable[PromptEntry]", get_prompts()):
                 self.register_prompt(p)
         if hasattr(inst, "to_agent_skill") and callable(inst.to_agent_skill):
             ctrl_id = getattr(inst, "skill_id", None) or getattr(inst, "prefix", None) or inst.__class__.__name__

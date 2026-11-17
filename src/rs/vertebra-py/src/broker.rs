@@ -1,7 +1,7 @@
 //! PyO3 bindings for shared-memory connection broker and statement cache.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use pyo3::buffer::PyBuffer;
@@ -54,12 +54,129 @@ pub fn stable_hash64(data: &Bound<'_, PyAny>) -> PyResult<u64> {
     ))
 }
 
+#[cfg(unix)]
+struct CachedShmPubSubTable {
+    fd: i32,
+    size: usize,
+    dev: u64,
+    ino: u64,
+    table: Arc<ShmLeaseTable>,
+}
+
+#[cfg(unix)]
+static SHM_PUBSUB_TABLE_CACHE: Mutex<Option<CachedShmPubSubTable>> = Mutex::new(None);
+
+#[cfg(unix)]
+fn resolve_env_lease_table() -> PyResult<Option<Arc<ShmLeaseTable>>> {
+    let fd_val = match std::env::var("VERTEBRA_BROKER_SHM_FD") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let fd: i32 = fd_val
+        .parse()
+        .map_err(|e: std::num::ParseIntError| PyValueError::new_err(e.to_string()))?;
+    let size: usize = match std::env::var("VERTEBRA_BROKER_SHM_SIZE") {
+        Ok(v) => v
+            .parse()
+            .map_err(|e: std::num::ParseIntError| PyValueError::new_err(e.to_string()))?,
+        Err(_) => 0,
+    };
+    // SAFETY: `libc::stat` is a plain C struct safe to zero-initialize before `fstat`.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `stat` points to initialized stack memory for `fstat`.
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(pyo3::exceptions::PyOSError::new_err(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    let dev = stat.st_dev as u64;
+    let ino = stat.st_ino as u64;
+    {
+        let guard = SHM_PUBSUB_TABLE_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(ref cached) = *guard
+            && cached.fd == fd
+            && cached.size == size
+            && cached.dev == dev
+            && cached.ino == ino
+        {
+            return Ok(Some(Arc::clone(&cached.table)));
+        }
+    }
+    let broker = LeaseBroker::from_fd(fd, size)?;
+    let table = broker.table();
+    let mut guard = SHM_PUBSUB_TABLE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some(CachedShmPubSubTable {
+        fd,
+        size,
+        dev,
+        ino,
+        table: Arc::clone(&table),
+    });
+    Ok(Some(table))
+}
+
+fn pubsub_publish_bytes(
+    topic: &str,
+    payload: &[u8],
+    idempotency_key: Option<&str>,
+) -> PyResult<Option<u64>> {
+    let is_shm = std::env::var("VERTEBRA_TRANSPORT_MODE").as_deref() == Ok("shm");
+    if !is_shm && let Some(bridge) = vertebra_core::bridge::BatchBridge::get() {
+        return Ok(bridge.publish_pubsub(topic, payload, idempotency_key));
+    }
+
+    if is_shm || std::env::var_os("VERTEBRA_BROKER_SHM_FD").is_some() {
+        let frame = vertebra_core::bridge::encode_shm_pubsub_frame(topic, payload, idempotency_key)
+            .map_err(|len| {
+                PyValueError::new_err(format!(
+                    "SHM pubsub frame length {len} exceeds {} byte limit",
+                    vertebra_core::broker::CHAN_MAX_PAYLOAD_BYTES
+                ))
+            })?;
+        #[cfg(unix)]
+        if let Some(table) = resolve_env_lease_table()? {
+            table.publish_channel(
+                vertebra_core::bridge::SHM_PUBSUB_CHANNEL,
+                &frame,
+                vertebra_core::broker::monotonic_now_ns(),
+                None,
+            );
+            return Ok(None);
+        }
+        return Ok(None);
+    }
+
+    Ok(None)
+}
+
+/// Publish `payload` (`Buffer | str`) to `topic` across the active Embedded or SHM Pub/Sub bridge.
+#[pyfunction]
+#[pyo3(signature = (topic, payload, idempotency_key=None))]
+pub fn pubsub_publish(
+    py: Python<'_>,
+    topic: &str,
+    payload: &Bound<'_, PyAny>,
+    idempotency_key: Option<&str>,
+) -> PyResult<Option<u64>> {
+    if let Ok(py_str) = payload.cast::<PyString>() {
+        let utf8 = py_str.to_str()?;
+        return pubsub_publish_bytes(topic, utf8.as_bytes(), idempotency_key);
+    }
+    crate::transport::with_buffer_slice(py, payload, |slice| {
+        pubsub_publish_bytes(topic, slice, idempotency_key)
+    })
+}
+
 fn broker_err_to_py(err: BrokerError) -> PyErr {
     match err {
         BrokerError::InvalidCapacity | BrokerError::InvalidPartition(_) => {
             pyo3::exceptions::PyValueError::new_err(err.to_string())
         }
-        BrokerError::RegionTooSmall { .. } => {
+        BrokerError::RegionTooSmall { .. } | BrokerError::MisalignedRegion { .. } => {
             pyo3::exceptions::PyValueError::new_err(err.to_string())
         }
         BrokerError::PoolExhausted | BrokerError::InitTimeout => {
@@ -614,6 +731,7 @@ impl LeaseBroker {
     pub fn from_fd(fd: i32, size: usize) -> PyResult<Self> {
         #[cfg(unix)]
         {
+            // SAFETY: `libc::dup` accepts a raw integer descriptor and returns `-1` with `errno` if invalid.
             let dup_fd = unsafe { libc::dup(fd) };
             if dup_fd < 0 {
                 return Err(pyo3::exceptions::PyOSError::new_err(
@@ -623,8 +741,11 @@ impl LeaseBroker {
             let effective_size = if size > 0 {
                 size
             } else {
+                // SAFETY: `libc::stat` is a plain C struct safe to zero-initialize before `fstat`.
                 let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `dup_fd` is a valid duplicated descriptor (`>= 0`) and `stat` is stack-allocated.
                 if unsafe { libc::fstat(dup_fd, &mut stat) } != 0 || stat.st_size <= 0 {
+                    // SAFETY: `dup_fd` is an open owned descriptor (`>= 0`) not yet transferred to `ShmRegion`.
                     unsafe {
                         libc::close(dup_fd);
                     }

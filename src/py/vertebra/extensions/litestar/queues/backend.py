@@ -6,12 +6,17 @@ import asyncio
 import contextlib
 import inspect as _inspect
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 import msgspec
 
-from vertebra.db.driver.capabilities import AsyncNotificationSource, AsyncQueueStore, QueueEntry
+from vertebra.db.driver.capabilities import (
+    AsyncNotificationSource,
+    AsyncQueueStore,
+    QueueEntry,
+    QueueReservation,
+)
 from vertebra.extensions.litestar.queues.shm_backend import (
     SHMExecutionBackend,
     SHMQueueBackend,
@@ -23,7 +28,11 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 try:
-    from litestar_queues.backends.base import BaseQueueBackend
+    from litestar_queues.backends.base import (
+        BaseQueueBackend,
+        is_external_dispatch_reservation,
+        record_matches_filters,
+    )
     from litestar_queues.backends.factory import queue_backend
     from litestar_queues.models import (
         HeartbeatTouch,
@@ -32,6 +41,7 @@ try:
         QueuedTaskRecord,
         QueueStatistics,
         StaleTaskRecoveryResult,
+        TaskRequest,
         TaskReservation,
         TaskStatus,
     )
@@ -59,6 +69,42 @@ __all__ = (
 )
 
 
+@runtime_checkable
+class _ClaimJobStore(Protocol):
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float = 30.0,
+        expected_attempt: int | None = None,
+    ) -> QueueEntry | None: ...
+
+
+@runtime_checkable
+class _EntryStatusStore(Protocol):
+    async def get_entry_status(self, job_id: str) -> str | None: ...
+
+
+@runtime_checkable
+class _SyncClosableStore(Protocol):
+    def close(self) -> Any: ...
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if isinstance(value, str):
+        return _ensure_utc(datetime.fromisoformat(value))
+    return None
+
+
 def _resolve_record_status(entry: QueueEntry, store_status: str | None = None) -> TaskStatus:
     """Derive litestar-queues TaskStatus from QueueEntry lease/schedule fields and optional store status."""
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
@@ -77,6 +123,8 @@ def _resolve_record_status(entry: QueueEntry, store_status: str | None = None) -
         if entry.scheduled_at_ms is not None and entry.scheduled_at_ms > now_ms:
             return "scheduled"
         return "pending"
+    if entry.completed_at_ms is not None:
+        return "failed" if entry.error is not None else "completed"
     if entry.lease_until_ms > now_ms:
         return "running"
     if entry.scheduled_at_ms is not None and entry.scheduled_at_ms > now_ms:
@@ -89,24 +137,47 @@ def _entry_to_record(entry: QueueEntry, *, store_status: str | None = None) -> Q
     sched = (
         datetime.fromtimestamp(entry.scheduled_at_ms / 1000.0, tz=UTC) if entry.scheduled_at_ms is not None else None
     )
+    expires_at = (
+        datetime.fromtimestamp(entry.expires_at_ms / 1000.0, tz=UTC) if entry.expires_at_ms is not None else None
+    )
+    completed_at = (
+        datetime.fromtimestamp(entry.completed_at_ms / 1000.0, tz=UTC) if entry.completed_at_ms is not None else None
+    )
+    heartbeat_at = (
+        datetime.fromtimestamp(entry.heartbeat_at_ms / 1000.0, tz=UTC) if entry.heartbeat_at_ms is not None else None
+    )
     retry_count = max(0, entry.attempt - 1)
     max_retries = max(0, entry.max_attempts - 1)
     status = _resolve_record_status(entry, store_status)
+    decoded_result: Any = decode_json(entry.result) if entry.result is not None else None
     if entry.payload:
         data = decode_json(entry.payload)
         if isinstance(data, dict):
             task_id = UUID(data["id"]) if "id" in data else UUID(entry.job_id)
+            created_at = _parse_dt(data.get("created_at")) or datetime.now(UTC)
+            queued_at = _parse_dt(data.get("queued_at")) or created_at
             return QueuedTaskRecord(
                 task_name=data.get("task_name", entry.task_name),
                 id=task_id,
                 args=tuple(data.get("args", ())),
                 kwargs=dict(data.get("kwargs", {})),
                 queue=data.get("queue", entry.queue),
+                execution_backend=data.get("execution_backend", "local"),
+                execution_profile=data.get("execution_profile"),
+                execution_ref=data.get("execution_ref"),
+                worker_id=entry.worker_id or data.get("worker_id"),
                 status=status,
-                priority=data.get("priority", 0),
+                priority=entry.priority if entry.priority != 0 else int(data.get("priority", 0)),
                 max_retries=max_retries,
                 retry_count=retry_count,
-                scheduled_at=sched,
+                scheduled_at=sched if sched is not None else _parse_dt(data.get("scheduled_at")),
+                expires_at=_parse_dt(data.get("expires_at")) or expires_at,
+                created_at=created_at,
+                queued_at=queued_at,
+                completed_at=completed_at if completed_at is not None else _parse_dt(data.get("completed_at")),
+                heartbeat_at=heartbeat_at,
+                result=decoded_result if entry.result is not None else data.get("result"),
+                error=entry.error if entry.error is not None else data.get("error"),
                 key=data.get("key") or entry.headers.get("key"),
                 metadata=dict(data.get("metadata", {})),
             )
@@ -114,11 +185,108 @@ def _entry_to_record(entry: QueueEntry, *, store_status: str | None = None) -> Q
         task_name=entry.task_name,
         id=UUID(entry.job_id),
         queue=entry.queue,
+        worker_id=entry.worker_id,
         status=status,
+        priority=entry.priority,
         max_retries=max_retries,
         retry_count=retry_count,
         scheduled_at=sched,
+        expires_at=expires_at,
+        completed_at=completed_at,
+        heartbeat_at=heartbeat_at,
+        result=decoded_result,
+        error=entry.error,
         key=entry.headers.get("key"),
+    )
+
+
+def _build_record_and_entry(
+    task_name: str,
+    *,
+    args: tuple[Any, ...] = (),
+    kwargs: Mapping[str, Any] | None = None,
+    queue: str = "default",
+    priority: int = 0,
+    max_retries: int = 0,
+    scheduled_at: datetime | None = None,
+    expires_at: datetime | None = None,
+    key: str | None = None,
+    execution_backend: str = "local",
+    execution_profile: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    record_id: UUID | None = None,
+    now: datetime | None = None,
+) -> tuple[QueuedTaskRecord, QueueEntry]:
+    """Construct a QueuedTaskRecord and matching QueueEntry from enqueue arguments."""
+    current_time = now or datetime.now(UTC)
+    norm_sched = _ensure_utc(scheduled_at) if scheduled_at is not None else None
+    norm_expires = _ensure_utc(expires_at) if expires_at is not None else None
+    status: TaskStatus = "scheduled" if norm_sched is not None and norm_sched > current_time else "pending"
+    resolved_id = record_id or uuid4()
+    resolved_kwargs = dict(kwargs or {})
+    resolved_metadata = dict(metadata or {})
+    record = QueuedTaskRecord(
+        task_name=task_name,
+        id=resolved_id,
+        args=args,
+        kwargs=resolved_kwargs,
+        queue=queue,
+        execution_backend=execution_backend,
+        execution_profile=execution_profile,
+        status=status,
+        priority=priority,
+        max_retries=max_retries,
+        scheduled_at=norm_sched,
+        expires_at=norm_expires,
+        created_at=current_time,
+        queued_at=current_time,
+        key=key,
+        metadata=resolved_metadata,
+    )
+    record_dict = {
+        "id": str(record.id),
+        "task_name": record.task_name,
+        "args": list(record.args),
+        "kwargs": record.kwargs,
+        "queue": record.queue,
+        "execution_backend": record.execution_backend,
+        "execution_profile": record.execution_profile,
+        "status": record.status,
+        "priority": record.priority,
+        "max_retries": record.max_retries,
+        "retry_count": record.retry_count,
+        "scheduled_at": record.scheduled_at.isoformat() if record.scheduled_at is not None else None,
+        "expires_at": record.expires_at.isoformat() if record.expires_at is not None else None,
+        "created_at": record.created_at.isoformat(),
+        "queued_at": record.queued_at.isoformat(),
+        "key": record.key,
+        "metadata": record.metadata,
+    }
+    sched_ms = int(record.scheduled_at.timestamp() * 1000) if record.scheduled_at is not None else None
+    expires_ms = int(record.expires_at.timestamp() * 1000) if record.expires_at is not None else None
+    headers = {"key": key} if key is not None else {}
+    entry = QueueEntry(
+        job_id=str(record.id),
+        queue=queue,
+        task_name=task_name,
+        payload=encode_json_bytes(record_dict),
+        attempt=1,
+        max_attempts=max_retries + 1,
+        scheduled_at_ms=sched_ms,
+        headers=headers,
+        priority=priority,
+        expires_at_ms=expires_ms,
+    )
+    return record, entry
+
+
+def _reservation_to_task_reservation(reservation: QueueReservation) -> TaskReservation:
+    """Convert an AsyncQueueStore QueueReservation into a litestar-queues TaskReservation."""
+    return TaskReservation(
+        key=reservation.key,
+        task_id=UUID(reservation.job_id),
+        task_name=reservation.task_name,
+        created_at=datetime.fromtimestamp(reservation.created_at_ms / 1000.0, tz=UTC),
     )
 
 
@@ -147,7 +315,6 @@ class StoreQueueBackendConfig(msgspec.Struct, frozen=True):
         )
 
 
-@queue_backend("vertebra_store")
 class StoreQueueBackend(BaseQueueBackend):
     """Engine-neutral queue backend adapting any AsyncQueueStore and notification source."""
 
@@ -205,6 +372,11 @@ class StoreQueueBackend(BaseQueueBackend):
             supports_maintenance=True,
         )
 
+    async def _get_entry_status(self, job_id: str) -> str | None:
+        if isinstance(self._store, _EntryStatusStore):
+            return await self._store.get_entry_status(job_id)
+        return None
+
     async def enqueue(
         self,
         task_name: str,
@@ -223,12 +395,10 @@ class StoreQueueBackend(BaseQueueBackend):
         id: UUID | None = None,
     ) -> QueuedTaskRecord:
         """Persist a single queued task into the backing store."""
-        record_id = id or uuid4()
-        record = QueuedTaskRecord(
-            task_name=task_name,
-            id=record_id,
+        record, entry = _build_record_and_entry(
+            task_name,
             args=args,
-            kwargs=kwargs or {},
+            kwargs=kwargs,
             queue=queue,
             priority=priority,
             max_retries=max_retries,
@@ -237,33 +407,8 @@ class StoreQueueBackend(BaseQueueBackend):
             key=key,
             execution_backend=execution_backend,
             execution_profile=execution_profile,
-            metadata=metadata or {},
-        )
-        record_dict = {
-            "id": str(record.id),
-            "task_name": record.task_name,
-            "args": list(record.args),
-            "kwargs": record.kwargs,
-            "queue": record.queue,
-            "status": record.status,
-            "priority": record.priority,
-            "max_retries": record.max_retries,
-            "retry_count": record.retry_count,
-            "scheduled_at": record.scheduled_at.isoformat() if record.scheduled_at else None,
-            "key": record.key,
-            "metadata": record.metadata,
-        }
-        sched_ms = int(scheduled_at.timestamp() * 1000) if scheduled_at else None
-        headers = {"key": key} if key else {}
-        entry = QueueEntry(
-            job_id=str(record.id),
-            queue=queue,
-            task_name=task_name,
-            payload=encode_json_bytes(record_dict),
-            attempt=1,
-            max_attempts=max_retries + 1,
-            scheduled_at_ms=sched_ms,
-            headers=headers,
+            metadata=metadata,
+            record_id=id,
         )
         await self._store.enqueue(entry)
         if self._notification_source is not None:
@@ -272,59 +417,62 @@ class StoreQueueBackend(BaseQueueBackend):
 
     async def enqueue_many(
         self,
-        tasks: Sequence[Any],
+        requests: Sequence[TaskRequest],
     ) -> list[QueuedTaskRecord]:
-        """Bulk-enqueue task specifications into the backing store."""
+        """Bulk-enqueue task requests into the backing store."""
+        if not requests:
+            return []
+        now = datetime.now(UTC)
         records: list[QueuedTaskRecord] = []
         entries: list[QueueEntry] = []
-        for t in tasks:
-            task_name = getattr(t, "task_name", "task")
-            args = getattr(t, "args", ())
-            kwargs = getattr(t, "kwargs", {})
-            queue = getattr(t, "queue", "default")
-            record_id = getattr(t, "id", None) or uuid4()
-            sched = getattr(t, "scheduled_at", None)
-            max_retries = getattr(t, "max_retries", 0)
-            key = getattr(t, "key", None)
-            record = QueuedTaskRecord(
-                task_name=task_name,
-                id=record_id,
-                args=args,
-                kwargs=kwargs or {},
-                queue=queue,
-                scheduled_at=sched,
-                max_retries=max_retries,
-                key=key,
+        for request in requests:
+            record, entry = _build_record_and_entry(
+                request.task_name,
+                args=request.args,
+                kwargs=request.kwargs,
+                queue=request.queue,
+                priority=request.priority,
+                max_retries=request.max_retries,
+                scheduled_at=request.scheduled_at,
+                expires_at=request.expires_at,
+                key=request.key,
+                execution_backend=request.execution_backend,
+                execution_profile=request.execution_profile,
+                metadata=request.metadata,
+                now=now,
             )
             records.append(record)
-            record_dict = {
-                "id": str(record.id),
-                "task_name": record.task_name,
-                "args": list(record.args),
-                "kwargs": record.kwargs,
-                "queue": record.queue,
-                "status": record.status,
-                "max_retries": record.max_retries,
-                "retry_count": record.retry_count,
-            }
-            sched_ms = int(sched.timestamp() * 1000) if sched else None
-            entries.append(
-                QueueEntry(
-                    job_id=str(record.id),
-                    queue=queue,
-                    task_name=task_name,
-                    payload=encode_json_bytes(record_dict),
-                    attempt=1,
-                    max_attempts=max_retries + 1,
-                    scheduled_at_ms=sched_ms,
-                )
-            )
+            entries.append(entry)
         await self._store.enqueue_many(entries)
         if self._notification_source is not None:
-            queues = {r.queue for r in records}
-            for q in queues:
-                await self._notification_source.publish("vertebra_queue_wakeup", q)
+            for queue_name in dict.fromkeys(r.queue for r in records):
+                await self._notification_source.publish("vertebra_queue_wakeup", queue_name)
+        self._record_enqueue_batch(len(requests))
         return records
+
+    async def assign_worker(
+        self,
+        task_id: UUID,
+        *,
+        worker_id: str,
+        expected_retry_count: int,
+    ) -> QueuedTaskRecord | None:
+        """Persist the active worker owner on a fenced running task attempt."""
+        target_id = str(task_id)
+        assigned = await self._store.assign_worker(
+            target_id,
+            worker_id=worker_id,
+            attempt=expected_retry_count + 1,
+        )
+        if not assigned:
+            return None
+        entry = await self._store.get_entry(target_id)
+        if entry is None:
+            return None
+        record = _entry_to_record(entry, store_status="claimed")
+        if record.worker_id is None:
+            record.worker_id = worker_id
+        return record
 
     async def claim_many(
         self,
@@ -334,9 +482,19 @@ class StoreQueueBackend(BaseQueueBackend):
         execution_backend: str | None = None,
         queue_limits: Mapping[str, int] | None = None,
     ) -> list[QueuedTaskRecord]:
-        """Claim ready tasks across specified queues."""
-        _ = (execution_backend, queue_limits)
-        target_queues = queues if queues else ("default",)
+        """Claim ready tasks across specified queues or all queues when empty."""
+        _ = execution_backend
+        if limit <= 0:
+            return []
+        if queues:
+            target_queues = queues
+        else:
+            ready = await self._store.list_entries(queue=None, status="ready", limit=max(limit * 10, 100))
+            target_queues = tuple(dict.fromkeys(entry.queue for entry in ready))
+        if queue_limits is not None:
+            target_queues = tuple(q for q in target_queues if queue_limits.get(q, 1) > 0)
+        if not target_queues:
+            return []
         entries = await self._store.claim(
             queues=target_queues,
             limit=limit,
@@ -356,9 +514,8 @@ class StoreQueueBackend(BaseQueueBackend):
         _ = expected_execution_ref
         target_id = str(task_id)
         expected_attempt = expected_retry_count + 1 if expected_retry_count is not None else None
-        claim_job_fn = getattr(self._store, "claim_job", None)
-        if callable(claim_job_fn):
-            claimed_entry = await claim_job_fn(
+        if isinstance(self._store, _ClaimJobStore):
+            claimed_entry = await self._store.claim_job(
                 target_id,
                 worker_id="worker",
                 lease_seconds=30.0,
@@ -415,7 +572,6 @@ class StoreQueueBackend(BaseQueueBackend):
         expected_retry_count: int | None = None,
     ) -> QueuedTaskRecord | None:
         """Acknowledge a completed task with attempt fencing."""
-        _ = result
         target_id = str(task_id)
         if expected_retry_count is not None:
             attempt = expected_retry_count + 1
@@ -426,7 +582,12 @@ class StoreQueueBackend(BaseQueueBackend):
         if not acked:
             return None
         entry = await self._store.get_entry(target_id)
-        return _entry_to_record(entry, store_status="completed") if entry is not None else None
+        if entry is None:
+            return None
+        record = _entry_to_record(entry, store_status="completed")
+        if record.result is None and result is not None:
+            record.result = result
+        return record
 
     async def fail_task(
         self,
@@ -450,7 +611,7 @@ class StoreQueueBackend(BaseQueueBackend):
         if not retry:
             delay_s: float | None = None
         elif retry_at is not None:
-            delay_s = max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+            delay_s = max(0.0, (_ensure_utc(retry_at) - datetime.now(UTC)).total_seconds())
         else:
             delay_s = 0.0
 
@@ -470,10 +631,57 @@ class StoreQueueBackend(BaseQueueBackend):
         *,
         worker_id: str | None = None,
     ) -> HeartbeatTouchResult:
-        """Extend visibility leases for in-flight tasks."""
-        ids = [str(t.task_id) for t in touches]
-        await self._store.heartbeat(ids, worker_id=worker_id or "worker", lease_seconds=30.0)
-        return HeartbeatTouchResult(touched_task_ids={t.task_id for t in touches})
+        """Extend visibility leases and heartbeat timestamps for in-flight tasks."""
+        if not touches:
+            return HeartbeatTouchResult()
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        touched_ids: set[UUID] = set()
+        missed_ids: set[UUID] = set()
+        by_worker: dict[str, list[str]] = {}
+        touched_job_ids: list[str] = []
+        for touch in touches:
+            target_id = str(touch.task_id)
+            entry = await self._store.get_entry(target_id)
+            if entry is None:
+                missed_ids.add(touch.task_id)
+                continue
+            if touch.expected_retry_count is not None and entry.attempt != touch.expected_retry_count + 1:
+                missed_ids.add(touch.task_id)
+                continue
+            store_status = await self._get_entry_status(target_id)
+            if store_status is not None and store_status.strip().lower() not in {"claimed", "running"}:
+                missed_ids.add(touch.task_id)
+                continue
+            touched_ids.add(touch.task_id)
+            touched_job_ids.append(target_id)
+            owner = entry.worker_id or worker_id or "worker"
+            by_worker.setdefault(owner, []).append(target_id)
+        if touched_job_ids:
+            await self._store.touch_heartbeats(touched_job_ids, heartbeat_at_ms=now_ms)
+            for owner, job_ids in by_worker.items():
+                await self._store.heartbeat(job_ids, worker_id=owner, lease_seconds=30.0)
+        return HeartbeatTouchResult(touched_task_ids=touched_ids, missed_task_ids=missed_ids)
+
+    async def null_heartbeats(
+        self,
+        task_ids: Sequence[UUID],
+        *,
+        expected_retry_count: int | None = None,
+    ) -> None:
+        """Clear heartbeat timestamps for task IDs."""
+        if not task_ids:
+            return
+        if expected_retry_count is None:
+            await self._store.null_heartbeats([str(tid) for tid in task_ids])
+            return
+        expected_attempt = expected_retry_count + 1
+        matching_ids: list[str] = []
+        for tid in task_ids:
+            entry = await self._store.get_entry(str(tid))
+            if entry is not None and entry.attempt == expected_attempt:
+                matching_ids.append(entry.job_id)
+        if matching_ids:
+            await self._store.null_heartbeats(matching_ids)
 
     async def requeue_stale_running(
         self,
@@ -482,8 +690,33 @@ class StoreQueueBackend(BaseQueueBackend):
         limit: int | None = None,
     ) -> StaleTaskRecoveryResult:
         """Reap abandoned in-flight claims back into ready status."""
+        _ = limit
         reaped = await self._store.reap_stale(lease_seconds=stale_after.total_seconds())
         return StaleTaskRecoveryResult(requeued=reaped)
+
+    async def expire_overdue(self, *, limit: int | None = None) -> list[QueuedTaskRecord]:
+        """Transition overdue pending or scheduled records to expired."""
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        fetch_limit = max(limit or 1000, 1000)
+        ready_entries = await self._store.list_entries(queue=None, status="ready", limit=fetch_limit)
+        overdue_candidates = [
+            entry for entry in ready_entries if entry.expires_at_ms is not None and entry.expires_at_ms <= now_ms
+        ]
+        overdue_candidates.sort(key=lambda entry: (entry.expires_at_ms or 0, entry.job_id))
+        expired_count = await self._store.expire_overdue(now_ms=now_ms, limit=limit)
+        if expired_count <= 0:
+            return []
+        expired_records: list[QueuedTaskRecord] = []
+        for candidate in overdue_candidates:
+            if limit is not None and len(expired_records) >= limit:
+                break
+            updated = await self._store.get_entry(candidate.job_id)
+            if updated is None:
+                continue
+            updated_status = await self._get_entry_status(candidate.job_id)
+            if updated_status == "expired" or (updated_status is None and updated.completed_at_ms is not None):
+                expired_records.append(_entry_to_record(updated, store_status="expired"))
+        return expired_records
 
     async def cleanup_terminal(
         self,
@@ -492,7 +725,8 @@ class StoreQueueBackend(BaseQueueBackend):
         limit: int | None = None,
     ) -> int:
         """Clean up terminal queue records older than before."""
-        return 0
+        before_ms = int(_ensure_utc(before).timestamp() * 1000)
+        return await self._store.cleanup_terminal(before_ms=before_ms, limit=limit)
 
     async def get_task(self, task_id: UUID) -> QueuedTaskRecord | None:
         """Retrieve a task record by UUID."""
@@ -500,8 +734,7 @@ class StoreQueueBackend(BaseQueueBackend):
         entry = await self._store.get_entry(target_id)
         if entry is None:
             return None
-        status_fn = getattr(self._store, "get_entry_status", None)
-        store_status = await status_fn(target_id) if callable(status_fn) else None
+        store_status = await self._get_entry_status(target_id)
         if store_status is None:
             completed = await self._store.list_entries(entry.queue, status="completed", limit=100)
             if any(item.job_id == target_id for item in completed):
@@ -518,12 +751,22 @@ class StoreQueueBackend(BaseQueueBackend):
         return records
 
     async def get_task_by_key(self, key: str) -> QueuedTaskRecord | None:
-        """Retrieve a task record by idempotency key."""
-        entries = await self._store.list_entries("default", limit=100)
-        for e in entries:
-            if e.headers.get("key") == key:
-                return _entry_to_record(e)
-        return None
+        """Retrieve a task record by idempotency key across all queues."""
+        entry = await self._store.get_entry_by_key(key, queue=None)
+        if entry is None:
+            entries = await self._store.list_entries(queue=None, status="ready", limit=1000)
+            entry = next(
+                (
+                    item
+                    for item in entries
+                    if item.headers.get("key") == key or item.headers.get("idempotency_key") == key
+                ),
+                None,
+            )
+        if entry is None:
+            return None
+        store_status = await self._get_entry_status(entry.job_id)
+        return _entry_to_record(entry, store_status=store_status)
 
     async def cancel_task(
         self,
@@ -532,8 +775,54 @@ class StoreQueueBackend(BaseQueueBackend):
         include_running: bool = False,
         expected_retry_count: int | None = None,
     ) -> bool:
-        """Cancel a pending or scheduled task."""
-        return await self._store.cancel(str(task_id))
+        """Cancel a pending, scheduled, or optionally running task."""
+        target_id = str(task_id)
+        if not include_running or expected_retry_count is not None:
+            entry = await self._store.get_entry(target_id)
+            if entry is None:
+                return False
+            if expected_retry_count is not None and entry.attempt != expected_retry_count + 1:
+                return False
+            if not include_running:
+                store_status = await self._get_entry_status(target_id)
+                if store_status is not None:
+                    if store_status.strip().lower() in {"claimed", "running"}:
+                        return False
+                elif entry.lease_until_ms > int(datetime.now(UTC).timestamp() * 1000):
+                    return False
+        return await self._store.cancel(target_id)
+
+    async def interrupt_task(
+        self,
+        task_id: UUID,
+        *,
+        expected_retry_count: int,
+        worker_id: str,
+        queued_at: datetime,
+    ) -> QueuedTaskRecord | None:
+        """Interrupt a fenced running task attempt and return the updated record."""
+        target_id = str(task_id)
+        entry = await self._store.get_entry(target_id)
+        if entry is None:
+            return None
+        if entry.attempt != expected_retry_count + 1 or entry.worker_id != worker_id:
+            return None
+        store_status = await self._get_entry_status(target_id)
+        if store_status is not None:
+            if store_status.strip().lower() not in {"claimed", "running"}:
+                return None
+        elif entry.lease_until_ms <= int(datetime.now(UTC).timestamp() * 1000):
+            return None
+        interrupted = await self._store.interrupt_task(target_id)
+        if not interrupted:
+            return None
+        updated = await self._store.get_entry(target_id)
+        if updated is None:
+            return None
+        updated_status = await self._get_entry_status(target_id)
+        record = _entry_to_record(updated, store_status=updated_status)
+        record.queued_at = _ensure_utc(queued_at)
+        return record
 
     async def cancel_tasks(
         self,
@@ -544,11 +833,20 @@ class StoreQueueBackend(BaseQueueBackend):
         metadata: Mapping[str, Any] | None = None,
         include_running: bool = False,
     ) -> int:
-        """Cancel multiple pending or scheduled tasks."""
-        entries = await self._store.list_entries(queue or "default", status="ready", limit=100)
+        """Cancel multiple pending, scheduled, or optionally running tasks."""
+        entries = list(await self._store.list_entries(queue, status="ready", limit=1000))
+        if include_running:
+            entries.extend(await self._store.list_entries(queue, status="claimed", limit=1000))
         cancelled = 0
-        for e in entries:
-            if (task_name is None or e.task_name == task_name) and await self._store.cancel(e.job_id):
+        for entry in entries:
+            record = _entry_to_record(entry)
+            if record_matches_filters(
+                record,
+                task_name=task_name,
+                queue=queue,
+                kwargs=kwargs,
+                metadata=metadata,
+            ) and await self._store.cancel(entry.job_id):
                 cancelled += 1
         return cancelled
 
@@ -559,10 +857,22 @@ class StoreQueueBackend(BaseQueueBackend):
         queue: str | None = None,
         execution_backend: str | None = None,
     ) -> list[QueuedTaskRecord]:
-        """List ready pending tasks."""
-        _ = execution_backend
-        entries = await self._store.list_entries(queue or "default", status="ready", limit=limit)
-        return [_entry_to_record(e, store_status="ready") for e in entries]
+        """List due ready pending tasks across queues or a single queue."""
+        if limit <= 0:
+            return []
+        entries = await self._store.list_entries(queue, status="ready", limit=max(limit * 10, 100))
+        records: list[QueuedTaskRecord] = []
+        for entry in entries:
+            record = _entry_to_record(entry, store_status="ready")
+            if not record.is_due or record.is_expired:
+                continue
+            if is_external_dispatch_reservation(record.execution_ref):
+                continue
+            if execution_backend is not None and record.execution_backend != execution_backend:
+                continue
+            records.append(record)
+        records.sort(key=lambda record: (-record.priority, record.queued_at, record.created_at, record.id.int))
+        return records[:limit]
 
     async def list_completed_by_task(
         self,
@@ -571,31 +881,43 @@ class StoreQueueBackend(BaseQueueBackend):
         since: datetime | None = None,
         limit: int = 10,
     ) -> list[QueuedTaskRecord]:
-        """List completed tasks matching task_name."""
-        _ = since
-        entries = await self._store.list_entries("default", status="completed", limit=limit)
-        return [_entry_to_record(e, store_status="completed") for e in entries if e.task_name == task_name]
+        """List completed tasks matching task_name across all queues."""
+        if limit <= 0:
+            return []
+        since_utc = _ensure_utc(since) if since is not None else None
+        entries = await self._store.list_entries(queue=None, status="completed", limit=max(limit * 10, 1000))
+        records: list[QueuedTaskRecord] = []
+        for entry in entries:
+            record = _entry_to_record(entry, store_status="completed")
+            if record.task_name != task_name:
+                continue
+            if since_utc is not None and (record.completed_at is None or record.completed_at < since_utc):
+                continue
+            records.append(record)
+        records.sort(key=lambda record: record.completed_at or record.created_at, reverse=True)
+        return records[:limit]
 
     async def list_running_external(
         self,
         *,
         limit: int | None = None,
     ) -> list[QueuedTaskRecord]:
-        """List running external tasks."""
-        entries = await self._store.list_entries("default", status="claimed", limit=limit or 100)
-        return [_entry_to_record(e, store_status="claimed") for e in entries]
+        """List running tasks across all queues."""
+        fetch_limit = limit if limit is not None else 1000
+        entries = await self._store.list_entries(queue=None, status="claimed", limit=fetch_limit)
+        records = [_entry_to_record(entry, store_status="claimed") for entry in entries]
+        return records[:limit] if limit is not None else records
 
     async def get_statistics(self, *, queue: str | None = None) -> QueueStatistics:
-        """Return operational statistics for the specified queue across all lifecycle statuses."""
-        target_queue = queue or "default"
-        ready_entries = await self._store.list_entries(target_queue, status="ready", limit=1000)
+        """Return operational statistics for the specified queue or across all queues."""
+        ready_entries = await self._store.list_entries(queue, status="ready", limit=1000)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         scheduled = sum(1 for e in ready_entries if e.scheduled_at_ms is not None and e.scheduled_at_ms > now_ms)
         pending = len(ready_entries) - scheduled
-        claimed_entries = await self._store.list_entries(target_queue, status="claimed", limit=1000)
-        completed_entries = await self._store.list_entries(target_queue, status="completed", limit=1000)
-        dead_entries = await self._store.list_entries(target_queue, status="dead_letter", limit=1000)
-        cancelled_entries = await self._store.list_entries(target_queue, status="cancelled", limit=1000)
+        claimed_entries = await self._store.list_entries(queue, status="claimed", limit=1000)
+        completed_entries = await self._store.list_entries(queue, status="completed", limit=1000)
+        dead_entries = await self._store.list_entries(queue, status="dead_letter", limit=1000)
+        cancelled_entries = await self._store.list_entries(queue, status="cancelled", limit=1000)
         return QueueStatistics(
             pending=pending,
             scheduled=scheduled,
@@ -612,15 +934,19 @@ class StoreQueueBackend(BaseQueueBackend):
         task_id: UUID,
         task_name: str,
     ) -> TaskReservation | None:
-        """Reserve an idempotency key."""
-        reserved = await self._store.reserve_unique_key(key, ttl_seconds=86400.0)
-        if reserved:
-            return TaskReservation(key=key, task_id=task_id, task_name=task_name, created_at=datetime.now(UTC))
-        return None
+        """Atomically reserve a forever idempotency key."""
+        existing = await self._store.reserve_identity(
+            key,
+            job_id=str(task_id),
+            task_name=task_name,
+            ttl_seconds=None,
+        )
+        return _reservation_to_task_reservation(existing) if existing is not None else None
 
     async def has_identity(self, key: str) -> TaskReservation | None:
-        """Check if an idempotency key is active."""
-        return None
+        """Check if a forever idempotency key is active."""
+        reservation = await self._store.get_reservation(key)
+        return _reservation_to_task_reservation(reservation) if reservation is not None else None
 
     async def reset_identity(
         self,
@@ -628,8 +954,9 @@ class StoreQueueBackend(BaseQueueBackend):
         *,
         expected_task_id: UUID | None = None,
     ) -> bool:
-        """Release an idempotency key reservation."""
-        return await self._store.release_unique_key(key)
+        """Release a forever idempotency key reservation."""
+        expected_job_id = str(expected_task_id) if expected_task_id is not None else None
+        return await self._store.reset_identity(key, expected_job_id=expected_job_id)
 
     async def acquire_maintenance(
         self,
@@ -668,14 +995,27 @@ class StoreQueueBackend(BaseQueueBackend):
                     if _inspect.isawaitable(res):
                         await res
 
+    async def time_until_next_due(self, *, queues: tuple[str, ...] = ()) -> float | None:
+        """Return seconds until the next scheduled task is due, if known."""
+        if queues:
+            return await self._store.next_due_delay(queues)
+        ready = await self._store.list_entries(queue=None, status="ready", limit=100)
+        if not ready:
+            return None
+        target_queues = tuple(dict.fromkeys(entry.queue for entry in ready))
+        return await self._store.next_due_delay(target_queues)
+
     async def close(self) -> None:
         """Close backing store resources."""
         if hasattr(self._store, "aclose"):
             await self._store.aclose()
-        elif hasattr(self._store, "close"):
+        elif isinstance(self._store, _SyncClosableStore):
             res = self._store.close()
-            if asyncio.iscoroutine(res):
+            if _inspect.isawaitable(res):
                 await res
+
+
+queue_backend("vertebra_store")(StoreQueueBackend)
 
 
 class ContainerTaskDependencyProvider:

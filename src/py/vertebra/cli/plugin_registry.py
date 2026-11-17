@@ -466,8 +466,8 @@ def _resolve_context_env(ctx: click.Context) -> VertebraEnv | None:
             return obj
         if obj is not None and hasattr(obj, "app") and hasattr(obj, "app_path"):
             return VertebraEnv(
-                app_path=str(obj.app_path),
-                app=obj.app,
+                app_path=str(getattr(obj, "app_path", "")),
+                app=getattr(obj, "app", None),
                 cwd=getattr(obj, "cwd", Path.cwd()),
                 host=getattr(obj, "host", None),
                 port=getattr(obj, "port", None),
@@ -599,7 +599,7 @@ def _enter_framework_lifespans(
         with contextlib.suppress(TypeError):
             cm = lifespan_fn()
             if hasattr(cm, "__enter__"):
-                stack.enter_context(cm)
+                stack.enter_context(cast("contextlib.AbstractContextManager[Any]", cm))
 
 
 def _extract_offload_config_json(app: Any) -> str | None:

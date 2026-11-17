@@ -113,6 +113,8 @@ unsafe impl Send for ShmCapsule {}
 // SAFETY: `ShmCapsule` synchronizes ownership claims via `AtomicPtr` (`ctx`) without unsynchronized interior mutation.
 unsafe impl Sync for ShmCapsule {}
 
+// SAFETY: C-ABI destructor callback invoked at most once with the raw `Arc<ShmRegion>` pointer
+// previously produced by `ShmCapsule::from_arc` (or null).
 unsafe extern "C" fn drop_shm_region_arc(ctx: *mut c_void) {
     if !ctx.is_null() {
         // SAFETY: `ctx` was produced via `Arc::into_raw` on an `Arc<ShmRegion>` in
@@ -123,6 +125,8 @@ unsafe extern "C" fn drop_shm_region_arc(ctx: *mut c_void) {
     }
 }
 
+// SAFETY: C-ABI unlink callback invoked while the caller still owns a live `ctx` pointer
+// produced by `ShmCapsule::from_arc` (or null).
 unsafe extern "C" fn unlink_shm_region_arc(ctx: *mut c_void) -> bool {
     if ctx.is_null() {
         return false;
@@ -193,10 +197,12 @@ impl ShmRegion {
         let size = align_to_page(size)?;
         #[cfg(unix)]
         {
+            // SAFETY: Caller guarantees `handle` is a valid open FD sized for `size` page-aligned bytes.
             return unsafe { map_fd_region(handle, size) };
         }
         #[cfg(windows)]
         {
+            // SAFETY: Caller guarantees `handle` is a valid mapping handle sized for `size` page-aligned bytes.
             return unsafe { map_windows_region(handle, size) };
         }
         #[allow(unreachable_code)]
@@ -205,6 +211,8 @@ impl ShmRegion {
 
     /// Map an existing shared memory file descriptor / handle into this process.
     pub fn from_fd(handle: ShmHandle, size: usize) -> Result<Self, ShmError> {
+        // SAFETY: Caller transfers an open `handle` backed by at least `size` bytes; `Self::map`
+        // validates non-zero page-aligned size and returns any OS mapping error.
         unsafe { Self::map(handle, size) }
     }
 
@@ -222,10 +230,11 @@ impl ShmRegion {
         let deadline = std::time::Duration::from_millis(INIT_WAIT_TIMEOUT_MS);
 
         loop {
-            // SAFETY: `cname` is a validated NUL-terminated `CString`.
             let fd = if name.starts_with("/tmp/vtb-") {
+                // SAFETY: `cname` is a validated NUL-terminated `/tmp/vtb-*` path `CString`.
                 unsafe { libc::open(cname.as_ptr(), libc::O_RDWR, 0o600) }
             } else {
+                // SAFETY: `cname` is a validated NUL-terminated POSIX SHM name `CString`.
                 unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) }
             };
             if fd < 0 {
@@ -248,6 +257,7 @@ impl ShmRegion {
             };
 
             if file_len == 0 {
+                // SAFETY: `fd` was opened above and is not yet owned by a `ShmRegion`.
                 unsafe {
                     libc::close(fd);
                 }
@@ -259,6 +269,7 @@ impl ShmRegion {
             }
 
             if file_len < req_user_len {
+                // SAFETY: `fd` was opened above and is closed on size validation failure.
                 unsafe {
                     libc::close(fd);
                 }
@@ -326,6 +337,8 @@ impl ShmRegion {
                     region.owner_header_offset = Some(trailer_off);
                 } else {
                     drop(region);
+                    #[cfg(test)]
+                    notify_magic_wait_hook();
                     if start.elapsed() >= deadline {
                         return Err(ShmError::InitTimeout);
                     }
@@ -534,6 +547,7 @@ impl ShmRegion {
         deadline: std::time::Duration,
     ) -> Result<u64, CreateOrOpenConflict> {
         loop {
+            // SAFETY: `cname` is a validated NUL-terminated POSIX SHM name `CString`.
             let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
             if fd < 0 {
                 let err = io::Error::last_os_error();
@@ -545,6 +559,7 @@ impl ShmRegion {
             let (file_len, dev, ino) = match stat_fd(fd) {
                 Ok(info) => info,
                 Err(err) => {
+                    // SAFETY: `fd` was opened above and is closed on `stat_fd` failure.
                     unsafe {
                         libc::close(fd);
                     }
@@ -552,6 +567,7 @@ impl ShmRegion {
                 }
             };
             if file_len == 0 {
+                // SAFETY: `fd` was opened above and is closed before retrying.
                 unsafe {
                     libc::close(fd);
                 }
@@ -562,6 +578,7 @@ impl ShmRegion {
                 continue;
             }
             if file_len < page * 2 || !file_len.is_multiple_of(page) {
+                // SAFETY: `fd` was opened above and is closed on invalid trailer sizing.
                 unsafe {
                     libc::close(fd);
                 }
@@ -581,11 +598,13 @@ impl ShmRegion {
             };
             if trailer_ptr == libc::MAP_FAILED {
                 let err = io::Error::last_os_error();
+                // SAFETY: `fd` was opened above and is closed after `mmap` failure.
                 unsafe {
                     libc::close(fd);
                 }
                 return Err(CreateOrOpenConflict::Err(err.into()));
             }
+            // SAFETY: `trailer_ptr` is a page-aligned mapping of `page` bytes (`>= size_of::<ShmOwnerPage>()`).
             let (magic, state, pid, owner_gen) = unsafe {
                 let p = &*(trailer_ptr as *const ShmOwnerPage);
                 (
@@ -595,6 +614,7 @@ impl ShmRegion {
                     p.header.owner_generation.load(Ordering::Acquire),
                 )
             };
+            // SAFETY: `trailer_ptr` was mapped above with length `page`.
             unsafe {
                 libc::munmap(trailer_ptr, page);
             }
@@ -652,6 +672,7 @@ impl ShmRegion {
         start: std::time::Instant,
         deadline: std::time::Duration,
     ) -> Result<Option<Self>, AttachOrRetry> {
+        // SAFETY: `cname` is a validated NUL-terminated POSIX SHM name `CString`.
         let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
         if fd < 0 {
             let err = io::Error::last_os_error();
@@ -663,6 +684,7 @@ impl ShmRegion {
         let (file_len, dev, ino) = match stat_fd(fd) {
             Ok(info) => info,
             Err(err) => {
+                // SAFETY: `fd` was opened above and is closed on `stat_fd` failure.
                 unsafe {
                     libc::close(fd);
                 }
@@ -670,20 +692,24 @@ impl ShmRegion {
             }
         };
         if file_len == 0 {
+            // SAFETY: `fd` was opened above and is closed while creator finishes truncating.
             unsafe {
                 libc::close(fd);
             }
             return Ok(None);
         }
         if file_len < page * 2 || !file_len.is_multiple_of(page) {
+            // SAFETY: `fd` was opened above and is closed on invalid trailer sizing.
             unsafe {
                 libc::close(fd);
             }
             return Err(AttachOrRetry::Err(ShmError::InvalidSize));
         }
+        // SAFETY: `fd` is an open SHM descriptor verified to be `file_len` bytes long.
         let mut region = match unsafe { map_fd_region(fd, file_len) } {
             Ok(r) => r,
             Err(err) => {
+                // SAFETY: `fd` was opened above and is closed on `mmap` failure.
                 unsafe {
                     libc::close(fd);
                 }
@@ -919,6 +945,8 @@ impl ShmRegion {
     /// # Safety
     /// The caller must ensure no mutable aliasing occurs across processes.
     pub unsafe fn as_slice(&self) -> &[u8] {
+        // SAFETY: `self.ptr` is a `NonNull` valid mapping of `self.len` bytes for `&self`'s
+        // lifetime, and the caller guarantees no conflicting unsynchronized mutable aliasing.
         unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
@@ -927,6 +955,8 @@ impl ShmRegion {
     /// # Safety
     /// The caller must ensure exclusive write access to this mapping.
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: `self.ptr` is a `NonNull` valid mapping of `self.len` bytes with exclusive
+        // `&mut self` access, and the caller guarantees cross-process write exclusivity.
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
@@ -1039,6 +1069,7 @@ impl Drop for ShmRegion {
 #[cfg(target_os = "linux")]
 fn create_memfd_region(size: usize) -> Result<ShmRegion, ShmError> {
     let name = CString::new("vertebra")?;
+    // SAFETY: `name` is a valid NUL-terminated `CString` passed to `SYS_memfd_create`.
     let fd = unsafe {
         libc::syscall(
             libc::SYS_memfd_create,
@@ -1049,7 +1080,7 @@ fn create_memfd_region(size: usize) -> Result<ShmRegion, ShmError> {
     if fd < 0 {
         return Err(io::Error::last_os_error().into());
     }
-    // SAFETY: syscall expects valid C string pointer and flags.
+    // SAFETY: `fd` is a newly created owned memfd truncated to page-aligned `size` before sealing and mapping.
     unsafe {
         if libc::ftruncate(fd, size as libc::off_t) != 0 {
             let err = io::Error::last_os_error();
@@ -1081,7 +1112,7 @@ fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
         // including the leading slash. Keep the generated name compact.
         let name = format!("/vtb-{pid:x}-{seq:x}-{attempt:x}");
         let cname = CString::new(name)?;
-        // SAFETY: shm_open expects a valid C string name.
+        // SAFETY: `cname` is a valid NUL-terminated `CString` and `O_CREAT | O_EXCL` creates atomically.
         let fd = unsafe {
             libc::shm_open(
                 cname.as_ptr(),
@@ -1090,6 +1121,8 @@ fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
             )
         };
         if fd >= 0 {
+            // SAFETY: `fd` is exclusively owned, truncated to page-aligned `size`, mapped, and
+            // unlinked from `/dev/shm` so only the anonymous FD mapping remains.
             unsafe {
                 if libc::ftruncate(fd, size as libc::off_t) != 0 {
                     let err = io::Error::last_os_error();
@@ -1119,9 +1152,12 @@ fn create_shm_open_region(size: usize) -> Result<ShmRegion, ShmError> {
     }
 }
 
+/// # Safety
+/// Caller must ensure `fd` is a valid open file descriptor backed by at least `size` bytes.
 #[cfg(unix)]
 unsafe fn map_fd_region(fd: RawFd, size: usize) -> Result<ShmRegion, ShmError> {
-    // SAFETY: map shared memory from an existing fd.
+    // SAFETY: Caller guarantees `fd` is open and at least `size` bytes; `mmap` checks errors
+    // and `NonNull::new` rejects null pointers.
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -1158,6 +1194,8 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
     };
 
     let size_u64 = size as u64;
+    // SAFETY: `CreateFileMappingW` with `INVALID_HANDLE_VALUE` and null name creates an anonymous
+    // pagefile-backed section of `size` bytes.
     let handle = unsafe {
         CreateFileMappingW(
             INVALID_HANDLE_VALUE,
@@ -1169,12 +1207,16 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
         )
     };
     if handle.is_null() {
+        // SAFETY: `GetLastError` reads the calling thread's last-error TLS value.
         return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
     }
+    // SAFETY: `handle` is a valid non-null file-mapping object sized for `size` bytes.
     let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
     let ptr = view.Value.cast::<u8>();
     if ptr.is_null() {
+        // SAFETY: `GetLastError` reads the calling thread's last-error TLS value.
         let err = io::Error::from_raw_os_error(unsafe { GetLastError() } as i32);
+        // SAFETY: `handle` was created above and must be closed when `MapViewOfFile` fails.
         unsafe {
             CloseHandle(handle);
         }
@@ -1195,14 +1237,18 @@ fn create_windows_region(size: usize) -> Result<ShmRegion, ShmError> {
     })
 }
 
+/// # Safety
+/// Caller must ensure `handle` is a valid Windows file-mapping handle backed by at least `size` bytes.
 #[cfg(windows)]
 unsafe fn map_windows_region(handle: RawHandle, size: usize) -> Result<ShmRegion, ShmError> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
 
+    // SAFETY: Caller guarantees `handle` is a valid mapping handle of at least `size` bytes.
     let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
     let ptr = view.Value.cast::<u8>();
     if ptr.is_null() {
+        // SAFETY: `GetLastError` reads the calling thread's last-error TLS value.
         return Err(io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).into());
     }
     let ptr = NonNull::new(ptr).ok_or(ShmError::MapFailed)?;
@@ -1438,6 +1484,7 @@ pub fn probe_owner_pid(name: &str) -> Option<u32> {
     validate_shm_name(name).ok()?;
     let page = os_page_size().ok()?;
     let cname = CString::new(name).ok()?;
+    // SAFETY: `cname` is a validated NUL-terminated POSIX SHM name `CString`.
     let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0) };
     if fd < 0 {
         return None;
@@ -1445,6 +1492,7 @@ pub fn probe_owner_pid(name: &str) -> Option<u32> {
     let (file_len, _, _) = match stat_fd(fd) {
         Ok(info) => info,
         Err(_) => {
+            // SAFETY: `fd` was opened above and is closed on `stat_fd` failure.
             unsafe {
                 libc::close(fd);
             }
@@ -1452,12 +1500,14 @@ pub fn probe_owner_pid(name: &str) -> Option<u32> {
         }
     };
     if file_len < page * 2 || !file_len.is_multiple_of(page) {
+        // SAFETY: `fd` was opened above and is closed on invalid trailer sizing.
         unsafe {
             libc::close(fd);
         }
         return None;
     }
     let trailer_off = file_len - page;
+    // SAFETY: `trailer_off` is page-aligned within `file_len`, mapping one trailer page read-only.
     let trailer_ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -1469,11 +1519,13 @@ pub fn probe_owner_pid(name: &str) -> Option<u32> {
         )
     };
     if trailer_ptr == libc::MAP_FAILED {
+        // SAFETY: `fd` was opened above and is closed on `mmap` failure.
         unsafe {
             libc::close(fd);
         }
         return None;
     }
+    // SAFETY: `trailer_ptr` maps `page` bytes (`>= size_of::<ShmOwnerPage>()`) aligned to a page boundary.
     let pid = unsafe {
         let p = &*(trailer_ptr as *const ShmOwnerPage);
         if p.magic.load(Ordering::Acquire) == SHM_OWNER_MAGIC {
@@ -1483,6 +1535,7 @@ pub fn probe_owner_pid(name: &str) -> Option<u32> {
             None
         }
     };
+    // SAFETY: `trailer_ptr` was mapped with length `page`, and `fd` is owned here.
     unsafe {
         libc::munmap(trailer_ptr, page);
         libc::close(fd);
@@ -1518,6 +1571,7 @@ fn validate_name(name: &str) -> Result<(), ShmError> {
 
 /// Return `true` when `/dev/shm` has at least `min_free_bytes` available (or on non-Linux hosts).
 pub fn dev_shm_has_headroom(min_free_bytes: usize) -> bool {
+    // SAFETY: `libc::statvfs` is POD valid when zero-initialized and `c"/dev/shm"` is a static NUL-terminated C string.
     #[cfg(target_os = "linux")]
     unsafe {
         let mut st: libc::statvfs = core::mem::zeroed();
@@ -1539,8 +1593,10 @@ pub fn shm_unlink_named(name: &str) -> Result<(), ShmError> {
     validate_name(name)?;
     let cname = CString::new(name)?;
     let result = if name.starts_with("/tmp/vtb-") {
+        // SAFETY: `cname` is a validated NUL-terminated `/tmp/vtb-*` path `CString`.
         unsafe { libc::unlink(cname.as_ptr()) }
     } else {
+        // SAFETY: `cname` is a validated NUL-terminated POSIX SHM name `CString`.
         unsafe { libc::shm_unlink(cname.as_ptr()) }
     };
     if result < 0 {
@@ -1583,6 +1639,38 @@ pub fn os_page_size() -> Result<usize, ShmError> {
 }
 
 #[cfg(test)]
+pub(crate) fn unique_test_shm_name(prefix: &str) -> String {
+    static TEST_SHM_SEQ: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let seq = TEST_SHM_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("{prefix}-{pid:x}-{seq:x}-{nanos:x}")
+}
+
+#[cfg(all(test, unix))]
+type MagicWaitSignal = Arc<(Mutex<bool>, std::sync::Condvar)>;
+
+#[cfg(all(test, unix))]
+std::thread_local! {
+    static MAGIC_WAIT_HOOK: std::cell::RefCell<Option<MagicWaitSignal>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn notify_magic_wait_hook() {
+    MAGIC_WAIT_HOOK.with(|hook| {
+        if let Some(pair) = hook.borrow().as_ref() {
+            let (lock, cvar) = &**pair;
+            let mut waited = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *waited = true;
+            cvar.notify_all();
+        }
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -1593,6 +1681,7 @@ mod tests {
     fn create_region_and_write() {
         let mut region = ShmRegion::create(1024).unwrap();
         assert!(region.len() >= 1024);
+        // SAFETY: `region` is exclusively owned in this test and mapped for at least 1024 bytes.
         unsafe {
             let slice = region.as_mut_slice();
             slice[0] = 42;
@@ -1603,16 +1692,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn create_and_open_named() {
-        let name = format!("/vertebra-test-{}", std::process::id());
+        let name = unique_test_shm_name("/vtb-test");
         let mut region = match ShmRegion::create_named(&name, 4096) {
             Ok(region) => region,
             Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
             Err(err) => panic!("create_named failed: {err:?}"),
         };
+        // SAFETY: `region` is exclusively owned prior to opening `opened`.
         unsafe {
             region.as_mut_slice()[0] = 7;
         }
         let opened = ShmRegion::open_named(&name, 4096).unwrap();
+        // SAFETY: `opened` maps the same segment with no concurrent writes during this read.
         unsafe {
             assert_eq!(opened.as_slice()[0], 7);
         }
@@ -1644,17 +1735,19 @@ mod tests {
             let name = std::env::var("VERTEBRA_SHM_NAME").unwrap();
             let size: usize = std::env::var("VERTEBRA_SHM_SIZE").unwrap().parse().unwrap();
             let region = ShmRegion::open_named(&name, size).unwrap();
+            // SAFETY: parent wrote byte `0` before spawning children and makes no further writes.
             unsafe {
                 assert_eq!(region.as_slice()[0], 42);
             }
             return;
         }
-        let name = format!("/vertebra-mp-{}", std::process::id());
+        let name = unique_test_shm_name("/vtb-mp");
         let mut region = match ShmRegion::create_named(&name, 4096) {
             Ok(region) => region,
             Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
             Err(err) => panic!("create_named failed: {err:?}"),
         };
+        // SAFETY: `region` is exclusively owned in the parent before spawning child processes.
         unsafe {
             region.as_mut_slice()[0] = 42;
         }
@@ -1684,7 +1777,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unlink_now_removes_name_while_mapping_stays_readable() {
-        let name = format!("/vtb-unlink-now-{}", std::process::id());
+        let name = unique_test_shm_name("/vtb-ul");
         let mut region = match ShmRegion::create_named(&name, 4096) {
             Ok(region) => region,
             Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
@@ -1739,7 +1832,7 @@ mod tests {
         use std::sync::Barrier;
         use std::sync::atomic::Ordering;
 
-        let name = format!("/vtb-cap-race-{}", std::process::id());
+        let name = unique_test_shm_name("/vtb-cap");
         let region = match ShmRegion::create_named(&name, 4096) {
             Ok(region) => region,
             Err(ShmError::Sys(err)) if err.kind() == io::ErrorKind::PermissionDenied => return,
@@ -1790,7 +1883,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_named_rejects_under_page_truncated_backing() {
-        let tmp_name = format!("/tmp/vtb-trunc-{}", std::process::id());
+        let tmp_name = unique_test_shm_name("/tmp/vtb-trunc");
         let cname = CString::new(tmp_name.as_str()).unwrap();
         // SAFETY: `cname` is a valid NUL-terminated path under `/tmp/vtb-*`.
         unsafe {
@@ -1812,8 +1905,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_named_waits_for_magic_publication_and_times_out_when_uninitialized() {
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                MAGIC_WAIT_HOOK.with(|hook| {
+                    *hook.borrow_mut() = None;
+                });
+            }
+        }
+
         let page = os_page_size().unwrap();
-        let ready_name = format!("/vtb-wait-magic-{}", std::process::id());
+        let ready_name = unique_test_shm_name("/vtb-wm");
         let cname_ready = CString::new(ready_name.as_str()).unwrap();
         let total_len = page * 2;
         // SAFETY: `cname_ready` is a valid POSIX SHM name under `/vtb-*`.
@@ -1830,9 +1932,19 @@ mod tests {
         };
         // SAFETY: `fd` holds `total_len` zeroed bytes.
         let writer_region = unsafe { map_fd_region(fd, total_len) }.unwrap();
+        let wait_signal = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        MAGIC_WAIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Arc::clone(&wait_signal));
+        });
+        let _hook_reset = HookReset;
+        let publisher_signal = Arc::clone(&wait_signal);
         let publisher = std::thread::spawn(move || {
             let mut reg = writer_region;
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            let (lock, cvar) = &*publisher_signal;
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = cvar
+                .wait_while(guard, |waited| !*waited)
+                .unwrap_or_else(|e| e.into_inner());
             // SAFETY: exclusive test writer before `SHM_OWNER_MAGIC` publication.
             unsafe {
                 reg.as_mut_slice()[0..4].copy_from_slice(b"OKAY");
@@ -1855,9 +1967,8 @@ mod tests {
             reg
         });
 
-        let wait_start = std::time::Instant::now();
         let opened = ShmRegion::open_named(&ready_name, page).unwrap();
-        assert!(wait_start.elapsed() >= std::time::Duration::from_millis(20));
+        assert!(*wait_signal.0.lock().unwrap_or_else(|e| e.into_inner()));
         // SAFETY: writer published `b"OKAY"` before releasing `SHM_OWNER_MAGIC`.
         unsafe {
             assert_eq!(&opened.as_slice()[0..4], b"OKAY");
@@ -1866,7 +1977,7 @@ mod tests {
         let _ = shm_unlink_named(&ready_name);
         drop(publisher.join().unwrap());
 
-        let timeout_name = format!("/vtb-magic-to-{}", std::process::id());
+        let timeout_name = unique_test_shm_name("/vtb-mto");
         let cname_to = CString::new(timeout_name.as_str()).unwrap();
         // SAFETY: creating raw zeroed SHM segment without `SHM_OWNER_MAGIC`.
         unsafe {

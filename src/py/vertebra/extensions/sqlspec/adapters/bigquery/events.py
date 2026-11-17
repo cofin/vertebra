@@ -1,8 +1,12 @@
 """BigQuery partitioned and clustered SQLSpec event queue store."""
 
-from typing import Any, TypedDict
+from __future__ import annotations
 
+from typing import Any, ClassVar, NotRequired
+
+from sqlspec.config import EventsConfig
 from sqlspec.extensions.events import BaseEventQueueStore
+from sqlspec.migrations.schema import DropStatement, SchemaTarget
 
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     bigquery_partition_clauses,
@@ -17,24 +21,14 @@ __all__ = (
 )
 
 
-class BigQueryEventsConfig(TypedDict, total=False):
+class BigQueryEventsConfig(EventsConfig):
     """Typed extension configuration for BigQuery partitioned event queues."""
 
-    queue_table: str
-    """Qualified BigQuery table name for the persisted event queue."""
-    lease_seconds: int
-    """Default visibility timeout in seconds for leased event rows."""
-    retention_seconds: int
-    """Retention window in seconds before acknowledged events expire."""
-    poll_interval: float
-    """Polling interval in seconds when waiting for queued events."""
-    event_poll_interval: float
-    """Interval in seconds between change-stream or queue poll iterations."""
-    with_partitioning: bool
+    with_partitioning: NotRequired[bool]
     """Enable BigQuery DATE partitioning on ``available_at``."""
-    partition_expiration_days: int
+    partition_expiration_days: NotRequired[int]
     """Partition retention window in days when partitioning is enabled."""
-    require_partition_filter: bool
+    require_partition_filter: NotRequired[bool]
     """Require partition filter predicates in generated event queue DDL."""
 
 
@@ -44,6 +38,7 @@ class BigQueryEventQueueStore(BaseEventQueueStore[Any]):
     __slots__ = ()
 
     adapter_name = "vertebra_bigquery"
+    dialect: ClassVar[str] = "bigquery"
     extension_config_options = BaseEventQueueStore.extension_config_options | frozenset(
         {
             "partition_expiration_days",
@@ -62,6 +57,26 @@ class BigQueryEventQueueStore(BaseEventQueueStore[Any]):
 
     def _qualified_table(self) -> str:
         return qualify_store_table(self._config, self.table_name)
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return dataset-qualified ``SchemaTarget`` definitions for the BigQuery event queue table."""
+        return [SchemaTarget.from_ddl(self._qualified_table(), self.create_statements()[0], dialect=self.dialect)]
+
+    def _index_ddl(self) -> str | None:
+        """Return ``None`` because BigQuery uses clustering instead of secondary B-tree indexes."""
+        return None
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """No-op companion reconciliation because BigQuery declares clustering in table DDL."""
+        _ = driver
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """No-op async companion reconciliation because BigQuery declares clustering in table DDL."""
+        _ = driver
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return BigQuery ``DROP TABLE IF EXISTS`` downgrade statements for the event queue table."""
+        return [DropStatement(statement) for statement in self.drop_statements()]
 
     def _column_types(self) -> tuple[str, str, str]:
         """Return ``(payload_type, metadata_type, timestamp_type)`` for GoogleSQL event tables."""

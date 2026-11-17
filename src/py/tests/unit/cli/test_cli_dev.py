@@ -21,12 +21,16 @@ def test_dev_command_exists(runner: CliRunner) -> None:
     assert "development mode" in result.output.lower()
 
 
-def test_dev_command_has_expected_options(runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    "option",
+    ["--host", "--port", "--log-level", "--asgi", "--no-reload", "--no-banner", "--no-tui", "--verbose"],
+    ids=["host", "port", "log-level", "asgi", "no-reload", "no-banner", "no-tui", "verbose"],
+)
+def test_dev_command_has_expected_options(runner: CliRunner, option: str) -> None:
     """Verify the dev command exposes expected options."""
     result = runner.invoke(cli, ["dev", "--help"])
     assert result.exit_code == 0, result.output
-    for option in ("--host", "--port", "--log-level", "--asgi", "--no-reload", "--no-banner", "--no-tui", "--verbose"):
-        assert option in result.output, f"Expected {option!r} in dev --help output"
+    assert option in result.output, f"Expected {option!r} in dev --help output"
 
 
 def test_run_command_has_no_dev_flag(runner: CliRunner) -> None:

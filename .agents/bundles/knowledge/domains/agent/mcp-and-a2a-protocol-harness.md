@@ -16,6 +16,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-17T05:50:00Z"
+    commit: 5a833832
+  - by: agent:flow-executor
     at: "2026-11-13T20:35:00Z"
     commit: 54a5103d
   - by: agent:flow-setup
@@ -28,12 +31,15 @@ sources:
   - id: agent-identity
     resource: src/py/vertebra/agent/core/identity.py::IapIdentitySource
     title: IAP ES256, mTLS CIDR, and callable identity sources
+  - id: mcp-sse
+    resource: src/py/vertebra/agent/core/sse.py::CacheSseStreamBroker
+    title: SyncCacheStore-backed SSE replay broker alongside SseStreamBroker
   - id: mcp-tasks
     resource: src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore
-    title: Exact-owner task access and immutable terminal records
+    title: Exact-owner task access, TTL pruning, QueueService dispatch, and CacheMCPTaskStore
   - id: mcp-sessions
     resource: src/py/vertebra/agent/mcp/sessions.py::MCPSessionStore
-    title: Owner-scoped legacy MCP sessions and resource subscriptions
+    title: Owner-scoped legacy MCP sessions, subscriptions, and AsyncCacheStore CacheMCPSessionStore
   - id: agent-plugin
     resource: src/py/vertebra/agent/plugin.py::AgentPlugin
     title: Native and framework MCP/A2A mounting with SkillCatalog and UI validation
@@ -94,10 +100,11 @@ sources:
 
 <!-- truth: start -->
 - `ToolSpec` and `ToolAnnotations` compile JSON Schemas once via `typing.get_type_hints` -> `msgspec.defstruct`; `Tool.authorize` runs guards once (`-32004`/`-32005`) before `Tool.call`, and `ConfirmationGate.consume_call_approval` enforces pending-only expiring single-use owner/argument-bound tickets (`-32003`).
-- `MCPCore` negotiates `SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")` (`-32022` on mismatch), validates `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` (`-32020`), pairs stateless `2026-07-28` (`server/discover`, `subscriptions/listen`) with owner-scoped `MCPSessionStore` `initialize`, `GET /mcp` SSE (`Last-Event-ID`, progress/log/list-changed), `DELETE /mcp`, `2025-03-26` batches, and `resources/subscribe` [^src-agent-mcp-service-py] [^mcp-sessions].
+- `MCPCore` negotiates `SUPPORTED_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")` (`-32022` on mismatch), advertises `completions` (`completion/complete` via `ToolRegistry.get_completion`), validates `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` (`-32020`), and gates `LEGACY_ONLY_METHODS` (`initialize`, `ping`, `logging/setLevel`, `resources/subscribe`, `resources/unsubscribe`; `tasks/result` removed) to legacy sessions [^src-agent-mcp-service-py] [^mcp-sessions].
+- Distributed multi-worker state uses `MCPConfig(cache_url=...)` (`CacheMCPSessionStore` over `AsyncCacheStore`; `CacheMCPTaskStore` and `CacheSseStreamBroker` over `SyncCacheStore`) and `A2AConfig(cache_url=...)` (`CacheA2ATaskStore`, cache-backed `PushNotificationDispatcher`, and `CacheSseStreamBroker`) [^mcp-sessions] [^mcp-tasks] [^mcp-sse] [^src-agent-a2a-service-py].
 - `SKILLS_EXTENSION` (`io.modelcontextprotocol/skills`), SEP-1865 `UI_EXTENSION` (`io.modelcontextprotocol/ui`, `McpIcon`, app-only filtering, `MCPCore.validate()`), and canonical `/.well-known/mcp.json` wire identically across `AgentPlugin`, Starlette, FastAPI, Flask, Django, and `litestar-mcp>=0.20.0` [^agent-plugin] [^src-agent-mcp-skills-py] [^src-agent-mcp-routes-py].
-- `run_stdio_server` dispatches incrementally with `notifications/cancelled` cancellation and `vtb ai mcp serve --app` discovery; `run_stdio_http_bridge` supports dual-mode SSE + `OidcTokenSource` (`AsyncGcpIdTokenCache`, `401` retry); `IapIdentitySource` verifies ES256 `x-goog-iap-jwt-assertion` JWTs [^src-agent-mcp-stdio-py] [^src-agent-mcp-bridge-py] [^agent-identity].
-- `AgentCard` (JWS-signed A2A 1.0), `registerWebMCPTools`, and `DynamicWorkflow`/`SpecTree` run alongside promoted `MCPTaskStore` isolation (`AgentContext`) [^src-agent-a2a-service-py] [^src-agent-workflow-py] [^mcp-tasks].
+- `run_stdio_server` dispatches incrementally with `notifications/cancelled` cancellation and `vtb ai mcp serve --app` discovery; `run_stdio_http_bridge` supports dual-mode SSE + `OidcTokenSource` (`AsyncGcpIdTokenCache`, `401` retry); `IapIdentitySource` verifies ES256 `x-goog-iap-jwt-assertion` JWTs and `BearerJWTGuard` delegates to `JWKSVerifier` [^src-agent-mcp-stdio-py] [^src-agent-mcp-bridge-py] [^agent-identity].
+- `A2AService.stream_message` cleans up broker subscriptions in `finally`, `PushNotificationDispatcher.validate_webhook_url` pins DNS-resolved public IPs against SSRF, and `MCPTaskStore` dispatches via `QueueService` and prunes TTL-expired records [^src-agent-a2a-service-py] [^mcp-tasks].
 <!-- truth: end -->
 
 ## 1. Dual-Mode MCP (`MCPCore`, Sessions, SSE, Skills & UI)
@@ -107,26 +114,27 @@ sources:
 | Component | Responsibility |
 | :--- | :--- |
 | [`ToolSpec`, `Tool`, `SchemaBuilder`](../../../../../src/py/vertebra/agent/core/schema.py)[^src-agent-core-schema-py] | Derives input/output schemas without `eval()`; splits `Tool.authorize` (`-32004` permission, `-32005` rate/budget limit) from `Tool.call` (`Tool.invoke` composes both). Default `exposure` excludes `"webmcp"` unless opted in. |
-| [`ToolRegistry` & `SkillCatalog`](../../../../../src/py/vertebra/agent/mcp/registry.py)[^src-agent-mcp-registry-py] | Unifies `ToolProvider`, `@tool`, controllers, and route handlers (`MCPRegistry(ToolRegistry)` alias retained for host extensions). Validates `ui://` resource links (`validate_ui_links`) and exposes filtered `SKILL.md` resources/prompts under `SKILLS_EXTENSION` [^src-agent-mcp-skills-py]. |
-| [`MCPCore` & `MCPSessionStore`](../../../../../src/py/vertebra/agent/mcp/service.py) | Validates `Origin`, `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` (`-32020`), `ETag` `304`, and `SUPPORTED_PROTOCOL_VERSIONS` (`-32022`). Manages owner-scoped legacy `initialize`/`DELETE /mcp` sessions, `2025-03-26` batches, `logging/setLevel` + `MCPCore.log`, `resources/subscribe`, and `2026-07-28` `subscriptions/listen` [^mcp-sessions]. |
-| [`AgentPlugin` & WebMCP](../../../../../src/py/vertebra/agent/plugin.py) | Coerces `SkillCatalog` and runs `MCPCore.validate()` at mount across native `App`, Litestar (`litestar-mcp>=0.20.0`), Starlette, FastAPI, Flask, and Django; `build_webmcp_manifest` filters `"webmcp"` tools and omits app-only tools for non-UI clients [^src-agent-mcp-webmcp-py]. |
+| [`ToolRegistry` & `SkillCatalog`](../../../../../src/py/vertebra/agent/mcp/registry.py)[^src-agent-mcp-registry-py] | Unifies `ToolProvider`, `@tool`, controllers, completion callbacks (`get_completion`), and route handlers (`MCPRegistry(ToolRegistry)` alias retained for host extensions). Validates `ui://` resource links (`validate_ui_links`) and exposes filtered `SKILL.md` resources/prompts under `SKILLS_EXTENSION` [^src-agent-mcp-skills-py]. |
+| [`MCPCore` & `MCPSessionStore` / `CacheMCPSessionStore`](../../../../../src/py/vertebra/agent/mcp/service.py) | Validates `Origin`, `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` (`-32020`), `ETag` `304`, and `SUPPORTED_PROTOCOL_VERSIONS` (`-32022`). Handles `completion/complete`, gates `LEGACY_ONLY_METHODS` (`initialize`, `ping`, `logging/setLevel`, `resources/subscribe`, `resources/unsubscribe`), and selects per-process (`MCPSessionStore`, `SseStreamBroker`) or `vertebra.cache`-backed (`CacheMCPSessionStore` over `AsyncCacheStore`, `CacheSseStreamBroker` over `SyncCacheStore`) stores via `MCPConfig(cache_url=...)` [^mcp-sessions] [^mcp-sse]. |
+| [`AgentPlugin` & WebMCP](../../../../../src/py/vertebra/agent/plugin.py) | Coerces `SkillCatalog` and runs `MCPCore.validate()` at mount across native `App`, Litestar (`litestar-mcp>=0.20.0` with awaitable `ObjectStoreSkillSource` reads), Starlette, FastAPI, Flask, and Django; `build_webmcp_manifest` filters `"webmcp"` tools and omits app-only tools for non-UI clients [^src-agent-mcp-webmcp-py]. |
 | [`run_stdio_server` & `run_stdio_http_bridge`](../../../../../src/py/vertebra/agent/mcp/stdio.py) | Incremental task-group stdio dispatch (`notifications/cancelled`, `notifications/progress` relay, EOF cleanup) wired into `vtb ai mcp serve --app`; dual-mode HTTP/GET SSE bridge (`Last-Event-ID`, `5` reconnects, EOF `DELETE`) + `OidcTokenSource` (`AsyncGcpIdTokenCache`, `401` single retry) for `vtb ai mcp bridge --audience` [^src-agent-mcp-bridge-py]. |
 
 ## 2. Caller Identity, Provider Tools & Task Ownership
 
-`AgentContext.from_scope` / `from_wsgi_environ` read framework-authenticated callers, while proxy headers require `MCPConfig(trust_proxy_identity=True)` paired with `IdentitySource`: `IapIdentitySource` (`vertebra-core[iap]`) cryptographically verifies ES256 `x-goog-iap-jwt-assertion` JWTs (`aud`, `iss`, `exp`), refusing plain `x-goog-authenticated-user-email`; `MtlsIdentitySource` validates immediate proxy peers against CIDRs; and `CallableIdentitySource` delegates to app policy [^agent-context] [^agent-identity].
+`AgentContext.from_scope` / `from_wsgi_environ` read framework-authenticated callers, while proxy headers require `MCPConfig(trust_proxy_identity=True)` paired with `IdentitySource`: `IapIdentitySource` (`vertebra-core[iap]`) cryptographically verifies ES256 `x-goog-iap-jwt-assertion` JWTs (`aud`, `iss`, `exp`), refusing plain `x-goog-authenticated-user-email`; `MtlsIdentitySource` validates immediate proxy peers against CIDRs; and `CallableIdentitySource` delegates to app policy. Inbound HTTP/gRPC Bearer JWT verification uses `JWKSVerifier` (`vertebra.framework.security`) [^agent-context] [^agent-identity].
 
-Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` so owner `tasks/cancel` stops execution while preserving terminal states and owner isolation [^mcp-tasks]. [`build_tools`](../../../../../src/py/vertebra/agent/tools/__init__.py)[^src-agent-tools-init-py] adapts [`ToolProvider`](../../../../../src/py/vertebra/typing.py)[^src-typing-public-py] implementations (`BigQueryToolProvider`, `SpannerToolProvider`[^src-db-tools-py]) lazily with canonical single-use expiring `ConfirmationGate` argument/owner checks.
+Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` / `CacheMCPTaskStore` (with `enqueue_execution` dispatching through `QueueService` and `prune_expired` enforcing `ttl_ms`) so owner `tasks/cancel` stops execution while preserving terminal states and owner isolation [^mcp-tasks]. [`build_tools`](../../../../../src/py/vertebra/agent/tools/__init__.py)[^src-agent-tools-init-py] adapts [`ToolProvider`](../../../../../src/py/vertebra/typing.py)[^src-typing-public-py] implementations (`BigQueryToolProvider`, `SpannerToolProvider`[^src-db-tools-py]) lazily with canonical single-use expiring `ConfirmationGate` argument/owner checks.
 
 ## 3. A2A 1.0, Workflows & Native FFI Acceleration
 
-- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, owner-isolated A2A tasks, SSRF-checked webhooks, stateless TS `McpClient`, `A2aClient`, and `registerWebMCPTools`.
+- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, owner-isolated A2A tasks (`A2ATaskStore` or `CacheA2ATaskStore` + `CacheSseStreamBroker` via `A2AConfig.cache_url`), `stream_message` `finally` disconnect cleanup, DNS-pinned SSRF validation (`PushNotificationDispatcher.validate_webhook_url` rejecting loopback/private/reserved/metadata IPs and connecting to the resolved IP), stateless TS `McpClient`, `A2aClient`, and `registerWebMCPTools`.
 - **Workflows & Native Caches ([`workflow.py`](../../../../../src/py/vertebra/agent/workflow.py)[^src-agent-workflow-py], [`agent.rs`](../../../../../src/rs/vertebra-py/src/agent.rs)[^src-vertebra-py-src-agent-rs], [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs])**: `DynamicWorkflow`, `WorkflowLiveState`, `SpecTree`, and `AgentRuntime` pair with PyO3 `classify_jsonrpc_frame`, `SchemaDigestCache`, and lock-free `WellKnownDiscoveryCache` `304` handling.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Trusted constructors, independent forks, and binding restoration.
 [^agent-identity]: `src/py/vertebra/agent/core/identity.py::IapIdentitySource` — ES256 IAP JWT, mTLS CIDR, and callable identity policies.
-[^mcp-tasks]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Owner-isolated task records and cancellation tokens.
-[^mcp-sessions]: `src/py/vertebra/agent/mcp/sessions.py::MCPSessionStore` — Owner-scoped legacy sessions and resource subscriptions.
+[^mcp-sse]: `src/py/vertebra/agent/core/sse.py::CacheSseStreamBroker` — `SyncCacheStore`-backed SSE replay broker alongside `SseStreamBroker`.
+[^mcp-tasks]: `src/py/vertebra/agent/mcp/tasks.py::MCPTaskStore` — Owner-isolated task records, TTL pruning, `QueueService` dispatch, and `CacheMCPTaskStore`.
+[^mcp-sessions]: `src/py/vertebra/agent/mcp/sessions.py::MCPSessionStore` — Owner-scoped legacy sessions, subscriptions, and `CacheMCPSessionStore`.
 [^agent-plugin]: `src/py/vertebra/agent/plugin.py::AgentPlugin` — Native and host-framework MCP/A2A mounting.
 [^src-typing-public-py]: `src/py/vertebra/typing.py` — Neutral `ToolProvider` and `ToolPolicyError` exports.
 [^src-db-tools-py]: `src/py/vertebra/db/adapters/bigquery/tools.py` — Adapter-owned BigQuery/Spanner `ToolProvider` policies.

@@ -22,6 +22,7 @@ use vertebra_core::transport::{BatchSnapshot, TransportNode};
 fn create_ring(slot_size: usize, slots: usize) -> Arc<SpscRing> {
     let layout = RingLayout::new(slot_size, slots, ChannelMode::Spsc);
     let region = Arc::new(ShmRegion::create(layout.total_size).unwrap());
+    // SAFETY: `region` was freshly created with `layout.total_size` bytes and exclusive ownership.
     Arc::new(unsafe { SpscRing::initialize(region, layout, 0, 0).unwrap() })
 }
 

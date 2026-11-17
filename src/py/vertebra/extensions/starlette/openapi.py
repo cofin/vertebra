@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
@@ -16,7 +15,13 @@ from vertebra.framework.openapi import (
     ScalarSpecSource,
     SwaggerDocsConfig,
 )
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    import starlette.responses as _starlette_responses
+    import starlette.routing as _starlette_routing
+
+    _ = (_starlette_responses, _starlette_routing)
 
 __all__ = (
     "AsyncAPIDocsConfig",
@@ -40,8 +45,8 @@ def mount_docs_routes(app: Any, config: OpenAPIConfig | None = None) -> dict[str
     if not isinstance(routes, list):
         return rendered
 
-    routing_mod = import_optional("starlette.routing")
-    responses_mod = import_optional("starlette.responses")
+    routing_mod = ensure_module("starlette.routing", package="starlette", extra="starlette")
+    responses_mod = ensure_module("starlette.responses", package="starlette", extra="starlette")
     existing_paths = {getattr(r, "path", None) for r in routes}
 
     for path, html_body in rendered.items():
@@ -49,26 +54,14 @@ def mount_docs_routes(app: Any, config: OpenAPIConfig | None = None) -> dict[str
             continue
 
         async def _serve_portal(_request: Any, _html: str = html_body) -> Any:
-            if responses_mod is not None and hasattr(responses_mod, "HTMLResponse"):
-                return responses_mod.HTMLResponse(_html)
-            return _html
+            return responses_mod.HTMLResponse(_html)
 
-        if routing_mod is not None and hasattr(routing_mod, "Route"):
-            routes.append(
-                routing_mod.Route(
-                    path,
-                    endpoint=_serve_portal,
-                    methods=["GET"],
-                    include_in_schema=False,
-                )
+        routes.append(
+            routing_mod.Route(
+                path,
+                endpoint=_serve_portal,
+                methods=["GET"],
+                include_in_schema=False,
             )
-        else:
-            routes.append(
-                SimpleNamespace(
-                    path=path,
-                    endpoint=_serve_portal,
-                    methods=["GET"],
-                    name=f"_vertebra_docs_{path.strip('/')}",
-                )
-            )
+        )
     return rendered

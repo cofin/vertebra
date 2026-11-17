@@ -1,5 +1,7 @@
 """Fused direct Litestar v2/v3 HTTPRouteHandler execution and ScopeState.body pre-seeding."""
 
+from __future__ import annotations
+
 import contextlib
 import enum
 import inspect
@@ -17,7 +19,6 @@ from vertebra.extensions.litestar.offload import (
     _get_handler_request_class,
     _is_default_local_filesystem,
     _is_empty_sentinel,
-    _is_rust_offload_active,
     _supports_v2_layer_resolution,
 )
 from vertebra.extensions.litestar.router import (
@@ -40,6 +41,7 @@ from vertebra.server._fastpath_core import (
     resolve_scalar_query_converter,
     serialize_litestar_http_exception,
 )
+from vertebra.server._offload import is_rust_offload_active
 from vertebra.typing import Empty
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
@@ -463,7 +465,7 @@ def _compile_routes_from_table(
     router_table: RouterTable,
     app: Any,
 ) -> dict[int, CompiledRoute]:
-    rust_offload = _is_rust_offload_active()
+    rust_offload = is_rust_offload_active()
     app_state = getattr(app, "state", None) if app is not None else None
     vtb_cfg = app_state.get("vertebra_config") if (app_state is not None and hasattr(app_state, "get")) else None
     cors_offloaded = rust_offload and (vtb_cfg is None or bool(getattr(vtb_cfg, "offload_cors", True)))
@@ -770,7 +772,7 @@ def _fallback_match_with_params(
     entry = table.match(method, path)
     if entry is None:
         return None
-    matched = entry.regex_pattern.match(path)
+    matched = entry.regex_pattern.match(path) if entry.regex_pattern is not None else None
     raw_groups = matched.groupdict() if matched is not None else {}
     params = table.convert_params(entry, raw_groups) if raw_groups else {}
     return entry, params

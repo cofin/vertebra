@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import litestar_mcp
@@ -227,3 +229,60 @@ def test_litestar_mcp_well_known_merges_skill_catalog_names(tmp_path: Path) -> N
         )
         assert init_resp.status_code == 200
         assert init_resp.json()["result"]["protocolVersion"] == "2025-11-25"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("store_mode", ["sync", "async"])
+async def test_object_store_skill_source_read_file_sync_and_async(store_mode: str) -> None:
+    """Verify ObjectStoreSkillSource.read_file supports both sync and async stores via inspect.isawaitable."""
+    payload = b"# Skill Guide\nUse tools safely.\n"
+    expected_digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    class _SyncStore:
+        def __init__(self, data: dict[str, bytes]) -> None:
+            self._data = data
+
+        def get(self, key: str) -> bytes | None:
+            return self._data.get(key)
+
+    class _AsyncStore:
+        def __init__(self, data: dict[str, bytes]) -> None:
+            self._data = data
+
+        async def get(self, key: str) -> bytes | None:
+            return self._data.get(key)
+
+    backing = {"skills/guide/SKILL.md": payload}
+    store: Any = _SyncStore(backing) if store_mode == "sync" else _AsyncStore(backing)
+    source = ObjectStoreSkillSource(store=store, prefix="skills")
+
+    skill_file = litestar_mcp.SkillFile(
+        relative_path="SKILL.md",
+        path=None,
+        uri="skill://guide/SKILL.md",
+        mime_type="text/markdown",
+        size=len(payload),
+        digest=expected_digest,
+    )
+    missing_file = litestar_mcp.SkillFile(
+        relative_path="missing.md",
+        path=None,
+        uri="skill://guide/missing.md",
+        mime_type="text/markdown",
+        size=0,
+        digest=expected_digest,
+    )
+    skill = litestar_mcp.Skill(
+        name="guide",
+        description="Guide skill",
+        uri="skill://guide/SKILL.md",
+        frontmatter={"name": "guide", "description": "Guide skill"},
+        files=(skill_file,),
+    )
+    req_mock = MagicMock()
+
+    resolved = await source.read_file(req_mock, skill, skill_file)
+    assert resolved == payload
+
+    with pytest.raises(LookupError, match="missing.md"):
+        await source.read_file(req_mock, skill, missing_file)

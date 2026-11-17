@@ -7,7 +7,7 @@ import contextlib
 import os
 import sys
 from collections.abc import MutableMapping
-from typing import Any
+from typing import Any, cast
 
 import click
 import msgspec
@@ -55,7 +55,9 @@ def execute_worker_cli(
                     if callable(lifespan_fn):
                         cm = lifespan_fn()
                         if hasattr(cm, "__aenter__"):
-                            await async_stack.enter_async_context(cm)
+                            await async_stack.enter_async_context(
+                                cast("contextlib.AbstractAsyncContextManager[Any]", cm)
+                            )
 
                 queue_service = WorkerRunner.resolve_queue_service(app)
                 runner = WorkerRunner(lanes, queue_service=queue_service, lame_duck=lame_duck)
@@ -84,7 +86,7 @@ def execute_worker_cli(
                     if probe_server is not None:
                         await probe_server.stop()
                     zpages.set_var("worker_state", "stopped")
-                return 0
+            return 0
 
         with enter_app_server_lifespan(app, app_path=app_path):
             try:

@@ -1,4 +1,4 @@
-import { encodeMcpHeaderValue, MCP_PROTOCOL_VERSION } from "./agent/index";
+import { encodeMcpHeaderValue, MCP_PROTOCOL_VERSION, parseMcpJsonRpcResponse } from "./agent/index";
 
 export interface WebMCPToolDescriptor {
   name: string;
@@ -17,8 +17,16 @@ export interface WebMCPManifest {
   tools: WebMCPToolDescriptor[];
 }
 
+export interface WebMCPConfirmationRequest {
+  readonly tool: WebMCPToolDescriptor;
+  readonly args: Record<string, unknown>;
+}
+
+export type WebMCPConfirmationHandler = (request: WebMCPConfirmationRequest) => boolean | Promise<boolean>;
+
 export interface BrowserModelContextExecuteOptions {
   signal?: AbortSignal;
+  requestUserInteraction?: (callback: () => Promise<boolean> | boolean) => Promise<boolean>;
 }
 
 export interface BrowserModelContextTool {
@@ -46,6 +54,7 @@ export interface RegisterWebMCPOptions {
   modelContext?: BrowserModelContext | null;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  onConfirm?: WebMCPConfirmationHandler;
 }
 
 export interface WebMCPRegistrationError {
@@ -78,6 +87,26 @@ function getBrowserModelContext(explicit?: BrowserModelContext | null): BrowserM
 
 function isWebMCPManifest(value: WebMCPManifest | RegisterWebMCPOptions | undefined): value is WebMCPManifest {
   return value !== undefined && "tools" in value && Array.isArray((value as WebMCPManifest).tools);
+}
+
+async function resolveConfirmation(
+  descriptor: WebMCPToolDescriptor,
+  args: Record<string, unknown>,
+  onConfirm?: WebMCPConfirmationHandler,
+  execOptions?: BrowserModelContextExecuteOptions,
+): Promise<boolean> {
+  if (onConfirm) {
+    return Boolean(await onConfirm({ tool: descriptor, args }));
+  }
+  const confirmFn = typeof globalThis.confirm === "function" ? globalThis.confirm : null;
+  if (!confirmFn) {
+    return false;
+  }
+  const promptMessage = `Allow tool '${descriptor.title ?? descriptor.name}' to execute?`;
+  if (typeof execOptions?.requestUserInteraction === "function") {
+    return Boolean(await execOptions.requestUserInteraction(() => confirmFn(promptMessage)));
+  }
+  return Boolean(confirmFn(promptMessage));
 }
 
 /**
@@ -152,6 +181,18 @@ export async function registerWebMCPTools(
           args: Record<string, unknown>,
           execOptions?: BrowserModelContextExecuteOptions,
         ): Promise<unknown> => {
+          const normalizedArgs = args ?? {};
+          if (descriptor.requiresConfirmation === true) {
+            const approved = await resolveConfirmation(
+              descriptor,
+              normalizedArgs,
+              resolvedOptions.onConfirm,
+              execOptions,
+            );
+            if (!approved) {
+              throw new Error(`WebMCP tool call '${descriptor.name}' cancelled: user confirmation declined`);
+            }
+          }
           const rpcId = `webmcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const activeSignal = execOptions?.signal ?? toolController.signal;
           const resp = await fetchFn(endpoint, {
@@ -169,7 +210,7 @@ export async function registerWebMCPTools(
               method: "tools/call",
               params: {
                 name: descriptor.name,
-                arguments: args ?? {},
+                arguments: normalizedArgs,
                 _meta: {
                   "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
                   "io.modelcontextprotocol/clientCapabilities": {},
@@ -181,14 +222,7 @@ export async function registerWebMCPTools(
           if (!resp.ok) {
             throw new Error(`WebMCP tool call '${descriptor.name}' failed with HTTP ${resp.status}`);
           }
-          const payload = (await resp.json()) as {
-            result?: unknown;
-            error?: { code: number; message: string };
-          };
-          if (payload.error) {
-            throw new Error(`WebMCP tool error (${payload.error.code}): ${payload.error.message}`);
-          }
-          return payload.result;
+          return await parseMcpJsonRpcResponse(resp);
         },
       };
       return { tool, controller: toolController };
@@ -197,6 +231,7 @@ export async function registerWebMCPTools(
 
   const ctx = getBrowserModelContext(resolvedOptions.modelContext);
   const registeredTools: BrowserModelContextTool[] = [];
+  const ownedControllers = new Map<string, AbortController>();
   const errors: WebMCPRegistrationError[] = [];
 
   if (ctx && typeof ctx.registerTool === "function") {
@@ -227,6 +262,7 @@ export async function registerWebMCPTools(
       try {
         await ctx.registerTool(tool, { signal: controller.signal });
         ctxMap.set(tool.name, controller);
+        ownedControllers.set(tool.name, controller);
         registeredTools.push(tool);
       } catch (err) {
         controller.abort();
@@ -249,14 +285,15 @@ export async function registerWebMCPTools(
     if (ctx) {
       const ctxMap = activeContextRegistrations.get(ctx);
       for (const tool of registeredTools) {
-        if (ctxMap?.get(tool.name)?.signal.aborted) {
+        const owned = ownedControllers.get(tool.name);
+        if (owned && ctxMap?.get(tool.name) === owned) {
           ctxMap.delete(tool.name);
-        }
-        if (typeof ctx.unregisterTool === "function") {
-          try {
-            void ctx.unregisterTool(tool.name);
-          } catch {
-            // Ignore unregister errors on disposal
+          if (typeof ctx.unregisterTool === "function") {
+            try {
+              void ctx.unregisterTool(tool.name);
+            } catch {
+              // Ignore unregister errors on disposal
+            }
           }
         }
       }

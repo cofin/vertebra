@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import validate_savepoint_name
@@ -29,6 +29,8 @@ __all__ = ("PostgresAsyncDriver", "PostgresSyncDriver")
 
 class PostgresSyncDriver(BaseSyncDriver):
     """Synchronous PostgreSQL SQLSpec driver emitting native `$1..$N` binds and Arrow COPY streams."""
+
+    __slots__ = ("_data_dictionary", "_savepoint_tokens")
 
     dialect: str = "postgres"
     _execution_parameter_style = ParameterStyle.NUMERIC
@@ -201,6 +203,8 @@ class PostgresSyncDriver(BaseSyncDriver):
 class PostgresAsyncDriver(BaseAsyncDriver):
     """Asynchronous PostgreSQL SQLSpec driver emitting native `$1..$N` binds and Arrow COPY streams."""
 
+    __slots__ = ("_data_dictionary", "_savepoint_tokens")
+
     dialect: str = "postgres"
     _execution_parameter_style = ParameterStyle.NUMERIC
 
@@ -319,7 +323,7 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         savepoint_fn = getattr(self.connection, "savepoint", None)
         if callable(savepoint_fn):
-            token = await savepoint_fn()
+            token = await cast("Any", savepoint_fn)()
             if isinstance(token, int):
                 self._savepoint_tokens[valid] = token
             return
@@ -331,7 +335,7 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         token = self._savepoint_tokens.pop(valid, None)
         release_fn = getattr(self.connection, "release_savepoint", None)
         if token is not None and callable(release_fn):
-            await release_fn(token)
+            await cast("Any", release_fn)(token)
             return
         await self.connection.execute(f"RELEASE SAVEPOINT {valid}")
 
@@ -341,7 +345,7 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         token = self._savepoint_tokens.get(valid)
         rollback_fn = getattr(self.connection, "rollback_to_savepoint", None)
         if token is not None and callable(rollback_fn):
-            await rollback_fn(token)
+            await cast("Any", rollback_fn)(token)
             return
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
@@ -354,7 +358,7 @@ class PostgresAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            rows_affected = await exec_many_fn(sql, param_sets)
+            rows_affected = await cast("Any", exec_many_fn)(sql, param_sets)
             return self.create_execution_result(
                 cursor,
                 rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),

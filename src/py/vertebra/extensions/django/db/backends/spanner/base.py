@@ -10,36 +10,61 @@ from vertebra.extensions.django.db.backends import DatabaseWrapperMixin
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    _BaseSpannerDatabaseWrapper: Any = object
-else:
-    try:
-        from django_spanner.base import (
-            DatabaseWrapper as _BaseSpannerDatabaseWrapper,
-        )
-    except ImportError:
-        _BaseSpannerDatabaseWrapper = object
-
-if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from django.db.backends.base.base import BaseDatabaseWrapper
+    from django.db.backends.base.client import BaseDatabaseClient
+    from django.db.backends.base.creation import BaseDatabaseCreation
+    from django.db.backends.base.features import BaseDatabaseFeatures
+    from django.db.backends.base.introspection import BaseDatabaseIntrospection
+    from django.db.backends.base.operations import BaseDatabaseOperations
+    from django.db.backends.base.schema import BaseDatabaseSchemaEditor
+
     from vertebra.db.dbapi import SyncDBAPICursor
+else:
+    BaseDatabaseWrapper = ensure_module(
+        "django.db.backends.base.base", package="django", extra="django"
+    ).BaseDatabaseWrapper
+    BaseDatabaseClient = ensure_module(
+        "django.db.backends.base.client", package="django", extra="django"
+    ).BaseDatabaseClient
+    BaseDatabaseCreation = ensure_module(
+        "django.db.backends.base.creation", package="django", extra="django"
+    ).BaseDatabaseCreation
+    BaseDatabaseFeatures = ensure_module(
+        "django.db.backends.base.features", package="django", extra="django"
+    ).BaseDatabaseFeatures
+    BaseDatabaseIntrospection = ensure_module(
+        "django.db.backends.base.introspection", package="django", extra="django"
+    ).BaseDatabaseIntrospection
+    BaseDatabaseOperations = ensure_module(
+        "django.db.backends.base.operations", package="django", extra="django"
+    ).BaseDatabaseOperations
+    BaseDatabaseSchemaEditor = ensure_module(
+        "django.db.backends.base.schema", package="django", extra="django"
+    ).BaseDatabaseSchemaEditor
 
 __all__ = ("DatabaseWrapper",)
 
 
-class DatabaseWrapper(DatabaseWrapperMixin, _BaseSpannerDatabaseWrapper):
+class DatabaseWrapper(DatabaseWrapperMixin, BaseDatabaseWrapper):
     """Django Cloud Spanner database wrapper backed by Vertebra native driver and LeaseBroker."""
 
     vendor: str = "spanner"
     display_name: str = "Cloud Spanner (Vertebra)"
     driver_scheme: str = "spanner"
     Database: Any = SyncDBAPIModule(paramstyle="named")
+    SchemaEditorClass = BaseDatabaseSchemaEditor
+    client_class = BaseDatabaseClient
+    creation_class = BaseDatabaseCreation
+    features_class = BaseDatabaseFeatures
+    introspection_class = BaseDatabaseIntrospection
+    ops_class = BaseDatabaseOperations
 
     def __init__(self, settings_dict: dict[str, Any], alias: str = "default") -> None:
         """Initialize Cloud Spanner DatabaseWrapper with settings dictionary and alias."""
-        ensure_module("django_spanner", package="vertebra-core[django-spanner]", extra="django-spanner")
-        if _BaseSpannerDatabaseWrapper is not object:
-            _BaseSpannerDatabaseWrapper.__init__(self, settings_dict, alias=alias)
+        ensure_module("django_spanner.base", package="django-google-spanner", extra="django-spanner")
+        BaseDatabaseWrapper.__init__(self, settings_dict, alias=alias)
         DatabaseWrapperMixin.__init__(self, settings_dict, alias=alias)
 
     def get_connection_params(self) -> dict[str, Any]:

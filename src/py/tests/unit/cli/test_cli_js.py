@@ -25,12 +25,16 @@ def test_js_group_exists(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
 
 
-def test_js_group_has_expected_subcommands(runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    "subcmd",
+    ["add", "remove", "list", "install", "build", "generate-types", "exec"],
+    ids=["add", "remove", "list", "install", "build", "generate-types", "exec"],
+)
+def test_js_group_has_expected_subcommands(runner: CliRunner, subcmd: str) -> None:
     """Verify the JS group has add, remove, list, install, build, generate-types, and exec."""
     result = runner.invoke(cli, ["js", "--help"])
     assert result.exit_code == 0, result.output
-    for subcmd in ("add", "remove", "list", "install", "build", "generate-types", "exec"):
-        assert subcmd in result.output, f"Expected subcommand {subcmd!r} in js --help"
+    assert subcmd in result.output, f"Expected subcommand {subcmd!r} in js --help"
 
 
 def test_js_group_add_help(runner: CliRunner) -> None:

@@ -53,6 +53,25 @@ class StateOpcode(IntEnum):
     BATCH_PATCH = 0x08
 
 
+_OPCODE_ARITY: dict[StateOpcode, int] = {
+    StateOpcode.FIELD_SET: 5,
+    StateOpcode.FIELD_DELETE: 4,
+    StateOpcode.OBJECT_REPLACE: 5,
+    StateOpcode.SYNC_REQUEST: 2,
+    StateOpcode.SYNC_RESPONSE: 3,
+    StateOpcode.ACTION_CALL: 5,
+    StateOpcode.ACTION_RESULT: 4,
+    StateOpcode.BATCH_PATCH: 4,
+}
+
+
+def _require_wire_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"State delta frame {field_name} must be an integer, got {type(value).__name__}"
+        raise ValueError(msg)
+    return value
+
+
 class HybridLogicalClock:
     """64-bit Hybrid Logical Clock packing 48-bit physical milliseconds and 16-bit logical counter."""
 
@@ -140,26 +159,35 @@ class StateDeltaFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array
     @classmethod
     def decode(cls, data: bytes | bytearray | memoryview) -> StateDeltaFrame:
         """Decode a compact MessagePack array into a StateDeltaFrame."""
-        raw = decode_msgpack(data)
-        if not isinstance(raw, list) or len(raw) < 2:
-            msg = "State delta wire payload must be a list of at least 2 elements"
+        try:
+            raw = decode_msgpack(data)
+        except msgspec.DecodeError as exc:
+            msg = f"Invalid MessagePack state delta frame: {exc}"
+            raise ValueError(msg) from exc
+        if not isinstance(raw, list | tuple) or len(raw) < 2:
+            msg = "State delta wire payload must be a sequence of at least 2 elements"
             raise ValueError(msg)
-        opcode = StateOpcode(int(raw[0]))
-        sid = int(raw[1])
+        opcode_int = _require_wire_int(raw[0], "opcode")
+        opcode = StateOpcode(opcode_int)
+        expected_len = _OPCODE_ARITY.get(opcode)
+        if expected_len is None or len(raw) != expected_len:
+            msg = f"State delta opcode {opcode.name} requires {expected_len} elements, got {len(raw)}"
+            raise ValueError(msg)
+        sid = _require_wire_int(raw[1], "state_id")
         if opcode in (StateOpcode.FIELD_SET, StateOpcode.OBJECT_REPLACE):
             return cls(
                 opcode=opcode,
                 state_id=sid,
-                field_id=int(raw[2]),
-                timestamp_ns=int(raw[3]),
+                field_id=_require_wire_int(raw[2], "field_id"),
+                timestamp_ns=_require_wire_int(raw[3], "timestamp_ns"),
                 value=raw[4],
             )
         if opcode == StateOpcode.FIELD_DELETE:
             return cls(
                 opcode=opcode,
                 state_id=sid,
-                field_id=int(raw[2]),
-                timestamp_ns=int(raw[3]),
+                field_id=_require_wire_int(raw[2], "field_id"),
+                timestamp_ns=_require_wire_int(raw[3], "timestamp_ns"),
             )
         if opcode == StateOpcode.SYNC_REQUEST:
             return cls(opcode=opcode, state_id=sid)
@@ -169,21 +197,21 @@ class StateDeltaFrame(msgspec.Struct, frozen=True, gc=False, kw_only=True, array
             return cls(
                 opcode=opcode,
                 state_id=sid,
-                field_id=int(raw[2]),
-                call_id=int(raw[3]),
+                field_id=_require_wire_int(raw[2], "field_id"),
+                call_id=_require_wire_int(raw[3], "call_id"),
                 value=raw[4],
             )
         if opcode == StateOpcode.ACTION_RESULT:
             return cls(
                 opcode=opcode,
                 state_id=sid,
-                call_id=int(raw[2]),
+                call_id=_require_wire_int(raw[2], "call_id"),
                 value=raw[3],
             )
         return cls(
             opcode=opcode,
             state_id=sid,
-            timestamp_ns=int(raw[2]),
+            timestamp_ns=_require_wire_int(raw[2], "timestamp_ns"),
             value=raw[3],
         )
 
@@ -226,22 +254,25 @@ class LiveState:
         return digest
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Compile state and field identifier maps for subclasses."""
+        """Compile state and field identifier maps across the LiveState MRO."""
         super().__init_subclass__(**kwargs)
         sid = cls.compute_state_id(cls.__name__)
         cls.state_id = sid
         cls.__vertebra_state_id__ = sid
         field_ids: dict[str, int] = {}
         field_map: dict[int, str] = {}
-        for name in getattr(cls, "__annotations__", {}):
-            if not name.startswith("_"):
-                fid = cls.compute_field_id(name)
-                field_ids[name] = fid
-                field_map[fid] = name
         actions: dict[int, str] = {}
-        for attr_name, attr_val in cls.__dict__.items():
-            if getattr(attr_val, "__vertebra_live_action__", False):
-                actions[cls.compute_field_id(attr_name)] = attr_name
+        for base in reversed(cls.__mro__):
+            if base is LiveState or not issubclass(base, LiveState):
+                continue
+            for name in base.__dict__.get("__annotations__", ()):
+                if not name.startswith("_"):
+                    fid = cls.compute_field_id(name)
+                    field_ids[name] = fid
+                    field_map[fid] = name
+            for attr_name, attr_val in base.__dict__.items():
+                if getattr(attr_val, "__vertebra_live_action__", False):
+                    actions[cls.compute_field_id(attr_name)] = attr_name
         cls._field_ids = field_ids
         cls.__vertebra_field_map__ = field_map
         cls.__vertebra_actions__ = actions
@@ -252,11 +283,19 @@ class LiveState:
         object.__setattr__(self, "_field_timestamps", {})
         object.__setattr__(self, "_pending_deltas", {})
         object.__setattr__(self, "_field_names", dict(self.__class__.__vertebra_field_map__))
-        for key, value in type(self).__dict__.items():
-            if not key.startswith("_") and not callable(value):
-                fid = self._field_ids.get(key) or self.compute_field_id(key)
-                self._field_names[fid] = key
-                object.__setattr__(self, key, value)
+        for base in reversed(type(self).__mro__):
+            if base is LiveState or not issubclass(base, LiveState):
+                continue
+            for key, value in base.__dict__.items():
+                if (
+                    key != "state_id"
+                    and not key.startswith("_")
+                    and not callable(value)
+                    and not isinstance(value, (classmethod, staticmethod, property))
+                ):
+                    fid = self._field_ids.get(key) or self.compute_field_id(key)
+                    self._field_names[fid] = key
+                    object.__setattr__(self, key, value)
         for key, value in initial.items():
             setattr(self, key, value)
         self._pending_deltas.clear()

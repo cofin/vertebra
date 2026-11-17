@@ -87,7 +87,7 @@ def test_event_loop_pool_sharded_execution() -> None:
         seen_threads: set[int] = set()
 
         async def _capture_thread(idx: int) -> tuple[int, int]:
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
             return idx, threading.get_ident()
 
         futures = [pool.schedule(_capture_thread(i), worker_index=i) for i in range(6)]
@@ -107,7 +107,7 @@ def test_event_loop_pool_schedule_batch() -> None:
     try:
 
         async def _compute(val: int) -> int:
-            await asyncio.sleep(0.002)
+            await asyncio.sleep(0)
             return val * 10
 
         coros = [_compute(i) for i in range(8)]

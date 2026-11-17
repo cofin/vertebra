@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-import types
+import re
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Self
 
 from vertebra.db.adapters.mysql import MySQLConfig
@@ -14,72 +14,66 @@ from vertebra.utils.module_loader import ensure_module
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from django.db.backends.mysql.base import (
-        DatabaseWrapper as DjangoMySQLDatabaseWrapper,
-    )
+    from django.db.backends.base.base import BaseDatabaseWrapper
+    from django.db.backends.base.introspection import BaseDatabaseIntrospection, TableInfo
+    from django.db.backends.mysql.client import DatabaseClient as MySQLDatabaseClient
+    from django.db.backends.mysql.creation import DatabaseCreation as MySQLDatabaseCreation
+    from django.db.backends.mysql.features import DatabaseFeatures as MySQLDatabaseFeatures
+    from django.db.backends.mysql.operations import DatabaseOperations as MySQLDatabaseOperations
+    from django.db.backends.mysql.schema import DatabaseSchemaEditor as MySQLDatabaseSchemaEditor
+    from django.db.backends.mysql.validation import DatabaseValidation as MySQLDatabaseValidation
 
     from vertebra.db.dbapi import SyncDBAPICursor
+else:
+    BaseDatabaseWrapper = ensure_module(
+        "django.db.backends.base.base", package="django", extra="django"
+    ).BaseDatabaseWrapper
+    _introspection_mod = ensure_module("django.db.backends.base.introspection", package="django", extra="django")
+    BaseDatabaseIntrospection = _introspection_mod.BaseDatabaseIntrospection
+    TableInfo = _introspection_mod.TableInfo
+    MySQLDatabaseClient = ensure_module(
+        "django.db.backends.mysql.client", package="django", extra="django"
+    ).DatabaseClient
+    MySQLDatabaseCreation = ensure_module(
+        "django.db.backends.mysql.creation", package="django", extra="django"
+    ).DatabaseCreation
+    MySQLDatabaseFeatures = ensure_module(
+        "django.db.backends.mysql.features", package="django", extra="django"
+    ).DatabaseFeatures
+    MySQLDatabaseOperations = ensure_module(
+        "django.db.backends.mysql.operations", package="django", extra="django"
+    ).DatabaseOperations
+    MySQLDatabaseSchemaEditor = ensure_module(
+        "django.db.backends.mysql.schema", package="django", extra="django"
+    ).DatabaseSchemaEditor
+    MySQLDatabaseValidation = ensure_module(
+        "django.db.backends.mysql.validation", package="django", extra="django"
+    ).DatabaseValidation
 
 __all__ = ("DatabaseWrapper",)
 
-
-def _ensure_mysqldb() -> None:
-    """Inject a minimal MySQLdb shim into sys.modules if mysqlclient is not installed."""
-    if "MySQLdb" in sys.modules:
-        return
-    m: Any = SyncDBAPIModule(paramstyle="format")
-    m.version_info = (2, 2, 2)
-    m.__version__ = "2.2.2"
-    constants_mod: Any = types.ModuleType("MySQLdb.constants")
-    client_mod: Any = types.ModuleType("MySQLdb.constants.CLIENT")
-    client_mod.MULTI_STATEMENTS = 0
-    client_mod.MULTI_RESULTS = 0
-    field_type_mod: Any = types.ModuleType("MySQLdb.constants.FIELD_TYPE")
-    for name in (
-        "BLOB",
-        "CHAR",
-        "DECIMAL",
-        "NEWDECIMAL",
-        "DATE",
-        "DATETIME",
-        "DOUBLE",
-        "FLOAT",
-        "INT24",
-        "JSON",
-        "LONG",
-        "LONGLONG",
-        "SHORT",
-        "STRING",
-        "TIME",
-        "TIMESTAMP",
-        "TINY",
-        "TINY_BLOB",
-        "MEDIUM_BLOB",
-        "LONG_BLOB",
-        "VAR_STRING",
-    ):
-        setattr(field_type_mod, name, object())
-    constants_mod.CLIENT = client_mod
-    constants_mod.FIELD_TYPE = field_type_mod
-    converters_mod: Any = types.ModuleType("MySQLdb.converters")
-    converters_mod.conversions = {}
-    sys.modules["MySQLdb"] = m
-    sys.modules["MySQLdb.constants"] = constants_mod
-    sys.modules["MySQLdb.constants.CLIENT"] = client_mod
-    sys.modules["MySQLdb.constants.FIELD_TYPE"] = field_type_mod
-    sys.modules["MySQLdb.converters"] = converters_mod
+_SERVER_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
-def _load_django_mysql_wrapper() -> type[Any]:
-    """Ensure MySQLdb shim is registered and return Django's MySQL DatabaseWrapper base."""
-    _ensure_mysqldb()
-    mod = ensure_module("django.db.backends.mysql.base", extra="django")
-    wrapper_cls: type[Any] = mod.DatabaseWrapper
-    return wrapper_cls
+class _MySQLIntrospection(BaseDatabaseIntrospection):
+    """Driver-free MySQL schema introspection over SyncDBAPI cursors."""
 
+    data_types_reverse: dict[Any, str] = {}
 
-if not TYPE_CHECKING:
-    DjangoMySQLDatabaseWrapper = _load_django_mysql_wrapper()
+    def get_table_list(self, cursor: Any) -> list[TableInfo]:
+        """Return a list of table and view entries in the active MySQL schema."""
+        cursor.execute("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = DATABASE()")
+        type_map = {"BASE TABLE": "t", "VIEW": "v"}
+        return [TableInfo(row[0], type_map.get(row[1], "t")) for row in cursor.fetchall()]
+
+    def get_storage_engine(self, cursor: Any, table_name: str) -> str:
+        """Return the storage engine name for ``table_name``."""
+        cursor.execute(
+            "SELECT engine FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+            [table_name],
+        )
+        row = cursor.fetchone()
+        return str(row[0]) if row and row[0] else "InnoDB"
 
 
 def _format_to_qmark(sql: str) -> str:
@@ -151,16 +145,89 @@ class MySQLCursorWrapper:
         self.cursor.close()
 
 
-class DatabaseWrapper(DatabaseWrapperMixin, DjangoMySQLDatabaseWrapper):
+class DatabaseWrapper(DatabaseWrapperMixin, BaseDatabaseWrapper):
     """Django MySQL database wrapper backed by Vertebra native driver and LeaseBroker."""
 
     vendor: str = "mysql"
     display_name: str = "MySQL (Vertebra)"
     Database: Any = SyncDBAPIModule(paramstyle="format")
+    SchemaEditorClass = MySQLDatabaseSchemaEditor
+    client_class = MySQLDatabaseClient
+    creation_class = MySQLDatabaseCreation
+    features_class = MySQLDatabaseFeatures
+    introspection_class = _MySQLIntrospection
+    ops_class = MySQLDatabaseOperations
+    validation_class = MySQLDatabaseValidation
+
+    data_types: dict[str, str] = {
+        "AutoField": "integer AUTO_INCREMENT",
+        "BigAutoField": "bigint AUTO_INCREMENT",
+        "BinaryField": "longblob",
+        "BooleanField": "bool",
+        "CharField": "varchar(%(max_length)s)",
+        "DateField": "date",
+        "DateTimeField": "datetime(6)",
+        "DecimalField": "numeric(%(max_digits)s, %(decimal_places)s)",
+        "DurationField": "bigint",
+        "FileField": "varchar(%(max_length)s)",
+        "FilePathField": "varchar(%(max_length)s)",
+        "FloatField": "double precision",
+        "IntegerField": "integer",
+        "BigIntegerField": "bigint",
+        "IPAddressField": "char(15)",
+        "GenericIPAddressField": "char(39)",
+        "JSONField": "json",
+        "PositiveBigIntegerField": "bigint UNSIGNED",
+        "PositiveIntegerField": "integer UNSIGNED",
+        "PositiveSmallIntegerField": "smallint UNSIGNED",
+        "SlugField": "varchar(%(max_length)s)",
+        "SmallAutoField": "smallint AUTO_INCREMENT",
+        "SmallIntegerField": "smallint",
+        "TextField": "longtext",
+        "TimeField": "time(6)",
+        "UUIDField": "char(32)",
+    }
+
+    _limited_data_types: tuple[str, ...] = (
+        "tinyblob",
+        "blob",
+        "mediumblob",
+        "longblob",
+        "tinytext",
+        "text",
+        "mediumtext",
+        "longtext",
+        "json",
+    )
+
+    operators: dict[str, str] = {
+        "exact": "= %s",
+        "iexact": "LIKE %s",
+        "contains": "LIKE BINARY %s",
+        "icontains": "LIKE %s",
+        "gt": "> %s",
+        "gte": ">= %s",
+        "lt": "< %s",
+        "lte": "<= %s",
+        "startswith": "LIKE BINARY %s",
+        "endswith": "LIKE BINARY %s",
+        "istartswith": "LIKE %s",
+        "iendswith": "LIKE %s",
+    }
+
+    pattern_esc: str = r"REPLACE(REPLACE(REPLACE({}, '\\', '\\\\'), '%%', '\%%'), '_', '\_')"
+    pattern_ops: dict[str, str] = {
+        "contains": "LIKE BINARY CONCAT('%%', {}, '%%')",
+        "icontains": "LIKE CONCAT('%%', {}, '%%')",
+        "startswith": "LIKE BINARY CONCAT({}, '%%')",
+        "istartswith": "LIKE CONCAT({}, '%%')",
+        "endswith": "LIKE BINARY CONCAT('%%', {})",
+        "iendswith": "LIKE CONCAT('%%', {})",
+    }
 
     def __init__(self, settings_dict: dict[str, Any], alias: str = "default") -> None:
         """Initialize MySQL DatabaseWrapper with settings dictionary and alias."""
-        DjangoMySQLDatabaseWrapper.__init__(self, settings_dict, alias=alias)
+        BaseDatabaseWrapper.__init__(self, settings_dict, alias=alias)
         DatabaseWrapperMixin.__init__(self, settings_dict, alias=alias)
 
     def get_connection_params(self) -> dict[str, Any]:
@@ -193,8 +260,65 @@ class DatabaseWrapper(DatabaseWrapperMixin, DjangoMySQLDatabaseWrapper):
         return MySQLCursorWrapper(self.connection.cursor())
 
     def get_database_version(self) -> tuple[int, ...]:
-        """Return MySQL/MariaDB server version tuple."""
-        return (8, 0, 36)
+        """Query the connected MySQL/MariaDB server version and parse ``(major, minor, patch)``."""
+        with self.temporary_connection() as cursor:
+            cursor.execute("SELECT VERSION()")
+            row = cursor.fetchone()
+        version_str = str(row[0]) if row and row[0] is not None else ""
+        match = _SERVER_VERSION_RE.search(version_str)
+        if match is None:
+            msg = f"Unable to determine MySQL version from version string {version_str!r}"
+            raise ValueError(msg)
+        return tuple(int(part) for part in match.groups())
+
+    @cached_property
+    def mysql_server_data(self) -> dict[str, Any]:
+        """Fetch MySQL server session variables used by Django feature flags."""
+        with self.temporary_connection() as cursor:
+            cursor.execute(
+                "SELECT VERSION(), @@sql_mode, @@default_storage_engine, "
+                "@@sql_auto_is_null, @@lower_case_table_names, "
+                "CONVERT_TZ('2001-01-01 01:00:00', 'UTC', 'UTC') IS NOT NULL"
+            )
+            row = cursor.fetchone()
+        if not row:
+            return {
+                "version": "",
+                "sql_mode": "",
+                "default_storage_engine": "InnoDB",
+                "sql_auto_is_null": False,
+                "lower_case_table_names": False,
+                "has_zoneinfo_database": False,
+            }
+        return {
+            "version": row[0],
+            "sql_mode": row[1],
+            "default_storage_engine": row[2],
+            "sql_auto_is_null": bool(row[3]),
+            "lower_case_table_names": bool(row[4]),
+            "has_zoneinfo_database": bool(row[5]),
+        }
+
+    @cached_property
+    def mysql_server_info(self) -> str:
+        """Return the raw server version string from ``mysql_server_data``."""
+        return str(self.mysql_server_data["version"])
+
+    @cached_property
+    def mysql_version(self) -> tuple[int, ...]:
+        """Return the parsed ``(major, minor, patch)`` server version tuple."""
+        return self.get_database_version()
+
+    @cached_property
+    def mysql_is_mariadb(self) -> bool:
+        """Return True when the connected server reports MariaDB."""
+        return "mariadb" in self.mysql_server_info.lower()
+
+    @cached_property
+    def sql_mode(self) -> set[str]:
+        """Return active SQL modes reported by the MySQL server."""
+        raw_mode = self.mysql_server_data["sql_mode"]
+        return set(str(raw_mode).split(",") if raw_mode else ())
 
     def _set_autocommit(self, autocommit: bool) -> None:
         """Set autocommit on the underlying connection."""

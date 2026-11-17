@@ -89,6 +89,7 @@ pub struct RawPostgresOptions {
     pub pooler_mode: String,
     pub protocol_level_pooler_cache: bool,
     pub statement_cache_size: i64,
+    pub cockroach_cluster: Option<String>,
 }
 
 impl RawPostgresOptions {
@@ -139,6 +140,7 @@ impl Default for RawPostgresOptions {
             pooler_mode: "direct".to_string(),
             protocol_level_pooler_cache: false,
             statement_cache_size: 256,
+            cockroach_cluster: None,
         }
     }
 }
@@ -178,6 +180,7 @@ impl fmt::Debug for RawPostgresOptions {
             .field("enable_iam_auth", &self.enable_iam_auth)
             .field("cloud_auth_options", &"<redacted>")
             .field("iam_auth_options", &"<redacted>")
+            .field("cockroach_cluster", &self.cockroach_cluster)
             .finish()
     }
 }
@@ -214,6 +217,7 @@ pub struct PostgresConfig {
     pub pooler_mode: PoolerMode,
     pub protocol_level_pooler_cache: bool,
     pub statement_cache_size: usize,
+    pub cockroach_cluster: Option<String>,
 }
 
 impl PostgresConfig {
@@ -321,19 +325,25 @@ impl PostgresConfig {
                 )));
             }
             let lower = k.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "user" | "database" | "options" | "replication"
-            ) {
+            if matches!(lower.as_str(), "user" | "database" | "replication") {
                 return Err(PostgresError::Config(format!(
                     "reserved startup parameter `{k}` must not be set in session_gucs"
                 )));
+            }
+            if lower == "options" && v.trim().is_empty() {
+                return Err(PostgresError::Config(
+                    "session_gucs `options` must not be empty".to_string(),
+                ));
             }
             if lower == "client_encoding" && !v.trim().eq_ignore_ascii_case("UTF8") {
                 return Err(PostgresError::Config(format!(
                     "session_gucs client_encoding must be `UTF8`, got `{v}`"
                 )));
             }
+        }
+
+        if let Some(ref cluster) = raw.cockroach_cluster {
+            validate_cockroach_cluster(cluster)?;
         }
 
         let cloud_sql_ip_type = normalize_ip_type("cloud_sql_ip_type", &raw.cloud_sql_ip_type)?;
@@ -440,6 +450,7 @@ impl PostgresConfig {
             pooler_mode,
             protocol_level_pooler_cache: raw.protocol_level_pooler_cache,
             statement_cache_size,
+            cockroach_cluster: raw.cockroach_cluster,
         })
     }
 
@@ -462,15 +473,23 @@ impl PostgresConfig {
             "application_name".to_string(),
             self.application_name.clone(),
         );
+        let mut raw_options: Option<String> = None;
         for (k, v) in &self.session_gucs {
             if k.eq_ignore_ascii_case("client_encoding") {
                 continue;
             }
             if k.eq_ignore_ascii_case("application_name") {
                 out.insert("application_name".to_string(), v.clone());
+            } else if k.eq_ignore_ascii_case("options") {
+                raw_options = Some(v.clone());
             } else {
                 out.insert(k.clone(), v.clone());
             }
+        }
+        if let Some(merged) =
+            merge_startup_options(raw_options.as_deref(), self.cockroach_cluster.as_deref())
+        {
+            out.insert("options".to_string(), merged);
         }
         out
     }
@@ -517,7 +536,41 @@ impl fmt::Debug for PostgresConfig {
             .field("enable_iam_auth", &self.enable_iam_auth)
             .field("cloud_auth_options", &"<redacted>")
             .field("iam_auth_options", &"<redacted>")
+            .field("cockroach_cluster", &self.cockroach_cluster)
             .finish()
+    }
+}
+
+fn validate_cockroach_cluster(cluster: &str) -> Result<(), PostgresError> {
+    if cluster.is_empty() || cluster.chars().any(char::is_whitespace) || cluster.contains('\0') {
+        return Err(PostgresError::Config(
+            "cockroach_cluster must be a non-empty string without whitespace or NUL bytes"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn merge_startup_options(
+    existing: Option<&str>,
+    cockroach_cluster: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(raw) = existing {
+        for token in raw.split_whitespace() {
+            if cockroach_cluster.is_some() && token.starts_with("--cluster=") {
+                continue;
+            }
+            parts.push(token.to_string());
+        }
+    }
+    if let Some(cluster) = cockroach_cluster {
+        parts.push(format!("--cluster={cluster}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
     }
 }
 
@@ -622,7 +675,7 @@ mod tests {
             ("replication", "database"),
             ("user", "other"),
             ("database", "other"),
-            ("options", "-c work_mem=4MB"),
+            ("options", "   "),
         ] {
             let mut guc_raw = RawPostgresOptions::new("localhost", "postgres", "appdb");
             guc_raw
@@ -634,14 +687,27 @@ mod tests {
             ));
         }
 
+        for bad_cluster in ["", "   ", "my cluster", "bad\0cluster"] {
+            let mut crdb_raw = RawPostgresOptions::new("localhost", "postgres", "appdb");
+            crdb_raw.cockroach_cluster = Some(bad_cluster.to_string());
+            assert!(matches!(
+                PostgresConfig::validate(crdb_raw),
+                Err(PostgresError::Config(_))
+            ));
+        }
+
         let mut valid = RawPostgresOptions::new("localhost", "postgres", "appdb");
         valid.application_name = "vtb-base".to_string();
+        valid.cockroach_cluster = Some("orange-finch-123".to_string());
         valid
             .session_gucs
             .insert("application_name".to_string(), "vtb-override".to_string());
         valid
             .session_gucs
             .insert("app.role".to_string(), "reader one".to_string());
+        valid
+            .session_gucs
+            .insert("options".to_string(), "-c work_mem=4MB".to_string());
         valid
             .session_gucs
             .insert("client_encoding".to_string(), "UTF8".to_string());
@@ -654,6 +720,10 @@ mod tests {
         assert_eq!(
             startup.get("app.role").map(String::as_str),
             Some("reader one")
+        );
+        assert_eq!(
+            startup.get("options").map(String::as_str),
+            Some("-c work_mem=4MB --cluster=orange-finch-123")
         );
         assert!(!startup.contains_key("client_encoding"));
     }
