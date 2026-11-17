@@ -70,12 +70,11 @@ def _get_decimal_column(data: Mapping[str, Any]) -> str:
 class _PostgreSQLFeatures(BaseDatabaseFeatures):
     """Driver-free PostgreSQL database capability flags."""
 
-    minimum_database_version: tuple[int, ...] = (14,)
+    minimum_database_version: tuple[int, ...] | None = (14,)
     allows_group_by_selected_pks: bool = True
     can_return_columns_from_insert: bool = True
     can_return_rows_from_bulk_insert: bool = True
     has_real_datatype: bool = True
-    supports_transactions: bool = True
     has_native_uuid_field: bool = True
     has_native_duration_field: bool = True
     has_native_json_field: bool = True
@@ -85,13 +84,18 @@ class _PostgreSQLFeatures(BaseDatabaseFeatures):
     supports_tablespaces: bool = True
     supports_paramstyle_pyformat: bool = True
 
+    @cached_property
+    def supports_transactions(self) -> bool:
+        """PostgreSQL supports transactional DDL and DML."""
+        return True
+
 
 class _PostgreSQLOperations(BaseDatabaseOperations):
     """Driver-free PostgreSQL SQL compilation operations."""
 
     compiler_module: str = "django.db.backends.postgresql.compiler"
     cast_char_field_without_max_length: str = "varchar"
-    explain_prefix: str = "EXPLAIN"
+    explain_prefix: str | None = "EXPLAIN"
 
     def max_name_length(self) -> int:
         """Return PostgreSQL NAMEDATALEN identifier limit (63 bytes)."""
