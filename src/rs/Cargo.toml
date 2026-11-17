@@ -66,7 +66,6 @@ prost-types = "0.14"
 rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2"] }
 rust_decimal = "1.41"
-rustix = "1.1"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 serde = { version = "1.0", features = ["derive"] }

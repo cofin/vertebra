@@ -3196,19 +3196,19 @@ impl ShmCache {
         let mut key_buf = [0u8; SHM_CACHE_MAX_KEY_BYTES];
         key_buf[..key.len()].copy_from_slice(key);
         let num_key_words = key.len().div_ceil(8);
-        for i in 0..num_key_words {
-            let off = i * 8;
-            let w = u64::from_ne_bytes(key_buf[off..off + 8].try_into().unwrap());
-            slot.key[i].store(w, Ordering::Relaxed);
+        let (key_chunks, _) = key_buf.as_chunks::<8>();
+        for (dst, chunk) in slot.key.iter().zip(key_chunks.iter()).take(num_key_words) {
+            let w = u64::from_ne_bytes(*chunk);
+            dst.store(w, Ordering::Relaxed);
         }
 
         let mut val_buf = [0u8; SHM_CACHE_MAX_VALUE_BYTES];
         val_buf[..value.len()].copy_from_slice(value);
         let num_val_words = value.len().div_ceil(8);
-        for i in 0..num_val_words {
-            let off = i * 8;
-            let w = u64::from_ne_bytes(val_buf[off..off + 8].try_into().unwrap());
-            slot.value[i].store(w, Ordering::Relaxed);
+        let (val_chunks, _) = val_buf.as_chunks::<8>();
+        for (dst, chunk) in slot.value.iter().zip(val_chunks.iter()).take(num_val_words) {
+            let w = u64::from_ne_bytes(*chunk);
+            dst.store(w, Ordering::Relaxed);
         }
 
         slot.key_len.store(key.len() as u16, Ordering::Relaxed);
