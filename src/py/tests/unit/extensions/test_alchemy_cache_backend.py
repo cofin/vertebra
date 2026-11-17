@@ -11,7 +11,7 @@ import msgspec
 import pytest
 from advanced_alchemy.cache import CacheManager
 from advanced_alchemy.cache._null import NO_VALUE, SyncCacheRegionProtocol
-from advanced_alchemy.filters import LimitOffset
+from advanced_alchemy.filters import LimitOffsetFilter
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository, SQLAlchemySyncRepository
 from advanced_alchemy.service import (
     OffsetPagination,
@@ -264,8 +264,8 @@ async def test_zero_copy_service_mixin_async_repository_pagination() -> None:
             ]
             await service.create_many(seeded, auto_commit=True)
 
-            limit_offset = LimitOffset(limit=2, offset=1)
-            items, total = await service.list_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
+            limit_offset = LimitOffsetFilter(limit=2, offset=1)
+            items, total = await service.get_many_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
             assert total == 5
 
             dto_page = service.to_schema(items, total=total, filters=[limit_offset], schema_type=_UserDto)
@@ -305,11 +305,11 @@ async def test_zero_copy_service_mixin_async_repository_pagination() -> None:
     ("filters", "expected_limit", "expected_offset"),
     [
         (None, 0, 0),
-        ([LimitOffset(limit=10, offset=20)], 10, 20),
+        ([LimitOffsetFilter(limit=10, offset=20)], 10, 20),
     ],
 )
 def test_zero_copy_service_mixin_sync_repository_empty_and_dict_fallback(
-    filters: list[LimitOffset] | None,
+    filters: list[LimitOffsetFilter] | None,
     expected_limit: int,
     expected_offset: int,
 ) -> None:
@@ -324,8 +324,8 @@ def test_zero_copy_service_mixin_sync_repository_empty_and_dict_fallback(
                 [_CachedUser(id=1, name="Ada Lovelace"), _CachedUser(id=2, name="Grace Hopper")],
                 auto_commit=True,
             )
-            limit_offset = LimitOffset(limit=1, offset=1)
-            items, total = service.list_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
+            limit_offset = LimitOffsetFilter(limit=1, offset=1)
+            items, total = service.get_many_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
             sync_page = service.to_schema(items, total=total, filters=[limit_offset], schema_type=_UserDto)
             assert isinstance(sync_page, OffsetPagination)
             assert sync_page.items == [_UserDto(id=2, name="Grace Hopper")]
@@ -354,7 +354,7 @@ def test_zero_copy_service_mixin_sync_repository_empty_and_dict_fallback(
             dict_page = service.to_schema(
                 [{"id": 9, "name": "Dict Row"}],
                 total=1,
-                filters=[LimitOffset(limit=5, offset=0)],
+                filters=[LimitOffsetFilter(limit=5, offset=0)],
                 schema_type=_UserDto,
             )
             assert isinstance(dict_page, OffsetPagination)

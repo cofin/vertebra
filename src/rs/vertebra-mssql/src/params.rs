@@ -1,19 +1,86 @@
 //! Parameter extraction, `@P1` placeholder rewriting, and `tiberius::ToSql` binding for `vertebra-mssql`.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::str::FromStr;
-
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PySequence, PyString};
-use rust_decimal::Decimal;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use tiberius::ToSql;
+use tiberius::numeric::Numeric;
 use tiberius::xml::XmlData;
 use uuid::Uuid;
 use vertebra_db::rewrite_mssql_placeholders;
 
 use crate::errors::MssqlError;
+
+const MAX_DECIMAL_DIGITS: usize = 38;
+const MAX_DECIMAL_MAGNITUDE_EXCLUSIVE: u128 = 100_000_000_000_000_000_000_000_000_000_000_000_000;
+
+/// Parse a fixed-point decimal string (`[+-]<digits>[.<digits>]`) into a 128-bit TDS [`Numeric`] (`<= 38` digits).
+pub fn parse_decimal_numeric(raw: &str) -> Result<Numeric, MssqlError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(MssqlError::data("Decimal parameter string is empty"));
+    }
+    let (negative, unsigned) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, trimmed)
+    };
+
+    let (int_part, frac_raw) = match unsigned.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (unsigned, ""),
+    };
+    if (int_part.is_empty() && frac_raw.is_empty())
+        || !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_raw.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(MssqlError::data(format!(
+            "invalid Decimal parameter `{raw}`"
+        )));
+    }
+
+    let mut frac_part = frac_raw;
+    while frac_part.len() > usize::from(Numeric::MAX_NUMERIC_SCALE) && frac_part.ends_with('0') {
+        frac_part = &frac_part[..frac_part.len() - 1];
+    }
+    if frac_part.len() > usize::from(Numeric::MAX_NUMERIC_SCALE) {
+        return Err(MssqlError::data(format!(
+            "Decimal parameter `{raw}` scale {} exceeds SQL Server maximum scale 38",
+            frac_part.len()
+        )));
+    }
+
+    let sig_int = int_part.trim_start_matches('0');
+    if sig_int.len() + frac_part.len() > MAX_DECIMAL_DIGITS {
+        return Err(MssqlError::data(format!(
+            "Decimal parameter `{raw}` exceeds SQL Server DECIMAL(38) precision"
+        )));
+    }
+
+    let mut magnitude: u128 = 0;
+    for b in sig_int.bytes().chain(frac_part.bytes()) {
+        magnitude = magnitude
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u128::from(b - b'0')))
+            .ok_or_else(|| MssqlError::data(format!("Decimal parameter `{raw}` overflows i128")))?;
+    }
+    if magnitude >= MAX_DECIMAL_MAGNITUDE_EXCLUSIVE {
+        return Err(MssqlError::data(format!(
+            "Decimal parameter `{raw}` exceeds SQL Server DECIMAL(38) range"
+        )));
+    }
+
+    let signed = if negative && magnitude > 0 {
+        -(magnitude as i128)
+    } else {
+        magnitude as i128
+    };
+    Ok(Numeric::new_with_scale(signed, frac_part.len() as u8))
+}
 
 /// Owned parameter value bound to a TDS `sp_executesql` RPC call (`@P1`, `@P2`, ...).
 #[derive(Clone, Debug)]
@@ -24,7 +91,7 @@ pub enum MssqlParam {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Decimal(Decimal),
+    Decimal(Numeric),
     Uuid(Uuid),
     Date(NaiveDate),
     Time(NaiveTime),
@@ -102,12 +169,12 @@ pub fn py_any_to_mssql_param(obj: &Bound<'_, PyAny>) -> Result<MssqlParam, Mssql
         .unwrap_or_default();
 
     if type_name == "Decimal" || module_name == "decimal" {
-        let text = obj
-            .str()
-            .and_then(|s| Ok(s.to_str()?.to_string()))
+        let formatted = obj
+            .call_method1("__format__", ("f",))
+            .and_then(|s| s.extract::<String>())
+            .or_else(|_| obj.str().and_then(|s| Ok(s.to_str()?.to_string())))
             .map_err(|e| MssqlError::data(e.to_string()))?;
-        let dec = Decimal::from_str(&text)
-            .map_err(|e| MssqlError::data(format!("invalid Decimal parameter `{text}`: {e}")))?;
+        let dec = parse_decimal_numeric(&formatted)?;
         return Ok(MssqlParam::Decimal(dec));
     }
 

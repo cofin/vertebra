@@ -478,21 +478,27 @@ async fn tds_prelogin_login7_envchange_routing_and_rpc_lifecycle() {
         .expect("fetch_optional on empty set");
     assert!(opt_empty.rows.is_empty());
 
+    let missing_val_err = client
+        .select_value("SELECT ZERO_ROWS FROM users".to_string(), vec![])
+        .await
+        .expect_err("select_value on empty set must fail with NotFound");
+    assert_eq!(missing_val_err.kind, MssqlErrorKind::NotFound);
+
     // Transaction Manager lifecycle: BEGIN, SAVEPOINT, ROLLBACK TO SAVEPOINT, RELEASE, COMMIT, ROLLBACK
     client
         .begin_transaction(Some("READ_COMMITTED".to_string()))
         .await
         .expect("begin_transaction");
     client
-        .savepoint("sp_alpha".to_string())
+        .savepoint("vtb_sp1".to_string())
         .await
         .expect("savepoint");
     client
-        .rollback_to_savepoint("sp_alpha".to_string())
+        .rollback_to_savepoint("vtb_sp1".to_string())
         .await
         .expect("rollback_to_savepoint");
     client
-        .release_savepoint("sp_alpha".to_string())
+        .release_savepoint("vtb_sp1".to_string())
         .await
         .expect("release_savepoint");
     client

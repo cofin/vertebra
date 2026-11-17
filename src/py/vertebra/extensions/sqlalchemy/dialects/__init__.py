@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.dialects import registry
@@ -10,7 +11,6 @@ from sqlalchemy.pool import NullPool
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
-    DIALECT_DESCRIPTORS: dict[str, type[Any]]
     from vertebra.extensions.sqlalchemy.dialects._base import (
         AsyncExecutionContext,
         SyncExecutionContext,
@@ -198,17 +198,6 @@ def register_sqlalchemy_dialects() -> None:
 
 def __getattr__(name: str) -> Any:
     """Lazily import and resolve dialect symbols on demand."""
-    if name == "DIALECT_DESCRIPTORS":
-        descriptors: dict[str, type[Any]] = {}
-        for scheme in ALL_DIALECT_SCHEMES:
-            reg_name = scheme.replace("+", ".")
-            for rname, rmod, rcls in _DIALECT_REGISTRATIONS:
-                if rname == reg_name:
-                    mod = ensure_module(rmod)
-                    descriptors[scheme] = getattr(mod, rcls)
-                    break
-        globals()["DIALECT_DESCRIPTORS"] = descriptors
-        return descriptors
     target = _LAZY_EXPORTS.get(name)
     if target is not None:
         mod_name, attr_name = target
@@ -218,6 +207,43 @@ def __getattr__(name: str) -> Any:
         return val
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
+
+
+class _DialectDescriptorRegistry(Mapping[str, type[Any]]):
+    """Lazy mapping of SQLAlchemy scheme strings to dialect classes without eager third-party imports."""
+
+    __slots__ = ("_cache", "_targets")
+
+    def __init__(self, registrations: tuple[tuple[str, str, str], ...]) -> None:
+        self._targets: dict[str, tuple[str, str]] = {
+            reg_name.replace(".", "+"): (mod_name, cls_name) for reg_name, mod_name, cls_name in registrations
+        }
+        self._cache: dict[str, type[Any]] = {}
+
+    def __getitem__(self, key: str) -> type[Any]:
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        target = self._targets.get(key)
+        if target is None:
+            raise KeyError(key)
+        mod_name, cls_name = target
+        mod = ensure_module(mod_name)
+        resolved: type[Any] = getattr(mod, cls_name)
+        self._cache[key] = resolved
+        return resolved
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(ALL_DIALECT_SCHEMES)
+
+    def __len__(self) -> int:
+        return len(ALL_DIALECT_SCHEMES)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key in self._targets
+
+
+DIALECT_DESCRIPTORS: Mapping[str, type[Any]] = _DialectDescriptorRegistry(_DIALECT_REGISTRATIONS)
 
 
 register_sqlalchemy_dialects()

@@ -6227,7 +6227,6 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "pretty-hex",
- "rust_decimal",
  "rustls-native-certs",
  "rustls-pki-types",
  "rustls-webpki",
@@ -6987,7 +6986,6 @@ dependencies = [
  "pyo3",
  "pyo3-build-config",
  "rcgen",
- "rust_decimal",
  "rustls",
  "thiserror 2.0.21",
  "tiberius",
@@ -7301,7 +7299,6 @@ checksum = "a0181c14ddd6c7b8b0b0132a5f1ea2f32be0d893cd3ea97b6e3b28886b8a3d1c"
 dependencies = [
  "cfg-if",
  "rustversion",
- "serde",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]

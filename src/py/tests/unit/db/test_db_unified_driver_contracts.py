@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import importlib.util
 import re
 import sqlite3
 import uuid
@@ -57,6 +58,11 @@ if TYPE_CHECKING:
 
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
+_HAS_SQLALCHEMY_GCP = (
+    importlib.util.find_spec("sqlalchemy_bigquery") is not None
+    and importlib.util.find_spec("google.cloud") is not None
+    and importlib.util.find_spec("google.cloud.sqlalchemy_spanner") is not None
+)
 
 
 _SQL_CONTRACT_ENGINES: tuple[str, ...] = (
@@ -670,11 +676,12 @@ async def test_cloud_dbapi_preserves_statement_autocommit(engine: str) -> None:
     sync_conn = SyncDBAPIConnection(url, driver=sync_driver, broker=None, share_pool=False)
     async_conn = AsyncDBAPIConnection(url, driver=async_driver, broker=None, share_pool=False)
     try:
-        sync_dialect = getattr(dialects, f"Sync{dialect_name}Dialect")()
-        async_dialect = getattr(dialects, f"Async{dialect_name}Dialect")()
-        assert sync_dialect.get_driver_connection(sync_conn) is sync_conn
         adapted = AsyncAdapt_vertebra_connection(SQLAlchemyAsyncDBAPI(dialect=engine), cast("Any", async_conn))
-        assert async_dialect.get_driver_connection(adapted) is async_conn
+        if _HAS_SQLALCHEMY_GCP:
+            sync_dialect = getattr(dialects, f"Sync{dialect_name}Dialect")()
+            async_dialect = getattr(dialects, f"Async{dialect_name}Dialect")()
+            assert sync_dialect.get_driver_connection(sync_conn) is sync_conn
+            assert async_dialect.get_driver_connection(adapted) is async_conn
         assert adapted.autocommit is True
         sync_cursor = sync_conn.cursor()
         async_cursor = async_conn.cursor()

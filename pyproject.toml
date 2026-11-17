@@ -65,7 +65,7 @@ adk = [
     "google-adk>=2.14.1",
 ]
 alchemy = [
-    "advanced-alchemy>=1.12.0",
+    "advanced-alchemy>=1.13.0b1",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
 ]
@@ -233,17 +233,18 @@ doc = [
 test = [
     "pytest",
     "pytest-cov>=5.0",
-    "pytest-databases>=0.20.0b1",
+    "pytest-databases>=0.20.0b3",
     "pytest-xdist>=3.6.1",
     "anyio",
     "sqlspec>=0.72.0",
     "google-adk>=2.14.1",
-    "advanced-alchemy>=1.12.0",
+    "advanced-alchemy>=1.13.0b1",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
     "duckdb-engine; python_version < '3.14'",
     "sqlalchemy-bigquery; python_version < '3.14'",
     "sqlalchemy-spanner; python_version < '3.14'",
+    "protobuf>=5.0",
     "pyarrow>=18.0.0",
     "pydantic>=2.9.0",
     "attrs>=24.0.0",
@@ -291,8 +292,6 @@ postgres-bench = [
 ]
 
 [tool.uv.sources]
-advanced-alchemy = { git = "https://github.com/jolt-org/advanced-alchemy.git", rev = "f09816bf5647695a8d6e940ee4633caddab44d64" }
-sqlspec = { git = "https://github.com/litestar-org/sqlspec.git", rev = "c2886c3d02b8aca705d137dd2640996488a8336a" }
 vertebra-bigquery = { path = "src/rs/vertebra-bigquery", editable = true }
 vertebra-bundler = { path = "src/rs/vertebra-bundler", editable = true }
 vertebra-duckdb = { path = "src/rs/vertebra-duckdb", editable = true }

@@ -411,6 +411,22 @@ def vtb_mariadb_config(request: pytest.FixtureRequest) -> MySQLConfig:
     )
 
 
+@pytest.fixture(scope="session")
+def oracle_26ai_image() -> str:
+    """Pull Oracle Free from GHCR by default to avoid anonymous Docker Hub rate limits in CI."""
+    return (
+        os.environ.get("VERTEBRA_CONFORMANCE_ORACLE_IMAGE", "").strip()
+        or os.environ.get("ORACLE_26AI_IMAGE", "").strip()
+        or "ghcr.io/gvenzl/oracle-free:23-slim-faststart"
+    )
+
+
+@pytest.fixture(scope="session")
+def oracle_23ai_image(oracle_26ai_image: str) -> str:
+    """Align ``oracle_23ai_image`` with ``oracle_26ai_image`` across pytest-databases versions."""
+    return oracle_26ai_image
+
+
 @pytest.fixture
 def vtb_oracle_config(request: pytest.FixtureRequest) -> OracleConfig:
     """Return an OracleConfig wired to the version-selected pytest-databases Oracle container."""

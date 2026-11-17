@@ -167,7 +167,8 @@ class ServiceVersionMatrix:
             "2025": "mssql_2025_service",
         },
         "oracle": {
-            "23ai": "oracle_23ai_service",
+            "23ai": "oracle_26ai_service",
+            "26ai": "oracle_26ai_service",
         },
     }
 

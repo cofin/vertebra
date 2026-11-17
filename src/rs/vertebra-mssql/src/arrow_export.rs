@@ -15,7 +15,7 @@ use tiberius::ColumnType;
 use vertebra_core::shm::ShmRegion;
 use vertebra_db::arrow_shm::{ShmArrowStreamWriter, write_shm_arrow_region_unregistered};
 
-use crate::codecs::{MssqlCellValue, MssqlColumnMeta, MssqlQueryResult};
+use crate::codecs::{MssqlCellValue, MssqlColumnMeta, MssqlQueryResult, format_numeric};
 use crate::errors::MssqlError;
 
 /// Default initial byte capacity (`64 KiB`) when opening an MSSQL `VTBARROW` stream writer.
@@ -214,7 +214,7 @@ pub fn rows_to_record_batch(
                         Some(MssqlCellValue::String(s) | MssqlCellValue::Xml(s)) => {
                             vals.push(Some(s.clone()))
                         }
-                        Some(MssqlCellValue::Decimal(d)) => vals.push(Some(d.to_string())),
+                        Some(MssqlCellValue::Decimal(d)) => vals.push(Some(format_numeric(*d))),
                         Some(MssqlCellValue::Uuid(u)) => vals.push(Some(u.to_string())),
                         Some(MssqlCellValue::Time(t)) => vals.push(Some(t.to_string())),
                         Some(MssqlCellValue::Date(d)) => vals.push(Some(d.to_string())),
@@ -318,7 +318,7 @@ mod tests {
     use std::io::Cursor;
 
     use arrow_ipc::reader::StreamReader;
-    use rust_decimal::Decimal;
+    use tiberius::numeric::Numeric;
     use vertebra_db::arrow_shm::{SHM_ARROW_MAGIC, ShmArrowFrameHeader};
 
     use super::*;
@@ -343,7 +343,7 @@ mod tests {
             rows: vec![
                 vec![
                     MssqlCellValue::Int64(1),
-                    MssqlCellValue::Decimal(Decimal::new(1999, 2)),
+                    MssqlCellValue::Decimal(Numeric::new_with_scale(1999, 2)),
                     MssqlCellValue::Bool(true),
                 ],
                 vec![

@@ -22,7 +22,7 @@ use vertebra_db::{
 };
 
 use crate::client::MssqlClient;
-use crate::codecs::MssqlCellValue;
+use crate::codecs::{MssqlCellValue, format_numeric};
 use crate::config::MssqlClientConfig;
 use crate::errors::MssqlError;
 use crate::params::MssqlParam;
@@ -186,7 +186,7 @@ fn mssql_cell_to_scalar(cell: &MssqlCellValue) -> DbRpcScalar {
         MssqlCellValue::Float64(v) => DbRpcScalar::Float(*v),
         MssqlCellValue::String(s) | MssqlCellValue::Xml(s) => DbRpcScalar::Str(s.clone()),
         MssqlCellValue::Bytes(b) => DbRpcScalar::Bytes(b.clone()),
-        MssqlCellValue::Decimal(d) => DbRpcScalar::Str(d.to_string()),
+        MssqlCellValue::Decimal(d) => DbRpcScalar::Str(format_numeric(*d)),
         MssqlCellValue::Uuid(u) => DbRpcScalar::Str(u.to_string()),
         MssqlCellValue::Date(d) => DbRpcScalar::Str(d.to_string()),
         MssqlCellValue::Time(t) => DbRpcScalar::Str(t.to_string()),

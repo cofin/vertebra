@@ -27,8 +27,12 @@ from advanced_alchemy.config import RoutingConfig
 from advanced_alchemy.exceptions import DuplicateKeyError, ForeignKeyError, wrap_sqlalchemy_exception
 from advanced_alchemy.extensions.litestar import SQLAlchemyPlugin
 from advanced_alchemy.extensions.litestar.store import SQLAlchemyStore, StoreModelMixin
-from advanced_alchemy.filters import RelationshipFilter as UpstreamRelationshipFilter
-from advanced_alchemy.filterset import FilterSet as UpstreamFilterSet
+from advanced_alchemy.filters import (
+    FilterSet as UpstreamFilterSet,
+)
+from advanced_alchemy.filters import (
+    RelationshipFilter as UpstreamRelationshipFilter,
+)
 from advanced_alchemy.repository import SQLAlchemySyncRepository
 from advanced_alchemy.routing import RoutingAsyncSessionMaker, RoutingSyncSessionMaker
 from advanced_alchemy.service import (
@@ -1028,7 +1032,6 @@ for mod_name in (
     "advanced_alchemy",
     "advanced_alchemy.cache",
     "advanced_alchemy.filters",
-    "advanced_alchemy.filterset",
     "advanced_alchemy.service",
     "sqlalchemy",
     "sqlalchemy.event",
@@ -1087,7 +1090,6 @@ for mod_name in (
     "advanced_alchemy",
     "advanced_alchemy.cache",
     "advanced_alchemy.filters",
-    "advanced_alchemy.filterset",
     "advanced_alchemy.service",
     "advanced_alchemy.types",
     "advanced_alchemy.types.file_object",

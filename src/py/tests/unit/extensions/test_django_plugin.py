@@ -456,6 +456,8 @@ def test_django_db_backends_never_inject_driver_shims() -> None:
     assert "oracledb" not in sys.modules
     script = (
         "import importlib, sys\n"
+        "sys.modules['psycopg'] = None\n"
+        "sys.modules['psycopg2'] = None\n"
         "before = set(sys.modules)\n"
         "for name in (\n"
         "    'vertebra.extensions.django.db.backends',\n"
@@ -469,7 +471,7 @@ def test_django_db_backends_never_inject_driver_shims() -> None:
         "added = set(sys.modules) - before\n"
         "assert 'MySQLdb' not in sys.modules, added\n"
         "assert 'oracledb' not in sys.modules, added\n"
-        "assert not any(m.startswith(('MySQLdb.', 'oracledb.')) for m in added), added\n"
+        "assert not any(m.startswith(('MySQLdb.', 'oracledb.', 'psycopg.', 'psycopg2.')) for m in added), added\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", script],

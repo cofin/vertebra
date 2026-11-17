@@ -24,8 +24,8 @@ from vertebra.utils.serializers import (
 try:
     from advanced_alchemy.cache import CacheConfig, CacheManager, setup_cache_listeners
     from advanced_alchemy.cache._null import NO_VALUE
-    from advanced_alchemy.filters import LimitOffset
-    from advanced_alchemy.service import OffsetPagination, ResultConverter, find_filter
+    from advanced_alchemy.filters import LimitOffsetFilter
+    from advanced_alchemy.service import CursorPagination, OffsetPagination, ResultConverter, find_filter
 except ImportError as exc:
     raise MissingDependencyError(
         "advanced-alchemy",
@@ -290,8 +290,8 @@ def _build_pagination[T](
     filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None,
     total: int | None,
 ) -> OffsetPagination[T]:
-    """Build an ``OffsetPagination`` using ``LimitOffset`` from ``filters`` and explicit ``total``."""
-    limit_offset = find_filter(LimitOffset, filters=filters or ())
+    """Build an ``OffsetPagination`` using ``LimitOffsetFilter`` from ``filters`` and explicit ``total``."""
+    limit_offset = find_filter(LimitOffsetFilter, filters=filters or ())
     limit = limit_offset.limit if limit_offset is not None else len(items)
     offset = limit_offset.offset if limit_offset is not None else 0
     resolved_total = len(items) if total is None else total
@@ -417,6 +417,54 @@ class ZeroCopyServiceMixin:
         format: Literal["msgpack", "json"] = "msgpack",
     ) -> OffsetPagination[ModelDTOT]: ...
 
+    @overload
+    def to_schema(
+        self,
+        data: Sequence[ModelOrRowMappingT],
+        total: int | None = None,
+        filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None = None,
+        *,
+        schema_type: None = None,
+        pagination_type: Literal["cursor"],
+        format: Literal["msgpack", "json"] = "msgpack",
+    ) -> CursorPagination[ModelOrRowMappingT]: ...
+
+    @overload
+    def to_schema(
+        self,
+        data: Sequence[ModelProtocol] | Sequence[RowMapping] | Sequence[Row[Any]] | Sequence[Mapping[str, object]],
+        total: int | None = None,
+        filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None = None,
+        *,
+        schema_type: type[ModelDTOT],
+        pagination_type: Literal["cursor"],
+        format: Literal["msgpack", "json"] = "msgpack",
+    ) -> CursorPagination[ModelDTOT]: ...
+
+    @overload
+    def to_schema(
+        self,
+        data: Sequence[ModelOrRowMappingT],
+        total: int | None = None,
+        filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None = None,
+        *,
+        schema_type: None = None,
+        pagination_type: Literal["limit_offset"],
+        format: Literal["msgpack", "json"] = "msgpack",
+    ) -> OffsetPagination[ModelOrRowMappingT]: ...
+
+    @overload
+    def to_schema(
+        self,
+        data: Sequence[ModelProtocol] | Sequence[RowMapping] | Sequence[Row[Any]] | Sequence[Mapping[str, object]],
+        total: int | None = None,
+        filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None = None,
+        *,
+        schema_type: type[ModelDTOT],
+        pagination_type: Literal["limit_offset"],
+        format: Literal["msgpack", "json"] = "msgpack",
+    ) -> OffsetPagination[ModelDTOT]: ...
+
     def to_schema(
         self,
         data: ModelOrRowMappingT
@@ -433,10 +481,29 @@ class ZeroCopyServiceMixin:
         filters: Sequence[StatementFilter | ColumnElement[bool]] | Sequence[StatementFilter] | None = None,
         *,
         schema_type: type[ModelDTOT] | None = None,
+        pagination_type: Literal["limit_offset", "cursor"] | None = None,
         format: Literal["msgpack", "json"] = "msgpack",
-    ) -> ModelOrRowMappingT | OffsetPagination[ModelOrRowMappingT] | ModelDTOT | OffsetPagination[ModelDTOT]:
-        """Convert ORM model instance(s) into ``schema_type`` or ``OffsetPagination`` using C-API vectorcall."""
+    ) -> (
+        ModelOrRowMappingT
+        | OffsetPagination[ModelOrRowMappingT]
+        | ModelDTOT
+        | OffsetPagination[ModelDTOT]
+        | CursorPagination[ModelOrRowMappingT]
+        | CursorPagination[ModelDTOT]
+        | OffsetPagination[Row[Any]]
+    ):
+        """Convert ORM model instance(s) into ``schema_type``, ``OffsetPagination``, or ``CursorPagination``."""
         _ = format
+        resolved_filters = filters if filters is not None else ()
+        cursor_page = ResultConverter._to_cursor_page(
+            cast("ResultConverter", self),
+            data,
+            resolved_filters,
+            schema_type,
+            pagination_type,
+        )
+        if cursor_page is not None:
+            return cursor_page
         if schema_type is None:
             if isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
                 return cast(
@@ -457,14 +524,16 @@ class ZeroCopyServiceMixin:
             elif not isinstance(data, Mapping) and hasattr(data, "__dict__"):
                 return cast("ModelDTOT", plan.orm_to_struct(data))
 
+        converter_fn: Any = ResultConverter.to_schema
         return cast(
-            "ModelDTOT | OffsetPagination[ModelDTOT]",
-            ResultConverter.to_schema(
-                cast("ResultConverter", self),
-                cast("ModelProtocol", data),
+            "ModelDTOT | OffsetPagination[ModelDTOT] | CursorPagination[ModelDTOT]",
+            converter_fn(
+                self,
+                data,
                 total=total,
                 filters=filters,
                 schema_type=schema_type,
+                pagination_type=pagination_type,
             ),
         )
 

@@ -1114,6 +1114,7 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     assert sync_cfg.connection_string == "spanner+vtb://proj/inst/db"
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 def test_spanner_alembic_impl_batches_ddl_in_exec_and_offline_sql() -> None:
     """Verify SpannerAlembicImpl._exec batches online DDL until emit_commit/DML and emits offline SQL."""
     batched_calls: list[list[str]] = []

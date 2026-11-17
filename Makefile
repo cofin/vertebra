@@ -242,14 +242,14 @@ endif
 sqlite-test:                                        ## Run vertebra-sqlite Rust + Python unit and conformance tests
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo test -p vertebra-sqlite --locked)
-	@uv run python -m mypy.stubtest vertebra._sqlite
-	@uv run pytest src/py/tests/unit/db/test_sqlite_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k sqlite -v
+	@PYTHONPATH="src/py:." uv run --no-sync python -m mypy.stubtest vertebra._sqlite
+	@uv run --no-sync pytest src/py/tests/unit/db/test_sqlite_driver.py src/py/tests/unit/db/test_optional_driver_wheels.py src/py/tests/integration/db/test_driver_conformance.py -k sqlite -v
 	@echo "${OK} SQLite tests passed"
 
 .PHONY: sqlite-wheel-check
 sqlite-wheel-check:                                 ## Build vertebra-sqlite wheel and verify payload isolation
 	@mkdir -p /tmp/vtb-wheels-sqlite && rm -f /tmp/vtb-wheels-sqlite/*.whl
-	@uv run maturin build --manifest-path src/rs/vertebra-sqlite/Cargo.toml --out /tmp/vtb-wheels-sqlite
+	@uv run --no-sync maturin build --manifest-path src/rs/vertebra-sqlite/Cargo.toml --out /tmp/vtb-wheels-sqlite
 	@PYTHONPATH="src/py:." uv run --no-sync python tools/scripts/_wheel_verify.py --wheel-dir /tmp/vtb-wheels-sqlite --wheel-glob "vertebra_sqlite-*.whl" --extension-prefix "vertebra/_sqlite"
 	@echo "${OK} vertebra-sqlite wheel isolation verified"
 

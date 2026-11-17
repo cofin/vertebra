@@ -382,11 +382,18 @@ async fn test_bind_listener_so_reuseport_allows_dual_bind() {
         "udp reuse_port=true must set SO_REUSEPORT"
     );
     let _udp2 = server::bind_udp_listener(udp_addr, true).expect("dual udp SO_REUSEPORT bind");
-    if server::bind_udp_listener(udp_addr, false).is_ok() {
+    if let Ok(udp_non_reuse) = server::bind_udp_listener(udp_addr, false) {
+        assert_eq!(
+            get_int_sockopt(udp_non_reuse.as_raw_fd(), libc::SO_REUSEPORT),
+            0,
+            "udp reuse_port=false must leave SO_REUSEPORT disabled"
+        );
+    }
+    if std::net::UdpSocket::bind(udp_addr).is_ok() {
         let nodename = kernel_nodename();
         assert_eq!(
             nodename, "sandbox",
-            "non-SO_REUSEPORT UDP bind must fail on native kernel ({nodename})"
+            "plain UdpSocket::bind without SO_REUSEADDR/SO_REUSEPORT must fail on native kernel ({nodename})"
         );
     }
 }

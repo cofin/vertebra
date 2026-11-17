@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
-    from advanced_alchemy.filters import RelationshipFilter
-    from advanced_alchemy.filterset import FilterSet
+    from advanced_alchemy.filters import FilterSet, RelationshipFilter
     from advanced_alchemy.service import SchemaDumpConfig, ServiceGroup
 
     from vertebra.extensions.alchemy.broker import (
@@ -85,7 +84,6 @@ __all__ = (
 
 __lazy_modules__ = [
     "advanced_alchemy.filters",
-    "advanced_alchemy.filterset",
     "advanced_alchemy.service",
     "vertebra.extensions.alchemy.broker",
     "vertebra.extensions.alchemy.cache",
@@ -103,7 +101,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "BrokerPlugin": ("vertebra.extensions.alchemy.broker", "BrokerPlugin"),
     "CacheConfig": ("vertebra.extensions.alchemy.cache", "CacheConfig"),
     "ChannelMessage": ("vertebra.extensions.alchemy.broker", "ChannelMessage"),
-    "FilterSet": ("advanced_alchemy.filterset", "FilterSet"),
+    "FilterSet": ("advanced_alchemy.filters", "FilterSet"),
     "ObjectStoreBackend": ("vertebra.extensions.alchemy.storage", "ObjectStoreBackend"),
     "RelationshipFilter": ("advanced_alchemy.filters", "RelationshipFilter"),
     "SchemaDumpConfig": ("advanced_alchemy.service", "SchemaDumpConfig"),
