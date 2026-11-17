@@ -185,6 +185,8 @@ async def test_mysql_family_multi_result_call_arrow_shm_and_pipeline(
                     )
                 )
                 assert len(batches) == 3
+                for batch in batches:
+                    batch.close()
 
                 with pytest.raises(_PipelineAbortError), driver.pipeline() as pipe:
                     pipe.execute(f"INSERT INTO {table} (id, label) VALUES (?, ?)", (99999, "rolled-back"))
@@ -225,6 +227,8 @@ async def test_mysql_family_multi_result_call_arrow_shm_and_pipeline(
                     )
                 ]
                 assert len(batches) == 3
+                for batch in batches:
+                    batch.close()
 
                 with pytest.raises(_PipelineAbortError):
                     async with driver.pipeline() as pipe:

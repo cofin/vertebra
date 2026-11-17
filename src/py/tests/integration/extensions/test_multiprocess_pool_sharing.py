@@ -627,7 +627,7 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
             if engine == "postgres":
                 backend_count = inspector.select_value(
                     "SELECT count(*)::int4 FROM pg_stat_activity WHERE application_name = $1",
-                    app_tag,
+                    (app_tag,),
                 )
             else:
                 backend_count = inspector.select_value(
@@ -667,7 +667,7 @@ def test_docker_multiprocess_pool_sharing(request: pytest.FixtureRequest, engine
                 idle_in_tx = inspector.select_value(
                     "SELECT count(*)::int4 FROM pg_stat_activity "
                     "WHERE application_name = $1 AND state = 'idle in transaction'",
-                    app_tag,
+                    (app_tag,),
                 )
                 assert int(idle_in_tx) == 0
             uncommitted_rows = inspector.select_value(f"SELECT COUNT(*) FROM {table_name} WHERE id = 999999")

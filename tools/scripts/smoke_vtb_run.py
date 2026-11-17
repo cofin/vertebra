@@ -35,8 +35,10 @@ import asyncio
 from typing import Any
 
 from vertebra import App
+from vertebra.framework.queues import QueueService
 
 app = App()
+app.state["vertebra_queue_service"] = QueueService()
 
 
 @app.get("/health")
@@ -212,7 +214,7 @@ class VtbRunSmoke:
             chunks: list[bytes] = []
             first_chunk_elapsed: float | None = None
             while True:
-                chunk = resp.read(64)
+                chunk = resp.read1(64)
                 if not chunk:
                     break
                 if first_chunk_elapsed is None:

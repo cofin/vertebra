@@ -64,6 +64,7 @@ class App:
         "_routes",
         "_shutdown_hooks",
         "_startup_hooks",
+        "_state",
         "_welcome_route_active",
     )
 
@@ -87,6 +88,7 @@ class App:
         self._plugins: list[Any] = []
         self._startup_hooks: list[LifecycleHook] = []
         self._shutdown_hooks: list[LifecycleHook] = []
+        self._state: dict[str, Any] = {}
         self._handler_index: dict[int, HandlerInfo] = {}
         self._handlers: dict[int, Callable[..., Any]] = {}
         self._mounts: list[tuple[str, Any, str]] = []
@@ -116,6 +118,11 @@ class App:
     def routes(self) -> tuple[Route, ...]:
         """Return all registered route definitions in registration order."""
         return tuple(self._routes)
+
+    @property
+    def state(self) -> dict[str, Any]:
+        """Return mutable application state shared with plugins, lifespan hooks, and worker runners."""
+        return self._state
 
     @property
     def routers(self) -> tuple[Router, ...]:

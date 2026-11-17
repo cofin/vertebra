@@ -436,6 +436,7 @@ def vtb_mssql_config(request: pytest.FixtureRequest) -> MSSQLConfig:
         user=mssql_service.user,
         password=mssql_service.password,
         database=mssql_service.database,
+        trust_server_certificate=True,
     )
 
 

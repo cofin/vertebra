@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::layout::CacheLine;
 use crate::platform::WaitWord;
-use crate::shm::{NamedAttach, ShmError, ShmRegion};
+#[cfg(unix)]
+use crate::shm::NamedAttach;
+use crate::shm::{ShmError, ShmRegion};
 
 pub const BROKER_MAGIC: u64 = u64::from_le_bytes(*b"VTBBRKR1");
 pub const BROKER_ABI_VERSION: u32 = 2;
@@ -244,7 +246,9 @@ pub fn monotonic_now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-#[repr(C, align(64))]
+#[repr(C)]
+#[cfg_attr(target_arch = "aarch64", repr(align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(align(64)))]
 pub struct ShmLeaseHeader {
     // Cache line 0 (64B): Immutable configuration
     pub magic: u64,
@@ -288,8 +292,11 @@ pub struct ShmLeaseHeader {
     pub partitions: [ShmPartitionEntry; MAX_POOL_PARTITIONS],
 }
 
+#[cfg(target_arch = "aarch64")]
+const _: () = assert!(std::mem::size_of::<ShmLeaseHeader>() == 4992);
+#[cfg(not(target_arch = "aarch64"))]
 const _: () = assert!(std::mem::size_of::<ShmLeaseHeader>() == 4544);
-const _: () = assert!(std::mem::align_of::<ShmLeaseHeader>() == 64);
+const _: () = assert!(std::mem::align_of::<ShmLeaseHeader>() == crate::layout::CACHELINE_BYTES);
 
 #[repr(C, align(64))]
 pub struct LeaseSlot {

@@ -14,9 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::thread::JoinHandle;
+#[cfg(not(unix))]
+use std::time::Duration;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib
+import importlib.util
 import io
 import json
 import sys
@@ -97,17 +98,11 @@ from vertebra.extensions.litestar.fastpath import (
 from vertebra.extensions.sqlalchemy import (
     ALL_DIALECT_SCHEMES,
     DIALECT_DESCRIPTORS,
-    AsyncBigQueryDialect,
-    AsyncSpangresDialect,
-    AsyncSpannerDialect,
     BigQueryAlembicImpl,
     CreateVectorIndexOp,
     MsgspecJSON,
     SpangresAlembicImpl,
     SpannerAlembicImpl,
-    SyncBigQueryDialect,
-    SyncSpangresDialect,
-    SyncSpannerDialect,
     Vector,
 )
 from vertebra.extensions.sqlalchemy import dialects as sqlalchemy_dialects_mod
@@ -135,6 +130,37 @@ from vertebra.typing import (
     ToolProvider,
     reset_dependency_cache,
 )
+
+_HAS_SQLALCHEMY_GCP = (
+    importlib.util.find_spec("sqlalchemy_bigquery") is not None
+    and importlib.util.find_spec("google.cloud.sqlalchemy_spanner") is not None
+)
+if _HAS_SQLALCHEMY_GCP:
+    from vertebra.extensions.sqlalchemy import (
+        AsyncBigQueryDialect as AsyncBigQueryDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        AsyncSpangresDialect as AsyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        AsyncSpannerDialect as AsyncSpannerDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncBigQueryDialect as SyncBigQueryDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncSpangresDialect as SyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncSpannerDialect as SyncSpannerDialect,
+    )
+else:
+    AsyncBigQueryDialect = cast("Any", None)
+    AsyncSpangresDialect = cast("Any", None)
+    AsyncSpannerDialect = cast("Any", None)
+    SyncBigQueryDialect = cast("Any", None)
+    SyncSpangresDialect = cast("Any", None)
+    SyncSpannerDialect = cast("Any", None)
 
 
 @pytest.mark.anyio
@@ -997,6 +1023,7 @@ def test_gcp_sqlalchemy_dialect_schemes_registered(scheme: str) -> None:
     assert scheme in DIALECT_DESCRIPTORS
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     """Verify SQLAlchemy 2.1 +vtb dialects, Vector/MsgspecJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
 
@@ -1566,6 +1593,7 @@ async def test_native_provider_preserves_driver_exception_identity(
         assert exc.value is failure
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
     """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
@@ -1697,6 +1725,7 @@ class _BrokenStrGCPError(Exception):
         raise RuntimeError("broken string conversion")
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_bigquery_sqlalchemy21_compilation_and_execution(asynchronous: bool) -> None:
@@ -1773,6 +1802,7 @@ async def test_bigquery_sqlalchemy21_compilation_and_execution(asynchronous: boo
         sync_engine.dispose()
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.parametrize(
     ("scheme", "dialect_cls", "expected_broker_base"),
     [
@@ -1810,6 +1840,7 @@ def test_bigquery_broker_query_selects_broker_pool_or_null_pool(
         fake_broker.close()
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("scheme_prefix", "asynchronous"),
@@ -1878,6 +1909,7 @@ async def test_spanner_and_spangres_sqlalchemy21_execution_and_pool(
         sync_engine.dispose()
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 async def test_spangres_rejects_twophase_and_spanner_is_disconnect() -> None:
     """Verify Spangres rejects two-phase commit loudly without emitting PREPARE TRANSACTION."""
@@ -1930,6 +1962,7 @@ async def test_spangres_rejects_twophase_and_spanner_is_disconnect() -> None:
         await async_engine.dispose()
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.parametrize(
     "dialect_cls",
     [
@@ -1974,6 +2007,7 @@ def test_gcp_dialects_is_disconnect_classification(
     assert dialect.is_disconnect(exc_factory(), _ConnStub(closed)) is expected
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.parametrize(
     ("dialect_module_name", "missing_dep"),
     [

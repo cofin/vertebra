@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import importlib
+import importlib.util
 import io
 import mmap
 import os
@@ -12,7 +13,7 @@ import sqlite3
 import struct
 import sys
 import zipfile
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import pyarrow as pa
@@ -104,10 +105,8 @@ from vertebra.db.driver._common import (
 )
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
-    AsyncDuckDBDialect,
     AsyncMSSQLDialect,
     NullPool,
-    SyncDuckDBDialect,
     SyncMSSQLDialect,
 )
 from vertebra.extensions.sqlalchemy.dialects.mssql import MSExecutionContext_vtb
@@ -140,6 +139,18 @@ from vertebra.typing import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
+if _HAS_DUCKDB_ENGINE:
+    from vertebra.extensions.sqlalchemy.dialects import (
+        AsyncDuckDBDialect as AsyncDuckDBDialect,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncDuckDBDialect as SyncDuckDBDialect,
+    )
+else:
+    AsyncDuckDBDialect = cast("Any", None)
+    SyncDuckDBDialect = cast("Any", None)
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
@@ -662,9 +673,12 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
 )
 def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
     """Verify SQLAlchemy +vtb dialects select NullPool when shm_broker=true is enabled."""
+    if dialect_name == "duckdb.vtb" and not _HAS_DUCKDB_ENGINE:
+        pytest.skip("duckdb-engine is only installed on Python < 3.14")
     assert len(ALL_DIALECT_SCHEMES) == 36
     assert registry.load("mssql.vtb") is SyncMSSQLDialect
-    assert registry.load("duckdb.vtb") is SyncDuckDBDialect
+    if _HAS_DUCKDB_ENGINE:
+        assert registry.load("duckdb.vtb") is SyncDuckDBDialect
     dialect_cls = registry.load(dialect_name)
     broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
     assert dialect_cls.get_pool_class(broker_url) is NullPool
@@ -2019,6 +2033,7 @@ def test_mssql_is_disconnect_codes(
     assert dialect.is_disconnect(err) is expected
 
 
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
 @pytest.mark.anyio
 async def test_duckdb_sqlalchemy21_real_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify live sync and async DuckDB engines run DDL, DML, and json_serializer on vertebra._duckdb."""
@@ -2026,7 +2041,10 @@ async def test_duckdb_sqlalchemy21_real_execution(monkeypatch: pytest.MonkeyPatc
     serializer = msgspec.json.encode
     deserializer = msgspec.json.decode
 
-    import duckdb_engine
+    duckdb_engine = pytest.importorskip(
+        "duckdb_engine",
+        reason="duckdb-engine is only installed on Python < 3.14",
+    )
 
     orig_init = duckdb_engine.Dialect.__init__
 
@@ -2094,6 +2112,7 @@ async def test_duckdb_sqlalchemy21_real_execution(monkeypatch: pytest.MonkeyPatc
         await async_engine.dispose()
 
 
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
 def test_duckdb_missing_dependency_error_when_uninstalled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify importing vertebra.extensions.sqlalchemy.dialects.duckdb without duckdb_engine names sqlalchemy-duckdb."""
     import vertebra.extensions.sqlalchemy.dialects.duckdb as duckdb_mod
@@ -2109,6 +2128,7 @@ def test_duckdb_missing_dependency_error_when_uninstalled(monkeypatch: pytest.Mo
         importlib.reload(duckdb_mod)
 
 
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
 @pytest.mark.parametrize(
     "dialect_cls",
     [SyncDuckDBDialect, AsyncDuckDBDialect],

@@ -7,6 +7,7 @@ import contextlib
 import os
 import sys
 from collections.abc import MutableMapping
+from pathlib import Path
 from typing import Any, cast
 
 import click
@@ -36,6 +37,9 @@ def execute_worker_cli(
     """Load the target application, enter its lifespan, bind QueueService, and run worker lanes."""
     prev_litestar_app = os.environ.get("LITESTAR_APP")
     prev_vertebra_app = os.environ.get("VERTEBRA_APP")
+    cwd_str = str(Path.cwd().resolve())
+    if cwd_str not in sys.path:
+        sys.path.insert(0, cwd_str)
     os.environ["LITESTAR_APP"] = app_path
     os.environ["VERTEBRA_APP"] = app_path
     try:

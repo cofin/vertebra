@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import importlib.util
 import subprocess
 import sys
 import warnings
@@ -90,16 +91,42 @@ from vertebra.extensions.sqlalchemy.dialects import (
     AsyncMySQLDialect,
     AsyncOracleDialect,
     AsyncPostgreSQLDialect,
-    AsyncSpangresDialect,
     AsyncSQLiteDialect,
-    SyncBigQueryDialect,
-    SyncDuckDBDialect,
     SyncMSSQLDialect,
-    SyncSpangresDialect,
-    SyncSpannerDialect,
 )
 from vertebra.extensions.sqlalchemy.pool import AsyncBrokerPool, BrokerPool
 from vertebra.storage import SyncObjectStore
+
+_HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
+_HAS_SQLALCHEMY_GCP = (
+    importlib.util.find_spec("sqlalchemy_bigquery") is not None
+    and importlib.util.find_spec("google.cloud.sqlalchemy_spanner") is not None
+)
+if _HAS_DUCKDB_ENGINE:
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncDuckDBDialect as SyncDuckDBDialect,
+    )
+else:
+    SyncDuckDBDialect = cast("Any", None)
+
+if _HAS_SQLALCHEMY_GCP:
+    from vertebra.extensions.sqlalchemy.dialects import (
+        AsyncSpangresDialect as AsyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncBigQueryDialect as SyncBigQueryDialect,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncSpangresDialect as SyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncSpannerDialect as SyncSpannerDialect,
+    )
+else:
+    AsyncSpangresDialect = cast("Any", None)
+    SyncBigQueryDialect = cast("Any", None)
+    SyncSpangresDialect = cast("Any", None)
+    SyncSpannerDialect = cast("Any", None)
 
 
 @pytest.mark.parametrize("autocommit", [False, True])
@@ -511,6 +538,8 @@ def test_vector_comparator_compiles_in_select_where_and_order_by(
     expected_order_token: str,
 ) -> None:
     """Verify Vector.Comparator expressions compile in where() and order_by() across all vector dialects."""
+    if dialect_cls is None:
+        pytest.skip("optional SQLAlchemy dialect package not installed")
     for vector_type in (
         Vector(3),
         PgVector(3),
@@ -536,11 +565,15 @@ def test_vector_comparator_compiles_in_select_where_and_order_by(
 
     unsupported_tbl = Table("docs", MetaData(), Column("embedding", Vector(3)))
     unsupported_stmt = select(unsupported_tbl).order_by(unsupported_tbl.c.embedding.cosine_distance([0.1, 0.2, 0.3]))
-    for unsupported_cls in (SyncDuckDBDialect, SyncSQLiteDialect):
+    unsupported_dialects: tuple[Any, ...] = (
+        (SyncDuckDBDialect, SyncSQLiteDialect) if _HAS_DUCKDB_ENGINE else (SyncSQLiteDialect,)
+    )
+    for unsupported_cls in unsupported_dialects:
         with pytest.raises(NotImplementedError):
             unsupported_stmt.compile(dialect=unsupported_cls())
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.parametrize("dialect_cls", [SyncSpangresDialect, AsyncSpangresDialect])
 def test_vector_spangres_ddl_compilation(dialect_cls: type[Any]) -> None:
     """Verify CreateTable compiles Vector(768) and Vector() cleanly on sync and async Spangres dialects."""
@@ -556,16 +589,18 @@ def test_msgspec_json_dialect_impls_and_sqlite_jsonb_roundtrip() -> None:
     """Verify MsgspecJSON dialect impl mapping, str bind encoding, and live SQLite JSONB round-trips."""
     mjson = MsgspecJSON()
     assert isinstance(mjson.load_dialect_impl(cast(Any, SyncPostgreSQLDialect)()), sa_postgresql.JSONB)
-    assert isinstance(mjson.load_dialect_impl(cast(Any, SyncSpangresDialect)()), sa_postgresql.JSONB)
     assert isinstance(mjson.load_dialect_impl(SyncSQLiteDialect()), sa_sqlite.JSONB)
     mssql_dialect = cast(Any, SyncMSSQLDialect)()
     mssql_impl = mjson.load_dialect_impl(mssql_dialect)
     assert mssql_impl.compile(dialect=mssql_dialect) == "NVARCHAR(max)"
     assert isinstance(mjson.load_dialect_impl(SyncOracleDialect()), sa_oracle.JSON)
-    assert type(mjson.load_dialect_impl(SyncBigQueryDialect())) is SAJSON
-    assert type(mjson.load_dialect_impl(SyncSpannerDialect())) is SAJSON
     assert isinstance(mjson.load_dialect_impl(SyncMySQLDialect()), SAJSON)
-    assert type(mjson.load_dialect_impl(SyncDuckDBDialect())) is SAJSON
+    if _HAS_SQLALCHEMY_GCP:
+        assert isinstance(mjson.load_dialect_impl(cast(Any, SyncSpangresDialect)()), sa_postgresql.JSONB)
+        assert type(mjson.load_dialect_impl(SyncBigQueryDialect())) is SAJSON
+        assert type(mjson.load_dialect_impl(SyncSpannerDialect())) is SAJSON
+    if _HAS_DUCKDB_ENGINE:
+        assert type(mjson.load_dialect_impl(SyncDuckDBDialect())) is SAJSON
 
     assert mjson.process_bind_param("hello", SyncSQLiteDialect()) == '"hello"'
     assert mjson.process_result_value(memoryview(b'{"k": 2}'), SyncSQLiteDialect()) == {"k": 2}
@@ -680,10 +715,12 @@ def test_alembic_impl_dialect_resolution_by_name() -> None:
     import vertebra.extensions.sqlalchemy.alembic as alembic_pkg
     import vertebra.extensions.sqlalchemy.alembic.impl as alembic_impl_mod
 
-    assert DefaultImpl.get_by_dialect(SyncDuckDBDialect()) is DuckDBAlembicImpl
-    assert DefaultImpl.get_by_dialect(SyncBigQueryDialect()) is BigQueryAlembicImpl
-    assert DefaultImpl.get_by_dialect(SyncSpannerDialect()) is SpannerAlembicImpl
-    assert DefaultImpl.get_by_dialect(cast(Any, SyncSpangresDialect)()) is SpangresAlembicImpl
+    if _HAS_DUCKDB_ENGINE:
+        assert DefaultImpl.get_by_dialect(SyncDuckDBDialect()) is DuckDBAlembicImpl
+    if _HAS_SQLALCHEMY_GCP:
+        assert DefaultImpl.get_by_dialect(SyncBigQueryDialect()) is BigQueryAlembicImpl
+        assert DefaultImpl.get_by_dialect(SyncSpannerDialect()) is SpannerAlembicImpl
+        assert DefaultImpl.get_by_dialect(cast(Any, SyncSpangresDialect)()) is SpangresAlembicImpl
 
     for removed in (
         "AlembicImpl",
@@ -955,6 +992,7 @@ def test_sqlalchemy_dialects_type_descriptor(dialect_cls: type[Any]) -> None:
         assert type(inst.type_descriptor(generic_json)) is not SAJSON
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.parametrize("spangres_cls", [SyncSpangresDialect, AsyncSpangresDialect])
 def test_sqlalchemy_dialects_spangres_numeric_dollar_compilation(spangres_cls: type[Any]) -> None:
     """Spangres dialects compile positional numeric_dollar ($1..$N) placeholders."""
@@ -973,6 +1011,10 @@ def test_sqlalchemy_dialects_spangres_numeric_dollar_compilation(spangres_cls: t
     assert "$1" in ins_text and "$2" in ins_text
 
 
+@pytest.mark.skipif(
+    not (_HAS_DUCKDB_ENGINE and _HAS_SQLALCHEMY_GCP),
+    reason="optional DuckDB/GCP SQLAlchemy dialects require Python < 3.14",
+)
 def test_sqlalchemy_dialects_alembic_bare_names() -> None:
     """Alembic DefaultImpl resolves custom DuckDB, BigQuery, Spanner, and Spangres dialects."""
     assert DefaultImpl.get_by_dialect(SyncDuckDBDialect()) is DuckDBAlembicImpl

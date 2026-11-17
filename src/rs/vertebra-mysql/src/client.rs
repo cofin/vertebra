@@ -166,6 +166,18 @@ pub fn py_param_to_mysql_value(val: &Bound<'_, PyAny>) -> Result<Value, MySQLErr
     if let Ok(b) = val.cast::<PyBool>() {
         return Ok(Value::Int(if b.is_true() { 1 } else { 0 }));
     }
+    let type_name = val
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    if type_name == "Decimal" {
+        let s = val
+            .str()
+            .map_err(|e| MySQLError::data(format!("Failed to format Decimal parameter: {e}")))?
+            .to_string();
+        return Ok(Value::Bytes(s.into_bytes()));
+    }
     if let Ok(i) = val.extract::<i64>() {
         return Ok(Value::Int(i));
     }
@@ -180,18 +192,6 @@ pub fn py_param_to_mysql_value(val: &Bound<'_, PyAny>) -> Result<Value, MySQLErr
     }
     if let Ok(b) = val.extract::<Vec<u8>>() {
         return Ok(Value::Bytes(b));
-    }
-    let type_name = val
-        .get_type()
-        .name()
-        .map(|n| n.to_string())
-        .unwrap_or_default();
-    if type_name == "Decimal" {
-        let s = val
-            .str()
-            .map_err(|e| MySQLError::data(format!("Failed to format Decimal parameter: {e}")))?
-            .to_string();
-        return Ok(Value::Bytes(s.into_bytes()));
     }
     if type_name == "datetime" {
         let dt_val = if let Ok(tz) = val.getattr("tzinfo")
@@ -341,16 +341,49 @@ pub fn prepare_sql_and_params(
     ))
 }
 
-fn decode_mysql_row(row: Row, columns: &[(String, u8)]) -> Result<Vec<DecodedCell>, MySQLError> {
+fn extract_mysql_column_meta(
+    columns: Option<&[mysql_async::Column]>,
+) -> Vec<(String, u8, u16, u16)> {
+    columns
+        .map(|cols| {
+            cols.iter()
+                .map(|c| {
+                    (
+                        c.name_str().into_owned(),
+                        c.column_type() as u8,
+                        c.flags().bits(),
+                        c.character_set(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn decode_mysql_row_with_meta(
+    row: Row,
+    columns: &[(String, u8, u16, u16)],
+) -> Result<Vec<DecodedCell>, MySQLError> {
     let mut cells = Vec::with_capacity(columns.len());
-    for (idx, (_, col_type)) in columns.iter().enumerate() {
+    for (idx, (_, col_type, col_flags, charset)) in columns.iter().enumerate() {
         let raw = row.as_ref(idx).cloned().unwrap_or(Value::NULL);
-        cells.push(decode_mysql_value(raw, *col_type)?);
+        cells.push(decode_mysql_value_with_meta(
+            raw, *col_type, *col_flags, *charset,
+        )?);
     }
     Ok(cells)
 }
 
 pub fn decode_mysql_value(val: Value, col_type: u8) -> Result<DecodedCell, MySQLError> {
+    decode_mysql_value_with_meta(val, col_type, 0, 63)
+}
+
+fn decode_mysql_value_with_meta(
+    val: Value,
+    col_type: u8,
+    col_flags: u16,
+    charset: u16,
+) -> Result<DecodedCell, MySQLError> {
     use mysql_async::consts::ColumnType;
     match val {
         Value::NULL => Ok(DecodedCell::Null),
@@ -372,11 +405,16 @@ pub fn decode_mysql_value(val: Value, col_type: u8) -> Result<DecodedCell, MySQL
         Value::Time(is_neg, days, hh, mm, ss, us) => Ok(DecodedCell::Time(
             is_neg, days, hh as u32, mm as u32, ss as u32, us,
         )),
-        Value::Bytes(bytes) => decode_bytes_by_column_type(bytes, col_type),
+        Value::Bytes(bytes) => decode_bytes_by_column_type(bytes, col_type, col_flags, charset),
     }
 }
 
-fn decode_bytes_by_column_type(bytes: Vec<u8>, col_type: u8) -> Result<DecodedCell, MySQLError> {
+fn decode_bytes_by_column_type(
+    bytes: Vec<u8>,
+    col_type: u8,
+    col_flags: u16,
+    charset: u16,
+) -> Result<DecodedCell, MySQLError> {
     use mysql_async::consts::ColumnType;
     if col_type == ColumnType::MYSQL_TYPE_DECIMAL as u8
         || col_type == ColumnType::MYSQL_TYPE_NEWDECIMAL as u8
@@ -438,11 +476,16 @@ fn decode_bytes_by_column_type(bytes: Vec<u8>, col_type: u8) -> Result<DecodedCe
     }
     if col_type == ColumnType::MYSQL_TYPE_BIT as u8
         || col_type == ColumnType::MYSQL_TYPE_VECTOR as u8
-        || col_type == ColumnType::MYSQL_TYPE_BLOB as u8
+    {
+        return Ok(DecodedCell::Bytes(bytes));
+    }
+    let is_blob_type = col_type == ColumnType::MYSQL_TYPE_BLOB as u8
         || col_type == ColumnType::MYSQL_TYPE_TINY_BLOB as u8
         || col_type == ColumnType::MYSQL_TYPE_MEDIUM_BLOB as u8
-        || col_type == ColumnType::MYSQL_TYPE_LONG_BLOB as u8
-    {
+        || col_type == ColumnType::MYSQL_TYPE_LONG_BLOB as u8;
+    let is_binary =
+        (col_flags & mysql_async::consts::ColumnFlags::BINARY_FLAG.bits()) != 0 || charset == 63;
+    if is_blob_type && is_binary {
         return Ok(DecodedCell::Bytes(bytes));
     }
     match String::from_utf8(bytes) {
@@ -633,21 +676,19 @@ impl MySQLClientCore {
                             .query_iter(sql.as_str())
                             .await
                             .map_err(MySQLError::from)?;
-                        columns = result
-                            .columns()
-                            .as_ref()
-                            .map(|cols| {
-                                cols.iter()
-                                    .map(|c| (c.name_str().into_owned(), c.column_type() as u8))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let col_meta = extract_mysql_column_meta(
+                            result.columns().as_ref().map(|c| c.as_ref()),
+                        );
+                        columns = col_meta
+                            .iter()
+                            .map(|(n, t, _, _)| (n.clone(), *t))
+                            .collect();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
                         res_affected = result.affected_rows();
                         res_last_id = result.last_insert_id();
                         for row in raw_rows {
-                            rows.push(decode_mysql_row(row, &columns)?);
+                            rows.push(decode_mysql_row_with_meta(row, &col_meta)?);
                         }
                     } else {
                         let stmt = conn.prep(sql.as_str()).await.map_err(MySQLError::from)?;
@@ -655,21 +696,19 @@ impl MySQLClientCore {
                             .exec_iter(&stmt, params)
                             .await
                             .map_err(MySQLError::from)?;
-                        columns = result
-                            .columns()
-                            .as_ref()
-                            .map(|cols| {
-                                cols.iter()
-                                    .map(|c| (c.name_str().into_owned(), c.column_type() as u8))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let col_meta = extract_mysql_column_meta(
+                            result.columns().as_ref().map(|c| c.as_ref()),
+                        );
+                        columns = col_meta
+                            .iter()
+                            .map(|(n, t, _, _)| (n.clone(), *t))
+                            .collect();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
                         res_affected = result.affected_rows();
                         res_last_id = result.last_insert_id();
                         for row in raw_rows {
-                            rows.push(decode_mysql_row(row, &columns)?);
+                            rows.push(decode_mysql_row_with_meta(row, &col_meta)?);
                         }
                     }
                     let affected = res_affected.max(conn.affected_rows());
@@ -708,22 +747,18 @@ impl MySQLClientCore {
                         .await
                         .map_err(MySQLError::from)?;
                     while !result.is_empty() {
-                        let cols: Vec<(String, u8)> = result
-                            .columns()
-                            .as_ref()
-                            .map(|c| {
-                                c.iter()
-                                    .map(|col| {
-                                        (col.name_str().into_owned(), col.column_type() as u8)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let col_meta = extract_mysql_column_meta(
+                            result.columns().as_ref().map(|c| c.as_ref()),
+                        );
+                        let cols: Vec<(String, u8)> = col_meta
+                            .iter()
+                            .map(|(n, t, _, _)| (n.clone(), *t))
+                            .collect();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
                         let mut decoded_rows = Vec::with_capacity(raw_rows.len());
                         for r in raw_rows {
-                            decoded_rows.push(decode_mysql_row(r, &cols)?);
+                            decoded_rows.push(decode_mysql_row_with_meta(r, &col_meta)?);
                         }
                         sets.push(DecodedResultSet {
                             columns: cols,
@@ -739,22 +774,18 @@ impl MySQLClientCore {
                         .await
                         .map_err(MySQLError::from)?;
                     while !result.is_empty() {
-                        let cols: Vec<(String, u8)> = result
-                            .columns()
-                            .as_ref()
-                            .map(|c| {
-                                c.iter()
-                                    .map(|col| {
-                                        (col.name_str().into_owned(), col.column_type() as u8)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let col_meta = extract_mysql_column_meta(
+                            result.columns().as_ref().map(|c| c.as_ref()),
+                        );
+                        let cols: Vec<(String, u8)> = col_meta
+                            .iter()
+                            .map(|(n, t, _, _)| (n.clone(), *t))
+                            .collect();
                         let raw_rows: Vec<Row> =
                             result.collect().await.map_err(MySQLError::from)?;
                         let mut decoded_rows = Vec::with_capacity(raw_rows.len());
                         for r in raw_rows {
-                            decoded_rows.push(decode_mysql_row(r, &cols)?);
+                            decoded_rows.push(decode_mysql_row_with_meta(r, &col_meta)?);
                         }
                         sets.push(DecodedResultSet {
                             columns: cols,
