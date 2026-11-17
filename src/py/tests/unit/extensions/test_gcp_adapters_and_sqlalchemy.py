@@ -135,32 +135,38 @@ _HAS_SQLALCHEMY_GCP = (
     importlib.util.find_spec("sqlalchemy_bigquery") is not None
     and importlib.util.find_spec("google.cloud.sqlalchemy_spanner") is not None
 )
+AsyncBigQueryDialect: Any = None
+AsyncSpangresDialect: Any = None
+AsyncSpannerDialect: Any = None
+SyncBigQueryDialect: Any = None
+SyncSpangresDialect: Any = None
+SyncSpannerDialect: Any = None
 if _HAS_SQLALCHEMY_GCP:
     from vertebra.extensions.sqlalchemy import (
-        AsyncBigQueryDialect as AsyncBigQueryDialect,
+        AsyncBigQueryDialect as _AsyncBigQueryDialect,
     )
     from vertebra.extensions.sqlalchemy import (
-        AsyncSpangresDialect as AsyncSpangresDialect,
+        AsyncSpangresDialect as _AsyncSpangresDialect,
     )
     from vertebra.extensions.sqlalchemy import (
-        AsyncSpannerDialect as AsyncSpannerDialect,
+        AsyncSpannerDialect as _AsyncSpannerDialect,
     )
     from vertebra.extensions.sqlalchemy import (
-        SyncBigQueryDialect as SyncBigQueryDialect,
+        SyncBigQueryDialect as _SyncBigQueryDialect,
     )
     from vertebra.extensions.sqlalchemy import (
-        SyncSpangresDialect as SyncSpangresDialect,
+        SyncSpangresDialect as _SyncSpangresDialect,
     )
     from vertebra.extensions.sqlalchemy import (
-        SyncSpannerDialect as SyncSpannerDialect,
+        SyncSpannerDialect as _SyncSpannerDialect,
     )
-else:
-    AsyncBigQueryDialect = cast("Any", None)
-    AsyncSpangresDialect = cast("Any", None)
-    AsyncSpannerDialect = cast("Any", None)
-    SyncBigQueryDialect = cast("Any", None)
-    SyncSpangresDialect = cast("Any", None)
-    SyncSpannerDialect = cast("Any", None)
+
+    AsyncBigQueryDialect = _AsyncBigQueryDialect
+    AsyncSpangresDialect = _AsyncSpangresDialect
+    AsyncSpannerDialect = _AsyncSpannerDialect
+    SyncBigQueryDialect = _SyncBigQueryDialect
+    SyncSpangresDialect = _SyncSpangresDialect
+    SyncSpannerDialect = _SyncSpannerDialect
 
 
 @pytest.mark.anyio

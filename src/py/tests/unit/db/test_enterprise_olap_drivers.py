@@ -13,7 +13,7 @@ import sqlite3
 import struct
 import sys
 import zipfile
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import pyarrow as pa
@@ -141,16 +141,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
+AsyncDuckDBDialect: Any = None
+SyncDuckDBDialect: Any = None
 if _HAS_DUCKDB_ENGINE:
     from vertebra.extensions.sqlalchemy.dialects import (
-        AsyncDuckDBDialect as AsyncDuckDBDialect,
+        AsyncDuckDBDialect as _AsyncDuckDBDialect,
     )
     from vertebra.extensions.sqlalchemy.dialects import (
-        SyncDuckDBDialect as SyncDuckDBDialect,
+        SyncDuckDBDialect as _SyncDuckDBDialect,
     )
-else:
-    AsyncDuckDBDialect = cast("Any", None)
-    SyncDuckDBDialect = cast("Any", None)
+
+    AsyncDuckDBDialect = _AsyncDuckDBDialect
+    SyncDuckDBDialect = _SyncDuckDBDialect
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
