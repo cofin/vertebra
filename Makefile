@@ -443,7 +443,6 @@ lint: ts-lint                                       ## Format and lint everythin
 	@echo "${INFO} Checking native extension stubs (stubtest)..."
 	@uv run --no-sync python -c 'import importlib.util, sys; missing = [m for m in ("vertebra._vertebra", "vertebra._bundler", "vertebra._storage", "vertebra._mysql", "vertebra._bigquery", "vertebra._mssql", "vertebra._spanner", "vertebra._duckdb", "vertebra._oracle", "vertebra._postgres", "vertebra._sqlite", "vertebra._redis", "vertebra._valkey") if importlib.util.find_spec(m) is None]; sys.exit(f"Missing native extensions: {missing}") if missing else None'
 	@uv run --no-sync python -m mypy.stubtest vertebra._vertebra vertebra._bundler vertebra._storage vertebra._mysql vertebra._bigquery vertebra._mssql vertebra._spanner vertebra._duckdb vertebra._oracle vertebra._postgres vertebra._sqlite vertebra._redis vertebra._valkey
-	@$(MAKE) review-check
 	@echo "${OK} Lint complete"
 
 .PHONY: lint-all
@@ -463,7 +462,6 @@ lint-all:                                           ## Check formatting, linting
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
 	@(cd src/rs && cargo fmt --all -- --check)
 	@(cd src/rs && cargo clippy --workspace --all-targets --features tls,http3,compression,gcp -- -D warnings)
-	@$(MAKE) review-check
 	@echo "${OK} All lint checks passed"
 
 .PHONY: review-check

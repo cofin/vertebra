@@ -43,7 +43,7 @@ sources:
 
 <!-- truth: start -->
 - `make review-route BASE=origin/main` maps modified files to owning areas and shards (covering all 13 PyO3 extensions under `[areas.pyo3-bridge]`).
-- `make lint` / `make lint-all` enforce `tsc --noEmit`, `pyright src/py/vertebra`, `tools/scripts/check_extras.py`, fail-loud 13-extension `mypy.stubtest`, and `make review-check`.
+- `make lint` / `make lint-all` enforce `tsc --noEmit`, `pyright src/py/vertebra`, `tools/scripts/check_extras.py`, and fail-loud 13-extension `mypy.stubtest`; `make review-check` runs local agentic review validation on demand.
 - `make bench-check BASELINE=pre-refactor` enforces `<= 3%` throughput regression and `<= 5%` latency increase.
 - Every false-positive suppression is cataloged in `false-positive-suppressions.md` with concrete evidence.
 <!-- truth: end -->

@@ -34,9 +34,9 @@ Commits remain local unless the user explicitly asks for delivery. Never create,
 make setup-env   # Configure public uv, bun/npm, and cargo registries on hosts whose mirrors replace them; no-op elsewhere
 make install     # Fresh setup: destroy .venv + clean, setup-env, pin Python 3.12, uv sync --all-extras --dev --group doc, bun install/build, make dev
 make dev         # Build non-extension Rust crates and install debug PyO3 extensions (_vertebra, _bundler, _storage, _mysql, _bigquery, _mssql, _spanner, _duckdb, _oracle, _postgres, _sqlite, _redis, _valkey)
-make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,http3,compression,gcp), and run tsc --noEmit + Mypy + Pyright + check_extras + 13-extension fail-loud stubtest + review-check
-make lint-all    # Read-only CI lint, tsc --noEmit, Mypy, Pyright, check_extras, Clippy (--features tls,http3,compression,gcp), 13-extension fail-loud stubtest, and review-check gate across TS, Python, and Rust
-make review-check # Validate review capability manifests, skills, agents, and privacy constraints
+make lint        # Auto-fix TS (Biome), Python (Ruff), Rust (rustfmt + Clippy --features tls,http3,compression,gcp), and run tsc --noEmit + Mypy + Pyright + check_extras + 13-extension fail-loud stubtest
+make lint-all    # Read-only CI lint, tsc --noEmit, Mypy, Pyright, check_extras, Clippy (--features tls,http3,compression,gcp), and 13-extension fail-loud stubtest gate across TS, Python, and Rust
+make review-check # Optional local check for review capability manifests, skills, agents, and privacy constraints
 make review-route # Route changed files to owning review areas and shards (BASE=origin/main)
 make rs-test     # Remove /dev/shm/test-* and /dev/shm/*vertebra*, then run Rust workspace tests (--features tls,http3,compression,gcp) + non-http3 fail-loud check
 make py-test     # Build debug extensions (make dev), verify mypy.stubtest across every installed extension, and run the Python pytest suite

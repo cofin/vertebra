@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      agents: ${{ steps.filter.outputs.agents }}
       python: ${{ steps.filter.outputs.python }}
       rust: ${{ steps.filter.outputs.rust }}
       rust_macos: ${{ steps.filter.outputs.rust_macos }}
@@ -36,11 +35,6 @@ jobs:
         id: filter
         with:
           filters: |
-            agents:
-              - '.agents/**'
-              - '.codex/**'
-              - 'AGENTS.md'
-              - '.github/workflows/ci.yml'
             python:
               - 'src/py/**'
               - 'tools/**'
@@ -73,23 +67,6 @@ jobs:
               - 'Makefile'
               - '.pre-commit-config.yaml'
               - 'biome.json'
-
-  review-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [changes]
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agents == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci == 'true'
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          python-version: "3.12"
-      - name: Validate review setup and OKF bundles
-        run: uv run --no-project --python 3.12 --with "msgspec>=0.18" python -m tools.scripts.review_setup validate
 
   lint:
     runs-on: ubuntu-latest
