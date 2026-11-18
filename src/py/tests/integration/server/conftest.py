@@ -170,7 +170,8 @@ def live_vertebra_server(
     env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
     EmbeddedPythonRuntime.detect().apply(env)
     env["VERTEBRA_SHM_PROFILE"] = "compact"
-    py_paths = [str(app_dir), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
+    vtb_pkg_root = str(Path(_vtb_cli.__file__).resolve().parents[2])
+    py_paths = [str(app_dir), vtb_pkg_root, *(p for p in sys.path if p), str(repo_root / "src" / "py")]
     env["PYTHONPATH"] = os.pathsep.join(py_paths)
 
     cmd = [
@@ -196,17 +197,20 @@ def live_vertebra_server(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
     try:
         _wait_until_healthy("127.0.0.1", port, proc)
         yield LiveServerHandle(host="127.0.0.1", port=port, topology=topology)
     finally:
         if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGTERM)
             try:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=2.0)
 
 

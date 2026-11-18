@@ -1,6 +1,8 @@
 """End-to-end streaming acceptance tests against live embedded and SHM vertebra-server."""
 
+import contextlib
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -9,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import vertebra
 from tests.integration.server.conftest import LiveServerHandle, _reserve_ephemeral_port
 from vertebra.supervisor import EmbeddedPythonRuntime, find_server_binary
 
@@ -121,7 +124,8 @@ def test_vertebra_server_aborts_startup_when_lifespan_fails(
     env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
     EmbeddedPythonRuntime.detect().apply(env)
     env["VERTEBRA_SHM_PROFILE"] = "compact"
-    py_paths = [str(tmp_path), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
+    vtb_pkg_root = str(Path(vertebra.__file__).resolve().parents[1])
+    py_paths = [str(tmp_path), vtb_pkg_root, *(p for p in sys.path if p), str(repo_root / "src" / "py")]
     env["PYTHONPATH"] = os.pathsep.join(py_paths)
 
     proc = subprocess.Popen(
@@ -146,12 +150,14 @@ def test_vertebra_server_aborts_startup_when_lifespan_fails(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
     start_time = time.monotonic()
     try:
         stdout, stderr = proc.communicate(timeout=10.0)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
         msg = f"vertebra-server ({topology}) hung or respawned infinitely on failing lifespan"
         raise AssertionError(msg) from None

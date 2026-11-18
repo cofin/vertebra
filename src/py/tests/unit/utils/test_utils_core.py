@@ -462,3 +462,58 @@ def test_shared_is_uuid_instance_recognizes_stdlib_and_non_uuid_values() -> None
     """Verify shared is_uuid_instance helper handles stdlib UUID and non-UUID values cleanly."""
     assert is_uuid_instance(uuid.uuid4()) is True
     assert is_uuid_instance("not-a-uuid") is False
+
+
+@pytest.mark.parametrize("should_fail", [False, True])
+def test_import_optional_waits_for_concurrent_initializing_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    should_fail: bool,
+) -> None:
+    """Verify concurrent threads do not observe half-initialized sys.modules entries during import."""
+    mod_name = f"_vtb_concurrent_init_{uuid.uuid4().hex}"
+    entered = threading.Event()
+    release = threading.Event()
+    state_mod_name = f"{mod_name}_sync"
+    state_mod: Any = types.ModuleType(state_mod_name)
+    state_mod.entered = entered
+    state_mod.release = release
+    monkeypatch.setitem(sys.modules, state_mod_name, state_mod)
+
+    tail = "raise ImportError('broken native binary')\n" if should_fail else "READY_ATTR = 'initialized'\n"
+    (tmp_path / f"{mod_name}.py").write_text(
+        f"import {state_mod_name} as _s\n_s.entered.set()\n_s.release.wait(timeout=5.0)\n{tail}",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    reset_dependency_cache(mod_name)
+
+    results: list[Any] = []
+    results_lock = threading.Lock()
+
+    def _loader() -> None:
+        loaded = import_optional(mod_name)
+        if not should_fail:
+            assert loaded is not None
+            assert getattr(loaded, "READY_ATTR", None) == "initialized"
+        with results_lock:
+            results.append(loaded)
+
+    t1 = threading.Thread(target=_loader)
+    t2 = threading.Thread(target=_loader)
+    t1.start()
+    assert entered.wait(timeout=5.0)
+    t2.start()
+    release.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert len(results) == 2
+    if should_fail:
+        assert results == [None, None]
+        assert mod_name not in sys.modules
+    else:
+        assert results[0] is results[1]
+        assert getattr(results[0], "READY_ATTR", None) == "initialized"
+    sys.modules.pop(mod_name, None)
+    reset_dependency_cache(mod_name)

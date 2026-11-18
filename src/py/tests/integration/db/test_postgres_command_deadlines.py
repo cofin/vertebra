@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,20 @@ from vertebra._vertebra import InterfaceError, OperationalError, QueryCancelledE
 
 if TYPE_CHECKING:
     from pytest_databases.docker.postgres import PostgresService
+
+_DOCKER_ENV = "VERTEBRA_CONFORMANCE_DOCKER"
+
+
+@pytest.fixture
+def deadline_postgres_service(request: pytest.FixtureRequest) -> PostgresService:
+    """Resolve live PostgresService or skip cleanly when no container runtime is reachable offline."""
+    try:
+        svc: PostgresService = request.getfixturevalue("postgres_service")
+    except Exception as exc:
+        if os.environ.get(_DOCKER_ENV) != "1" and type(exc).__name__ == "RuntimeResolutionError":
+            pytest.skip(f"Container runtime unavailable for live PostgreSQL deadline tests: {exc}")
+        raise
+    return svc
 
 
 def _client_kwargs(svc: PostgresService) -> dict[str, Any]:
@@ -48,12 +63,12 @@ def _client_kwargs(svc: PostgresService) -> dict[str, Any]:
     ],
 )
 def test_invalid_timeout_rejected_before_io_sync_and_async(
-    postgres_service: PostgresService,
+    deadline_postgres_service: PostgresService,
     bad_timeout: Any,
     expected_exc: type[Exception],
 ) -> None:
     """Verify invalid timeout values fail synchronously before emission and keep sessions clean."""
-    kwargs = _client_kwargs(postgres_service)
+    kwargs = _client_kwargs(deadline_postgres_service)
     client = SyncPostgresClient(**kwargs)
     client.connect()
     try:
@@ -84,11 +99,11 @@ def test_invalid_timeout_rejected_before_io_sync_and_async(
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
-    postgres_service: PostgresService,
+    deadline_postgres_service: PostgresService,
     mode: str,
 ) -> None:
     """Verify timeout=0.1 raises OperationalError(sqlstate=None), cancels pg_sleep, and replaces PID."""
-    kwargs = _client_kwargs(postgres_service)
+    kwargs = _client_kwargs(deadline_postgres_service)
     marker = f"vtb_dl_probe_{mode}"
 
     if mode == "sync":
@@ -192,11 +207,11 @@ def test_live_client_deadline_cancels_pg_sleep_and_replaces_pooled_backend_pid(
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_live_shared_query_multi_budget_and_statement_timeout_precedence(
-    postgres_service: PostgresService,
+    deadline_postgres_service: PostgresService,
     mode: str,
 ) -> None:
     """Verify query_multi shares one non-renewing budget and statement_timeout surfaces 57014."""
-    kwargs = _client_kwargs(postgres_service)
+    kwargs = _client_kwargs(deadline_postgres_service)
 
     if mode == "sync":
         c_multi = SyncPostgresClient(**kwargs)

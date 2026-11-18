@@ -891,6 +891,15 @@ mod tests {
             })
             .expect("spawn");
 
+            let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let had_pkg = sys_modules.contains("vertebra").unwrap_or(false);
+            let had_core = sys_modules.contains("vertebra._vertebra").unwrap_or(false);
+            let prev_pkg = sys_modules.get_item("vertebra").ok();
+            let prev_core = sys_modules.get_item("vertebra._vertebra").ok();
+            sys_modules
+                .set_item("vertebra._vertebra", py.None())
+                .unwrap();
+
             let globals = PyDict::new(py);
             globals.set_item("spawn", spawn).unwrap();
             let fallback_script = CString::new(concat!(
@@ -912,12 +921,6 @@ mod tests {
                 .unwrap();
             assert_eq!(ty_name, "RuntimeError");
             assert_eq!(msg, "Rust task panicked: ring panic");
-
-            let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
-            let had_pkg = sys_modules.contains("vertebra").unwrap_or(false);
-            let had_core = sys_modules.contains("vertebra._vertebra").unwrap_or(false);
-            let prev_pkg = sys_modules.get_item("vertebra").ok();
-            let prev_core = sys_modules.get_item("vertebra._vertebra").ok();
 
             let pkg = PyModule::new(py, "vertebra").unwrap();
             let core = PyModule::new(py, "vertebra._vertebra").unwrap();

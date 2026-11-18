@@ -46,8 +46,9 @@ def import_app(app_path: str) -> Any:
 
 def import_optional(module_name: str) -> Any | None:
     """Import and return a cached module when available, or None if not installed."""
-    if module_name in sys.modules:
-        return sys.modules[module_name]
+    cached = sys.modules.get(module_name)
+    if cached is not None and not getattr(getattr(cached, "__spec__", None), "_initializing", False):
+        return cached
     if not module_available(module_name):
         return None
     try:
