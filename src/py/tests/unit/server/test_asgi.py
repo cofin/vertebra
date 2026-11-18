@@ -445,8 +445,11 @@ def test_asgi_runner_custom_loop_not_closed_by_runner() -> None:
 def test_asgi_runner_Works_Inside_Running_Loop() -> None:
     """Runner uses run_coroutine_threadsafe when loop is already running."""
     loop = asyncio.new_event_loop()
+    started = threading.Event()
+    loop.call_soon(started.set)
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
+    assert started.wait(timeout=2.0)
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})

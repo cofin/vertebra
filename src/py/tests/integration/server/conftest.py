@@ -29,6 +29,7 @@ _ = _vtb_cli
 _STREAMING_FIXTURE_MODULE = textwrap.dedent(
     """\
     import asyncio
+    import threading
     from collections.abc import AsyncIterator
     from typing import Any
 
@@ -36,15 +37,42 @@ _STREAMING_FIXTURE_MODULE = textwrap.dedent(
     from vertebra.framework._app import App
     from vertebra.server._asgi._sse import SseEvent, SseResponse
 
-    _GATES: dict[str, asyncio.Event] = {}
+
+    class _CrossThreadGate:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._is_set = False
+            self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+
+        async def wait(self) -> None:
+            loop = asyncio.get_running_loop()
+            ev = asyncio.Event()
+            with self._lock:
+                if self._is_set:
+                    return
+                self._waiters.append((loop, ev))
+            await ev.wait()
+
+        def set(self) -> None:
+            with self._lock:
+                self._is_set = True
+                waiters = list(self._waiters)
+                self._waiters.clear()
+            for loop, ev in waiters:
+                loop.call_soon_threadsafe(ev.set)
 
 
-    def _gate_for(stream_id: str) -> asyncio.Event:
-        gate = _GATES.get(stream_id)
-        if gate is None:
-            gate = asyncio.Event()
-            _GATES[stream_id] = gate
-        return gate
+    _GATES_LOCK = threading.Lock()
+    _GATES: dict[str, _CrossThreadGate] = {}
+
+
+    def _gate_for(stream_id: str) -> _CrossThreadGate:
+        with _GATES_LOCK:
+            gate = _GATES.get(stream_id)
+            if gate is None:
+                gate = _CrossThreadGate()
+                _GATES[stream_id] = gate
+            return gate
 
 
     async def _asgi_sse_app(scope: Any, receive: Any, send: Any) -> None:

@@ -231,10 +231,10 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: |
-          PY_BIN="$(realpath ../.venv/bin/python)"
+          PY_BIN="$(realpath "$GITHUB_WORKSPACE/.venv/bin/python")"
           PY_PREFIX="$("$PY_BIN" -c 'import sys; print(sys.base_prefix)')"
           PY_LIBDIR="$("$PY_BIN" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-          PY_SITE="$(../.venv/bin/python -c 'import os, site; print(os.pathsep.join(site.getsitepackages()))')"
+          PY_SITE="$("$GITHUB_WORKSPACE/.venv/bin/python" -c 'import os, site; print(os.pathsep.join(site.getsitepackages()))')"
           PYTHONPATH="$GITHUB_WORKSPACE/src/py:$PY_SITE" PYTHONHOME="$PY_PREFIX" DYLD_FALLBACK_LIBRARY_PATH="$PY_LIBDIR" PYO3_PYTHON="$PY_BIN" cargo test --workspace --features tls,http3,compression,gcp
 
   test-typescript:

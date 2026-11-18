@@ -24,7 +24,11 @@ from sqlspec.storage.registry import StorageRegistry
 
 import vertebra._storage as native_st
 from vertebra.db.arrow import ArrowCursor
-from vertebra.extensions.sqlspec.storage import ObjectStoreBackend, register_storage_alias
+from vertebra.extensions.sqlspec.storage import (
+    ObjectStoreBackend,
+    ObjectStoreRegistry,
+    register_storage_alias,
+)
 from vertebra.storage import (
     ArtifactReference,
     AsyncObjectStore,
@@ -1469,7 +1473,8 @@ def test_sqlspec_object_store_backend_signing_and_registry_alias() -> None:
     )
     assert isinstance(batch_urls, list) and len(batch_urls) == 2
 
-    registry = StorageRegistry()
+    registry = ObjectStoreRegistry()
+    assert isinstance(registry, StorageRegistry)
     register_storage_alias("artifacts", "memory://", registry=registry, base_path="tenant-a")
     assert registry.is_alias_registered("artifacts") is True
     resolved = registry.get("artifacts")

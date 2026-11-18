@@ -838,7 +838,7 @@ class ObjectStoreRegistry(StorageRegistry):
         if path_str:
             potential_alias = path_str.split("/", 1)[0]
             if (
-                potential_alias not in self._alias_configs
+                not self.is_alias_registered(potential_alias)
                 and self._fallback_registry is not None
                 and self._fallback_registry.is_alias_registered(potential_alias)
             ):
@@ -897,17 +897,10 @@ def register_storage_alias(
 ) -> None:
     """Register a storage URI or native ObjectStore URL under `alias` in SQLSpec's `storage_registry`."""
     reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
-    target_registry = reg_mod.storage_registry if registry is None else registry
     uri = uri_or_store.url if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)) else uri_or_store
-    if backend is None or backend == "vertebra":
-        backend_config = dict(kwargs)
-        if base_path:
-            backend_config["base_path"] = base_path
-        target_registry._alias_configs[alias] = (
-            cast("type[ObjectStoreProtocol]", ObjectStoreBackend),
-            uri,
-            backend_config,
-        )
-        target_registry.clear_cache(alias)
+    if registry is not None:
+        registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
         return
-    target_registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
+    get_object_store_registry().register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
+    with contextlib.suppress(SQLSpecMissingDependencyError, ValueError):
+        reg_mod.storage_registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
