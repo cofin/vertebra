@@ -59,13 +59,13 @@ vtb = "vertebra.cli:cli"
 
 [project.optional-dependencies]
 sqlspec = [
-    "sqlspec>=0.72.0",
+    "sqlspec>=0.72.2",
 ]
 adk = [
     "google-adk>=2.14.1",
 ]
 alchemy = [
-    "advanced-alchemy>=1.13.0b1",
+    "advanced-alchemy>=1.13.0b2",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
 ]
@@ -236,9 +236,9 @@ test = [
     "pytest-databases>=0.20.0b3",
     "pytest-xdist>=3.6.1",
     "anyio",
-    "sqlspec>=0.72.0",
+    "sqlspec>=0.72.2",
     "google-adk>=2.14.1",
-    "advanced-alchemy>=1.13.0b1",
+    "advanced-alchemy>=1.13.0b2",
     "sqlalchemy>=2.1.0",
     "alembic>=1.18.0",
     "duckdb-engine; python_version < '3.14'",

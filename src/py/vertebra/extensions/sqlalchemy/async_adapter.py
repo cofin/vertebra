@@ -19,8 +19,13 @@ from sqlalchemy.util.concurrency import await_
 import vertebra.db.dbapi._sync as dbapi_sync
 from vertebra.db.dbapi._async import AsyncDBAPICursor, AsyncDBAPIModule
 from vertebra.db.dbapi._sync import (
+    BFILE,
     BINARY,
+    BLOB,
+    CLOB,
     DATETIME,
+    FIXED_CHAR,
+    NCLOB,
     NUMBER,
     ROWID,
     STRING,
@@ -218,6 +223,11 @@ class SQLAlchemyAsyncDBAPI(AsyncAdapt_dbapi_module):
     Binary = Binary
     STRING = STRING
     BINARY = BINARY
+    BLOB = BLOB
+    BFILE = BFILE
+    CLOB = CLOB
+    NCLOB = NCLOB
+    FIXED_CHAR = FIXED_CHAR
     NUMBER = NUMBER
     DATETIME = DATETIME
     ROWID = ROWID

@@ -12,9 +12,8 @@ from typing import Any, Final, Self
 from vertebra.db.driver import DataError
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module, import_optional
-from vertebra.utils.schema import to_schema
+from vertebra.utils.schema import can_vectorcall_hydrate_schema, to_schema
 from vertebra.utils.serializers import ZeroCopyCodecRegistry
-from vertebra.utils.type_guards import get_msgspec_rename_config
 
 __all__ = (
     "ARROW_SHM_THRESHOLD_ROWS",
@@ -461,6 +460,8 @@ def _hydrate_rows_with_schema(
     rows: Sequence[Any],
     columns: Sequence[str],
     schema_type: type[Any] | None = None,
+    *,
+    normalize_nested: bool = True,
 ) -> list[Any]:
     """Hydrate tabular rows into dictionaries or typed `schema_type` instances via C-API vectorcall or `to_schema`."""
     if not rows:
@@ -469,7 +470,7 @@ def _hydrate_rows_with_schema(
         if isinstance(rows[0], Mapping):
             return [dict(r) for r in rows]
         return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
-    if get_msgspec_rename_config(schema_type) is None:
+    if can_vectorcall_hydrate_schema(schema_type):
         try:
             plan = ZeroCopyCodecRegistry.compile(schema_type)
             if isinstance(rows[0], Mapping):
@@ -484,7 +485,7 @@ def _hydrate_rows_with_schema(
         if isinstance(rows[0], Mapping)
         else [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
     )
-    return list(to_schema(dict_rows, schema_type=schema_type))
+    return list(to_schema(dict_rows, schema_type=schema_type, normalize_nested=normalize_nested))
 
 
 def _table_to_rows_and_cols(

@@ -14,6 +14,9 @@ import msgspec
 import pydantic
 import pytest
 
+from vertebra.db.adapters.bigquery.core import BigQueryCore
+from vertebra.db.adapters.spanner.core import SpannerCore
+from vertebra.db.arrow import _hydrate_rows_with_schema
 from vertebra.framework.openapi import (
     AsyncAPIDocsConfig,
     ElementsDocsConfig,
@@ -32,7 +35,7 @@ from vertebra.framework.openapi import (
 )
 from vertebra.typing import UNSET, CamelizedBaseStruct, Empty
 from vertebra.utils.dispatch import TypeDispatcher
-from vertebra.utils.schema import to_schema, to_value_type, transform_dict_keys
+from vertebra.utils.schema import can_vectorcall_hydrate_schema, to_schema, to_value_type, transform_dict_keys
 from vertebra.utils.serializers import schema_components
 from vertebra.utils.text import camelize, kebabize, snake_case
 from vertebra.utils.type_converters import (
@@ -570,6 +573,27 @@ def test_openapi_neutral_portal_configs_and_renderers(
     assert from_fn == from_method
 
 
+class _CamelNestedChild(msgspec.Struct, frozen=True, rename="camel"):
+    item_name: str
+    item_count: int
+
+
+class _ExplicitAliasChild(msgspec.Struct, frozen=True):
+    display_name: str = msgspec.field(name="displayName")
+
+
+class _KebabNestedEnvelope(msgspec.Struct, frozen=True, rename="kebab"):
+    child_rows: list[_CamelNestedChild]
+    metadata_map: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+class _OptionalCollectionEnvelope(msgspec.Struct, frozen=True):
+    child: _CamelNestedChild | None = None
+    children: tuple[_CamelNestedChild, ...] = ()
+    children_by_key: dict[str, _CamelNestedChild] = msgspec.field(default_factory=dict)
+    explicit_child: _ExplicitAliasChild | None = None
+
+
 def test_openapi_config_validation_and_spec_builder_schema_components() -> None:
     """Verify OpenAPIConfig rejects invalid backends at init and OpenAPISpecBuilder emits component schemas."""
     invalid_backend = cast("Any", "unknown_backend")
@@ -592,3 +616,97 @@ def test_openapi_config_validation_and_spec_builder_schema_components() -> None:
     assert "_NestedInnerStruct" in schemas
     assert "_FlatSchemaStruct" in schemas
     assert schemas["_NestedOuterStruct"]["properties"]["inner"]["$ref"] == "#/components/schemas/_NestedInnerStruct"
+
+
+def test_to_schema_msgspec_opt_in_normalize_nested_and_map_key_preservation() -> None:
+    """Verify to_schema defaults to encoded nested names, preserves dict keys, and supports normalize_nested."""
+    child_payload = {"item_name": "python", "itemName": "encoded", "item_count": 2}
+    row = {
+        "child": child_payload,
+        "children": [child_payload],
+        "children_by_key": {"snake_map_key": child_payload},
+        "explicit_child": {"display_name": "Ada"},
+    }
+    expected_child = _CamelNestedChild(item_name="encoded", item_count=2)
+
+    with pytest.raises(msgspec.ValidationError, match="itemCount"):
+        to_schema(row, schema_type=_OptionalCollectionEnvelope)
+
+    hydrated = to_schema(row, schema_type=_OptionalCollectionEnvelope, normalize_nested=True)
+    assert hydrated == _OptionalCollectionEnvelope(
+        child=expected_child,
+        children=(expected_child,),
+        children_by_key={"snake_map_key": expected_child},
+        explicit_child=_ExplicitAliasChild(display_name="Ada"),
+    )
+    assert child_payload == {"item_name": "python", "itemName": "encoded", "item_count": 2}
+
+    batch_row = {
+        "child_rows": [{"item_name": "pencil", "itemCount": 3}],
+        "metadata_map": {"preserve_snake_key": 1},
+    }
+    batch_hydrated = to_schema([batch_row], schema_type=_KebabNestedEnvelope, normalize_nested=True)
+    assert batch_hydrated == [
+        _KebabNestedEnvelope(
+            child_rows=[_CamelNestedChild(item_name="pencil", item_count=3)],
+            metadata_map={"preserve_snake_key": 1},
+        )
+    ]
+
+    default_map_only = to_schema(
+        {"child_rows": [{"itemName": "pen", "itemCount": 1}], "metadata_map": {"raw_snake_key": 9}},
+        schema_type=_KebabNestedEnvelope,
+    )
+    assert default_map_only.metadata_map == {"raw_snake_key": 9}
+
+
+@pytest.mark.parametrize("hydrator", ["arrow", "bigquery", "spanner"])
+def test_row_hydrators_convert_nested_msgspec_structs(hydrator: str) -> None:
+    """Verify driver row hydrators normalize nested Struct fields by default and support normalize_nested=False."""
+    assert can_vectorcall_hydrate_schema(_SampleStruct) is True
+    assert can_vectorcall_hydrate_schema(_SampleCamelStruct) is False
+    assert can_vectorcall_hydrate_schema(_OptionalCollectionEnvelope) is False
+
+    encoded_rows = [({"itemName": "notebook", "itemCount": 4},)]
+    python_rows = [({"item_name": "notebook", "item_count": 4},)]
+    cols = ("child",)
+
+    if hydrator == "arrow":
+        res_encoded = _hydrate_rows_with_schema(encoded_rows, cols, _OptionalCollectionEnvelope, normalize_nested=False)
+        res_default = _hydrate_rows_with_schema(python_rows, cols, _OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError, match="itemName"):
+            _hydrate_rows_with_schema(python_rows, cols, _OptionalCollectionEnvelope, normalize_nested=False)
+    elif hydrator == "bigquery":
+        res_encoded = BigQueryCore.hydrate_query_rows(
+            cols,
+            encoded_rows,
+            schema_type=_OptionalCollectionEnvelope,
+            normalize_nested=False,
+        )
+        res_default = BigQueryCore.hydrate_query_rows(cols, python_rows, schema_type=_OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError):
+            BigQueryCore.hydrate_query_rows(
+                cols,
+                python_rows,
+                schema_type=_OptionalCollectionEnvelope,
+                normalize_nested=False,
+            )
+    else:
+        res_encoded = SpannerCore.hydrate_query_rows(
+            cols,
+            encoded_rows,
+            schema_type=_OptionalCollectionEnvelope,
+            normalize_nested=False,
+        )
+        res_default = SpannerCore.hydrate_query_rows(cols, python_rows, schema_type=_OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError):
+            SpannerCore.hydrate_query_rows(
+                cols,
+                python_rows,
+                schema_type=_OptionalCollectionEnvelope,
+                normalize_nested=False,
+            )
+
+    assert isinstance(res_default[0].child, _CamelNestedChild)
+    assert res_default[0].child == _CamelNestedChild(item_name="notebook", item_count=4)
+    assert res_encoded[0].child == _CamelNestedChild(item_name="notebook", item_count=4)

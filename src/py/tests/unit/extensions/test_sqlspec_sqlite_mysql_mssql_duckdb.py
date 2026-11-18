@@ -10,9 +10,13 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
+import msgspec
 import pytest
+from sqlglot import parse_one
+from sqlspec import sql
 from sqlspec.config import ADKConfig
 from sqlspec.core import SQL, ParameterStyle, TypedParameter
+from sqlspec.core.hashing import hash_optimized_expression
 from sqlspec.exceptions import (
     CheckViolationError,
     ConnectionTimeoutError,
@@ -40,6 +44,7 @@ from sqlspec.extensions.adk.memory.store import BaseAsyncADKMemoryStore, BaseSyn
 from sqlspec.extensions.litestar.store import CompanionIndex
 from sqlspec.migrations.context import MigrationContext
 from sqlspec.utils.adapters import resolve_adapter_name, resolve_extension_store_class
+from sqlspec.utils.schema import to_schema as sqlspec_to_schema
 
 from vertebra.extensions.sqlspec.adapters.duckdb import (
     DUCKDB_COPY_FILENAME_FOLLOWS_QUERY,
@@ -5429,3 +5434,43 @@ def test_duckdb_reconcile_error_semantics(case: str) -> None:
 
     with pytest.raises(MigrationError):
         duckdb_reconcile.reconcile(MigrationContext(config=sync_cfg, driver=async_driver))
+
+
+class _DuckDBNestedItem(msgspec.Struct, frozen=True, rename="camel"):
+    item_name: str
+    item_count: int
+
+
+class _DuckDBInventoryRow(msgspec.Struct, frozen=True):
+    item: _DuckDBNestedItem
+
+
+def test_sqlspec_0722_nested_msgspec_schema_and_builder_pushdown() -> None:
+    """Verify SQLSpec 0.72.2 driver.to_schema default normalize_nested=True, ASOF join preservation, and scope hashing."""
+    cfg = DuckDBSyncConfig(database=":memory:duck_0722_schema")
+    try:
+        with cfg.provide_session() as session:
+            row = session.select_one(
+                "SELECT {'item_name': ?, 'item_count': ?} AS item",
+                "Pencil",
+                2,
+            )
+            expected = _DuckDBInventoryRow(item=_DuckDBNestedItem(item_name="Pencil", item_count=2))
+            assert session.to_schema(row, schema_type=_DuckDBInventoryRow) == expected
+            with pytest.raises(msgspec.ValidationError, match="itemName"):
+                session.to_schema(row, schema_type=_DuckDBInventoryRow, normalize_nested=False)
+            with pytest.raises(msgspec.ValidationError, match="itemName"):
+                sqlspec_to_schema(row, schema_type=_DuckDBInventoryRow)
+            assert sqlspec_to_schema(row, schema_type=_DuckDBInventoryRow, normalize_nested=True) == expected
+    finally:
+        cfg.close()
+
+    asof_sql = "SELECT u.id, o.price FROM users u ASOF JOIN orders o ON u.ts >= o.ts WHERE o.price > 10"
+    builder = sql.select("*", dialect="duckdb")
+    builder.set_expression(parse_one(asof_sql, read="duckdb"))
+    rendered = " ".join(builder.build().sql.split())
+    assert 'ON "u"."ts" >= "o"."ts" WHERE "o"."price" > 10' in rendered
+
+    outer_filter = parse_one("SELECT x FROM (SELECT x + 1 AS x FROM (SELECT 1 AS x)) WHERE x = 1")
+    inner_filter = parse_one("SELECT x FROM (SELECT x + 1 AS x FROM (SELECT 1 AS x) WHERE x = 1)")
+    assert hash_optimized_expression(outer_filter, "duckdb") != hash_optimized_expression(inner_filter, "duckdb")

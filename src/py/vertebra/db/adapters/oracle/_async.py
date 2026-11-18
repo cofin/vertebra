@@ -242,7 +242,13 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         self._pipe_savepoint_seq: int = 0
         self._pipeline_active: bool = False
         self._last_pipeline_outcomes: tuple[Any, ...] = ()
+        self._last_out_binds: Any = None
         self._tx_events: list[str] = []
+
+    @property
+    def out_binds(self) -> Any:
+        """Return the coerced `out_binds` payload from the most recent execution."""
+        return self._last_out_binds
 
     @property
     def last_pipeline_outcomes(self) -> tuple[Any, ...]:
@@ -512,20 +518,25 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> int:
         """Execute a DML, DDL, or PL/SQL statement asynchronously and return affected row count."""
-        out_binds = kwargs.get("out_binds")
-        coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
+        in_params, out_binds, out_vars = OracleCore.split_out_bind_parameters(parameters, kwargs.get("out_binds"))
+        coerced = OracleCore.coerce_parameters(in_params, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
         self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
         grant = self._acquire_broker_lease()
         try:
             async with self._checkout_client() as active_client:
-                OracleCore.track_session_context_sql(self._session_context, sql, parameters)
+                OracleCore.track_session_context_sql(self._session_context, sql, in_params)
                 result = await active_client.execute(
                     sql,
                     coerced,
                     out_binds=out_binds,
                     fetch_decimals=self.config.driver_features.fetch_decimals,
                     enable_lowercase_column_names=self.config.driver_features.enable_lowercase_column_names,
+                )
+                self._last_out_binds = OracleCore.populate_out_bind_vars(
+                    out_vars,
+                    result,
+                    features=self.config.driver_features,
                 )
                 if isinstance(result, int):
                     return max(result, 0)
@@ -572,14 +583,14 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL asynchronously and return `(rows, column_names)`."""
-        out_binds = kwargs.get("out_binds")
-        coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
+        in_params, out_binds, out_vars = OracleCore.split_out_bind_parameters(parameters, kwargs.get("out_binds"))
+        coerced = OracleCore.coerce_parameters(in_params, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
         self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
         grant = self._acquire_broker_lease()
         try:
             async with self._checkout_client() as active_client:
-                OracleCore.track_session_context_sql(self._session_context, sql, parameters)
+                OracleCore.track_session_context_sql(self._session_context, sql, in_params)
                 lowercase = self.config.driver_features.enable_lowercase_column_names
                 fetch_decimals = self.config.driver_features.fetch_decimals
                 if OracleCore.is_dml_or_plsql(sql):
@@ -598,7 +609,16 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
                         fetch_decimals=fetch_decimals,
                         enable_lowercase_column_names=lowercase,
                     )
-                return OracleCore.coerce_result_rows_and_cols(result, features=self.config.driver_features)
+                self._last_out_binds = OracleCore.populate_out_bind_vars(
+                    out_vars,
+                    result,
+                    features=self.config.driver_features,
+                )
+                return OracleCore.coerce_result_rows_and_cols(
+                    result,
+                    features=self.config.driver_features,
+                    out_hints=out_binds,
+                )
         finally:
             self._release_broker_lease(grant)
 

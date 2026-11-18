@@ -14,6 +14,7 @@ import pytest
 from advanced_alchemy.base import UUIDAuditBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
+from advanced_alchemy.types import ORA_JSONB, JsonB
 from advanced_alchemy.types.file_object import FileObject, StoredObject
 from alembic.autogenerate import produce_migrations, render_python_code
 from alembic.ddl.impl import DefaultImpl
@@ -34,16 +35,25 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.util.concurrency import greenlet_spawn
 
+import vertebra._oracle as _oracle_native
 import vertebra.extensions.sqlalchemy as sqlalchemy_pkg
 import vertebra.extensions.sqlalchemy.types as sqlalchemy_types_mod
+from tests.unit.db.oracle_test_doubles import _StubAsyncOracleClient, _StubSyncOracleClient
 from tests.unit.db.postgres_ports import FakePostgresCluster, FakeSyncPostgresPool
 from tests.unit.extensions.test_sqlspec_vtb_stacks import _NativeBindConnection
 from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.db.dbapi import (
+    BFILE,
+    BLOB,
+    CLOB,
+    FIXED_CHAR,
+    NCLOB,
     AsyncDBAPIConnection,
+    AsyncDBAPIModule,
     InterfaceError,
     OperationalError,
     ProgrammingError,
@@ -1736,3 +1746,181 @@ async def test_sqlite_is_disconnect_closed_connection(dialect_cls: type[Any]) ->
         with pytest.raises(Exception) as aexc_info:
             await aconn.cursor().execute("SELECT 1")
         assert dialect.is_disconnect(aexc_info.value) is True
+
+
+class _OracleJsonBlobClient(_StubSyncOracleClient):
+    """In-memory Oracle native client double servicing SQLAlchemy init and BLOB JSON round-trips."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows_by_id: dict[int, tuple[bytes | None, bytes | None]] = {}
+
+    def query(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        out_binds: Any = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> _oracle_native.OracleQueryResult:
+        super().query(
+            sql,
+            params,
+            out_binds=out_binds,
+            fetch_decimals=fetch_decimals,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        lower_sql = sql.lower()
+        if "product_component_version" in lower_sql:
+            col = _oracle_native.OracleColumn("version", "VARCHAR2")
+            return _oracle_native.OracleQueryResult([col], [("23.4.0.0.0",)], rowcount=1)
+        if "current_schema" in lower_sql:
+            col = _oracle_native.OracleColumn("schema", "VARCHAR2")
+            return _oracle_native.OracleQueryResult([col], [("APP_OWNER",)], rowcount=1)
+        if "v$parameter" in lower_sql:
+            col = _oracle_native.OracleColumn("value", "VARCHAR2")
+            return _oracle_native.OracleQueryResult([col], [("23.4.0.0.0",)], rowcount=1)
+        row_id = int(params["id_1"]) if isinstance(params, dict) and "id_1" in params else 1
+        stored = self.rows_by_id.get(row_id)
+        cols = [
+            _oracle_native.OracleColumn("native_data", "BLOB"),
+            _oracle_native.OracleColumn("legacy_data", "BLOB"),
+        ]
+        rows = [stored] if stored is not None else []
+        return _oracle_native.OracleQueryResult(cols, rows, rowcount=len(rows))
+
+    def execute(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        out_binds: Any = None,
+        fetch_decimals: bool = False,
+        enable_lowercase_column_names: bool | None = None,
+    ) -> _oracle_native.OracleQueryResult:
+        super().execute(
+            sql,
+            params,
+            out_binds=out_binds,
+            fetch_decimals=fetch_decimals,
+            enable_lowercase_column_names=enable_lowercase_column_names,
+        )
+        assert isinstance(params, dict)
+        assert "ret_0" not in params
+        assert "ret_1" not in params
+        row_id = int(params["id"])
+        native_val = params.get("native_data")
+        legacy_val = params.get("legacy_data")
+        assert native_val is None or isinstance(native_val, bytes)
+        assert legacy_val is None or isinstance(legacy_val, bytes)
+        self.rows_by_id[row_id] = (native_val, legacy_val)
+        return _oracle_native.OracleQueryResult(
+            [],
+            [],
+            rowcount=1,
+            out_binds={"ret_0": native_val, "ret_1": legacy_val},
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("row_id", "payload"),
+    [
+        (1, {"key": "value"}),
+        (2, {"text": "é" * 33_000, "numbers": [7, 1.25]}),
+        (3, '{"already_json": 1}'),
+        (4, None),
+    ],
+)
+async def test_advanced_alchemy_1130b2_oracle_jsonb_blob_transport_and_returning(
+    asynchronous: bool,
+    row_id: int,
+    payload: Any,
+) -> None:
+    """Verify Advanced Alchemy 1.13.0b2 ORA_JSONB/JsonB DDL, DBAPI BLOB types, and RETURNING round-trips."""
+    sync_dbapi = SyncDBAPIModule(dialect="oracle")
+    async_dbapi = AsyncDBAPIModule(dialect="oracle")
+    sa_async_dbapi = SQLAlchemyAsyncDBAPI(dialect="oracle")
+    for mod in (sync_dbapi, async_dbapi, sa_async_dbapi):
+        assert mod.BLOB is BLOB
+        assert mod.BFILE is BFILE
+        assert mod.CLOB is CLOB
+        assert mod.NCLOB is NCLOB
+        assert mod.FIXED_CHAR is FIXED_CHAR
+        assert mod.BLOB == "BLOB"
+
+    meta = MetaData()
+    docs = Table(
+        "aa_ora_json_docs",
+        meta,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("native_data", JsonB),
+        Column("legacy_data", ORA_JSONB(use_blob=True)),
+    )
+
+    dialect_23 = SyncOracleDialect()
+    dialect_23.server_version_info = (23, 4)
+    ddl_23 = str(CreateTable(docs).compile(dialect=dialect_23)).upper()
+    select_23 = str(select(docs.c.native_data, docs.c.legacy_data).compile(dialect=dialect_23)).upper()
+    assert "NATIVE_DATA JSON" in ddl_23
+    assert "LEGACY_DATA BLOB" in ddl_23
+    assert "LEGACY_DATA IS JSON" in ddl_23
+    assert "JSON_SERIALIZE(AA_ORA_JSON_DOCS.NATIVE_DATA RETURNING BLOB)" in select_23
+
+    dialect_19 = SyncOracleDialect()
+    dialect_19.server_version_info = (19, 0)
+    ddl_19 = str(CreateTable(docs).compile(dialect=dialect_19)).upper()
+    assert "NATIVE_DATA BLOB" in ddl_19
+    assert "NATIVE_DATA IS JSON" in ddl_19
+
+    ins_stmt = (
+        docs.insert()
+        .values(id=row_id, native_data=payload, legacy_data=payload)
+        .returning(docs.c.native_data, docs.c.legacy_data)
+    )
+    sel_stmt = select(docs.c.native_data, docs.c.legacy_data).where(docs.c.id == row_id)
+
+    if not asynchronous:
+        sync_client = _OracleJsonBlobClient()
+        sync_driver = SyncOracleDriver(OracleConfig(), client=sync_client)
+        sync_engine = create_engine(
+            "oracle+vtb://scott:tiger@localhost:1521/freepdb1",
+            creator=lambda: SyncDBAPIConnection("oracle+vtb://localhost", driver=sync_driver),
+        )
+        try:
+            with sync_engine.begin() as conn:
+                ret_row = conn.execute(ins_stmt).one()
+                assert ret_row.native_data == payload
+                assert ret_row.legacy_data == payload
+                fetched_row = conn.execute(sel_stmt).one()
+                assert fetched_row.native_data == payload
+                assert fetched_row.legacy_data == payload
+            exec_calls = [data for kind, data in sync_client.calls if kind == "execute"]
+            assert len(exec_calls) == 1
+            assert exec_calls[0]["out_binds"] == {"ret_0": "BLOB", "ret_1": "BLOB"}
+        finally:
+            sync_engine.dispose()
+        return
+
+    async_stub = _StubAsyncOracleClient()
+    async_stub._sync = _OracleJsonBlobClient()
+    async_driver = AsyncOracleDriver(OracleConfig(), client=async_stub)
+    async_engine = create_async_engine(
+        "oracle+vtb_async://scott:tiger@localhost:1521/freepdb1",
+        async_creator=lambda: AsyncDBAPIConnection("oracle+vtb_async://localhost", driver=async_driver),
+    )
+    try:
+        async with async_engine.begin() as aconn:
+            aret_row = (await aconn.execute(ins_stmt)).one()
+            assert aret_row.native_data == payload
+            assert aret_row.legacy_data == payload
+            afetched_row = (await aconn.execute(sel_stmt)).one()
+            assert afetched_row.native_data == payload
+            assert afetched_row.legacy_data == payload
+        aexec_calls = [data for kind, data in async_stub.calls if kind == "execute"]
+        assert len(aexec_calls) == 1
+        assert aexec_calls[0]["out_binds"] == {"ret_0": "BLOB", "ret_1": "BLOB"}
+    finally:
+        await async_engine.dispose()
