@@ -59,7 +59,7 @@ vtb = "vertebra.cli:cli"
 
 [project.optional-dependencies]
 sqlspec = [
-    "sqlspec>=0.72.0",
+    "sqlspec>=0.72.1",
 ]
 adk = [
     "google-adk>=2.14.1",
@@ -236,7 +236,7 @@ test = [
     "pytest-databases>=0.20.0b3",
     "pytest-xdist>=3.6.1",
     "anyio",
-    "sqlspec>=0.72.0",
+    "sqlspec>=0.72.1",
     "google-adk>=2.14.1",
     "advanced-alchemy>=1.13.0b1",
     "sqlalchemy>=2.1.0",

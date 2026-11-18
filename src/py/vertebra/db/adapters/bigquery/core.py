@@ -23,11 +23,10 @@ from vertebra.telemetry.db_propagation import SqlTracePropagator
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
-from vertebra.utils.schema import to_schema
+from vertebra.utils.schema import can_vectorcall_hydrate_schema, to_schema
 from vertebra.utils.serializers import encode_json
 from vertebra.utils.text import split_qualified_identifier, validate_identifier
 from vertebra.utils.type_converters import time_iso_convert
-from vertebra.utils.type_guards import get_msgspec_rename_config
 
 if TYPE_CHECKING:
     from vertebra._bigquery import (
@@ -143,6 +142,7 @@ class BigQueryCore:
         rows: Sequence[Sequence[Any]],
         *,
         schema_type: type[Any] | None = None,
+        normalize_nested: bool = False,
     ) -> list[Any]:
         """Hydrate query rows into dictionaries or `schema_type` instances via C-API vectorcall or `to_schema`."""
         if not rows:
@@ -150,14 +150,14 @@ class BigQueryCore:
         col_tuple = tuple(columns)
         if schema_type is None or schema_type is dict:
             return [dict(zip(col_tuple, row, strict=False)) for row in rows]
-        if get_msgspec_rename_config(schema_type) is None:
+        if not normalize_nested and can_vectorcall_hydrate_schema(schema_type):
             try:
                 return hydrate_rows_vectorcall(schema_type, list(rows), col_tuple)
             except Exception:
                 pass
         dicts = [dict(zip(col_tuple, row, strict=False)) for row in rows]
         try:
-            return list(to_schema(dicts, schema_type=schema_type))
+            return list(to_schema(dicts, schema_type=schema_type, normalize_nested=normalize_nested))
         except Exception:
             if issubclass(schema_type, msgspec.Struct):
                 return [msgspec.convert(d, type=schema_type) for d in dicts]
