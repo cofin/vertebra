@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from sqlspec.core import StatementFilter
     from sqlspec.driver._routing import AsyncRoutingSession, SyncRoutingSession
     from sqlspec.storage import StorageBridgeJob, StorageDestination, StorageFormat, StorageTelemetry
+    from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
     from sqlspec.typing import StatementParameters
 
 __all__ = (
@@ -721,6 +722,18 @@ class BaseSyncDriver(SyncDriverAdapterBase):
         self._attach_partition_telemetry(telemetry_payload, partitioner)
         return self._storage_job(telemetry_payload, telemetry)
 
+    def _storage_pipeline(self) -> SyncStoragePipeline:
+        """Build a synchronous storage pipeline backed by `ObjectStoreRegistry`."""
+        factory = self.storage_pipeline_factory
+        if factory is not None:
+            return cast("SyncStoragePipeline", factory())
+        pipeline_mod = ensure_module("sqlspec.storage.pipeline", package="sqlspec", extra="sqlspec")
+        storage_mod = ensure_module("vertebra.extensions.sqlspec.storage")
+        return cast(
+            "SyncStoragePipeline",
+            pipeline_mod.SyncStoragePipeline(registry=storage_mod.get_object_store_registry()),
+        )
+
     def stream_arrow_batches(
         self,
         statement: Any,
@@ -1158,6 +1171,18 @@ class BaseAsyncDriver(AsyncDriverAdapterBase):
         )
         self._attach_partition_telemetry(telemetry_payload, partitioner)
         return self._storage_job(telemetry_payload, telemetry)
+
+    def _storage_pipeline(self) -> AsyncStoragePipeline:
+        """Build an asynchronous storage pipeline backed by `ObjectStoreRegistry`."""
+        factory = self.storage_pipeline_factory
+        if factory is not None:
+            return cast("AsyncStoragePipeline", factory())
+        pipeline_mod = ensure_module("sqlspec.storage.pipeline", package="sqlspec", extra="sqlspec")
+        storage_mod = ensure_module("vertebra.extensions.sqlspec.storage")
+        return cast(
+            "AsyncStoragePipeline",
+            pipeline_mod.AsyncStoragePipeline(registry=storage_mod.get_object_store_registry()),
+        )
 
     async def stream_arrow_batches(
         self,

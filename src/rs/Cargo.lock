@@ -6871,7 +6871,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "futures",
  "google-cloud-auth",
  "google-cloud-gax",
  "google-cloud-rpc",

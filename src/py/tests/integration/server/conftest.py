@@ -17,7 +17,7 @@ import msgspec
 import pytest
 
 import vertebra.cli as _vtb_cli
-from vertebra.supervisor._supervisor import find_server_binary
+from vertebra.supervisor._supervisor import EmbeddedPythonRuntime, find_server_binary
 
 __all__ = (
     "LiveServerHandle",
@@ -140,7 +140,7 @@ def live_vertebra_server(
     port = _reserve_ephemeral_port()
     env = dict(os.environ)
     env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
-    env["PYTHONHOME"] = sys.base_prefix
+    EmbeddedPythonRuntime.detect().apply(env)
     env["VERTEBRA_SHM_PROFILE"] = "compact"
     py_paths = [str(app_dir), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
     env["PYTHONPATH"] = os.pathsep.join(py_paths)

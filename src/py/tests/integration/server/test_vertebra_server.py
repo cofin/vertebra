@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration.server.conftest import LiveServerHandle, _reserve_ephemeral_port
-from vertebra.supervisor import find_server_binary
+from vertebra.supervisor import EmbeddedPythonRuntime, find_server_binary
 
 
 @pytest.mark.parametrize(
@@ -119,7 +119,7 @@ def test_vertebra_server_aborts_startup_when_lifespan_fails(
     port = _reserve_ephemeral_port()
     env = dict(os.environ)
     env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
-    env["PYTHONHOME"] = sys.base_prefix
+    EmbeddedPythonRuntime.detect().apply(env)
     env["VERTEBRA_SHM_PROFILE"] = "compact"
     py_paths = [str(tmp_path), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
     env["PYTHONPATH"] = os.pathsep.join(py_paths)

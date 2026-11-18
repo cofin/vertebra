@@ -158,7 +158,8 @@ ts-lint:                                            ## Lint TS package with auto
 .PHONY: dev
 dev:                                                ## Install native extensions in debug mode for development
 	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
-	@(cd src/rs && $(if $(PYO3_PYTHON),PYO3_PYTHON="$(PYO3_PYTHON)",) cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --exclude vertebra-redis --exclude vertebra-valkey)
+	@rm -f "$(CARGO_TARGET_DIR)/release/vertebra-server" src/rs/target/release/vertebra-server
+	@(cd src/rs && $(if $(PYO3_PYTHON),PYO3_PYTHON="$$(realpath "$(PYO3_PYTHON)")",) cargo build --workspace --exclude vertebra-py --exclude vertebra-bundler --exclude vertebra-storage --exclude vertebra-mysql --exclude vertebra-bigquery --exclude vertebra-mssql --exclude vertebra-spanner --exclude vertebra-duckdb --exclude vertebra-oracle --exclude vertebra-postgres --exclude vertebra-sqlite --exclude vertebra-redis --exclude vertebra-valkey)
 	@uv run maturin develop --uv
 	@uv run maturin develop --uv -m src/rs/vertebra-bundler/Cargo.toml
 	@uv run maturin develop --uv -m src/rs/vertebra-storage/Cargo.toml
@@ -214,6 +215,21 @@ build-pgo: ts-build                                 ## Build PGO-optimized relea
 rs-test:                                            ## Run Rust tests (all features + non-http3 fail-loud check)
 	@rm -rf /dev/shm/test-* /dev/shm/*vertebra* 2>/dev/null || true
 	if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi
+	py_extra_paths="$(CURDIR)/src/py"
+	if [ -n "$${PYO3_PYTHON:-}" ] && [ -x "$${PYO3_PYTHON}" ]; then
+		export PYTHONHOME="$$("$${PYO3_PYTHON}" -c 'import sys; print(sys.base_prefix)')"
+		py_site="$$("$${PYO3_PYTHON}" -c 'import os, site; print(os.pathsep.join(site.getsitepackages()))')"
+		if [ -n "$${py_site}" ]; then
+			py_extra_paths="$${py_extra_paths}:$${py_site}"
+		fi
+		py_libdir="$$("$${PYO3_PYTHON}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+		if [ -n "$${py_libdir}" ]; then
+			export LD_LIBRARY_PATH="$${py_libdir}$${LD_LIBRARY_PATH:+:$${LD_LIBRARY_PATH}}"
+			export DYLD_FALLBACK_LIBRARY_PATH="$${py_libdir}$${DYLD_FALLBACK_LIBRARY_PATH:+:$${DYLD_FALLBACK_LIBRARY_PATH}}"
+		fi
+		export PYO3_PYTHON="$$(realpath "$${PYO3_PYTHON}")"
+	fi
+	export PYTHONPATH="$${py_extra_paths}$${PYTHONPATH:+:$${PYTHONPATH}}"
 	cd src/rs
 	cargo test --workspace --features tls,http3,compression,gcp
 	cargo test -p vertebra-http --features tls,compression --lib config::tests

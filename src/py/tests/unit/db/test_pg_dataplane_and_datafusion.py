@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import re
 import socket
@@ -510,12 +511,21 @@ def test_arrow_cursor_empty_buffer_constructs_from_rows_and_polars_roundtrip() -
     row_cursor = ArrowCursor(b"", rows=[(1, "alpha")], columns=["id", "name"])
     row_table = row_cursor.to_arrow_table()
     assert row_table.to_pylist() == [{"id": 1, "name": "alpha"}]
-    assert row_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+    has_polars = importlib.util.find_spec("polars") is not None
+    if has_polars:
+        assert row_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+    else:
+        with pytest.raises(MissingDependencyError, match="polars"):
+            row_cursor.to_polars()
 
     shm_view = arrow_module.write_arrow_shm(row_table)
     ipc_cursor = arrow_module.read_arrow_shm(shm_view)
     assert ipc_cursor.to_arrow_table().equals(row_table)
-    assert ipc_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+    if has_polars:
+        assert ipc_cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}]
+    else:
+        with pytest.raises(MissingDependencyError, match="polars"):
+            ipc_cursor.to_polars()
 
 
 class _DeterministicDataFrame:

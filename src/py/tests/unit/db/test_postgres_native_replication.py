@@ -473,6 +473,11 @@ class _ScriptedReplicationServer:
         with self._cond:
             return self._sessions[index]
 
+    def session_or_none(self, index: int) -> _ReplicationSession | None:
+        """Return accepted session by index when startup completed, or None if dropped early."""
+        with self._cond:
+            return self._sessions[index] if index < len(self._sessions) else None
+
     def _notify_state_locked(self) -> None:
         """Notify Condition and async waiters under self._cond."""
         self._cond.notify_all()
@@ -940,8 +945,9 @@ def test_replication_identity_and_unawaited_open_drop() -> None:
                 gc.collect()
                 gate.set()
                 await asyncio.sleep(0)
-                if srv.accept_count >= 3:
-                    assert await srv.session(2).wait_closed_async(timeout=2.0)
+                dropped_session = srv.session_or_none(2)
+                if dropped_session is not None:
+                    assert await dropped_session.wait_closed_async(timeout=2.0)
             finally:
                 await client.close()
 

@@ -17,7 +17,6 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
-futures = { workspace = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
 google-cloud-rpc = { workspace = true, optional = true }

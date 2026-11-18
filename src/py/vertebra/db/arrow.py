@@ -207,12 +207,11 @@ class ArrowCursor:
 
     def to_polars(self) -> Any:
         """Deserialize the Arrow IPC buffer into a `polars.DataFrame`."""
+        tbl = self.to_arrow_table()
         pl = ensure_module("polars", package="polars", extra="polars")
-        ensure_module("pyarrow", package="pyarrow", extra="arrow")
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "to_polars"):
             with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
                 return self._shm_cursor.to_polars()
-        tbl = self.to_arrow_table()
         return pl.from_arrow(tbl)
 
     def to_pylist(self) -> list[dict[str, Any]]:

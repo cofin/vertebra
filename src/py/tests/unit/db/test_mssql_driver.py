@@ -829,8 +829,9 @@ def test_sync_mssql_pipeline_exit_contract(scenario: str) -> None:
                     pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "nested_auto"))
                 assert driver.in_transaction is True
                 assert server.has_wire_text("nested_auto")
-                assert server.received_tx_requests == [5, 9]
-            assert server.received_tx_requests == [5, 9, 7]
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
         elif scenario == "exception_discard":
             with pytest.raises(RuntimeError, match="abort"), driver.pipeline() as pipe:
                 pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (3, "flushed_before_err"))
@@ -851,9 +852,10 @@ def test_sync_mssql_pipeline_exit_contract(scenario: str) -> None:
                 assert driver.in_transaction is True
                 assert server.has_wire_text("inner_flushed")
                 assert not server.has_wire_text("inner_never_sent")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
                 assert server.has_wire_text("ROLLBACK TRANSACTION [_vtb_pipe_")
-                assert server.received_tx_requests == [5, 9]
-            assert server.received_tx_requests == [5, 9, 7]
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
     finally:
         driver.close()
         server.close()
@@ -882,8 +884,9 @@ async def test_async_mssql_pipeline_exit_contract(scenario: str) -> None:
                     pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "nested_auto"))
                 assert driver.in_transaction is True
                 assert server.has_wire_text("nested_auto")
-                assert server.received_tx_requests == [5, 9]
-            assert server.received_tx_requests == [5, 9, 7]
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
         elif scenario == "exception_discard":
             with pytest.raises(RuntimeError, match="abort"):
                 async with driver.pipeline() as pipe:
@@ -906,9 +909,10 @@ async def test_async_mssql_pipeline_exit_contract(scenario: str) -> None:
                 assert driver.in_transaction is True
                 assert server.has_wire_text("inner_flushed")
                 assert not server.has_wire_text("inner_never_sent")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
                 assert server.has_wire_text("ROLLBACK TRANSACTION [_vtb_pipe_")
-                assert server.received_tx_requests == [5, 9]
-            assert server.received_tx_requests == [5, 9, 7]
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
     finally:
         await driver.close()
         server.close()

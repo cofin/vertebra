@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 from urllib.parse import urlparse
 
 from vertebra.storage import (
@@ -43,7 +43,10 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 
 try:
+    from sqlspec.exceptions import MissingDependencyError as SQLSpecMissingDependencyError
+    from sqlspec.protocols import ObjectStoreProtocol
     from sqlspec.storage.backends.base import ObjectStoreBase
+    from sqlspec.storage.registry import StorageRegistry
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
@@ -51,7 +54,6 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager, AbstractContextManager
 
     from sqlspec.storage.pipeline import StorageFormat
-    from sqlspec.storage.registry import StorageRegistry
     from sqlspec.typing import ArrowRecordBatch, ArrowTable
 
     from vertebra._storage import StorageBuffer
@@ -60,6 +62,8 @@ if TYPE_CHECKING:
 __all__ = (
     "ArrowFlightSerializer",
     "ObjectStoreBackend",
+    "ObjectStoreRegistry",
+    "get_object_store_registry",
     "register_storage_alias",
 )
 
@@ -815,6 +819,73 @@ class ObjectStoreBackend(ObjectStoreBase):
         return lowered
 
 
+_NATIVE_ONLY_SCHEMES: frozenset[str] = frozenset({"memory", "oci", "r2"})
+_OBJECT_STORE_REGISTRY: ObjectStoreRegistry | None = None
+
+
+class ObjectStoreRegistry(StorageRegistry):
+    """SQLSpec `StorageRegistry` resolving `memory://` and cloud URIs through `ObjectStoreBackend`."""
+
+    __slots__ = ("_fallback_registry",)
+
+    def __init__(self, *, fallback_registry: StorageRegistry | None = None) -> None:
+        super().__init__()
+        self._fallback_registry = fallback_registry
+
+    def get(self, uri_or_alias: str | Path, *, backend: str | None = None, **kwargs: Any) -> ObjectStoreProtocol:
+        """Resolve a storage URI or named alias using native `ObjectStoreBackend` fallback."""
+        path_str = str(uri_or_alias)
+        if path_str:
+            potential_alias = path_str.split("/", 1)[0]
+            if (
+                potential_alias not in self._alias_configs
+                and self._fallback_registry is not None
+                and self._fallback_registry.is_alias_registered(potential_alias)
+            ):
+                return self._fallback_registry.get(uri_or_alias, backend=backend, **kwargs)
+            scheme = self._scheme(path_str)
+            if scheme == "memory" and backend in (None, "vertebra"):
+                uri_or_alias = "memory://"
+        return super().get(uri_or_alias, backend=backend, **kwargs)
+
+    def _backend_from_uri(self, uri: str, *, backend_override: str | None = None, **kwargs: Any) -> ObjectStoreProtocol:
+        """Instantiate a backend for `uri`, preferring `ObjectStoreBackend` when third-party stores are absent."""
+        if backend_override == "vertebra":
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+        scheme = self._scheme(uri)
+        if backend_override is None and scheme in _NATIVE_ONLY_SCHEMES:
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+        try:
+            return super()._backend_from_uri(uri, backend_override=backend_override, **kwargs)
+        except SQLSpecMissingDependencyError:
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+
+    def _determine_backend_class(self, uri: str) -> type[ObjectStoreProtocol]:
+        """Select the backend class for `uri`, falling back to `ObjectStoreBackend`."""
+        scheme = self._scheme(uri)
+        if scheme in _NATIVE_ONLY_SCHEMES:
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+        try:
+            return super()._determine_backend_class(uri)
+        except SQLSpecMissingDependencyError:
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+
+    def _backend_class(self, backend_type: str) -> type[ObjectStoreProtocol]:
+        """Return the backend class for `backend_type`, adding `"vertebra"`."""
+        if backend_type == "vertebra":
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+        return super()._backend_class(backend_type)
+
+
+def get_object_store_registry() -> ObjectStoreRegistry:
+    """Return the shared `ObjectStoreRegistry` delegating global aliases to SQLSpec's `storage_registry`."""
+    global _OBJECT_STORE_REGISTRY
+    if _OBJECT_STORE_REGISTRY is None:
+        reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
+        _OBJECT_STORE_REGISTRY = ObjectStoreRegistry(fallback_registry=reg_mod.storage_registry)
+    return _OBJECT_STORE_REGISTRY
+
+
 def register_storage_alias(
     alias: str,
     uri_or_store: str | SyncObjectStore | AsyncObjectStore,
@@ -828,4 +899,15 @@ def register_storage_alias(
     reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
     target_registry = reg_mod.storage_registry if registry is None else registry
     uri = uri_or_store.url if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)) else uri_or_store
+    if backend is None or backend == "vertebra":
+        backend_config = dict(kwargs)
+        if base_path:
+            backend_config["base_path"] = base_path
+        target_registry._alias_configs[alias] = (
+            cast("type[ObjectStoreProtocol]", ObjectStoreBackend),
+            uri,
+            backend_config,
+        )
+        target_registry.clear_cache(alias)
+        return
     target_registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)

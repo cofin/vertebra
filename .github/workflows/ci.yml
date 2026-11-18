@@ -107,6 +107,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -146,6 +147,7 @@ jobs:
           workspaces: "src/rs"
           key: "py-${{ matrix.python-version }}"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: astral-sh/setup-uv@v7
         with:
@@ -178,11 +180,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
+      - name: Provision Python runtime for embedded PyO3 tests
+        run: uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "msgspec>=0.18"
       - name: Check Windows target portability
         working-directory: src/rs
         run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --no-default-features
@@ -212,17 +221,21 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
+      - name: Provision Python runtime for embedded PyO3 tests
+        run: uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "msgspec>=0.18"
       - name: Test with macOS feature flags
         working-directory: src/rs
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: |
-          PY_BIN="$(uv python find 3.12)"
+          PY_BIN="$(realpath ../.venv/bin/python)"
           PY_PREFIX="$("$PY_BIN" -c 'import sys; print(sys.base_prefix)')"
           PY_LIBDIR="$("$PY_BIN" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-          PYTHONHOME="$PY_PREFIX" DYLD_FALLBACK_LIBRARY_PATH="$PY_LIBDIR" PYO3_PYTHON="$PY_BIN" cargo test --workspace --features tls,http3,compression,gcp
+          PY_SITE="$(../.venv/bin/python -c 'import os, site; print(os.pathsep.join(site.getsitepackages()))')"
+          PYTHONPATH="$GITHUB_WORKSPACE/src/py:$PY_SITE" PYTHONHOME="$PY_PREFIX" DYLD_FALLBACK_LIBRARY_PATH="$PY_LIBDIR" PYO3_PYTHON="$PY_BIN" cargo test --workspace --features tls,http3,compression,gcp
 
   test-typescript:
     runs-on: ubuntu-latest
@@ -273,6 +286,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -303,6 +317,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -340,6 +355,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -370,6 +386,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -400,6 +417,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -598,6 +616,10 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+      - name: Free runner disk space for Oracle 23ai image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
       - name: Build native extensions
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"

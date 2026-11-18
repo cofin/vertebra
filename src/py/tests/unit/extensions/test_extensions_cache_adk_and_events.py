@@ -17,7 +17,9 @@ import pytest
 from advanced_alchemy.cache import CacheManager
 from advanced_alchemy.cache._null import NO_VALUE
 from sqlspec.config import ADKConfig
+from sqlspec.core import StatementConfig
 from sqlspec.data_dictionary import VersionInfo
+from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 from sqlspec.exceptions import MigrationError
 from sqlspec.extensions.adk import BaseAsyncADKStore, BaseSyncADKStore
 from sqlspec.extensions.adk.artifact.store import BaseAsyncADKArtifactStore, BaseSyncADKArtifactStore
@@ -1457,7 +1459,7 @@ class _RecordingAsyncMigrationDataDictionary(_RecordingBaseDataDictionary):
         return self._get_version()
 
 
-class _RecordingSyncMigrationDriver:
+class _RecordingSyncMigrationDriver(SyncDriverAdapterBase):
     def __init__(
         self,
         data_dictionary: _RecordingMigrationDataDictionary | None = None,
@@ -1465,30 +1467,69 @@ class _RecordingSyncMigrationDriver:
         select_rows: dict[str, list[Any]] | None = None,
         execute_error: Exception | None = None,
     ) -> None:
-        self.data_dictionary = data_dictionary or _RecordingMigrationDataDictionary()
+        super().__init__(connection=None, statement_config=StatementConfig())
+        self._data_dictionary = data_dictionary or _RecordingMigrationDataDictionary()
         self.scripts: list[str] = []
         self.executed: list[tuple[str, Any]] = []
         self.selects: list[tuple[str, Any]] = []
         self._select_rows = dict(select_rows or {})
         self._execute_error = execute_error
 
-    def execute_script(self, sql_text: str) -> None:
+    @property
+    def data_dictionary(self) -> Any:
+        return self._data_dictionary
+
+    def begin(self) -> None:
+        return None
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def dispatch_execute(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        raise NotImplementedError
+
+    def dispatch_execute_many(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        raise NotImplementedError
+
+    def dispatch_special_handling(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        return None
+
+    def handle_database_exceptions(self) -> Any:
+        raise NotImplementedError
+
+    def with_cursor(self, connection: Any) -> Any:
+        _ = connection
+        raise NotImplementedError
+
+    def execute_script(self, sql_text: str, *parameters: Any, **kwargs: Any) -> Any:
+        _ = (parameters, kwargs)
         self.scripts.append(sql_text)
 
-    def execute(self, sql_text: str, parameters: Any = None) -> None:
-        self.executed.append((sql_text, parameters))
+    def execute(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> Any:
+        _ = kwargs
+        param_arg = parameters[0] if parameters else None
+        self.executed.append((str(sql_text), param_arg))
         if self._execute_error is not None:
             raise self._execute_error
 
-    def select(self, sql_text: str, parameters: Any = None) -> list[Any]:
-        self.selects.append((sql_text, parameters))
+    def select(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> list[Any]:
+        _ = kwargs
+        param_arg = parameters[0] if parameters else None
+        sql_str = str(sql_text)
+        self.selects.append((sql_str, param_arg))
         for marker, rows in self._select_rows.items():
-            if marker in sql_text:
+            if marker in sql_str:
                 return list(rows)
         return []
 
 
-class _RecordingAsyncMigrationDriver:
+class _RecordingAsyncMigrationDriver(AsyncDriverAdapterBase):
     def __init__(
         self,
         data_dictionary: _RecordingAsyncMigrationDataDictionary | None = None,
@@ -1496,25 +1537,64 @@ class _RecordingAsyncMigrationDriver:
         select_rows: dict[str, list[Any]] | None = None,
         execute_error: Exception | None = None,
     ) -> None:
-        self.data_dictionary = data_dictionary or _RecordingAsyncMigrationDataDictionary()
+        super().__init__(connection=None, statement_config=StatementConfig())
+        self._data_dictionary = data_dictionary or _RecordingAsyncMigrationDataDictionary()
         self.scripts: list[str] = []
         self.executed: list[tuple[str, Any]] = []
         self.selects: list[tuple[str, Any]] = []
         self._select_rows = dict(select_rows or {})
         self._execute_error = execute_error
 
-    async def execute_script(self, sql_text: str) -> None:
+    @property
+    def data_dictionary(self) -> Any:
+        return self._data_dictionary
+
+    async def begin(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def dispatch_execute(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        raise NotImplementedError
+
+    async def dispatch_execute_many(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        raise NotImplementedError
+
+    async def dispatch_special_handling(self, cursor: Any, statement: Any) -> Any:
+        _ = (cursor, statement)
+        return None
+
+    def handle_database_exceptions(self) -> Any:
+        raise NotImplementedError
+
+    def with_cursor(self, connection: Any) -> Any:
+        _ = connection
+        raise NotImplementedError
+
+    async def execute_script(self, sql_text: str, *parameters: Any, **kwargs: Any) -> Any:
+        _ = (parameters, kwargs)
         self.scripts.append(sql_text)
 
-    async def execute(self, sql_text: str, parameters: Any = None) -> None:
-        self.executed.append((sql_text, parameters))
+    async def execute(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> Any:
+        _ = kwargs
+        param_arg = parameters[0] if parameters else None
+        self.executed.append((str(sql_text), param_arg))
         if self._execute_error is not None:
             raise self._execute_error
 
-    async def select(self, sql_text: str, parameters: Any = None) -> list[Any]:
-        self.selects.append((sql_text, parameters))
+    async def select(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> list[Any]:
+        _ = kwargs
+        param_arg = parameters[0] if parameters else None
+        sql_str = str(sql_text)
+        self.selects.append((sql_str, param_arg))
         for marker, rows in self._select_rows.items():
-            if marker in sql_text:
+            if marker in sql_str:
                 return list(rows)
         return []
 
@@ -1835,6 +1915,8 @@ def test_reconcile_module_isolation_and_error_semantics(engine: str) -> None:
     probe_script = (
         "import sys\n"
         f"import vertebra.extensions.sqlspec.adapters.{engine}.reconcile as rec\n"
+        "from sqlspec.core import StatementConfig\n"
+        "from sqlspec.driver import SyncDriverAdapterBase\n"
         "from sqlspec.migrations.context import MigrationContext\n"
         f"from vertebra.extensions.sqlspec.adapters.{engine} import {cfg_cls_name}\n"
         "assert 'google.adk' not in sys.modules\n"
@@ -1844,8 +1926,20 @@ def test_reconcile_module_isolation_and_error_semantics(engine: str) -> None:
         "    def get_columns(self, _d, _t, *, schema=None): return []\n"
         "    def get_indexes(self, _d, *, table, schema=None): return []\n"
         "    def get_version(self, _d): return None\n"
-        "class _Drv:\n"
-        "    data_dictionary = _DD()\n"
+        "class _Drv(SyncDriverAdapterBase):\n"
+        "    def __init__(self):\n"
+        "        super().__init__(connection=None, statement_config=StatementConfig())\n"
+        "        self._dd = _DD()\n"
+        "    @property\n"
+        "    def data_dictionary(self): return self._dd\n"
+        "    def begin(self): pass\n"
+        "    def commit(self): pass\n"
+        "    def rollback(self): pass\n"
+        "    def dispatch_execute(self, _c, _s): raise NotImplementedError\n"
+        "    def dispatch_execute_many(self, _c, _s): raise NotImplementedError\n"
+        "    def dispatch_special_handling(self, _c, _s): return None\n"
+        "    def handle_database_exceptions(self): raise NotImplementedError\n"
+        "    def with_cursor(self, _c): raise NotImplementedError\n"
         "    def execute_script(self, _s): pass\n"
         "    def execute(self, _s, _p=None): pass\n"
         "    def select(self, _s, _p=None): return []\n"
