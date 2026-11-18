@@ -24,8 +24,13 @@ from vertebra.typing import (
 )
 
 __all__ = (
+    "BFILE",
     "BINARY",
+    "BLOB",
+    "CLOB",
     "DATETIME",
+    "FIXED_CHAR",
+    "NCLOB",
     "NUMBER",
     "ROWID",
     "STRING",
@@ -505,6 +510,11 @@ DATETIME: Final[_DBAPITypeObject] = _DBAPITypeObject(
     1184,
 )
 ROWID: Final[_DBAPITypeObject] = _DBAPITypeObject("ROWID", "ROWID", "OID", 26)
+BLOB: Final[_DBAPITypeObject] = _DBAPITypeObject("BLOB", bytes, bytearray, memoryview, "BLOB")
+BFILE: Final[_DBAPITypeObject] = _DBAPITypeObject("BFILE", bytes, bytearray, memoryview, "BFILE")
+CLOB: Final[_DBAPITypeObject] = _DBAPITypeObject("CLOB", str, "CLOB")
+NCLOB: Final[_DBAPITypeObject] = _DBAPITypeObject("NCLOB", str, "NCLOB")
+FIXED_CHAR: Final[_DBAPITypeObject] = _DBAPITypeObject("FIXED_CHAR", str, "CHAR", "NCHAR", "FIXED_CHAR")
 
 
 def Date(year: int, month: int, day: int) -> datetime.date:
@@ -1517,6 +1527,11 @@ class SyncDBAPIModule:
     Binary = Binary
     STRING = STRING
     BINARY = BINARY
+    BLOB = BLOB
+    BFILE = BFILE
+    CLOB = CLOB
+    NCLOB = NCLOB
+    FIXED_CHAR = FIXED_CHAR
     NUMBER = NUMBER
     DATETIME = DATETIME
     ROWID = ROWID

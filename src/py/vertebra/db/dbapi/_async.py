@@ -7,8 +7,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol, cast
 
 from vertebra.db.dbapi._sync import (
+    BFILE,
     BINARY,
+    BLOB,
+    CLOB,
     DATETIME,
+    FIXED_CHAR,
+    NCLOB,
     NUMBER,
     ROWID,
     STRING,
@@ -605,6 +610,11 @@ class AsyncDBAPIModule:
     Binary = Binary
     STRING = STRING
     BINARY = BINARY
+    BLOB = BLOB
+    BFILE = BFILE
+    CLOB = CLOB
+    NCLOB = NCLOB
+    FIXED_CHAR = FIXED_CHAR
     NUMBER = NUMBER
     DATETIME = DATETIME
     ROWID = ROWID

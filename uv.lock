@@ -18,7 +18,7 @@ resolution-markers = [
 
 [[package]]
 name = "advanced-alchemy"
-version = "1.13.0b1"
+version = "1.13.0b2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alembic" },
@@ -26,9 +26,9 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/37/f4/2c9f05e474cf2dd63fff382a0f9202a41ebf38c1e4a2cf6fb63fea3e0e56/advanced_alchemy-1.13.0b1.tar.gz", hash = "sha256:5b5b48aa088330d5675c165fe49dd1ad191a7a39fc7fd33939cd50ac97bf2adb", size = 2216922, upload-time = "2026-11-17T20:27:45.365Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/00/36fbbe5ce6e84823254ee81a6af40d6af1730f3aee287fbfe109ac2cc491/advanced_alchemy-1.13.0b2.tar.gz", hash = "sha256:43298b99f6854945d487e37f394411c8a24fda465388362e590725af8a9c8d31", size = 2219162, upload-time = "2026-11-18T04:51:00.22Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b6/d4/02ffcd60c5c54f786beeee0a39eba155bf3f89c34a1a699bf770eaed1c4a/advanced_alchemy-1.13.0b1-py3-none-any.whl", hash = "sha256:22e31df9014c7a28ad35fd28e1a135d6798313f5fe8153021a93f1064608399e", size = 444394, upload-time = "2026-11-17T20:27:43.152Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/9a/c3960186955ea794175ec140497fd0ad72bc4d74bbbc4d1f1767377196c9/advanced_alchemy-1.13.0b2-py3-none-any.whl", hash = "sha256:82ee547f21eb3d1a5eb10e96b54569f266563328d04ce909f23aafd91afca142", size = 445231, upload-time = "2026-11-18T04:50:57.914Z" },
 ]
 
 [[package]]
@@ -4674,7 +4674,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "advanced-alchemy", marker = "extra == 'alchemy'", specifier = ">=1.13.0b1" },
+    { name = "advanced-alchemy", marker = "extra == 'alchemy'", specifier = ">=1.13.0b2" },
     { name = "alembic", marker = "extra == 'alchemy'", specifier = ">=1.18.0" },
     { name = "anyio", specifier = ">=4.0" },
     { name = "attrs", marker = "extra == 'attrs'", specifier = ">=24.0.0" },
@@ -4750,7 +4750,7 @@ build = [
     { name = "maturin", specifier = ">=1.5,<2" },
 ]
 dev = [
-    { name = "advanced-alchemy", specifier = ">=1.13.0b1" },
+    { name = "advanced-alchemy", specifier = ">=1.13.0b2" },
     { name = "alembic", specifier = ">=1.18.0" },
     { name = "anyio" },
     { name = "attrs", specifier = ">=24.0.0" },
@@ -4812,7 +4812,7 @@ postgres-bench = [
     { name = "psycopg", extras = ["binary"], marker = "python_full_version < '3.14'", specifier = ">=3.2,<3.4" },
 ]
 test = [
-    { name = "advanced-alchemy", specifier = ">=1.13.0b1" },
+    { name = "advanced-alchemy", specifier = ">=1.13.0b2" },
     { name = "alembic", specifier = ">=1.18.0" },
     { name = "anyio" },
     { name = "attrs", specifier = ">=24.0.0" },
