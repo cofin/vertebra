@@ -1,19 +1,27 @@
 """Core protocol helpers, exception mapping, connection shim, and typed parameter encoding for Spanner."""
 
+from __future__ import annotations
+
 import base64
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal, Self
 
 import msgspec
-from sqlspec.core import ParameterStyle, StatementConfig, TypedParameter
+from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig, TypedParameter
+from sqlspec.core.cache import get_cache_config
 from sqlspec.exceptions import (
+    CheckViolationError,
+    ConnectionTimeoutError,
     DatabaseConnectionError,
     DataError,
+    DeadlockError,
     DialectNotSupportedError,
+    ForeignKeyViolationError,
     IntegrityError,
+    NotNullViolationError,
     OperationalError,
     OperationCancelledError,
     PermissionDeniedError,
@@ -25,17 +33,31 @@ from sqlspec.exceptions import (
 )
 from sqlspec.utils.serializers import to_json
 
-from vertebra._vertebra import SpannerAbortedError, SpannerError
+from vertebra._vertebra import (
+    ConnectionFailure,
+    DatabaseError,
+    GoogleCloudAuthError,
+    GoogleCloudError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    PoolExhaustedError,
+    ProgrammingError,
+    QueryCancelledError,
+    SerializationFailure,
+    SpannerAbortedError,
+    SpannerError,
+)
+from vertebra._vertebra import DataError as NativeDataError
+from vertebra._vertebra import IntegrityError as NativeIntegrityError
+from vertebra._vertebra import NotFoundError as NativeNotFoundError
+from vertebra._vertebra import OperationalError as NativeOperationalError
 from vertebra.db.adapters.spanner import (
     Mutation,
     SpannerConfig,
     StalenessBound,
     SyncSpannerDriver,
     SyncSpannerSnapshot,
-)
-from vertebra.extensions.sqlspec._driver import (
-    map_native_database_exception,
-    native_statement_config,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
@@ -53,7 +75,9 @@ __all__ = (
     "farm_fingerprint_shard",
     "farmhash_fingerprint64",
     "is_spanner_table_missing",
+    "map_native_database_exception",
     "map_spanner_exception",
+    "native_statement_config",
     "normalize_spanner_dialect",
     "object_to_artifact_reference",
     "parse_utc_timestamp",
@@ -86,6 +110,47 @@ def normalize_spanner_dialect(value: Any) -> Literal["googlesql", "spangres"]:
 def sqlspec_dialect_name(value: Any) -> Literal["spanner", "spangres"]:
     """Map a Spanner dialect label to SQLSpec's public dialect name without exposing ``googlesql``."""
     return "spangres" if normalize_spanner_dialect(value) == "spangres" else "spanner"
+
+
+def native_statement_config(
+    dialect: str,
+    parameter_style: ParameterStyle,
+    **overrides: Any,
+) -> StatementConfig:
+    """Construct an isolated ``StatementConfig`` configured for the adapter's native bind syntax."""
+    default_style = overrides.pop("default_style", ParameterStyle.QMARK)
+    supported_styles = overrides.pop("supported_styles", None)
+    supported_execution_styles = overrides.pop("supported_execution_styles", None)
+    preserve_parameter_format = bool(overrides.pop("preserve_parameter_format", True))
+    enable_caching = overrides.pop("enable_caching", None)
+
+    if supported_styles is not None:
+        input_styles: Collection[ParameterStyle] = set(supported_styles)
+    elif parameter_style == ParameterStyle.NAMED_COLON:
+        input_styles = {ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}
+    else:
+        input_styles = {default_style, parameter_style}
+
+    exec_styles: Collection[ParameterStyle] = (
+        set(supported_execution_styles) if supported_execution_styles is not None else {parameter_style}
+    )
+    caching = get_cache_config().compiled_cache_enabled if enable_caching is None else enable_caching
+    parameter_config = overrides.pop(
+        "parameter_config",
+        ParameterStyleConfig(
+            default_parameter_style=default_style,
+            supported_parameter_styles=set(input_styles),
+            default_execution_parameter_style=parameter_style,
+            supported_execution_parameter_styles=set(exec_styles),
+            preserve_parameter_format=preserve_parameter_format,
+        ),
+    )
+    return StatementConfig(
+        dialect=dialect,
+        enable_caching=caching,
+        parameter_config=parameter_config,
+        **overrides,
+    )
 
 
 def default_statement_config(dialect: str = "googlesql") -> StatementConfig:
@@ -215,6 +280,100 @@ def encode_spanner_batch_parameters(
     for item in parameter_sets:
         encoded.append(encode_spanner_parameters(item, dialect=dialect))
     return encoded
+
+
+def _is_google_api_exception(exc: BaseException) -> bool:
+    """Check whether ``exc`` originates from ``google.api_core`` or ``google.cloud`` without importing them."""
+    return any(cls.__module__.startswith(("google.api_core", "google.cloud")) for cls in type(exc).__mro__)
+
+
+def map_native_database_exception(exc: BaseException) -> Exception | None:
+    """Map Vertebra native ``DatabaseError`` / ``GoogleCloudError`` hierarchy exceptions to ``sqlspec.exceptions.*``."""
+    if isinstance(exc, SQLSpecError):
+        return None
+    if not isinstance(exc, (DatabaseError, GoogleCloudError, SpannerError)) and not _is_google_api_exception(exc):
+        return None
+
+    message = str(exc)
+    lower = message.lower()
+    sqlstate = str(getattr(exc, "sqlstate", "") or "").upper()
+    code_attr = getattr(exc, "code", None)
+    code_str = str(code_attr if code_attr is not None else "").upper()
+
+    if (
+        isinstance(exc, GoogleCloudAuthError)
+        or sqlstate in {"42501", "28000", "28P01"}
+        or any(token in lower for token in ("permission denied", "unauthenticated", "forbidden", "access denied"))
+    ):
+        return PermissionDeniedError(message)
+
+    if isinstance(exc, QueryCancelledError) or any(
+        token in lower for token in ("cancelled", "canceled", "query was interrupted", "57014")
+    ):
+        return OperationCancelledError(message)
+
+    if (
+        isinstance(exc, (SpannerAbortedError, SerializationFailure))
+        or sqlstate in {"40001", "40P01"}
+        or any(token in lower for token in ("deadlock", "serialization", "aborted"))
+    ):
+        if "deadlock" in lower or sqlstate == "40P01":
+            return DeadlockError(message)
+        return SerializationConflictError(message)
+
+    if isinstance(exc, NativeIntegrityError) or sqlstate.startswith("23"):
+        if "unique" in lower or "duplicate" in lower or sqlstate == "23505":
+            return UniqueViolationError(message)
+        if "foreign key" in lower or sqlstate == "23503":
+            return ForeignKeyViolationError(message)
+        if "check constraint" in lower or sqlstate == "23514":
+            return CheckViolationError(message)
+        if "not null" in lower or "not-null" in lower or sqlstate == "23502":
+            return NotNullViolationError(message)
+        return IntegrityError(message)
+
+    if isinstance(exc, (ConnectionFailure, PoolExhaustedError)) or sqlstate.startswith("08"):
+        if "timeout" in lower or "timed out" in lower:
+            return ConnectionTimeoutError(message)
+        return DatabaseConnectionError(message)
+
+    if isinstance(exc, (NativeDataError, NativeNotFoundError)) or sqlstate.startswith("22"):
+        return DataError(message)
+
+    if isinstance(exc, NotSupportedError):
+        return DialectNotSupportedError(message)
+
+    if isinstance(exc, NativeOperationalError) or "timeout" in lower or "deadline" in lower:
+        if any(token in lower for token in ("timeout", "timed out", "deadline", "57014")):
+            return QueryTimeoutError(message)
+        if "deadlock" in lower:
+            return DeadlockError(message)
+        if any(token in lower for token in ("connection", "refused", "unreachable", "reset by peer")):
+            return DatabaseConnectionError(message)
+        return OperationalError(message)
+
+    if isinstance(exc, ProgrammingError) or any(
+        token in lower for token in ("syntax", "parse error", "no such table", "does not exist", "undefined")
+    ):
+        return SQLParsingError(message)
+
+    if isinstance(exc, (SpannerError, GoogleCloudError)) or _is_google_api_exception(exc):
+        if "ALREADY_EXISTS" in code_str or "already exists" in lower:
+            return UniqueViolationError(message)
+        if "DEADLINE_EXCEEDED" in code_str or "timeout" in lower:
+            return QueryTimeoutError(message)
+        if "PERMISSION_DENIED" in code_str or "UNAUTHENTICATED" in code_str:
+            return PermissionDeniedError(message)
+        if "ABORTED" in code_str:
+            return SerializationConflictError(message)
+        if "CANCELLED" in code_str:
+            return OperationCancelledError(message)
+        return OperationalError(message)
+
+    if isinstance(exc, (InterfaceError, InternalError, DatabaseError)):
+        return OperationalError(message)
+
+    return OperationalError(message)
 
 
 def map_spanner_exception(exc: BaseException) -> Exception | None:

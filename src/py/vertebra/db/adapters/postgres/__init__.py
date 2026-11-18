@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         PostgresCheckpointConflictError,
         PostgresCheckpointStore,
         PostgresReplicationGapError,
+        SqlPostgresCheckpointStore,
     )
     from vertebra.db.adapters.postgres.config import PoolerMode, PostgreSQLConfig
     from vertebra.db.adapters.postgres.core import (
@@ -144,6 +145,7 @@ __all__ = (
     "PostgresTarget",
     "PostgresValue",
     "PreparePostgresQuery",
+    "SqlPostgresCheckpointStore",
     "SyncPipelineClientProtocol",
     "SyncPostgresNotificationSource",
     "SyncPostgresPipeline",
@@ -236,6 +238,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "PostgresTarget": ("vertebra.db.adapters.postgres.options", "PostgresTarget"),
     "PostgresValue": ("vertebra.db.adapters.postgres.types", "PostgresValue"),
     "PreparePostgresQuery": ("vertebra.db.adapters.postgres.pipeline", "PreparePostgresQuery"),
+    "SqlPostgresCheckpointStore": ("vertebra.db.adapters.postgres.change_stream", "SqlPostgresCheckpointStore"),
     "SyncPipelineClientProtocol": ("vertebra.db.adapters.postgres.pipeline", "SyncPipelineClientProtocol"),
     "SyncPostgresNotificationSource": (
         "vertebra.db.adapters.postgres.notify",

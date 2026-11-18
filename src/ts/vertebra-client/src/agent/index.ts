@@ -14,10 +14,54 @@ export function encodeMcpHeaderValue(value: string): string {
   const bytes = new TextEncoder().encode(value);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+    const byte = bytes[i];
+    if (byte !== undefined) {
+      binary += String.fromCharCode(byte);
+    }
   }
   const b64 = typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
   return `=?base64?${b64}?=`;
+}
+
+interface McpJsonRpcEnvelope {
+  result?: unknown;
+  error?: { code?: number; message: string };
+}
+
+/**
+ * Parse a JSON or `text/event-stream` SSE MCP JSON-RPC response, returning the
+ * terminal `result` or throwing the JSON-RPC `error.message`.
+ */
+export async function parseMcpJsonRpcResponse(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("content-type") ?? "";
+  let data: McpJsonRpcEnvelope;
+  if (contentType.includes("text/event-stream")) {
+    const sseText = await response.text();
+    let lastParsed: McpJsonRpcEnvelope | null = null;
+    for (const line of sseText.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        const rawJson = trimmed.slice(5).trim();
+        if (rawJson) {
+          const candidate = JSON.parse(rawJson) as unknown;
+          if (candidate !== null && typeof candidate === "object" && ("result" in candidate || "error" in candidate)) {
+            lastParsed = candidate as McpJsonRpcEnvelope;
+          }
+        }
+      }
+    }
+    if (!lastParsed) {
+      throw new Error("No JSON-RPC response message found in MCP SSE stream");
+    }
+    data = lastParsed;
+  } else {
+    data = (await response.json()) as McpJsonRpcEnvelope;
+  }
+
+  if (data.error) {
+    throw new Error(data.error.message);
+  }
+  return data.result;
 }
 
 export interface McpClientOptions {
@@ -105,35 +149,7 @@ export class McpClient {
       throw new Error(`MCP error ${resp.status}: ${await resp.text()}`);
     }
 
-    const contentType = resp.headers.get("content-type") ?? "";
-    let data: { result?: T; error?: { message: string } };
-    if (contentType.includes("text/event-stream")) {
-      const sseText = await resp.text();
-      let lastParsed: { result?: T; error?: { message: string } } | null = null;
-      for (const line of sseText.split("\n")) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("data:")) {
-          const rawJson = trimmed.slice(5).trim();
-          if (rawJson) {
-            const candidate = JSON.parse(rawJson) as { result?: T; error?: { message: string } };
-            if ("result" in candidate || "error" in candidate) {
-              lastParsed = candidate;
-            }
-          }
-        }
-      }
-      if (!lastParsed) {
-        throw new Error("No JSON-RPC response message found in MCP SSE stream");
-      }
-      data = lastParsed;
-    } else {
-      data = (await resp.json()) as { result?: T; error?: { message: string } };
-    }
-
-    if (data.error) {
-      throw new Error(data.error.message);
-    }
-    return data.result as T;
+    return (await parseMcpJsonRpcResponse(resp)) as T;
   }
 
   async discover(capabilities: Record<string, unknown> = {}): Promise<unknown> {

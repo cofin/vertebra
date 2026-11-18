@@ -16,8 +16,8 @@ import inspect
 import logging
 import mimetypes
 import secrets
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from typing import Any, NoReturn
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from typing import Any, NoReturn, cast
 
 import anyio
 import msgspec
@@ -42,7 +42,7 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCRouter,
 )
 from vertebra.agent.core.schema import ToolArgumentError, is_app_only_tool
-from vertebra.agent.core.sse import SseFrame, SseStreamBroker, StreamLimitExceededError
+from vertebra.agent.core.sse import CacheSseStreamBroker, SseFrame, SseStreamBroker, StreamLimitExceededError
 from vertebra.agent.mcp.client import MCP_NAME_FIELDS, decode_mcp_header_value
 from vertebra.agent.mcp.models import (
     HEADER_MISMATCH,
@@ -71,11 +71,12 @@ from vertebra.agent.mcp.models import (
     ToolCallOutput,
 )
 from vertebra.agent.mcp.registry import RegistryChangeKind, ToolRegistry
-from vertebra.agent.mcp.sessions import MCPSession, MCPSessionStore, SessionLimitExceededError
+from vertebra.agent.mcp.sessions import CacheMCPSessionStore, MCPSession, MCPSessionStore, SessionLimitExceededError
 from vertebra.agent.mcp.skills import SKILL_FILE_NAME, SkillAccessError, SkillCatalog
-from vertebra.agent.mcp.tasks import MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
+from vertebra.agent.mcp.tasks import CacheMCPTaskStore, MCPTaskStore, TaskLookupError, TaskRecord, TaskStateError
 from vertebra.agent.runtime import ConfirmationGate
 from vertebra.agent.telemetry import AgentTelemetryRecorder
+from vertebra.cache import AsyncCacheStore, SyncCacheStore
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 logger = logging.getLogger(__name__)
@@ -119,33 +120,110 @@ class MCPCore:
         task_store: MCPTaskStore | None = None,
         skill_catalog: Any | None = None,
         confirmation_gate: ConfirmationGate | None = None,
-        session_store: MCPSessionStore | None = None,
+        session_store: MCPSessionStore | CacheMCPSessionStore | None = None,
     ) -> None:
         self.config = config if config is not None else MCPConfig()
         self.confirmation_gate = confirmation_gate if confirmation_gate is not None else ConfirmationGate()
         self.registry = registry if registry is not None else ToolRegistry(confirmation_gate=self.confirmation_gate)
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
-        self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
-        self.task_store = task_store if task_store is not None else MCPTaskStore(stream_broker=self.stream_broker)
+        self._owned_sync_cache: SyncCacheStore | None = None
+        self._owned_async_cache: AsyncCacheStore | None = None
+        self._owns_stream_broker = False
+        self._owns_task_store = False
+        self._owns_session_store = False
+
+        resolved_broker = stream_broker if stream_broker is not None else self.config.stream_broker
+        if resolved_broker is None:
+            if self.config.cache_url is not None:
+                sync_cache = self._ensure_owned_sync_cache()
+                resolved_broker = CacheSseStreamBroker(store=sync_cache, key_prefix="vtb:mcp:sse:")
+                self._owns_stream_broker = True
+            else:
+                resolved_broker = SseStreamBroker()
+        self.stream_broker: SseStreamBroker = resolved_broker
+
+        resolved_task_store = task_store if task_store is not None else self.config.task_store
+        if resolved_task_store is None:
+            if self.config.cache_url is not None:
+                sync_cache = self._ensure_owned_sync_cache()
+                resolved_task_store = CacheMCPTaskStore(
+                    store=sync_cache,
+                    key_prefix="vtb:mcp:task:",
+                    stream_broker=self.stream_broker,
+                )
+                self._owns_task_store = True
+            else:
+                resolved_task_store = MCPTaskStore(stream_broker=self.stream_broker)
+        self.task_store: MCPTaskStore = resolved_task_store
+
         self.skill_catalog: SkillCatalog | None = SkillCatalog.coerce(skill_catalog, telemetry=self.telemetry)
-        self.session_store = (
-            session_store
-            if session_store is not None
-            else MCPSessionStore(
-                ttl_seconds=self.config.session_ttl_seconds,
-                max_sessions=self.config.max_sessions,
-            )
-        )
+
+        resolved_session_store = session_store if session_store is not None else self.config.session_store
+        if resolved_session_store is None:
+            if self.config.cache_url is not None:
+                self._owned_async_cache = AsyncCacheStore(
+                    self.config.cache_url,
+                    default_ttl=self.config.session_ttl_seconds,
+                    key_prefix="vtb:mcp:sess:",
+                )
+                resolved_session_store = CacheMCPSessionStore(
+                    store=self._owned_async_cache,
+                    key_prefix="vtb:mcp:sess:",
+                    default_ttl=self.config.session_ttl_seconds,
+                    max_sessions=self.config.max_sessions,
+                )
+                self._owns_session_store = True
+            else:
+                resolved_session_store = MCPSessionStore(
+                    ttl_seconds=self.config.session_ttl_seconds,
+                    max_sessions=self.config.max_sessions,
+                )
+        self.session_store: MCPSessionStore | CacheMCPSessionStore = resolved_session_store
         self.router = JSONRPCRouter()
         self._extensions: dict[str, dict[str, Any]] = {}
         self._listen_registrations: dict[str, _ListenRegistration] = {}
         self._event_counter: int = 0
         self._task_runs: dict[str, tuple[asyncio.Task[None], AgentContext]] = {}
+        self._task_contexts: dict[str, AgentContext] = {}
 
         self._register_handlers()
         self.registry.add_listener(self._on_registry_changed)
         if self.skill_catalog is not None:
             self.skill_catalog.add_listener(self._on_skills_changed)
+
+    def _ensure_owned_sync_cache(self) -> SyncCacheStore:
+        if self._owned_sync_cache is None:
+            assert self.config.cache_url is not None
+            self._owned_sync_cache = SyncCacheStore(self.config.cache_url)
+        return self._owned_sync_cache
+
+    async def aclose(self) -> None:
+        """Release owned cache stores and cancel active background task runs."""
+        for task_id, (run, task_context) in list(self._task_runs.items()):
+            task_context.cancellation_token.cancel("MCPCore closing")
+            run.cancel()
+            self._task_runs.pop(task_id, None)
+        self._task_contexts.clear()
+        if self._owns_session_store:
+            aclose_fn = getattr(self.session_store, "aclose", None)
+            if callable(aclose_fn):
+                res = aclose_fn()
+                if inspect.isawaitable(res):
+                    await res
+        if self._owns_task_store:
+            close_fn = getattr(self.task_store, "close", None)
+            if callable(close_fn):
+                close_fn()
+        if self._owns_stream_broker:
+            close_fn = getattr(self.stream_broker, "close", None)
+            if callable(close_fn):
+                close_fn()
+        if self._owned_async_cache is not None:
+            await self._owned_async_cache.aclose()
+            self._owned_async_cache = None
+        if self._owned_sync_cache is not None:
+            self._owned_sync_cache.close()
+            self._owned_sync_cache = None
 
     def validate(self) -> None:
         """Validate tool and resource cross-references including SEP-1865 ``ui://`` links."""
@@ -322,6 +400,7 @@ class MCPCore:
             }
         if self.config.logging:
             capabilities["logging"] = {}
+        capabilities["completions"] = {}
 
         extensions: dict[str, Any] = {}
         if self.config.ui_mime_types:
@@ -1690,22 +1769,33 @@ class MCPCore:
 
             task_context = (context if isinstance(context, AgentContext) else AgentContext()).fork()
 
-            async def _run_async_tool() -> None:
-                token = bind_agent_context(task_context)
-                try:
-                    res = await target_tool.call(arguments, context=task_context)
-                    formatted = self._format_tool_output(res, is_error=False)
-                    self.task_store.complete(task.task_id, formatted)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    self.task_store.fail(task.task_id, {"message": str(exc)})
-                finally:
-                    reset_agent_context(token)
+            if self.task_store.queue_service is not None:
+                self._task_contexts[task.task_id] = task_context
+                await self.task_store.enqueue_execution(
+                    task.task_id,
+                    self._execute_queued_tool_task,
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    owner_id=owner_id,
+                )
+            else:
 
-            bg_task = asyncio.create_task(_run_async_tool())
-            self._task_runs[task.task_id] = (bg_task, task_context)
-            bg_task.add_done_callback(lambda _run: self._task_runs.pop(task.task_id, None))
+                async def _run_async_tool() -> None:
+                    token = bind_agent_context(task_context)
+                    try:
+                        res = await target_tool.call(arguments, context=task_context)
+                        formatted = self._format_tool_output(res, is_error=False)
+                        self.task_store.complete(task.task_id, formatted)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self.task_store.fail(task.task_id, {"message": str(exc)})
+                    finally:
+                        reset_agent_context(token)
+
+                bg_task = asyncio.create_task(_run_async_tool())
+                self._task_runs[task.task_id] = (bg_task, task_context)
+                bg_task.add_done_callback(lambda _run: self._task_runs.pop(task.task_id, None))
             return self._with_meta(
                 "tools/call",
                 {"task": {"taskId": task.task_id, "status": task.status, "pollInterval": task.poll_interval_ms}},
@@ -2196,13 +2286,52 @@ class MCPCore:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing 'taskId'"))
         try:
             task = self.task_store.cancel(str(task_id), self._caller_owner(context), reason)
-            if task.status == "cancelled" and str(task_id) in self._task_runs:
-                run, task_context = self._task_runs[str(task_id)]
-                task_context.cancellation_token.cancel(reason or "Task cancelled by client")
-                run.cancel()
+            if task.status == "cancelled":
+                queued_ctx = self._task_contexts.pop(str(task_id), None)
+                if queued_ctx is not None:
+                    queued_ctx.cancellation_token.cancel(reason or "Task cancelled by client")
+                if str(task_id) in self._task_runs:
+                    run, task_context = self._task_runs[str(task_id)]
+                    task_context.cancellation_token.cancel(reason or "Task cancelled by client")
+                    run.cancel()
             return self._with_meta("tasks/cancel", {"task": self._task_to_dict(task)})
         except TaskLookupError as exc:
             raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+
+    async def _execute_queued_tool_task(
+        self,
+        task_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> None:
+        try:
+            current = self.task_store.get(task_id, owner_id)
+        except TaskLookupError:
+            self._task_contexts.pop(task_id, None)
+            return
+        if current.is_terminal:
+            self._task_contexts.pop(task_id, None)
+            return
+        target_tool = self.registry.get_tool(tool_name)
+        if target_tool is None:
+            self._task_contexts.pop(task_id, None)
+            self.task_store.fail(task_id, {"message": f"Tool not found: {tool_name}"})
+            return
+        task_context = self._task_contexts.pop(task_id, None) or AgentContext()
+        if task_context.cancellation_token.is_cancelled:
+            return
+        token = bind_agent_context(task_context)
+        try:
+            res = await target_tool.call(arguments, context=task_context)
+            formatted = self._format_tool_output(res, is_error=False)
+            self.task_store.complete(task_id, formatted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.task_store.fail(task_id, {"message": str(exc)})
+        finally:
+            reset_agent_context(token)
 
     async def _handle_tasks_list(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """List tasks owned by caller."""
@@ -2216,7 +2345,90 @@ class MCPCore:
 
     async def _handle_completion(self, params: Any = None, context: Any = None) -> dict[str, Any]:
         """Handle argument completion request."""
-        return self._with_meta("completion/complete", {"completion": {"values": [], "total": 0, "hasMore": False}})
+        if not isinstance(params, Mapping):
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Invalid completion params"))
+        ref = params.get("ref")
+        argument = params.get("argument")
+        if not isinstance(ref, Mapping) or not isinstance(argument, Mapping):
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message="Missing 'ref' or 'argument' in completion/complete")
+            )
+        ref_type = ref.get("type")
+        if ref_type == "ref/prompt":
+            ref_name = ref.get("name")
+        elif ref_type == "ref/resource":
+            ref_name = ref.get("uri")
+        else:
+            ref_name = ref.get("name") or ref.get("uri")
+        if not isinstance(ref_name, str) or not ref_name:
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message="Missing completion reference 'name' or 'uri'")
+            )
+        arg_name = argument.get("name")
+        if not isinstance(arg_name, str) or not arg_name:
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing completion argument 'name'"))
+        arg_value = str(argument.get("value", ""))
+        callback = self.registry.get_completion(ref_name)
+        if callback is None:
+            raise JSONRPCErrorException(
+                JSONRPCError(code=INVALID_PARAMS, message=f"Unknown completion reference: {ref_name}")
+            )
+        raw_result = await self._invoke_completion_callback(callback, ref_name, arg_name, arg_value, context)
+        if isinstance(raw_result, Mapping):
+            raw_values = [str(v) for v in raw_result.get("values", ())]
+            total_raw = raw_result.get("total")
+            total = (
+                int(total_raw) if isinstance(total_raw, int) and not isinstance(total_raw, bool) else len(raw_values)
+            )
+            values = raw_values[:100]
+            explicit_more = raw_result.get("hasMore", raw_result.get("has_more"))
+            has_more = bool(len(raw_values) > 100 or explicit_more or total > len(values))
+        else:
+            raw_values = [str(v) for v in raw_result] if raw_result is not None else []
+            total = len(raw_values)
+            values = raw_values[:100]
+            has_more = total > 100
+        return self._with_meta(
+            "completion/complete",
+            {"completion": {"values": values, "total": total, "hasMore": has_more}},
+            context=context,
+        )
+
+    async def _invoke_completion_callback(
+        self,
+        callback: Callable[..., Any],
+        ref_name: str,
+        arg_name: str,
+        arg_value: str,
+        context: Any,
+    ) -> Any:
+        try:
+            sig = inspect.signature(callback)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is None:
+            raw = callback(arg_name, arg_value)
+        else:
+            positional = [
+                param
+                for param in sig.parameters.values()
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            has_varargs = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in sig.parameters.values())
+            if len(positional) >= 3:
+                if positional[2].name in ("ctx", "context"):
+                    raw = callback(arg_name, arg_value, context)
+                else:
+                    raw = callback(ref_name, arg_name, arg_value)
+            elif len(positional) == 2 or has_varargs:
+                raw = callback(arg_name, arg_value)
+            elif len(positional) == 1:
+                raw = callback(arg_value)
+            else:
+                raw = callback()
+        if inspect.isawaitable(raw):
+            raw = await raw
+        return raw
 
 
 class _ListenRegistration(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -2270,7 +2482,7 @@ class _ListenStreamWrapper(AsyncIterator[bytes]):
             aclose = getattr(self._inner, "aclose", None)
             if callable(aclose):
                 with contextlib.suppress(BaseException):
-                    await aclose()
+                    await cast("Awaitable[Any]", aclose())
         finally:
             self._cleanup()
 

@@ -13,7 +13,9 @@ import anyio
 import msgspec
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
+from vertebra.cache import SyncCacheStore
 from vertebra.typing import VertebraError
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
 class StreamLimitExceededError(VertebraError):
@@ -316,7 +318,120 @@ class _ManagedSseStream(AsyncIterator[bytes]):
         )
 
 
+class CacheSseStreamBroker(SseStreamBroker):
+    """SSE stream broker persisting bounded replay frames in SyncCacheStore across workers."""
+
+    def __init__(
+        self,
+        store: SyncCacheStore | None = None,
+        *,
+        cache_url: str = "memory://",
+        key_prefix: str = "vtb:sse:",
+        replay_capacity: int = 1024,
+        ttl_seconds: float | None = 3600.0,
+    ) -> None:
+        super().__init__(replay_capacity=replay_capacity)
+        self.key_prefix = key_prefix
+        self.ttl_seconds = ttl_seconds
+        self._owns_store = store is None
+        self._store: SyncCacheStore = (
+            store if store is not None else SyncCacheStore(cache_url, key_prefix=key_prefix, default_ttl=ttl_seconds)
+        )
+
+    def publish(self, session_id: str, frame: SseFrame) -> bool:
+        """Publish a frame to local streams and persist it in the shared replay cache."""
+        frames = self._load_frames(session_id)
+        frames.append(frame)
+        if len(frames) > self.replay_capacity:
+            frames = frames[-self.replay_capacity :]
+        self._save_frames(session_id, frames)
+        self._register_session(session_id)
+        return super().publish(session_id, frame)
+
+    def broadcast(self, frame: SseFrame, session_ids: Sequence[str] | None = None) -> int:
+        """Broadcast a frame to specified sessions or all locally and remotely known sessions."""
+        if session_ids is None:
+            merged = list(dict.fromkeys([*self._buffers.keys(), *self._load_sessions()]))
+            return super().broadcast(frame, merged)
+        return super().broadcast(frame, session_ids)
+
+    def close_session(self, session_id: str) -> None:
+        """Close active SSE streams and delete persisted replay state for a session."""
+        super().close_session(session_id)
+        self._store.delete(self._replay_key(session_id))
+        sessions = self._load_sessions()
+        if session_id in sessions:
+            updated = [sid for sid in sessions if sid != session_id]
+            self._save_sessions(updated)
+
+    def close(self) -> None:
+        """Release the backing SyncCacheStore if owned by this stream broker."""
+        if self._owns_store:
+            self._store.close()
+
+    def _subscribe_raw(
+        self,
+        session_id: str,
+        last_event_id: str | None = None,
+    ) -> tuple[MemoryObjectSendStream[SseFrame], MemoryObjectReceiveStream[SseFrame], SseReplayBuffer]:
+        cached_frames = self._load_frames(session_id)
+        if cached_frames:
+            buf = SseReplayBuffer(capacity=self.replay_capacity)
+            for frame in cached_frames:
+                buf.append(frame)
+            self._buffers[session_id] = buf
+        return super()._subscribe_raw(session_id, last_event_id=last_event_id)
+
+    def _replay_key(self, session_id: str) -> str:
+        return f"{self.key_prefix}replay:{session_id}"
+
+    def _sessions_key(self) -> str:
+        return f"{self.key_prefix}sessions"
+
+    def _load_frames(self, session_id: str) -> list[SseFrame]:
+        raw = self._store.get(self._replay_key(session_id))
+        if raw is None:
+            return []
+        parsed = decode_json(raw)
+        if not isinstance(parsed, list):
+            return []
+        return [msgspec.convert(item, SseFrame) for item in parsed]
+
+    def _save_frames(self, session_id: str, frames: list[SseFrame]) -> None:
+        self._store.set(
+            self._replay_key(session_id),
+            encode_json_bytes(frames),
+            ttl=self.ttl_seconds,
+        )
+
+    def _load_sessions(self) -> list[str]:
+        raw = self._store.get(self._sessions_key())
+        if raw is None:
+            return []
+        parsed = decode_json(raw)
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed]
+
+    def _save_sessions(self, session_ids: list[str]) -> None:
+        if not session_ids:
+            self._store.delete(self._sessions_key())
+            return
+        self._store.set(
+            self._sessions_key(),
+            encode_json_bytes(list(dict.fromkeys(session_ids))),
+            ttl=self.ttl_seconds,
+        )
+
+    def _register_session(self, session_id: str) -> None:
+        sessions = self._load_sessions()
+        if session_id not in sessions:
+            sessions.append(session_id)
+            self._save_sessions(sessions)
+
+
 __all__ = [
+    "CacheSseStreamBroker",
     "SseFrame",
     "SseReplayBuffer",
     "SseStreamBroker",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 import types
 from collections.abc import Mapping
@@ -28,11 +29,16 @@ from vertebra.db.adapters.spanner.change_stream import (
     SpannerChildPartition,
     SyncSpannerChangeStreamSource,
 )
+from vertebra.db.adapters.spanner.queue import (
+    compute_spanner_shard_id,
+    farm_fingerprint64,
+)
 from vertebra.db.cdc import CDCConfig, ChangeFeed
 from vertebra.db.driver.capabilities import (
     AsyncChangeSource,
     AsyncQueueStore,
     QueueEntry,
+    QueueReservation,
     SyncChangeSource,
     SyncQueueStore,
 )
@@ -1155,7 +1161,14 @@ class _InMemorySpannerQueueWire:
                 "idempotency_key": _p("idempotency_key", 14),
                 "traceparent": _p("traceparent", 15),
                 "headers": _p("headers", 16),
-                "last_error": None,
+                "priority": int(_p("priority", 17) or 0),
+                "expires_at_ms": _p("expires_at_ms", 18),
+                "completed_at_ms": _p("completed_at_ms", 19),
+                "worker_id": _p("worker_id", 20),
+                "heartbeat_at_ms": _p("heartbeat_at_ms", 21),
+                "result": _p("result", 22),
+                "error": _p("error", 23),
+                "last_error": _p("error", 23),
             }
             return self._result_from_dicts([], row_count=1)
 
@@ -1167,6 +1180,7 @@ class _InMemorySpannerQueueWire:
             ordered = sorted(
                 jobs.values(),
                 key=lambda j: (
+                    -int(j.get("priority") or 0),
                     j.get("scheduled_at") if j.get("scheduled_at") is not None else j["enqueued_at"],
                     j["enqueued_at"],
                 ),
@@ -1203,10 +1217,27 @@ class _InMemorySpannerQueueWire:
             claimed_job["attempt"] = int(claimed_job["attempt"]) + 1
             claimed_job["locked_until"] = locked_until
             claimed_job["consumer_name"] = consumer_name
+            claimed_job["worker_id"] = consumer_name
             claimed_job["receipt_handle"] = receipt_handle
             return self._result_from_dicts([dict(claimed_job)])
 
         if upper.startswith("DELETE FROM VERTEBRA_QUEUE_JOBS"):
+            if "STATUS IN ('ACKED'" in upper:
+                before_ms = int(_p("before_ms", 1))
+                to_del = [
+                    job_key
+                    for job_key, j in jobs.items()
+                    if j["status"] in ("acked", "completed", "cancelled", "dead_letter", "expired")
+                    and (
+                        int(j["completed_at_ms"])
+                        if j.get("completed_at_ms") is not None
+                        else round(float(j["enqueued_at"]) * 1000)
+                    )
+                    < before_ms
+                ]
+                for job_key in to_del:
+                    del jobs[job_key]
+                return self._result_from_dicts([], row_count=len(to_del))
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
             target_job = jobs.get((shard_id, task_id))
@@ -1215,8 +1246,17 @@ class _InMemorySpannerQueueWire:
                     del jobs[(shard_id, task_id)]
                     return self._result_from_dicts([], row_count=1)
                 return self._result_from_dicts([], row_count=0)
-            attempt = int(_p("attempt", 3))
-            if target_job is not None and target_job["status"] == "running" and int(target_job["attempt"]) == attempt:
+            if "ATTEMPT =" in upper or "ATTEMPT =" in upper:
+                attempt = int(_p("attempt", 3))
+                if (
+                    target_job is not None
+                    and target_job["status"] == "running"
+                    and int(target_job["attempt"]) == attempt
+                ):
+                    del jobs[(shard_id, task_id)]
+                    return self._result_from_dicts([], row_count=1)
+                return self._result_from_dicts([], row_count=0)
+            if target_job is not None:
                 del jobs[(shard_id, task_id)]
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
@@ -1225,10 +1265,14 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
             attempt = int(_p("attempt", 3))
+            completed_at_ms = int(_p("completed_at_ms", 4))
             acked_job = jobs.get((shard_id, task_id))
             if acked_job is not None and acked_job["status"] == "running" and int(acked_job["attempt"]) == attempt:
                 acked_job["status"] = "acked"
                 acked_job["locked_until"] = None
+                acked_job["worker_id"] = None
+                acked_job["consumer_name"] = None
+                acked_job["completed_at_ms"] = completed_at_ms
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1238,16 +1282,39 @@ class _InMemorySpannerQueueWire:
             found_job = jobs.get((shard_id, task_id))
             return self._result_from_dicts([dict(found_job)] if found_job is not None else [])
 
-        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS WHERE LANE"):
-            lane = str(_p("lane", 1))
-            if "STATUS =" in upper:
+        if upper.startswith("SELECT * FROM VERTEBRA_QUEUE_JOBS"):
+            ordered_jobs = sorted(jobs.values(), key=lambda j: float(j["enqueued_at"]))
+            if "WHERE LANE =" in upper and "STATUS =" in upper:
+                lane = str(_p("lane", 1))
                 st = str(_p("status", 2))
                 lim = int(_p("limit", 3))
-                matched = [dict(j) for j in jobs.values() if j["lane"] == lane and j["status"] == st][:lim]
-            else:
+                matched = [dict(j) for j in ordered_jobs if j["lane"] == lane and j["status"] == st][:lim]
+            elif "WHERE LANE =" in upper:
+                lane = str(_p("lane", 1))
                 lim = int(_p("limit", 2))
-                matched = [dict(j) for j in jobs.values() if j["lane"] == lane][:lim]
+                matched = [dict(j) for j in ordered_jobs if j["lane"] == lane][:lim]
+            elif "WHERE STATUS =" in upper:
+                st = str(_p("status", 1))
+                lim = int(_p("limit", 2))
+                matched = [dict(j) for j in ordered_jobs if j["status"] == st][:lim]
+            else:
+                lim = int(_p("limit", 1))
+                matched = [dict(j) for j in ordered_jobs][:lim]
             return self._result_from_dicts(matched)
+
+        if upper.startswith("SELECT J.* FROM VERTEBRA_QUEUE_JOBS J LEFT JOIN VERTEBRA_QUEUE_UNIQUE_KEYS U"):
+            key = str(_p("key", 1))
+            lane_filter = str(_p("lane", 2)) if "J.LANE =" in upper else None
+            reserved_job_ids = {
+                str(r["job_id"]) for r in unique_keys.values() if r.get("unique_key") == key and r.get("job_id")
+            }
+            candidates = [
+                dict(j)
+                for j in sorted(jobs.values(), key=lambda item: float(item["enqueued_at"]), reverse=True)
+                if (j["task_id"] in reserved_job_ids or j.get("idempotency_key") == key)
+                and (lane_filter is None or j["lane"] == lane_filter)
+            ]
+            return self._result_from_dicts(candidates[:1])
 
         if upper.startswith("SELECT MIN(SCHEDULED_AT) AS MIN_SCHED"):
             lanes = set(_p("lanes", 1))
@@ -1299,12 +1366,17 @@ class _InMemorySpannerQueueWire:
             shard_id = int(_p("shard_id", 2))
             task_id = str(_p("task_id", 3))
             attempt = int(_p("attempt", 4))
+            completed_at_ms = int(_p("completed_at_ms", 5))
             dlq_job = jobs.get((shard_id, task_id))
             if dlq_job is not None and int(dlq_job["attempt"]) == attempt:
                 dlq_job["status"] = "dead_letter"
                 dlq_job["locked_until"] = None
+                dlq_job["worker_id"] = None
+                dlq_job["consumer_name"] = None
                 dlq_job["receipt_handle"] = None
                 dlq_job["last_error"] = last_err
+                dlq_job["error"] = last_err
+                dlq_job["completed_at_ms"] = completed_at_ms
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1320,8 +1392,10 @@ class _InMemorySpannerQueueWire:
                 retry_job["scheduled_at"] = sched_at
                 retry_job["locked_until"] = None
                 retry_job["consumer_name"] = None
+                retry_job["worker_id"] = None
                 retry_job["receipt_handle"] = None
                 retry_job["last_error"] = last_err
+                retry_job["error"] = last_err
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
 
@@ -1348,6 +1422,7 @@ class _InMemorySpannerQueueWire:
                     job["status"] = "pending"
                     job["locked_until"] = None
                     job["consumer_name"] = None
+                    job["worker_id"] = None
                     job["receipt_handle"] = None
                     reaped += 1
             return self._result_from_dicts([], row_count=reaped)
@@ -1362,6 +1437,46 @@ class _InMemorySpannerQueueWire:
             ][:lim]
             return self._result_from_dicts(due)
 
+        if upper.startswith("SELECT SHARD_ID, TASK_ID FROM VERTEBRA_QUEUE_JOBS WHERE STATUS IN ('ACKED'"):
+            before_ms = int(_p("before_ms", 1))
+            lim = int(_p("limit", 2))
+            term_rows = [
+                j
+                for j in jobs.values()
+                if j["status"] in ("acked", "completed", "cancelled", "dead_letter", "expired")
+                and (
+                    int(j["completed_at_ms"])
+                    if j.get("completed_at_ms") is not None
+                    else round(float(j["enqueued_at"]) * 1000)
+                )
+                < before_ms
+            ]
+            term_rows.sort(
+                key=lambda j: (
+                    int(j["completed_at_ms"])
+                    if j.get("completed_at_ms") is not None
+                    else round(float(j["enqueued_at"]) * 1000)
+                )
+            )
+            return self._result_from_dicts(
+                [{"shard_id": j["shard_id"], "task_id": j["task_id"]} for j in term_rows[:lim]]
+            )
+
+        if upper.startswith("SELECT SHARD_ID, TASK_ID FROM VERTEBRA_QUEUE_JOBS WHERE STATUS IN ('PENDING', 'RUNNING')"):
+            now_ms = int(_p("now_ms", 1))
+            lim = int(_p("limit", 2))
+            overdue = [
+                j
+                for j in jobs.values()
+                if j["status"] in ("pending", "running")
+                and j.get("expires_at_ms") is not None
+                and int(j["expires_at_ms"]) <= now_ms
+            ]
+            overdue.sort(key=lambda j: int(j["expires_at_ms"]))
+            return self._result_from_dicts(
+                [{"shard_id": j["shard_id"], "task_id": j["task_id"]} for j in overdue[:lim]]
+            )
+
         if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET SCHEDULED_AT = NULL"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
@@ -1374,12 +1489,81 @@ class _InMemorySpannerQueueWire:
         if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'CANCELLED'"):
             shard_id = int(_p("shard_id", 1))
             task_id = str(_p("task_id", 2))
+            completed_at_ms = int(_p("completed_at_ms", 3))
             canc_job = jobs.get((shard_id, task_id))
             if canc_job is not None and canc_job["status"] in ("pending", "running"):
                 canc_job["status"] = "cancelled"
                 canc_job["locked_until"] = None
+                canc_job["worker_id"] = None
+                canc_job["consumer_name"] = None
+                canc_job["completed_at_ms"] = completed_at_ms
+                if "ERROR =" in upper:
+                    err_val = str(_p("error", 4))
+                    canc_job["error"] = err_val
+                    canc_job["last_error"] = err_val
                 return self._result_from_dicts([], row_count=1)
             return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET WORKER_ID ="):
+            worker_id = str(_p("worker_id", 1))
+            shard_id = int(_p("shard_id", 2))
+            task_id = str(_p("task_id", 3))
+            attempt = int(_p("attempt", 4))
+            target = jobs.get((shard_id, task_id))
+            if target is not None and target["status"] == "running" and int(target["attempt"]) == attempt:
+                target["worker_id"] = worker_id
+                target["consumer_name"] = worker_id
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET HEARTBEAT_AT_MS = NULL"):
+            shard_id = int(_p("shard_id", 1))
+            task_id = str(_p("task_id", 2))
+            target = jobs.get((shard_id, task_id))
+            if target is not None:
+                target["heartbeat_at_ms"] = None
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET HEARTBEAT_AT_MS ="):
+            hb_ms = int(_p("heartbeat_at_ms", 1))
+            shard_id = int(_p("shard_id", 2))
+            task_id = str(_p("task_id", 3))
+            target = jobs.get((shard_id, task_id))
+            if target is not None and target["status"] == "running":
+                target["heartbeat_at_ms"] = hb_ms
+                return self._result_from_dicts([], row_count=1)
+            return self._result_from_dicts([], row_count=0)
+
+        if upper.startswith("UPDATE VERTEBRA_QUEUE_JOBS SET STATUS = 'EXPIRED'"):
+            if "WHERE SHARD_ID =" in upper:
+                shard_id = int(_p("shard_id", 1))
+                task_id = str(_p("task_id", 2))
+                now_ms = int(_p("now_ms", 3))
+                target = jobs.get((shard_id, task_id))
+                if target is not None:
+                    target["status"] = "expired"
+                    target["locked_until"] = None
+                    target["worker_id"] = None
+                    target["consumer_name"] = None
+                    target["completed_at_ms"] = now_ms
+                    return self._result_from_dicts([], row_count=1)
+                return self._result_from_dicts([], row_count=0)
+            now_ms = int(_p("now_ms", 1))
+            expired_count = 0
+            for job in jobs.values():
+                if (
+                    job["status"] in ("pending", "running")
+                    and job.get("expires_at_ms") is not None
+                    and int(job["expires_at_ms"]) <= now_ms
+                ):
+                    job["status"] = "expired"
+                    job["locked_until"] = None
+                    job["worker_id"] = None
+                    job["consumer_name"] = None
+                    job["completed_at_ms"] = now_ms
+                    expired_count += 1
+            return self._result_from_dicts([], row_count=expired_count)
 
         if "VERTEBRA_QUEUE_LEASES" in upper and "ON CONFLICT" in upper:
             lease_key = str(params["p1"])
@@ -1439,9 +1623,28 @@ class _InMemorySpannerQueueWire:
             expires_at = float(params["p2"])
             now_ts = float(params["p3"])
             existing_uk = unique_keys.get(key)
-            if existing_uk is None or float(existing_uk["expires_at"]) <= now_ts:
+            if existing_uk is None or (
+                existing_uk.get("expires_at") is not None and float(existing_uk["expires_at"]) <= now_ts
+            ):
                 unique_keys[key] = {"unique_key": key, "expires_at": expires_at}
                 return self._result_from_dicts([{"unique_key": key}])
+            return self._result_from_dicts([])
+
+        if upper.startswith(
+            "SELECT UNIQUE_KEY, EXPIRES_AT, JOB_ID, TASK_NAME, CREATED_AT_MS FROM VERTEBRA_QUEUE_UNIQUE_KEYS"
+        ):
+            key = str(_p("key", 1))
+            existing_uk = unique_keys.get(key)
+            return self._result_from_dicts([dict(existing_uk)] if existing_uk is not None else [])
+
+        if upper.startswith("SELECT UNIQUE_KEY, JOB_ID, TASK_NAME, CREATED_AT_MS FROM VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            key = str(_p("key", 1))
+            now_ts = float(_p("now_ts", 2))
+            existing_uk = unique_keys.get(key)
+            if existing_uk is not None and (
+                existing_uk.get("expires_at") is None or float(existing_uk["expires_at"]) > now_ts
+            ):
+                return self._result_from_dicts([dict(existing_uk)])
             return self._result_from_dicts([])
 
         if upper.startswith("SELECT UNIQUE_KEY, EXPIRES_AT FROM VERTEBRA_QUEUE_UNIQUE_KEYS"):
@@ -1450,21 +1653,54 @@ class _InMemorySpannerQueueWire:
             return self._result_from_dicts([dict(existing_uk)] if existing_uk is not None else [])
 
         if upper.startswith("INSERT INTO VERTEBRA_QUEUE_UNIQUE_KEYS"):
-            key = str(params["key"])
-            unique_keys[key] = {"unique_key": key, "expires_at": float(params["expires_at"])}
+            key = str(_p("key", 1))
+            raw_exp = _p("expires_at", 2)
+            rec_uk: dict[str, Any] = {
+                "unique_key": key,
+                "expires_at": float(raw_exp) if raw_exp is not None else None,
+            }
+            if "JOB_ID" in upper:
+                rec_uk["job_id"] = _p("job_id", 3)
+                rec_uk["task_name"] = _p("task_name", 4)
+                rec_uk["created_at_ms"] = _p("created_at_ms", 5)
+            unique_keys[key] = rec_uk
             return self._result_from_dicts([], row_count=1)
 
         if upper.startswith("UPDATE VERTEBRA_QUEUE_UNIQUE_KEYS"):
-            key = str(params["key"])
-            unique_keys[key] = {"unique_key": key, "expires_at": float(params["expires_at"])}
+            key = str(_p("key", 1))
+            raw_exp = _p("expires_at", 2)
+            rec_uk_upd: dict[str, Any] = {
+                "unique_key": key,
+                "expires_at": float(raw_exp) if raw_exp is not None else None,
+            }
+            if "JOB_ID" in upper:
+                rec_uk_upd["job_id"] = _p("job_id", 3)
+                rec_uk_upd["task_name"] = _p("task_name", 4)
+                rec_uk_upd["created_at_ms"] = _p("created_at_ms", 5)
+            unique_keys[key] = rec_uk_upd
             return self._result_from_dicts([], row_count=1)
 
         if upper.startswith("DELETE FROM VERTEBRA_QUEUE_UNIQUE_KEYS"):
+            if "EXPIRES_AT IS NOT NULL" in upper:
+                before_s = float(_p("before_s", 1))
+                to_drop = [
+                    k
+                    for k, v in unique_keys.items()
+                    if v.get("expires_at") is not None and float(v["expires_at"]) <= before_s
+                ]
+                for k in to_drop:
+                    del unique_keys[k]
+                return self._result_from_dicts([], row_count=len(to_drop))
             key = str(_p("key", 1))
-            if key in unique_keys:
-                del unique_keys[key]
-                return self._result_from_dicts([], row_count=1)
-            return self._result_from_dicts([], row_count=0)
+            existing_uk = unique_keys.get(key)
+            if existing_uk is None:
+                return self._result_from_dicts([], row_count=0)
+            if "JOB_ID =" in upper:
+                expected_job_id = str(_p("expected_job_id", 2))
+                if existing_uk.get("job_id") != expected_job_id:
+                    return self._result_from_dicts([], row_count=0)
+            del unique_keys[key]
+            return self._result_from_dicts([], row_count=1)
 
         msg = f"Unhandled SQL in _InMemorySpannerQueueWire ({self.dialect}): {sql}"
         raise AssertionError(msg)
@@ -1696,3 +1932,243 @@ async def test_spanner_queue_store_table_validation_and_store_dlq_replay(
     assert reclaimed[0].attempt == 1
     await backend.ack(reclaimed[0])
     await backend.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("", -7286425919675154353),
+        (b"", -7286425919675154353),
+        ("a", -5528939962900187677),
+        ("abc", 2640714258260161385),
+        ("abcd", 1897425971756105985),
+        ("alphabet", -2427165924636348523),
+        ("user-42", 5340128202724118949),
+        ("hello world", 6381520714923946011),
+        ("1234567890123456", -1207638713069763548),
+        ("12345678901234567", -8899476072607698506),
+        ("a" * 32, -1553158580277161704),
+        ("a" * 40, 2168401864796137711),
+        ("a" * 64, 5893282057753879417),
+        ("a" * 65, 3757222151784111843),
+        ("a" * 128, -1828092727725220631),
+        ("café-🚀", -3691481111669660328),
+    ],
+)
+def test_farm_fingerprint64_matches_google_reference_vectors(payload: bytes | str, expected: int) -> None:
+    """farm_fingerprint64 matches Google FarmHash Fingerprint64 across all byte-length branches and UTF-8."""
+    assert farm_fingerprint64(payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("task_id", "shard_count"),
+    [
+        ("", 16),
+        ("abc", 16),
+        ("alphabet", 16),
+        ("user-42", 8),
+        ("café-🚀", 32),
+        ("x" * 96, 64),
+        ("single-shard", 1),
+        ("zero-shard", 0),
+    ],
+)
+def test_compute_spanner_shard_id_uses_farm_fingerprint_and_delegates(task_id: str, shard_count: int) -> None:
+    """compute_spanner_shard_id computes MOD(ABS(FARM_FINGERPRINT), shard_count) and matches SpannerQueueBackend."""
+    expected_shards = max(1, shard_count)
+    expected = abs(farm_fingerprint64(task_id)) % expected_shards
+    shard_id = compute_spanner_shard_id(task_id, shard_count)
+    assert shard_id == expected
+    assert 0 <= shard_id < expected_shards
+    assert SpannerQueueBackend.compute_shard_id(task_id, shard_count) == expected
+
+
+@pytest.mark.parametrize("spill_threshold_bytes", [8, 4096], ids=["spilled", "inline"])
+def test_change_feed_concurrent_publish_event_assigns_unique_contiguous_ids(spill_threshold_bytes: int) -> None:
+    """Concurrent ChangeFeed.publish_event calls produce strictly unique contiguous 1..N*M event_ids."""
+    num_threads = 8
+    events_per_thread = 25
+    total_events = num_threads * events_per_thread
+    feed = ChangeFeed(
+        CDCConfig(
+            channel="concurrent_cdc",
+            spill_threshold_bytes=spill_threshold_bytes,
+            max_history_size=total_events,
+            max_memory_spills=total_events,
+        )
+    )
+    barrier = threading.Barrier(num_threads)
+    results_lock = threading.Lock()
+    published: list[tuple[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def _worker(worker_id: int) -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            local_results = [
+                feed.publish_event("INSERT", {"worker": worker_id, "seq": seq}) for seq in range(events_per_thread)
+            ]
+            with results_lock:
+                published.extend(local_results)
+        except BaseException as exc:
+            with results_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(idx,)) for idx in range(num_threads)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+
+    assert not errors
+    assert len(published) == total_events
+    event_ids = [evt.event_id for _, evt in published]
+    assert len(set(event_ids)) == total_events
+    assert set(event_ids) == set(range(1, total_events + 1))
+
+    replayed = feed.replay_since(0)
+    assert [evt.event_id for evt in replayed] == list(range(1, total_events + 1))
+
+    for wire_envelope, evt in published:
+        hydrated = feed.hydrate_notification(wire_envelope)
+        assert hydrated == evt
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect", ["googlesql", "spangres"])
+async def test_spanner_queue_store_extended_capabilities_across_dialects(
+    dialect: Literal["googlesql", "spangres"],
+) -> None:
+    """SyncSpannerQueueStore and AsyncSpannerQueueStore implement all extended AsyncQueueStore capabilities across dialects."""
+    wire = _InMemorySpannerQueueWire(dialect)
+    cfg = SpannerConfig(
+        project_id="p",
+        instance_id="i",
+        database_id="d",
+        dialect=dialect,
+        endpoint="http://localhost:9010",
+    )
+    sync_drv = SyncSpannerDriver(cfg, client=wire.sync_client())
+    async_drv = AsyncSpannerDriver(cfg, client=wire.async_client())
+    sync_store = SyncSpannerQueueStore(sync_drv, shard_count=8, cleanup_on_ack=False)
+    async_store = AsyncSpannerQueueStore(async_drv, shard_count=8, cleanup_on_ack=False)
+
+    await async_store.ensure_schema()
+
+    now_ms = int(time.time() * 1000)
+    j1 = await async_store.enqueue(
+        QueueEntry(
+            job_id="ext-job-1",
+            queue="q-alpha",
+            task_name="task.one",
+            payload=b"p1",
+            priority=5,
+            headers={"idempotency_key": "k-1"},
+        )
+    )
+    j2 = sync_store.enqueue(
+        QueueEntry(
+            job_id="ext-job-2",
+            queue="q-beta",
+            task_name="task.two",
+            payload=b"p2",
+            priority=10,
+            expires_at_ms=now_ms - 1000,
+            headers={"key": "k-2"},
+        )
+    )
+    j3 = await async_store.enqueue(
+        QueueEntry(
+            job_id="ext-job-3",
+            queue="q-alpha",
+            task_name="task.three",
+            payload=b"p3",
+            expires_at_ms=now_ms + 60_000,
+        )
+    )
+
+    all_entries = await async_store.list_entries(queue=None, limit=10)
+    assert {entry.job_id for entry in all_entries} == {j1, j2, j3}
+    alpha_entries = sync_store.list_entries("q-alpha", status="ready", limit=10)
+    assert {entry.job_id for entry in alpha_entries} == {j1, j3}
+
+    by_key = await async_store.get_entry_by_key("k-1")
+    assert by_key is not None
+    assert by_key.job_id == j1
+    assert by_key.priority == 5
+    assert sync_store.get_entry_by_key("k-2", queue="q-alpha") is None
+    by_key_beta = sync_store.get_entry_by_key("k-2", queue="q-beta")
+    assert by_key_beta is not None
+    assert by_key_beta.job_id == j2
+
+    wire.abort_remaining = 1
+    assert await async_store.reserve_identity("id-forever", job_id=j1, task_name="task.one", ttl_seconds=None) is None
+    winner = sync_store.reserve_identity("id-forever", job_id="other-job", task_name="task.other", ttl_seconds=60.0)
+    assert isinstance(winner, QueueReservation)
+    assert winner.key == "id-forever"
+    assert winner.job_id == j1
+    assert winner.task_name == "task.one"
+
+    fetched_res = await async_store.get_reservation("id-forever")
+    assert fetched_res is not None
+    assert fetched_res.job_id == j1
+
+    assert sync_store.reset_identity("id-forever", expected_job_id="wrong-job") is False
+    assert await async_store.get_reservation("id-forever") is not None
+
+    assert await async_store.reserve_identity("id-temp", job_id=j3, task_name="task.three", ttl_seconds=0.001) is None
+    await asyncio.sleep(0.01)
+    assert await async_store.get_reservation("id-temp") is None
+    assert sync_store.reserve_identity("id-temp", job_id=j3, task_name="task.three", ttl_seconds=60.0) is None
+    assert await async_store.reset_identity("id-temp", expected_job_id=j3) is True
+    assert await async_store.get_reservation("id-temp") is None
+
+    claimed = await async_store.claim(["q-alpha"], limit=1, worker_id="w-init", lease_seconds=30.0)
+    assert len(claimed) == 1
+    assert claimed[0].job_id == j1
+    assert claimed[0].worker_id == "w-init"
+
+    assert sync_store.assign_worker(j1, worker_id="w-reassigned", attempt=1) is True
+    assert await async_store.assign_worker(j1, worker_id="w-wrong", attempt=99) is False
+    reloaded = await async_store.get_entry(j1)
+    assert reloaded is not None
+    assert reloaded.worker_id == "w-reassigned"
+
+    assert await async_store.touch_heartbeats([j1], heartbeat_at_ms=123456) == 1
+    hb_entry = sync_store.get_entry(j1)
+    assert hb_entry is not None
+    assert hb_entry.heartbeat_at_ms == 123456
+    assert sync_store.null_heartbeats([j1]) == 1
+    cleared_entry = await async_store.get_entry(j1)
+    assert cleared_entry is not None
+    assert cleared_entry.heartbeat_at_ms is None
+
+    assert await async_store.ack(j1, attempt=1) is True
+    assert sync_store.interrupt_task(j3, error="cancelled-by-operator") is True
+    interrupted = await async_store.get_entry(j3)
+    assert interrupted is not None
+    assert interrupted.error == "cancelled-by-operator"
+
+    assert await async_store.expire_overdue(now_ms=now_ms, limit=5) == 1
+    expired_entry = sync_store.get_entry(j2)
+    assert expired_entry is not None
+    assert expired_entry.completed_at_ms == now_ms
+
+    j4_pending = await async_store.enqueue(
+        QueueEntry(
+            job_id="ext-job-4",
+            queue="q-alpha",
+            task_name="task.four",
+            payload=b"p4",
+        )
+    )
+    future_ms = int(time.time() * 1000) + 60_000
+    assert sync_store.cleanup_terminal(before_ms=future_ms, limit=2) == 2
+    assert await async_store.cleanup_terminal(before_ms=future_ms) == 1
+
+    remaining = await async_store.list_entries(queue=None, limit=10)
+    assert [entry.job_id for entry in remaining] == [j4_pending]
+    assert await async_store.get_reservation("id-forever") is not None
+
+    await async_store.aclose()
+    sync_store.close()

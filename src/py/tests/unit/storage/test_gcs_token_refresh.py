@@ -88,6 +88,8 @@ class _MockTokenServer:
 
     def __init__(self) -> None:
         self.oauth_calls = 0
+        self.sts_calls = 0
+        self.oidc_url_calls = 0
         self.metadata_calls = 0
         self.metadata_id_calls = 0
         self.iam_calls = 0
@@ -97,14 +99,18 @@ class _MockTokenServer:
         self.last_headers: dict[str, str] = {}
         self.last_post_body: bytes = b""
         self.last_token_form: dict[str, list[str]] = {}
+        self.last_sts_form: dict[str, list[str]] = {}
         self.last_metadata_path: str = ""
         self.last_iam_body: bytes = b""
         self.expires_in: int = 3600
         self.token_status: int = 200
+        self.sts_status: int = 200
         self.metadata_status: int = 200
         self.id_token_status: int = 200
         self.id_token_exp_offset_s: int = 3600
         self.id_token_client_id: str = "user-client-id"
+        self.oidc_subject_token: str = "test-token-placeholder-url"
+        self.expected_oidc_header: tuple[str, str] | None = None
         self.omit_id_token: bool = False
         self.expire_time_iso: str = "2099-01-01T00:00:00Z"
         self._lock = threading.Lock()
@@ -167,6 +173,22 @@ class _MockTokenServer:
                         self.wfile.write(raw)
                         return
 
+                    if self.path.startswith("/oidc-token"):
+                        parent.oidc_url_calls += 1
+                        if parent.expected_oidc_header is not None:
+                            h_name, h_val = parent.expected_oidc_header
+                            if parent.last_headers.get(h_name.lower()) != h_val:
+                                self.send_response(403)
+                                self.end_headers()
+                                return
+                        raw = json.dumps({"access_token": parent.oidc_subject_token}).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
+
                     if (
                         self.path.startswith("/storage/v1/b/")
                         or self.path.startswith("/download/storage/v1/b/")
@@ -220,6 +242,32 @@ class _MockTokenServer:
                 with parent._lock:
                     parent.last_headers = {k.lower(): v for k, v in self.headers.items()}
                     parent.last_post_body = body
+                    if self.path == "/sts/token":
+                        parent.sts_calls += 1
+                        idx = parent.sts_calls
+                        parent.last_sts_form = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                        if parent.sts_status != 200:
+                            err_raw = json.dumps({"error": "invalid_grant"}).encode("utf-8")
+                            self.send_response(parent.sts_status)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(err_raw)))
+                            self.end_headers()
+                            self.wfile.write(err_raw)
+                            return
+                        sts_payload = {
+                            "access_token": f"mock-sts-token-{idx}",
+                            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                            "token_type": "Bearer",
+                            "expires_in": parent.expires_in,
+                        }
+                        raw = json.dumps(sts_payload).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
+
                     if self.path == "/token":
                         parent.oauth_calls += 1
                         idx = parent.oauth_calls
@@ -1526,3 +1574,140 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
         assert async_provider.needs_refresh() is False
     finally:
         await async_driver.close()
+
+
+@pytest.mark.parametrize("source_mode", ["file_text", "file_json", "url_json"])
+@pytest.mark.parametrize("with_impersonation", [False, True])
+def test_sync_gcp_token_cache_external_account_adc_proactive_refresh(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_mode: str,
+    with_impersonation: bool,
+) -> None:
+    """Verify SyncGcpTokenCache exchanges external_account file/URL subject tokens via STS and optional impersonation."""
+    token_server.expires_in = 10
+    token_server.expected_oidc_header = ("X-OIDC-Auth", "test-token-placeholder-hdr")
+    token_server.oidc_subject_token = "test-token-placeholder-url-1"
+
+    credential_source: dict[str, Any]
+    if source_mode == "file_text":
+        tok_file = tmp_path / "oidc-subject.txt"
+        tok_file.write_text("test-token-placeholder-file-text\n", encoding="utf-8")
+        credential_source = {"file": str(tok_file), "format": {"type": "text"}}
+    elif source_mode == "file_json":
+        tok_file = tmp_path / "oidc-subject.json"
+        tok_file.write_text(json.dumps({"id_token": "test-token-placeholder-file-json"}), encoding="utf-8")
+        credential_source = {
+            "file": str(tok_file),
+            "format": {"type": "json", "subject_token_field_name": "id_token"},
+        }
+    else:
+        credential_source = {
+            "url": f"{token_server.base_url}/oidc-token",
+            "headers": {"X-OIDC-Auth": "test-token-placeholder-hdr"},
+            "format": {"type": "json", "subject_token_field_name": "access_token"},
+        }
+
+    adc_payload: dict[str, Any] = {
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": f"{token_server.base_url}/sts/token",
+        "quota_project_id": "wif-py-quota",
+        "credential_source": credential_source,
+    }
+    if with_impersonation:
+        adc_payload["service_account_impersonation_url"] = (
+            f"{token_server.base_url}/v1/projects/-/serviceAccounts/wif@proj.iam.gserviceaccount.com:generateAccessToken"
+        )
+
+    adc_path = tmp_path / "external_account_adc.json"
+    adc_path.write_text(json.dumps(adc_payload), encoding="utf-8")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
+
+    cache = SyncGcpTokenCache({"refresh_skew_ms": "60000"})
+    snap1 = cache.get_token()
+    assert snap1.generation == 1
+    assert snap1.quota_project_id == "wif-py-quota"
+    assert token_server.sts_calls == 1
+    assert token_server.last_sts_form["grant_type"] == ["urn:ietf:params:oauth:grant-type:token-exchange"]
+    if with_impersonation:
+        assert snap1.access_token == "mock-oauth-token-impersonated-1"
+        assert token_server.iam_calls == 1
+    else:
+        assert snap1.access_token == "mock-sts-token-1"
+        assert cache.needs_refresh() is True
+        snap2 = cache.get_token()
+        assert snap2.generation == 2
+        assert snap2.access_token == "mock-sts-token-2"
+        assert token_server.sts_calls == 2
+
+    if source_mode == "url_json":
+        assert token_server.oidc_url_calls >= 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("source_mode", ["file_text", "url_json"])
+async def test_async_gcp_token_cache_external_account_adc_refresh_and_executable_rejection(
+    token_server: _MockTokenServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_mode: str,
+) -> None:
+    """Verify AsyncGcpTokenCache exchanges external_account credentials via ambient ADC and rejects executable sources."""
+    token_server.expected_oidc_header = ("Metadata", "true")
+    token_server.oidc_subject_token = "test-token-placeholder-async-url"
+
+    if source_mode == "file_text":
+        tok_file = tmp_path / "async-oidc.txt"
+        tok_file.write_text("test-token-placeholder-async-file\n", encoding="utf-8")
+        credential_source: dict[str, Any] = {"file": str(tok_file)}
+    else:
+        credential_source = {
+            "url": f"{token_server.base_url}/oidc-token",
+            "headers": {"Metadata": "true"},
+            "format": {"type": "json", "subject_token_field_name": "access_token"},
+        }
+
+    adc_path = tmp_path / "async_external_account.json"
+    adc_path.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                "token_url": f"{token_server.base_url}/sts/token",
+                "credential_source": credential_source,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
+
+    async_cache = AsyncGcpTokenCache()
+    snap1 = await async_cache.get_token()
+    assert snap1.access_token == "mock-sts-token-1"
+    assert snap1.generation == 1
+    assert token_server.sts_calls == 1
+
+    snap2 = await async_cache.get_token(force_refresh=True)
+    assert snap2.access_token == "mock-sts-token-2"
+    assert snap2.generation == 2
+    assert token_server.sts_calls == 2
+
+    exec_adc_path = tmp_path / "executable_external_account.json"
+    exec_adc_path.write_text(
+        json.dumps(
+            {
+                "type": "external_account",
+                "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                "token_url": f"{token_server.base_url}/sts/token",
+                "credential_source": {"executable": {"command": "/bin/echo nope"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises((GoogleCloudAuthError, ValueError, RuntimeError)):
+        SyncGcpTokenCache({"application_credentials": str(exec_adc_path)}, allow_ambient_adc=False)

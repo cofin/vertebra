@@ -515,7 +515,8 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         out_binds = kwargs.get("out_binds")
         coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
-        grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
+        self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
+        grant = self._acquire_broker_lease()
         try:
             with self._checkout_client() as active_client:
                 OracleCore.track_session_context_sql(self._session_context, sql, parameters)
@@ -530,7 +531,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     return max(result, 0)
                 return max(int(result.rowcount), 0)
         finally:
-            OracleCore.release_broker_lease(self._broker, grant)
+            self._release_broker_lease(grant)
 
     def execute_many(
         self,
@@ -546,12 +547,13 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
             OracleCore.coerce_parameters(p, features=self.config.driver_features) or () for p in parameter_sets
         ]
         first_len = len(coerced_seq[0]) if coerced_seq else 0
-        grant = OracleCore.acquire_broker_lease(self._broker, sql, first_len)
+        self._lookup_or_cache_statement(sql, param_count=first_len, param_plan=b"\x00\x01")
+        grant = self._acquire_broker_lease()
         try:
             with self._checkout_client() as active_client:
                 return int(active_client.execute_many(sql, coerced_seq))
         finally:
-            OracleCore.release_broker_lease(self._broker, grant)
+            self._release_broker_lease(grant)
 
     def execute_tuples(
         self,
@@ -573,7 +575,8 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         out_binds = kwargs.get("out_binds")
         coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
         param_count = len(coerced) if coerced is not None else 0
-        grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
+        self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
+        grant = self._acquire_broker_lease()
         try:
             with self._checkout_client() as active_client:
                 OracleCore.track_session_context_sql(self._session_context, sql, parameters)
@@ -597,7 +600,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     )
                 return OracleCore.coerce_result_rows_and_cols(result, features=self.config.driver_features)
         finally:
-            OracleCore.release_broker_lease(self._broker, grant)
+            self._release_broker_lease(grant)
 
     def select(
         self,
@@ -629,7 +632,8 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
         ):
             coerced = OracleCore.coerce_parameters(parameters, features=self.config.driver_features)
             param_count = len(coerced) if coerced is not None else 0
-            grant = OracleCore.acquire_broker_lease(self._broker, sql, param_count)
+            self._lookup_or_cache_statement(sql, param_count=param_count, param_plan=b"\x00\x01")
+            grant = self._acquire_broker_lease()
             try:
                 with self._checkout_client() as active_client:
                     OracleCore.track_session_context_sql(self._session_context, sql, parameters)
@@ -643,7 +647,7 @@ class SyncOracleDriver(SyncDatabaseDriver[OracleConfig]):
                     )
                     return cursor
             finally:
-                OracleCore.release_broker_lease(self._broker, grant)
+                self._release_broker_lease(grant)
         rows, raw_cols = self.execute_with_description(sql, parameters, **kwargs)
         cols = [col.lower() if self.config.driver_features.enable_lowercase_column_names else col for col in raw_cols]
         return ArrowCursor.from_rows(rows, cols, threshold_rows=threshold_rows)

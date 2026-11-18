@@ -7,6 +7,17 @@ from typing import TYPE_CHECKING, Any
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.oracle._typing import (
+        OracleAsyncConnectionContext,
+        OracleAsyncSessionContext,
+        OracleAsyncSessionlessTransactionContext,
+        OracleConnectionParams,
+        OracleDriverFeatures,
+        OraclePoolParams,
+        OracleSyncConnectionContext,
+        OracleSyncSessionContext,
+        OracleSyncSessionlessTransactionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.oracle.adk import (
         OracleAsyncADKArtifactStore,
         OracleAsyncADKMemoryStore,
@@ -16,6 +27,12 @@ if TYPE_CHECKING:
         OracleSyncADKStore,
     )
     from vertebra.extensions.sqlspec.adapters.oracle.config import OracleAsyncConfig, OracleSyncConfig
+    from vertebra.extensions.sqlspec.adapters.oracle.core import (
+        OracleSessionContextConfig,
+        build_duality_etag_update_sql,
+        extract_duality_view_etag,
+        inject_duality_view_etag,
+    )
     from vertebra.extensions.sqlspec.adapters.oracle.data_dictionary import (
         OracleAsyncDataDictionary,
         OracleSyncDataDictionary,
@@ -33,18 +50,31 @@ __all__ = (
     "OracleAsyncADKMemoryStore",
     "OracleAsyncADKStore",
     "OracleAsyncConfig",
+    "OracleAsyncConnectionContext",
     "OracleAsyncDataDictionary",
     "OracleAsyncDriver",
     "OracleAsyncEventsBackend",
+    "OracleAsyncSessionContext",
+    "OracleAsyncSessionlessTransactionContext",
+    "OracleConnectionParams",
+    "OracleDriverFeatures",
     "OracleEventQueueStore",
     "OracleLitestarStore",
+    "OraclePoolParams",
+    "OracleSessionContextConfig",
     "OracleSyncADKArtifactStore",
     "OracleSyncADKMemoryStore",
     "OracleSyncADKStore",
     "OracleSyncConfig",
+    "OracleSyncConnectionContext",
     "OracleSyncDataDictionary",
     "OracleSyncDriver",
     "OracleSyncEventsBackend",
+    "OracleSyncSessionContext",
+    "OracleSyncSessionlessTransactionContext",
+    "build_duality_etag_update_sql",
+    "extract_duality_view_etag",
+    "inject_duality_view_etag",
 )
 
 _EXPORTS: dict[str, tuple[str, str]] = {
@@ -52,24 +82,76 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "OracleAsyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.oracle.adk", "OracleAsyncADKMemoryStore"),
     "OracleAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.oracle.adk", "OracleAsyncADKStore"),
     "OracleAsyncConfig": ("vertebra.extensions.sqlspec.adapters.oracle.config", "OracleAsyncConfig"),
+    "OracleAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleAsyncConnectionContext",
+    ),
     "OracleAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.oracle.data_dictionary",
         "OracleAsyncDataDictionary",
     ),
     "OracleAsyncDriver": ("vertebra.extensions.sqlspec.adapters.oracle.driver", "OracleAsyncDriver"),
     "OracleAsyncEventsBackend": ("vertebra.extensions.sqlspec.adapters.oracle.events", "OracleAsyncEventsBackend"),
+    "OracleAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleAsyncSessionContext",
+    ),
+    "OracleAsyncSessionlessTransactionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleAsyncSessionlessTransactionContext",
+    ),
+    "OracleConnectionParams": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleConnectionParams",
+    ),
+    "OracleDriverFeatures": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleDriverFeatures",
+    ),
     "OracleEventQueueStore": ("vertebra.extensions.sqlspec.adapters.oracle.events", "OracleEventQueueStore"),
     "OracleLitestarStore": ("vertebra.extensions.sqlspec.adapters.oracle.litestar", "OracleLitestarStore"),
+    "OraclePoolParams": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OraclePoolParams",
+    ),
+    "OracleSessionContextConfig": (
+        "vertebra.extensions.sqlspec.adapters.oracle.core",
+        "OracleSessionContextConfig",
+    ),
     "OracleSyncADKArtifactStore": ("vertebra.extensions.sqlspec.adapters.oracle.adk", "OracleSyncADKArtifactStore"),
     "OracleSyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.oracle.adk", "OracleSyncADKMemoryStore"),
     "OracleSyncADKStore": ("vertebra.extensions.sqlspec.adapters.oracle.adk", "OracleSyncADKStore"),
     "OracleSyncConfig": ("vertebra.extensions.sqlspec.adapters.oracle.config", "OracleSyncConfig"),
+    "OracleSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleSyncConnectionContext",
+    ),
     "OracleSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.oracle.data_dictionary",
         "OracleSyncDataDictionary",
     ),
     "OracleSyncDriver": ("vertebra.extensions.sqlspec.adapters.oracle.driver", "OracleSyncDriver"),
     "OracleSyncEventsBackend": ("vertebra.extensions.sqlspec.adapters.oracle.events", "OracleSyncEventsBackend"),
+    "OracleSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleSyncSessionContext",
+    ),
+    "OracleSyncSessionlessTransactionContext": (
+        "vertebra.extensions.sqlspec.adapters.oracle._typing",
+        "OracleSyncSessionlessTransactionContext",
+    ),
+    "build_duality_etag_update_sql": (
+        "vertebra.extensions.sqlspec.adapters.oracle.core",
+        "build_duality_etag_update_sql",
+    ),
+    "extract_duality_view_etag": (
+        "vertebra.extensions.sqlspec.adapters.oracle.core",
+        "extract_duality_view_etag",
+    ),
+    "inject_duality_view_etag": (
+        "vertebra.extensions.sqlspec.adapters.oracle.core",
+        "inject_duality_view_etag",
+    ),
 }
 
 

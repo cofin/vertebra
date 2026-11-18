@@ -79,7 +79,7 @@ def test_asgi_scope_advertises_extensions() -> None:
     scope = req.asgi_scope("/v1")
     assert scope["path"] == "/users"
     assert scope["root_path"] == "/v1"
-    extensions = scope["extensions"]
+    extensions = cast("dict[str, Any]", scope["extensions"])
     assert "http.response.pathsend" in extensions
     assert "http.response.zerocopysend" in extensions
     assert "http.response.trailers" in extensions
@@ -89,7 +89,7 @@ def test_asgi_scope_advertises_extensions() -> None:
     assert "http.response.push" not in extensions
 
     https_scope = AsgiScope.from_parts(method="GET", path="/secure", scheme="https")
-    assert "tls" in https_scope["extensions"]
+    assert "tls" in cast("dict[str, Any]", https_scope["extensions"])
 
 
 @pytest.mark.anyio
@@ -292,7 +292,7 @@ async def test_asgi_protocol_zerocopysend_pathsend_and_lifespan_batch(tmp_path: 
     assert resp_path.body == b"disk-bytes-payload"
 
     seen_paths_and_states: list[tuple[str, str, int]] = []
-    shared_state = {"count": 10}
+    shared_state: dict[str, object] = {"count": 10}
 
     async def mounted_app(scope: Any, receive: Any, send: Any) -> None:
         await receive()

@@ -551,7 +551,7 @@ class AsgiRunner:
         else:
             asgi_scope_fn = getattr(request, "asgi_scope", None)
             if callable(asgi_scope_fn):
-                scope = asgi_scope_fn(self._mount_prefix or None)
+                scope = cast("Callable[[str | None], AsgiScope]", asgi_scope_fn)(self._mount_prefix or None)
             else:
                 scope = self._build_scope_from_stub(request)
         if self._lifespan_state:
@@ -579,7 +579,7 @@ class AsgiRunner:
         if raw_headers is not None:
             asgi_items = getattr(raw_headers, "asgi_items", None)
             if callable(asgi_items):
-                header_pairs = list(asgi_items())
+                header_pairs = list(cast("Callable[[], Iterable[tuple[bytes, bytes]]]", asgi_items)())
             else:
                 items = raw_headers.items() if hasattr(raw_headers, "items") else raw_headers
                 for k, v in items:

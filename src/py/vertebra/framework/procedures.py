@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 
@@ -22,7 +22,7 @@ from vertebra.utils.serializers import (
 from vertebra.utils.text import snake_case
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from pathlib import Path
 
 __all__ = (
@@ -151,7 +151,7 @@ class ProcedureRouter:
             return target
         get_procs = getattr(target, "get_procedures", None)
         if callable(get_procs):
-            for proc in get_procs():
+            for proc in cast("Iterable[Procedure]", get_procs()):
                 self._register_procedure(proc)
             return target
         msg = f"ProcedureRouter.register expects a Procedure, ProcedureRouter, or Controller, got {type(target)!r}"

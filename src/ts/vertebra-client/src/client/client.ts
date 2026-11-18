@@ -24,7 +24,7 @@ class HttpClient {
   /**
    * Make a typed REST call.
    */
-  async call<TInput = any, TOutput = any>(
+  async call<TInput = unknown, TOutput = unknown>(
     method: string,
     path: string,
     input?: TInput,
@@ -37,7 +37,7 @@ class HttpClient {
   /**
    * Make a typed REST call and return the full response.
    */
-  async callWithResponse<TInput = any, TOutput = any>(
+  async callWithResponse<TInput = unknown, TOutput = unknown>(
     method: string,
     path: string,
     input?: TInput,
@@ -80,17 +80,17 @@ class HttpClient {
           await throwParsedError(response);
         }
 
-        let data: any;
+        let data: TOutput;
         const contentLength = response.headers.get("content-length");
         const contentType = response.headers.get("content-type");
 
         if (response.status === 204 || contentLength === "0") {
-          data = undefined;
+          data = undefined as TOutput;
         } else if (contentType?.includes("application/json")) {
           const text = await response.text();
-          data = text.length > 0 ? JSON.parse(text) : undefined;
+          data = (text.length > 0 ? JSON.parse(text) : undefined) as TOutput;
         } else {
-          data = await response.text();
+          data = (await response.text()) as TOutput;
         }
 
         const rawRequestId = response.headers.get("X-Request-ID");
@@ -105,8 +105,8 @@ class HttpClient {
           headers: response.headers,
           requestId,
         };
-      } catch (error: any) {
-        if (error.name === "AbortError") {
+      } catch (error: unknown) {
+        if ((error instanceof DOMException || error instanceof Error) && error.name === "AbortError") {
           lastError = new TimeoutError();
         } else if (error instanceof TypeError) {
           lastError = new NetworkError(error.message);
@@ -143,7 +143,7 @@ class HttpClient {
   /**
    * Build a URL with interpolated path parameters and optional query string.
    */
-  private buildUrl(path: string, method: string, input?: any): { url: string; bodyInput?: any } {
+  private buildUrl(path: string, method: string, input?: unknown): { url: string; bodyInput?: unknown } {
     let interpolatedPath = path;
     const queryParams = new URLSearchParams();
     const isGetOrHead = method === "GET" || method === "HEAD";
@@ -167,7 +167,7 @@ class HttpClient {
         return { url, bodyInput: undefined };
       }
 
-      const remaining: Record<string, any> = {};
+      const remaining: Record<string, unknown> = {};
       let remainingCount = 0;
       for (const [key, value] of Object.entries(input)) {
         if (!consumedKeys.has(key)) {

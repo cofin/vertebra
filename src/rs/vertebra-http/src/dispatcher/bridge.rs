@@ -16,14 +16,14 @@ use vertebra_core::protocol::flags;
 use vertebra_core::transport::InProcessRequest;
 
 use super::correlation::{CorrelationId, InFlightRequests};
-use super::streams::ResponseStreamRegistry;
+use super::streams::{DEFAULT_STREAM_QUEUE_DEPTH, ResponseStreamRegistry};
 use super::types::service_unavailable_response;
 use crate::batcher::PendingRequest;
 use crate::body::PendingResponse;
 
 const BRIDGE_SHARDS: usize = 8;
 const BRIDGE_SHARD_MASK: usize = BRIDGE_SHARDS - 1;
-const DEFAULT_BRIDGE_MAX_INFLIGHT: usize = 65_536;
+pub(super) const DEFAULT_BRIDGE_MAX_INFLIGHT: usize = 65_536;
 
 /// Sharded O(1) in-flight correlation table for embedded bridge mode.
 pub struct BridgeCorrelation {
@@ -43,13 +43,18 @@ impl Default for BridgeCorrelation {
 impl BridgeCorrelation {
     /// Construct an 8-shard correlation slab with total capacity `max_inflight`.
     pub fn with_capacity(max_inflight: usize) -> Self {
+        Self::with_capacity_and_queue_depth(max_inflight, DEFAULT_STREAM_QUEUE_DEPTH)
+    }
+
+    /// Construct an 8-shard correlation slab with total capacity `max_inflight` and stream queue depth.
+    pub fn with_capacity_and_queue_depth(max_inflight: usize, stream_queue_depth: usize) -> Self {
         let per_shard = (max_inflight / BRIDGE_SHARDS).max(64);
         Self {
             shards: std::array::from_fn(|_| Mutex::new(InFlightRequests::new(per_shard))),
             next_batch: AtomicUsize::new(0),
             active_requests: CacheLine(AtomicUsize::new(0)),
             sink_registered: AtomicBool::new(false),
-            streams: ResponseStreamRegistry::default(),
+            streams: ResponseStreamRegistry::with_capacity(stream_queue_depth),
         }
     }
 

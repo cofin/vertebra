@@ -5,12 +5,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from urllib.parse import urlparse
 
+import msgspec
+
 from vertebra.db.adapters.valkey.core import (
     ClusterRedirect,
     PubSubMessage,
     ValkeyCore,
 )
+from vertebra.db.driver._cloud_auth import (
+    AZURE_REDIS_SCOPE,
+    AzureEntraTokenProvider,
+    DatabaseTokenProvider,
+)
 from vertebra.db.driver._common import VALKEY_DIALECT_TAG, BaseDatabaseConfig
+from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,7 +83,7 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     enable_gcp_iam_auth: bool = False
     """Alias for `enable_gcp_memorystore_iam` enabling IAM token authentication."""
     token_provider: Any = None
-    """Optional zero-argument callable returning an ephemeral IAM access token."""
+    """Optional cloud `DatabaseTokenProvider` or zero-argument callable returning an ephemeral IAM access token."""
     iam_token_provider: Any = None
     """Alias for `token_provider` supplying IAM authentication tokens."""
     memorystore_instance_id: str | None = None
@@ -84,6 +92,59 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """Maximum pooled sockets maintained per target node."""
     broker: Any = None
     """Optional shared-memory broker for cross-worker push fan-out."""
+
+    def __post_init__(self) -> None:
+        if (
+            self.token_provider is not None
+            and self.iam_token_provider is not None
+            and self.token_provider is not self.iam_token_provider
+        ):
+            msg = "Cannot configure both token_provider and iam_token_provider on ValkeyConfig"
+            raise ImproperConfigurationError(msg)
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        gcp_iam_flag = bool(self.enable_gcp_memorystore_iam or self.iam_auth_enabled or self.enable_gcp_iam_auth)
+        if gcp_iam_flag and isinstance(provider, DatabaseTokenProvider):
+            msg = (
+                "Cannot combine GCP IAM authentication (enable_gcp_iam_auth=True) with a "
+                "DatabaseTokenProvider on ValkeyConfig; configure one credential mechanism"
+            )
+            raise ImproperConfigurationError(msg)
+        if isinstance(self.token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "token_provider",
+                self.token_provider.with_default_scope(AZURE_REDIS_SCOPE),
+            )
+        if isinstance(self.iam_token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "iam_token_provider",
+                self.iam_token_provider.with_default_scope(AZURE_REDIS_SCOPE),
+            )
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        """Return a URL representation with embedded userinfo passwords masked."""
+        if "://" in url:
+            scheme, rest = url.split("://", 1)
+            if "@" in rest:
+                userinfo, tail = rest.split("@", 1)
+                if ":" in userinfo:
+                    user, _ = userinfo.split(":", 1)
+                    return f"{scheme}://{user}:***@{tail}"
+        return url
+
+    def __repr__(self) -> str:
+        """Return a redacted representation that omits passwords and token secrets."""
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        provider_name = type(provider).__name__ if provider is not None else None
+        return (
+            f"ValkeyConfig(url={self._redact_url(self.url)!r}, username={self.username!r}, "
+            f"password={'***' if self.password is not None else None!r}, "
+            f"protocol={self.protocol!r}, topology={self.topology!r}, "
+            f"enable_gcp_memorystore_iam={self.enable_gcp_memorystore_iam!r}, "
+            f"token_provider={provider_name!r})"
+        )
 
     @property
     def uses_tls(self) -> bool:
@@ -120,6 +181,24 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
         """Return the configured IAM token provider callable."""
         provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
         return provider if callable(provider) else None
+
+    @property
+    def effective_database_token_provider(self) -> DatabaseTokenProvider | None:
+        """Return the configured `DatabaseTokenProvider` instance when present."""
+        provider = self.token_provider if self.token_provider is not None else self.iam_token_provider
+        return provider if isinstance(provider, DatabaseTokenProvider) else None
+
+    def with_resolved_token(self, token: str | None) -> Self:
+        """Return a copy carrying a resolved bearer token as password with GCP IAM flags cleared."""
+        return msgspec.structs.replace(
+            self,
+            password=token if token is not None else self.password,
+            token_provider=None,
+            iam_token_provider=None,
+            enable_gcp_memorystore_iam=False,
+            iam_auth_enabled=False,
+            enable_gcp_iam_auth=False,
+        )
 
     @property
     def effective_sentinel_master_name(self) -> str | None:
@@ -171,6 +250,7 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     def pool_key(self) -> tuple[Any, ...]:
         """Return the canonical shared-pool fingerprint tuple."""
         memorystore_id = self.memorystore_instance_id or ""
+        db_provider = self.effective_database_token_provider
         if (
             not self.username
             and self.protocol == 3
@@ -183,9 +263,10 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             and not self.client_tracking_prefixes
             and not self.effective_iam_enabled
             and not memorystore_id
+            and db_provider is None
         ):
             return (self.dialect, self.url)
-        return (
+        base_key = (
             self.dialect,
             self.url,
             self.username or "",
@@ -200,7 +281,29 @@ class ValkeyConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
             self.effective_iam_enabled,
             memorystore_id,
         )
+        if db_provider is None:
+            return base_key
+        try:
+            provider_key: Any = hash(db_provider)
+        except TypeError:
+            provider_key = id(db_provider)
+        return (*base_key, type(db_provider).__qualname__, provider_key)
 
     def to_redis_config(self) -> Any:
         """Convert to equivalent configuration object."""
         return self
+
+
+def is_valkey_auth_rejection(exc: BaseException) -> bool:
+    """Return True when `exc` represents a Valkey authentication rejection."""
+    detail = str(exc).upper()
+    return (
+        "WRONGPASS" in detail
+        or "NOAUTH" in detail
+        or "UNAUTH" in detail
+        or "ERRAUTH" in detail
+        or "AUTHENTICATIONFAILED" in detail
+        or "AUTHENTICATION FAILED" in detail
+        or "INVALID USERNAME-PASSWORD PAIR" in detail
+        or "AUTH FAILED" in detail
+    )

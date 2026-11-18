@@ -6,10 +6,8 @@ pub mod r2;
 pub mod signing;
 pub mod store;
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -22,19 +20,23 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
-use pyo3::types::{PyBytes, PyCapsule, PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
-use tokio::task::AbortHandle;
+use pyo3::types::{PyBytes, PyCapsule, PyType};
 use vertebra_core::gcp_auth::{
     GCP_TOKEN_CACHE_CAPSULE_NAME, GcpTokenCacheCapsule, SharedGcpTokenCacheHandle,
 };
-use vertebra_core::notify::{AsyncCompletionQueue, Notifier};
+pub use vertebra_core::py_async::RustTaskAwaitable;
+use vertebra_core::py_async::spawn_rust_task_with_attr;
 
-use crate::oci::{OciCavageCredentials, OciParConfig, build_oci_par_url, sign_oci_cavage_request};
+use crate::oci::{
+    OciCavageCredentials, OciParConfig, build_oci_par_url, extract_oci_par_object_key,
+    sign_oci_cavage_request, verify_oci_par_url,
+};
 use crate::r2::chunk_uniform_parts;
 use crate::signing::{
-    AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, GcsV4CanonicalRequest, HmacSigner,
-    S3SignConfig, resolve_gcs_endpoint_origin, sign_aws_sigv4_headers, sign_azure_sas_url,
-    sign_gcs_v4_with_iam_endpoint_and_cache, sign_s3_v4_url, verify_s3_v4_url,
+    AwsSigV4HeaderConfig, AzureSasConfig, GcsSignConfig, GcsV4CanonicalRequest, GcsVerifyConfig,
+    HmacSigner, S3SignConfig, resolve_gcs_endpoint_origin, sign_aws_sigv4_headers,
+    sign_azure_sas_url, sign_gcs_v4_with_iam_endpoint_and_cache, sign_s3_v4_url,
+    verify_azure_sas_url, verify_gcs_v4_url, verify_s3_v4_url,
 };
 use crate::store::{
     MultipartUploadSession, ObjectStoreEngine, PutConditionalOptions, StorageError,
@@ -246,204 +248,7 @@ impl StorageBuffer {
     unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        format!("Rust task panicked: {text}")
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        format!("Rust task panicked: {text}")
-    } else {
-        "Rust task panicked".to_string()
-    }
-}
-
-fn make_task_panic_err(py: Python<'_>, message: String) -> PyErr {
-    if let Ok(core_mod) = py.import("vertebra._vertebra")
-        && let Ok(exc_attr) = core_mod.getattr("TaskPanicError")
-        && let Ok(exc_ty) = exc_attr.cast_into::<PyType>()
-    {
-        return PyErr::from_type(exc_ty, (message,));
-    }
-    PyRuntimeError::new_err(message)
-}
-
-#[pyclass(
-    name = "_StorageTaskCanceller",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type
-)]
-struct StorageTaskCanceller {
-    abort: AbortHandle,
-}
-
-#[pymethods]
-impl StorageTaskCanceller {
-    fn __call__(&self, future: &Bound<'_, PyAny>) -> PyResult<()> {
-        if future.call_method0("cancelled")?.extract::<bool>()? {
-            self.abort.abort();
-        }
-        Ok(())
-    }
-}
-
-type OutcomeProducer = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
-
-struct CompletedStorageTask {
-    future: Py<PyAny>,
-    produce: OutcomeProducer,
-}
-
-struct RustCompletionRing {
-    completion: AsyncCompletionQueue<CompletedStorageTask>,
-    fallback_wakeup: Mutex<Option<(Py<PyWeakref>, &'static str)>>,
-}
-
-impl RustCompletionRing {
-    fn signal_fallback(&self) {
-        if self.completion.notifier().is_some() {
-            return;
-        }
-        Python::attach(|py| {
-            let target = {
-                let mut guard = self
-                    .fallback_wakeup
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                match guard.as_ref() {
-                    Some((weak_loop, attr_name)) => match weak_loop.bind(py).upgrade() {
-                        Some(loop_bound) => Some((loop_bound, *attr_name)),
-                        None => {
-                            *guard = None;
-                            None
-                        }
-                    },
-                    None => None,
-                }
-            };
-            if let Some((loop_bound, attr_name)) = target
-                && let Ok(drainer) = loop_bound.getattr(attr_name)
-            {
-                let _ = loop_bound.call_method1("call_soon_threadsafe", (drainer,));
-            }
-        });
-    }
-}
-
-#[pyclass(
-    name = "_StorageCompletionDrainer",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type
-)]
-struct StorageCompletionDrainer {
-    ring: Arc<RustCompletionRing>,
-}
-
-#[pymethods]
-impl StorageCompletionDrainer {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        self.ring.completion.clear_notifier();
-        let mut batch = Vec::new();
-        while self.ring.completion.drain_into(&mut batch) {
-            for item in batch.drain(..) {
-                let fut = item.future.bind(py);
-                let cancelled: bool = fut
-                    .call_method0("cancelled")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(false);
-                if cancelled {
-                    continue;
-                }
-                match catch_unwind(AssertUnwindSafe(|| (item.produce)(py))) {
-                    Ok(Ok(val)) => {
-                        let _ = fut.call_method1("set_result", (val,));
-                    }
-                    Ok(Err(err)) => {
-                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
-                    }
-                    Err(payload) => {
-                        let err = make_task_panic_err(py, panic_message(payload));
-                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn ensure_loop_completion_ring(
-    py: Python<'_>,
-    loop_obj: &Bound<'_, PyAny>,
-) -> PyResult<Arc<RustCompletionRing>> {
-    const ATTR_NAME: &str = "_vertebra_storage_drainer";
-    if let Ok(existing) = loop_obj.getattr(ATTR_NAME)
-        && let Ok(drainer) = existing.cast::<StorageCompletionDrainer>()
-    {
-        return Ok(Arc::clone(&drainer.get().ring));
-    }
-
-    #[cfg(unix)]
-    if let Ok(notifier) = Notifier::new() {
-        let fd = notifier.as_raw_fd();
-        let temp_ring = Arc::new(RustCompletionRing {
-            completion: AsyncCompletionQueue::new(Some(notifier)),
-            fallback_wakeup: Mutex::new(None),
-        });
-        let drainer_py = Py::new(
-            py,
-            StorageCompletionDrainer {
-                ring: Arc::clone(&temp_ring),
-            },
-        )?;
-        if loop_obj
-            .call_method1("add_reader", (fd, drainer_py.bind(py)))
-            .is_ok()
-        {
-            if let Err(err) = loop_obj.setattr(ATTR_NAME, drainer_py.bind(py)) {
-                let _ = loop_obj.call_method1("remove_reader", (fd,));
-                return Err(err);
-            }
-            return Ok(temp_ring);
-        }
-    }
-
-    let weak_loop = PyWeakrefReference::new(loop_obj)?
-        .into_any()
-        .cast_into::<PyWeakref>()?
-        .unbind();
-    let ring = Arc::new(RustCompletionRing {
-        completion: AsyncCompletionQueue::new(None),
-        fallback_wakeup: Mutex::new(Some((weak_loop, ATTR_NAME))),
-    });
-    let drainer_py = Py::new(
-        py,
-        StorageCompletionDrainer {
-            ring: Arc::clone(&ring),
-        },
-    )?;
-    loop_obj.setattr(ATTR_NAME, drainer_py.bind(py))?;
-    Ok(ring)
-}
-
-/// Native Rust awaitable backed by the shared Tokio runtime without `asyncio.to_thread`.
-#[pyclass(
-    name = "RustTaskAwaitable",
-    module = "vertebra._storage",
-    frozen,
-    immutable_type
-)]
-pub struct RustTaskAwaitable {
-    future: Py<PyAny>,
-}
-
-#[pymethods]
-impl RustTaskAwaitable {
-    fn __await__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let iter = self.future.bind(py).call_method0("__await__")?;
-        Ok(iter.unbind())
-    }
-}
+const STORAGE_COMPLETION_DRAINER_ATTR: &str = "_vertebra_storage_drainer";
 
 fn spawn_rust_task<F, T, M>(py: Python<'_>, fut: F, map_fn: M) -> PyResult<RustTaskAwaitable>
 where
@@ -451,58 +256,13 @@ where
     T: Send + 'static,
     M: FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
 {
-    let asyncio = py.import("asyncio")?;
-    let loop_obj = asyncio.call_method0("get_running_loop")?;
-    let py_fut = loop_obj.call_method0("create_future")?;
-    let ring = ensure_loop_completion_ring(py, &loop_obj)?;
-    let fut_for_cb = py_fut.clone().unbind();
-    let handle = runtime_handle();
-    let worker = handle.spawn(fut);
-    let abort = worker.abort_handle();
-    let canceller = match Py::new(
+    spawn_rust_task_with_attr(
         py,
-        StorageTaskCanceller {
-            abort: abort.clone(),
-        },
-    ) {
-        Ok(cb) => cb,
-        Err(err) => {
-            abort.abort();
-            return Err(err);
-        }
-    };
-    if let Err(err) = py_fut.call_method1("add_done_callback", (canceller,)) {
-        abort.abort();
-        return Err(err);
-    }
-    let fut_for_await = py_fut.unbind();
-
-    handle.spawn(async move {
-        let produce: OutcomeProducer = match worker.await {
-            Ok(Ok(val)) => Box::new(move |py| map_fn(py, val)),
-            Ok(Err(err)) => Box::new(move |_| Err(to_py_err(err))),
-            Err(join) if join.is_panic() => {
-                let message = panic_message(join.into_panic());
-                Box::new(move |py| Err(make_task_panic_err(py, message)))
-            }
-            Err(_) => Box::new(|_| {
-                Err(pyo3::exceptions::asyncio::CancelledError::new_err(
-                    "Rust storage task was cancelled",
-                ))
-            }),
-        };
-        let should_signal = ring.completion.push(CompletedStorageTask {
-            future: fut_for_cb,
-            produce,
-        });
-        if should_signal {
-            ring.signal_fallback();
-        }
-    });
-
-    Ok(RustTaskAwaitable {
-        future: fut_for_await,
-    })
+        fut,
+        map_fn,
+        |_, err| to_py_err(err),
+        STORAGE_COMPLETION_DRAINER_ATTR,
+    )
 }
 
 #[pyclass(
@@ -851,6 +611,11 @@ impl PySyncObjectStore {
         self.engine.scheme()
     }
 
+    #[getter]
+    fn supports_atomic_rename(&self) -> bool {
+        self.engine.supports_atomic_rename()
+    }
+
     fn to_async(&self) -> PyAsyncObjectStore {
         PyAsyncObjectStore {
             engine: self.engine.clone(),
@@ -1144,11 +909,24 @@ impl PySyncObjectStore {
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
-    fn rename(&self, py: Python<'_>, src: &str, dst: &str, if_not_exists: bool) -> PyResult<()> {
+    #[pyo3(signature = (src, dst, *, if_not_exists=false, atomic_only=false))]
+    fn rename(
+        &self,
+        py: Python<'_>,
+        src: &str,
+        dst: &str,
+        if_not_exists: bool,
+        atomic_only: bool,
+    ) -> PyResult<()> {
         let engine = self.engine.clone();
-        py.detach(|| block_on_storage(async move { engine.rename(src, dst, if_not_exists).await }))
-            .map_err(to_py_err)
+        py.detach(|| {
+            block_on_storage(async move {
+                engine
+                    .rename_with_options(src, dst, if_not_exists, atomic_only)
+                    .await
+            })
+        })
+        .map_err(to_py_err)
     }
 
     #[pyo3(signature = (prefix=None))]
@@ -1229,6 +1007,11 @@ impl PyAsyncObjectStore {
     #[getter]
     fn scheme(&self) -> &str {
         self.engine.scheme()
+    }
+
+    #[getter]
+    fn supports_atomic_rename(&self) -> bool {
+        self.engine.supports_atomic_rename()
     }
 
     fn to_sync(&self) -> PySyncObjectStore {
@@ -1536,18 +1319,23 @@ impl PyAsyncObjectStore {
         )
     }
 
-    #[pyo3(signature = (src, dst, *, if_not_exists=false))]
+    #[pyo3(signature = (src, dst, *, if_not_exists=false, atomic_only=false))]
     fn rename(
         &self,
         py: Python<'_>,
         src: String,
         dst: String,
         if_not_exists: bool,
+        atomic_only: bool,
     ) -> PyResult<RustTaskAwaitable> {
         let engine = self.engine.clone();
         spawn_rust_task(
             py,
-            async move { engine.rename(&src, &dst, if_not_exists).await },
+            async move {
+                engine
+                    .rename_with_options(&src, &dst, if_not_exists, atomic_only)
+                    .await
+            },
             |py, ()| Ok(py.None()),
         )
     }
@@ -1817,6 +1605,94 @@ fn py_sign_azure_sas_url(
 }
 
 #[pyfunction]
+#[pyo3(signature = (bucket, service_account_email, method, signed_url, timestamp=None, verify_key_pem=None, access_key_id=None, secret_access_key=None, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_verify_gcs_v4_url(
+    py: Python<'_>,
+    bucket: &str,
+    service_account_email: &str,
+    method: &str,
+    signed_url: &str,
+    timestamp: Option<i64>,
+    verify_key_pem: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+) -> PyResult<bool> {
+    let now_ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let cfg = GcsVerifyConfig {
+        bucket: bucket.to_string(),
+        service_account_email: service_account_email.to_string(),
+        verify_key_pem,
+        access_key_id,
+        secret_access_key,
+        endpoint,
+    };
+    py.detach(|| verify_gcs_v4_url(&cfg, method, signed_url, now_ts))
+        .map_err(PyErr::from)
+}
+
+#[pyfunction]
+#[pyo3(signature = (account, container, access_key, method, signed_url, timestamp=None, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_verify_azure_sas_url(
+    py: Python<'_>,
+    account: &str,
+    container: &str,
+    access_key: &str,
+    method: &str,
+    signed_url: &str,
+    timestamp: Option<i64>,
+    endpoint: Option<String>,
+) -> PyResult<bool> {
+    let now_ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let cfg = AzureSasConfig {
+        account: account.to_string(),
+        container: container.to_string(),
+        access_key_b64: access_key.to_string(),
+        endpoint,
+    };
+    py.detach(|| verify_azure_sas_url(&cfg, method, signed_url, now_ts))
+        .map_err(PyErr::from)
+}
+
+#[pyfunction]
+#[pyo3(signature = (bucket, namespace, region, par_token, signed_url, object_path=None, expires_at=None, timestamp=None, endpoint=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_verify_oci_par_url(
+    py: Python<'_>,
+    bucket: &str,
+    namespace: &str,
+    region: &str,
+    par_token: &str,
+    signed_url: &str,
+    object_path: Option<&str>,
+    expires_at: Option<i64>,
+    timestamp: Option<i64>,
+    endpoint: Option<String>,
+) -> PyResult<bool> {
+    let now_ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let cfg = OciParConfig {
+        region: region.to_string(),
+        namespace: namespace.to_string(),
+        bucket: bucket.to_string(),
+        par_token: par_token.to_string(),
+        endpoint,
+    };
+    py.detach(|| {
+        let resolved_key = match object_path {
+            Some(key) => key.to_string(),
+            None => match extract_oci_par_object_key(signed_url, &cfg)? {
+                Some(extracted) => extracted,
+                None => return Ok(false),
+            },
+        };
+        verify_oci_par_url(signed_url, &cfg, &resolved_key, expires_at, now_ts)
+    })
+    .map_err(PyErr::from)
+}
+
+#[pyfunction]
 #[pyo3(signature = (data, part_size=8388608))]
 fn py_chunk_r2_uniform_parts(
     py: Python<'_>,
@@ -2015,10 +1891,80 @@ pub fn _storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sign_gcs_v4_iam_url_async, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_oci_cavage_headers, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_azure_sas_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_verify_gcs_v4_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_verify_azure_sas_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_verify_oci_par_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_chunk_r2_uniform_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_sign_aws_sigv4_headers, m)?)?;
     m.add_function(wrap_pyfunction!(sign_oci_par_url, m)?)?;
     m.add_function(wrap_pyfunction!(build_gcs_v4_canonical_request, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_gcs_iam_v4_url, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+
+    use pyo3::prelude::*;
+    use pyo3::types::{PyCFunction, PyDict, PyTuple};
+
+    use super::{STORAGE_COMPLETION_DRAINER_ATTR, StorageError, spawn_rust_task};
+
+    #[test]
+    fn storage_drainer_uses_isolated_attr_and_maps_storage_errors() {
+        Python::attach(|py| {
+            let spawn_ok =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    spawn_rust_task(args.py(), async { Ok::<i64, StorageError>(77) }, |py, v| {
+                        Ok(v.into_pyobject(py)?.into_any().unbind())
+                    })
+                })
+                .expect("spawn_ok");
+            let spawn_err =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    spawn_rust_task(
+                        args.py(),
+                        async {
+                            Err::<i64, StorageError>(StorageError::Io(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "no object",
+                            )))
+                        },
+                        |py, v| Ok(v.into_pyobject(py)?.into_any().unbind()),
+                    )
+                })
+                .expect("spawn_err");
+
+            let globals = PyDict::new(py);
+            globals.set_item("spawn_ok", spawn_ok).unwrap();
+            globals.set_item("spawn_err", spawn_err).unwrap();
+            globals
+                .set_item("drainer_attr", STORAGE_COMPLETION_DRAINER_ATTR)
+                .unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    loop = asyncio.get_running_loop()\n",
+                "    setattr(loop, '_vertebra_core_completion_drainer', object())\n",
+                "    val = await spawn_ok()\n",
+                "    not_found = False\n",
+                "    try:\n",
+                "        await spawn_err()\n",
+                "    except FileNotFoundError:\n",
+                "        not_found = True\n",
+                "    return (val, not_found, hasattr(loop, drainer_attr))\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: (i64, bool, bool) = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, (77, true, true));
+        });
+    }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import types
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -229,7 +230,7 @@ class DatabaseWrapperMixin:
             pgbouncer=False,
         )
         try:
-            editor = super_schema_editor(*args, **kwargs)
+            editor: Any = super_schema_editor(*args, **kwargs)
         finally:
             self.settings_dict = orig_settings
             self.pooler_config = orig_pooler
@@ -292,7 +293,8 @@ class DatabaseWrapperMixin:
         if not callable(cursor_fn):
             msg = f"{type(self).__name__} does not expose cursor() for SQL execution"
             raise ImproperConfigurationError(msg)
-        with cursor_fn() as cur:
+        cursor_cm: Any = cursor_fn()
+        with cursor_cm as cur:
             if params is not None:
                 cur.execute(sql, params)
             else:
@@ -322,44 +324,47 @@ def _direct_schema_editor_class(base_cls: type[Any]) -> type[Any]:
     if cached is not None:
         return cached
 
-    class _DirectDDLSchemaEditor(base_cls):
-        def __enter__(self) -> Any:
-            wrapper = getattr(self, "_vtb_wrapper", None)
-            if wrapper is not None:
-                direct_settings = wrapper.derive_direct_settings()
-                self._vtb_saved_state = (
-                    wrapper.settings_dict,
-                    wrapper.pooler_config,
-                    getattr(wrapper, "connection", None),
-                )
-                wrapper.settings_dict = direct_settings
-                wrapper.pooler_config = msgspec.structs.replace(
-                    wrapper.pooler_config,
-                    pooler_mode="session",
-                    pgbouncer=False,
-                )
+    def _enter(self: Any) -> Any:
+        wrapper = getattr(self, "_vtb_wrapper", None)
+        if wrapper is not None:
+            direct_settings = wrapper.derive_direct_settings()
+            self._vtb_saved_state = (
+                wrapper.settings_dict,
+                wrapper.pooler_config,
+                getattr(wrapper, "connection", None),
+            )
+            wrapper.settings_dict = direct_settings
+            wrapper.pooler_config = msgspec.structs.replace(
+                wrapper.pooler_config,
+                pooler_mode="session",
+                pgbouncer=False,
+            )
+            if hasattr(wrapper, "connection"):
+                wrapper.connection = None
+        return base_cls.__enter__(self)
+
+    def _exit(self: Any, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        wrapper = getattr(self, "_vtb_wrapper", None)
+        saved = getattr(self, "_vtb_saved_state", None)
+        try:
+            return base_cls.__exit__(self, exc_type, exc_val, exc_tb)
+        finally:
+            if wrapper is not None and saved is not None:
+                orig_settings, orig_pooler, orig_conn = saved
+                temp_conn = getattr(wrapper, "connection", None)
+                if temp_conn is not None and temp_conn is not orig_conn:
+                    with contextlib.suppress(Exception):
+                        temp_conn.close()
+                wrapper.settings_dict = orig_settings
+                wrapper.pooler_config = orig_pooler
                 if hasattr(wrapper, "connection"):
-                    wrapper.connection = None
-            return super().__enter__()
+                    wrapper.connection = orig_conn
 
-        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
-            wrapper = getattr(self, "_vtb_wrapper", None)
-            saved = getattr(self, "_vtb_saved_state", None)
-            try:
-                return super().__exit__(exc_type, exc_val, exc_tb)
-            finally:
-                if wrapper is not None and saved is not None:
-                    orig_settings, orig_pooler, orig_conn = saved
-                    temp_conn = getattr(wrapper, "connection", None)
-                    if temp_conn is not None and temp_conn is not orig_conn:
-                        with contextlib.suppress(Exception):
-                            temp_conn.close()
-                    wrapper.settings_dict = orig_settings
-                    wrapper.pooler_config = orig_pooler
-                    if hasattr(wrapper, "connection"):
-                        wrapper.connection = orig_conn
-
-    _DirectDDLSchemaEditor.__name__ = f"Direct{base_cls.__name__}"
-    _DirectDDLSchemaEditor.__qualname__ = f"Direct{base_cls.__qualname__}"
-    _DIRECT_SCHEMA_EDITOR_CLASSES[base_cls] = _DirectDDLSchemaEditor
-    return _DirectDDLSchemaEditor
+    direct_cls: type[Any] = types.new_class(
+        f"Direct{base_cls.__name__}",
+        (base_cls,),
+        exec_body=lambda ns: ns.update({"__enter__": _enter, "__exit__": _exit}),
+    )
+    direct_cls.__qualname__ = f"Direct{base_cls.__qualname__}"
+    _DIRECT_SCHEMA_EDITOR_CLASSES[base_cls] = direct_cls
+    return direct_cls

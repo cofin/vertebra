@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PySequence, PyString, PyTuple};
@@ -88,12 +88,24 @@ pub struct QueuedCommand {
     pub decoder: PipelineDecoder,
 }
 
+fn valkey_slot_map_to_py_dict(
+    py: Python<'_>,
+    map: HashMap<u16, (String, u16)>,
+) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    for (slot, (host, port)) in map {
+        let tuple = (host, port).into_pyobject(py)?;
+        dict.set_item(slot, tuple)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
 /// Core thread-safe async Valkey engine shared across Sync/Async clients and pipelines.
 pub struct ValkeyEngine {
     pub config: Arc<ValkeyConfigInner>,
     tracking_cache: Option<Arc<TrackingCache>>,
     pools: Mutex<HashMap<String, Vec<RespConnection>>>,
-    topology: RwLock<ClusterTopology>,
+    topology: SyncRwLock<ClusterTopology>,
     sentinel_primary: RwLock<Option<(String, u16)>>,
     closed: AtomicBool,
 }
@@ -114,7 +126,7 @@ impl ValkeyEngine {
             config,
             tracking_cache,
             pools: Mutex::new(HashMap::new()),
-            topology: RwLock::new(ClusterTopology::empty()),
+            topology: SyncRwLock::new(ClusterTopology::empty()),
             sentinel_primary: RwLock::new(None),
             closed: AtomicBool::new(false),
         })
@@ -167,9 +179,9 @@ impl ValkeyEngine {
         }
     }
 
-    pub async fn slot_map(&self) -> std::collections::HashMap<u16, (String, u16)> {
-        let topo = self.topology.read().await;
-        topo.slot_map()
+    #[must_use]
+    pub fn slot_map(&self) -> std::collections::HashMap<u16, (String, u16)> {
+        self.topology.read().slot_map()
     }
 
     fn ensure_open(&self) -> Result<(), ValkeyError> {
@@ -384,7 +396,7 @@ impl ValkeyEngine {
     pub async fn refresh_cluster_topology(&self) -> Result<ClusterTopology, ValkeyError> {
         let mut candidates: Vec<ClusterNodeEndpoint> = Vec::new();
         {
-            let existing = self.topology.read().await;
+            let existing = self.topology.read();
             candidates.extend(existing.primary_nodes());
         }
         for seed in &self.config.cluster_nodes {
@@ -423,7 +435,7 @@ impl ValkeyEngine {
                 && let Ok(topo) = ClusterTopology::from_cluster_shards(&resp, self.config.tls)
             {
                 self.return_connection(route, conn).await;
-                let mut guard = self.topology.write().await;
+                let mut guard = self.topology.write();
                 *guard = topo.clone();
                 return Ok(topo);
             }
@@ -433,7 +445,7 @@ impl ValkeyEngine {
                 Ok(resp) => match ClusterTopology::from_cluster_slots(&resp) {
                     Ok(topo) => {
                         self.return_connection(route, conn).await;
-                        let mut guard = self.topology.write().await;
+                        let mut guard = self.topology.write();
                         *guard = topo.clone();
                         return Ok(topo);
                     }
@@ -451,7 +463,7 @@ impl ValkeyEngine {
 
     async fn ensure_cluster_topology(&self) -> Result<ClusterTopology, ValkeyError> {
         {
-            let topo = self.topology.read().await;
+            let topo = self.topology.read();
             if topo.shard_count() > 0 {
                 return Ok(topo.clone());
             }
@@ -470,7 +482,7 @@ impl ValkeyEngine {
                     && let Ok((host, port)) = parse_sentinel_addr(&seed, 6379)
                 {
                     let fallback = ClusterTopology::initial_seed_fallback(host, port);
-                    let mut guard = self.topology.write().await;
+                    let mut guard = self.topology.write();
                     *guard = fallback.clone();
                     return Ok(fallback);
                 }
@@ -546,17 +558,18 @@ impl ValkeyEngine {
             let (ep, is_ask, is_replica) = if let Some((ov_ep, ask, ro)) = override_route.take() {
                 (ov_ep, ask, ro)
             } else {
-                let topo = self.topology.read().await;
-                let picked = match slot {
-                    Some(s) => topo
-                        .route_for_slot(s, read_only, self.config.read_from_replicas)
-                        .or_else(|| topo.any_primary().map(|p| (p, false))),
-                    None => topo.any_primary().map(|p| (p, false)),
+                let picked = {
+                    let topo = self.topology.read();
+                    match slot {
+                        Some(s) => topo
+                            .route_for_slot(s, read_only, self.config.read_from_replicas)
+                            .or_else(|| topo.any_primary().map(|p| (p, false))),
+                        None => topo.any_primary().map(|p| (p, false)),
+                    }
                 };
                 match picked {
                     Some((node, ro)) => (node, false, ro),
                     None => {
-                        drop(topo);
                         let refreshed = self.refresh_cluster_topology().await?;
                         match slot
                             .and_then(|s| {
@@ -636,7 +649,7 @@ impl ValkeyEngine {
                         }
                         if kind == "MOVED" {
                             {
-                                let mut topo = self.topology.write().await;
+                                let mut topo = self.topology.write();
                                 topo.update_moved_slot(redir_slot, &redir_host, redir_port);
                             }
                             override_route = Some((
@@ -1885,14 +1898,7 @@ impl SyncValkeyClient {
     }
 
     pub fn slot_map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let engine = Arc::clone(&self.engine);
-        let map = py.detach(|| block_on_db(async move { engine.slot_map().await }));
-        let dict = PyDict::new(py);
-        for (slot, (host, port)) in map {
-            let tuple = (host, port).into_pyobject(py)?;
-            dict.set_item(slot, tuple)?;
-        }
-        Ok(dict.into_any().unbind())
+        valkey_slot_map_to_py_dict(py, self.engine.slot_map())
     }
 
     pub fn close(&self, py: Python<'_>) {
@@ -2712,14 +2718,7 @@ impl AsyncValkeyClient {
     }
 
     pub fn slot_map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let engine = Arc::clone(&self.engine);
-        let map = py.detach(|| block_on_db(async move { engine.slot_map().await }));
-        let dict = PyDict::new(py);
-        for (slot, (host, port)) in map {
-            let tuple = (host, port).into_pyobject(py)?;
-            dict.set_item(slot, tuple)?;
-        }
-        Ok(dict.into_any().unbind())
+        valkey_slot_map_to_py_dict(py, self.engine.slot_map())
     }
 
     pub fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, RustDbTaskAwaitable>> {

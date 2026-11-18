@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
@@ -20,7 +21,7 @@ from vertebra.db.adapters.postgres.queue import (
     AsyncPostgresQueueStore,
     SyncPostgresQueueStore,
 )
-from vertebra.db.driver.capabilities import QueueEntry
+from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry
 from vertebra.framework.queues.base import (
     CronLease,
     DeadLetterEntry,
@@ -34,7 +35,7 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Sequence
 
 __all__ = (
     "CLAIM_POSTGRES_JOBS_SQL",
@@ -105,6 +106,25 @@ WHERE j.task_id = claimed.task_id
 RETURNING j.task_id, j.task_name, j.lane, j.payload, j.attempt, j.max_retries,
           j.enqueued_at, j.scheduled_at, j.idempotency_key, j.traceparent, j.receipt_handle;
 """
+
+
+@runtime_checkable
+class _DeadLetterPoppableStore(Protocol):
+    """Protocol for queue stores providing atomic dead-letter pop operations."""
+
+    def pop_dead_letter(self, job_id: str) -> QueueEntry | None | Awaitable[QueueEntry | None]:
+        """Atomically remove and return a dead-lettered queue entry."""
+        ...
+
+
+async def _pop_dead_letter_entry(store: AsyncQueueStore, dlq_id: str) -> QueueEntry | None:
+    """Invoke pop_dead_letter when supported by store, otherwise fall back to get_entry."""
+    if isinstance(store, _DeadLetterPoppableStore):
+        result = store.pop_dead_letter(dlq_id)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return await store.get_entry(dlq_id)
 
 
 @runtime_checkable
@@ -590,11 +610,7 @@ class PostgreSQLQueueBackend:
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Replay dead-letter job by re-enqueuing into jobs table and deleting from DLQ."""
         if self._store is not None:
-            pop_fn = getattr(self._store, "pop_dead_letter", None)
-            if callable(pop_fn):
-                entry = await pop_fn(dlq_id)
-            else:
-                entry = await self._store.get_entry(dlq_id)
+            entry = await _pop_dead_letter_entry(self._store, dlq_id)
             if entry is None:
                 return None
             try:

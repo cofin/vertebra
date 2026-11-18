@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import os
 import posixpath
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,11 @@ from urllib.parse import unquote
 
 import msgspec
 
+from vertebra.db.driver._cloud_auth import (
+    AZURE_POSTGRES_SCOPE,
+    AwsAuroraDsqlIamTokenProvider,
+    AzureEntraTokenProvider,
+)
 from vertebra.typing import ImproperConfigurationError
 
 if TYPE_CHECKING:
@@ -22,9 +28,12 @@ __all__ = (
     "PostgresClientOptions",
     "PostgresTarget",
     "build_native_client_options",
+    "is_postgres_auth_rejection",
+    "merge_postgres_options",
     "parse_libpq_conninfo",
     "parse_postgres_dsn",
     "parse_query_pairs_strict",
+    "validate_cockroach_cluster",
 )
 
 _VALID_SSLMODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
@@ -188,6 +197,49 @@ class PostgresClientOptions(msgspec.Struct, frozen=True):
             }
         )
         return kwargs
+
+
+def validate_cockroach_cluster(cluster: str) -> str:
+    """Validate a CockroachDB cluster routing identifier (`--cluster=<id>`)."""
+    if not isinstance(cluster, str) or not cluster or any(ch.isspace() or ch == "\0" for ch in cluster):
+        raise ImproperConfigurationError("cockroach_cluster must be a non-empty string without whitespace or NUL bytes")
+    return cluster
+
+
+def merge_postgres_options(*raw_options: str | None, cockroach_cluster: str | None = None) -> str | None:
+    """Merge PostgreSQL startup `options` flags with an optional CockroachDB `--cluster=<id>` token."""
+    validated_cluster = validate_cockroach_cluster(cockroach_cluster) if cockroach_cluster is not None else None
+    chunks: list[str] = []
+    for raw in raw_options:
+        if raw is None:
+            continue
+        if "\0" in raw:
+            raise ImproperConfigurationError("PostgreSQL options must not contain NUL bytes")
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        if validated_cluster is not None:
+            cleaned = re.sub(r"(?:^|\s)--cluster=\S+", " ", cleaned).strip()
+        if cleaned:
+            chunks.append(cleaned)
+    if validated_cluster is not None:
+        chunks.append(f"--cluster={validated_cluster}")
+    merged = " ".join(chunks).strip()
+    return merged or None
+
+
+def is_postgres_auth_rejection(exc: BaseException) -> bool:
+    """Return True when an exception represents a PostgreSQL authentication or token rejection."""
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate in ("28P01", "28000"):
+        return True
+    detail = str(exc).lower()
+    return (
+        "28p01" in detail
+        or "28000" in detail
+        or "password authentication failed" in detail
+        or "authentication failed" in detail
+    )
 
 
 def parse_query_pairs_strict(query: str) -> dict[str, str]:
@@ -454,6 +506,16 @@ def build_native_client_options(
     )
     primary = targets[0]
 
+    token_provider = explicit.get("token_provider", config.token_provider)
+    if isinstance(token_provider, AzureEntraTokenProvider):
+        token_provider = token_provider.with_default_scope(AZURE_POSTGRES_SCOPE)
+    if isinstance(token_provider, AwsAuroraDsqlIamTokenProvider) and primary.sslmode == "disable":
+        raise ImproperConfigurationError(
+            "AwsAuroraDsqlIamTokenProvider requires TLS and cannot be used with sslmode='disable'"
+        )
+    if password_str is None and token_provider is not None:
+        password_str = str(token_provider.resolve_sync())
+
     channel_binding_raw = _resolve_scalar(
         explicit,
         parsed.params,
@@ -719,13 +781,66 @@ def build_native_client_options(
         else config.enable_iam_auth
     )
 
+    enable_columnar_raw = _resolve_scalar(
+        explicit,
+        parsed.params,
+        active_env,
+        explicit_keys=("enable_alloydb_columnar_engine",),
+        dsn_keys=("enable_alloydb_columnar_engine",),
+    )
+    enable_columnar = (
+        _parse_bool(enable_columnar_raw, field_name="enable_alloydb_columnar_engine")
+        if enable_columnar_raw is not None
+        else config.enable_alloydb_columnar_engine
+    )
+
     session_gucs = config.build_session_gucs()
+    if enable_columnar or alloydb_instance_uri is not None:
+        session_gucs.setdefault("google_columnar_engine.enabled", "on")
+        session_gucs.setdefault("alloydb.enable_columnar_engine", "on")
     if application_name:
         session_gucs["application_name"] = application_name
+    config_options_raw = session_gucs.pop("options", None)
+    extra_options_raw: str | None = None
     extra_gucs = explicit.get("session_gucs")
     if isinstance(extra_gucs, Mapping):
         for guc_key, guc_val in extra_gucs.items():
-            session_gucs[str(guc_key)] = str(guc_val)
+            key_str = str(guc_key)
+            if key_str.lower() == "options":
+                extra_options_raw = str(guc_val)
+            else:
+                session_gucs[key_str] = str(guc_val)
+
+    dsn_or_env_options = _resolve_scalar(
+        {},
+        parsed.params,
+        active_env,
+        explicit_keys=(),
+        dsn_keys=("options",),
+        env_key="PGOPTIONS",
+    )
+    explicit_options = explicit.get("options")
+    cockroach_cluster_raw = _resolve_scalar(
+        explicit,
+        parsed.params,
+        {},
+        explicit_keys=("cockroach_cluster",),
+        dsn_keys=("cockroach_cluster",),
+    )
+    cockroach_cluster = (
+        validate_cockroach_cluster(cockroach_cluster_raw)
+        if cockroach_cluster_raw is not None
+        else config.cockroach_cluster
+    )
+    merged_options = merge_postgres_options(
+        str(dsn_or_env_options) if dsn_or_env_options is not None else None,
+        config_options_raw,
+        extra_options_raw,
+        str(explicit_options) if explicit_options is not None else None,
+        cockroach_cluster=cockroach_cluster,
+    )
+    if merged_options is not None:
+        session_gucs["options"] = merged_options
 
     min_size = _parse_int(explicit.get("min_size", config.min_size), field_name="min_size", minimum=0)
     max_size = _parse_int(explicit.get("max_size", config.max_size), field_name="max_size", minimum=1)

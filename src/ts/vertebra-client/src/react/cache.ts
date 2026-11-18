@@ -22,13 +22,17 @@ function canonicalize(value: unknown): unknown {
 }
 
 export interface CacheEntry {
-  data: any;
+  data: unknown;
   timestamp: number;
-  promise?: Promise<any> | null;
+  promise?: Promise<unknown> | null;
+  settledPromise?: Promise<unknown>;
+  epoch: number;
 }
 
 export class QueryCache {
   private entries = new Map<string, CacheEntry>();
+  private epochs = new Map<string, number>();
+  private baseEpoch = 0;
   private listeners = new Set<() => void>();
   private _version = 0;
 
@@ -36,8 +40,12 @@ export class QueryCache {
     return this._version;
   }
 
+  private getEpoch(key: string): number {
+    return this.baseEpoch + (this.epochs.get(key) ?? 0);
+  }
+
   /** Build a stable cache key from request parameters. */
-  static stableKey(method: string, path: string, input: any): string {
+  static stableKey(method: string, path: string, input: unknown): string {
     const inputKey = input !== undefined ? JSON.stringify(canonicalize(input)) : "";
     return `${method}:${path}:${inputKey}`;
   }
@@ -46,6 +54,9 @@ export class QueryCache {
   get(key: string, staleTime: number): CacheEntry | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
+    if (entry.epoch !== this.getEpoch(key)) {
+      return undefined;
+    }
     if (staleTime > 0 && Date.now() - entry.timestamp >= staleTime) {
       return undefined;
     }
@@ -53,27 +64,36 @@ export class QueryCache {
   }
 
   /** Get or create a pending promise for a cache key. */
-  getOrCreate(key: string, staleTime: number, fetcher: () => Promise<any>): Promise<any> {
+  getOrCreate<TData = unknown>(key: string, staleTime: number, fetcher: () => Promise<TData>): Promise<TData> {
+    const activeEpoch = this.getEpoch(key);
     const entry = this.entries.get(key);
 
-    // Fresh cache hit — return data immediately
-    if (entry && entry.timestamp > 0 && staleTime > 0 && Date.now() - entry.timestamp < staleTime) {
-      return Promise.resolve(entry.data);
+    if (entry && entry.timestamp > 0 && entry.epoch === activeEpoch) {
+      if (staleTime === 0 || Date.now() - entry.timestamp < staleTime) {
+        return (entry.settledPromise ?? Promise.resolve(entry.data)) as Promise<TData>;
+      }
     }
 
-    // In-flight request — deduplicate
     if (entry?.promise) {
-      return entry.promise;
+      return entry.promise as Promise<TData>;
     }
 
-    // Start new fetch
     const promise = fetcher()
       .then((data) => {
-        this.entries.set(key, { data, timestamp: Date.now(), promise: undefined });
-        this.notify();
+        const current = this.entries.get(key);
+        if (!current || current.promise === promise) {
+          this.entries.set(key, {
+            data,
+            timestamp: Date.now(),
+            promise: undefined,
+            settledPromise: promise,
+            epoch: activeEpoch,
+          });
+          this.notify();
+        }
         return data;
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         const current = this.entries.get(key);
         if (current?.promise === promise) {
           current.promise = undefined;
@@ -84,19 +104,23 @@ export class QueryCache {
         throw err;
       });
 
-    // Store pending promise for dedup
     if (entry) {
       entry.promise = promise;
     } else {
-      this.entries.set(key, { data: null, timestamp: 0, promise });
+      this.entries.set(key, { data: null, timestamp: 0, promise, epoch: activeEpoch });
     }
 
     return promise;
   }
 
   /** Set a cache entry directly. */
-  set(key: string, data: any): void {
-    this.entries.set(key, { data, timestamp: Date.now(), promise: undefined });
+  set(key: string, data: unknown): void {
+    this.entries.set(key, {
+      data,
+      timestamp: Date.now(),
+      promise: undefined,
+      epoch: this.getEpoch(key),
+    });
     this.notify();
   }
 
@@ -104,11 +128,22 @@ export class QueryCache {
   invalidate(pattern?: string): void {
     if (!pattern) {
       this.entries.clear();
+      this.baseEpoch += 1;
     } else {
+      const matchingKeys = new Set<string>();
       for (const key of this.entries.keys()) {
         if (key.startsWith(pattern)) {
-          this.entries.delete(key);
+          matchingKeys.add(key);
         }
+      }
+      for (const key of this.epochs.keys()) {
+        if (key.startsWith(pattern)) {
+          matchingKeys.add(key);
+        }
+      }
+      for (const key of matchingKeys) {
+        this.entries.delete(key);
+        this.epochs.set(key, (this.epochs.get(key) ?? 0) + 1);
       }
     }
     this.notify();

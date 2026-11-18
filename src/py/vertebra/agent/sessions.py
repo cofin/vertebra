@@ -19,6 +19,7 @@ import msgspec
 from vertebra.agent.spec import AgentMessage
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.text import validate_identifier
 
 ANONYMOUS_OWNER = "anonymous"
 
@@ -148,7 +149,7 @@ class SQLSpecSessionStore:
         adk_store: Any = None,
     ) -> None:
         self.driver = driver
-        self.table_name = table_name
+        self.table_name = validate_identifier(table_name, "table_name")
         self.adk_store = adk_store
         self._locks = _LockManager()
 
@@ -421,22 +422,35 @@ class ObjectStoreSessionStore:
 
 
 class _LockManager:
-    """Manages per-session async mutual exclusion locks."""
+    """Manages per-session async mutual exclusion locks with refcounted idle eviction."""
 
     def __init__(self) -> None:
         self._locks: dict[tuple[str, str], anyio.Lock] = {}
+        self._refcounts: dict[tuple[str, str], int] = {}
         self._meta_lock = anyio.Lock()
 
     @asynccontextmanager
     async def acquire(self, owner: str, session_id: str) -> AsyncIterator[None]:
-        """Acquire the lock for a specific (owner, session_id) pair."""
+        """Acquire the lock for a specific (owner, session_id) pair and evict when idle."""
         key = (owner, session_id)
         async with self._meta_lock:
-            if key not in self._locks:
-                self._locks[key] = anyio.Lock()
-            target_lock = self._locks[key]
-        async with target_lock:
-            yield
+            target_lock = self._locks.get(key)
+            if target_lock is None:
+                target_lock = anyio.Lock()
+                self._locks[key] = target_lock
+            self._refcounts[key] = self._refcounts.get(key, 0) + 1
+        try:
+            async with target_lock:
+                yield
+        finally:
+            with anyio.CancelScope(shield=True):
+                async with self._meta_lock:
+                    remaining = self._refcounts.get(key, 0) - 1
+                    if remaining <= 0:
+                        self._refcounts.pop(key, None)
+                        self._locks.pop(key, None)
+                    else:
+                        self._refcounts[key] = remaining
 
 
 def _sql_text(statement: str) -> Any:

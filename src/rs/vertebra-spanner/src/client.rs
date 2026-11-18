@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::future::try_join_all;
@@ -17,7 +18,7 @@ use google_cloud_spanner::omni::TlsConfig;
 use google_cloud_spanner::result::ResultSet;
 use google_cloud_spanner::statement::Statement;
 use google_cloud_spanner::transaction::ReadWriteTransaction;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 use tonic::transport::Channel;
 use url::Url;
 use vertebra_core::gcp_auth::GcpTokenCache;
@@ -244,11 +245,12 @@ pub struct SpannerClient {
     token_cache: Option<Arc<GcpTokenCache>>,
     injected_spanner: Option<Arc<Spanner>>,
     injected_admin: Option<Arc<DatabaseAdmin>>,
-    official: Arc<OnceCell<Spanner>>,
-    database_client: Arc<OnceCell<DatabaseClient>>,
-    admin_client: Arc<OnceCell<DatabaseAdmin>>,
+    official: Arc<RwLock<Option<Arc<Spanner>>>>,
+    database_client: Arc<RwLock<Option<Arc<DatabaseClient>>>>,
+    admin_client: Arc<RwLock<Option<Arc<DatabaseAdmin>>>>,
     pub(crate) grpc_channel: Arc<OnceCell<Channel>>,
     pub(crate) mux_session: Arc<OnceCell<String>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for SpannerClient {
@@ -280,11 +282,12 @@ impl SpannerClient {
             token_cache,
             injected_spanner: None,
             injected_admin: None,
-            official: Arc::new(OnceCell::new()),
-            database_client: Arc::new(OnceCell::new()),
-            admin_client: Arc::new(OnceCell::new()),
+            official: Arc::new(RwLock::new(None)),
+            database_client: Arc::new(RwLock::new(None)),
+            admin_client: Arc::new(RwLock::new(None)),
             grpc_channel: Arc::new(OnceCell::new()),
             mux_session: Arc::new(OnceCell::new()),
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -304,12 +307,43 @@ impl SpannerClient {
             token_cache: None,
             injected_spanner: Some(Arc::new(spanner)),
             injected_admin: admin.map(Arc::new),
-            official: Arc::new(OnceCell::new()),
-            database_client: Arc::new(OnceCell::new()),
-            admin_client: Arc::new(OnceCell::new()),
+            official: Arc::new(RwLock::new(None)),
+            database_client: Arc::new(RwLock::new(None)),
+            admin_client: Arc::new(RwLock::new(None)),
             grpc_channel: Arc::new(OnceCell::new()),
             mux_session: Arc::new(OnceCell::new()),
+            closed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Close this client idempotently, releasing cached handles where resettable and rejecting further calls.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.database_client.try_write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.official.try_write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.admin_client.try_write() {
+            *guard = None;
+        }
+    }
+
+    /// Return `true` if [`SpannerClient::close`] has been called.
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ensure_open(&self) -> Result<(), SpannerError> {
+        if self.is_closed() {
+            return Err(SpannerError::Gcp(GcpErrorInfo::new(
+                9,
+                "Spanner client is closed",
+            )));
+        }
+        Ok(())
     }
 
     /// Client configuration reference.
@@ -360,63 +394,90 @@ impl SpannerClient {
         )))
     }
 
-    async fn official_spanner(&self) -> Result<&Spanner, SpannerError> {
+    async fn official_spanner(&self) -> Result<Arc<Spanner>, SpannerError> {
+        self.ensure_open()?;
         if let Some(ref spanner) = self.injected_spanner {
-            return Ok(spanner.as_ref());
+            return Ok(Arc::clone(spanner));
         }
-        self.official
-            .get_or_try_init(|| async {
-                install_rustls_ring_provider();
-                let mut builder = Spanner::builder()
-                    .with_endpoint(self.effective_endpoint.clone())
-                    .with_credentials(official_credentials(self.token_cache.clone()))
-                    .with_channel_pool(StaticChannelPoolConfig::new(self.config.pool_size.max(1)));
-                if let Some(ref pem) = self.config.ca_pem {
-                    builder = builder
-                        .with_omni_tls(TlsConfig::new().with_root_certificate_pem(pem.clone()));
-                }
-                builder.build().await.map_err(|e| {
-                    SpannerError::Protocol(format!("failed to build Spanner client: {e}"))
-                })
-            })
-            .await
+        if let Some(spanner) = self.official.read().await.as_ref() {
+            return Ok(Arc::clone(spanner));
+        }
+        let mut guard = self.official.write().await;
+        self.ensure_open()?;
+        if let Some(spanner) = guard.as_ref() {
+            return Ok(Arc::clone(spanner));
+        }
+        install_rustls_ring_provider();
+        let mut builder = Spanner::builder()
+            .with_endpoint(self.effective_endpoint.clone())
+            .with_credentials(official_credentials(self.token_cache.clone()))
+            .with_channel_pool(StaticChannelPoolConfig::new(self.config.pool_size.max(1)));
+        if let Some(ref pem) = self.config.ca_pem {
+            builder =
+                builder.with_omni_tls(TlsConfig::new().with_root_certificate_pem(pem.clone()));
+        }
+        let spanner =
+            Arc::new(builder.build().await.map_err(|e| {
+                SpannerError::Protocol(format!("failed to build Spanner client: {e}"))
+            })?);
+        self.ensure_open()?;
+        *guard = Some(Arc::clone(&spanner));
+        Ok(spanner)
     }
 
-    async fn database_client(&self) -> Result<&DatabaseClient, SpannerError> {
-        self.database_client
-            .get_or_try_init(|| async {
-                let spanner = self.official_spanner().await?;
-                let mut builder = spanner
-                    .database_client(&self.config.database)
-                    .with_leader_aware_routing(self.config.route_to_leader_enabled);
-                if let Some(ref role) = self.config.database_role
-                    && !role.is_empty()
-                {
-                    builder = builder.with_database_role(role.clone());
-                }
-                Ok(builder.build().await?)
-            })
-            .await
+    async fn database_client(&self) -> Result<Arc<DatabaseClient>, SpannerError> {
+        self.ensure_open()?;
+        if let Some(db) = self.database_client.read().await.as_ref() {
+            return Ok(Arc::clone(db));
+        }
+        let mut guard = self.database_client.write().await;
+        self.ensure_open()?;
+        if let Some(db) = guard.as_ref() {
+            return Ok(Arc::clone(db));
+        }
+        let spanner = self.official_spanner().await?;
+        let mut builder = spanner
+            .database_client(&self.config.database)
+            .with_leader_aware_routing(self.config.route_to_leader_enabled);
+        if let Some(ref role) = self.config.database_role
+            && !role.is_empty()
+        {
+            builder = builder.with_database_role(role.clone());
+        }
+        let db = Arc::new(builder.build().await?);
+        self.ensure_open()?;
+        *guard = Some(Arc::clone(&db));
+        Ok(db)
     }
 
-    async fn database_admin(&self) -> Result<&DatabaseAdmin, SpannerError> {
+    async fn database_admin(&self) -> Result<Arc<DatabaseAdmin>, SpannerError> {
+        self.ensure_open()?;
         if let Some(ref admin) = self.injected_admin {
-            return Ok(admin.as_ref());
+            return Ok(Arc::clone(admin));
         }
-        self.admin_client
-            .get_or_try_init(|| async {
-                install_rustls_ring_provider();
-                let admin_ep = self.effective_admin_endpoint()?;
-                DatabaseAdmin::builder()
-                    .with_endpoint(admin_ep)
-                    .with_credentials(official_credentials(self.token_cache.clone()))
-                    .build()
-                    .await
-                    .map_err(|e| {
-                        SpannerError::Protocol(format!("failed to build DatabaseAdmin: {e}"))
-                    })
-            })
-            .await
+        if let Some(admin) = self.admin_client.read().await.as_ref() {
+            return Ok(Arc::clone(admin));
+        }
+        let mut guard = self.admin_client.write().await;
+        self.ensure_open()?;
+        if let Some(admin) = guard.as_ref() {
+            return Ok(Arc::clone(admin));
+        }
+        install_rustls_ring_provider();
+        let admin_ep = self.effective_admin_endpoint()?;
+        let admin = Arc::new(
+            DatabaseAdmin::builder()
+                .with_endpoint(admin_ep)
+                .with_credentials(official_credentials(self.token_cache.clone()))
+                .build()
+                .await
+                .map_err(|e| {
+                    SpannerError::Protocol(format!("failed to build DatabaseAdmin: {e}"))
+                })?,
+        );
+        self.ensure_open()?;
+        *guard = Some(Arc::clone(&admin));
+        Ok(admin)
     }
 
     fn statement(&self, sql: &str, params: &[SpannerQueryParameter]) -> Statement {
@@ -484,6 +545,7 @@ impl SpannerClient {
         params: &[SpannerQueryParameter],
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_query(self.statement(sql, params), staleness)
             .await
     }
@@ -495,6 +557,7 @@ impl SpannerClient {
         params: Vec<SpannerQueryParameter>,
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_query(self.statement_owned(sql, params), staleness)
             .await
     }
@@ -524,6 +587,7 @@ impl SpannerClient {
         data_boost_enabled: bool,
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_partitioned_query(
             self.statement(sql, params),
             max_partitions,
@@ -542,6 +606,7 @@ impl SpannerClient {
         data_boost_enabled: bool,
         staleness: SpannerStaleness,
     ) -> Result<SpannerQueryResult, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_partitioned_query(
             self.statement_owned(sql, params),
             max_partitions,
@@ -568,9 +633,12 @@ impl SpannerClient {
         let options =
             spanner_model::PartitionOptions::new().set_max_partitions(max_partitions.max(1));
         let partitions = batch_tx.partition_query(stmt, options).await?;
-        let part_results = try_join_all(partitions.into_iter().map(|part| async move {
-            let rs = part.set_data_boost(data_boost_enabled).execute(db).await?;
-            collect_query_result(rs).await
+        let part_results = try_join_all(partitions.into_iter().map(|part| {
+            let db = Arc::clone(&db);
+            async move {
+                let rs = part.set_data_boost(data_boost_enabled).execute(&db).await?;
+                collect_query_result(rs).await
+            }
         }))
         .await?;
 
@@ -609,6 +677,7 @@ impl SpannerClient {
         request_tag: Option<&str>,
         transaction_tag: Option<&str>,
     ) -> Result<i64, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_dml(
             self.statement_with_tag(sql, params, request_tag),
             transaction_tag,
@@ -624,6 +693,7 @@ impl SpannerClient {
         request_tag: Option<&str>,
         transaction_tag: Option<&str>,
     ) -> Result<i64, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_dml(
             self.statement_owned_with_tag(sql, params, request_tag),
             transaction_tag,
@@ -664,6 +734,7 @@ impl SpannerClient {
         request_tag: Option<&str>,
         transaction_tag: Option<&str>,
     ) -> Result<Vec<i64>, SpannerError> {
+        self.ensure_open()?;
         if statements.is_empty() {
             return Ok(Vec::new());
         }
@@ -685,6 +756,7 @@ impl SpannerClient {
         request_tag: Option<&str>,
         transaction_tag: Option<&str>,
     ) -> Result<Vec<i64>, SpannerError> {
+        self.ensure_open()?;
         if statements.is_empty() {
             return Ok(Vec::new());
         }
@@ -734,6 +806,7 @@ impl SpannerClient {
         params: &[SpannerQueryParameter],
         exclude_txn_from_change_streams: bool,
     ) -> Result<i64, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_partitioned_dml(
             self.statement(sql, params),
             exclude_txn_from_change_streams,
@@ -748,6 +821,7 @@ impl SpannerClient {
         params: Vec<SpannerQueryParameter>,
         exclude_txn_from_change_streams: bool,
     ) -> Result<i64, SpannerError> {
+        self.ensure_open()?;
         self.execute_statement_partitioned_dml(
             self.statement_owned(sql, params),
             exclude_txn_from_change_streams,
@@ -778,6 +852,7 @@ impl SpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> Result<SpannerCommitResult, SpannerError> {
+        self.ensure_open()?;
         if mutations.is_empty() {
             return Ok(SpannerCommitResult {
                 commit_timestamp_micros: None,
@@ -806,6 +881,7 @@ impl SpannerClient {
         exclude_txn_from_change_streams: bool,
         max_commit_delay_ms: Option<u64>,
     ) -> Result<SpannerCommitResult, SpannerError> {
+        self.ensure_open()?;
         if mutations.is_empty() {
             return Ok(SpannerCommitResult {
                 commit_timestamp_micros: None,
@@ -856,6 +932,7 @@ impl SpannerClient {
         mutation_groups: &[SpannerMutationGroup],
         exclude_txn_from_change_streams: bool,
     ) -> Result<Vec<SpannerBatchWriteResult>, SpannerError> {
+        self.ensure_open()?;
         if mutation_groups.is_empty() {
             return Ok(Vec::new());
         }
@@ -871,7 +948,7 @@ impl SpannerClient {
                 let chunk_len = chunk.len() as i32;
                 let mut part = self
                     .batch_write_official_chunk(
-                        db,
+                        &db,
                         std::mem::take(&mut chunk),
                         chunk_start,
                         exclude_txn_from_change_streams,
@@ -892,7 +969,12 @@ impl SpannerClient {
         }
         if !chunk.is_empty() {
             let mut part = self
-                .batch_write_official_chunk(db, chunk, chunk_start, exclude_txn_from_change_streams)
+                .batch_write_official_chunk(
+                    &db,
+                    chunk,
+                    chunk_start,
+                    exclude_txn_from_change_streams,
+                )
                 .await?;
             results.append(&mut part);
         }
@@ -905,6 +987,7 @@ impl SpannerClient {
         mutation_groups: Vec<SpannerMutationGroup>,
         exclude_txn_from_change_streams: bool,
     ) -> Result<Vec<SpannerBatchWriteResult>, SpannerError> {
+        self.ensure_open()?;
         if mutation_groups.is_empty() {
             return Ok(Vec::new());
         }
@@ -920,7 +1003,7 @@ impl SpannerClient {
                 let chunk_len = chunk.len() as i32;
                 let mut part = self
                     .batch_write_official_chunk(
-                        db,
+                        &db,
                         std::mem::take(&mut chunk),
                         chunk_start,
                         exclude_txn_from_change_streams,
@@ -941,7 +1024,12 @@ impl SpannerClient {
         }
         if !chunk.is_empty() {
             let mut part = self
-                .batch_write_official_chunk(db, chunk, chunk_start, exclude_txn_from_change_streams)
+                .batch_write_official_chunk(
+                    &db,
+                    chunk,
+                    chunk_start,
+                    exclude_txn_from_change_streams,
+                )
                 .await?;
             results.append(&mut part);
         }
@@ -987,6 +1075,7 @@ impl SpannerClient {
     /// Execute batched DDL statements via `DatabaseAdmin::update_database_ddl` and poll `get_operation`
     /// until `done == true` or `config.ddl_timeout` elapses.
     pub async fn update_database_ddl(&self, statements: &[String]) -> Result<String, SpannerError> {
+        self.ensure_open()?;
         if statements.is_empty() {
             return Ok(String::new());
         }
@@ -1033,5 +1122,63 @@ impl SpannerClient {
                     SpannerError::Protocol(format!("GetOperation({op_name}) failed: {e}"))
                 })?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_close_is_idempotent_and_rejects_operations() {
+        let mut config = SpannerClientConfig::new("projects/p/instances/i/databases/d");
+        config.endpoint = "http://127.0.0.1:9".to_string();
+        let client = SpannerClient::new(config).expect("client");
+        let cloned = client.clone();
+        assert!(!client.is_closed());
+        assert!(!cloned.is_closed());
+
+        client.close();
+        assert!(client.is_closed());
+        assert!(cloned.is_closed());
+        client.close();
+        assert!(client.is_closed());
+
+        assert!(matches!(
+            client.query("SELECT 1", &[], SpannerStaleness::Strong).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.execute_dml("DELETE FROM t WHERE true", &[], None, None).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.execute_batch_dml(&[], None, None).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.execute_partitioned_dml("DELETE FROM t WHERE true", &[], false).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.apply_mutations(&[], None, false, None).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.batch_write(&[], false).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.update_database_ddl(&[]).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            client.partitioned_query("SELECT 1", &[], 1, false, SpannerStaleness::Strong).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
+        assert!(matches!(
+            cloned.query_owned("SELECT 1", Vec::new(), SpannerStaleness::Strong).await,
+            Err(SpannerError::Gcp(ref info)) if info.code == 9 && info.message == "Spanner client is closed"
+        ));
     }
 }

@@ -6,6 +6,8 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from vertebra.extensions.litestar.channels import ChannelsBackend
+from vertebra.extensions.litestar.queues.backend import StoreQueueBackendConfig
+from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 
@@ -123,7 +125,6 @@ def create_shm_queue_config(
         package="litestar-queues",
         extra="queues",
     )
-    from vertebra.extensions.litestar.queues.shm_backend import SHMQueueBackendConfig
 
     backend_config = SHMQueueBackendConfig(
         min_wakeup_timeout=min_wakeup_timeout,
@@ -157,7 +158,6 @@ def create_store_queue_config(
         package="litestar-queues",
         extra="queues",
     )
-    from vertebra.extensions.litestar.queues.backend import StoreQueueBackendConfig
 
     backend_config = StoreQueueBackendConfig(
         store=store,

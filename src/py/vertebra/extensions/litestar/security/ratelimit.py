@@ -1,12 +1,10 @@
-"""Rate limiting guard backed by Rust token bucket limiter."""
+"""Rate limiting guard delegating token-bucket enforcement to neutral RateLimitGuard."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from litestar.exceptions import PermissionDeniedException
-
-from vertebra._vertebra import RateLimiter
+from vertebra.framework.security import RateLimitGuard as _NeutralRateLimitGuard
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
@@ -14,11 +12,13 @@ if TYPE_CHECKING:
 
     from litestar.connection import ASGIConnection
 
+__all__ = ("RateLimitGuard",)
+
 
 class RateLimitGuard:
-    """Litestar route guard powered by Rust token-bucket RateLimiter."""
+    """Litestar route guard powered by neutral token-bucket RateLimitGuard."""
 
-    __slots__ = ("_capacity", "_key_func", "_limiter", "_refill_rate_per_sec")
+    __slots__ = ("_guard", "_key_func", "_permission_denied_cls")
 
     def __init__(
         self,
@@ -28,21 +28,20 @@ class RateLimitGuard:
         key_func: Callable[[ASGIConnection[Any, Any, Any, Any]], str] | None = None,
     ) -> None:
         """Initialize the token bucket rate limiter guard with capacity and refill rate."""
-        ensure_module("litestar_security", extra="security")
-        self._capacity = max(1, int(capacity))
-        self._refill_rate_per_sec = max(0.001, float(refill_rate_per_sec))
-        self._limiter = RateLimiter(self._capacity, self._refill_rate_per_sec)
+        exc_mod = ensure_module("litestar.exceptions", extra="litestar")
+        self._permission_denied_cls = exc_mod.PermissionDeniedException
+        self._guard = _NeutralRateLimitGuard(capacity, refill_rate_per_sec)
         self._key_func = key_func
 
     @property
     def capacity(self) -> int:
         """Return the burst token bucket capacity."""
-        return self._capacity
+        return self._guard.capacity
 
     @property
     def refill_rate_per_sec(self) -> float:
         """Return the refill rate in tokens per second."""
-        return self._refill_rate_per_sec
+        return self._guard.refill_rate_per_sec
 
     def __call__(self, connection: ASGIConnection[Any, Any, Any, Any], _: Any) -> None:
         """Evaluate rate limit admission for the incoming connection."""
@@ -52,5 +51,5 @@ class RateLimitGuard:
             client = getattr(connection, "client", None)
             key = getattr(client, "host", None) or "global"
 
-        if not self._limiter.acquire(str(key)):
-            raise PermissionDeniedException(detail="Rate limit exceeded")
+        if not self._guard.allow(str(key)):
+            raise self._permission_denied_cls(detail="Rate limit exceeded")

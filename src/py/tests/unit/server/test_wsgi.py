@@ -93,7 +93,7 @@ def test_wsgi_environ_mandatory_pep3333_keys() -> None:
     assert env["wsgi.multithread"] is True
     assert env["wsgi.multiprocess"] is False
     assert env["wsgi.run_once"] is False
-    assert env["wsgi.input"].read() == b'{"name":"Jo"}'
+    assert cast("Any", env["wsgi.input"]).read() == b'{"name":"Jo"}'
 
 
 def test_wsgi_environ_dict_mutation_and_iteration() -> None:
@@ -133,7 +133,7 @@ def test_wsgi_environ_from_request() -> None:
     assert env["HTTP_AUTHORIZATION"] == "Bearer tok"
     assert env["SERVER_NAME"] == "api.local"
     assert env["SERVER_PORT"] == "9000"
-    assert env["wsgi.input"].read() == b"data"
+    assert cast("Any", env["wsgi.input"]).read() == b"data"
 
 
 class MockRequest:
@@ -417,7 +417,7 @@ def test_wsgi_errors_reflects_reassigned_stderr(monkeypatch: pytest.MonkeyPatch)
     env = req.wsgi_environ()
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stderr", buf)
-    errors_stream = env["wsgi.errors"]
+    errors_stream = cast("Any", env["wsgi.errors"])
     errors_stream.write("wsgi error line\n")
     assert buf.getvalue() == "wsgi error line\n"
 

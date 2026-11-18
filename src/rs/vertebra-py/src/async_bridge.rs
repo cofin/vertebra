@@ -1,17 +1,19 @@
 //! Shared Tokio completion ring and awaitables for `vertebra._vertebra`.
 //!
 //! Delegates task execution and per-loop `AsyncCompletionQueue` draining to
-//! [`vertebra_db::py_async`] using the `"_vertebra_core_completion_drainer"` loop attribute so
+//! [`vertebra_core::py_async`] using the `"_vertebra_core_completion_drainer"` loop attribute so
 //! `vertebra._vertebra` coexists cleanly alongside standalone driver wheels (`vertebra._bigquery`,
-//! `vertebra._spanner`) on the same Python `asyncio` event loop.
+//! `vertebra._spanner`) and `vertebra._storage` on the same Python `asyncio` event loop.
 
 use std::future::Future;
 
 use pyo3::prelude::*;
 
-pub use vertebra_db::py_async::{
-    CompletedDbTask, DbCompletionDrainer, DbOutcomeProducer, RustDbTaskAwaitable, block_on_db,
-    db_runtime_handle, spawn_rust_db_task_with_attr,
+pub use vertebra_core::py_async::{
+    CompletedTask as CompletedDbTask, CompletionDrainer as DbCompletionDrainer,
+    OutcomeProducer as DbOutcomeProducer, RustTaskAwaitable as RustDbTaskAwaitable,
+    block_on_runtime as block_on_db, runtime_handle as db_runtime_handle,
+    spawn_rust_task_with_attr as spawn_rust_db_task_with_attr,
 };
 
 /// Event-loop attribute name storing the `_vertebra` core completion drainer.
@@ -42,7 +44,10 @@ where
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<RustDbTaskAwaitable>()?;
+    m.add(
+        "RustDbTaskAwaitable",
+        m.py().get_type::<RustDbTaskAwaitable>(),
+    )?;
     m.add("TaskPanicError", m.py().get_type::<TaskPanicError>())?;
     Ok(())
 }
@@ -50,20 +55,28 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     use pyo3::prelude::*;
     use pyo3::types::{PyCFunction, PyDict, PyModule, PyTuple};
+    use tokio::sync::watch;
 
     use super::{TaskPanicError, spawn_rust_db_task};
 
-    struct DropFlag(Arc<AtomicBool>);
+    struct DropSignal {
+        flag: Arc<AtomicBool>,
+        state: Arc<(Mutex<bool>, Condvar)>,
+    }
 
-    impl Drop for DropFlag {
+    impl Drop for DropSignal {
         fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
+            self.flag.store(true, Ordering::SeqCst);
+            let (lock, cvar) = &*self.state;
+            let mut dropped = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *dropped = true;
+            cvar.notify_all();
         }
     }
 
@@ -179,19 +192,30 @@ mod tests {
     fn cancelled_await_aborts_rust_task() {
         let dropped = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
+        let drop_state = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started_rx) = watch::channel(false);
+
         let dropped_clone = Arc::clone(&dropped);
         let completed_clone = Arc::clone(&completed);
+        let drop_state_clone = Arc::clone(&drop_state);
 
         Python::attach(|py| {
+            ensure_task_panic_registered(py);
             let spawn =
                 PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
                     let dropped_inner = Arc::clone(&dropped_clone);
                     let completed_inner = Arc::clone(&completed_clone);
+                    let drop_state_inner = Arc::clone(&drop_state_clone);
+                    let tx = started_tx.clone();
                     spawn_rust_db_task(
                         args.py(),
                         async move {
-                            let _guard = DropFlag(dropped_inner);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let _guard = DropSignal {
+                                flag: dropped_inner,
+                                state: drop_state_inner,
+                            };
+                            let _ = tx.send(true);
+                            std::future::pending::<()>().await;
                             completed_inner.store(true, Ordering::SeqCst);
                             Ok::<i64, String>(1)
                         },
@@ -200,27 +224,53 @@ mod tests {
                     )
                 })
                 .expect("closure");
-            let _ = run_coroutine(
-                py,
-                spawn,
-                concat!(
-                    "async def main():\n",
-                    "    task = asyncio.ensure_future(spawn())\n",
-                    "    await asyncio.sleep(0.05)\n",
-                    "    task.cancel()\n",
-                    "    try:\n",
-                    "        await task\n",
-                    "    except asyncio.CancelledError:\n",
-                    "        pass\n",
-                    "    return True\n",
-                    "result = asyncio.run(main())\n",
-                ),
-            )
-            .expect("run coroutine");
+            let wait_started =
+                PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| {
+                    let mut rx = started_rx.clone();
+                    spawn_rust_db_task(
+                        args.py(),
+                        async move {
+                            let _ = rx.wait_for(|&started| started).await;
+                            Ok::<(), String>(())
+                        },
+                        |py, ()| Ok(py.None()),
+                        |_, e| pyo3::exceptions::PyRuntimeError::new_err(e),
+                    )
+                })
+                .expect("wait_started");
+
+            let globals = PyDict::new(py);
+            globals.set_item("spawn", spawn).unwrap();
+            globals.set_item("wait_started", wait_started).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    ready = wait_started()\n",
+                "    task = asyncio.ensure_future(spawn())\n",
+                "    await ready\n",
+                "    task.cancel()\n",
+                "    try:\n",
+                "        await task\n",
+                "    except asyncio.CancelledError:\n",
+                "        pass\n",
+                "    return True\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .expect("valid script cstring");
+            py.run(&script, Some(&globals), None)
+                .expect("run coroutine");
             py.detach(|| {
-                let deadline = Instant::now() + Duration::from_secs(1);
-                while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
+                let (lock, cvar) = &*drop_state;
+                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let timeout = Duration::from_secs(1);
+                while !*guard {
+                    let (next_guard, wait_res) = cvar
+                        .wait_timeout(guard, timeout)
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard = next_guard;
+                    if wait_res.timed_out() {
+                        break;
+                    }
                 }
             });
         });

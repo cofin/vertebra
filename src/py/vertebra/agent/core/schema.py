@@ -19,6 +19,7 @@ import msgspec
 from vertebra.agent.core.context import AgentContext
 from vertebra.agent.core.guards import authorize as authorize_guards
 from vertebra.typing import FrozenBaseStruct
+from vertebra.utils.serializers import schema_components
 
 try:
     from vertebra import _vertebra
@@ -409,7 +410,7 @@ class SchemaBuilder:
 
         struct_name = f"_{getattr(fn, '__name__', 'Tool').lstrip('_') or 'Tool'}Input"
         param_struct = msgspec.defstruct(struct_name, fields, kw_only=True, gc=False)
-        (_,), component_defs = msgspec.json.schema_components(
+        (_,), component_defs = schema_components(
             (param_struct,),
             schema_hook=self._fallback_schema_hook,
         )
@@ -443,7 +444,7 @@ class SchemaBuilder:
             return None
         normalized = self._normalize_annotated(return_ann)
         try:
-            (root_schema,), component_defs = msgspec.json.schema_components(
+            (root_schema,), component_defs = schema_components(
                 (normalized,),
                 schema_hook=self._fallback_schema_hook,
             )

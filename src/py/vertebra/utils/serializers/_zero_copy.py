@@ -6,7 +6,7 @@ import dataclasses
 import inspect
 import struct
 import threading
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 
@@ -157,7 +157,7 @@ def encode_grpc_frame_into(
 
     serialize_to_str = getattr(value, "SerializeToString", None)
     if callable(serialize_to_str) and ("proto" in format or format == "grpc"):
-        proto_bytes: bytes = serialize_to_str()
+        proto_bytes = cast("bytes", serialize_to_str())
         del buf[GRPC_LPM_HEADER_LEN:]
         buf.extend(proto_bytes)
         _LPM_STRUCT.pack_into(buf, 0, int(compressed), len(proto_bytes))
@@ -228,8 +228,7 @@ def decode_grpc_frames(
     """Decode all concatenated 5-byte LPM gRPC frames from a Request, WsgiInput, or buffer in zero copy."""
     decode_frames_fn = getattr(source, "decode_grpc_frames", None)
     if callable(decode_frames_fn):
-        res: list[Any] = decode_frames_fn(target_type, format)
-        return res
+        return cast("list[Any]", decode_frames_fn(target_type, format))
 
     mv = memoryview(source.encode("utf-8") if isinstance(source, str) else source)
     if len(mv) == 0:
@@ -387,6 +386,8 @@ class ZeroCopyCodecRegistry:
             )
 
         is_cls = inspect.isclass(target_type)
+        json_dec: Callable[[Any], Any]
+        mp_dec: Callable[[Any], Any]
 
         if is_cls and issubclass(target_type, msgspec.Struct):
             json_dec = msgspec.json.Decoder(target_type).decode
@@ -402,16 +403,12 @@ class ZeroCopyCodecRegistry:
                 msgpack_encoder=mp_enc,
             )
 
-        if (
-            is_cls
-            and hasattr(target_type, "__pydantic_validator__")
-            and hasattr(target_type, "__pydantic_serializer__")
-        ):
-            validator = target_type.__pydantic_validator__
-            serializer = target_type.__pydantic_serializer__
-            val_json = validator.validate_json
-            val_python = validator.validate_python
-            to_json = serializer.to_json
+        pyd_validator = getattr(target_type, "__pydantic_validator__", None) if is_cls else None
+        pyd_serializer = getattr(target_type, "__pydantic_serializer__", None) if is_cls else None
+        if pyd_validator is not None and pyd_serializer is not None:
+            val_json = pyd_validator.validate_json
+            val_python = pyd_validator.validate_python
+            to_json = pyd_serializer.to_json
             mp_raw_dec = msgspec.msgpack.decode
             mp_enc = msgspec.msgpack.Encoder(enc_hook=_default_zero_copy_enc_hook).encode
 
@@ -424,17 +421,21 @@ class ZeroCopyCodecRegistry:
             def _pyd_mp_dec(buf: Any, _vp: Any = val_python, _md: Any = mp_raw_dec) -> Any:
                 return _vp(_md(buf))
 
+            def _pyd_mp_enc(v: Any, _ps: Any = pyd_serializer, _me: Any = mp_enc) -> bytes:
+                return cast("bytes", _me(_ps.to_python(v, mode="json")))
+
             return TypeAdapterPlan(
                 target_type=target_type,
                 kind="pydantic",
                 json_decoder=_pyd_json_dec,
                 msgpack_decoder=_pyd_mp_dec,
                 json_encoder=to_json,
-                msgpack_encoder=lambda v: mp_enc(serializer.to_python(v, mode="json")),
+                msgpack_encoder=_pyd_mp_enc,
             )
 
-        if is_cls and hasattr(target_type, "FromString") and hasattr(target_type, "SerializeToString"):
-            from_str = target_type.FromString
+        from_str = getattr(target_type, "FromString", None) if is_cls else None
+        serialize_to_str_attr = getattr(target_type, "SerializeToString", None) if is_cls else None
+        if callable(from_str) and callable(serialize_to_str_attr):
 
             def _proto_dec(buf: Any, _fs: Any = from_str) -> Any:
                 try:
@@ -460,11 +461,14 @@ class ZeroCopyCodecRegistry:
                 raw_j = msgspec.json.decode
                 raw_m = msgspec.msgpack.decode
 
-                def json_dec(b: Any, _t: Any = target_type) -> Any:
+                def _attrs_json_dec(b: Any, _t: Any = target_type) -> Any:
                     return hydrate_one_vectorcall(_t, raw_j(b))
 
-                def mp_dec(b: Any, _t: Any = target_type) -> Any:
+                def _attrs_mp_dec(b: Any, _t: Any = target_type) -> Any:
                     return hydrate_one_vectorcall(_t, raw_m(b))
+
+                json_dec = _attrs_json_dec
+                mp_dec = _attrs_mp_dec
 
             def _attrs_enc_hook(obj: Any) -> Any:
                 if hasattr(obj, "__attrs_attrs__"):
@@ -511,11 +515,14 @@ class ZeroCopyCodecRegistry:
             mp_dec = msgspec.msgpack.Decoder(target_type).decode
         except TypeError:
 
-            def json_dec(b: Any, _t: Any = target_type) -> Any:
+            def _generic_json_dec(b: Any, _t: Any = target_type) -> Any:
                 return msgspec.convert(msgspec.json.decode(b), type=_t)
 
-            def mp_dec(b: Any, _t: Any = target_type) -> Any:
+            def _generic_mp_dec(b: Any, _t: Any = target_type) -> Any:
                 return msgspec.convert(msgspec.msgpack.decode(b), type=_t)
+
+            json_dec = _generic_json_dec
+            mp_dec = _generic_mp_dec
 
         return TypeAdapterPlan(
             target_type=target_type,

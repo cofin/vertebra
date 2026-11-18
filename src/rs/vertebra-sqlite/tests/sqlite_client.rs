@@ -1,8 +1,8 @@
 //! Integration tests for vertebra-sqlite pool, transactions, WAL concurrency,
 //! Arrow streaming, backup/restore, and cancellation.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -87,15 +87,18 @@ fn test_wal_file_concurrent_readers() {
     }
 
     let running = Arc::new(AtomicBool::new(true));
+    let start_barrier = Arc::new(Barrier::new(5));
     let mut reader_handles = Vec::new();
 
     // Spawn 4 concurrent readers
     for _ in 0..4 {
         let pool_clone = Arc::clone(&pool);
         let running_clone = Arc::clone(&running);
+        let barrier_clone = Arc::clone(&start_barrier);
         let handle = thread::spawn(move || {
+            barrier_clone.wait();
             let mut read_count = 0;
-            while running_clone.load(Ordering::Relaxed) {
+            while running_clone.load(Ordering::Relaxed) || read_count == 0 {
                 let res = pool_clone
                     .fetch_all(
                         "SELECT count(*) FROM counter".to_string(),
@@ -109,6 +112,8 @@ fn test_wal_file_concurrent_readers() {
         });
         reader_handles.push(handle);
     }
+
+    start_barrier.wait();
 
     // Writer writes more rows concurrently
     for i in 10..20 {

@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
-from litestar.response import Response
 
 from vertebra.agent.mcp.routes import render_well_known_mcp_json
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from litestar.connection import ASGIConnection
+    from litestar.response import Response
 
 __all__ = ["WellKnownAgentCardOffload"]
 
@@ -79,16 +80,21 @@ class WellKnownAgentCardOffload(msgspec.Struct, frozen=True, gc=False, kw_only=T
     def create_response(self, connection: ASGIConnection[Any, Any, Any, Any]) -> Response[bytes]:
         """Create an HTTP 200 or 304 response with ETag and Cache-Control headers."""
         ensure_module("litestar_mcp", extra="mcp")
+        response_mod = ensure_module("litestar.response", extra="litestar")
+        response_cls = response_mod.Response
 
         headers = {
             "etag": self.etag,
             "cache-control": f"public, max-age={self.max_age}",
         }
         if self.matches_if_none_match(connection):
-            return Response(b"", status_code=304, headers=headers)
-        return Response(
-            self.body_bytes,
-            status_code=200,
-            media_type="application/json",
-            headers=headers,
+            return cast("Response[bytes]", response_cls(b"", status_code=304, headers=headers))
+        return cast(
+            "Response[bytes]",
+            response_cls(
+                self.body_bytes,
+                status_code=200,
+                media_type="application/json",
+                headers=headers,
+            ),
         )

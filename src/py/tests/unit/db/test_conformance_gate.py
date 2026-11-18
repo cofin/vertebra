@@ -217,8 +217,9 @@ def test_conformance_gate_record_and_failures_detect_skips_xfails_and_zero_runs(
         ("mssql", {}, "mssql_2022_service"),
         ("mssql", {"VERTEBRA_CONFORMANCE_MSSQL_VERSION": "2022"}, "mssql_2022_service"),
         ("mssql", {"VERTEBRA_CONFORMANCE_MSSQL_VERSION": "2025"}, "mssql_2025_service"),
-        ("oracle", {}, "oracle_23ai_service"),
-        ("oracle", {"VERTEBRA_CONFORMANCE_ORACLE_VERSION": "23ai"}, "oracle_23ai_service"),
+        ("oracle", {}, "oracle_26ai_service"),
+        ("oracle", {"VERTEBRA_CONFORMANCE_ORACLE_VERSION": "23ai"}, "oracle_26ai_service"),
+        ("oracle", {"VERTEBRA_CONFORMANCE_ORACLE_VERSION": "26ai"}, "oracle_26ai_service"),
     ],
 )
 def test_service_version_matrix_resolves_fixture_names(
@@ -252,7 +253,7 @@ def test_service_version_matrix_resolves_fixture_names(
         (
             "oracle",
             {"VERTEBRA_CONFORMANCE_ORACLE_VERSION": "19c"},
-            r"Allowed versions: 23ai",
+            r"Allowed versions: 23ai, 26ai",
         ),
     ],
 )

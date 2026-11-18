@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:15:00Z"
+    commit: 5a833832
   - by: agent:flow-archive
     at: "2026-11-15T17:48:00Z"
     commit: 246d7d0e
@@ -60,9 +63,12 @@ sources:
   - id: src-utils-sync-tools-py
     resource: src/py/vertebra/utils/sync_tools.py
     title: "Python implementation module (src/py/vertebra/utils/sync_tools.py)"
-  - id: src-tests-unit-db-test-native-db-drivers-py
-    resource: src/py/tests/unit/db/test_native_db_drivers.py
-    title: "Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py)"
+  - id: src-tests-unit-db-test-db-capabilities-and-purity-gates-py
+    resource: src/py/tests/unit/db/test_db_capabilities_and_purity_gates.py
+    title: "Driver capability protocols, pool_key isolation, provide_driver, and AST purity gates"
+  - id: src-tests-unit-db-test-db-drivers-channels-and-dialers-py
+    resource: src/py/tests/unit/db/test_db_drivers_channels_and_dialers.py
+    title: "Native database drivers, Cloud SQL and AlloyDB dialers, ChannelBus, and ArrowCursor tests"
 ---
 
 # Shared-Memory Connection Broker & Statement Cache
@@ -70,6 +76,8 @@ sources:
 <!-- truth: start -->
 - `ShmLeaseTable` co-locates lock-free CAS connection lease slots (`LeaseState::{Free,Leased,Quarantined}`), a seqlock `ShmStatementCache` (256 B `StatementSlot`), and a cross-worker `ShmChannelSlot` pub/sub ring (`DEFAULT_CHANNEL_CAPACITY = 64` × 384 B) inside a single shared-memory region.
 - Expired or crashed worker leases are reclaimed via monotonic `expiry_ns` deadlines and PID-tagged `reclaim_worker_leases` sweeps into `SLOT_STATE_QUARANTINED` (`LeaseState::Quarantined`) until explicit server rollback and `dispose_quarantined`.
+- `BrokerConfig` exposes single millisecond timeout fields (`acquire_timeout_ms: int = 5_000` and `lease_ttl_ms: int = 30_000`). `SyncConnectionLease.release()` and `AsyncConnectionLease.release()` mark `_released = True` only after native release succeeds, and `AsyncConnectionLease.release_sync()` delegates synchronously or raises `InterfaceError` when no synchronous transport path exists.
+- `AsyncSHMBrokerTransport` exposes `AsyncBrokerStream` from `stream_dbrpc(...)`, carries no `*_sync` methods, offloads blocking native broker operations through `SyncPool.default().submit_async(...)`, and pairs with `BrokerHost` disposal-failure tracking (`ShutdownReport.disposal_errors`, `last_disposal_error`) and `BrokerEngineDiscovery` (including `vertebra._sqlite`).
 <!-- truth: end -->
 
 Vertebra provides cross-process shared-memory database connection management and statement caching via [`src/rs/vertebra-core/src/broker.rs`](../../../../../src/rs/vertebra-core/src/broker.rs)[^src-vertebra-core-src-broker-rs] and [`src/py/vertebra/extensions/broker/transport.py`](../../../../../src/py/vertebra/extensions/broker/transport.py)[^src-extensions-broker-transport-py].
@@ -97,14 +105,15 @@ Vertebra provides cross-process shared-memory database connection management and
 
 [`vertebra.extensions.broker.transport`](../../../../../src/py/vertebra/extensions/broker/transport.py), [`vertebra.extensions.broker.host`](../../../../../src/py/vertebra/extensions/broker/host.py)[^src-extensions-broker-host-py], [`vertebra.extensions.broker.engines`](../../../../../src/py/vertebra/extensions/broker/engines.py)[^src-extensions-broker-engines-py], and [`vertebra.extensions.broker.plugin`](../../../../../src/py/vertebra/extensions/broker/plugin.py)[^src-extensions-broker-plugin-py] integrate the native SHM tables into Python runtimes:
 
-- **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport`**: Coordinate lease requests across workers via `LeaseBroker` and `StatementCache`, resolving local partitions with `lookup_partition`. Segments attach over named POSIX SHM (`ShmOwnerHeader` generation/PID reclamation) or authenticated `0600` UDS `SCM_RIGHTS` delivery (`BrokerAttachClient` / `BrokerAttachServer`).
-- **`BrokerHost`, `BrokerEngineDiscovery` & Quarantine Supervision**: `BrokerHost` (`vtb broker serve`, `ShutdownReport`) hosts server pools and `BrokerEngineCapsule` (`BROKER_ENGINE_ABI_VERSION = 1`) vtables across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, and `vertebra._duckdb` (with per-`(pool_id, lease_slot)` pinned connection transactions in `PostgresBrokerBackend`); worker exit/`SIGKILL` transitions slots into `LeaseState::Quarantined` via `reclaim_worker_leases`, executes server `ROLLBACK` cleanup, and clears capacity via `dispose_quarantined`.
+- **`BrokerConfig`, Lease Release Ordering & `release_sync()`**: `BrokerConfig` defines single millisecond timing fields (`lease_ttl_ms: int = 30_000` and `acquire_timeout_ms: int = 5_000`). Both `SyncConnectionLease.release()` and `AsyncConnectionLease.release()` invoke the native transport release first and set `_released = True` only after release succeeds; failed native releases propagate and leave the lease releasable. `AsyncConnectionLease.release_sync()` invokes a synchronous release hook (`_release_sync` / `release_sync`) for non-greenlet teardown paths and raises `InterfaceError` when the backing transport provides none, without creating or closing unawaited coroutines.
+- **`SyncSHMBrokerTransport` / `AsyncSHMBrokerTransport` & `AsyncBrokerStream`**: Coordinate lease requests across workers via `LeaseBroker` and `StatementCache`, resolving local partitions with `lookup_partition`. Segments attach over named POSIX SHM (`ShmOwnerHeader` generation/PID reclamation) or authenticated `0600` UDS `SCM_RIGHTS` delivery (`BrokerAttachClient` / `BrokerAttachServer`). `AsyncSHMBrokerTransport` carries no `*_sync` methods, provides `get_pinned_session` and `unpin_session`, and offloads blocking native operations (`release`, `quarantine`, `dispose_quarantined`, `reclaim_worker_leases`, `get_pinned_session`, `unpin_session`, `begin_transaction`, `commit_transaction`, `rollback_transaction`, `execute_dbrpc`, `publish`, `drain_channel`, `drain_all_channels`, `close`) onto `SyncPool.default().submit_async(...)`. `SyncSHMBrokerTransport.stream_dbrpc(...)` returns `BrokerStream`, and `AsyncSHMBrokerTransport.stream_dbrpc(...)` returns `AsyncBrokerStream` (`__aiter__`, `__anext__`, `aclose()`, `cancel()`). Both streams decode frames through `_BaseBrokerStream._decode_chunk` and raise `DataError` on malformed DBRPC frames.
+- **`BrokerHost`, `BrokerEngineDiscovery` & Quarantine Supervision**: `BrokerHost` (`vtb broker serve`, `ShutdownReport`) hosts server pools and `BrokerEngineCapsule` (`BROKER_ENGINE_ABI_VERSION = 1`) vtables discovered by `BrokerEngineDiscovery.register_installed()` across `vertebra._postgres`, `vertebra._mysql`, `vertebra._oracle`, `vertebra._mssql`, `vertebra._duckdb`, and `vertebra._sqlite`. Worker exit/`SIGKILL` transitions slots into `LeaseState::Quarantined` via `reclaim_worker_leases`, executes server `ROLLBACK` cleanup, and clears capacity via `dispose_quarantined`. When `on_dispose` or `dispose_quarantined` fails during `_recover_single_lease`, `_record_disposal_error` increments `ShutdownReport.disposal_errors`, captures `last_disposal_error`, logs structured context, and invokes any registered `on_disposal_error` callback (`register_lease_session` / host default) alongside `rollback_errors`, `pool_close_errors`, and `last_pool_close_error`.
 - **`vertebra.db.dbapi` & SQLAlchemy `BrokerPool`**: Standalone PEP 249 `SyncDBAPIConnection` and `AsyncDBAPIConnection` (`SyncDBAPIModule`, `AsyncDBAPIModule`, `is_row_returning_sql` in [`_sync.py`](../../../../../src/py/vertebra/db/dbapi/_sync.py)[^src-db-dbapi-sync-py]) run without SQLAlchemy or adapter-package imports. `SQLAlchemyAsyncDBAPI` ([`async_adapter.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/async_adapter.py)[^src-extensions-sqlalchemy-async-adapter-py]) pairs with `BrokerPool`, `AsyncBrokerPool`, and `broker_creator` ([`pool.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/pool.py)[^src-extensions-sqlalchemy-pool-py]) to share SHM partitions across SQLAlchemy and Advanced Alchemy engines; session release or pool return failures quarantine the lease and raise `LeaseQuarantinedError`.
 - **`BrokerPlugin` & `DbPoolMetricSample`**: Install broker state, DI providers, ZPages (`/brokerz`) diagnostics, and OpenTelemetry `DbPoolMetricSample` counters (`quarantined`, `total_reclaimed`, `total_quarantined`, `total_disposed`); see [Shared-Memory Broker & Cross-Process Limitations](shm-broker-limitations.md).
 - **`DatabaseRegistry.default()`, `BaseDatabaseConfig.pool_key()`, & `provide_driver`** ([`vertebra.db.registry`](../../../../../src/py/vertebra/db/registry.py)[^src-db-registry-py], [`vertebra.db.driver._common`](../../../../../src/py/vertebra/db/driver/_common.py)[^src-db-driver-common-py]): Every adapter config overrides `BaseDatabaseConfig.pool_key()` (returning `None` for `:memory:` SQLite and DuckDB instances so ephemeral in-memory databases never cross-pollinate), and `DatabaseRegistry.pool_fingerprint(config_or_url)` delegates directly to `config.pool_key()`. `DatabaseRegistry.default()`, `DatabaseRegistry.default_broker()`, and `provide_driver(name_or_config, *, sync=False, registry=None)` allow native database adapters declared independently across stacked `Django` (`DatabaseWrapperMixin`), `Litestar` (`SQLSpec` `SyncAdapterConfig` / `AsyncAdapterConfig`), `SQLAlchemy` (`+vtb` `SyncDBAPIConnection` / `AsyncDBAPIConnection`), and `Vertebra Native` apps to reuse the exact same underlying connection pool, `SyncCloudSQLDialer` / `AsyncCloudSQLDialer` / `SyncAlloyDBDialer` / `AsyncAlloyDBDialer`, and process-wide SHM `LeaseBroker` (unless `share_pool=False` is set).
 - **`SyncPool` & `SyncLoopShardedResource` / `AsyncLoopShardedResource`** ([`vertebra.utils.sync_tools`](../../../../../src/py/vertebra/utils/sync_tools.py)[^src-utils-sync-tools-py]): `SyncPool` sizes its `ThreadPoolExecutor` to `max(1, max_workers if max_workers is not None else cpu_count * 2)` workers, propagates `contextvars`, recreates the executor across `fork`, and coalesces `submit_async` completion wakeups per event loop via `_AsyncCompletionQueue` (`_wake_armed` flag and `loop.call_soon_threadsafe(self.drain)`). `SyncLoopShardedResource[T]` / `AsyncLoopShardedResource[T]` shards non-thread-safe async primitives per event-loop thread.
 
-Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-tests-unit-db-test-native-db-drivers-py].
+Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-tests-unit-db-test-db-capabilities-and-purity-gates-py], [^src-tests-unit-db-test-db-drivers-channels-and-dialers-py].
 
 [^src-vertebra-core-src-broker-rs]: `src/rs/vertebra-core/src/broker.rs` — Rust implementation module (src/rs/vertebra-core/src/broker.rs).
 [^src-vertebra-py-src-lib-rs]: `src/rs/vertebra-py/src/lib.rs` — Rust implementation module (src/rs/vertebra-py/src/lib.rs).
@@ -118,4 +127,5 @@ Provenance sources: [^src-vertebra-py-src-lib-rs], [^src-tests-unit-db-test-nati
 [^src-db-registry-py]: `src/py/vertebra/db/registry.py` — Python implementation module (src/py/vertebra/db/registry.py).
 [^src-db-driver-common-py]: `src/py/vertebra/db/driver/_common.py` — Python implementation module (src/py/vertebra/db/driver/_common.py).
 [^src-utils-sync-tools-py]: `src/py/vertebra/utils/sync_tools.py` — Python implementation module (src/py/vertebra/utils/sync_tools.py).
-[^src-tests-unit-db-test-native-db-drivers-py]: `src/py/tests/unit/db/test_native_db_drivers.py` — Python implementation module (src/py/tests/unit/db/test_native_db_drivers.py).
+[^src-tests-unit-db-test-db-capabilities-and-purity-gates-py]: `src/py/tests/unit/db/test_db_capabilities_and_purity_gates.py` — Driver capability protocols, `pool_key` isolation, `provide_driver`, and AST purity gates.
+[^src-tests-unit-db-test-db-drivers-channels-and-dialers-py]: `src/py/tests/unit/db/test_db_drivers_channels_and_dialers.py` — Native database drivers, Cloud SQL and AlloyDB dialers, `ChannelBus`, and `ArrowCursor` tests.

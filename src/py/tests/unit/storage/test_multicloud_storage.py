@@ -239,8 +239,8 @@ def test_gcs_v4_local_rsa_presigning_without_network() -> None:
     assert signed_get != signed_put
 
 
-def test_verify_presigned_url_gcs_raises_not_implemented() -> None:
-    """Verifying a GCS presigned URL offline raises NotImplementedError."""
+def test_verify_presigned_url_gcs_requires_verification_key() -> None:
+    """Verifying a GCS presigned URL offline fails loudly without verification keys."""
     store = SyncObjectStore(
         "gs://ml-artifacts",
         signing=SigningConfig(
@@ -252,8 +252,8 @@ def test_verify_presigned_url_gcs_raises_not_implemented() -> None:
         ),
     )
     with pytest.raises(
-        NotImplementedError,
-        match="GCS presigned URL verification is not supported offline",
+        ValueError,
+        match="verify_key_pem",
     ):
         store.verify_presigned_url(
             "https://storage.googleapis.com/ml-artifacts/test.bin?X-Goog-Algorithm=GOOG4-RSA-SHA256"

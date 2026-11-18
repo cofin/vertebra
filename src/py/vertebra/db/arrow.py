@@ -6,17 +6,14 @@ import contextlib
 import mmap
 import os
 import threading
-from collections.abc import Buffer, Mapping, Sequence
+from collections.abc import Buffer, Callable, Mapping, Sequence
 from typing import Any, Final, Self
 
+from vertebra.db.driver import DataError
 from vertebra.typing import MissingDependencyError
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module, import_optional
 from vertebra.utils.schema import to_schema
-from vertebra.utils.serializers import (
-    ZeroCopyCodecRegistry,
-    decode_json,
-    encode_json_bytes,
-)
+from vertebra.utils.serializers import ZeroCopyCodecRegistry
 from vertebra.utils.type_guards import get_msgspec_rename_config
 
 __all__ = (
@@ -192,31 +189,30 @@ class ArrowCursor:
 
     def to_arrow_table(self) -> Any:
         """Deserialize the Arrow IPC buffer into a `pyarrow.Table` with zero copy."""
+        pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         ipc_table = self._ipc_table()
         if ipc_table is not None:
             return ipc_table
-        pa = import_optional("pyarrow")
-        if pa is not None:
-            cols = self._columns or tuple(f"col_{i}" for i in range(len(self._rows[0]) if self._rows else 0))
-            pydict = {col: [r[idx] if idx < len(r) else None for r in self._rows] for idx, col in enumerate(cols)}
-            return pa.Table.from_pydict(pydict)
-        return self
+        try:
+            view = self.buffer_view()
+        except TypeError as exc:
+            msg = f"ArrowCursor buffer is not a valid bytes-like object: {exc}"
+            raise DataError(msg) from exc
+        if len(view) > 0:
+            msg = "ArrowCursor buffer does not contain a valid Arrow IPC stream"
+            raise DataError(msg)
+        cols = self._columns or tuple(f"col_{i}" for i in range(len(self._rows[0]) if self._rows else 0))
+        pydict = {col: [r[idx] if idx < len(r) else None for r in self._rows] for idx, col in enumerate(cols)}
+        return pa.Table.from_pydict(pydict)
 
     def to_polars(self) -> Any:
         """Deserialize the Arrow IPC buffer into a `polars.DataFrame`."""
+        tbl = self.to_arrow_table()
+        pl = ensure_module("polars", package="polars", extra="polars")
         if self._shm_cursor is not None and hasattr(self._shm_cursor, "to_polars"):
-            with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError, ImportError):
+            with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError):
                 return self._shm_cursor.to_polars()
-        pl = import_optional("polars")
-        if pl is not None:
-            view = self.buffer_view()
-            if len(view) > 0 and hasattr(pl, "read_ipc_stream"):
-                with contextlib.suppress(Exception):
-                    return pl.read_ipc_stream(bytes(view))
-            tbl = self.to_arrow_table()
-            if tbl is not self:
-                return pl.from_arrow(tbl)
-        return self.to_pylist()
+        return pl.from_arrow(tbl)
 
     def to_pylist(self) -> list[dict[str, Any]]:
         """Convert the buffered rows into a list of dictionaries."""
@@ -345,7 +341,7 @@ class ArrowCursor:
         pa = import_optional("pyarrow")
         if pa is None:
             return None
-        with contextlib.suppress(TypeError, ValueError, OSError, RuntimeError, BufferError):
+        with contextlib.suppress(pa.ArrowException, TypeError, ValueError, OSError, RuntimeError, BufferError):
             view = self.buffer_view()
             if len(view) == 0:
                 return None
@@ -354,7 +350,8 @@ class ArrowCursor:
 
 
 def write_arrow_shm(table: Any) -> memoryview:
-    """Serialize a PyArrow Table, RecordBatch, or row sequence into a shared-memory Arrow IPC buffer."""
+    """Serialize a PyArrow Table, RecordBatch, ArrowCursor, or row sequence into a shared-memory Arrow IPC buffer."""
+    pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
     native_mod = import_optional("vertebra._vertebra")
     if native_mod is not None:
         native_fn = getattr(native_mod, "write_arrow_shm", None)
@@ -366,23 +363,42 @@ def write_arrow_shm(table: Any) -> memoryview:
 
     if isinstance(table, (bytes, bytearray, memoryview)):
         payload = bytes(table)
-    else:
-        pa = import_optional("pyarrow")
-        if pa is not None and hasattr(table, "schema"):
-            sink = pa.BufferOutputStream()
+        if len(payload) == 0:
+            msg = "Arrow IPC payload cannot be empty"
+            raise DataError(msg)
+        try:
+            pa.ipc.open_stream(pa.py_buffer(payload)).read_all()
+        except (pa.ArrowException, TypeError, ValueError, OSError, RuntimeError, BufferError) as exc:
+            msg = f"Payload is not a valid Arrow IPC stream: {exc}"
+            raise DataError(msg) from exc
+    elif hasattr(table, "schema") and (hasattr(table, "to_batches") or isinstance(table, pa.RecordBatch)):
+        sink = pa.BufferOutputStream()
+        try:
             with pa.ipc.new_stream(sink, table.schema) as writer:
                 if hasattr(table, "to_batches"):
                     writer.write_table(table)
                 else:
                     writer.write_batch(table)
-            payload = sink.getvalue().to_pybytes()
-        elif isinstance(table, ArrowCursor):
-            return table.buffer_view()
-        elif isinstance(table, Sequence) and not isinstance(table, str):
+        except (pa.ArrowException, TypeError, ValueError, OSError) as exc:
+            msg = f"Failed to serialize Arrow object to IPC stream: {exc}"
+            raise DataError(msg) from exc
+        payload = sink.getvalue().to_pybytes()
+    elif isinstance(table, ArrowCursor):
+        view = table.buffer_view()
+        if len(view) > 0:
+            table.to_arrow_table()
+            return view
+        return write_arrow_shm(table.to_arrow_table())
+    elif isinstance(table, Sequence) and not isinstance(table, (str, bytes, bytearray)):
+        try:
             cur = ArrowCursor.from_rows(table, threshold_rows=1)
-            return cur.buffer_view()
-        else:
-            payload = encode_json_bytes(table)
+        except (pa.ArrowException, TypeError, ValueError) as exc:
+            msg = f"Cannot serialize sequence to Arrow IPC shared memory: {exc}"
+            raise DataError(msg) from exc
+        return cur.buffer_view()
+    else:
+        msg = f"Unsupported Arrow SHM payload type: {type(table).__name__}"
+        raise DataError(msg)
 
     region = mmap.mmap(-1, max(4096, len(payload)))
     region[: len(payload)] = payload
@@ -394,22 +410,28 @@ def read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor:
 
     Accepts raw offset-0 Arrow IPC streams and `VTBARROW` frames (8-byte magic, `u64` little-endian
     payload length, payload). Arrow buffers are decoded lazily over `pa.py_buffer(payload_view)`, and
-    the cursor anchors `(region, raw_view, payload_view)` so they never outlive the mapping. Non-IPC
-    payloads fall back to JSON row decoding.
+    the cursor anchors `(region, raw_view, payload_view)` so they never outlive the mapping.
 
     The returned cursor holds a buffer export of the caller's region. Closing an `mmap` region,
     or leaving a `with mmap.mmap(...)` block, while the cursor (or a table decoded from it) is
     alive raises `BufferError`; release the cursor and drop decoded tables first.
 
     Raises:
+        MissingDependencyError: When `pyarrow` is not installed.
         ValueError: When a `VTBARROW` header is shorter than `16` bytes or declares a payload
             longer than the region.
+        DataError: When the payload is empty or not a valid Arrow IPC stream.
     """
+    pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
     if isinstance(region, ArrowCursor):
         return region
     if hasattr(region, "shm_name") and hasattr(region, "byte_len") and hasattr(region, "buffer_view"):
         return ArrowCursor(region, used_shm=True, shm_cursor=region)
-    raw_view = memoryview(region).cast("B")
+    try:
+        raw_view = memoryview(region).cast("B")
+    except TypeError as exc:
+        msg = f"Shared-memory Arrow region must support the buffer protocol: {exc}"
+        raise DataError(msg) from exc
     if length is not None:
         raw_view = raw_view[:length]
     payload_view = raw_view
@@ -423,21 +445,16 @@ def read_arrow_shm(region: Any, length: int | None = None) -> ArrowCursor:
             msg = f"VTBARROW frame declares {frame_end} bytes but the region holds {len(raw_view)}"
             raise ValueError(msg)
         payload_view = raw_view[_VTBARROW_HEADER_SIZE:frame_end]
+    if len(payload_view) == 0:
+        msg = "Shared-memory Arrow region is empty"
+        raise DataError(msg)
     anchor = (region, raw_view, payload_view)
-    pa = import_optional("pyarrow")
-    if pa is not None and len(payload_view) > 0:
-        with contextlib.suppress(TypeError, ValueError, OSError):
-            schema = pa.ipc.open_stream(pa.py_buffer(payload_view)).schema
-            return ArrowCursor(payload_view, columns=schema.names, used_shm=True, shm_anchor=anchor)
-    rows: list[tuple[Any, ...]] = []
-    cols: tuple[str, ...] = ()
-    if len(payload_view) > 0:
-        with contextlib.suppress(TypeError, ValueError):
-            decoded = decode_json(bytes(payload_view))
-            if isinstance(decoded, list) and decoded and isinstance(decoded[0], dict):
-                cols = tuple(decoded[0].keys())
-                rows = [tuple(d.get(c) for c in cols) for d in decoded]
-    return ArrowCursor(payload_view, rows=rows, columns=cols, used_shm=True, shm_anchor=anchor)
+    try:
+        schema = pa.ipc.open_stream(pa.py_buffer(payload_view)).schema
+    except (pa.ArrowException, TypeError, ValueError, OSError, RuntimeError, BufferError) as exc:
+        msg = f"Shared-memory region does not contain a valid Arrow IPC stream: {exc}"
+        raise DataError(msg) from exc
+    return ArrowCursor(payload_view, columns=schema.names, used_shm=True, shm_anchor=anchor)
 
 
 def _hydrate_rows_with_schema(
@@ -491,10 +508,15 @@ def _table_to_rows_and_cols(
             return [], cols
         column_values = (table.column(index[c]).to_pylist() if c in index else [None] * num_rows for c in cols)
         return list(zip(*column_values, strict=True)), cols
-    if isinstance(data, ArrowCursor) or hasattr(data, "to_pylist") and callable(data.to_pylist):
+    to_pylist_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = getattr(data, "to_pylist", None)
+    to_dicts_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = getattr(data, "to_dicts", None)
+    pylist: Sequence[Mapping[str, Any]]
+    if isinstance(data, ArrowCursor):
         pylist = data.to_pylist()
-    elif hasattr(data, "to_dicts") and callable(data.to_dicts):
-        pylist = data.to_dicts()
+    elif callable(to_pylist_fn):
+        pylist = to_pylist_fn()
+    elif callable(to_dicts_fn):
+        pylist = to_dicts_fn()
     elif isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
         if not data:
             return [], tuple(columns or ())

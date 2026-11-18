@@ -1,27 +1,35 @@
 """SQLite synchronous and asynchronous SQLSpec driver adapters."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import ExecutionResult
 
-from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver, unwrap_typed_parameters
+from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     default_statement_config,
     map_sqlite_exception,
     normalize_sqlite_many_parameters,
     normalize_sqlite_parameters,
+    unwrap_typed_parameters,
 )
 from vertebra.extensions.sqlspec.adapters.sqlite.data_dictionary import (
     SQLiteAsyncDataDictionary,
     SQLiteSyncDataDictionary,
 )
 
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.sqlite._typing import SQLiteDriverFeatures
+
 __all__ = ("SQLiteAsyncDriver", "SQLiteSyncDriver")
 
 
 class SQLiteSyncDriver(BaseSyncDriver):
     """Synchronous SQLite SQLSpec driver over Vertebra `SyncSQLiteDriver`."""
+
+    __slots__ = ("_data_dictionary",)
 
     dialect: str = "sqlite"
     _execution_parameter_style = ParameterStyle.QMARK
@@ -30,7 +38,7 @@ class SQLiteSyncDriver(BaseSyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: SQLiteDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -39,7 +47,7 @@ class SQLiteSyncDriver(BaseSyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -74,7 +82,7 @@ class SQLiteSyncDriver(BaseSyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = exec_many_fn(sql, param_sets)
+            res = cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0
@@ -87,6 +95,8 @@ class SQLiteSyncDriver(BaseSyncDriver):
 class SQLiteAsyncDriver(BaseAsyncDriver):
     """Asynchronous SQLite SQLSpec driver over Vertebra `AsyncSQLiteDriver`."""
 
+    __slots__ = ("_data_dictionary",)
+
     dialect: str = "sqlite"
     _execution_parameter_style = ParameterStyle.QMARK
 
@@ -94,7 +104,7 @@ class SQLiteAsyncDriver(BaseAsyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: SQLiteDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -103,7 +113,7 @@ class SQLiteAsyncDriver(BaseAsyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -138,7 +148,7 @@ class SQLiteAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = await exec_many_fn(sql, param_sets)
+            res = await cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0

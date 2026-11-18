@@ -6,9 +6,11 @@ import contextlib
 import os
 import threading
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -29,6 +31,12 @@ def _shm_arrow_segments() -> set[str]:
     if not shm_dir.is_dir():
         return set()
     return {entry.name for entry in shm_dir.iterdir() if "vtb" in entry.name.lower() or "arrow" in entry.name.lower()}
+
+
+def _close_arrow_batches(batches: Sequence[Any]) -> None:
+    """Close materialized Arrow batch cursors so shared-memory segments are released."""
+    for batch in batches:
+        batch.close()
 
 
 @pytest.fixture(
@@ -185,6 +193,7 @@ async def test_mysql_family_multi_result_call_arrow_shm_and_pipeline(
                     )
                 )
                 assert len(batches) == 3
+                _close_arrow_batches(batches)
 
                 with pytest.raises(_PipelineAbortError), driver.pipeline() as pipe:
                     pipe.execute(f"INSERT INTO {table} (id, label) VALUES (?, ?)", (99999, "rolled-back"))
@@ -225,6 +234,7 @@ async def test_mysql_family_multi_result_call_arrow_shm_and_pipeline(
                     )
                 ]
                 assert len(batches) == 3
+                _close_arrow_batches(batches)
 
                 with pytest.raises(_PipelineAbortError):
                     async with driver.pipeline() as pipe:

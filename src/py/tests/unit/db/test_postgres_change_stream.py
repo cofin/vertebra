@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import pytest
 
+from vertebra.db.adapters.postgres import SqlPostgresCheckpointStore as ExportedSqlPostgresCheckpointStore
 from vertebra.db.adapters.postgres.change_stream import (
     MemoryPostgresCheckpointStore,
     PostgresChangeConfig,
     PostgresChangeSource,
     PostgresCheckpoint,
     PostgresCheckpointConflictError,
+    PostgresCheckpointStore,
     PostgresReplicationGapError,
+    SqlPostgresCheckpointStore,
+    _decode_identity_key,
+    _encode_identity_key,
 )
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.events import (
@@ -1368,3 +1374,319 @@ async def test_change_source_interruptible_backoff_wakes_immediately_on_aclose()
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(backoff_task, timeout=1.0)
     assert backoff_driver.open_count == 1
+
+
+class _FakeSqlCheckpointDriver:
+    """In-memory PostgreSQL SQL driver double evaluating checkpoint DDL and CAS queries."""
+
+    def __init__(self) -> None:
+        self.tables: dict[str, dict[str, tuple[int, int, int]]] = {}
+        self.ddl_statements: list[str] = []
+        self.queries: list[tuple[str, tuple[Any, ...] | None]] = []
+
+    async def execute(self, sql: str, parameters: tuple[Any, ...] | None = None) -> int:
+        self.queries.append((sql, parameters))
+        match = re.match(r"^\s*CREATE TABLE IF NOT EXISTS ([A-Za-z0-9_.]+)\s*\(", sql)
+        if match is None:
+            raise AssertionError(f"Unexpected execute SQL: {sql}")
+        table_name = match.group(1)
+        self.ddl_statements.append(sql)
+        self.tables.setdefault(table_name, {})
+        return 0
+
+    async def select_one_or_none(
+        self,
+        sql: str,
+        parameters: tuple[Any, ...] | None = None,
+    ) -> dict[str, Any] | None:
+        self.queries.append((sql, parameters))
+        params = parameters or ()
+
+        select_match = re.match(
+            r"^\s*SELECT commit_end_lsn, next_event_id, version FROM ([A-Za-z0-9_.]+) WHERE identity_key = \$1\s*$",
+            sql,
+        )
+        if select_match is not None:
+            table = self.tables[select_match.group(1)]
+            row = table.get(str(params[0]))
+            if row is None:
+                return None
+            return {
+                "commit_end_lsn": row[0],
+                "next_event_id": row[1],
+                "version": row[2],
+            }
+
+        insert_match = re.match(
+            r"^\s*INSERT INTO ([A-Za-z0-9_.]+) "
+            r"\(identity_key, commit_end_lsn, next_event_id, version\) "
+            r"VALUES \(\$1, \$2, \$3, 1\) "
+            r"ON CONFLICT \(identity_key\) DO NOTHING "
+            r"RETURNING version\s*$",
+            sql,
+        )
+        if insert_match is not None:
+            table = self.tables[insert_match.group(1)]
+            key = str(params[0])
+            if key in table:
+                return None
+            table[key] = (int(params[1]), int(params[2]), 1)
+            return {"version": 1}
+
+        update_match = re.match(
+            r"^\s*UPDATE ([A-Za-z0-9_.]+) "
+            r"SET commit_end_lsn = \$2, next_event_id = \$3, version = version \+ 1 "
+            r"WHERE identity_key = \$1 "
+            r"AND version = \$4 "
+            r"AND commit_end_lsn <= \$2 "
+            r"AND next_event_id <= \$3 "
+            r"RETURNING version\s*$",
+            sql,
+        )
+        if update_match is not None:
+            table = self.tables[update_match.group(1)]
+            key = str(params[0])
+            existing = table.get(key)
+            if existing is None:
+                return None
+            cur_lsn, cur_event_id, cur_version = existing
+            new_lsn = int(params[1])
+            new_event_id = int(params[2])
+            expected_version = int(params[3])
+            if cur_version != expected_version or cur_lsn > new_lsn or cur_event_id > new_event_id:
+                return None
+            next_version = cur_version + 1
+            table[key] = (new_lsn, new_event_id, next_version)
+            return {"version": next_version}
+
+        raise AssertionError(f"Unexpected select_one_or_none SQL: {sql}")
+
+
+@pytest.mark.anyio
+async def test_sql_checkpoint_store_export_protocol_and_ddl() -> None:
+    """Verify SqlPostgresCheckpointStore export, protocol conformance, DDL, and single-flight ensure_table."""
+    assert ExportedSqlPostgresCheckpointStore is SqlPostgresCheckpointStore
+    driver = _FakeSqlCheckpointDriver()
+    store = SqlPostgresCheckpointStore(driver, table_name="custom_cdc_checkpoints")
+    assert isinstance(store, PostgresCheckpointStore)
+    ddl = store.ddl()
+    assert ddl == (
+        "CREATE TABLE IF NOT EXISTS custom_cdc_checkpoints ("
+        "identity_key TEXT PRIMARY KEY, "
+        "commit_end_lsn BIGINT NOT NULL, "
+        "next_event_id BIGINT NOT NULL, "
+        "version BIGINT NOT NULL DEFAULT 1)"
+    )
+
+    await asyncio.gather(store.ensure_table(), store.ensure_table(), store.ensure_table())
+    assert len(driver.ddl_statements) == 1
+    assert "custom_cdc_checkpoints" in driver.tables
+
+
+@pytest.mark.parametrize(
+    "bad_table",
+    [
+        "",
+        "   ",
+        "checkpoints; DROP TABLE users",
+        "bad-table",
+        "1invalid_start",
+        "public..checkpoints",
+    ],
+)
+def test_sql_checkpoint_store_rejects_invalid_table_name(bad_table: str) -> None:
+    """Verify invalid or SQL-injection table names fail loudly at construction."""
+    driver = _FakeSqlCheckpointDriver()
+    with pytest.raises(ValueError):
+        SqlPostgresCheckpointStore(driver, table_name=bad_table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        ("sys", "", "cdc_slot", "pub"),
+        ("sys", "appdb", "bad.slot", "pub"),
+        ("sys", "appdb", "slot; DROP TABLE x", "pub"),
+        ("sys", "appdb", "cdc_slot"),
+    ],
+)
+async def test_sql_checkpoint_store_rejects_malformed_identity_keys(bad_key: Any) -> None:
+    """Verify malformed IdentityKey tuples and invalid slot names are rejected cleanly."""
+    store = SqlPostgresCheckpointStore(_FakeSqlCheckpointDriver())
+    with pytest.raises(ValueError):
+        await store.load(bad_key)
+
+
+@pytest.mark.parametrize(
+    "bad_raw",
+    [
+        "not-json",
+        '{"a": 1}',
+        '["sys", "appdb", "cdc_slot"]',
+        '["sys", "", "cdc_slot", "pub"]',
+        '["sys", "appdb", "bad.slot", "pub"]',
+    ],
+)
+def test_decode_identity_key_rejects_malformed_payloads(bad_raw: str) -> None:
+    """Verify _decode_identity_key rejects non-array, short, empty, or unsafe payloads."""
+    with pytest.raises(ValueError):
+        _decode_identity_key(bad_raw)
+
+
+@pytest.mark.anyio
+async def test_sql_checkpoint_store_identity_key_punctuation_roundtrip() -> None:
+    """Verify canonical JSON array encoding keeps punctuated IdentityKeys collision-free."""
+    key_a = ("sys:1|prod", "app.db/v2,main", "cdc_slot_a", "pub=orders:v1,2")
+    key_b = ("sys:1|prod,app.db/v2", "main", "cdc_slot_a", "pub=orders:v1,2")
+    encoded_a = _encode_identity_key(key_a)
+    encoded_b = _encode_identity_key(key_b)
+    assert encoded_a != encoded_b
+    assert _decode_identity_key(encoded_a) == key_a
+    assert _decode_identity_key(encoded_b) == key_b
+
+    store = SqlPostgresCheckpointStore(_FakeSqlCheckpointDriver())
+    cp_a = await store.save(PostgresCheckpoint(identity_key=key_a, commit_end_lsn=10, next_event_id=2))
+    cp_b = await store.save(PostgresCheckpoint(identity_key=key_b, commit_end_lsn=20, next_event_id=5))
+    assert await store.load(key_a) == cp_a
+    assert await store.load(key_b) == cp_b
+
+
+@pytest.mark.anyio
+async def test_sql_checkpoint_store_cas_insert_update_and_conflicts() -> None:
+    """Verify SqlPostgresCheckpointStore enforces CAS insert, update, version, and monotonicity."""
+    driver = _FakeSqlCheckpointDriver()
+    store = SqlPostgresCheckpointStore(driver)
+    ident = _identity()
+
+    assert await store.load(ident.identity_key) is None
+
+    bad_initial = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=100,
+        next_event_id=2,
+        version=2,
+    )
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(bad_initial, expected=None)
+
+    first = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=100,
+        next_event_id=2,
+        version=1,
+    )
+    saved_first = await store.save(first, expected=None)
+    assert saved_first == first
+    assert await store.load(ident.identity_key) == saved_first
+
+    with pytest.raises(PostgresCheckpointConflictError) as dup_exc:
+        await store.save(first, expected=None)
+    assert dup_exc.value.sqlstate == "40001"
+
+    second = saved_first.advance(commit_end_lsn=200, next_event_id=3)
+    saved_second = await store.save(second, expected=saved_first)
+    assert saved_second.version == 2
+    assert saved_second.commit_end_lsn == 200
+    assert saved_second.next_event_id == 3
+    assert await store.load(ident.identity_key) == saved_second
+
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(saved_first.advance(commit_end_lsn=250, next_event_id=4), expected=saved_first)
+
+    other_key = _identity(slot="other_slot").identity_key
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(
+            PostgresCheckpoint(identity_key=other_key, commit_end_lsn=300, next_event_id=4, version=3),
+            expected=saved_second,
+        )
+
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(
+            PostgresCheckpoint(identity_key=ident.identity_key, commit_end_lsn=250, next_event_id=4, version=4),
+            expected=saved_second,
+        )
+
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(
+            PostgresCheckpoint(identity_key=ident.identity_key, commit_end_lsn=150, next_event_id=4, version=3),
+            expected=saved_second,
+        )
+
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(
+            PostgresCheckpoint(identity_key=ident.identity_key, commit_end_lsn=250, next_event_id=2, version=3),
+            expected=saved_second,
+        )
+
+    stale_expected = PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=100,
+        next_event_id=2,
+        version=2,
+    )
+    with pytest.raises(PostgresCheckpointConflictError):
+        await store.save(
+            PostgresCheckpoint(identity_key=ident.identity_key, commit_end_lsn=180, next_event_id=3, version=3),
+            expected=stale_expected,
+        )
+
+
+@pytest.mark.anyio
+async def test_change_source_resumes_from_sql_checkpoint_store() -> None:
+    """Verify PostgresChangeSource persists and resumes next_event_id continuity via SqlPostgresCheckpointStore."""
+    sql_driver = _FakeSqlCheckpointDriver()
+    store_a = SqlPostgresCheckpointStore(sql_driver)
+    ident = _identity()
+
+    stream_a = _FakeNativeStream(
+        [
+            PostgresReplicationRecord(kind="insert", payload={"id": 1}, commit_end_lsn=100),
+            PostgresReplicationRecord(kind="update", payload={"id": 2}, commit_end_lsn=200),
+        ]
+    )
+    source_a = PostgresChangeSource(
+        _FakeReplicationDriver(ident, [stream_a]),
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store_a,
+    )
+    ev1 = await source_a.__anext__()
+    ev2 = await source_a.__anext__()
+    assert (ev1.event_id, ev2.event_id) == (1, 2)
+    await source_a.acknowledge(200)
+    await source_a.aclose()
+
+    persisted = await store_a.load(ident.identity_key)
+    assert persisted == PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=200,
+        next_event_id=3,
+        version=1,
+    )
+
+    store_b = SqlPostgresCheckpointStore(sql_driver)
+    stream_b = _FakeNativeStream(
+        [
+            PostgresReplicationRecord(kind="delete", payload={"id": 3}, commit_end_lsn=350),
+        ]
+    )
+    driver_b = _FakeReplicationDriver(ident, [stream_b])
+    source_b = PostgresChangeSource(
+        driver_b,
+        PostgresChangeConfig(slot="cdc_slot", publication="pub_orders", reconnect=False),
+        store_b,
+    )
+    ev3 = await source_b.__anext__()
+    assert driver_b.opened_args == [(200, False)]
+    assert ev3.event_id == 3
+    assert ev3.operation == "delete"
+    await source_b.acknowledge(350)
+    await source_b.aclose()
+
+    resumed = await store_b.load(ident.identity_key)
+    assert resumed == PostgresCheckpoint(
+        identity_key=ident.identity_key,
+        commit_end_lsn=350,
+        next_event_id=4,
+        version=2,
+    )

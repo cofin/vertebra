@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import weakref
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Iterable
-from typing import Self
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Buffer, Callable, Iterable
+from typing import Any, Self, cast
 
+import msgspec
+
+import vertebra._vertebra as _native
 from vertebra.db.cdc import ChangeEvent, ChangeFeed
 from vertebra.db.driver import AsyncChangeSource, AsyncNotificationSource, SyncNotificationSource
 from vertebra.typing import FrozenBaseStruct
@@ -22,7 +26,23 @@ from vertebra.utils.serializers import (
 __all__ = (
     "ChannelBus",
     "ChannelEnvelope",
+    "ChannelMessage",
+    "pubsub_publish",
 )
+
+
+def pubsub_publish(
+    topic: str,
+    payload: Buffer | str,
+    idempotency_key: str | None = None,
+) -> int | None:
+    """Publish a payload to ``topic`` through the active Rust Pub/Sub bridge."""
+    fn = cast(
+        Callable[[str, Buffer | str, str | None], int | None],
+        vars(_native)["pubsub_publish"],
+    )
+    return fn(topic, payload, idempotency_key)
+
 
 _ENVELOPE_PREFIX = b"vtb:env:"
 
@@ -35,6 +55,13 @@ class ChannelEnvelope(FrozenBaseStruct, frozen=True, gc=False):
     payload: bytes
 
 
+class ChannelMessage(msgspec.Struct, frozen=True, gc=False):
+    """Typed pub/sub message frame."""
+
+    channel: str
+    data: bytes
+
+
 class ChannelBus:
     """Fan out local bytes and bridge notification or change-source capabilities."""
 
@@ -42,6 +69,7 @@ class ChannelBus:
         "_backend_kind",
         "_change_feed",
         "_change_source",
+        "_closed_queues",
         "_history",
         "_listeners",
         "_max_history",
@@ -94,6 +122,7 @@ class ChannelBus:
         self._subscribers: dict[str, set[asyncio.Queue[tuple[str, bytes] | None]]] = {}
         self._subscribed_channels: set[str] = set()
         self._queues: set[asyncio.Queue[tuple[str, bytes] | None]] = set()
+        self._closed_queues: weakref.WeakSet[asyncio.Queue[tuple[str, bytes] | None]] = weakref.WeakSet()
         self._listeners: list[Callable[[str, bytes], None]] = []
         self._running = False
         if self._change_feed is not None:
@@ -231,6 +260,54 @@ class ChannelBus:
             self._subscribed_channels.add(channel)
             self._subscribers.setdefault(channel, set()).update(self._queues)
 
+    def close_subscriber(self, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
+        """Mark a subscriber queue as closed, signal termination, and evict references."""
+        self._closed_queues.add(queue)
+        with contextlib.suppress(asyncio.QueueFull):
+            queue.put_nowait(None)
+        self._unregister_stream_queue(queue)
+
+    def _evict_closed_subscribers(self) -> None:
+        """Remove closed subscriber queues and empty topic buckets from internal registries."""
+        if self._closed_queues:
+            for closed in tuple(self._closed_queues):
+                self._queues.discard(closed)
+                for topic_queues in self._subscribers.values():
+                    topic_queues.discard(closed)
+        empty_topics = [topic for topic, topic_queues in self._subscribers.items() if not topic_queues]
+        for topic in empty_topics:
+            self._subscribers.pop(topic, None)
+
+    async def subscribe_messages(self, channels: Iterable[str]) -> AsyncIterator[ChannelMessage]:
+        """Subscribe to ``channels``, yield typed ``ChannelMessage`` items, and clean up on exit."""
+        topics = tuple(channels)
+        topic_set = frozenset(topics)
+        if not self._running:
+            await self.on_startup()
+        await self.subscribe(topics)
+        queue = self._register_stream_queue()
+        try:
+            while self._running:
+                item = await queue.get()
+                if item is None:
+                    break
+                channel, payload = item
+                if channel in topic_set and channel in self._subscribed_channels:
+                    yield ChannelMessage(channel=channel, data=payload)
+        finally:
+            self.close_subscriber(queue)
+
+    @contextlib.asynccontextmanager
+    async def subscription(self, channels: Iterable[str]) -> AsyncIterator[AsyncIterator[ChannelMessage]]:
+        """Context-managed typed pub/sub stream guaranteeing immediate subscriber cleanup."""
+        stream = self.subscribe_messages(channels)
+        try:
+            yield stream
+        finally:
+            aclose_fn = getattr(stream, "aclose", None)
+            if callable(aclose_fn):
+                await cast("Awaitable[Any]", aclose_fn())
+
     async def unsubscribe(self, channels: Iterable[str]) -> None:
         """Detach topics from the transport and active stream queues."""
         topics = tuple(channels)
@@ -241,6 +318,7 @@ class ChannelBus:
         for channel in topics:
             self._subscribed_channels.discard(channel)
             self._subscribers.pop(channel, None)
+        self._evict_closed_subscribers()
 
     async def stream_events(self) -> AsyncGenerator[tuple[str, bytes], None]:
         """Yield publications until shutdown, releasing the queue on disconnect."""
@@ -326,9 +404,11 @@ class ChannelBus:
 
     def _unregister_stream_queue(self, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         """Detach a stream queue from every topic."""
+        self._closed_queues.add(queue)
         self._queues.discard(queue)
         for queues in self._subscribers.values():
             queues.discard(queue)
+        self._evict_closed_subscribers()
 
     @staticmethod
     def _decode_change_event(event: ChangeEvent) -> tuple[str, bytes]:

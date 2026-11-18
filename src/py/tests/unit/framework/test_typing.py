@@ -1,8 +1,11 @@
 """Tests for the typing layer (_typing.py and typing.py)."""
 
+import ast
 import importlib.util
+import pathlib
 import subprocess
 import sys
+import tomllib
 from typing import Any
 
 import msgspec
@@ -86,17 +89,20 @@ def test_optional_dependency_canonical_name() -> None:
     assert bool(flag) is True
 
 
-def test_trimmed_typing_surface_removes_dead_stubs() -> None:
-    """Verify dead typing stubs and flags are removed from internal typing."""
-    for name in (
+@pytest.mark.parametrize(
+    "name",
+    [
         "UnsetType",
         "StructStub",
         "AttrsInstanceStub",
         "NumpyArrayStub",
         "MSGSPEC_INSTALLED",
         "ORJSON_INSTALLED",
-    ):
-        assert not hasattr(internal_typing, name)
+    ],
+)
+def test_trimmed_typing_surface_removes_dead_stubs(name: str) -> None:
+    """Verify dead typing stubs and flags are removed from internal typing."""
+    assert not hasattr(internal_typing, name)
 
 
 def test_lazy_vertebra_import_and_native_server_import() -> None:
@@ -114,9 +120,9 @@ def test_lazy_vertebra_import_and_native_server_import() -> None:
     assert res.returncode == 0, res.stderr
 
 
-def test_public_typing_facade_exports_structs_exceptions_and_sentinels() -> None:
-    """Verify vertebra.typing exports the full public typing, struct, sentinel, and exception surface."""
-    for attr in (
+@pytest.mark.parametrize(
+    "attr",
+    [
         "BaseStruct",
         "CamelizedBaseStruct",
         "FrozenBaseStruct",
@@ -134,8 +140,11 @@ def test_public_typing_facade_exports_structs_exceptions_and_sentinels() -> None
         "OptionalDependency",
         "module_available",
         "reset_dependency_cache",
-    ):
-        assert hasattr(vertebra_typing, attr), f"Missing {attr} on vertebra.typing"
+    ],
+)
+def test_public_typing_facade_exports_structs_exceptions_and_sentinels(attr: str) -> None:
+    """Verify vertebra.typing exports the full public typing, struct, sentinel, and exception surface."""
+    assert hasattr(vertebra_typing, attr), f"Missing {attr} on vertebra.typing"
 
 
 @pytest.mark.parametrize(
@@ -212,14 +221,14 @@ def test_optional_array_loaders_raise_missing_dependency_error(
     pkg_name: str,
     loader_fn: Any,
 ) -> None:
-    """Optional numpy and pandas loaders report their own package and install hint when absent."""
+    """Optional numpy and pandas loaders report their package and extra install hint when absent."""
     monkeypatch.setitem(sys.modules, pkg_name, None)
     reset_dependency_cache(pkg_name)
     try:
         with pytest.raises(MissingDependencyError) as pkg_exc:
             loader_fn()
         assert pkg_exc.value.package == pkg_name
-        assert pkg_exc.value.install_package == pkg_name
+        assert pkg_exc.value.install_package == f"vertebra-core[{pkg_name}]"
     finally:
         reset_dependency_cache(pkg_name)
 
@@ -294,3 +303,153 @@ def test_storage_integrity_error_hierarchy_and_separation_from_db() -> None:
     assert isinstance(err, VertebraError)
     assert isinstance(err, OSError)
     assert not isinstance(err, vertebra_db.IntegrityError)
+
+
+_CHAPTER_EXTENSION_HOSTS: tuple[str, ...] = ("litestar", "starlette", "fastapi", "flask", "django")
+_CHAPTER_OWNED_SUBTREES: tuple[str, ...] = (
+    "src/py/vertebra/extensions/litestar",
+    "src/py/vertebra/extensions/starlette",
+    "src/py/vertebra/extensions/fastapi",
+    "src/py/vertebra/extensions/flask",
+    "src/py/vertebra/extensions/django",
+    "src/py/vertebra/extensions/grpc",
+    "src/py/vertebra/extensions/apex",
+    "src/py/vertebra/framework",
+    "src/py/vertebra/agent",
+    "src/py/vertebra/embeddings",
+    "src/py/vertebra/server/worker.py",
+    "src/py/vertebra/server/_offload.py",
+    "src/py/vertebra/server/_routing.py",
+    "src/py/vertebra/server/_fastpath_core.py",
+)
+
+
+def _iter_chapter_python_files() -> list[pathlib.Path]:
+    repo_root = pathlib.Path(__file__).resolve().parents[5]
+    files: list[pathlib.Path] = []
+    for rel in _CHAPTER_OWNED_SUBTREES:
+        target = repo_root / rel
+        if target.is_file():
+            files.append(target)
+        elif target.is_dir():
+            files.extend(sorted(target.rglob("*.py")))
+    assert files, f"Expected chapter Python files under {repo_root}"
+    return files
+
+
+@pytest.mark.parametrize("extension_name", _CHAPTER_EXTENSION_HOSTS)
+def test_framework_extension_imports_isolated_from_siblings_and_alchemy(extension_name: str) -> None:
+    """Each framework extension imports when sibling extensions, alchemy, and unrelated hosts are blocked."""
+    siblings = [name for name in _CHAPTER_EXTENSION_HOSTS if name != extension_name]
+    blocked_modules = [f"vertebra.extensions.{name}" for name in siblings] + [
+        "vertebra.extensions.alchemy",
+        *siblings,
+    ]
+    code = (
+        "import importlib, sys\n"
+        f"blocked = {blocked_modules!r}\n"
+        "for mod in blocked:\n"
+        "    sys.modules[mod] = None\n"
+        f"mod = importlib.import_module('vertebra.extensions.{extension_name}')\n"
+        "assert mod is not None\n"
+        f"unexpected = [m for m in blocked if sys.modules.get(m) is not None]\n"
+        "assert not unexpected, f'Unexpectedly imported blocked modules: {unexpected}'\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+
+def test_chapter_extension_modules_have_no_cross_extension_imports() -> None:
+    """No framework extension imports another framework extension or vertebra.extensions.alchemy."""
+    repo_root = pathlib.Path(__file__).resolve().parents[5]
+    violations: list[str] = []
+    for ext in _CHAPTER_EXTENSION_HOSTS:
+        forbidden = {f"vertebra.extensions.{other}" for other in _CHAPTER_EXTENSION_HOSTS if other != ext} | {
+            "vertebra.extensions.alchemy"
+        }
+        ext_dir = repo_root / "src/py/vertebra/extensions" / ext
+        py_files = sorted(ext_dir.rglob("*.py"))
+        assert py_files, f"Expected extension files under {ext_dir}"
+        for py_file in py_files:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if any(alias.name == f or alias.name.startswith(f"{f}.") for f in forbidden):
+                            violations.append(f"{py_file.relative_to(repo_root)}:{node.lineno}: {ast.unparse(node)}")
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and any(node.module == f or node.module.startswith(f"{f}.") for f in forbidden)
+                ):
+                    violations.append(f"{py_file.relative_to(repo_root)}:{node.lineno}: {ast.unparse(node)}")
+    assert violations == []
+
+
+def test_chapter_modules_use_centralized_schema_components() -> None:
+    """No chapter module calls msgspec.json.schema_components directly outside utils/serializers/_schema.py."""
+    repo_root = pathlib.Path(__file__).resolve().parents[5]
+    violations: list[str] = []
+    for py_file in _iter_chapter_python_files():
+        rel = py_file.relative_to(repo_root)
+        if str(rel) == "src/py/vertebra/utils/serializers/_schema.py":
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "schema_components":
+                rendered = ast.unparse(node)
+                if rendered.endswith("msgspec.json.schema_components"):
+                    violations.append(f"{rel}:{node.lineno}: {rendered}")
+    assert violations == []
+
+
+def test_chapter_modules_have_no_disallowed_function_scoped_imports() -> None:
+    """Chapter modules contain no function-scoped runtime imports outside __getattr__."""
+    repo_root = pathlib.Path(__file__).resolve().parents[5]
+    violations: list[str] = []
+    for py_file in _iter_chapter_python_files():
+        rel = py_file.relative_to(repo_root)
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "__getattr__":
+                    continue
+                for sub in ast.walk(node):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        violations.append(f"{rel}:{sub.lineno} ({node.name}): {ast.unparse(sub)}")
+    assert violations == []
+
+
+def test_pyproject_typing_and_coverage_policy() -> None:
+    """Verify pyright pin, strict mypy overrides, and explicit coverage omissions in pyproject.toml."""
+    repo_root = pathlib.Path(__file__).resolve().parents[5]
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    lint_deps = pyproject["dependency-groups"]["lint"]
+    assert "pyright==1.1.381" in lint_deps
+
+    pyright_cfg = pyproject["tool"]["pyright"]
+    assert pyright_cfg["pythonVersion"] == "3.12"
+    assert pyright_cfg["include"] == ["src/py/vertebra"]
+    assert pyright_cfg["exclude"] == ["**/__pycache__", "src/py/vertebra/server/_js/bundle"]
+    assert pyright_cfg["typeCheckingMode"] == "standard"
+    assert pyright_cfg["reportMissingImports"] == "error"
+    assert pyright_cfg["reportMissingTypeStubs"] == "none"
+    assert pyright_cfg["reportUnusedImport"] == "error"
+    assert pyright_cfg["reportUnusedVariable"] == "warning"
+
+    overrides = pyproject["tool"]["mypy"]["overrides"]
+    assert not any(override.get("disallow_subclassing_any") is False for override in overrides)
+    override_modules = {mod for override in overrides for mod in override.get("module", [])}
+    assert "google.cloud.*" not in override_modules
+    assert "dogpile" not in override_modules
+    assert "dogpile.*" not in override_modules
+    assert "google.cloud.sqlalchemy_spanner" in override_modules
+    assert "google.cloud.sqlalchemy_spanner.*" in override_modules
+
+    coverage_cfg = pyproject["tool"]["coverage"]
+    assert "ignore_errors" not in coverage_cfg["report"]
+    expected_omit = ["src/py/vertebra/server/_js/**", "src/py/tests/**"]
+    assert coverage_cfg["run"]["source"] == ["src/py/vertebra"]
+    assert coverage_cfg["run"]["omit"] == expected_omit
+    assert coverage_cfg["report"]["omit"] == expected_omit

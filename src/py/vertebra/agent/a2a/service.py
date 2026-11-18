@@ -5,14 +5,18 @@ implementing all 11 core A2A 1.0 JSON-RPC methods, SSE streaming events,
 and caller-isolated durable task management.
 """
 
+from __future__ import annotations
+
+import builtins
+import contextlib
 import ipaddress
 import secrets
+import socket
 import time
 import urllib.parse
-import urllib.request
 from collections.abc import AsyncIterable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import msgspec
@@ -40,9 +44,15 @@ from vertebra.agent.core.jsonrpc import (
     JSONRPCRequest,
     JSONRPCRouter,
 )
-from vertebra.agent.core.sse import SseFrame, SseStreamBroker
+from vertebra.agent.core.sse import CacheSseStreamBroker, SseFrame, SseStreamBroker
 from vertebra.agent.telemetry import AgentTelemetryRecorder
+from vertebra.cache import SyncCacheStore
+from vertebra.cache._sync import _parse_url_scheme
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
+
+if TYPE_CHECKING:
+    import httpx
 
 __all__ = (
     "CONTENT_TYPE_NOT_SUPPORTED",
@@ -54,6 +64,7 @@ __all__ = (
     "A2AConfig",
     "A2AService",
     "A2ATaskStore",
+    "CacheA2ATaskStore",
     "PushNotificationDispatcher",
     "get_owner_key",
 )
@@ -100,6 +111,20 @@ class A2AConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Maximum number of tasks retained in `A2ATaskStore` before LRU eviction."""
     task_ttl_seconds: int = 86400
     """Time-to-live in seconds (`24 hours` default) for retained task records."""
+    cache_url: str | None = None
+    """Optional `vertebra.cache` backend URL for distributed A2A tasks, push configs, and SSE replay."""
+    task_store: Any | None = None
+    """Optional pre-configured A2A task store overriding `cache_url` and in-memory defaults."""
+    push_dispatcher: Any | None = None
+    """Optional pre-configured push notification dispatcher overriding `cache_url` and defaults."""
+    stream_broker: Any | None = None
+    """Optional pre-configured SSE stream broker overriding `cache_url` and in-memory defaults."""
+
+    def __post_init__(self) -> None:
+        if self.cache_url is not None:
+            _parse_url_scheme(self.cache_url)
+        if self.task_ttl_seconds <= 0:
+            raise ValueError("A2AConfig.task_ttl_seconds must be positive")
 
 
 class A2ATaskStore:
@@ -190,60 +215,277 @@ class A2ATaskStore:
                 self._tasks.pop(sorted_entries[idx][0], None)
 
 
+class CacheA2ATaskStore(A2ATaskStore):
+    """Distributed owner-isolated A2A task store backed by SyncCacheStore."""
+
+    def __init__(
+        self,
+        store: SyncCacheStore | None = None,
+        *,
+        cache_url: str = "memory://",
+        key_prefix: str = "vtb:a2a:task:",
+        max_tasks: int = 10000,
+        ttl_seconds: int = 86400,
+    ) -> None:
+        super().__init__(max_tasks=max_tasks, ttl_seconds=ttl_seconds)
+        self.key_prefix = key_prefix
+        self._owns_store = store is None
+        self._store: SyncCacheStore = (
+            store
+            if store is not None
+            else SyncCacheStore(cache_url, key_prefix=key_prefix, default_ttl=float(ttl_seconds))
+        )
+
+    def save(self, task: Task, owner_id: str) -> None:
+        """Store or update a task with caller ownership, enforcing monotonic terminal states."""
+        existing = self._load_entry(task.task_id)
+        if existing is not None:
+            existing_task, existing_owner = existing
+            if existing_owner != owner_id:
+                raise JSONRPCErrorException(
+                    JSONRPCError(code=TASK_NOT_FOUND, message=f"Task '{task.task_id}' not found")
+                )
+            if existing_task.status.state in TERMINAL_A2A_STATES:
+                return
+        payload = {
+            "task": _serialize_struct(task),
+            "owner_id": owner_id,
+            "updated_at": self._now(),
+        }
+        self._store.set(self._item_key(task.task_id), encode_json_bytes(payload), ttl=float(self.ttl_seconds))
+        owner_key = self._owner_key(owner_id)
+        task_ids = self._load_id_list(owner_key)
+        if task.task_id not in task_ids:
+            task_ids.append(task.task_id)
+            self._save_id_list(owner_key, task_ids)
+
+    def get(self, task_id: str, owner_id: str) -> Task:
+        """Retrieve a task under caller ownership, raising TASK_NOT_FOUND on mismatch."""
+        entry = self._load_entry(task_id)
+        if entry is None:
+            raise JSONRPCErrorException(JSONRPCError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
+        task, stored_owner = entry
+        if stored_owner != owner_id:
+            raise JSONRPCErrorException(JSONRPCError(code=TASK_NOT_FOUND, message=f"Task '{task_id}' not found"))
+        return task
+
+    def list(
+        self,
+        owner_id: str,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> tuple[tuple[Task, ...], str | None]:
+        """List tasks belonging to owner_id with cursor pagination."""
+        owner_key = self._owner_key(owner_id)
+        task_ids = self._load_id_list(owner_key)
+        matching_tasks: builtins.list[Task] = []
+        kept_ids: builtins.list[str] = []
+        dirty = False
+        for task_id in task_ids:
+            entry = self._load_entry(task_id)
+            if entry is not None and entry[1] == owner_id:
+                matching_tasks.append(entry[0])
+                kept_ids.append(task_id)
+            else:
+                dirty = True
+        if dirty:
+            self._save_id_list(owner_key, kept_ids)
+        matching_tasks.sort(key=lambda t: t.task_id)
+        page = paginate_sequence(matching_tasks, cursor=cursor, page_size=limit)
+        return page.items, page.next_cursor
+
+    def close(self) -> None:
+        """Release the backing SyncCacheStore if owned by this task store."""
+        if self._owns_store:
+            self._store.close()
+
+    def _item_key(self, task_id: str) -> str:
+        return f"{self.key_prefix}item:{task_id}"
+
+    def _owner_key(self, owner_id: str) -> str:
+        return f"{self.key_prefix}owner:{owner_id}"
+
+    def _load_entry(self, task_id: str) -> tuple[Task, str] | None:
+        raw = self._store.get(self._item_key(task_id))
+        if raw is None:
+            return None
+        parsed = decode_json(raw)
+        if not isinstance(parsed, dict) or "task" not in parsed:
+            return None
+        task = msgspec.convert(parsed["task"], Task)
+        stored_owner = str(parsed.get("owner_id", ""))
+        return task, stored_owner
+
+    def _load_id_list(self, key: str) -> builtins.list[str]:
+        raw = self._store.get(key)
+        if raw is None:
+            return []
+        parsed = decode_json(raw)
+        if not isinstance(parsed, builtins.list):
+            return []
+        return [str(item) for item in parsed]
+
+    def _save_id_list(self, key: str, ids: builtins.list[str]) -> None:
+        if not ids:
+            self._store.delete(key)
+            return
+        unique_ids = builtins.list(dict.fromkeys(ids))
+        self._store.set(key, encode_json_bytes(unique_ids), ttl=float(self.ttl_seconds))
+
+
 class PushNotificationDispatcher:
     """Manages and delivers signed push notification webhooks with strict SSRF validation."""
 
-    def __init__(self, allow_insecure_webhooks: bool = False) -> None:
+    def __init__(
+        self,
+        allow_insecure_webhooks: bool = False,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+        store: SyncCacheStore | None = None,
+        cache_url: str | None = None,
+        key_prefix: str = "vtb:a2a:push:",
+        ttl_seconds: float | None = 86400.0,
+    ) -> None:
         self.allow_insecure_webhooks = allow_insecure_webhooks
+        self._http_client = http_client
+        self._transport = transport
+        self.key_prefix = key_prefix
+        self.ttl_seconds = ttl_seconds
+        self._owns_store = store is None and cache_url is not None
+        if store is not None:
+            self._store: SyncCacheStore | None = store
+        elif cache_url is not None:
+            self._store = SyncCacheStore(cache_url, key_prefix=key_prefix, default_ttl=ttl_seconds)
+        else:
+            self._store = None
         self._configs: dict[str, tuple[PushNotificationConfig, str]] = {}
 
-    def validate_webhook_url(self, url: str) -> None:
-        """Validate webhook URL against SSRF and unsupported targets."""
+    @staticmethod
+    def _is_disallowed_ip(
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        *,
+        allow_insecure: bool,
+    ) -> bool:
+        candidate: ipaddress.IPv4Address | ipaddress.IPv6Address = ip
+        if isinstance(candidate, ipaddress.IPv6Address) and candidate.ipv4_mapped is not None:
+            candidate = candidate.ipv4_mapped
+        if candidate.is_link_local or candidate.is_multicast or candidate.is_unspecified:
+            return True
+        return bool(not allow_insecure and (candidate.is_private or candidate.is_loopback or candidate.is_reserved))
+
+    def validate_webhook_url(
+        self,
+        url: str,
+        *,
+        allow_insecure_webhooks: bool | None = None,
+    ) -> tuple[str, str, int, str, str]:
+        """Resolve and validate webhook URL against SSRF, returning (scheme, host, port, path, resolved_ip)."""
+        effective_allow_insecure = (
+            self.allow_insecure_webhooks if allow_insecure_webhooks is None else allow_insecure_webhooks
+        )
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise JSONRPCErrorException(
-                JSONRPCError(code=INVALID_PARAMS, message=f"Unsupported webhook scheme: {parsed.scheme}")
-            )
-        if not self.allow_insecure_webhooks and parsed.scheme != "https":
-            raise JSONRPCErrorException(
-                JSONRPCError(code=INVALID_PARAMS, message="Insecure HTTP webhooks are disallowed; use HTTPS")
-            )
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https"):
+            msg = f"Unsupported webhook scheme: {parsed.scheme}"
+            raise ValueError(msg)
+        if not effective_allow_insecure and scheme != "https":
+            msg = "Insecure HTTP webhooks are disallowed; use HTTPS"
+            raise ValueError(msg)
 
         hostname = (parsed.hostname or "").lower()
         if not hostname:
-            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message="Missing hostname in webhook URL"))
+            msg = "Missing hostname in webhook URL"
+            raise ValueError(msg)
 
         if hostname in ("169.254.169.254", "metadata.google.internal", "instance-data"):
-            raise JSONRPCErrorException(
-                JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets cloud metadata: {hostname}")
-            )
+            msg = f"Webhook URL targets cloud metadata: {hostname}"
+            raise ValueError(msg)
+
+        if not effective_allow_insecure and (
+            hostname == "localhost" or hostname.endswith(".local") or hostname.endswith(".internal")
+        ):
+            msg = f"Webhook URL targets internal hostname: {hostname}"
+            raise ValueError(msg)
 
         try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_link_local:
-                raise JSONRPCErrorException(
-                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets link-local address: {ip}")
-                )
-            if not self.allow_insecure_webhooks and (ip.is_private or ip.is_loopback or ip.is_reserved):
-                raise JSONRPCErrorException(
-                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets private/loopback IP: {ip}")
-                )
-        except ValueError as err:
-            if not self.allow_insecure_webhooks and (
-                hostname == "localhost" or hostname.endswith(".local") or hostname.endswith(".internal")
-            ):
-                raise JSONRPCErrorException(
-                    JSONRPCError(code=INVALID_PARAMS, message=f"Webhook URL targets internal hostname: {hostname}")
-                ) from err
+            port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
+        except ValueError as exc:
+            msg = f"Invalid port in webhook URL: {exc}"
+            raise ValueError(msg) from exc
+
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        try:
+            addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            msg = f"Failed to resolve webhook hostname {hostname!r}: {exc}"
+            raise ValueError(msg) from exc
+
+        if not addr_infos:
+            msg = f"Webhook hostname {hostname!r} resolved to no addresses"
+            raise ValueError(msg)
+
+        validated_ips: list[str] = []
+        for info in addr_infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            raw_ip = str(sockaddr[0]).split("%", 1)[0]
+            try:
+                ip = ipaddress.ip_address(raw_ip)
+            except ValueError as exc:
+                msg = f"Invalid resolved IP address {raw_ip!r} for webhook hostname {hostname!r}"
+                raise ValueError(msg) from exc
+            if self._is_disallowed_ip(ip, allow_insecure=effective_allow_insecure):
+                msg = f"Webhook URL targets disallowed IP address: {ip}"
+                raise ValueError(msg)
+            validated_ips.append(str(ip))
+
+        if not validated_ips:
+            msg = f"Webhook hostname {hostname!r} resolved to no usable addresses"
+            raise ValueError(msg)
+
+        return scheme, hostname, port, path, validated_ips[0]
+
+    def _config_key(self, task_id: str) -> str:
+        return f"{self.key_prefix}item:{task_id}"
+
+    def _load_config_entry(self, task_id: str) -> tuple[PushNotificationConfig, str] | None:
+        if self._store is None:
+            return self._configs.get(task_id)
+        raw = self._store.get(self._config_key(task_id))
+        if raw is None:
+            return None
+        parsed = decode_json(raw)
+        if not isinstance(parsed, dict) or "config" not in parsed:
+            return None
+        config = msgspec.convert(parsed["config"], PushNotificationConfig)
+        stored_owner = str(parsed.get("owner_id", ""))
+        return config, stored_owner
+
+    def close(self) -> None:
+        """Release the backing SyncCacheStore if owned by this dispatcher."""
+        if self._owns_store and self._store is not None:
+            self._store.close()
 
     def set_config(self, task_id: str, config: PushNotificationConfig, owner_id: str) -> None:
         """Register or update a push notification config for a task."""
-        self.validate_webhook_url(config.url)
+        try:
+            self.validate_webhook_url(config.url)
+        except ValueError as exc:
+            raise JSONRPCErrorException(JSONRPCError(code=INVALID_PARAMS, message=str(exc))) from exc
+        if self._store is not None:
+            payload = {"config": _serialize_struct(config), "owner_id": owner_id}
+            self._store.set(self._config_key(task_id), encode_json_bytes(payload), ttl=self.ttl_seconds)
+            return
         self._configs[task_id] = (config, owner_id)
 
     def get_config(self, task_id: str, owner_id: str) -> PushNotificationConfig:
         """Retrieve push notification config for a task."""
-        entry = self._configs.get(task_id)
+        entry = self._load_config_entry(task_id)
         if entry is None or entry[1] != owner_id:
             raise JSONRPCErrorException(
                 JSONRPCError(code=TASK_NOT_FOUND, message=f"Push notification config for '{task_id}' not found")
@@ -252,40 +494,72 @@ class PushNotificationDispatcher:
 
     def list_configs(self, task_id: str, owner_id: str) -> tuple[PushNotificationConfig, ...]:
         """List push notification configs for a task."""
-        entry = self._configs.get(task_id)
+        entry = self._load_config_entry(task_id)
         if entry is None or entry[1] != owner_id:
             return ()
         return (entry[0],)
 
     def delete_config(self, task_id: str, owner_id: str) -> bool:
         """Delete push notification config for a task."""
-        entry = self._configs.get(task_id)
+        entry = self._load_config_entry(task_id)
         if entry is None or entry[1] != owner_id:
             return False
+        if self._store is not None:
+            return bool(self._store.delete(self._config_key(task_id)))
         self._configs.pop(task_id, None)
         return True
 
     async def dispatch(self, task_id: str, event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent) -> None:
-        """Deliver status or artifact update event to configured webhook."""
-        entry = self._configs.get(task_id)
+        """Deliver status or artifact update event to configured webhook via DNS-pinned IP connection."""
+        entry = self._load_config_entry(task_id)
         if entry is None:
             return
         config, _ = entry
-        headers = {"Content-Type": "application/json"}
+        scheme, host, port, path, resolved_ip = self.validate_webhook_url(config.url)
+        ip_obj = ipaddress.ip_address(resolved_ip)
+        connect_host = f"[{resolved_ip}]" if ip_obj.version == 6 else resolved_ip
+        default_port = 443 if scheme == "https" else 80
+        target_url = (
+            f"{scheme}://{connect_host}:{port}{path}" if port != default_port else f"{scheme}://{connect_host}{path}"
+        )
+        host_header = f"{host}:{port}" if port != default_port else host
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Host": host_header,
+        }
         if config.token:
             headers["Authorization"] = f"Bearer {config.token}"
+        extensions: dict[str, Any] = {}
+        if scheme == "https":
+            extensions["sni_hostname"] = host
 
         payload_bytes = encode_json_bytes(_serialize_struct(event))
+        httpx_mod = ensure_module("httpx")
 
-        def _send() -> None:
-            req = urllib.request.Request(config.url, data=payload_bytes, headers=headers, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=10.0) as resp:
-                    resp.read()
-            except Exception:
-                pass
+        if self._http_client is not None:
+            with contextlib.suppress(httpx_mod.HTTPError):
+                await self._http_client.post(
+                    target_url,
+                    content=payload_bytes,
+                    headers=headers,
+                    extensions=extensions,
+                    follow_redirects=False,
+                    timeout=10.0,
+                )
+            return
 
-        await anyio.to_thread.run_sync(_send)
+        async with httpx_mod.AsyncClient(
+            transport=self._transport,
+            timeout=10.0,
+            follow_redirects=False,
+        ) as client:
+            with contextlib.suppress(httpx_mod.HTTPError):
+                await client.post(
+                    target_url,
+                    content=payload_bytes,
+                    headers=headers,
+                    extensions=extensions,
+                )
 
 
 type A2AExecutorCallable = Callable[
@@ -309,28 +583,94 @@ class A2AService:
         tool_registry: Any | None = None,
     ) -> None:
         self.config = config if config is not None else A2AConfig()
-        self.task_store = (
-            task_store
-            if task_store is not None
-            else A2ATaskStore(
-                max_tasks=self.config.max_tasks,
-                ttl_seconds=self.config.task_ttl_seconds,
-            )
-        )
-        self.push_dispatcher = (
-            push_dispatcher
-            if push_dispatcher is not None
-            else PushNotificationDispatcher(
-                allow_insecure_webhooks=self.config.allow_insecure_webhooks,
-            )
-        )
-        self.stream_broker = stream_broker if stream_broker is not None else SseStreamBroker()
+        self._owned_sync_cache: SyncCacheStore | None = None
+        self._owns_task_store = False
+        self._owns_push_dispatcher = False
+        self._owns_stream_broker = False
+
+        resolved_task_store = task_store if task_store is not None else self.config.task_store
+        if resolved_task_store is None:
+            if self.config.cache_url is not None:
+                sync_cache = self._ensure_owned_sync_cache()
+                resolved_task_store = CacheA2ATaskStore(
+                    store=sync_cache,
+                    key_prefix="vtb:a2a:task:",
+                    max_tasks=self.config.max_tasks,
+                    ttl_seconds=self.config.task_ttl_seconds,
+                )
+                self._owns_task_store = True
+            else:
+                resolved_task_store = A2ATaskStore(
+                    max_tasks=self.config.max_tasks,
+                    ttl_seconds=self.config.task_ttl_seconds,
+                )
+        self.task_store: A2ATaskStore = resolved_task_store
+
+        resolved_push = push_dispatcher if push_dispatcher is not None else self.config.push_dispatcher
+        if resolved_push is None:
+            if self.config.cache_url is not None:
+                sync_cache = self._ensure_owned_sync_cache()
+                resolved_push = PushNotificationDispatcher(
+                    allow_insecure_webhooks=self.config.allow_insecure_webhooks,
+                    store=sync_cache,
+                    key_prefix="vtb:a2a:push:",
+                    ttl_seconds=float(self.config.task_ttl_seconds),
+                )
+                self._owns_push_dispatcher = True
+            else:
+                resolved_push = PushNotificationDispatcher(
+                    allow_insecure_webhooks=self.config.allow_insecure_webhooks,
+                )
+        self.push_dispatcher: PushNotificationDispatcher = resolved_push
+
+        resolved_broker = stream_broker if stream_broker is not None else self.config.stream_broker
+        if resolved_broker is None:
+            if self.config.cache_url is not None:
+                sync_cache = self._ensure_owned_sync_cache()
+                resolved_broker = CacheSseStreamBroker(
+                    store=sync_cache,
+                    key_prefix="vtb:a2a:sse:",
+                    ttl_seconds=float(self.config.task_ttl_seconds),
+                )
+                self._owns_stream_broker = True
+            else:
+                resolved_broker = SseStreamBroker()
+        self.stream_broker: SseStreamBroker = resolved_broker
+
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.executor = executor
         self.tool_registry: Any | None = tool_registry
         self.router = JSONRPCRouter()
         self._event_counter: int = 0
         self._register_routes()
+
+    def _ensure_owned_sync_cache(self) -> SyncCacheStore:
+        if self._owned_sync_cache is None:
+            assert self.config.cache_url is not None
+            self._owned_sync_cache = SyncCacheStore(self.config.cache_url)
+        return self._owned_sync_cache
+
+    def close(self) -> None:
+        """Release any cache stores owned by this A2AService instance."""
+        if self._owns_task_store:
+            close_fn = getattr(self.task_store, "close", None)
+            if callable(close_fn):
+                close_fn()
+        if self._owns_push_dispatcher:
+            close_fn = getattr(self.push_dispatcher, "close", None)
+            if callable(close_fn):
+                close_fn()
+        if self._owns_stream_broker:
+            close_fn = getattr(self.stream_broker, "close", None)
+            if callable(close_fn):
+                close_fn()
+        if self._owned_sync_cache is not None:
+            self._owned_sync_cache.close()
+            self._owned_sync_cache = None
+
+    async def aclose(self) -> None:
+        """Asynchronously release any cache stores owned by this A2AService instance."""
+        self.close()
 
     async def handle_payload(self, body: bytes, context: AgentContext | None = None) -> bytes:
         """Process incoming raw JSON-RPC body and return response bytes."""
@@ -520,19 +860,32 @@ class A2AService:
         async def _run_in_background() -> None:
             await self.execute_task_flow(message, context_id, task_id, owner_id)
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_run_in_background)
+        closed_early = False
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_run_in_background)
 
-            async for frame in recv_stream:
-                yield frame
                 try:
-                    payload = decode_json(frame.data)
-                    if isinstance(payload, dict) and payload.get("final") is True:
-                        break
-                except Exception:
-                    pass
-
-        self.stream_broker.disconnect(task_id)
+                    async for frame in recv_stream:
+                        yield frame
+                        try:
+                            payload = decode_json(frame.data)
+                            if isinstance(payload, dict) and payload.get("final") is True:
+                                break
+                        except Exception:
+                            pass
+                except GeneratorExit:
+                    closed_early = True
+                    tg.cancel_scope.cancel()
+                except BaseException:
+                    tg.cancel_scope.cancel()
+                    raise
+        finally:
+            with contextlib.suppress(Exception):
+                recv_stream.close()
+            self.stream_broker.disconnect(task_id)
+        if closed_early:
+            return
 
     async def handle_tasks_get(
         self,
@@ -611,26 +964,28 @@ class A2AService:
 
         recv_stream, _ = self.stream_broker.subscribe(task_id, last_event_id=last_event_id)
 
-        if task.status.state in TERMINAL_A2A_STATES:
-            while True:
+        try:
+            if task.status.state in TERMINAL_A2A_STATES:
+                while True:
+                    try:
+                        frame = recv_stream.receive_nowait()
+                        yield frame
+                    except (anyio.WouldBlock, anyio.ClosedResourceError):
+                        break
+                return
+
+            async for frame in recv_stream:
+                yield frame
                 try:
-                    frame = recv_stream.receive_nowait()
-                    yield frame
-                except (anyio.WouldBlock, anyio.ClosedResourceError):
-                    break
+                    payload = decode_json(frame.data)
+                    if isinstance(payload, dict) and payload.get("final") is True:
+                        break
+                except Exception:
+                    pass
+        finally:
+            with contextlib.suppress(Exception):
+                recv_stream.close()
             self.stream_broker.disconnect(task_id)
-            return
-
-        async for frame in recv_stream:
-            yield frame
-            try:
-                payload = decode_json(frame.data)
-                if isinstance(payload, dict) and payload.get("final") is True:
-                    break
-            except Exception:
-                pass
-
-        self.stream_broker.disconnect(task_id)
 
     async def handle_push_set(
         self,

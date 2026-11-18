@@ -281,8 +281,6 @@ class EngineConformanceSpec(FrozenBaseStruct, frozen=True, gc=False):
     """Typed `DatabaseError` subclasses expected when querying a nonexistent relation."""
     native_extension_module: str | None = None
     """Compiled native Rust PyO3 extension module required for live wire execution, if any."""
-    pending_flow_id: str | None = None
-    """Owning `native-data-platform` Flow spec ID when native wire implementation is still pending."""
     env_dsn_vars: tuple[str, ...] = ()
     """Environment variable names providing live external or emulator DSNs."""
     container_fixture: str | None = None
@@ -435,7 +433,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_POSTGRES_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._postgres",
-        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_POSTGRES_DSN",),
         container_fixture="vtb_postgres_config",
     ),
@@ -451,7 +448,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_ORACLE_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._oracle",
-        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_ORACLE_DSN",),
         container_fixture="vtb_oracle_config",
     ),
@@ -466,7 +462,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_MYSQL_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._mysql",
-        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MYSQL_DSN",),
         container_fixture="vtb_mysql_config",
     ),
@@ -481,7 +476,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_MYSQL_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._mysql",
-        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MARIADB_DSN",),
         container_fixture="vtb_mariadb_config",
     ),
@@ -496,7 +490,6 @@ ENGINE_SPECS: tuple[EngineConformanceSpec, ...] = (
         types_ddl=_MSSQL_TYPES_DDL,
         supports_pipeline=True,
         native_extension_module="vertebra._mssql",
-        pending_flow_id=None,
         env_dsn_vars=("VERTEBRA_CONFORMANCE_MSSQL_DSN",),
         container_fixture="vtb_mssql_config",
     ),
@@ -700,7 +693,7 @@ def _build_live_engine_params(
     *,
     env: Mapping[str, str] | None = None,
 ) -> list[Any]:
-    """Build fixture parameters, marking pending engines strict ``xfail`` only when their native module imports.
+    """Build fixture parameters with stable IDs for all expanded engine variants.
 
     Args:
         specs: Engine specs to parametrize.
@@ -709,37 +702,18 @@ def _build_live_engine_params(
     Returns:
         One ``pytest.param`` per spec variant with stable parameter IDs.
     """
-    params: list[Any] = []
-    for param_id, spec in _expand_live_engine_variants(specs, env=env):
-        if spec.pending_flow_id is not None and not _native_module_missing(spec):
-            params.append(
-                pytest.param(
-                    spec,
-                    id=param_id,
-                    marks=pytest.mark.xfail(strict=True, reason=f"Owned by {spec.pending_flow_id}"),
-                )
-            )
-        else:
-            params.append(pytest.param(spec, id=param_id))
-    return params
-
-
-def _native_module_missing(spec: EngineConformanceSpec) -> bool:
-    """Return True when ``spec`` names a native module that does not import."""
-    return spec.native_extension_module is not None and import_optional(spec.native_extension_module) is None
+    return [pytest.param(spec, id=param_id) for param_id, spec in _expand_live_engine_variants(specs, env=env)]
 
 
 def _require_native_module(spec: EngineConformanceSpec) -> None:
-    """Skip the case, or fail a non-pending case under Docker conformance, when the native module is missing.
+    """Skip locally, or fail under Docker conformance, when the native module is missing.
 
     Args:
         spec: Engine spec whose ``native_extension_module`` is checked.
 
     Raises:
-        pytest.skip.Exception: When the module is missing and either the spec is pending or
-            ``VERTEBRA_CONFORMANCE_DOCKER`` is not ``"1"``.
-        pytest.fail.Exception: When the module is missing, the spec is not pending, and
-            ``VERTEBRA_CONFORMANCE_DOCKER`` is ``"1"``.
+        pytest.skip.Exception: When the module is missing and ``VERTEBRA_CONFORMANCE_DOCKER`` is not ``"1"``.
+        pytest.fail.Exception: When the module is missing and ``VERTEBRA_CONFORMANCE_DOCKER`` is ``"1"``.
     """
     if spec.native_extension_module is None:
         return
@@ -747,7 +721,7 @@ def _require_native_module(spec: EngineConformanceSpec) -> None:
         ensure_module(spec.native_extension_module)
     except MissingDependencyError:
         reason = f"{spec.engine} conformance requires the {spec.native_extension_module} native module"
-        if spec.pending_flow_id is None and os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
+        if os.environ.get(_CONFORMANCE_DOCKER_ENV) == "1":
             pytest.fail(reason, pytrace=False)
         pytest.skip(reason)
 
@@ -1687,22 +1661,18 @@ def test_gcp_conformance_specs_encode_typed_null_json_and_error_contracts() -> N
 
 
 @pytest.mark.parametrize(
-    ("module_name", "pending_flow_id", "docker_env", "expected_outcome"),
+    ("module_name", "docker_env", "expected_outcome"),
     [
-        ("vertebra._vtb_conformance_absent", None, None, "skip"),
-        ("vertebra._vtb_conformance_absent", None, "1", "fail"),
-        ("vertebra._vtb_conformance_absent", None, "0", "skip"),
-        ("vertebra._vtb_conformance_absent", "native-probe-driver", None, "skip"),
-        ("vertebra._vtb_conformance_absent", "native-probe-driver", "1", "skip"),
-        ("json", None, "1", "ok"),
-        (None, None, "1", "ok"),
+        ("vertebra._vtb_conformance_absent", None, "skip"),
+        ("vertebra._vtb_conformance_absent", "1", "fail"),
+        ("vertebra._vtb_conformance_absent", "0", "skip"),
+        ("json", "1", "ok"),
+        (None, "1", "ok"),
     ],
     ids=[
         "missing_local",
         "missing_docker",
         "missing_docker_zero",
-        "missing_pending_local",
-        "missing_pending_docker",
         "present",
         "no_module",
     ],
@@ -1710,16 +1680,14 @@ def test_gcp_conformance_specs_encode_typed_null_json_and_error_contracts() -> N
 def test_require_native_module_outcome_by_docker_mode(
     monkeypatch: pytest.MonkeyPatch,
     module_name: str | None,
-    pending_flow_id: str | None,
     docker_env: str | None,
     expected_outcome: str,
 ) -> None:
-    """``_require_native_module`` skips missing modules and fails non-pending specs under Docker conformance."""
+    """``_require_native_module`` skips missing modules locally and fails under Docker conformance."""
     base_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "sqlite")
     spec = structs.replace(
         base_spec,
         native_extension_module=module_name,
-        pending_flow_id=pending_flow_id,
     )
     if docker_env is None:
         monkeypatch.delenv(_CONFORMANCE_DOCKER_ENV, raising=False)
@@ -1740,33 +1708,22 @@ def test_require_native_module_outcome_by_docker_mode(
         _require_native_module(spec)
 
 
-def test_live_engine_params_mark_strict_xfail_only_when_native_module_imports() -> None:
-    """``_build_live_engine_params`` attaches strict ``xfail`` only when a pending spec's native module imports."""
+def test_live_engine_params_emit_unmarked_params() -> None:
+    """``_build_live_engine_params`` emits unmarked ``pytest.param`` entries for every spec variant."""
     base_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "sqlite")
-    reset_dependency_cache("vertebra._vtb_conformance_absent")
-    reset_dependency_cache("json")
-    absent_pending = structs.replace(
+    absent_spec = structs.replace(
         base_spec,
         engine="absent",
         native_extension_module="vertebra._vtb_conformance_absent",
-        pending_flow_id="native-probe-driver",
     )
-    present_pending = structs.replace(
+    present_spec = structs.replace(
         base_spec,
         engine="present",
         native_extension_module="json",
-        pending_flow_id="native-probe-driver",
     )
-    absent_plain = structs.replace(
-        base_spec,
-        engine="plain",
-        native_extension_module="vertebra._vtb_conformance_absent",
-        pending_flow_id=None,
-    )
-    params = _build_live_engine_params((absent_pending, present_pending, absent_plain), env={})
-    assert [param.id for param in params] == ["absent", "present", "plain"]
-    assert [[mark.name for mark in param.marks] for param in params] == [[], ["xfail"], []]
-    assert params[1].marks[0].kwargs == {"strict": True, "reason": "Owned by native-probe-driver"}
+    params = _build_live_engine_params((absent_spec, present_spec), env={})
+    assert [param.id for param in params] == ["absent", "present"]
+    assert [param.marks for param in params] == [(), ()]
 
 
 def test_resolve_live_config_checks_native_module_before_credentials(
@@ -1831,10 +1788,9 @@ def test_valkey_driver_raises_missing_dependency_when_wheel_absent(
 
 
 def test_postgres_conformance_spec_and_version_matrix() -> None:
-    """PostgreSQL conformance enables pipelines, native types DDL, clears pending gates, and expands 14..18."""
+    """PostgreSQL conformance enables pipelines, native types DDL, and expands 14..18."""
     pg_spec = next(spec for spec in ENGINE_SPECS if spec.engine == "postgres")
     assert pg_spec.supports_pipeline is True
-    assert pg_spec.pending_flow_id is None
     assert pg_spec.native_extension_module == "vertebra._postgres"
     assert "BYTEA" in pg_spec.types_ddl
     assert "NUMERIC(18, 4)" in pg_spec.types_ddl

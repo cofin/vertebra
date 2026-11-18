@@ -1,18 +1,22 @@
 //! PyO3 bindings for `vertebra-db` cloud dialers, wire codecs, and shared-memory Arrow IPC cursors.
 
 use std::collections::HashMap;
-use std::ffi::{c_int, c_void};
+use std::ffi::{CStr, c_int, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use arrow_array::ffi::FFI_ArrowSchema;
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
+use arrow_ipc::reader::StreamReader;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyCapsule};
 use vertebra_core::shm::{ShmCapsule, ShmRegion};
 use vertebra_db::arrow_shm::{
-    ShmArrowFrameHeader, open_shm_arrow_region, read_shm_arrow_frame_with, release_shm_arrow_frame,
+    ShmArrowFrameHeader, open_shm_arrow_region, read_shm_arrow_frame, release_shm_arrow_frame,
     write_shm_arrow_region, write_shm_arrow_region_unregistered,
 };
 use vertebra_db::dialer::{
@@ -176,7 +180,46 @@ impl AlloyDBDialer {
     }
 }
 
+const ARROW_ARRAY_STREAM_CAPSULE_NAME: &CStr = c"arrow_array_stream";
+const ARROW_SCHEMA_CAPSULE_NAME: &CStr = c"arrow_schema";
 const MAX_ARROW_CURSOR_BYTE_LEN: usize = (isize::MAX as usize) - ShmArrowFrameHeader::SIZE;
+
+fn decode_arrow_ipc_reader_from_slice(
+    payload: &[u8],
+) -> Result<Box<dyn RecordBatchReader + Send>, String> {
+    let reader = StreamReader::try_new(std::io::Cursor::new(payload), None)
+        .map_err(|e| format!("invalid Arrow IPC stream: {e}"))?;
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("corrupt Arrow IPC batch: {e}"))?;
+    Ok(Box::new(RecordBatchIterator::new(
+        batches.into_iter().map(Ok),
+        schema,
+    )))
+}
+
+fn decode_arrow_ipc_reader(
+    backing: &ArrowBacking,
+    end: usize,
+) -> Result<Box<dyn RecordBatchReader + Send>, String> {
+    let (ptr, len) = backing.as_ptr_and_len();
+    if ptr.is_null() || len < end {
+        return Err("ArrowCursor backing smaller than declared byte_len".to_string());
+    }
+    // SAFETY: `ptr` is non-null, `end <= len`, `end <= isize::MAX`, and the mapping is immutable
+    // and anchored by `backing` (`Arc<ShmRegion>` or `Arc<CapsuleBacking>`) for this call.
+    let frame = unsafe { core::slice::from_raw_parts(ptr, end) };
+    let payload = &frame[ShmArrowFrameHeader::SIZE..end];
+    decode_arrow_ipc_reader_from_slice(payload)
+}
+
+fn try_decode_requested_schema<'a, S>(ffi: &'a FFI_ArrowSchema) -> Result<S, S::Error>
+where
+    S: TryFrom<&'a FFI_ArrowSchema>,
+{
+    S::try_from(ffi)
+}
 
 #[inline]
 fn checked_arrow_frame_end(byte_len: usize) -> Option<usize> {
@@ -270,6 +313,7 @@ pub struct ArrowCursor {
     #[pyo3(get)]
     pub row_count: usize,
     backing: Option<ArrowBacking>,
+    released: Arc<AtomicBool>,
 }
 
 impl ArrowCursor {
@@ -284,7 +328,40 @@ impl ArrowCursor {
             byte_len,
             row_count,
             backing: Some(ArrowBacking::Region(region)),
+            released: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn resolve_arrow_backing(&self) -> PyResult<(ArrowBacking, usize)> {
+        if self.released.load(Ordering::Acquire) {
+            return Err(PyValueError::new_err("ArrowCursor has been released"));
+        }
+        let end = checked_arrow_frame_end(self.byte_len)
+            .ok_or_else(|| PyValueError::new_err("ArrowCursor byte_len overflow"))?;
+        if let Some(ref backing) = self.backing {
+            let (ptr, len) = backing.as_ptr_and_len();
+            if ptr.is_null() || len < end {
+                return Err(PyValueError::new_err(
+                    "ArrowCursor backing smaller than declared byte_len",
+                ));
+            }
+            return Ok((backing.clone(), end));
+        }
+        if self.shm_name.is_empty() {
+            return Err(PyValueError::new_err(
+                "ArrowCursor has no shared-memory backing",
+            ));
+        }
+        let (region, header_len) =
+            open_shm_arrow_region(&self.shm_name).map_err(PyValueError::new_err)?;
+        let required = checked_arrow_frame_end(header_len)
+            .ok_or_else(|| PyValueError::new_err("ArrowCursor byte_len overflow"))?;
+        if region.len() < required || region.len() < end {
+            return Err(PyValueError::new_err(
+                "ArrowCursor ShmRegion smaller than declared byte_len",
+            ));
+        }
+        Ok((ArrowBacking::Region(region), end))
     }
 }
 
@@ -309,6 +386,7 @@ impl ArrowCursor {
             byte_len,
             row_count,
             backing,
+            released: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -328,6 +406,7 @@ impl ArrowCursor {
             byte_len: len,
             row_count,
             backing: Some(ArrowBacking::Region(region)),
+            released: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -398,6 +477,7 @@ impl ArrowCursor {
                 unlink_fn: cap_ref.unlink_fn,
                 unlinked: AtomicBool::new(false),
             }))),
+            released: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -406,13 +486,10 @@ impl ArrowCursor {
         py: Python<'py>,
         shm_name: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        read_shm_arrow_frame_with(shm_name, |slice| {
-            PyBytes::new_with(py, slice.len(), |buf| {
-                buf.copy_from_slice(slice);
-                Ok(())
-            })
-        })
-        .map_err(PyRuntimeError::new_err)?
+        let payload = py
+            .detach(|| read_shm_arrow_frame(shm_name))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyBytes::new(py, &payload))
     }
 
     pub fn read_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -445,6 +522,50 @@ impl ArrowCursor {
         Ok(unsafe { Bound::from_owned_ptr(py, ptr) })
     }
 
+    #[pyo3(signature = (requested_schema=None))]
+    pub fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let requested_ffi_schema = if let Some(req) = requested_schema {
+            let cap = req.cast::<PyCapsule>().map_err(|_| {
+                PyValueError::new_err("requested_schema must be an arrow_schema PyCapsule")
+            })?;
+            let ptr = cap
+                .pointer_checked(Some(ARROW_SCHEMA_CAPSULE_NAME))
+                .map_err(|_| {
+                    PyValueError::new_err("requested_schema PyCapsule must be named arrow_schema")
+                })?;
+            // SAFETY: `pointer_checked` verified the `arrow_schema` capsule name and a
+            // non-null `FFI_ArrowSchema*` kept alive by `cap` for this call.
+            let ffi_schema = unsafe { &*ptr.as_ptr().cast::<FFI_ArrowSchema>() };
+            Some(ffi_schema)
+        } else {
+            None
+        };
+
+        let (backing, end) = self.resolve_arrow_backing()?;
+        let batch_reader = py
+            .detach(move || decode_arrow_ipc_reader(&backing, end))
+            .map_err(PyValueError::new_err)?;
+
+        if let Some(ffi_schema) = requested_ffi_schema {
+            let stream_schema = batch_reader.schema();
+            let requested = try_decode_requested_schema(ffi_schema).map_err(|e| {
+                PyValueError::new_err(format!("invalid requested_schema FFI_ArrowSchema: {e}"))
+            })?;
+            if *stream_schema != requested {
+                return Err(PyNotImplementedError::new_err(
+                    "ArrowCursor.__arrow_c_stream__ does not support schema casting",
+                ));
+            }
+        }
+
+        let ffi_stream = FFI_ArrowArrayStream::new(batch_reader);
+        PyCapsule::new_with_value(py, ffi_stream, ARROW_ARRAY_STREAM_CAPSULE_NAME)
+    }
+
     pub fn to_pyarrow<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let pa = py.import("pyarrow")?;
@@ -466,6 +587,7 @@ impl ArrowCursor {
     }
 
     pub fn release(&self, py: Python<'_>) -> bool {
+        self.released.store(true, Ordering::Release);
         let name = self.shm_name.clone();
         let backing = self.backing.clone();
         py.detach(move || {
@@ -510,6 +632,10 @@ impl ArrowCursor {
         let _ = self.release(py);
     }
 
+    // SAFETY: Called by CPython's buffer protocol with the GIL attached (`slf` is a live
+    // `ArrowCursor`, `view` is checked non-null). `PyBuffer_FillInfo` sets `(*view).obj` to an
+    // incremented owning reference to `slf`, pinning `this.backing` (`Arc<ShmRegion>` or
+    // `Arc<CapsuleBacking>`) for the lifetime of any exported `memoryview`.
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut ffi::Py_buffer,
@@ -558,6 +684,8 @@ impl ArrowCursor {
         Ok(())
     }
 
+    // SAFETY: Paired PEP 3118 release hook invoked by CPython on `PyBuffer_Release`; `ArrowCursor`
+    // allocates no per-view state and `(*view).obj` drop releases the pinned exporter reference.
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 }
 
@@ -1074,6 +1202,81 @@ mod tests {
                 .unwrap();
             assert_eq!(still_readable, payload);
             assert!(!py_cursor.borrow().release(py));
+        });
+    }
+
+    #[test]
+    fn arrow_cursor_c_stream_exports_empty_and_multi_batch_ipc_and_rejects_released_or_corrupt() {
+        use std::sync::Arc;
+
+        use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
+        use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+        use arrow_ipc::writer::StreamWriter;
+
+        let batch1 = RecordBatch::try_from_iter(vec![
+            ("id", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef),
+            (
+                "name",
+                Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let batch2 = RecordBatch::try_from_iter(vec![
+            ("id", Arc::new(Int64Array::from(vec![3])) as ArrayRef),
+            ("name", Arc::new(StringArray::from(vec!["c"])) as ArrayRef),
+        ])
+        .unwrap();
+        let schema = batch1.schema();
+
+        let mut empty_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut empty_buf, &schema).unwrap();
+            writer.finish().unwrap();
+        }
+        let empty_reader = super::decode_arrow_ipc_reader_from_slice(&empty_buf).unwrap();
+        assert_eq!(empty_reader.schema(), schema);
+        let empty_ffi = FFI_ArrowArrayStream::new(empty_reader);
+        let empty_imported = RecordBatchStreamReader::try_new(empty_ffi).unwrap();
+        assert_eq!(empty_imported.schema(), schema);
+        let empty_batches: Vec<RecordBatch> =
+            empty_imported.collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(empty_batches.is_empty());
+
+        let mut multi_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut multi_buf, &schema).unwrap();
+            writer.write(&batch1).unwrap();
+            writer.write(&batch2).unwrap();
+            writer.finish().unwrap();
+        }
+        let multi_reader = super::decode_arrow_ipc_reader_from_slice(&multi_buf).unwrap();
+        let multi_ffi = FFI_ArrowArrayStream::new(multi_reader);
+        let multi_imported = RecordBatchStreamReader::try_new(multi_ffi).unwrap();
+        assert_eq!(multi_imported.schema(), schema);
+        let multi_batches: Vec<RecordBatch> =
+            multi_imported.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(multi_batches.len(), 2);
+        assert_eq!(multi_batches[0].num_rows(), 2);
+        assert_eq!(multi_batches[1].num_rows(), 1);
+
+        assert!(super::decode_arrow_ipc_reader_from_slice(b"").is_err());
+        let truncated = &multi_buf[..multi_buf.len() / 2];
+        assert!(super::decode_arrow_ipc_reader_from_slice(truncated).is_err());
+
+        Python::initialize();
+        Python::attach(|py| {
+            let shm_name = format!("vtb-py-cstream-{}", std::process::id());
+            let cursor = ArrowCursor::write_ipc_to_shm(py, &shm_name, &multi_buf, 3).unwrap();
+            let capsule = cursor.__arrow_c_stream__(py, None).unwrap();
+            assert!(
+                capsule
+                    .pointer_checked(Some(super::ARROW_ARRAY_STREAM_CAPSULE_NAME))
+                    .is_ok()
+            );
+            drop(capsule);
+
+            assert!(cursor.release(py));
+            assert!(cursor.__arrow_c_stream__(py, None).is_err());
         });
     }
 }

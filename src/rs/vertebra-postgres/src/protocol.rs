@@ -343,6 +343,17 @@ mod tests {
         assert!(body.contains("client_encoding\0UTF8\0"));
         assert!(body.contains("application_name\0vtb-unit\0"));
         assert!(body.contains("TimeZone\0UTC\0"));
+
+        let mut crdb_raw = RawPostgresOptions::new("db.example.invalid", "alice", "appdb");
+        crdb_raw.cockroach_cluster = Some("my-cluster".to_string());
+        crdb_raw
+            .session_gucs
+            .insert("options".to_string(), "-c work_mem=4MB".to_string());
+        let crdb_cfg = PostgresConfig::validate(crdb_raw).expect("valid crdb config");
+        let mut crdb_buf = BytesMut::new();
+        encode_startup_frame(&crdb_cfg, &mut crdb_buf).expect("crdb startup frame encodes");
+        let crdb_body = String::from_utf8_lossy(&crdb_buf[8..]);
+        assert!(crdb_body.contains("options\0-c work_mem=4MB --cluster=my-cluster\0"));
     }
 
     #[tokio::test]

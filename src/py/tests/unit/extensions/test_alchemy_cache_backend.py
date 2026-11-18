@@ -1,157 +1,48 @@
-"""Unit tests for SQLAlchemyCacheBackend."""
+"""Unit tests for Advanced Alchemy cache regions, serializers, and CacheManager integration."""
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import time
-from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 import pytest
-from sqlalchemy import Integer, String, create_engine, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from advanced_alchemy.cache import CacheManager
+from advanced_alchemy.cache._null import NO_VALUE, SyncCacheRegionProtocol
+from advanced_alchemy.filters import LimitOffsetFilter
+from advanced_alchemy.repository import SQLAlchemyAsyncRepository, SQLAlchemySyncRepository
+from advanced_alchemy.service import (
+    OffsetPagination,
+    SQLAlchemyAsyncRepositoryService,
+    SQLAlchemySyncRepositoryService,
+)
+from sqlalchemy import Integer, String, create_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+import vertebra.extensions.alchemy as alchemy_ext
+import vertebra.extensions.alchemy.cache as alchemy_cache_mod
+import vertebra.extensions.django.cache as django_cache_mod
+import vertebra.extensions.sqlalchemy as sqlalchemy_ext
+from vertebra.cache import AsyncCacheStore, CacheStats, SyncCacheStore
 from vertebra.db.adapters.redis import AsyncRedisDriver, RedisConfig, SyncRedisDriver
 from vertebra.extensions.alchemy import (
-    AsyncCacheManager,
-    CacheEntry,
-    CacheStats,
-    SQLAlchemyCacheBackend,
+    AsyncCacheRegion,
+    SyncCacheRegion,
     ZeroCopyServiceMixin,
     create_async_alchemy_config,
     create_cache_config,
     create_sync_alchemy_config,
+    msgspec_model_deserializer,
+    msgspec_model_serializer,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from tests.unit.conftest import Resp3FakeServer
-
-
-def test_cache_entry_monotonic_expiration() -> None:
-    """Verify CacheEntry is_expired correctly compares against monotonic time."""
-    entry = CacheEntry(value="alpha", expires_at=100.0)
-    assert entry.value == "alpha"
-    assert entry.is_expired(99.9) is False
-    assert entry.is_expired(100.0) is True
-    assert entry.is_expired(100.1) is True
-
-    indefinite_entry = CacheEntry(value="beta", expires_at=None)
-    assert indefinite_entry.is_expired(999999.0) is False
-
-
-def test_mapping_protocol_and_lru_eviction() -> None:
-    """Verify MutableMapping interface and capacity-based LRU eviction."""
-    cache = SQLAlchemyCacheBackend(capacity=3)
-    cache["k1"] = "v1"
-    cache["k2"] = "v2"
-    cache["k3"] = "v3"
-
-    assert len(cache) == 3
-    assert list(cache) == ["k1", "k2", "k3"]
-    assert "k1" in cache
-    assert "missing" not in cache
-    assert cache["k1"] == "v1"
-
-    cache["k4"] = "v4"
-    assert len(cache) == 3
-    assert "k2" not in cache
-    assert "k1" in cache
-    assert "k3" in cache
-    assert "k4" in cache
-
-    del cache["k3"]
-    assert len(cache) == 2
-    assert "k3" not in cache
-
-    with pytest.raises(KeyError):
-        _ = cache["k3"]
-
-    with pytest.raises(KeyError):
-        del cache["k3"]
-
-    popped = cache.pop("k1")
-    assert popped == "v1"
-    assert "k1" not in cache
-    assert cache.pop("k1", "fallback") == "fallback"
-
-    cache.clear()
-    assert len(cache) == 0
-
-
-def test_sync_ttl_expiration_and_stats() -> None:
-    """Verify TTL expiration and stats tracking."""
-    cache = SQLAlchemyCacheBackend(capacity=10, default_ttl=0.05)
-    cache["fast"] = "quick"
-    cache.set("slow", "steady", ttl=10.0)
-
-    assert cache.get("fast") == "quick"
-    assert cache.exists("fast") is True
-    assert cache.expires_in("fast") is not None
-    assert cache.expires_in("slow") is not None
-    assert cache.expires_in("missing") is None
-
-    time.sleep(0.06)
-
-    assert cache.get("fast") is None
-    assert "fast" not in cache
-    assert cache.exists("fast") is False
-    assert cache.get("slow") == "steady"
-
-    stats = cache.stats()
-    assert isinstance(stats, CacheStats)
-    assert stats.expirations >= 1
-    assert stats.hits >= 2
-    assert stats.capacity == 10
-
-
-@pytest.mark.anyio
-async def test_async_cache_methods() -> None:
-    """Verify get_async, set_async, delete_async, exists_async, and clear_async."""
-    cache = SQLAlchemyCacheBackend(capacity=5)
-
-    await cache.set_async("a_key", "a_val", ttl=timedelta(seconds=60))
-    assert await cache.exists_async("a_key") is True
-    assert await cache.get_async("a_key") == "a_val"
-    assert await cache.get_async("missing", default="def") == "def"
-
-    ttl = await cache.expires_in_async("a_key")
-    assert ttl is not None and ttl > 0
-
-    deleted = await cache.delete_async("a_key")
-    assert deleted is True
-    assert await cache.exists_async("a_key") is False
-    assert await cache.delete_async("a_key") is False
-
-    await cache.set_async("temp", "val")
-    assert len(cache) == 1
-    await cache.clear_async()
-    assert len(cache) == 0
-
-
-def test_sqlalchemy_compiled_cache_integration() -> None:
-    """Verify SQLAlchemyCacheBackend operates as an execution_options compiled_cache for SQLAlchemy Engine."""
-    cache = SQLAlchemyCacheBackend(capacity=128)
-    engine = create_engine("sqlite:///:memory:", execution_options={"compiled_cache": cache})
-
-    with engine.connect() as conn:
-        res1 = conn.execute(text("SELECT 1 AS num")).scalar()
-        assert res1 == 1
-
-        res2 = conn.execute(text("SELECT 1 AS num")).scalar()
-        assert res2 == 1
-
-    stats = cache.stats()
-    assert len(cache) > 0
-    assert stats.hits >= 1
-
-
-def test_shm_factory_initialization() -> None:
-    """Verify create_shm_cache_backend initializes segment metadata."""
-    cache = SQLAlchemyCacheBackend.create_shm_cache_backend(name="custom-shm-test", capacity=512)
-    assert cache.shm_name == "custom-shm-test"
-    assert cache.capacity == 512
-    cache["sql"] = "SELECT 42"
-    assert cache["sql"] == "SELECT 42"
 
 
 class _CacheBase(DeclarativeBase):
@@ -170,138 +61,390 @@ class _UserDto(msgspec.Struct, frozen=True, gc=False):
     name: str
 
 
-class _SampleService(ZeroCopyServiceMixin):
-    pass
+class _AsyncUserRepository(SQLAlchemyAsyncRepository[_CachedUser]):
+    model_type = _CachedUser
+
+
+class _AsyncUserService(ZeroCopyServiceMixin, SQLAlchemyAsyncRepositoryService[_CachedUser, _AsyncUserRepository]):
+    repository_type = _AsyncUserRepository
+
+
+class _SyncUserRepository(SQLAlchemySyncRepository[_CachedUser]):
+    model_type = _CachedUser
+
+
+class _SyncUserService(ZeroCopyServiceMixin, SQLAlchemySyncRepositoryService[_CachedUser, _SyncUserRepository]):
+    repository_type = _SyncUserRepository
+
+
+@pytest.mark.parametrize("scheme", ["memory", "shm", "file"])
+def test_cache_manager_entity_roundtrip_and_invalidate_all(scheme: str, tmp_path: Path) -> None:
+    """Upstream CacheManager(create_cache_config(...)) supports entity round trips, NO_VALUE misses, and invalidate_all_sync."""
+    if scheme == "file":
+        url = f"file://{tmp_path / 'aa_cache'}"
+    elif scheme == "shm":
+        url = f"shm://aa_test_{time.time_ns()}"
+    else:
+        url = "memory://"
+
+    cfg = create_cache_config(url, expiration_time=120, capacity=256)
+    manager = CacheManager(cfg)
+
+    assert manager.get_sync("missing:key") is NO_VALUE
+    assert manager.get_entity_sync("cached_users", 999, _CachedUser) is None
+
+    ada = _CachedUser(id=7, name="Ada Lovelace")
+    grace = _CachedUser(id=8, name="Grace Hopper")
+    manager.set_entity_sync("cached_users", 7, ada)
+    manager.set_entity_sync("cached_users", 8, grace)
+
+    loaded_ada = manager.get_entity_sync("cached_users", 7, _CachedUser)
+    assert loaded_ada is not None
+    assert loaded_ada.id == 7
+    assert loaded_ada.name == "Ada Lovelace"
+
+    manager.set_many_sync("cached_users:all", [ada, grace])
+    many = manager.get_many_sync("cached_users:all", _CachedUser)
+    assert many is not None
+    assert [u.name for u in many] == ["Ada Lovelace", "Grace Hopper"]
+
+    manager.invalidate_entity_sync("cached_users", 7)
+    assert manager.get_entity_sync("cached_users", 7, _CachedUser) is None
+    assert manager.get_entity_sync("cached_users", 8, _CachedUser) is not None
+
+    manager.invalidate_all_sync()
+    assert manager.get_entity_sync("cached_users", 8, _CachedUser) is None
+    assert manager.get_many_sync("cached_users:all", _CachedUser) is None
+
+
+def test_create_cache_config_negative_expiration_and_eager_validation() -> None:
+    """Negative or zero expiration_time maps to ttl=None (no expiry) and bad URLs fail eagerly."""
+    now = 100.0
+    store = SyncCacheStore("memory://", _clock=lambda: now)
+    region = SyncCacheRegion(store, expiration_time=-1)
+    region.set("forever", {"ok": True})
+    now += 86400.0
+    assert region.get("forever") == {"ok": True}
+
+    cfg = create_cache_config("memory://", expiration_time=-1)
+    manager = CacheManager(cfg)
+    user = _CachedUser(id=1, name="Persistent")
+    manager.set_entity_sync("cached_users", 1, user)
+    loaded = manager.get_entity_sync("cached_users", 1, _CachedUser)
+    assert loaded is not None
+    assert loaded.name == "Persistent"
+
+    with pytest.raises(ValueError, match="Unsupported cache URL scheme"):
+        create_cache_config("invalid://bad-scheme")
+
+
+def test_sync_cache_region_protocol_and_value_framing() -> None:
+    """SyncCacheRegion satisfies SyncCacheRegionProtocol, frames None/bytes/str/collections, and forwards TTL."""
+    now = 50.0
+    store = SyncCacheStore("memory://", key_prefix="vtb:region:", _clock=lambda: now)
+    region: SyncCacheRegionProtocol = SyncCacheRegion(store, expiration_time=60)
+
+    assert region.configure("ignored", expiration_time=30, arguments={"x": 1}) is region
+    assert region.get("missing") is NO_VALUE
+
+    calls = 0
+
+    def _create_none() -> None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    assert region.get_or_create("none_key", _create_none) is None
+    assert region.get_or_create("none_key", _create_none) is None
+    assert region.get("none_key") is None
+    assert calls == 1
+
+    region.set("bytes_key", b"raw-bytes")
+    region.set("str_key", "raw-text")
+    region.set("list_key", ["a", "b"])
+    region.set("dict_key", {"k": "v", "n": 1})
+    assert isinstance(region.get("bytes_key"), bytes)
+    assert region.get("bytes_key") == b"raw-bytes"
+    assert isinstance(region.get("str_key"), str)
+    assert region.get("str_key") == "raw-text"
+    assert region.get("list_key") == ["a", "b"]
+    assert region.get("dict_key") == {"k": "v", "n": 1}
+
+    created = region.get_or_create("short_ttl", lambda: "ephemeral", expiration_time=5)
+    assert created == "ephemeral"
+    now += 6.0
+    assert region.get("short_ttl") is NO_VALUE
+
+    region.delete("bytes_key")
+    assert region.get("bytes_key") is NO_VALUE
+
+    region.invalidate()
+    assert region.get("str_key") is NO_VALUE
+    stats = store.stats()
+    assert isinstance(stats, CacheStats)
+    assert stats.hits >= 2
 
 
 @pytest.mark.anyio
-async def test_async_cache_manager_sync_async_and_zero_copy_schema_projection() -> None:
-    """AsyncCacheManager caches ORM entities, decodes directly into msgspec.Struct, and wires into configs."""
-    cfg = create_cache_config(expiration_time=120, capacity=256)
-    manager = AsyncCacheManager(cfg)
+async def test_async_cache_region_methods_and_ttl_forwarding() -> None:
+    """AsyncCacheRegion supports async get, get_or_create, set, delete, invalidate, and sync configure."""
+    now = 200.0
+    store = AsyncCacheStore("memory://", key_prefix="vtb:aregion:", _clock=lambda: now)
+    region = AsyncCacheRegion(store, expiration_time=60)
 
-    user = _CachedUser(id=7, name="Ada Lovelace")
-    manager.set_entity_sync("cached_users", 7, user)
+    assert region.configure("ignored", expiration_time=-1) is region
+    assert await region.get("missing") is NO_VALUE
 
-    loaded_sync = manager.get_entity_sync("cached_users", 7, _CachedUser)
-    assert loaded_sync is not None
-    assert loaded_sync.id == 7
-    assert loaded_sync.name == "Ada Lovelace"
+    calls = 0
 
-    dto_sync = manager.get_schema_sync("cached_users", 7, _UserDto)
-    assert dto_sync == _UserDto(id=7, name="Ada Lovelace")
+    async def _create_none() -> str | None:
+        nonlocal calls
+        calls += 1
+        return None
 
-    user_async = _CachedUser(id=8, name="Grace Hopper")
-    await manager.set_entity_async("cached_users", 8, user_async)
-    loaded_async = await manager.get_entity_async("cached_users", 8, _CachedUser)
-    assert loaded_async is not None
-    assert loaded_async.name == "Grace Hopper"
+    assert await region.get_or_create("none_key", _create_none) is None
+    assert await region.get_or_create("none_key", _create_none) is None
+    assert await region.get("none_key") is None
+    assert calls == 1
 
-    dto_async = await manager.get_schema_async("cached_users", 8, _UserDto)
-    assert dto_async == _UserDto(id=8, name="Grace Hopper")
+    await region.set("forever", {"id": 42})
+    now += 10000.0
+    assert await region.get("forever") == {"id": 42}
 
-    await manager.set_many_async("cached_users:all", [user, user_async])
-    many_dtos = await manager.get_many_schema_async("cached_users:all", _UserDto)
-    assert many_dtos == [
-        _UserDto(id=7, name="Ada Lovelace"),
-        _UserDto(id=8, name="Grace Hopper"),
-    ]
+    async def _create_ephemeral() -> str:
+        return "short"
 
-    svc = _SampleService()
-    assert svc.to_schema(user, schema_type=_UserDto) == _UserDto(id=7, name="Ada Lovelace")
-    assert svc.to_schema([user, user_async], schema_type=_UserDto) == [
-        _UserDto(id=7, name="Ada Lovelace"),
-        _UserDto(id=8, name="Grace Hopper"),
-    ]
+    assert await region.get_or_create("ephemeral", _create_ephemeral, expiration_time=4) == "short"
+    now += 5.0
+    assert await region.get("ephemeral") is NO_VALUE
 
+    await region.delete("forever")
+    assert await region.get("forever") is NO_VALUE
+
+    await region.set("to_clear", "val")
+    await region.invalidate()
+    assert await region.get("to_clear") is NO_VALUE
+
+
+@pytest.mark.parametrize("fmt", ["msgpack", "json"])
+def test_msgspec_model_serializer_and_deserializer_roundtrip(fmt: Literal["msgpack", "json"]) -> None:
+    """Serializer/deserializer pair handles ORM models, msgspec structs, and schema_type=None."""
+    user = _CachedUser(id=11, name="Katherine Johnson")
+    encoded = msgspec_model_serializer(user, format=fmt)
+
+    decoded_model = msgspec_model_deserializer(encoded, _CachedUser, format=fmt)
+    assert isinstance(decoded_model, _CachedUser)
+    assert decoded_model.id == 11
+    assert decoded_model.name == "Katherine Johnson"
+
+    decoded_dto = msgspec_model_deserializer(encoded, _UserDto, format=fmt)
+    assert decoded_dto == _UserDto(id=11, name="Katherine Johnson")
+
+    decoded_raw = msgspec_model_deserializer(encoded, None, format=fmt)
+    assert decoded_raw == {"id": 11, "name": "Katherine Johnson"}
+
+
+@pytest.mark.anyio
+async def test_zero_copy_service_mixin_async_repository_pagination() -> None:
+    """ZeroCopyServiceMixin with SQLAlchemyAsyncRepositoryService returns OffsetPagination and single schemas."""
+    engine = create_async_engine("sqlite+vtb_async:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(_CacheBase.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            service = _AsyncUserService(session=session)
+            seeded = [
+                _CachedUser(id=1, name="Ada Lovelace"),
+                _CachedUser(id=2, name="Grace Hopper"),
+                _CachedUser(id=3, name="Katherine Johnson"),
+                _CachedUser(id=4, name="Margaret Hamilton"),
+                _CachedUser(id=5, name="Radia Perlman"),
+            ]
+            await service.create_many(seeded, auto_commit=True)
+
+            limit_offset = LimitOffsetFilter(limit=2, offset=1)
+            items, total = await service.get_many_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
+            assert total == 5
+
+            dto_page = service.to_schema(items, total=total, filters=[limit_offset], schema_type=_UserDto)
+            assert isinstance(dto_page, OffsetPagination)
+            assert len(dto_page.items) == 2
+            assert dto_page.limit == 2
+            assert dto_page.offset == 1
+            assert dto_page.total == total
+            assert dto_page.items == [
+                _UserDto(id=2, name="Grace Hopper"),
+                _UserDto(id=3, name="Katherine Johnson"),
+            ]
+
+            raw_page = service.to_schema(items, total=total, filters=[limit_offset])
+            assert isinstance(raw_page, OffsetPagination)
+            assert raw_page.items == list(items)
+            assert raw_page.limit == 2
+            assert raw_page.offset == 1
+            assert raw_page.total == total
+
+            single_dto = service.to_schema(items[0], schema_type=_UserDto)
+            assert single_dto == _UserDto(id=2, name="Grace Hopper")
+
+            single_raw = service.to_schema(items[0])
+            assert single_raw is items[0]
+
+            default_bounds_page = service.to_schema(items, schema_type=_UserDto, format="json")
+            assert isinstance(default_bounds_page, OffsetPagination)
+            assert default_bounds_page.limit == 2
+            assert default_bounds_page.offset == 0
+            assert default_bounds_page.total == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected_limit", "expected_offset"),
+    [
+        (None, 0, 0),
+        ([LimitOffsetFilter(limit=10, offset=20)], 10, 20),
+    ],
+)
+def test_zero_copy_service_mixin_sync_repository_empty_and_dict_fallback(
+    filters: list[LimitOffsetFilter] | None,
+    expected_limit: int,
+    expected_offset: int,
+) -> None:
+    """ZeroCopyServiceMixin with SQLAlchemySyncRepositoryService preserves total on empty pages and delegates dicts."""
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        _CacheBase.metadata.create_all(engine)
+        session_factory = sessionmaker(engine, expire_on_commit=False)
+        with session_factory() as session:
+            service = _SyncUserService(session=session)
+            service.create_many(
+                [_CachedUser(id=1, name="Ada Lovelace"), _CachedUser(id=2, name="Grace Hopper")],
+                auto_commit=True,
+            )
+            limit_offset = LimitOffsetFilter(limit=1, offset=1)
+            items, total = service.get_many_and_count(limit_offset, order_by=[(_CachedUser.id, False)])
+            sync_page = service.to_schema(items, total=total, filters=[limit_offset], schema_type=_UserDto)
+            assert isinstance(sync_page, OffsetPagination)
+            assert sync_page.items == [_UserDto(id=2, name="Grace Hopper")]
+            assert sync_page.limit == 1
+            assert sync_page.offset == 1
+            assert sync_page.total == 2
+
+            empty_rows: list[_CachedUser] = []
+            empty_raw_page = service.to_schema(empty_rows, total=5, filters=filters)
+            assert isinstance(empty_raw_page, OffsetPagination)
+            assert empty_raw_page.items == []
+            assert empty_raw_page.limit == expected_limit
+            assert empty_raw_page.offset == expected_offset
+            assert empty_raw_page.total == 5
+
+            empty_dto_page = service.to_schema([], total=5, filters=filters, schema_type=_UserDto)
+            assert isinstance(empty_dto_page, OffsetPagination)
+            assert empty_dto_page.items == []
+            assert empty_dto_page.limit == expected_limit
+            assert empty_dto_page.offset == expected_offset
+            assert empty_dto_page.total == 5
+
+            dict_dto = service.to_schema({"id": 9, "name": "Dict Row"}, schema_type=_UserDto)
+            assert dict_dto == _UserDto(id=9, name="Dict Row")
+
+            dict_page = service.to_schema(
+                [{"id": 9, "name": "Dict Row"}],
+                total=1,
+                filters=[LimitOffsetFilter(limit=5, offset=0)],
+                schema_type=_UserDto,
+            )
+            assert isinstance(dict_page, OffsetPagination)
+            assert dict_page.items == [_UserDto(id=9, name="Dict Row")]
+            assert dict_page.limit == 5
+            assert dict_page.offset == 0
+            assert dict_page.total == 1
+    finally:
+        engine.dispose()
+
+
+def test_plugin_cache_wiring() -> None:
+    """Plugin factories wire upstream CacheManager from URLs, stores, and regions."""
     async_cfg = create_async_alchemy_config("sqlite+aiosqlite:///:memory:", cache_config="memory://")
-    assert isinstance(async_cfg.cache_manager, AsyncCacheManager)
+    assert isinstance(async_cfg.cache_manager, CacheManager)
 
-    sync_cfg = create_sync_alchemy_config("sqlite:///:memory:", cache_config=SQLAlchemyCacheBackend(capacity=64))
-    assert isinstance(sync_cfg.cache_manager, AsyncCacheManager)
+    sync_store = SyncCacheStore("memory://")
+    sync_cfg = create_sync_alchemy_config("sqlite:///:memory:", cache_config=sync_store)
+    assert isinstance(sync_cfg.cache_manager, CacheManager)
+
+    region_cfg = create_sync_alchemy_config("sqlite:///:memory:", cache_config=SyncCacheRegion(sync_store))
+    assert isinstance(region_cfg.cache_manager, CacheManager)
 
 
-@pytest.mark.anyio
-async def test_alchemy_cache_clear_removes_only_its_prefix(resp3_server: Resp3FakeServer) -> None:
-    """SQLAlchemyCacheBackend.clear and clear_async remove only keys under the backend's key_prefix."""
-    sync_driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
-    async_driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
+def test_redis_backed_cache_manager_invalidate_all_scoped_to_prefix(resp3_server: Resp3FakeServer) -> None:
+    """CacheManager.invalidate_all_sync clears only keys under the region key_prefix."""
+    driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
     try:
-        sync_driver.set("other:keep", b"1")
-        await async_driver.set("other:keep", b"1")
+        driver.set("other:keep", b"1")
+        cfg_a = create_cache_config(resp3_server.redis_url, key_prefix="vtb:aa:")
+        cfg_b = create_cache_config(resp3_server.redis_url, key_prefix="vtb:other:")
+        mgr_a = CacheManager(cfg_a)
+        mgr_b = CacheManager(cfg_b)
 
-        backend_a = SQLAlchemyCacheBackend(
-            sync_driver=sync_driver,
-            async_driver=async_driver,
-            key_prefix="vtb:aa:",
-        )
-        backend_b = SQLAlchemyCacheBackend(
-            sync_driver=sync_driver,
-            async_driver=async_driver,
-            key_prefix="vtb:other:",
-        )
+        mgr_a.set_entity_sync("cached_users", 1, _CachedUser(id=1, name="Alpha"))
+        mgr_b.set_entity_sync("cached_users", 2, _CachedUser(id=2, name="Beta"))
 
-        backend_a.set("user:1", {"id": 1})
-        backend_a.set("vtb:aa:user:2", {"id": 2})
-        backend_b.set("user:9", {"id": 9})
-
-        assert sync_driver.get("vtb:aa:user:1") is not None
-        assert sync_driver.get("vtb:aa:user:2") is not None
-        assert sync_driver.get("vtb:other:user:9") is not None
-
-        backend_a.clear()
-        assert sync_driver.get("other:keep") == b"1"
-        assert sync_driver.get("vtb:aa:user:1") is None
-        assert sync_driver.get("vtb:aa:user:2") is None
-        assert sync_driver.get("vtb:other:user:9") is not None
-        assert backend_b.get("user:9") == {"id": 9}
-
-        await backend_a.set_async("user:1", {"id": 1})
-        await backend_a.set_async("vtb:aa:user:2", {"id": 2})
-        await backend_b.set_async("user:9", {"id": 9})
-
-        await backend_a.clear_async()
-        assert await async_driver.get("other:keep") == b"1"
-        assert await async_driver.get("vtb:aa:user:1") is None
-        assert await async_driver.get("vtb:aa:user:2") is None
-        assert await async_driver.get("vtb:other:user:9") is not None
-        assert await backend_b.get_async("user:9") == {"id": 9}
+        mgr_a.invalidate_all_sync()
+        assert driver.get("other:keep") == b"1"
+        assert mgr_a.get_entity_sync("cached_users", 1, _CachedUser) is None
+        loaded_b = mgr_b.get_entity_sync("cached_users", 2, _CachedUser)
+        assert loaded_b is not None
+        assert loaded_b.name == "Beta"
     finally:
-        sync_driver.close()
-        await async_driver.close()
+        driver.close()
 
 
-@pytest.mark.anyio
-async def test_alchemy_cache_sends_sub_second_ttl_as_milliseconds(resp3_server: Resp3FakeServer) -> None:
-    """Sub-second TTLs are sent to the Redis/Valkey driver as millisecond PX expiries."""
-    sync_driver = SyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
-    async_driver = AsyncRedisDriver(RedisConfig(url=resp3_server.redis_url))
-    try:
-        backend = SQLAlchemyCacheBackend(
-            sync_driver=sync_driver,
-            async_driver=async_driver,
-            key_prefix="vtb:aa:",
-        )
-
-        backend.set("ephemeral", {"ok": True}, ttl=0.25)
-        assert 1 <= sync_driver.pttl("vtb:aa:ephemeral") <= 250
-
-        await backend.set_async("ephemeral_async", {"ok": True}, ttl=timedelta(milliseconds=250))
-        assert 1 <= await async_driver.pttl("vtb:aa:ephemeral_async") <= 250
-    finally:
-        sync_driver.close()
-        await async_driver.close()
-
-
-def test_alchemy_cache_memory_url_stays_local() -> None:
-    """SQLAlchemyCacheBackend.from_url('memory://') builds the local L1 cache without a Redis driver."""
-    backend = SQLAlchemyCacheBackend.from_url("memory://")
-    assert backend.sync_driver is None
-    assert backend.async_driver is None
-
-
-@pytest.mark.parametrize("bad_prefix", ["", "bad*", "bad?key", "bad[0]"])
-def test_alchemy_cache_rejects_invalid_key_prefix(bad_prefix: str) -> None:
-    """Empty or glob-containing key_prefix values raise ValueError."""
+def test_async_redis_driver_direct_cleanup_smoke(resp3_server: Resp3FakeServer) -> None:
+    """Verify SyncCacheStore with resp3_server rejects invalid key prefixes cleanly."""
     with pytest.raises(ValueError, match="key_prefix"):
-        SQLAlchemyCacheBackend(key_prefix=bad_prefix)
+        create_cache_config(resp3_server.redis_url, key_prefix="bad*")
+    assert AsyncRedisDriver is not None
+
+
+def test_legacy_cache_classes_and_sqlalchemy_cache_module_deleted() -> None:
+    """Deleted cache backends, dogpile adapters, and sqlalchemy.cache must not exist."""
+    removed_alchemy = (
+        "AsyncCacheBackend",
+        "AsyncCacheManager",
+        "CacheEntry",
+        "CacheStats",
+        "DogpileMemoryBackend",
+        "DogpileRedisBackend",
+        "DogpileShmBackend",
+        "DogpileStorageBackend",
+        "DogpileValkeyBackend",
+        "SQLAlchemyCacheBackend",
+        "SyncCacheBackend",
+        "register_dogpile_backends",
+    )
+    for name in removed_alchemy:
+        assert not hasattr(alchemy_cache_mod, name)
+        assert not hasattr(alchemy_ext, name)
+
+    removed_sqlalchemy = (
+        "AsyncCacheBackend",
+        "CacheEntry",
+        "CacheStats",
+        "CompiledCache",
+        "ResultCache",
+        "SQLAlchemyCacheBackend",
+        "SyncCacheBackend",
+    )
+    for name in removed_sqlalchemy:
+        assert not hasattr(sqlalchemy_ext, name)
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vertebra.extensions.sqlalchemy.cache")
+
+    django_source = importlib.util.find_spec(django_cache_mod.__name__)
+    assert django_source is not None and django_source.origin is not None
+    with open(django_source.origin, encoding="utf-8") as handle:
+        assert "vertebra.extensions.alchemy" not in handle.read()

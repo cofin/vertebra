@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gc
+import importlib
+import importlib.util
 import io
 import mmap
 import os
@@ -16,8 +18,10 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import pyarrow as pa
 import pytest
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, delete, insert, select
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine.url import URL
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import vertebra.db as db_pkg
 import vertebra.db.adapters.duckdb as db_duckdb_mod
@@ -29,6 +33,7 @@ import vertebra.db.adapters.sqlite as db_sqlite_mod
 import vertebra.db.arrow as db_arrow_mod
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
 from vertebra._vertebra import ArrowCursor as NativeArrowCursor
+from vertebra._vertebra import LeaseBroker, ProgrammingError
 from vertebra.db import (
     ARROW_SHM_THRESHOLD_ROWS,
     AlloyDBAuthType,
@@ -43,6 +48,7 @@ from vertebra.db import (
 from vertebra.db.adapters.duckdb import (
     AsyncDuckDBDriver,
     DuckDBConfig,
+    DuckDBCore,
     DuckDBSecretConfig,
     SyncDuckDBDriver,
     duckdb_bootstrap_statements,
@@ -50,6 +56,7 @@ from vertebra.db.adapters.duckdb import (
 from vertebra.db.adapters.mssql import (
     AsyncMSSQLDriver,
     MSSQLConfig,
+    MSSQLCore,
     SyncMSSQLDriver,
     rewrite_mssql_placeholders,
 )
@@ -85,15 +92,24 @@ from vertebra.db.adapters.sqlite import (
     SyncSQLiteDriver,
 )
 from vertebra.db.dbapi import (
+    AsyncDBAPIConnection,
+    InterfaceError,
     SyncDBAPIConnection,
     SyncDBAPICursor,
 )
+from vertebra.db.driver._common import (
+    DUCKDB_DIALECT_TAG,
+    MSSQL_DIALECT_TAG,
+    ORACLE_DIALECT_TAG,
+    CommonDriverMixin,
+)
 from vertebra.extensions.sqlalchemy.dialects import (
     ALL_DIALECT_SCHEMES,
+    AsyncMSSQLDialect,
     NullPool,
-    SyncDuckDBDialect,
     SyncMSSQLDialect,
 )
+from vertebra.extensions.sqlalchemy.dialects.mssql import MSExecutionContext_vtb
 from vertebra.extensions.sqlspec.adapters import (
     DuckDBAsyncConfig,
     DuckDBSyncConfig,
@@ -123,6 +139,20 @@ from vertebra.typing import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_HAS_DUCKDB_ENGINE = importlib.util.find_spec("duckdb_engine") is not None
+AsyncDuckDBDialect: Any = None
+SyncDuckDBDialect: Any = None
+if _HAS_DUCKDB_ENGINE:
+    from vertebra.extensions.sqlalchemy.dialects import (
+        AsyncDuckDBDialect as _AsyncDuckDBDialect,
+    )
+    from vertebra.extensions.sqlalchemy.dialects import (
+        SyncDuckDBDialect as _SyncDuckDBDialect,
+    )
+
+    AsyncDuckDBDialect = _AsyncDuckDBDialect
+    SyncDuckDBDialect = _SyncDuckDBDialect
 
 _DUCKDB_SKIP_REASON = "vertebra._duckdb native extension is not built"
 
@@ -178,22 +208,25 @@ class _MockLeaseTable:
 
 
 class _MockStatementEntry:
-    __slots__ = ("compiled_sql", "param_count", "portal_name")
+    __slots__ = ("compiled_sql", "param_count", "param_plan")
 
-    def __init__(self, param_count: int, compiled_sql: bytes, portal_name: bytes) -> None:
+    def __init__(self, param_count: int, compiled_sql: bytes, param_plan: bytes) -> None:
         self.param_count = param_count
         self.compiled_sql = compiled_sql
-        self.portal_name = portal_name
+        self.param_plan = param_plan
 
 
 class _MockStatementCache:
     def __init__(self) -> None:
-        self.entries: dict[tuple[int, str], _MockStatementEntry] = {}
+        self.entries: dict[tuple[int, bytes], _MockStatementEntry] = {}
         self.hits: int = 0
         self.misses: int = 0
 
-    def lookup(self, dialect_tag: int, sql: str) -> _MockStatementEntry | None:
-        key = (dialect_tag, sql)
+    def lookup(self, dialect_tag: int, raw_sql: bytes) -> _MockStatementEntry | None:
+        if not isinstance(raw_sql, bytes):
+            msg = "raw_sql must be bytes"
+            raise TypeError(msg)
+        key = (dialect_tag, raw_sql)
         if key in self.entries:
             self.hits += 1
             return self.entries[key]
@@ -203,18 +236,39 @@ class _MockStatementCache:
     def insert(
         self,
         dialect_tag: int,
-        sql: str,
+        raw_sql: bytes,
         param_count: int,
         compiled_sql: bytes,
-        portal_name: bytes,
-    ) -> None:
-        self.entries[(dialect_tag, sql)] = _MockStatementEntry(param_count, compiled_sql, portal_name)
+        param_plan: bytes,
+    ) -> bool:
+        if not isinstance(raw_sql, bytes):
+            msg = "raw_sql must be bytes"
+            raise TypeError(msg)
+        self.entries[(dialect_tag, raw_sql)] = _MockStatementEntry(param_count, compiled_sql, param_plan)
+        return True
 
 
 class _MockBroker:
     def __init__(self) -> None:
         self.lease_table = _MockLeaseTable()
-        self.statement_cache = _MockStatementCache()
+        self._statement_cache = _MockStatementCache()
+
+    def acquire(
+        self,
+        worker_pid: int,
+        ttl_ns: int = 0,
+        timeout_ms: int = 5000,
+        bind_key_hash: int = 0,
+    ) -> _MockLeaseGrant:
+        _ = (ttl_ns, timeout_ms, bind_key_hash)
+        return self.lease_table.acquire(worker_pid)
+
+    def release(self, slot_index: int, generation: int) -> bool:
+        self.lease_table.release(slot_index, generation)
+        return True
+
+    def statement_cache(self) -> _MockStatementCache:
+        return self._statement_cache
 
 
 class _OracleSessionPort:
@@ -514,7 +568,7 @@ def test_mssql_tds_framing_and_placeholder_rewriter() -> None:
     mssql_driver.execute("INSERT INTO ledger (id, code) VALUES (?, ?)", (7, "USD"))
     assert mssql_driver.last_rewritten_sql == "INSERT INTO ledger (id, code) VALUES (@P1, @P2)"
     assert mssql_driver.select("SELECT id, code FROM ledger WHERE id = ?", (7,)) == [{"id": 7, "code": "USD"}]
-    assert broker.statement_cache.hits >= 0
+    assert broker.statement_cache().hits >= 0
     mssql_driver.close()
 
 
@@ -621,9 +675,12 @@ async def test_sqlspec_adapters_and_async_drivers() -> None:
 )
 def test_sqlalchemy_vtb_dialect_nullpool_selection(dialect_name: str) -> None:
     """Verify SQLAlchemy +vtb dialects select NullPool when shm_broker=true is enabled."""
+    if dialect_name == "duckdb.vtb" and not _HAS_DUCKDB_ENGINE:
+        pytest.skip("duckdb-engine is only installed on Python < 3.14")
     assert len(ALL_DIALECT_SCHEMES) == 36
     assert registry.load("mssql.vtb") is SyncMSSQLDialect
-    assert registry.load("duckdb.vtb") is SyncDuckDBDialect
+    if _HAS_DUCKDB_ENGINE:
+        assert registry.load("duckdb.vtb") is SyncDuckDBDialect
     dialect_cls = registry.load(dialect_name)
     broker_url = URL.create(dialect_name.replace(".", "+"), host="localhost", query={"shm_broker": "true"})
     assert dialect_cls.get_pool_class(broker_url) is NullPool
@@ -1217,8 +1274,9 @@ def test_oracle_drivers_raise_missing_dependency_when_native_module_absent(
         with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"), cfg.provide_session():
             pass
 
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[oracle\]"):
+        with pytest.raises(InterfaceError, match=r"vertebra-core\[oracle\]") as dbapi_exc:
             SyncDBAPIConnection("oracle+vtb://localhost:1521/FREEPDB1", broker=_MockBroker())
+        assert isinstance(dbapi_exc.value.__cause__, MissingDependencyError)
     finally:
         reset_dependency_cache("vertebra._oracle")
 
@@ -1267,8 +1325,9 @@ def test_mssql_drivers_raise_missing_dependency_when_native_module_absent(
         with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"), cfg.provide_session():
             pass
 
-        with pytest.raises(MissingDependencyError, match=r"vertebra-core\[mssql\]"):
+        with pytest.raises(InterfaceError, match=r"vertebra-core\[mssql\]") as dbapi_exc:
             SyncDBAPIConnection("mssql+vtb://localhost:1433/master", broker=_MockBroker())
+        assert isinstance(dbapi_exc.value.__cause__, MissingDependencyError)
     finally:
         reset_dependency_cache("vertebra._mssql")
 
@@ -1333,3 +1392,773 @@ def test_duckdb_driver_executes_on_duckdb_engine() -> None:
         driver.rollback()
     finally:
         driver.close()
+
+
+@pytest.mark.parametrize("core_cls", [OracleCore, DuckDBCore], ids=["oracle-core", "duckdb-core"])
+@pytest.mark.parametrize("method_name", ["acquire_broker_lease", "release_broker_lease"])
+def test_core_probe_helpers_removed(core_cls: type[Any], method_name: str) -> None:
+    """OracleCore and DuckDBCore no longer carry duplicate broker probe helpers."""
+    assert not hasattr(core_cls, method_name)
+
+
+class _SyncOracleLeaseTestClient:
+    def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
+        _ = (parameters, kwargs)
+        if sql == "RAISE":
+            msg = "simulated oracle execution failure"
+            raise RuntimeError(msg)
+        return 1
+
+    def close(self) -> None:
+        return None
+
+
+class _AsyncOracleLeaseTestClient:
+    async def execute(self, sql: str, parameters: Any = None, **kwargs: Any) -> int:
+        _ = (parameters, kwargs)
+        if sql == "RAISE":
+            msg = "simulated async oracle execution failure"
+            raise RuntimeError(msg)
+        return 1
+
+    async def close(self) -> None:
+        return None
+
+
+def test_sync_oracle_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
+    """SyncOracleDriver caches bytes-keyed StatementPlan entries and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = SyncOracleDriver(OracleConfig(), broker=broker, client=_SyncOracleLeaseTestClient())
+    try:
+        sql = "INSERT INTO items (id) VALUES (:1)"
+        assert driver.execute(sql, [1]) == 1
+        sc = broker.statement_cache()
+        assert sc is not None
+        stats_after_first = sc.stats()
+        assert stats_after_first.misses == 1
+        assert stats_after_first.hits == 0
+        assert stats_after_first.inserts == 1
+
+        assert driver.execute(sql, [2]) == 1
+        stats_after_second = sc.stats()
+        assert stats_after_second.hits == 1
+        plan = sc.lookup(ORACLE_DIALECT_TAG, sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 1
+        assert plan.compiled_sql == sql.encode("utf-8")
+        assert plan.param_plan == b"\x00\x01"
+
+        with pytest.raises(RuntimeError, match="simulated oracle execution failure"):
+            driver.execute("RAISE")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 3
+        assert broker_stats.total_released == 3
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_oracle_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
+    """AsyncOracleDriver caches bytes-keyed StatementPlan entries and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = AsyncOracleDriver(OracleConfig(), broker=broker, client=_AsyncOracleLeaseTestClient())
+    try:
+        sql = "INSERT INTO items (id) VALUES (:1)"
+        assert await driver.execute(sql, [1]) == 1
+        assert await driver.execute(sql, [2]) == 1
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits == 1
+        plan = sc.lookup(ORACLE_DIALECT_TAG, sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 1
+
+        with pytest.raises(RuntimeError, match="simulated async oracle execution failure"):
+            await driver.execute("RAISE")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 3
+        assert broker_stats.total_released == 3
+    finally:
+        await driver.close()
+
+
+def test_sync_duckdb_driver_uses_real_lease_broker_and_releases_on_error() -> None:
+    """SyncDuckDBDriver routes through CommonDriverMixin bytes StatementCache and LeaseBroker."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = SyncDuckDBDriver(DuckDBConfig(path=":memory:"), broker=broker)
+    try:
+        driver.execute("CREATE TABLE items (id INTEGER)")
+        insert_sql = "INSERT INTO items VALUES (?)"
+        assert driver.execute(insert_sql, (1,)) == 1
+        assert driver.execute(insert_sql, (2,)) == 1
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(DUCKDB_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 1
+
+        with pytest.raises(ProgrammingError, match="nonexistent_table_for_lease_test"):
+            driver.execute_tuples("SELECT * FROM nonexistent_table_for_lease_test")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_duckdb_driver_uses_real_lease_broker_and_releases_on_error() -> None:
+    """AsyncDuckDBDriver routes through CommonDriverMixin bytes StatementCache and LeaseBroker."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"), broker=broker)
+    try:
+        await driver.execute("CREATE TABLE items (id INTEGER)")
+        insert_sql = "INSERT INTO items VALUES (?)"
+        assert await driver.execute(insert_sql, (1,)) == 1
+        assert await driver.execute(insert_sql, (2,)) == 1
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(DUCKDB_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 1
+
+        with pytest.raises(ProgrammingError, match="nonexistent_table_for_lease_test"):
+            await driver.execute_tuples("SELECT * FROM nonexistent_table_for_lease_test")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        await driver.close()
+
+
+def test_common_driver_mixin_statement_cache_propagates_invalid_dialect_tag() -> None:
+    """CommonDriverMixin._lookup_or_cache_statement does not swallow native dialect errors."""
+
+    class _BadDialectDriver(CommonDriverMixin[DuckDBConfig]):
+        dialect_tag = -1
+
+    broker = LeaseBroker(pool_size=1, max_overflow=0, stmt_capacity=8)
+    driver = _BadDialectDriver(DuckDBConfig(path=":memory:"), broker=broker)
+    with pytest.raises(OverflowError):
+        driver._lookup_or_cache_statement("SELECT 1")
+
+
+class _AsyncMSSQLBrokerTestClient:
+    """Async MSSQL client double delegating to an in-memory SQLite connection."""
+
+    def __init__(self) -> None:
+        self._sync = _MockMSSQLClient()
+
+    async def execute(self, sql: str, params: Any = None) -> int:
+        return self._sync.execute(sql, params)
+
+    async def query(self, sql: str, params: Any = None) -> dict[str, Any]:
+        return self._sync.query(sql, params)
+
+    async def fetch_all(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+        return self._sync.fetch_all(sql, params)
+
+    async def close(self) -> None:
+        self._sync.close()
+
+
+@pytest.mark.parametrize(
+    ("target", "method_name"),
+    [
+        (MSSQLCore, "prepare_and_lease"),
+        (MSSQLCore, "release_broker_lease"),
+        (SyncSQLiteDriver, "_acquire_sqlite_broker_lease"),
+        (SyncSQLiteDriver, "_release_sqlite_broker_lease"),
+        (AsyncSQLiteDriver, "_acquire_sqlite_broker_lease"),
+        (AsyncSQLiteDriver, "_release_sqlite_broker_lease"),
+    ],
+)
+def test_mssql_and_sqlite_probe_helpers_removed(target: type[Any], method_name: str) -> None:
+    """MSSQLCore and SQLite drivers no longer carry broker/statement-cache probe helpers."""
+    assert not hasattr(target, method_name)
+
+
+def test_sync_mssql_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
+    """SyncMSSQLDriver caches rewritten @P1 bytes plans and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = SyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_MockMSSQLClient())
+    try:
+        driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, code TEXT)")
+        insert_sql = "INSERT INTO items (id, code) VALUES (?, ?)"
+        assert driver.execute(insert_sql, (1, "USD")) == 1
+        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
+        assert driver.execute(insert_sql, (2, "EUR")) == 1
+        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(MSSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 2
+        assert plan.compiled_sql == b"INSERT INTO items (id, code) VALUES (@P1, @P2)"
+
+        with pytest.raises(sqlite3.OperationalError):
+            driver.select("SELECT * FROM nonexistent_mssql_table")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+async def test_async_mssql_driver_uses_common_mixin_broker_and_bytes_statement_cache() -> None:
+    """AsyncMSSQLDriver caches rewritten @P1 bytes plans and releases leases on error."""
+    broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    driver = AsyncMSSQLDriver(MSSQLConfig(), broker=broker, client=_AsyncMSSQLBrokerTestClient())
+    try:
+        await driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, code TEXT)")
+        insert_sql = "INSERT INTO items (id, code) VALUES (?, ?)"
+        assert await driver.execute(insert_sql, (1, "USD")) == 1
+        assert await driver.execute(insert_sql, (2, "EUR")) == 1
+        assert driver.last_rewritten_sql == "INSERT INTO items (id, code) VALUES (@P1, @P2)"
+
+        sc = broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits >= 1
+        plan = sc.lookup(MSSQL_DIALECT_TAG, insert_sql.encode("utf-8"))
+        assert plan is not None
+        assert plan.param_count == 2
+        assert plan.compiled_sql == b"INSERT INTO items (id, code) VALUES (@P1, @P2)"
+
+        with pytest.raises(sqlite3.OperationalError):
+            await driver.select("SELECT * FROM nonexistent_mssql_table")
+        broker_stats = broker.stats()
+        assert broker_stats.active_leases == 0
+        assert broker_stats.total_acquired == 4
+        assert broker_stats.total_released == 4
+    finally:
+        await driver.close()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "tail_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+def test_sync_duckdb_pipeline_exit_contract(scenario: str) -> None:
+    """SyncDuckDBPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    driver = SyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+    try:
+        driver.execute("CREATE TABLE pipe_items (id INTEGER PRIMARY KEY, label VARCHAR)")
+        if scenario == "auto_flush":
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "auto"))
+            assert driver.in_transaction is False
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [(1, "auto")]
+        elif scenario == "tail_flush":
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "first"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "tail"))
+            assert driver.in_transaction is False
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [
+                (1, "first"),
+                (2, "tail"),
+            ]
+        elif scenario == "caller_tx_rollback":
+            driver.begin()
+            driver.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "outer"))
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "inner"))
+            assert driver.in_transaction is True
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [
+                (1, "outer"),
+                (2, "inner"),
+            ]
+            driver.rollback()
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"), driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "first"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "discarded"))
+                raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items") == []
+        else:
+            driver.begin()
+            driver.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "outer_kept"))
+            with pytest.raises(RuntimeError, match="abort_inner"), driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "inner_flushed"))
+                assert pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (3, "inner_discarded"))
+                raise RuntimeError("abort_inner")
+            assert driver.in_transaction is True
+            driver.commit()
+            assert driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [(1, "outer_kept")]
+    finally:
+        driver.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "tail_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+async def test_async_duckdb_pipeline_exit_contract(scenario: str) -> None:
+    """AsyncDuckDBPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    driver = AsyncDuckDBDriver(DuckDBConfig(path=":memory:"))
+    try:
+        await driver.execute("CREATE TABLE pipe_items (id INTEGER PRIMARY KEY, label VARCHAR)")
+        if scenario == "auto_flush":
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "auto"))
+            assert driver.in_transaction is False
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [(1, "auto")]
+        elif scenario == "tail_flush":
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "first"))
+                assert await pipe.results() == [1]
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "tail"))
+            assert driver.in_transaction is False
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [
+                (1, "first"),
+                (2, "tail"),
+            ]
+        elif scenario == "caller_tx_rollback":
+            await driver.begin()
+            await driver.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "outer"))
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "inner"))
+            assert driver.in_transaction is True
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [
+                (1, "outer"),
+                (2, "inner"),
+            ]
+            await driver.rollback()
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"):
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "first"))
+                    assert await pipe.results() == [1]
+                    pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "discarded"))
+                    raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items") == []
+        else:
+            await driver.begin()
+            await driver.execute("INSERT INTO pipe_items VALUES (?, ?)", (1, "outer_kept"))
+            with pytest.raises(RuntimeError, match="abort_inner"):
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (2, "inner_flushed"))
+                    assert await pipe.results() == [1]
+                    pipe.execute("INSERT INTO pipe_items VALUES (?, ?)", (3, "inner_discarded"))
+                    raise RuntimeError("abort_inner")
+            assert driver.in_transaction is True
+            await driver.commit()
+            assert await driver.execute_tuples("SELECT id, label FROM pipe_items ORDER BY id") == [(1, "outer_kept")]
+    finally:
+        await driver.close()
+
+
+class _FakeMSSQLProtocolError(Exception):
+    """Error double carrying sqlstate and vendor_code for dialect tests."""
+
+    def __init__(self, message: str, *, sqlstate: str | None = None, vendor_code: int | None = None) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+        self.vendor_code = vendor_code
+
+
+class _FakeMSSQLSyncProtocolDriver:
+    """Protocol-fake sync SQL Server driver supporting metadata, OUTPUT, and nextset()."""
+
+    def __init__(
+        self,
+        *,
+        fail_serverproperty: bool = False,
+        server_version_info: tuple[int, ...] | None = None,
+        leading_empty_sets: int = 0,
+        spin_forever: bool = False,
+    ) -> None:
+        self.fail_serverproperty = fail_serverproperty
+        if server_version_info is not None:
+            self.server_version_info = server_version_info
+        self.leading_empty_sets = leading_empty_sets
+        self.spin_forever = spin_forever
+        self.nextset_calls = 0
+        self._pending_sets: list[tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]] = []
+        self.queries: list[str] = []
+
+    def begin(self, isolation_level: str | None = None) -> None:
+        _ = isolation_level
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def nextset(self) -> Any:
+        self.nextset_calls += 1
+        if self.spin_forever:
+            return ([], None)
+        if not self._pending_sets:
+            return False
+        return self._pending_sets.pop(0)
+
+    def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]:
+        _ = parameters
+        self.queries.append(sql)
+        upper = sql.upper()
+        if "SERVERPROPERTY" in upper:
+            if self.fail_serverproperty:
+                raise ProgrammingError("SERVERPROPERTY unsupported")
+            return [("16.0.1000.6",)], (("version", None, None, None, None, None, None),)
+        if "@@VERSION" in upper:
+            return (
+                [("Microsoft SQL Server 2022 (RTM-CU12) - 16.0.4115.5 (X64)",)],
+                (("version", None, None, None, None, None, None),),
+            )
+        if "CAST('TEST MAX SUPPORT'" in upper:
+            return [("test max support",)], (("val", None, None, None, None, None, None),)
+        if "FN_LISTEXTENDEDPROPERTY" in upper:
+            return [(1,)], (("val", None, None, None, None, None, None),)
+        if "SCHEMA_NAME()" in upper:
+            return [("dbo",)], (("schema_name", None, None, None, None, None, None),)
+        if "OUTPUT INSERTED." in upper or "OUTPUT DELETED." in upper:
+            output_set = ([(42,)], (("id", None, None, None, None, None, None),))
+            if self.spin_forever:
+                return [], None
+            if self.leading_empty_sets > 0:
+                self._pending_sets = [([], None) for _ in range(self.leading_empty_sets - 1)]
+                self._pending_sets.append(output_set)
+                return [], None
+            return output_set
+        return [], None
+
+
+class _FakeMSSQLAsyncProtocolDriver:
+    """Protocol-fake async SQL Server driver delegating to _FakeMSSQLSyncProtocolDriver."""
+
+    def __init__(self, sync_driver: _FakeMSSQLSyncProtocolDriver) -> None:
+        self._sync = sync_driver
+        if hasattr(sync_driver, "server_version_info"):
+            self.server_version_info = sync_driver.server_version_info
+
+    async def begin(self, isolation_level: str | None = None) -> None:
+        self._sync.begin(isolation_level)
+
+    async def commit(self) -> None:
+        self._sync.commit()
+
+    async def rollback(self) -> None:
+        self._sync.rollback()
+
+    async def close(self) -> None:
+        self._sync.close()
+
+    async def nextset(self) -> Any:
+        return self._sync.nextset()
+
+    async def execute_with_description(
+        self,
+        sql: str,
+        parameters: Any = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[tuple[Any, ...], ...] | None]:
+        return self._sync.execute_with_description(sql, parameters)
+
+
+@pytest.mark.parametrize(
+    ("fail_serverproperty", "preset_version", "expected_version"),
+    [
+        (False, None, (16, 0, 1000, 6)),
+        (True, None, (16, 0, 4115, 5)),
+        (False, (15, 0, 2000, 5), (15, 0, 2000, 5)),
+    ],
+)
+@pytest.mark.anyio
+async def test_mssql_get_server_version_info_queries_and_falls_back_to_version(
+    fail_serverproperty: bool,
+    preset_version: tuple[int, ...] | None,
+    expected_version: tuple[int, ...],
+) -> None:
+    """Verify SERVERPROPERTY parsing, @@VERSION fallback, and raw server_version_info on sync and async MSSQL."""
+    sync_driver = _FakeMSSQLSyncProtocolDriver(
+        fail_serverproperty=fail_serverproperty,
+        server_version_info=preset_version,
+    )
+    sync_engine = create_engine(
+        "mssql+vtb://localhost:1433/master",
+        creator=lambda: SyncDBAPIConnection(
+            "mssql+vtb://localhost:1433/master",
+            driver=sync_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        with sync_engine.connect():
+            assert sync_engine.dialect.server_version_info == expected_version
+            assert sync_engine.dialect.execution_ctx_cls is MSExecutionContext_vtb
+    finally:
+        sync_engine.dispose()
+
+    async_inner = _FakeMSSQLSyncProtocolDriver(
+        fail_serverproperty=fail_serverproperty,
+        server_version_info=preset_version,
+    )
+    async_driver = _FakeMSSQLAsyncProtocolDriver(async_inner)
+    async_engine = create_async_engine(
+        "mssql+vtb_async://localhost:1433/master",
+        async_creator=lambda: AsyncDBAPIConnection(
+            "mssql+vtb_async://localhost:1433/master",
+            driver=async_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        async with async_engine.connect():
+            assert async_engine.dialect.server_version_info == expected_version
+            assert async_engine.dialect.execution_ctx_cls is MSExecutionContext_vtb
+    finally:
+        await async_engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_mssql_execution_context_output_and_nextset() -> None:
+    """Verify OUTPUT inserted/deleted advance cursor.nextset() across sync and async MSSQL engines."""
+    metadata = MetaData()
+    tbl = Table(
+        "mssql_items",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("name", String(64)),
+    )
+
+    sync_driver = _FakeMSSQLSyncProtocolDriver(leading_empty_sets=2)
+    sync_engine = create_engine(
+        "mssql+vtb://localhost:1433/master",
+        creator=lambda: SyncDBAPIConnection(
+            "mssql+vtb://localhost:1433/master",
+            driver=sync_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        with sync_engine.begin() as conn:
+            inserted_rows = conn.execute(insert(tbl).values(name="alpha").returning(tbl.c.id)).fetchall()
+            assert inserted_rows == [(42,)]
+            deleted_rows = conn.execute(delete(tbl).where(tbl.c.id == 42).returning(tbl.c.id)).fetchall()
+            assert deleted_rows == [(42,)]
+    finally:
+        sync_engine.dispose()
+
+    async_driver = _FakeMSSQLAsyncProtocolDriver(_FakeMSSQLSyncProtocolDriver(leading_empty_sets=2))
+    async_engine = create_async_engine(
+        "mssql+vtb_async://localhost:1433/master",
+        async_creator=lambda: AsyncDBAPIConnection(
+            "mssql+vtb_async://localhost:1433/master",
+            driver=async_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        async with async_engine.begin() as aconn:
+            inserted_rows = (await aconn.execute(insert(tbl).values(name="beta").returning(tbl.c.id))).fetchall()
+            assert inserted_rows == [(42,)]
+            deleted_rows = (await aconn.execute(delete(tbl).where(tbl.c.id == 42).returning(tbl.c.id))).fetchall()
+            assert deleted_rows == [(42,)]
+    finally:
+        await async_engine.dispose()
+
+    spinning_driver = _FakeMSSQLSyncProtocolDriver(spin_forever=True)
+    spinning_engine = create_engine(
+        "mssql+vtb://localhost:1433/master",
+        creator=lambda: SyncDBAPIConnection(
+            "mssql+vtb://localhost:1433/master",
+            driver=spinning_driver,
+            share_pool=False,
+        ),
+    )
+    try:
+        with spinning_engine.begin() as conn:
+            res = conn.execute(insert(tbl).values(name="spin").returning(tbl.c.id))
+            assert res.returns_rows is False
+            assert 1 <= spinning_driver.nextset_calls <= 32
+    finally:
+        spinning_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "dialect_cls",
+    [SyncMSSQLDialect, AsyncMSSQLDialect],
+)
+@pytest.mark.parametrize(
+    ("sqlstate", "vendor_code", "expected"),
+    [
+        ("08S01", None, True),
+        ("08001", None, True),
+        ("HYT00", None, True),
+        ("HY010", None, True),
+        (None, 10054, True),
+        ("23505", None, False),
+        ("40001", None, False),
+        (None, 2627, False),
+    ],
+)
+def test_mssql_is_disconnect_codes(
+    dialect_cls: type[SyncMSSQLDialect | AsyncMSSQLDialect],
+    sqlstate: str | None,
+    vendor_code: int | None,
+    expected: bool,
+) -> None:
+    """Verify SyncMSSQLDialect and AsyncMSSQLDialect classify SQLSTATE and vendor disconnect codes."""
+    dialect = dialect_cls()
+    err = _FakeMSSQLProtocolError("mssql failure", sqlstate=sqlstate, vendor_code=vendor_code)
+    assert dialect.is_disconnect(err) is expected
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
+@pytest.mark.anyio
+async def test_duckdb_sqlalchemy21_real_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify live sync and async DuckDB engines run DDL, DML, and json_serializer on vertebra._duckdb."""
+    pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
+    serializer = msgspec.json.encode
+    deserializer = msgspec.json.decode
+
+    duckdb_engine = pytest.importorskip(
+        "duckdb_engine",
+        reason="duckdb-engine is only installed on Python < 3.14",
+    )
+
+    orig_init = duckdb_engine.Dialect.__init__
+
+    def _reject_json_kwargs(self: Any, *args: Any, **kwargs: Any) -> None:
+        if "json_serializer" in kwargs or "json_deserializer" in kwargs:
+            msg = "unexpected keyword argument 'json_serializer'"
+            raise TypeError(msg)
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb_engine.Dialect, "__init__", _reject_json_kwargs)
+    guarded_dialect = SyncDuckDBDialect(json_serializer=serializer, json_deserializer=deserializer)
+    assert guarded_dialect._json_serializer is serializer
+    assert guarded_dialect._json_deserializer is deserializer
+    monkeypatch.undo()
+
+    sync_engine = create_engine(
+        "duckdb+vtb:///:memory:",
+        json_serializer=serializer,
+        json_deserializer=deserializer,
+    )
+    metadata = MetaData()
+    sync_items = Table(
+        "duck_sync_items",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(64)),
+    )
+    try:
+        assert sync_engine.dialect._json_serializer is serializer
+        assert sync_engine.dialect._json_deserializer is deserializer
+        with sync_engine.begin() as conn:
+            metadata.create_all(conn)
+            conn.execute(insert(sync_items).values(id=1, name="alpha"))
+            rows = conn.execute(select(sync_items)).fetchall()
+            assert rows == [(1, "alpha")]
+            assert sync_engine.dialect.server_version_info == (8, 0)
+            dbapi_conn = conn.connection.dbapi_connection
+            assert dbapi_conn is not None
+            assert sync_engine.dialect.do_ping(dbapi_conn) is True
+    finally:
+        sync_engine.dispose()
+
+    async_items = Table(
+        "duck_async_items",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(64)),
+    )
+    async_engine = create_async_engine("duckdb+vtb_async:///:memory:")
+    try:
+        async with async_engine.begin() as aconn:
+            await aconn.run_sync(async_items.metadata.create_all)
+            await aconn.execute(insert(async_items).values(id=2, name="beta"))
+            rows = (await aconn.execute(select(async_items))).fetchall()
+            assert rows == [(2, "beta")]
+            assert async_engine.dialect.server_version_info == (8, 0)
+            ping_ok = await aconn.run_sync(
+                lambda sc: (
+                    sc.connection.dbapi_connection is not None
+                    and async_engine.dialect.do_ping(sc.connection.dbapi_connection)
+                )
+            )
+            assert ping_ok is True
+    finally:
+        await async_engine.dispose()
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
+def test_duckdb_missing_dependency_error_when_uninstalled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify importing vertebra.extensions.sqlalchemy.dialects.duckdb without duckdb_engine names sqlalchemy-duckdb."""
+    import vertebra.extensions.sqlalchemy.dialects.duckdb as duckdb_mod
+
+    monkeypatch.setitem(sys.modules, "duckdb_engine", None)
+    reset_dependency_cache("duckdb_engine")
+    try:
+        with pytest.raises(MissingDependencyError, match=r"sqlalchemy-duckdb"):
+            importlib.reload(duckdb_mod)
+    finally:
+        monkeypatch.undo()
+        reset_dependency_cache("duckdb_engine")
+        importlib.reload(duckdb_mod)
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB_ENGINE, reason="duckdb-engine is only installed on Python < 3.14")
+@pytest.mark.parametrize(
+    "dialect_cls",
+    [SyncDuckDBDialect, AsyncDuckDBDialect],
+)
+@pytest.mark.parametrize(
+    ("sqlstate", "message", "closed", "expected"),
+    [
+        ("08006", "socket error", False, True),
+        ("08S01", "comm link failure", False, True),
+        (None, "database operation failed", True, True),
+        (None, "connection closed unexpectedly", False, True),
+        ("40001", "serialization failure", False, False),
+        ("23505", "unique violation", False, False),
+    ],
+)
+def test_duckdb_is_disconnect_codes(
+    dialect_cls: type[SyncDuckDBDialect | AsyncDuckDBDialect],
+    sqlstate: str | None,
+    message: str,
+    closed: bool,
+    expected: bool,
+) -> None:
+    """Verify DuckDB dialects classify SQLSTATE 08*, closed connections, and non-disconnect codes."""
+
+    class _ConnStub:
+        def __init__(self, is_closed: bool) -> None:
+            self.closed = is_closed
+
+    dialect = dialect_cls()
+    err = _FakeMSSQLProtocolError(message, sqlstate=sqlstate)
+    assert dialect.is_disconnect(err, _ConnStub(closed)) is expected

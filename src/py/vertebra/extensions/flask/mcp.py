@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from vertebra.agent.mcp.controllers import (
     PromptController,
@@ -23,6 +23,10 @@ from vertebra.agent.mcp.webmcp import (
     build_webmcp_manifest,
     render_webmcp_manifest_json,
 )
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 __all__ = (
     "MCPConfig",
@@ -45,12 +49,13 @@ __all__ = (
 
 
 def attach_mcp_routes(
-    app: Any,
+    app: Flask | Any,
     config: MCPConfig | None = None,
     *,
     skills: MCPSkillsConfig | SkillCatalog | None = None,
 ) -> MCPRegistry:
     """Scan Flask ``view_functions`` for ``@mcp_tool``, ``@mcp_resource``, and ``@mcp_prompt``."""
+    ensure_module("flask", extra="flask")
     resolved = config or MCPConfig(server_name="vertebra-flask-mcp")
     registry = MCPRegistry()
 

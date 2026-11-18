@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Self
+from collections.abc import Awaitable, Callable
+from typing import Any, Self, cast
 from urllib.parse import parse_qsl
 
 import anyio.to_thread
@@ -316,7 +316,7 @@ async def dispatch_handler_direct(
         return buffered
 
     if callable(response) and not isinstance(response, type):
-        await response(scope, receive, send)
+        await cast("Awaitable[Any]", response(scope, receive, send))
         return None
 
     payload_bytes = encode_json_bytes(response)

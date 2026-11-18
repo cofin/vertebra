@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +76,7 @@ class DeferredProp(msgspec.Struct, frozen=True, gc=False):
     resolver: Callable[[], Any]
     group: str = "default"
     once: bool = False
+    expires_in: int | None = None
 
 
 class MergeProp(msgspec.Struct, frozen=True, gc=False):
@@ -148,6 +149,66 @@ def inertia(
     )
 
 
+def _get_header(request: Any, name: str) -> str | None:
+    """Lookup an HTTP request header case-insensitively."""
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    if hasattr(headers, "get"):
+        val = headers.get(name)
+        if val is not None:
+            return str(val)
+        lower_name = name.lower()
+        val = headers.get(lower_name)
+        if val is not None:
+            return str(val)
+        if hasattr(headers, "items"):
+            for key, item_val in headers.items():
+                if str(key).lower() == lower_name:
+                    return str(item_val)
+    return None
+
+
+def _build_request_url(request: Any) -> str:
+    """Build the Inertia page URL including non-empty query string."""
+    path = str(getattr(request, "path", "/"))
+    if "?" in path:
+        return path
+    query_val = getattr(request, "query_string", None)
+    if query_val is None:
+        query_val = getattr(request, "query", None)
+    if query_val is None:
+        query_val = getattr(request, "raw_query", None)
+    if isinstance(query_val, bytes):
+        query_str = query_val.decode("utf-8", errors="replace")
+    elif query_val:
+        query_str = str(query_val)
+    else:
+        query_str = ""
+    if query_str.startswith("?"):
+        query_str = query_str[1:]
+    return f"{path}?{query_str}" if query_str else path
+
+
+def _build_once_meta(key: str, expires_in: int | None) -> dict[str, Any]:
+    """Construct Inertia v3 onceProps metadata entry."""
+    meta: dict[str, Any] = {"prop": key}
+    if expires_in is not None:
+        meta["expiresAt"] = expires_in
+    return meta
+
+
+async def _resolve_async_value(value: Any) -> Any:
+    """Resolve sync/async callables, awaitables, and async iterables."""
+    if callable(value):
+        value = value()
+    if inspect.isawaitable(value):
+        value = await value
+    if isinstance(value, AsyncIterable) and not isinstance(value, (str, bytes, bytearray)):
+        return [item async for item in value]
+    return value
+
+
 class _BaseInertiaMiddleware:
     """Shared Inertia.js v3 protocol configuration, prop resolution, and HTML shell rendering."""
 
@@ -170,36 +231,35 @@ class _BaseInertiaMiddleware:
 
     def is_inertia_request(self, request: Any) -> bool:
         """Return True when the request carries X-Inertia: true."""
-        headers = request.headers
-        value: str = headers.get("X-Inertia", "") if hasattr(headers, "get") else ""
-        return str(value).lower() == "true"
+        value = _get_header(request, "X-Inertia") or ""
+        return value.lower() == "true"
 
     def check_version(self, request: Any) -> str | None:
         """Compare client version against current version, returning current version on mismatch."""
-        headers = request.headers
-        client_version = headers.get("X-Inertia-Version", "") if hasattr(headers, "get") else ""
+        client_version = _get_header(request, "X-Inertia-Version") or ""
         current = self.get_version()
         if client_version and client_version != current:
             return current
         return None
 
-    def resolve_props(
+    def _plan_props(
         self,
         request: Any,
         props: dict[str, Any],
         component: str,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Resolve props and build Inertia v3 metadata."""
+        *,
+        shared_keys: frozenset[str] = frozenset(),
+    ) -> tuple[list[tuple[str, Any, bool]], dict[str, Any]]:
+        """Plan prop evaluations and build Inertia v3 metadata."""
         partial_component, include_fields, exclude_fields = self._parse_partial(request)
         is_partial = partial_component is not None and partial_component == component
 
-        headers = request.headers
-        reset_str = headers.get("X-Inertia-Reset", "") if hasattr(headers, "get") else ""
-        reset_fields = self._parse_csv_header(str(reset_str)) if reset_str else []
-        except_once_str = headers.get("X-Inertia-Except-Once-Props", "") if hasattr(headers, "get") else ""
-        except_once = self._parse_csv_header(str(except_once_str)) if except_once_str else []
+        reset_str = _get_header(request, "X-Inertia-Reset") or ""
+        reset_set = set(self._parse_csv_header(reset_str)) if reset_str else set()
+        except_once_str = _get_header(request, "X-Inertia-Except-Once-Props") or ""
+        except_once = set(self._parse_csv_header(except_once_str)) if except_once_str else set()
 
-        resolved: dict[str, Any] = {}
+        to_resolve: list[tuple[str, Any, bool]] = []
         deferred: dict[str, list[str]] = {}
         merge_props: list[str] = []
         prepend_props: list[str] = []
@@ -211,41 +271,46 @@ class _BaseInertiaMiddleware:
             if is_partial and exclude_fields and key in exclude_fields:
                 continue
 
+            is_shared = key in shared_keys
+
             if isinstance(value, DeferredProp):
-                if not is_partial:
-                    deferred.setdefault(value.group, []).append(key)
+                if value.once and key in except_once and key not in reset_set:
                     continue
-                if include_fields and key not in include_fields:
+                if not is_partial or (include_fields and key not in include_fields):
                     deferred.setdefault(value.group, []).append(key)
+                    if value.once and key not in reset_set:
+                        once_props[key] = _build_once_meta(key, value.expires_in)
                     continue
-                resolved[key] = value.resolver()
+                to_resolve.append((key, value.resolver, True))
+                if value.once and key not in reset_set:
+                    once_props[key] = _build_once_meta(key, value.expires_in)
             elif isinstance(value, MergeProp):
-                if is_partial and include_fields and key not in include_fields:
+                if is_partial and include_fields and key not in include_fields and not is_shared:
                     continue
-                resolved[key] = value.resolver()
-                if value.prepend:
-                    prepend_props.append(key)
-                else:
-                    merge_props.append(key)
+                to_resolve.append((key, value.resolver, True))
+                if key not in reset_set:
+                    if value.prepend:
+                        prepend_props.append(key)
+                    else:
+                        merge_props.append(key)
             elif isinstance(value, DeepMergeProp):
-                if is_partial and include_fields and key not in include_fields:
+                if is_partial and include_fields and key not in include_fields and not is_shared:
                     continue
-                resolved[key] = value.resolver()
-                deep_merge_props.append(key)
+                to_resolve.append((key, value.resolver, True))
+                if key not in reset_set:
+                    deep_merge_props.append(key)
             elif isinstance(value, OnceProp):
-                if key in except_once:
+                if key in except_once and key not in reset_set:
                     continue
-                if is_partial and include_fields and key not in include_fields:
+                if is_partial and include_fields and key not in include_fields and not is_shared:
                     continue
-                resolved[key] = value.resolver()
-                meta: dict[str, Any] = {"prop": key}
-                if value.expires_in is not None:
-                    meta["expiresAt"] = value.expires_in
-                once_props[key] = meta
+                to_resolve.append((key, value.resolver, True))
+                if key not in reset_set:
+                    once_props[key] = _build_once_meta(key, value.expires_in)
             elif isinstance(value, ScrollProp):
-                if is_partial and include_fields and key not in include_fields:
+                if is_partial and include_fields and key not in include_fields and not is_shared:
                     continue
-                resolved[key] = value.resolver()
+                to_resolve.append((key, value.resolver, True))
                 scroll_props[key] = {
                     "pageName": value.page_name,
                     "currentPage": value.current_page,
@@ -254,15 +319,11 @@ class _BaseInertiaMiddleware:
                 }
             elif isinstance(value, OptionalProp):
                 if is_partial and (not include_fields or key in include_fields):
-                    resolved[key] = value.resolver()
-            elif callable(value):
-                if is_partial and include_fields and key not in include_fields:
-                    continue
-                resolved[key] = value()
+                    to_resolve.append((key, value.resolver, True))
             else:
-                if is_partial and include_fields and key not in include_fields:
+                if is_partial and include_fields and key not in include_fields and not is_shared:
                     continue
-                resolved[key] = value
+                to_resolve.append((key, value, callable(value)))
 
         metadata: dict[str, Any] = {}
         if deferred:
@@ -277,39 +338,90 @@ class _BaseInertiaMiddleware:
             metadata["scrollProps"] = scroll_props
         if once_props:
             metadata["onceProps"] = once_props
-        if reset_fields:
-            metadata["resetProps"] = reset_fields
 
+        return to_resolve, metadata
+
+    def resolve_props(
+        self,
+        request: Any,
+        props: dict[str, Any],
+        component: str,
+        *,
+        shared_keys: frozenset[str] = frozenset(),
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve props synchronously and build Inertia v3 metadata."""
+        to_resolve, metadata = self._plan_props(request, props, component, shared_keys=shared_keys)
+        resolved: dict[str, Any] = {}
+        for key, value, is_call in to_resolve:
+            resolved[key] = value() if is_call else value
         return resolved, metadata
 
-    def build_page_object(self, request: Any, response: InertiaResponse) -> dict[str, Any]:
-        """Construct the full Inertia v3 page object."""
-        merged_props: dict[str, Any] = {}
-        if self._config.shared_data:
-            merged_props.update(self._config.shared_data)
-        merged_props.update(response.props)
+    async def aresolve_props(
+        self,
+        request: Any,
+        props: dict[str, Any],
+        component: str,
+        *,
+        shared_keys: frozenset[str] = frozenset(),
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve sync/async props and async iterables and build Inertia v3 metadata."""
+        to_resolve, metadata = self._plan_props(request, props, component, shared_keys=shared_keys)
+        resolved: dict[str, Any] = {}
+        for key, value, _ in to_resolve:
+            resolved[key] = await _resolve_async_value(value)
+        return resolved, metadata
 
-        resolved_props, metadata = self.resolve_props(request, merged_props, response.component)
-
+    def _assemble_page_object(
+        self,
+        request: Any,
+        response: InertiaResponse,
+        resolved_props: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Assemble the final Inertia v3 page payload dictionary."""
         page: dict[str, Any] = {
             "component": response.component,
             "props": resolved_props,
-            "url": getattr(request, "path", "/"),
+            "url": _build_request_url(request),
             "version": self.get_version(),
         }
-
         if response.encrypt_history:
             page["encryptHistory"] = True
         if response.clear_history:
             page["clearHistory"] = True
-
         page.update(metadata)
         return page
 
-    @staticmethod
-    def should_redirect_303(method: str, status_code: int) -> bool:
-        """Return True when a 301/302 redirect after PUT/PATCH/DELETE should become 303."""
-        return method.upper() in ("PUT", "PATCH", "DELETE") and status_code in (301, 302)
+    def _merge_props(self, response: InertiaResponse) -> tuple[dict[str, Any], frozenset[str]]:
+        """Merge configured shared_data with response props."""
+        merged_props: dict[str, Any] = {}
+        shared_keys = frozenset(self._config.shared_data.keys()) if self._config.shared_data else frozenset()
+        if self._config.shared_data:
+            merged_props.update(self._config.shared_data)
+        merged_props.update(response.props)
+        return merged_props, shared_keys
+
+    def build_page_object(self, request: Any, response: InertiaResponse) -> dict[str, Any]:
+        """Construct the full Inertia v3 page object synchronously."""
+        merged_props, shared_keys = self._merge_props(response)
+        resolved_props, metadata = self.resolve_props(
+            request,
+            merged_props,
+            response.component,
+            shared_keys=shared_keys,
+        )
+        return self._assemble_page_object(request, response, resolved_props, metadata)
+
+    async def abuild_page_object(self, request: Any, response: InertiaResponse) -> dict[str, Any]:
+        """Construct the full Inertia v3 page object asynchronously."""
+        merged_props, shared_keys = self._merge_props(response)
+        resolved_props, metadata = await self.aresolve_props(
+            request,
+            merged_props,
+            response.component,
+            shared_keys=shared_keys,
+        )
+        return self._assemble_page_object(request, response, resolved_props, metadata)
 
     def _render_html_response(
         self,
@@ -318,12 +430,7 @@ class _BaseInertiaMiddleware:
         ssr_result: SSRResult | None,
     ) -> InertiaHttpResponse:
         """Render the HTML page shell with resolved asset tags, early hints, and CSP nonce."""
-        headers = getattr(request, "headers", None)
-        csp_nonce: str | None = None
-        if headers is not None and hasattr(headers, "get"):
-            raw_nonce = headers.get(self._config.csp_nonce_header) or headers.get(self._config.csp_nonce_header.lower())
-            if raw_nonce:
-                csp_nonce = str(raw_nonce)
+        csp_nonce = _get_header(request, self._config.csp_nonce_header) or None
 
         asset_tags: ResolvedAssetTags | None = None
         early_hints_spec: EarlyHintsSpec | None = None
@@ -366,14 +473,13 @@ class _BaseInertiaMiddleware:
 
     def _parse_partial(self, request: Any) -> tuple[str | None, list[str], list[str]]:
         """Extract (component, include_fields, exclude_fields) for partial reloads."""
-        headers = request.headers
-        component = headers.get("X-Inertia-Partial-Component") if hasattr(headers, "get") else None
-        include_str = headers.get("X-Inertia-Partial-Data", "") if hasattr(headers, "get") else ""
-        exclude_str = headers.get("X-Inertia-Partial-Except", "") if hasattr(headers, "get") else ""
+        component = _get_header(request, "X-Inertia-Partial-Component")
+        include_str = _get_header(request, "X-Inertia-Partial-Data") or ""
+        exclude_str = _get_header(request, "X-Inertia-Partial-Except") or ""
         return (
             component,
-            self._parse_csv_header(str(include_str)) if include_str else [],
-            self._parse_csv_header(str(exclude_str)) if exclude_str else [],
+            self._parse_csv_header(include_str) if include_str else [],
+            self._parse_csv_header(exclude_str) if exclude_str else [],
         )
 
     @staticmethod
@@ -399,14 +505,14 @@ class SyncInertiaMiddleware(_BaseInertiaMiddleware):
         is_inertia = self.is_inertia_request(request)
 
         req_method = getattr(request, "method", "GET")
-        req_path = getattr(request, "path", "/")
+        req_url = _build_request_url(request)
 
         if is_inertia and req_method.upper() == "GET":
             conflict_version = self.check_version(request)
             if conflict_version is not None:
                 return InertiaHttpResponse(
                     status=409,
-                    headers={"X-Inertia-Location": req_path},
+                    headers={"X-Inertia-Location": req_url},
                     body=b"",
                 )
 
@@ -459,18 +565,18 @@ class AsyncInertiaMiddleware(_BaseInertiaMiddleware):
         is_inertia = self.is_inertia_request(request)
 
         req_method = getattr(request, "method", "GET")
-        req_path = getattr(request, "path", "/")
+        req_url = _build_request_url(request)
 
         if is_inertia and req_method.upper() == "GET":
             conflict_version = self.check_version(request)
             if conflict_version is not None:
                 return InertiaHttpResponse(
                     status=409,
-                    headers={"X-Inertia-Location": req_path},
+                    headers={"X-Inertia-Location": req_url},
                     body=b"",
                 )
 
-        page = self.build_page_object(request, response)
+        page = await self.abuild_page_object(request, response)
 
         if is_inertia:
             body = encode_json(page, as_bytes=True)

@@ -490,6 +490,12 @@ async fn run_server(
 
     #[cfg(all(feature = "python", unix))]
     let mut shm_factory: Option<Arc<std::sync::Mutex<vertebra_http::workers::RingFactory>>> = None;
+    #[cfg(all(feature = "python", unix))]
+    let mut shm_readers: Option<
+        Arc<vertebra_http::dispatcher::shm_reader::ResponseReaderRegistry>,
+    > = None;
+    #[cfg(all(feature = "python", unix))]
+    let mut shm_supervisor: Option<tokio::task::JoinHandle<()>> = None;
     #[cfg(feature = "python")]
     let mut embedded_workers: Option<EmbeddedPythonWorkers> = None;
 
@@ -511,6 +517,7 @@ async fn run_server(
                     RingPairConfig::for_environment(worker_count),
                     config.workers.broker_pool_size,
                     config.workers.broker_max_overflow,
+                    config.workers.broker_stmt_capacity,
                 )
                 .expect("failed to create ring factory");
 
@@ -521,7 +528,11 @@ async fn run_server(
                 );
 
                 let ring_pairs = factory.all_ring_pairs().to_vec();
-                let shm = ShmDispatcher::new(ring_pairs.clone(), 65536);
+                let shm = ShmDispatcher::new_with_queue_depth(
+                    ring_pairs.clone(),
+                    65536,
+                    config.stream_queue_depth,
+                );
                 dispatcher = Arc::new(
                     Dispatcher::from_shm(Arc::clone(&shm))
                         .with_backpressure(config.backpressure.clone()),
@@ -529,7 +540,7 @@ async fn run_server(
 
                 shm.spawn_sweeper(server_shutdown_token.clone());
 
-                shm_reader::spawn_response_readers(
+                let readers = shm_reader::ResponseReaderRegistry::spawn_all(
                     ring_pairs,
                     Arc::clone(&dispatcher),
                     server_shutdown_token.clone(),
@@ -542,22 +553,28 @@ async fn run_server(
                 factory.attach_children(children, &app_path, &config.workers.python_bin);
 
                 let factory = Arc::new(Mutex::new(factory));
-                Supervisor::spawn(
+                let supervisor_handle = Supervisor::spawn_with_readers(
                     Arc::clone(&factory),
                     Arc::clone(&shm),
+                    Arc::clone(&dispatcher),
+                    Arc::clone(&readers),
                     server_shutdown_token.clone(),
                     Arc::clone(&shm_startup_failed),
                 );
 
                 shm_factory = Some(factory);
+                shm_readers = Some(readers);
+                shm_supervisor = Some(supervisor_handle);
             }
 
             #[cfg(not(unix))]
             {
                 BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
                     .expect("failed to initialize batch bridge");
-                dispatcher =
-                    Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
+                dispatcher = Arc::new(
+                    Dispatcher::new_with_queue_depth(config.stream_queue_depth)
+                        .with_backpressure(config.backpressure.clone()),
+                );
                 dispatcher.spawn_bridge_sweeper(server_shutdown_token.clone());
                 embedded_workers = Some(spawn_python_workers(
                     app_path.clone(),
@@ -567,7 +584,10 @@ async fn run_server(
                 )?);
             }
         } else {
-            dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
+            dispatcher = Arc::new(
+                Dispatcher::new_with_queue_depth(config.stream_queue_depth)
+                    .with_backpressure(config.backpressure.clone()),
+            );
             dispatcher.spawn_bridge_sweeper(server_shutdown_token.clone());
             embedded_workers = Some(spawn_python_workers(
                 app_path.clone(),
@@ -592,7 +612,10 @@ async fn run_server(
             BatchBridge::init(256, 1_048_576, 16, config.thread_count.max(1))
                 .expect("failed to initialize batch bridge");
         }
-        dispatcher = Arc::new(Dispatcher::new().with_backpressure(config.backpressure.clone()));
+        dispatcher = Arc::new(
+            Dispatcher::new_with_queue_depth(config.stream_queue_depth)
+                .with_backpressure(config.backpressure.clone()),
+        );
         spawn_response_reader(Arc::clone(&dispatcher));
         info!(bind = %config.bind, "vertebra-server starting (no python)");
     }
@@ -609,28 +632,53 @@ async fn run_server(
         16384,
     );
 
+    let state = server::ServerState::new(router, dispatcher, Arc::clone(&config), collector_shards);
+
+    #[cfg(all(feature = "python", unix))]
+    let pubsub_forwarder = shm_factory.as_ref().map(|factory| {
+        let broker_table = Arc::clone(factory.lock().unwrap().broker_table());
+        state
+            .pubsub_broker
+            .spawn_shm_channel_forwarder(broker_table, server_shutdown_token.clone())
+    });
+
     let shutdown_token_for_loop = server_shutdown_token.clone();
-    server::run_with_collector(
-        Arc::clone(&config),
-        router,
-        dispatcher,
-        collector_shards,
-        async move {
-            tokio::select! {
-                _ = wait_for_shutdown_signal() => {}
-                _ = shutdown_token_for_loop.cancelled() => {
-                    error!("stopping accept loop due to worker failure");
-                }
+    server::run_with_collector_state(state, async move {
+        tokio::select! {
+            _ = wait_for_shutdown_signal() => {}
+            _ = shutdown_token_for_loop.cancelled() => {
+                error!("stopping accept loop due to worker failure");
             }
-        },
-    )
+        }
+    })
     .await?;
 
     server_shutdown_token.cancel();
 
+    if config.topology == Topology::Embedded
+        && let Some(bridge) = BatchBridge::get()
+    {
+        bridge.clear_webtransport_sink();
+    }
+
+    #[cfg(all(feature = "python", unix))]
+    if let Some(handle) = pubsub_forwarder {
+        let _ = handle.await;
+    }
+
     #[cfg(feature = "python")]
     if let Some(pool) = embedded_workers {
         pool.shutdown();
+    }
+
+    #[cfg(all(feature = "python", unix))]
+    if let Some(handle) = shm_supervisor {
+        let _ = handle.await;
+    }
+
+    #[cfg(all(feature = "python", unix))]
+    if let Some(readers) = shm_readers {
+        readers.stop_and_join_all().await;
     }
 
     #[cfg(all(feature = "python", unix))]

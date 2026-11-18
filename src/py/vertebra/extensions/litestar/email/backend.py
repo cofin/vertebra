@@ -7,22 +7,20 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vertebra._storage import py_sign_aws_sigv4_headers
-from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 
-try:
-    from litestar_email.backends.base import BaseEmailBackend
-except ImportError as exc:
-    raise MissingDependencyError(
-        "litestar-email",
-        install_package="litestar-email",
-        extra="email",
-    ) from exc
-
 if TYPE_CHECKING:
+    from litestar_email.backends.base import BaseEmailBackend
     from litestar_email.message import EmailMessage
     from litestar_email.transports.base import HTTPTransport
+
+__all__ = (
+    "SESEmailBackend",
+    "SESEmailConfig",
+)
+
+_CACHED_SES_BACKEND_CLS: type[Any] | None = None
 
 
 class SESEmailConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -36,10 +34,11 @@ class SESEmailConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     http_transport: str = "httpx"
 
 
-class SESEmailBackend(BaseEmailBackend):
+class _SESEmailBackendImpl:
     """Amazon SES email backend using Rust py_sign_aws_sigv4_headers with zero botocore dependency."""
 
-    __slots__ = ("_config", "_transport")
+    fail_silently: bool
+    _resolve_from: Any
 
     def __init__(
         self,
@@ -50,8 +49,9 @@ class SESEmailBackend(BaseEmailBackend):
         default_from_name: str | None = None,
     ) -> None:
         """Initialize the SES email backend with optional configuration."""
-        ensure_module("litestar_email", extra="email")
-        super().__init__(
+        base_mod = ensure_module("litestar_email.backends.base", package="litestar-email", extra="email")
+        base_mod.BaseEmailBackend.__init__(
+            self,
             fail_silently=fail_silently,
             default_from_email=default_from_email,
             default_from_name=default_from_name,
@@ -69,9 +69,10 @@ class SESEmailBackend(BaseEmailBackend):
         if self._transport is not None:
             return False
 
-        trans_mod = ensure_module("litestar_email.transports", extra="email")
-        self._transport = trans_mod.get_transport(self._config.http_transport)
-        await self._transport.open(timeout=float(self._config.timeout))
+        trans_mod = ensure_module("litestar_email.transports", package="litestar-email", extra="email")
+        transport = trans_mod.get_transport(self._config.http_transport)
+        self._transport = transport
+        await transport.open(timeout=float(self._config.timeout))
         return True
 
     async def close(self) -> None:
@@ -90,7 +91,7 @@ class SESEmailBackend(BaseEmailBackend):
         if not messages:
             return 0
 
-        exc_mod = ensure_module("litestar_email.exceptions", extra="email")
+        exc_mod = ensure_module("litestar_email.exceptions", package="litestar-email", extra="email")
         new_connection = await self.open()
 
         try:
@@ -119,14 +120,15 @@ class SESEmailBackend(BaseEmailBackend):
             msg = "SES transport not initialized"
             raise RuntimeError(msg)
 
-        exc_mod = ensure_module("litestar_email.exceptions", extra="email")
+        exc_mod = ensure_module("litestar_email.exceptions", package="litestar-email", extra="email")
         if getattr(message, "attachments", None):
             msg = (
                 "Amazon SES backend does not support attachments via Simple content type. Use SMTP backend or raw MIME."
             )
             raise exc_mod.EmailDeliveryError(msg)
 
-        _, _, from_formatted = self._resolve_from(message)
+        resolve_from = self._resolve_from
+        _, _, from_formatted = resolve_from(message)
         body_section: dict[str, Any] = {}
         if getattr(message, "body", None):
             body_section["Text"] = {"Data": message.body}
@@ -198,3 +200,35 @@ class SESEmailBackend(BaseEmailBackend):
             session_token=self._config.aws_session_token,
         )
         return dict(headers)
+
+
+if TYPE_CHECKING:
+
+    class SESEmailBackend(_SESEmailBackendImpl, BaseEmailBackend):
+        """Amazon SES email backend using Rust py_sign_aws_sigv4_headers with zero botocore dependency."""
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind ``SESEmailBackend`` to ``litestar_email.backends.base.BaseEmailBackend``."""
+    global _CACHED_SES_BACKEND_CLS
+    if name == "SESEmailBackend":
+        if _CACHED_SES_BACKEND_CLS is None:
+            base_mod = ensure_module("litestar_email.backends.base", package="litestar-email", extra="email")
+            base_cls = base_mod.BaseEmailBackend
+            _CACHED_SES_BACKEND_CLS = type(
+                "SESEmailBackend",
+                (_SESEmailBackendImpl, base_cls),
+                {
+                    "__module__": __name__,
+                    "__doc__": _SESEmailBackendImpl.__doc__,
+                    "__slots__": (),
+                },
+            )
+        return _CACHED_SES_BACKEND_CLS
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return module attributes including lazily bound ``SESEmailBackend``."""
+    return sorted(set(globals()) | set(__all__))

@@ -2,20 +2,51 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import contextlib
+import hashlib
+import hmac
 import re
+import subprocess
+import sys
 import threading
 from collections.abc import Awaitable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import msgspec
 import pytest
 import starlette.requests
+from advanced_alchemy.config import EngineConfig, RoutingConfig
+from advanced_alchemy.extensions.fastapi import (
+    SQLAlchemyAsyncConfig as FastAPISQLAlchemyAsyncConfig,
+)
+from advanced_alchemy.extensions.fastapi import (
+    SQLAlchemySyncConfig as FastAPISQLAlchemySyncConfig,
+)
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 from starlette.responses import JSONResponse, Response
+from starlette.testclient import TestClient
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request
 from vertebra.agent.mcp.routes import AsgiMcpApp
+from vertebra.extensions.alchemy import (
+    create_async_alchemy_config,
+    create_fastapi_alchemy,
+    create_sync_alchemy_config,
+)
+from vertebra.extensions.broker import (
+    AsyncSHMBrokerTransport,
+    BrokerConfig,
+    SyncSHMBrokerTransport,
+)
 from vertebra.extensions.django import (
     MsgspecView as DjangoMsgspecView,
 )
@@ -23,19 +54,39 @@ from vertebra.extensions.django import (
     VertebraPlugin as DjangoVertebraPlugin,
 )
 from vertebra.extensions.fastapi import (
+    AssetManifest,
+    AuthenticatedPrincipal,
+    CacheStore,
+    ChannelsBackend,
+    FastAPIOffloadMiddleware,
     FastPath,
+    JWTAuthBackend,
+    JWTAuthGuard,
+    MemoryConfig,
     MsgspecJSONResponse,
     OpenAPIConfig,
+    RateLimitGuard,
     RouteCompiler,
+    SHMQueueBackend,
     SwaggerDocsConfig,
+    SyncStorageRegistry,
     VertebraConfig,
     VertebraPlugin,
+    ViteConfig,
+    ViteExtension,
     WebMCPConfig,
+    attach_cache_store,
+    attach_channels,
+    attach_storage,
     compile_dependant_plan,
     execute_dependant_plan,
+    get_vertebra_client_path,
+    get_vertebra_client_vite_aliases,
     mcp_tool,
     mount_mcp_routes,
     offload_middlewares,
+    vite_asset,
+    vite_hmr_client,
 )
 from vertebra.extensions.fastapi.fastpath import (
     BUFFERED_RESPONSE_TYPES,
@@ -66,6 +117,7 @@ from vertebra.extensions.starlette import VertebraPlugin as StarletteVertebraPlu
 from vertebra.extensions.starlette.fastpath import serialize_buffered_response
 from vertebra.framework._app import App
 from vertebra.framework.queues import MemoryQueueBackend, task
+from vertebra.framework.vite import clear_vite_bridges
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath, resolve_fastpath_provider
 from vertebra.server.worker import _instantiate_mount_runners
@@ -602,3 +654,388 @@ async def test_fastapi_queue_extension() -> None:
         assert svc is qsvc
         assert await svc.drain_once(("io",)) == [15]
         assert ran == [5]
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize(
+    ("connection_string", "use_routing", "use_engine"),
+    [
+        (None, False, False),
+        ("", False, False),
+        ("   ", False, False),
+        ("sqlite:///:memory:", True, False),
+        ("sqlite:///:memory:", False, True),
+        (None, True, True),
+        ("sqlite:///:memory:", True, True),
+    ],
+)
+def test_alchemy_config_rejects_missing_or_conflicting_sources(
+    is_async: bool,
+    connection_string: str | None,
+    use_routing: bool,
+    use_engine: bool,
+) -> None:
+    """Verify Alchemy config factories require exactly one source among URL, routing_config, or engine_instance."""
+    routing_cfg = RoutingConfig(primary_connection_string="sqlite+vtb:///:memory:") if use_routing else None
+    engine = (
+        (create_async_engine("sqlite+vtb_async:///:memory:") if is_async else create_engine("sqlite+vtb:///:memory:"))
+        if use_engine
+        else None
+    )
+    try:
+        with pytest.raises(ValueError):
+            if is_async:
+                create_async_alchemy_config(
+                    connection_string,
+                    routing_config=routing_cfg,
+                    engine_instance=cast("Any", engine),
+                )
+            else:
+                create_sync_alchemy_config(
+                    connection_string,
+                    routing_config=routing_cfg,
+                    engine_instance=cast("Any", engine),
+                )
+    finally:
+        if engine is not None:
+            if is_async:
+                asyncio.run(cast("Any", engine).dispose())
+            else:
+                cast("Any", engine).dispose()
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_alchemy_config_rejects_unknown_framework(is_async: bool) -> None:
+    """Verify Alchemy config factories reject unsupported framework hosts with ValueError."""
+    with pytest.raises(ValueError, match="Unsupported framework host"):
+        if is_async:
+            create_async_alchemy_config("sqlite+vtb_async:///:memory:", framework=cast("Any", "django"))
+        else:
+            create_sync_alchemy_config("sqlite+vtb:///:memory:", framework=cast("Any", "django"))
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_alchemy_config_preserves_explicit_pool_settings_with_broker(is_async: bool) -> None:
+    """Verify explicit pool_pre_ping, pool_recycle=None, and poolclass survive even when a broker is provided."""
+    broker = (
+        AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+        if is_async
+        else SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    )
+    explicit_engine_cfg = EngineConfig(pool_pre_ping=False, pool_recycle=cast("Any", None), poolclass=NullPool)
+    try:
+        cfg = (
+            create_async_alchemy_config(
+                "postgresql+vtb_async://user:pass@localhost/appdb",
+                framework="fastapi",
+                broker=broker,
+                engine_config=explicit_engine_cfg,
+            )
+            if is_async
+            else create_sync_alchemy_config(
+                "postgresql+vtb://user:pass@localhost/appdb",
+                framework="fastapi",
+                broker=broker,
+                engine_config=explicit_engine_cfg,
+            )
+        )
+        assert cfg.engine_config.pool_pre_ping is False
+        assert cfg.engine_config.pool_recycle is None
+        assert cfg.engine_config.poolclass is NullPool
+    finally:
+        if isinstance(broker, AsyncSHMBrokerTransport):
+            asyncio.run(broker.close())
+        else:
+            broker.close()
+
+
+def test_fastapi_alchemy_factory_and_app_binding() -> None:
+    """Verify FastAPI Alchemy config factories build FastAPI configs and attach AdvancedAlchemy to FastAPI."""
+    with pytest.raises(ValueError, match="at least one configuration"):
+        create_fastapi_alchemy()
+
+    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", framework="fastapi")
+    sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", framework="fastapi")
+    assert isinstance(async_cfg, FastAPISQLAlchemyAsyncConfig)
+    assert isinstance(sync_cfg, FastAPISQLAlchemySyncConfig)
+
+    app = FastAPI()
+    ext = create_fastapi_alchemy(async_cfg, app=app)
+    assert ext.config == [async_cfg]
+    assert async_cfg.app is app
+
+    routed_cfg = create_sync_alchemy_config(
+        framework="fastapi",
+        routing_config=RoutingConfig(engines={"default": ["sqlite+vtb:///:memory:"]}),
+    )
+    assert isinstance(routed_cfg, FastAPISQLAlchemySyncConfig)
+    assert routed_cfg.routing_config is not None
+
+
+class _PydanticItem(BaseModel):
+    name: str
+    qty: int = 1
+
+
+def _build_hs256_jwt(claims: dict[str, Any], secret: bytes) -> str:
+    header_b64 = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=")
+    payload_bytes = msgspec.json.encode(claims)
+    payload_b64 = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=")
+    signing_input = header_b64 + b"." + payload_b64
+    sig_b64 = base64.urlsafe_b64encode(hmac.new(secret, signing_input, hashlib.sha256).digest()).rstrip(b"=")
+    return (signing_input + b"." + sig_b64).decode("ascii")
+
+
+def test_fastapi_plugin_real_app_testclient_lifespan_cors_openapi_and_idempotency() -> None:
+    """Verify VertebraPlugin.init_app wraps lifespan, installs ASGI offload middleware once, and preserves handlers."""
+    lifecycle_events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def custom_lifespan(_app: FastAPI) -> Any:
+        lifecycle_events.append("startup")
+        try:
+            yield {"lifespan_marker": "active"}
+        finally:
+            lifecycle_events.append("shutdown")
+
+    app = FastAPI(title="Vertebra FastAPI Test", lifespan=custom_lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://app.example.com"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=True,
+    )
+
+    def get_tenant(tenant: str = "default") -> str:
+        return tenant
+
+    @app.post("/items/{item_id}")
+    async def create_item(
+        item_id: int,
+        payload: _PydanticItem,
+        tenant: str = Depends(get_tenant),
+    ) -> dict[str, Any]:
+        return {"item_id": item_id, "name": payload.name, "qty": payload.qty, "tenant": tenant}
+
+    @app.get("/boom")
+    async def raise_boom() -> dict[str, str]:
+        raise ValueError("custom failure")
+
+    @app.exception_handler(ValueError)
+    async def handle_value_error(_request: Any, exc: ValueError) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=418)
+
+    plugin = VertebraPlugin()
+    plugin.init_app(app)
+    plugin.init_app(app)
+
+    vertebra_middlewares = [mw for mw in app.user_middleware if mw.cls is cast("Any", FastAPIOffloadMiddleware)]
+    assert len(vertebra_middlewares) == 1
+    assert lifecycle_events == []
+
+    with TestClient(app) as client:
+        assert lifecycle_events == ["startup"]
+        assert plugin.offload_plan is not None
+        assert plugin.offload_plan.cors is not None
+        assert plugin.offload_plan.openapi is not None
+
+        preflight = client.options(
+            "/items/10",
+            headers={
+                "Origin": "https://app.example.com",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+        )
+        assert preflight.status_code == 204
+        assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
+        assert preflight.headers["access-control-allow-credentials"] == "true"
+
+        schema_resp = client.get("/openapi.json", headers={"Origin": "https://app.example.com"})
+        assert schema_resp.status_code == 200
+        etag = schema_resp.headers["etag"]
+        assert "/items/{item_id}" in schema_resp.json()["paths"]
+        assert schema_resp.headers["access-control-allow-origin"] == "https://app.example.com"
+
+        cached_resp = client.get("/openapi.json", headers={"If-None-Match": etag})
+        assert cached_resp.status_code == 304
+        assert cached_resp.content == b""
+
+        created = client.post("/items/42?tenant=globex", json={"name": "widget", "qty": 3})
+        assert created.status_code == 200
+        assert created.json() == {"item_id": 42, "name": "widget", "qty": 3, "tenant": "globex"}
+
+        boom = client.get("/boom")
+        assert boom.status_code == 418
+        assert boom.json() == {"error": "custom failure"}
+
+    assert lifecycle_events == ["startup", "shutdown"]
+
+
+def test_fastapi_plugin_testclient_fastpath_direct_dispatch() -> None:
+    """Verify TestClient dispatches middleware-free FastAPI routes through FastPath and OpenAPI ETag cache."""
+    app = FastAPI(title="FastPath Direct App")
+    plugin = VertebraPlugin()
+    plugin.init_app(app)
+
+    def resolve_scope(tag: str = "base") -> str:
+        return tag
+
+    @app.post("/orders/{order_id}")
+    async def submit_order(
+        order_id: int,
+        payload: _PydanticItem,
+        tag: str = Depends(resolve_scope),
+    ) -> dict[str, Any]:
+        return {"order_id": order_id, "name": payload.name, "tag": tag}
+
+    with TestClient(app) as client:
+        assert plugin.fastpath is not None
+        assert plugin.router_table is not None
+        matched = plugin.router_table.match("POST", "/orders/99")
+        assert matched is not None
+        compiled = plugin.compiled_routes[matched.handler_id]
+        assert compiled.is_bypass_eligible is True
+
+        resp = client.post("/orders/99?tag=turbo", json={"name": "ssd", "qty": 2})
+        assert resp.status_code == 200
+        assert resp.json() == {"order_id": 99, "name": "ssd", "tag": "turbo"}
+
+        schema_resp = client.get("/openapi.json")
+        assert schema_resp.status_code == 200
+        not_modified = client.get("/openapi.json", headers={"If-None-Match": schema_resp.headers["etag"]})
+        assert not_modified.status_code == 304
+
+
+@pytest.mark.parametrize(
+    "submodule",
+    [
+        "config",
+        "plugin",
+        "offload",
+        "openapi",
+        "router",
+        "fastpath",
+        "responses",
+        "dependencies",
+        "channels",
+        "mcp",
+        "queues",
+        "security",
+        "storage",
+        "store",
+        "vite",
+    ],
+)
+def test_fastapi_subprocess_import_isolation_and_missing_dependency(submodule: str) -> None:
+    """Verify vertebra.extensions.fastapi imports cleanly without Starlette/Litestar extensions or FastAPI installed."""
+    script = (
+        "import importlib, sys\n"
+        "from types import SimpleNamespace\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        "for mod in (\n"
+        "    'fastapi', 'starlette', 'starlette.routing', 'starlette.responses', 'starlette.requests',\n"
+        "    'litestar', 'litestar_queues', 'vertebra.extensions.starlette', 'vertebra.extensions.litestar'\n"
+        "):\n"
+        "    sys.modules[mod] = None\n"
+        "pkg = importlib.import_module('vertebra.extensions.fastapi')\n"
+        f"sub = importlib.import_module('vertebra.extensions.fastapi.{submodule}')\n"
+        "assert sub is not None\n"
+        "assert hasattr(pkg, 'SHMQueueBackend')\n"
+        "for removed in ('SHMExecutionBackend', 'create_shm_queue_config', 'create_sqlspec_queue_config'):\n"
+        "    assert not hasattr(pkg, removed), removed\n"
+        "cross = [m for m in sys.modules if m.startswith(('vertebra.extensions.starlette', 'vertebra.extensions.litestar')) and sys.modules[m] is not None]\n"
+        "assert not cross, f'Unexpected cross-imports: {cross}'\n"
+        "try:\n"
+        "    pkg.mount_mcp_routes(SimpleNamespace())\n"
+        "except MissingDependencyError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('Expected MissingDependencyError when fastapi is blocked')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+
+@pytest.mark.anyio
+async def test_fastapi_feature_adapters_neutral_roundtrips(tmp_path: Path) -> None:
+    """Verify FastAPI Vite, storage, security, cache store, and channels adapters via neutral modules."""
+    clear_vite_bridges()
+    app = FastAPI()
+
+    manifest_file = tmp_path / "manifest.json"
+    manifest_file.write_text(
+        '{"src/main.ts":{"file":"assets/main-abc123.js","isEntry":true,"css":["assets/main-def456.css"]}}',
+        encoding="utf-8",
+    )
+    manifest = AssetManifest.from_file(manifest_file)
+    vite_ext = ViteExtension(
+        config=ViteConfig(asset_url="/static/"),
+        manifest=manifest,
+    )
+    vite_ext.init_app(app)
+    assert app.state.vite is vite_ext
+    tags = vite_ext.asset_tags("src/main.ts")
+    assert "/static/assets/main-abc123.js" in tags
+    assert "/static/assets/main-def456.css" in tags
+    assert vite_ext.hmr_client_tag() == ""
+    assert vite_asset("src/main.ts")
+    assert vite_hmr_client() == ""
+    assert get_vertebra_client_path().name == "vertebra-client"
+    assert "@vertebra/client" in get_vertebra_client_vite_aliases()
+
+    storage = attach_storage(app, SyncStorageRegistry(default_store=MemoryConfig()))
+    assert isinstance(storage, SyncStorageRegistry)
+    store_backend = storage.get()
+    store_backend.put("hello.txt", b"fastapi-storage")
+    assert store_backend.get("hello.txt") == b"fastapi-storage"
+
+    secret = b"test-token-placeholder-secret-32"
+    token = _build_hs256_jwt({"sub": "user-1", "scope": "read write", "exp": 4_102_444_800}, secret)
+    auth_backend = JWTAuthBackend(secret)
+    auth_result = await auth_backend.authenticate(SimpleNamespace(headers={"authorization": f"Bearer {token}"}))
+    assert auth_result is not None
+    scopes, principal = auth_result
+    assert scopes == ("read", "write")
+    assert isinstance(principal, AuthenticatedPrincipal)
+    assert principal.sub == "user-1"
+    assert JWTAuthGuard(secret).verify_token(token).sub == "user-1"
+
+    limiter = RateLimitGuard(capacity=1, refill_rate=0.0)
+    assert limiter.allow("client-a") is True
+    assert limiter.allow("client-a") is False
+
+    cache = attach_cache_store(app, CacheStore(key_prefix="fastapi-test"))
+    cache.set_sync("sync-key", "sync-val", expires_in=30)
+    assert cache.get_sync("sync-key") == b"sync-val"
+    await cache.set("async-key", b"async-val", expires_in=30)
+    assert await cache.get("async-key") == b"async-val"
+    await cache.delete_all()
+    assert await cache.get("async-key") is None
+
+    channels = attach_channels(app)
+    assert isinstance(channels, ChannelsBackend)
+    await channels.on_startup()
+    try:
+        received: list[bytes] = []
+
+        async def _consume() -> None:
+            async with channels.subscription(["events"]) as stream:
+                async for msg in stream:
+                    received.append(msg.data)
+                    break
+
+        consumer = asyncio.create_task(_consume())
+        await asyncio.sleep(0)
+        await channels.publish(b"ping", ["events"])
+        await asyncio.wait_for(consumer, timeout=2.0)
+        assert received == [b"ping"]
+    finally:
+        await channels.on_shutdown()
+    assert SHMQueueBackend is not None

@@ -9,7 +9,9 @@ use std::time::Duration;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, dangerous::insecure_decode, encode};
 use serde::{Deserialize, Serialize};
 
-use crate::gcp_auth::{GcpAuthSource, GcpTokenCache, current_unix_ms, normalize_gcp_options};
+use crate::gcp_auth::{
+    ExternalAccountStsRequest, GcpAuthSource, GcpTokenCache, current_unix_ms, normalize_gcp_options,
+};
 
 pub const DEFAULT_ID_TOKEN_REFRESH_SKEW_MS: u64 = 300_000;
 pub const DEFAULT_MAX_ID_TOKEN_AUDIENCES: usize = 64;
@@ -655,6 +657,76 @@ impl GcpIdTokenCache {
                     .ok_or_else(|| {
                         "OAuth2 refresh response contained no id_token; re-authenticate with `gcloud auth application-default login` or configure service_account / target_service_account credentials".to_string()
                     })
+            }
+            GcpAuthSource::ExternalAccount {
+                audience: wif_audience,
+                subject_token_type,
+                token_url,
+                credential_source,
+                service_account_impersonation_url,
+                quota_project_id,
+                scopes,
+                client_id: ext_client_id,
+                client_secret: ext_client_secret,
+                ..
+            } => {
+                let Some(imp_url) = service_account_impersonation_url.as_deref() else {
+                    return Err(
+                        "external_account credentials require service_account_impersonation_url or target_service_account impersonation to mint OIDC ID tokens"
+                            .to_string(),
+                    );
+                };
+                let id_token_url = imp_url
+                    .strip_suffix(":generateAccessToken")
+                    .map(|prefix| format!("{prefix}:generateIdToken"))
+                    .ok_or_else(|| {
+                        format!(
+                            "invalid external_account service_account_impersonation_url '{imp_url}': expected ':generateAccessToken' suffix"
+                        )
+                    })?;
+                let sts_token = self
+                    .credentials
+                    .fetch_external_sts_token(ExternalAccountStsRequest {
+                        audience: wif_audience,
+                        subject_token_type,
+                        token_url,
+                        credential_source,
+                        scopes,
+                        client_id: ext_client_id.as_deref(),
+                        client_secret: ext_client_secret.as_deref(),
+                    })
+                    .await?;
+                let mut req = self
+                    .credentials
+                    .http_client()
+                    .post(&id_token_url)
+                    .bearer_auth(&sts_token)
+                    .json(&IamGenerateIdTokenRequest {
+                        audience,
+                        include_email: self.options.include_email,
+                    });
+                if let Some(qp) = quota_project_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                    req = req.header("x-goog-user-project", qp.trim());
+                }
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|e| format!("IAM generateIdToken failed: {e}"))?;
+                if !resp.status().is_success() {
+                    return Err(format!(
+                        "IAM generateIdToken returned HTTP {}",
+                        resp.status()
+                    ));
+                }
+                let parsed: IamGenerateIdTokenResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("invalid IAM generateIdToken JSON: {e}"))?;
+                parsed
+                    .token
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .ok_or_else(|| "IAM generateIdToken response contained no token".to_string())
             }
         }
     }

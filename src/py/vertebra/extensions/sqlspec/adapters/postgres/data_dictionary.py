@@ -16,6 +16,7 @@ from sqlspec.data_dictionary import (
     MetadataSupport,
     TableMetadata,
     VersionInfo,
+    get_data_dictionary_loader,
 )
 from sqlspec.data_dictionary.dialects.postgres import (
     POSTGRES_CONFIG,
@@ -23,14 +24,25 @@ from sqlspec.data_dictionary.dialects.postgres import (
     resolve_postgres_json_type,
 )
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
+from sqlspec.exceptions import SQLFileNotFoundError
 from sqlspec.utils.serializers import from_json
 
 from vertebra.extensions.sqlspec.adapters.postgres.core import pg_row_value
 
 if TYPE_CHECKING:
+    from sqlspec.core import SQL
     from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 __all__ = ("PostgresAsyncDataDictionary", "PostgresSyncDataDictionary")
+
+
+def _postgres_query(domain: str, operation: str) -> SQL:
+    """Resolve a required PostgreSQL catalog query via the SQLSpec dialect loader."""
+    query = get_data_dictionary_loader().get_domain_query("postgres", domain, operation)
+    if query.sql is None:
+        msg = f"No data-dictionary query found for postgres/{domain}/{operation}"
+        raise SQLFileNotFoundError(msg)
+    return query.sql
 
 
 def _schema_capability() -> MetadataCapability:
@@ -66,51 +78,48 @@ def _rows_as_dicts(rows: Sequence[Any] | None) -> list[dict[str, Any]]:
     return result
 
 
-class _PostgresDataDictionaryMixin:
-    """Shared version parsing, schema resolution, and optimal PostgreSQL type helpers."""
+def _parse_postgres_version(
+    dictionary: SyncDataDictionaryBase | AsyncDataDictionaryBase, raw_value: Any
+) -> VersionInfo | None:
+    """Parse PostgreSQL version string using `POSTGRES_VERSION_PATTERN` with dotted fallback."""
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    parsed = dictionary.parse_version_with_pattern(POSTGRES_VERSION_PATTERN, text)
+    if isinstance(parsed, VersionInfo):
+        return parsed
+    parts = [part for part in text.split(".") if part.isdigit()]
+    if not parts:
+        return None
+    major = int(parts[0])
+    minor = int(parts[1]) if len(parts) > 1 else 0
+    patch = int(parts[2]) if len(parts) > 2 else 0
+    return VersionInfo(major=major, minor=minor, patch=patch)
+
+
+def _resolve_optimal_postgres_type(version_info: VersionInfo | None, type_category: str) -> str:
+    """Resolve the optimal PostgreSQL SQL type for `type_category`."""
+    if type_category in {"json", "jsonb"}:
+        return resolve_postgres_json_type(version_info)
+    return POSTGRES_CONFIG.get_optimal_type(type_category)
+
+
+def _decode_json_field(value: Any) -> Any:
+    """Decode JSON-encoded catalog columns when returned as raw strings."""
+    if isinstance(value, (dict, list)) or value is None:
+        return value
+    try:
+        return from_json(str(value))
+    except (TypeError, ValueError):
+        return value
+
+
+class PostgresSyncDataDictionary(SyncDataDictionaryBase):
+    """Synchronous PostgreSQL data dictionary backed by SQLSpec catalog SQL queries."""
 
     __slots__ = ()
-
-    @staticmethod
-    def _parse_version_with(dictionary: Any, raw_value: Any) -> VersionInfo | None:
-        if raw_value is None:
-            return None
-        text = str(raw_value).strip()
-        if not text:
-            return None
-        parsed = dictionary.parse_version_with_pattern(POSTGRES_VERSION_PATTERN, text)
-        if isinstance(parsed, VersionInfo):
-            return parsed
-        parts = [part for part in text.split(".") if part.isdigit()]
-        if not parts:
-            return None
-        major = int(parts[0])
-        minor = int(parts[1]) if len(parts) > 1 else 0
-        patch = int(parts[2]) if len(parts) > 2 else 0
-        return VersionInfo(major=major, minor=minor, patch=patch)
-
-    @staticmethod
-    def _resolve_feature_from_version(dictionary: Any, version_info: VersionInfo | None, feature: str) -> bool:
-        return bool(dictionary.resolve_feature_flag(feature, version_info))
-
-    @staticmethod
-    def _resolve_optimal_type(version_info: VersionInfo | None, type_category: str) -> str:
-        if type_category in {"json", "jsonb"}:
-            return resolve_postgres_json_type(version_info)
-        return POSTGRES_CONFIG.get_optimal_type(type_category)
-
-    @staticmethod
-    def _decode_json_field(value: Any) -> Any:
-        if isinstance(value, (dict, list)) or value is None:
-            return value
-        try:
-            return from_json(str(value))
-        except (TypeError, ValueError):
-            return value
-
-
-class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionaryBase):
-    """Synchronous PostgreSQL data dictionary backed by SQLSpec catalog SQL queries."""
 
     dialect: ClassVar[str] = "postgres"
 
@@ -120,14 +129,14 @@ class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionar
         if driver_id in self._version_fetch_attempted:
             return self._version_cache.get(driver_id)
 
-        row = driver.select_one_or_none(self.get_query("version", "current"))
+        row = driver.select_one_or_none(_postgres_query("version", "current"))
         if row is None:
             self._log_version_unavailable(type(self).dialect, "missing")
             self.cache_version(driver_id, None)
             return None
 
         raw_version = _extract_row_str(row, "version", "server_version", "version_num")
-        version_info = self._parse_version_with(self, raw_version)
+        version_info = _parse_postgres_version(self, raw_version)
         if version_info is None:
             self._log_version_unavailable(type(self).dialect, "parse_failed")
             self.cache_version(driver_id, None)
@@ -139,21 +148,21 @@ class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionar
 
     def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
         """Evaluate PostgreSQL feature availability against detected server version."""
-        return self._resolve_feature_from_version(self, self.get_version(driver), feature)
+        return self.resolve_feature_flag(feature, self.get_version(driver))
 
     def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
         """Return the optimal PostgreSQL SQL type for `type_category`."""
-        return self._resolve_optimal_type(self.get_version(driver), type_category)
+        return _resolve_optimal_postgres_type(self.get_version(driver), type_category)
 
     def get_schemas(self, driver: SyncDriverAdapterBase) -> MetadataResult:
         """List accessible non-system PostgreSQL schemas."""
-        rows = driver.select(self.get_query("schemas", "list"))
+        rows = driver.select(_postgres_query("schemas", "list"))
         return MetadataResult("schemas", capability=_schema_capability(), items=tuple(_rows_as_dicts(rows)))
 
     def get_tables(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """Return PostgreSQL tables and views in `schema` (default `public`)."""
         schema_name = self.resolve_schema(schema)
-        rows = driver.select(self.get_query("tables", "by_schema"), schema_name=schema_name)
+        rows = driver.select(_postgres_query("tables", "by_schema"), schema_name=schema_name, table_name=None)
         return cast("list[TableMetadata]", _rows_as_dicts(rows))
 
     def get_columns(
@@ -165,9 +174,13 @@ class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionar
         """Return PostgreSQL column metadata for one table or an entire schema."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = driver.select(self.get_query("columns", "by_schema"), schema_name=schema_name)
+            rows = driver.select(_postgres_query("columns", "by_schema"), schema_name=schema_name, table_name=None)
         else:
-            rows = driver.select(self.get_query("columns", "by_table"), schema_name=schema_name, table_name=table)
+            rows = driver.select(
+                _postgres_query("columns", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
+            )
         return cast("list[ColumnMetadata]", _rows_as_dicts(rows))
 
     def get_indexes(
@@ -179,13 +192,17 @@ class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionar
         """Return PostgreSQL index definitions for a table or schema."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = driver.select(self.get_query("indexes", "by_schema"), schema_name=schema_name)
+            rows = driver.select(_postgres_query("indexes", "by_schema"), schema_name=schema_name, table_name=None)
         else:
-            rows = driver.select(self.get_query("indexes", "by_table"), schema_name=schema_name, table_name=table)
+            rows = driver.select(
+                _postgres_query("indexes", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
+            )
         results = _rows_as_dicts(rows)
         for item in results:
             if "columns" in item:
-                item["columns"] = self._decode_json_field(item["columns"])
+                item["columns"] = _decode_json_field(item["columns"])
         return cast("list[IndexMetadata]", results)
 
     def get_foreign_keys(
@@ -197,14 +214,20 @@ class PostgresSyncDataDictionary(_PostgresDataDictionaryMixin, SyncDataDictionar
         """Return PostgreSQL foreign key constraints for a table or schema."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = driver.select(self.get_query("foreign_keys", "by_schema"), schema_name=schema_name)
+            rows = driver.select(_postgres_query("foreign_keys", "by_schema"), schema_name=schema_name)
         else:
-            rows = driver.select(self.get_query("foreign_keys", "by_table"), schema_name=schema_name, table_name=table)
+            rows = driver.select(
+                _postgres_query("foreign_keys", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
+            )
         return cast("list[ForeignKeyMetadata]", _rows_as_dicts(rows))
 
 
-class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDictionaryBase):
+class PostgresAsyncDataDictionary(AsyncDataDictionaryBase):
     """Asynchronous PostgreSQL data dictionary backed by SQLSpec catalog SQL queries."""
+
+    __slots__ = ()
 
     dialect: ClassVar[str] = "postgres"
 
@@ -214,14 +237,14 @@ class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDiction
         if driver_id in self._version_fetch_attempted:
             return self._version_cache.get(driver_id)
 
-        row = await driver.select_one_or_none(self.get_query("version", "current"))
+        row = await driver.select_one_or_none(_postgres_query("version", "current"))
         if row is None:
             self._log_version_unavailable(type(self).dialect, "missing")
             self.cache_version(driver_id, None)
             return None
 
         raw_version = _extract_row_str(row, "version", "server_version", "version_num")
-        version_info = self._parse_version_with(self, raw_version)
+        version_info = _parse_postgres_version(self, raw_version)
         if version_info is None:
             self._log_version_unavailable(type(self).dialect, "parse_failed")
             self.cache_version(driver_id, None)
@@ -233,21 +256,21 @@ class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDiction
 
     async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
         """Evaluate PostgreSQL feature availability asynchronously."""
-        return self._resolve_feature_from_version(self, await self.get_version(driver), feature)
+        return self.resolve_feature_flag(feature, await self.get_version(driver))
 
     async def get_optimal_type(self, driver: AsyncDriverAdapterBase, type_category: str) -> str:
         """Return the optimal PostgreSQL SQL type for `type_category`."""
-        return self._resolve_optimal_type(await self.get_version(driver), type_category)
+        return _resolve_optimal_postgres_type(await self.get_version(driver), type_category)
 
     async def get_schemas(self, driver: AsyncDriverAdapterBase) -> MetadataResult:
         """List accessible non-system PostgreSQL schemas asynchronously."""
-        rows = await driver.select(self.get_query("schemas", "list"))
+        rows = await driver.select(_postgres_query("schemas", "list"))
         return MetadataResult("schemas", capability=_schema_capability(), items=tuple(_rows_as_dicts(rows)))
 
     async def get_tables(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """Return PostgreSQL tables and views in `schema` asynchronously."""
         schema_name = self.resolve_schema(schema)
-        rows = await driver.select(self.get_query("tables", "by_schema"), schema_name=schema_name)
+        rows = await driver.select(_postgres_query("tables", "by_schema"), schema_name=schema_name, table_name=None)
         return cast("list[TableMetadata]", _rows_as_dicts(rows))
 
     async def get_columns(
@@ -259,9 +282,15 @@ class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDiction
         """Return PostgreSQL column metadata asynchronously."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = await driver.select(self.get_query("columns", "by_schema"), schema_name=schema_name)
+            rows = await driver.select(
+                _postgres_query("columns", "by_schema"), schema_name=schema_name, table_name=None
+            )
         else:
-            rows = await driver.select(self.get_query("columns", "by_table"), schema_name=schema_name, table_name=table)
+            rows = await driver.select(
+                _postgres_query("columns", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
+            )
         return cast("list[ColumnMetadata]", _rows_as_dicts(rows))
 
     async def get_indexes(
@@ -273,13 +302,19 @@ class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDiction
         """Return PostgreSQL index definitions asynchronously."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = await driver.select(self.get_query("indexes", "by_schema"), schema_name=schema_name)
+            rows = await driver.select(
+                _postgres_query("indexes", "by_schema"), schema_name=schema_name, table_name=None
+            )
         else:
-            rows = await driver.select(self.get_query("indexes", "by_table"), schema_name=schema_name, table_name=table)
+            rows = await driver.select(
+                _postgres_query("indexes", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
+            )
         results = _rows_as_dicts(rows)
         for item in results:
             if "columns" in item:
-                item["columns"] = self._decode_json_field(item["columns"])
+                item["columns"] = _decode_json_field(item["columns"])
         return cast("list[IndexMetadata]", results)
 
     async def get_foreign_keys(
@@ -291,9 +326,11 @@ class PostgresAsyncDataDictionary(_PostgresDataDictionaryMixin, AsyncDataDiction
         """Return PostgreSQL foreign key constraints asynchronously."""
         schema_name = self.resolve_schema(schema)
         if table is None:
-            rows = await driver.select(self.get_query("foreign_keys", "by_schema"), schema_name=schema_name)
+            rows = await driver.select(_postgres_query("foreign_keys", "by_schema"), schema_name=schema_name)
         else:
             rows = await driver.select(
-                self.get_query("foreign_keys", "by_table"), schema_name=schema_name, table_name=table
+                _postgres_query("foreign_keys", "by_table"),
+                schema_name=schema_name,
+                table_name=self.resolve_identifier(table),
             )
         return cast("list[ForeignKeyMetadata]", _rows_as_dicts(rows))

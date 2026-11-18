@@ -15,9 +15,12 @@ from vertebra.framework.queues import (
     TaskDef,
 )
 from vertebra.server.lanes import QUEUE_SERVICE_STATE_KEY
+from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+
+    from flask import Flask
 
     from vertebra.framework.di import Container
 
@@ -63,8 +66,9 @@ class QueueBackend:
         """Return the bound Container if configured."""
         return self._container
 
-    def init_app(self, app: Any) -> None:
+    def init_app(self, app: Flask | Any) -> None:
         """Attach queue service to Flask app extensions."""
+        ensure_module("flask", extra="flask")
         if hasattr(app, "extensions"):
             app.extensions["vertebra_queue_backend"] = self
             app.extensions[QUEUE_SERVICE_STATE_KEY] = self._queue_service

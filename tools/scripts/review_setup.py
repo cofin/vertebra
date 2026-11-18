@@ -1620,15 +1620,13 @@ class ReviewSetupValidator:
 
         return issues
 
+    @staticmethod
     def _validate_commit_sha(
-        self,
         raw_sha: object,
         rel_file: str,
         field_name: str,
-        has_git: bool,
-        ancestry_cache: dict[str, bool],
     ) -> ReviewIssue | None:
-        """Validate that a frontmatter commit SHA is lowercase hex and reachable from HEAD."""
+        """Validate that a frontmatter commit SHA is a 7-40 character lowercase hex string."""
         if raw_sha is None:
             return None
         sha = str(raw_sha).strip()
@@ -1641,23 +1639,6 @@ class ReviewSetupValidator:
                 1,
                 f"{field_name} '{sha}' must be a 7-40 character lowercase hex commit SHA",
             )
-        if has_git:
-            is_ancestor = ancestry_cache.get(sha)
-            if is_ancestor is None:
-                proc = subprocess.run(
-                    ["git", "-C", str(self.repo_root), "merge-base", "--is-ancestor", sha, "HEAD"],
-                    check=False,
-                    capture_output=True,
-                )
-                is_ancestor = proc.returncode == 0
-                ancestry_cache[sha] = is_ancestor
-            if not is_ancestor:
-                return ReviewIssue(
-                    "bundles",
-                    rel_file,
-                    1,
-                    f"{field_name} '{sha}' is not an ancestor of HEAD",
-                )
         return None
 
     def _check_bundles(self) -> list[ReviewIssue]:
@@ -1670,8 +1651,6 @@ class ReviewSetupValidator:
         policy = self._manifest.policy if self._manifest else ValidationPolicy()
         max_truth = policy.max_truth_lines
         reserved_names = set(policy.okf_reserved) if policy.okf_reserved else {"index.md", "log.md"}
-        has_git = (self.repo_root / ".git").exists() and not (self.repo_root / ".git" / "shallow").exists()
-        ancestry_cache: dict[str, bool] = {}
 
         index_file = bundles_root / "index.md"
         if index_file.exists():
@@ -1751,8 +1730,6 @@ class ReviewSetupValidator:
                             doc.frontmatter.get(commit_key),
                             rel_spec,
                             commit_key,
-                            has_git,
-                            ancestry_cache,
                         )
                         if sha_issue is not None:
                             issues.append(sha_issue)
@@ -1824,8 +1801,6 @@ class ReviewSetupValidator:
                                 ver_entry.get("commit"),
                                 rel_file,
                                 "verified.commit",
-                                has_git,
-                                ancestry_cache,
                             )
                             if sha_issue is not None:
                                 issues.append(sha_issue)

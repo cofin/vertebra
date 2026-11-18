@@ -12,6 +12,7 @@ if TYPE_CHECKING:
         DataFusionMode,
         TableRegistration,
     )
+    from vertebra.db.adapters.datafusion.core import DataFusionCore
     from vertebra.db.adapters.datafusion.driver import (
         ARROW_STREAM_MEDIA_TYPE,
         DataFusionEngine,
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 __all__ = (
     "ARROW_STREAM_MEDIA_TYPE",
     "DataFusionConfig",
+    "DataFusionCore",
     "DataFusionEngine",
     "DataFusionMode",
     "TableRegistration",
@@ -27,12 +29,14 @@ __all__ = (
 
 __lazy_modules__ = [
     "vertebra.db.adapters.datafusion.config",
+    "vertebra.db.adapters.datafusion.core",
     "vertebra.db.adapters.datafusion.driver",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ARROW_STREAM_MEDIA_TYPE": ("vertebra.db.adapters.datafusion.driver", "ARROW_STREAM_MEDIA_TYPE"),
     "DataFusionConfig": ("vertebra.db.adapters.datafusion.config", "DataFusionConfig"),
+    "DataFusionCore": ("vertebra.db.adapters.datafusion.core", "DataFusionCore"),
     "DataFusionEngine": ("vertebra.db.adapters.datafusion.driver", "DataFusionEngine"),
     "DataFusionMode": ("vertebra.db.adapters.datafusion.config", "DataFusionMode"),
     "TableRegistration": ("vertebra.db.adapters.datafusion.config", "TableRegistration"),

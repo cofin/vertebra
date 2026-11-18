@@ -22,6 +22,7 @@ from vertebra._vertebra import (
     DatabaseError,
     GoogleCloudAuthError,
     InterfaceError,
+    LeaseBroker,
 )
 from vertebra.db import (
     AsyncAlloyDBDialer,
@@ -36,7 +37,14 @@ from vertebra.db.adapters.postgres import (
     PostgreSQLConfig,
     SyncPostgreSQLDriver,
 )
-from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.db.adapters.postgres.options import build_native_client_options
+from vertebra.db.driver import (
+    AZURE_POSTGRES_SCOPE,
+    AwsAuroraDsqlIamTokenProvider,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+)
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 
 
 @pytest.mark.anyio
@@ -569,7 +577,7 @@ async def test_native_async_lifecycle_and_concurrent_progress() -> None:
         nonlocal ticks
         while not gate.is_set():
             ticks += 1
-            await asyncio.sleep(0.002)
+            await asyncio.sleep(0)
 
     async with server:
         clients = [
@@ -593,7 +601,7 @@ async def test_native_async_lifecycle_and_concurrent_progress() -> None:
         with pytest.raises(InterfaceError):
             await clients[0].connect()
 
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         gate.set()
         await asyncio.gather(*connect_tasks)
         await ticker_task
@@ -746,12 +754,12 @@ async def test_native_async_cancel_inflight_and_queued_completion_race() -> None
         queued_event = threading.Event()
 
         def _reject_drainer_reader(fd: Any, callback: Callable[..., Any], *args: Any) -> Any:
-            if type(callback).__name__ == "_DbCompletionDrainer":
+            if type(callback).__name__ in ("_DbCompletionDrainer", "_RustCompletionDrainer"):
                 raise NotImplementedError
             return orig_add_reader(fd, callback, *args)
 
         def _hold_drainer_wakeup(callback: Callable[..., Any], *args: Any) -> Any:
-            if type(callback).__name__ == "_DbCompletionDrainer":
+            if type(callback).__name__ in ("_DbCompletionDrainer", "_RustCompletionDrainer"):
                 held_callbacks.append(lambda: callback(*args))
                 queued_event.set()
                 return None
@@ -956,3 +964,364 @@ def test_native_constructor_unix_socket_reachability() -> None:
             assert startup_seen["app.env"] == "ci"
             client.close()
             worker.join(timeout=2.0)
+
+
+@pytest.mark.anyio
+async def test_postgres_drivers_discard_statement_plan_and_release_real_broker_leases() -> None:
+    """Sync and Async PostgreSQL drivers use CommonDriverMixin LeaseBroker and bytes StatementCache cleanly."""
+    cluster = FakePostgresCluster()
+    sync_broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    sync_driver = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=FakeSyncPostgresPool(cluster), broker=sync_broker)
+    try:
+        assert sync_driver.execute("CREATE TABLE pg_lease_items (id INTEGER)") == 0
+        assert sync_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (1,)) == 1
+        assert sync_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (2,)) == 1
+        sc = sync_broker.statement_cache()
+        assert sc is not None
+        assert sc.stats().hits == 1
+        assert sync_broker.stats().active_leases == 0
+        assert sync_broker.stats().total_acquired == 3
+        assert sync_broker.stats().total_released == 3
+    finally:
+        sync_driver.close()
+
+    async_broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
+    async_driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=FakeAsyncPostgresPool(cluster), broker=async_broker)
+    try:
+        assert await async_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (3,)) == 1
+        assert await async_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (4,)) == 1
+        async_sc = async_broker.statement_cache()
+        assert async_sc is not None
+        assert async_sc.stats().hits == 1
+        assert async_broker.stats().active_leases == 0
+        assert async_broker.stats().total_acquired == 2
+        assert async_broker.stats().total_released == 2
+    finally:
+        await async_driver.close()
+
+
+def _read_pg_message(conn: socket.socket) -> tuple[bytes, bytes]:
+    """Read one frontend PostgreSQL wire message `(tag, payload)`."""
+    tag = _recv_exact(conn, 1)
+    total_len = struct.unpack(">i", _recv_exact(conn, 4))[0]
+    payload = _recv_exact(conn, total_len - 4) if total_len > 4 else b""
+    return tag, payload
+
+
+def test_postgres_config_token_provider_redaction_and_dsql_sslmode_rejection() -> None:
+    """Verify PostgreSQLConfig redacts credentials in repr, resolves token_provider, and blocks DSQL sslmode=disable."""
+    rds_provider = AwsRdsIamTokenProvider(
+        endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+        region="us-east-1",
+        username="iam_user",
+        access_key_id="AKIAEXAMPLEKEY1234",
+        secret_access_key="test-secret-key-placeholder",
+        session_token="test-session-placeholder",
+        clock=lambda: 1_794_873_600.0,
+    )
+    cfg = PostgreSQLConfig(
+        dsn="postgresql://iam_user:inline-secret@db.example:5432/appdb",
+        iam_auth_options={"service_account_key": "secret-sa-json"},
+        token_provider=rds_provider,
+    )
+    rendered = repr(cfg)
+    assert "inline-secret" not in rendered
+    assert "secret-sa-json" not in rendered
+    assert "AKIAEXAMPLEKEY1234" not in rendered
+    assert "test-secret-key-placeholder" not in rendered
+    assert "test-session-placeholder" not in rendered
+    assert "AwsRdsIamTokenProvider" in rendered
+
+    opts = build_native_client_options(cfg, env={})
+    assert opts.password == "inline-secret"
+
+    cfg_no_pw = PostgreSQLConfig(
+        dsn="postgresql://iam_user@db.example:5432/appdb",
+        token_provider=rds_provider,
+    )
+    opts_token = build_native_client_options(cfg_no_pw, env={})
+    assert opts_token.password == rds_provider.resolve_sync()
+
+    dsql_provider = AwsAuroraDsqlIamTokenProvider(
+        hostname="cluster.dsql.us-east-1.on.aws",
+        region="us-east-1",
+        access_key_id="AKIAEXAMPLEKEY1234",
+        secret_access_key="test-secret-key-placeholder",
+    )
+    with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+        PostgreSQLConfig(
+            dsn="postgresql://admin@cluster.dsql.us-east-1.on.aws:5432/postgres?sslmode=disable",
+            token_provider=dsql_provider,
+        )
+
+    valid_dsql_cfg = PostgreSQLConfig(
+        dsn="postgresql://admin@cluster.dsql.us-east-1.on.aws:5432/postgres",
+        token_provider=dsql_provider,
+    )
+    with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+        build_native_client_options(valid_dsql_cfg, env={"PGSSLMODE": "disable"})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_postgres_drivers_token_provider_refresh_and_auth_retry(mode: str) -> None:
+    """Verify Sync and Async PostgreSQL drivers rotate expired IAM tokens and force-refresh on 28P01."""
+    now = [1000.0]
+    issued: list[str] = []
+
+    def _mint(*, now_ts: float) -> str:
+        token = f"iam-token-{len(issued) + 1}-at-{int(now_ts)}"
+        issued.append(token)
+        return token
+
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host="127.0.0.1",
+        region="us-east-1",
+        username="iam_user",
+        refresh_margin_seconds=60.0,
+        token_ttl_seconds=900,
+        clock=lambda: now[0],
+        signer=_mint,
+    )
+
+    seen_passwords: list[str] = []
+    stop_event = threading.Event()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        srv.settimeout(0.2)
+        port = srv.getsockname()[1]
+
+        def _handle_conn(conn: socket.socket, conn_idx: int) -> None:
+            with conn:
+                _ = _read_startup_map(conn)
+                conn.sendall(_pg_frame(b"R", struct.pack(">i", 3)))
+                tag, payload = _read_pg_message(conn)
+                assert tag == b"p"
+                password = payload.rstrip(b"\x00").decode("utf-8")
+                seen_passwords.append(password)
+                if conn_idx == 2:
+                    conn.sendall(_pg_error_frame("28P01", "password authentication failed"))
+                    return
+                conn.sendall(_pg_trust_greeting_frames("17.2"))
+                while True:
+                    try:
+                        msg_tag, _ = _read_pg_message(conn)
+                    except EOFError:
+                        break
+                    if msg_tag == b"X":
+                        break
+                    if msg_tag == b"Q":
+                        conn.sendall(_pg_frame(b"C", b"SELECT 1\x00") + _pg_frame(b"Z", b"I"))
+                    elif msg_tag == b"S":
+                        conn.sendall(
+                            _pg_frame(b"1", b"")
+                            + _pg_frame(b"2", b"")
+                            + _pg_frame(b"C", b"SELECT 1\x00")
+                            + _pg_frame(b"Z", b"I")
+                        )
+
+        def _server() -> None:
+            idx = 0
+            while not stop_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                t = threading.Thread(target=_handle_conn, args=(conn, idx), daemon=True)
+                t.start()
+                idx += 1
+
+        srv_thread = threading.Thread(target=_server, daemon=True)
+        srv_thread.start()
+
+        cfg = PostgreSQLConfig(
+            dsn=f"postgresql://iam_user@127.0.0.1:{port}/appdb?sslmode=disable",
+            min_size=0,
+            max_size=2,
+            token_provider=provider,
+        )
+        try:
+            if mode == "sync":
+                driver = SyncPostgreSQLDriver(cfg)
+                try:
+                    driver.connect()
+                    assert driver.execute("SELECT 1") == 1
+                    assert len(issued) == 1
+                    assert seen_passwords[-1] == issued[0]
+
+                    now[0] = 1850.0
+                    assert driver.execute("SELECT 1") == 1
+                    assert len(issued) == 2
+                    assert seen_passwords[-1] == issued[1]
+
+                    driver.close()
+                    driver.connect()
+                    assert driver.execute("SELECT 1") == 1
+                    assert len(issued) == 3
+                    assert seen_passwords[-2:] == [issued[1], issued[2]]
+                finally:
+                    driver.close()
+            else:
+                async_driver = AsyncPostgreSQLDriver(cfg)
+                try:
+                    await async_driver.connect()
+                    assert await async_driver.execute("SELECT 1") == 1
+                    assert len(issued) == 1
+                    assert seen_passwords[-1] == issued[0]
+
+                    now[0] = 1850.0
+                    assert await async_driver.execute("SELECT 1") == 1
+                    assert len(issued) == 2
+                    assert seen_passwords[-1] == issued[1]
+
+                    await async_driver.close()
+                    await async_driver.connect()
+                    assert await async_driver.execute("SELECT 1") == 1
+                    assert len(issued) == 3
+                    assert seen_passwords[-2:] == [issued[1], issued[2]]
+                finally:
+                    await async_driver.close()
+        finally:
+            stop_event.set()
+            srv_thread.join(timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    ("explicit_scope", "expected_scope"),
+    [
+        (None, AZURE_POSTGRES_SCOPE),
+        ("https://custom.postgres.example/.default", "https://custom.postgres.example/.default"),
+    ],
+)
+def test_postgres_config_azure_entra_default_scope_and_redaction(
+    explicit_scope: str | None,
+    expected_scope: str,
+) -> None:
+    """Verify PostgreSQLConfig supplies AZURE_POSTGRES_SCOPE for AzureEntraTokenProvider and redacts secrets."""
+    seen_scopes: list[str] = []
+
+    def _fetch(scope: str) -> tuple[str, float]:
+        seen_scopes.append(scope)
+        return (f"test-token-placeholder-{scope}", 5000.0)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="pg-client",
+        client_secret="test-client-secret-placeholder",
+        scope=explicit_scope,
+        fetcher=_fetch,
+        clock=lambda: 1000.0,
+    )
+    cfg = PostgreSQLConfig(
+        dsn="postgresql://entra_user@pg.postgres.database.azure.com:5432/appdb?sslmode=require",
+        token_provider=provider,
+    )
+    rendered = repr(cfg)
+    assert "AzureEntraTokenProvider" in rendered
+    assert "test-client-secret-placeholder" not in rendered
+
+    opts = build_native_client_options(cfg, env={})
+    assert opts.password == f"test-token-placeholder-{expected_scope}"
+    assert seen_scopes == [expected_scope]
+    assert "test-token-placeholder-" not in repr(cfg)
+
+
+@pytest.mark.parametrize(
+    ("dsn", "cockroach_cluster", "expected_options"),
+    [
+        (
+            "postgresql://user:test-token-placeholder@crdb.example:26257/appdb",
+            "orange-finch-123",
+            "--cluster=orange-finch-123",
+        ),
+        (
+            "postgresql://user:test-token-placeholder@crdb.example:26257/appdb?options=--cluster%3Dfrom-dsn",
+            None,
+            "--cluster=from-dsn",
+        ),
+        (
+            "postgresql://user:test-token-placeholder@crdb.example:26257/appdb?options=-c%20work_mem%3D4MB",
+            "orange-finch-123",
+            "-c work_mem=4MB --cluster=orange-finch-123",
+        ),
+        (
+            "postgresql://user:test-token-placeholder@crdb.example:26257/appdb?options=--cluster%3Dstale%20-c%20work_mem%3D4MB",
+            "orange-finch-123",
+            "-c work_mem=4MB --cluster=orange-finch-123",
+        ),
+    ],
+)
+def test_postgres_cockroach_cluster_options_propagation_and_redaction(
+    dsn: str,
+    cockroach_cluster: str | None,
+    expected_options: str,
+) -> None:
+    """Verify CockroachDB cluster routing and DSN options propagate cleanly and redact credentials."""
+    cfg = PostgreSQLConfig(dsn=dsn, cockroach_cluster=cockroach_cluster)
+    rendered = repr(cfg)
+    assert "test-token-placeholder" not in rendered
+
+    opts = build_native_client_options(cfg, env={})
+    assert opts.session_gucs["options"] == expected_options
+    assert opts.to_client_kwargs()["session_gucs"]["options"] == expected_options
+
+
+@pytest.mark.parametrize("bad_cluster", ["", "   ", "my cluster", "bad\0cluster"])
+def test_postgres_cockroach_cluster_validation_rejects_invalid_values(bad_cluster: str) -> None:
+    """Verify empty, whitespace, or NUL-containing cockroach_cluster values are rejected."""
+    with pytest.raises(ImproperConfigurationError, match="cockroach_cluster"):
+        PostgreSQLConfig(
+            dsn="postgresql://user@crdb.example:26257/appdb",
+            cockroach_cluster=bad_cluster,
+        )
+
+
+def test_postgres_alloydb_columnar_engine_startup_gucs() -> None:
+    """Verify enable_alloydb_columnar_engine populates google_columnar_engine.enabled in startup GUCs."""
+    cfg = PostgreSQLConfig(
+        dsn="postgresql://user@127.0.0.1:5432/appdb",
+        enable_alloydb_columnar_engine=True,
+    )
+    gucs = cfg.build_session_gucs()
+    assert gucs["google_columnar_engine.enabled"] == "on"
+    assert gucs["alloydb.enable_columnar_engine"] == "on"
+    opts = build_native_client_options(cfg, env={})
+    assert opts.session_gucs["google_columnar_engine.enabled"] == "on"
+    assert opts.session_gucs["alloydb.enable_columnar_engine"] == "on"
+
+
+def test_postgres_cockroach_cluster_wire_startup_forwarding() -> None:
+    """Verify PostgreSQLConfig(cockroach_cluster=...) forwards --cluster=<id> in native StartupMessage."""
+    startup_seen: dict[str, str] = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+
+        def _server() -> None:
+            nonlocal startup_seen
+            conn, _ = srv.accept()
+            with conn:
+                startup_seen = _read_startup_map(conn)
+                conn.sendall(_pg_trust_greeting_frames("16.4"))
+                _ = conn.recv(16)
+
+        worker = threading.Thread(target=_server, daemon=True)
+        worker.start()
+
+        cfg = PostgreSQLConfig(
+            dsn=f"postgresql://alice:test-token-placeholder@127.0.0.1:{port}/appdb?sslmode=disable&options=-c%20work_mem%3D4MB",
+            cockroach_cluster="orange-finch-123",
+        )
+        assert "test-token-placeholder" not in repr(cfg)
+        opts = build_native_client_options(cfg, env={})
+        client = SyncPostgresClient(**opts.to_client_kwargs())
+        client.connect()
+        assert startup_seen["options"] == "-c work_mem=4MB --cluster=orange-finch-123"
+        client.close()
+        worker.join(timeout=2.0)

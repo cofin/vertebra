@@ -45,6 +45,8 @@ export {
 } from "./live/index";
 export {
   interpolateRoutePath,
+  type RouteDefinition,
+  type RouteRegistry,
   type RouteUrlOptions,
   routeUrl,
   wsUrl,

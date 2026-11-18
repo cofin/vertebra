@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::layout::CacheLine;
 use crate::platform::WaitWord;
-use crate::shm::{NamedAttach, ShmError, ShmRegion};
+#[cfg(unix)]
+use crate::shm::NamedAttach;
+use crate::shm::{ShmError, ShmRegion};
 
 pub const BROKER_MAGIC: u64 = u64::from_le_bytes(*b"VTBBRKR1");
 pub const BROKER_ABI_VERSION: u32 = 2;
@@ -101,6 +103,10 @@ pub enum BrokerError {
     InvalidCapacity,
     #[error("shared memory region is too small: expected {expected} bytes, got {actual} bytes")]
     RegionTooSmall { expected: usize, actual: usize },
+    #[error(
+        "misaligned shared-memory broker section at offset {offset} (requires {align}-byte alignment)"
+    )]
+    MisalignedRegion { offset: usize, align: usize },
     #[error("invalid broker magic header: {0:#x}")]
     InvalidMagic(u64),
     #[error("unsupported broker ABI version: {0}")]
@@ -189,6 +195,39 @@ fn libc_errno(err: &std::io::Error) -> i32 {
     err.raw_os_error().unwrap_or(5)
 }
 
+const MAX_STUCK_SPINS: u32 = 2048;
+
+fn checked_aligned_section<T>(
+    base: *const u8,
+    offset: usize,
+    section_bytes: usize,
+    region_len: usize,
+) -> Result<*mut T, BrokerError> {
+    let min_bytes = section_bytes.max(std::mem::size_of::<T>());
+    let end = offset
+        .checked_add(min_bytes)
+        .ok_or(BrokerError::RegionTooSmall {
+            expected: usize::MAX,
+            actual: region_len,
+        })?;
+    let align = std::mem::align_of::<T>();
+    let Some(addr) = (base as usize).checked_add(offset) else {
+        return Err(BrokerError::MisalignedRegion { offset, align });
+    };
+    if !offset.is_multiple_of(align) || !addr.is_multiple_of(align) {
+        return Err(BrokerError::MisalignedRegion { offset, align });
+    }
+    if end > region_len {
+        return Err(BrokerError::RegionTooSmall {
+            expected: end,
+            actual: region_len,
+        });
+    }
+    // SAFETY: `offset + section_bytes <= region_len`, `base + offset` does not overflow,
+    // and both `offset` and `base + offset` satisfy `align_of::<T>()`.
+    Ok(unsafe { base.add(offset) as *mut T })
+}
+
 #[inline]
 pub fn pack_state_pid(state: u32, pid: u32) -> u64 {
     ((state as u64) << 32) | (pid as u64)
@@ -207,7 +246,9 @@ pub fn monotonic_now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-#[repr(C, align(64))]
+#[repr(C)]
+#[cfg_attr(target_arch = "aarch64", repr(align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(align(64)))]
 pub struct ShmLeaseHeader {
     // Cache line 0 (64B): Immutable configuration
     pub magic: u64,
@@ -251,8 +292,11 @@ pub struct ShmLeaseHeader {
     pub partitions: [ShmPartitionEntry; MAX_POOL_PARTITIONS],
 }
 
+#[cfg(target_arch = "aarch64")]
+const _: () = assert!(std::mem::size_of::<ShmLeaseHeader>() == 4992);
+#[cfg(not(target_arch = "aarch64"))]
 const _: () = assert!(std::mem::size_of::<ShmLeaseHeader>() == 4544);
-const _: () = assert!(std::mem::align_of::<ShmLeaseHeader>() == 64);
+const _: () = assert!(std::mem::align_of::<ShmLeaseHeader>() == crate::layout::CACHELINE_BYTES);
 
 #[repr(C, align(64))]
 pub struct LeaseSlot {
@@ -346,6 +390,7 @@ pub struct ShmLeaseTable {
 
 // SAFETY: All fields accessed via ShmLeaseHeader and LeaseSlot are atomic or immutable.
 unsafe impl Send for ShmLeaseTable {}
+// SAFETY: Shared references only perform atomic operations or read immutable header metadata.
 unsafe impl Sync for ShmLeaseTable {}
 
 impl ShmLeaseTable {
@@ -438,44 +483,67 @@ impl ShmLeaseTable {
             Self::validate_capacities(pool_size, max_overflow, stmt_capacity, false)?;
         let req_size =
             Self::required_size_with_statements(pool_size, max_overflow, eff_stmt_cap_checked);
-        if region.len() < req_size {
+        let region_len = region.len();
+        if region_len < req_size {
             return Err(BrokerError::RegionTooSmall {
                 expected: req_size,
-                actual: region.len(),
+                actual: region_len,
             });
         }
 
-        let region_len = region.len();
+        let base = region.as_ptr() as *const u8;
+        let lease_bytes = Self::lease_section_size(pool_size, max_overflow);
+        let header_ptr =
+            checked_aligned_section::<ShmLeaseHeader>(base, 0, lease_bytes, region_len)?;
+        let total_slots = (pool_size as usize)
+            .checked_add(max_overflow as usize)
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let slots_offset = std::mem::size_of::<ShmLeaseHeader>();
+        let slots_bytes = total_slots
+            .checked_mul(std::mem::size_of::<LeaseSlot>())
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let slots_ptr =
+            checked_aligned_section::<LeaseSlot>(base, slots_offset, slots_bytes, region_len)?;
 
-        // SAFETY: region.as_mut_slice() is valid for req_size bytes. Zero out entire broker region.
+        let (eff_stmt_cap, stmt_offset_usize, stmt_bytes, stmt_hdr_ptr) =
+            if eff_stmt_cap_checked > 0 {
+                let cap = eff_stmt_cap_checked;
+                let offset = lease_bytes;
+                let bytes = ShmStatementCache::required_size(cap);
+                let ptr =
+                    checked_aligned_section::<ShmStatementHeader>(base, offset, bytes, region_len)?;
+                (cap, offset, bytes, Some(ptr))
+            } else {
+                (0, 0, 0, None)
+            };
+
+        let channel_offset_usize = lease_bytes
+            .checked_add(stmt_bytes)
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let channel_bytes = Self::channel_section_size(DEFAULT_CHANNEL_CAPACITY);
+        let chan_hdr_ptr = checked_aligned_section::<ShmChannelHeader>(
+            base,
+            channel_offset_usize,
+            channel_bytes,
+            region_len,
+        )?;
+
+        // SAFETY: `region` has exclusive access during initialization and spans at least `req_size` bytes.
         unsafe {
             let slice = region.as_mut_slice();
             slice[..req_size].fill(0);
         }
 
-        let header_ptr = unsafe { region.as_mut_slice() }.as_mut_ptr() as *mut ShmLeaseHeader;
-
-        let lease_bytes = Self::lease_section_size(pool_size, max_overflow);
-        let (eff_stmt_cap, stmt_offset, stmt_bytes) = if eff_stmt_cap_checked > 0 {
-            let cap = eff_stmt_cap_checked;
-            let offset = lease_bytes as u64;
-            let bytes = ShmStatementCache::required_size(cap);
-            let stmt_hdr_ptr =
-                unsafe { (header_ptr as *mut u8).add(lease_bytes) as *mut ShmStatementHeader };
+        if let Some(stmt_hdr_ptr) = stmt_hdr_ptr {
+            // SAFETY: `stmt_hdr_ptr` was validated by `checked_aligned_section` and zero-initialized above.
             unsafe {
                 let shdr = &mut *stmt_hdr_ptr;
-                shdr.capacity = cap;
-                shdr.set_mask = (cap / 4) - 1;
+                shdr.capacity = eff_stmt_cap;
+                shdr.set_mask = (eff_stmt_cap / 4) - 1;
             }
-            (cap, offset, bytes)
-        } else {
-            (0, 0, 0)
-        };
+        }
 
-        let channel_offset = (lease_bytes + stmt_bytes) as u64;
-        let chan_hdr_ptr = unsafe {
-            (header_ptr as *mut u8).add(channel_offset as usize) as *mut ShmChannelHeader
-        };
+        // SAFETY: `chan_hdr_ptr` was validated by `checked_aligned_section` and zero-initialized above.
         unsafe {
             let chdr = &mut *chan_hdr_ptr;
             chdr.capacity = DEFAULT_CHANNEL_CAPACITY;
@@ -485,7 +553,7 @@ impl ShmLeaseTable {
             chdr.total_dropped.store(0, Ordering::Release);
         }
 
-        // SAFETY: header_ptr is valid and aligned. Initialize header fields.
+        // SAFETY: `header_ptr` was validated by `checked_aligned_section` and zero-initialized above.
         unsafe {
             let hdr = &mut *header_ptr;
             hdr.magic = BROKER_MAGIC;
@@ -493,10 +561,10 @@ impl ShmLeaseTable {
             hdr.pool_size = pool_size;
             hdr.max_overflow = max_overflow;
             hdr.stmt_capacity = eff_stmt_cap;
-            hdr.stmt_offset = stmt_offset;
+            hdr.stmt_offset = stmt_offset_usize as u64;
             hdr.total_size = region_len as u64;
             hdr.channel_capacity = DEFAULT_CHANNEL_CAPACITY;
-            hdr.channel_offset = channel_offset;
+            hdr.channel_offset = channel_offset_usize as u64;
             hdr.active_leases.0.store(0, Ordering::Release);
             hdr.waiters.0.store(0, Ordering::Release);
             hdr.wake_seq.0.store(0);
@@ -504,12 +572,8 @@ impl ShmLeaseTable {
             hdr.partition_count.0.store(0, Ordering::Release);
         }
 
-        // SAFETY: `header_ptr` starts at the allocated SHM region base, which spans `req_size >= sizeof(ShmLeaseHeader) + (pool_size + max_overflow) * sizeof(LeaseSlot)`.
-        let slots_ptr = unsafe {
-            (header_ptr as *mut u8).add(std::mem::size_of::<ShmLeaseHeader>()) as *mut LeaseSlot
-        };
-        for idx in 0..((pool_size + max_overflow) as usize) {
-            // SAFETY: `slots_ptr` covers `pool_size + max_overflow` `LeaseSlot` entries within `req_size`.
+        for idx in 0..total_slots {
+            // SAFETY: `slots_ptr` was validated for `total_slots` `LeaseSlot` entries within `req_size`.
             unsafe {
                 (&*slots_ptr.add(idx))
                     .partition_id
@@ -520,18 +584,19 @@ impl ShmLeaseTable {
         Ok(())
     }
 
-    pub fn attach_region(mut region: ShmRegion) -> Result<Self, BrokerError> {
-        if region.len() < std::mem::size_of::<ShmLeaseHeader>() {
-            return Err(BrokerError::RegionTooSmall {
-                expected: std::mem::size_of::<ShmLeaseHeader>(),
-                actual: region.len(),
-            });
-        }
-
-        let header_ptr = unsafe { region.as_mut_slice() }.as_mut_ptr() as *mut ShmLeaseHeader;
+    pub fn attach_region(region: ShmRegion) -> Result<Self, BrokerError> {
+        let region_len = region.len();
+        let base = region.as_ptr() as *const u8;
+        let header_ptr = checked_aligned_section::<ShmLeaseHeader>(
+            base,
+            0,
+            std::mem::size_of::<ShmLeaseHeader>(),
+            region_len,
+        )?;
         let live_owner = region
             .owner_alive()
             .then(|| region.owner_pid().unwrap_or(0));
+        // SAFETY: `header_ptr` was validated for bounds and alignment by `checked_aligned_section`.
         let (pool_size, max_overflow, stmt_capacity) = unsafe {
             let hdr = &*header_ptr;
             if hdr.magic != BROKER_MAGIC {
@@ -558,20 +623,25 @@ impl ShmLeaseTable {
         };
 
         let req_size = Self::required_size_with_statements(pool_size, max_overflow, stmt_capacity);
-        if region.len() < req_size {
+        if region_len < req_size {
             if let Some(owner_pid) = live_owner {
                 return Err(BrokerError::SegmentInUse { owner_pid });
             }
             return Err(BrokerError::RegionTooSmall {
                 expected: req_size,
-                actual: region.len(),
+                actual: region_len,
             });
         }
 
-        // SAFETY: `header_ptr` starts at the allocated SHM region base, which spans `req_size >= sizeof(ShmLeaseHeader) + (pool_size + max_overflow) * sizeof(LeaseSlot)`.
-        let slots_ptr = unsafe {
-            (header_ptr as *mut u8).add(std::mem::size_of::<ShmLeaseHeader>()) as *mut LeaseSlot
-        };
+        let total_slots = (pool_size as usize)
+            .checked_add(max_overflow as usize)
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let slots_offset = std::mem::size_of::<ShmLeaseHeader>();
+        let slots_bytes = total_slots
+            .checked_mul(std::mem::size_of::<LeaseSlot>())
+            .ok_or(BrokerError::InvalidCapacity)?;
+        let slots_ptr =
+            checked_aligned_section::<LeaseSlot>(base, slots_offset, slots_bytes, region_len)?;
 
         Ok(Self {
             region: Arc::new(region),
@@ -637,8 +707,15 @@ impl ShmLeaseTable {
         let probe = ShmRegion::open_named(name, std::mem::size_of::<ShmLeaseHeader>())
             .map_err(|e| map_shm_error(e, name))?;
         let live_owner = probe.owner_alive().then(|| probe.owner_pid().unwrap_or(0));
+        let header_ptr = checked_aligned_section::<ShmLeaseHeader>(
+            probe.as_ptr() as *const u8,
+            0,
+            std::mem::size_of::<ShmLeaseHeader>(),
+            probe.len(),
+        )?;
+        // SAFETY: `header_ptr` was validated for bounds and alignment by `checked_aligned_section`.
         let total_size = unsafe {
-            let hdr = &*(probe.as_ptr() as *const ShmLeaseHeader);
+            let hdr = &*header_ptr;
             if hdr.magic != BROKER_MAGIC {
                 if let Some(owner_pid) = live_owner {
                     return Err(BrokerError::SegmentInUse { owner_pid });
@@ -1895,20 +1972,26 @@ impl ShmLeaseTable {
     fn channel_header_and_slots(&self) -> Option<(&ShmChannelHeader, *const ShmChannelSlot, u32)> {
         let hdr = self.header();
         let cap = hdr.channel_capacity;
-        let offset = hdr.channel_offset as usize;
+        let offset = usize::try_from(hdr.channel_offset).ok()?;
         if cap == 0 || offset == 0 {
             return None;
         }
-        let req_end = offset + Self::channel_section_size(cap);
-        if self.region.len() < req_end {
-            return None;
-        }
-        unsafe {
-            let ch_hdr_ptr = self.region.as_ptr().add(offset) as *const ShmChannelHeader;
-            let slots_ptr = (ch_hdr_ptr as *const u8).add(std::mem::size_of::<ShmChannelHeader>())
-                as *const ShmChannelSlot;
-            Some((&*ch_hdr_ptr, slots_ptr, cap))
-        }
+        let slots_bytes = (cap as usize).checked_mul(std::mem::size_of::<ShmChannelSlot>())?;
+        let section_bytes = std::mem::size_of::<ShmChannelHeader>()
+            .checked_add(slots_bytes)
+            .and_then(|raw| raw.checked_add(63))
+            .map(|aligned| aligned & !63)?;
+        let base = self.region.as_ptr() as *const u8;
+        let region_len = self.region.len();
+        let ch_hdr_ptr =
+            checked_aligned_section::<ShmChannelHeader>(base, offset, section_bytes, region_len)
+                .ok()?;
+        let slots_offset = offset.checked_add(std::mem::size_of::<ShmChannelHeader>())?;
+        let slots_ptr =
+            checked_aligned_section::<ShmChannelSlot>(base, slots_offset, slots_bytes, region_len)
+                .ok()?;
+        // SAFETY: `ch_hdr_ptr` and `slots_ptr` were validated for bounds and alignment by `checked_aligned_section`.
+        unsafe { Some((&*ch_hdr_ptr, slots_ptr as *const ShmChannelSlot, cap)) }
     }
 
     pub fn publish_channel(
@@ -1939,6 +2022,7 @@ impl ShmLeaseTable {
         // Pass 1: find a free slot
         for offset in 0..cap_usize {
             let idx = (start + offset) % cap_usize;
+            // SAFETY: `idx < cap_usize` and `slots_ptr` spans `cap_usize` `ShmChannelSlot` entries.
             let slot = unsafe { &*slots_ptr.add(idx) };
             if slot.state.load(Ordering::Acquire) == CHAN_SLOT_FREE
                 && slot
@@ -1961,6 +2045,7 @@ impl ShmLeaseTable {
             let mut oldest_idx = start;
             let mut oldest_seq = u64::MAX;
             for idx in 0..cap_usize {
+                // SAFETY: `idx < cap_usize` and `slots_ptr` spans `cap_usize` `ShmChannelSlot` entries.
                 let slot = unsafe { &*slots_ptr.add(idx) };
                 if slot.state.load(Ordering::Acquire) == CHAN_SLOT_READY {
                     let s = slot.seq.load(Ordering::Relaxed);
@@ -1970,6 +2055,7 @@ impl ShmLeaseTable {
                     }
                 }
             }
+            // SAFETY: `oldest_idx < cap_usize` and `slots_ptr` spans `cap_usize` `ShmChannelSlot` entries.
             let slot = unsafe { &*slots_ptr.add(oldest_idx) };
             if slot
                 .state
@@ -1990,6 +2076,7 @@ impl ShmLeaseTable {
             return false;
         };
 
+        // SAFETY: `idx < cap_usize` and `slots_ptr` spans `cap_usize` `ShmChannelSlot` entries.
         let slot = unsafe { &*slots_ptr.add(idx) };
         let ts = if timestamp_ns > 0 {
             timestamp_ns
@@ -1999,21 +2086,27 @@ impl ShmLeaseTable {
 
         let mut ch_buf = [0u8; CHAN_MAX_NAME_BYTES];
         ch_buf[..channel.len()].copy_from_slice(channel);
-        let ch_words = unsafe {
-            std::slice::from_raw_parts(ch_buf.as_ptr() as *const u64, channel.len().div_ceil(8))
-        };
-        for (i, &w) in ch_words.iter().enumerate() {
-            slot.channel_words[i].store(w, Ordering::Relaxed);
+        for (i, chunk) in ch_buf
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .take(channel.len().div_ceil(8))
+            .enumerate()
+        {
+            slot.channel_words[i].store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
         }
 
         let lid_len = if let Some(lid) = lease_id {
             let mut lid_buf = [0u8; CHAN_MAX_LEASE_ID_BYTES];
             lid_buf[..lid.len()].copy_from_slice(lid);
-            let lid_words = unsafe {
-                std::slice::from_raw_parts(lid_buf.as_ptr() as *const u64, lid.len().div_ceil(8))
-            };
-            for (i, &w) in lid_words.iter().enumerate() {
-                slot.lease_id_words[i].store(w, Ordering::Relaxed);
+            for (i, chunk) in lid_buf
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .take(lid.len().div_ceil(8))
+                .enumerate()
+            {
+                slot.lease_id_words[i].store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
             }
             lid.len() as u16
         } else {
@@ -2023,14 +2116,14 @@ impl ShmLeaseTable {
         if !payload.is_empty() {
             let mut pay_buf = [0u8; CHAN_MAX_PAYLOAD_BYTES];
             pay_buf[..payload.len()].copy_from_slice(payload);
-            let pay_words = unsafe {
-                std::slice::from_raw_parts(
-                    pay_buf.as_ptr() as *const u64,
-                    payload.len().div_ceil(8),
-                )
-            };
-            for (i, &w) in pay_words.iter().enumerate() {
-                slot.payload_words[i].store(w, Ordering::Relaxed);
+            for (i, chunk) in pay_buf
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .take(payload.len().div_ceil(8))
+                .enumerate()
+            {
+                slot.payload_words[i].store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
             }
         }
 
@@ -2055,6 +2148,7 @@ impl ShmLeaseTable {
         let mut collected: Vec<(u64, ChannelFrame)> = Vec::new();
 
         for idx in 0..cap as usize {
+            // SAFETY: `idx < cap as usize` and `slots_ptr` spans `cap` `ShmChannelSlot` entries.
             let slot = unsafe { &*slots_ptr.add(idx) };
             if slot.state.load(Ordering::Acquire) != CHAN_SLOT_READY {
                 continue;
@@ -2087,6 +2181,7 @@ impl ShmLeaseTable {
             for (i, word) in ch_words.iter_mut().enumerate().take(ch_len2.div_ceil(8)) {
                 *word = slot.channel_words[i].load(Ordering::Relaxed);
             }
+            // SAFETY: `ch_len2 <= CHAN_MAX_NAME_BYTES` (64) == `size_of_val(&ch_words)`.
             let ch_slice =
                 unsafe { std::slice::from_raw_parts(ch_words.as_ptr() as *const u8, ch_len2) };
             if ch_slice != channel {
@@ -2100,6 +2195,7 @@ impl ShmLeaseTable {
             for (i, word) in pay_words.iter_mut().enumerate().take(pay_len.div_ceil(8)) {
                 *word = slot.payload_words[i].load(Ordering::Relaxed);
             }
+            // SAFETY: `pay_len <= CHAN_MAX_PAYLOAD_BYTES` (256) == `size_of_val(&pay_words)`.
             let payload_vec = unsafe {
                 std::slice::from_raw_parts(pay_words.as_ptr() as *const u8, pay_len).to_vec()
             };
@@ -2111,6 +2207,7 @@ impl ShmLeaseTable {
                 for (i, word) in lid_words.iter_mut().enumerate().take(lid_len.div_ceil(8)) {
                     *word = slot.lease_id_words[i].load(Ordering::Relaxed);
                 }
+                // SAFETY: `lid_len <= CHAN_MAX_LEASE_ID_BYTES` (32) == `size_of_val(&lid_words)`.
                 Some(unsafe {
                     std::slice::from_raw_parts(lid_words.as_ptr() as *const u8, lid_len).to_vec()
                 })
@@ -2147,6 +2244,7 @@ impl ShmLeaseTable {
         let mut collected: Vec<(u64, ChannelFrame)> = Vec::new();
 
         for idx in 0..cap as usize {
+            // SAFETY: `idx < cap as usize` and `slots_ptr` spans `cap` `ShmChannelSlot` entries.
             let slot = unsafe { &*slots_ptr.add(idx) };
             if slot.state.load(Ordering::Acquire) != CHAN_SLOT_READY {
                 continue;
@@ -2170,6 +2268,7 @@ impl ShmLeaseTable {
             for (i, word) in ch_words.iter_mut().enumerate().take(ch_len.div_ceil(8)) {
                 *word = slot.channel_words[i].load(Ordering::Relaxed);
             }
+            // SAFETY: `ch_len <= CHAN_MAX_NAME_BYTES` (64) == `size_of_val(&ch_words)`.
             let channel_vec = unsafe {
                 std::slice::from_raw_parts(ch_words.as_ptr() as *const u8, ch_len).to_vec()
             };
@@ -2180,6 +2279,7 @@ impl ShmLeaseTable {
             for (i, word) in pay_words.iter_mut().enumerate().take(pay_len.div_ceil(8)) {
                 *word = slot.payload_words[i].load(Ordering::Relaxed);
             }
+            // SAFETY: `pay_len <= CHAN_MAX_PAYLOAD_BYTES` (256) == `size_of_val(&pay_words)`.
             let payload_vec = unsafe {
                 std::slice::from_raw_parts(pay_words.as_ptr() as *const u8, pay_len).to_vec()
             };
@@ -2191,6 +2291,7 @@ impl ShmLeaseTable {
                 for (i, word) in lid_words.iter_mut().enumerate().take(lid_len.div_ceil(8)) {
                     *word = slot.lease_id_words[i].load(Ordering::Relaxed);
                 }
+                // SAFETY: `lid_len <= CHAN_MAX_LEASE_ID_BYTES` (32) == `size_of_val(&lid_words)`.
                 Some(unsafe {
                     std::slice::from_raw_parts(lid_words.as_ptr() as *const u8, lid_len).to_vec()
                 })
@@ -2320,6 +2421,7 @@ pub struct ShmStatementCache {
 
 // SAFETY: All StatementSlot and ShmStatementHeader memory is accessed via atomic primitives.
 unsafe impl Send for ShmStatementCache {}
+// SAFETY: Shared references only perform atomic operations or read immutable header metadata.
 unsafe impl Sync for ShmStatementCache {}
 
 impl ShmStatementCache {
@@ -2362,25 +2464,34 @@ impl ShmStatementCache {
             .checked_next_power_of_two()
             .ok_or(BrokerError::InvalidCapacity)?;
         let req_size = Self::required_size(cap);
-        let expected_end = offset
-            .checked_add(req_size)
+        let region_len = region.len();
+        let region_base = region.as_ptr() as *const u8;
+        let header_ptr = checked_aligned_section::<ShmStatementHeader>(
+            region_base,
+            offset,
+            req_size,
+            region_len,
+        )?;
+        let slots_offset = offset
+            .checked_add(std::mem::size_of::<ShmStatementHeader>())
+            .ok_or(BrokerError::RegionTooSmall {
+                expected: usize::MAX,
+                actual: region_len,
+            })?;
+        let slots_bytes = (cap as usize)
+            .checked_mul(std::mem::size_of::<StatementSlot>())
             .ok_or(BrokerError::InvalidCapacity)?;
-        if region.len() < expected_end {
-            return Err(BrokerError::RegionTooSmall {
-                expected: expected_end,
-                actual: region.len(),
-            });
-        }
-
-        let header_ptr = unsafe { region.as_ptr().add(offset) as *mut ShmStatementHeader };
-        let slots_ptr = unsafe {
-            (header_ptr as *mut u8).add(std::mem::size_of::<ShmStatementHeader>())
-                as *mut StatementSlot
-        };
+        let slots_ptr = checked_aligned_section::<StatementSlot>(
+            region_base,
+            slots_offset,
+            slots_bytes,
+            region_len,
+        )?;
 
         if create {
+            // SAFETY: `header_ptr` and `req_size` bytes at `offset` were validated by `checked_aligned_section`.
             unsafe {
-                std::ptr::write_bytes(region.as_ptr().add(offset), 0, req_size);
+                std::ptr::write_bytes(header_ptr as *mut u8, 0, req_size);
                 let hdr = &mut *header_ptr;
                 hdr.capacity = cap;
                 hdr.set_mask = (cap / 4) - 1;
@@ -2478,11 +2589,13 @@ impl ShmStatementCache {
 
     #[inline]
     fn header(&self) -> &ShmStatementHeader {
+        // SAFETY: `self.header` points to a validated `ShmStatementHeader` kept alive by `self._region` or caller.
         unsafe { &*self.header }
     }
 
     #[inline]
     fn slot(&self, index: usize) -> &StatementSlot {
+        // SAFETY: `index` is bounded by `set_mask * 4 + 4 <= capacity` and `self.slots` spans `capacity` entries.
         unsafe { &*self.slots.add(index) }
     }
 
@@ -2565,6 +2678,7 @@ impl ShmStatementCache {
                 hdr.hits.fetch_add(1, Ordering::Relaxed);
 
                 let byte_ptr = words.as_ptr() as *const u8;
+                // SAFETY: `total_bytes == sql_len + plan_len <= STMT_SLOT_PAYLOAD_BYTES` (224) == `size_of_val(&words)`.
                 let payload_slice = unsafe { std::slice::from_raw_parts(byte_ptr, total_bytes) };
 
                 let compiled_sql = payload_slice[..sql_len].to_vec();
@@ -2645,29 +2759,61 @@ impl ShmStatementCache {
         let way = target_way.unwrap_or(0);
         let slot = self.slot(base + way);
 
-        // Claim slot for writing via seqlock odd increment
-        let mut even_seq = slot.seq.load(Ordering::Relaxed);
-        if (even_seq & 1) != 0 {
-            even_seq = even_seq.wrapping_add(1);
-        }
-
-        loop {
-            match slot.seq.compare_exchange_weak(
-                even_seq,
-                even_seq.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => {
-                    even_seq = if (actual & 1) != 0 {
-                        actual.wrapping_add(1)
+        // Claim slot for writing via seqlock odd increment, recovering if a writer crashed mid-update.
+        const MAX_TOTAL_INSERT_SPINS: u32 = MAX_STUCK_SPINS * 16;
+        let mut cur = slot.seq.load(Ordering::Acquire);
+        let mut last_odd_seq = 0u64;
+        let mut stuck_spins = 0u32;
+        let mut total_spins = 0u32;
+        let (claimed_odd, was_eviction) = loop {
+            if (cur & 1) == 0 {
+                match slot.seq.compare_exchange_weak(
+                    cur,
+                    cur.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break (cur.wrapping_add(1), cur > 0),
+                    Err(actual) => {
+                        cur = actual;
+                    }
+                }
+            } else {
+                if cur == last_odd_seq {
+                    stuck_spins += 1;
+                } else {
+                    last_odd_seq = cur;
+                    stuck_spins = 1;
+                }
+                if stuck_spins >= MAX_STUCK_SPINS {
+                    let next_odd = cur.saturating_add(2);
+                    match slot.seq.compare_exchange(
+                        cur,
+                        next_odd,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break (next_odd, true),
+                        Err(actual) => {
+                            cur = actual;
+                            last_odd_seq = 0;
+                            stuck_spins = 0;
+                        }
+                    }
+                } else {
+                    if stuck_spins > 64 {
+                        std::thread::yield_now();
                     } else {
-                        actual
-                    };
+                        std::hint::spin_loop();
+                    }
+                    cur = slot.seq.load(Ordering::Acquire);
                 }
             }
-        }
+            total_spins += 1;
+            if total_spins >= MAX_TOTAL_INSERT_SPINS {
+                return false;
+            }
+        };
 
         // Prepare payload buffer
         let mut payload_buf = [0u8; STMT_SLOT_PAYLOAD_BYTES];
@@ -2675,10 +2821,7 @@ impl ShmStatementCache {
         payload_buf[compiled_sql.len()..compiled_sql.len() + param_plan.len()]
             .copy_from_slice(param_plan);
 
-        let num_words = total_bytes.div_ceil(8);
-        let word_slice = unsafe {
-            std::slice::from_raw_parts(payload_buf.as_ptr() as *const u64, num_words.min(28))
-        };
+        let num_words = total_bytes.div_ceil(8).min(28);
 
         // Write fields
         slot.dialect_and_clock
@@ -2689,17 +2832,25 @@ impl ShmStatementCache {
         slot.plan_len
             .store(param_plan.len() as u16, Ordering::Relaxed);
 
-        for (i, &word) in word_slice.iter().enumerate() {
-            slot.payload[i].store(word, Ordering::Relaxed);
+        for (i, chunk) in payload_buf
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .take(num_words)
+            .enumerate()
+        {
+            slot.payload[i].store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
         }
 
         slot.sql_hash.store(hash, Ordering::Relaxed);
 
-        // Commit seqlock: even_seq + 2
-        slot.seq.store(even_seq.wrapping_add(2), Ordering::Release);
+        // Commit seqlock: next_odd + 1 (never 0)
+        let next_even = claimed_odd.wrapping_add(1);
+        let pub_seq = if next_even == 0 { 2 } else { next_even };
+        slot.seq.store(pub_seq, Ordering::Release);
 
         hdr.inserts.fetch_add(1, Ordering::Relaxed);
-        if even_seq > 0 {
+        if was_eviction {
             hdr.evictions.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -2799,6 +2950,7 @@ enum CacheSlotSnapshot {
 // SAFETY: All `ShmCacheHeader` and `ShmCacheSlot` fields accessed after initialization use atomics,
 // and `capacity` is validated once and stored immutably on `ShmCache`.
 unsafe impl Send for ShmCache {}
+// SAFETY: Shared references only perform atomic operations or read immutable capacity/pointers.
 unsafe impl Sync for ShmCache {}
 
 impl ShmCache {
@@ -3004,6 +3156,20 @@ impl ShmCache {
         self.capacity as u32
     }
 
+    #[cfg(test)]
+    fn set_slot_expiry_for_test(&self, index: usize, expiry_ns: u64) {
+        let slot = self.slot(index);
+        let seq = slot.seq.load(Ordering::Acquire);
+        let odd_seq = if (seq & 1) == 0 {
+            seq.wrapping_add(1)
+        } else {
+            seq
+        };
+        slot.seq.store(odd_seq, Ordering::Release);
+        slot.expiry_ns.store(expiry_ns, Ordering::Relaxed);
+        Self::unlock_slot(slot, odd_seq);
+    }
+
     #[inline]
     fn unlock_slot(slot: &ShmCacheSlot, odd_seq: u64) {
         debug_assert_eq!(odd_seq & 1, 1);
@@ -3037,19 +3203,19 @@ impl ShmCache {
         let mut key_buf = [0u8; SHM_CACHE_MAX_KEY_BYTES];
         key_buf[..key.len()].copy_from_slice(key);
         let num_key_words = key.len().div_ceil(8);
-        for i in 0..num_key_words {
-            let off = i * 8;
-            let w = u64::from_ne_bytes(key_buf[off..off + 8].try_into().unwrap());
-            slot.key[i].store(w, Ordering::Relaxed);
+        let (key_chunks, _) = key_buf.as_chunks::<8>();
+        for (dst, chunk) in slot.key.iter().zip(key_chunks.iter()).take(num_key_words) {
+            let w = u64::from_ne_bytes(*chunk);
+            dst.store(w, Ordering::Relaxed);
         }
 
         let mut val_buf = [0u8; SHM_CACHE_MAX_VALUE_BYTES];
         val_buf[..value.len()].copy_from_slice(value);
         let num_val_words = value.len().div_ceil(8);
-        for i in 0..num_val_words {
-            let off = i * 8;
-            let w = u64::from_ne_bytes(val_buf[off..off + 8].try_into().unwrap());
-            slot.value[i].store(w, Ordering::Relaxed);
+        let (val_chunks, _) = val_buf.as_chunks::<8>();
+        for (dst, chunk) in slot.value.iter().zip(val_chunks.iter()).take(num_val_words) {
+            let w = u64::from_ne_bytes(*chunk);
+            dst.store(w, Ordering::Relaxed);
         }
 
         slot.key_len.store(key.len() as u16, Ordering::Relaxed);
@@ -3994,6 +4160,7 @@ mod tests {
         // Attach a second handle from the same underlying FD (if unix)
         #[cfg(unix)]
         if let Some(fd) = table.region_handle() {
+            // SAFETY: `fd` is a valid open shared-memory file descriptor owned by `table`.
             let dup_fd = unsafe { libc::dup(fd) };
             assert!(dup_fd >= 0);
             let region2 = ShmRegion::from_fd(dup_fd, table.region_size()).unwrap();
@@ -4347,9 +4514,16 @@ mod tests {
         assert_eq!(pstats.quarantined, 0);
     }
 
+    fn unique_test_shm_name(prefix: &str) -> String {
+        static TEST_SHM_SEQ: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let seq = TEST_SHM_SEQ.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{}-{seq}", std::process::id())
+    }
+
     #[test]
     fn test_shm_cache_lifecycle() {
-        let name = format!("test-shm-cache-{}", std::process::id());
+        let name = unique_test_shm_name("test-shm-cache");
         let (cache, created) = ShmCache::open_or_create_named(&name, 1024 * 32, 32).unwrap();
         assert!(created);
         assert!(cache.set(b"key1", b"val1", None));
@@ -4388,6 +4562,7 @@ mod tests {
 
         // Corrupting `hdr.capacity` to 0, non-power-of-two, or oversized must reject attach
         // while existing `cache` keeps its validated local capacity.
+        // SAFETY: `region` holds a valid `ShmCacheHeader` at offset 0 and no concurrent mutators exist in this test.
         unsafe {
             let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
             hdr.capacity = 0;
@@ -4396,6 +4571,7 @@ mod tests {
             ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, false).err(),
             Some(BrokerError::InvalidCapacity)
         );
+        // SAFETY: `region` holds a valid `ShmCacheHeader` at offset 0 and no concurrent mutators exist in this test.
         unsafe {
             let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
             hdr.capacity = 24;
@@ -4404,6 +4580,7 @@ mod tests {
             ShmCache::from_region_at_offset(Arc::clone(&region), 0, 16, false).err(),
             Some(BrokerError::InvalidCapacity)
         );
+        // SAFETY: `region` holds a valid `ShmCacheHeader` at offset 0 and no concurrent mutators exist in this test.
         unsafe {
             let hdr = &mut *(region.as_ptr() as *mut ShmCacheHeader);
             hdr.capacity = 64;
@@ -4454,7 +4631,7 @@ mod tests {
         assert!(cache.set(k0, b"v0", Some(40_000_000))); // 40ms TTL -> expires after k1/k2 land behind it
         assert!(cache.set(k1, b"v1", None));
         assert!(cache.set(k2, b"v2", None));
-        std::thread::sleep(Duration::from_millis(50));
+        cache.set_slot_expiry_for_test(target_bucket, 1);
 
         // Expired `k0` at the head of the chain must NOT abort linear probing for `k1` or `k2`.
         assert_eq!(cache.get(k0), None);
@@ -4525,5 +4702,142 @@ mod tests {
             cache.slot(bucket).expiry_ns.load(Ordering::Acquire),
             orig_expiry
         );
+    }
+
+    #[test]
+    fn test_statement_cache_recovers_from_stuck_odd_seqlock() {
+        let req_size = ShmStatementCache::required_size(16);
+        let region = ShmRegion::create(req_size).unwrap();
+        let cache = ShmStatementCache::init_in_region(region, 16).unwrap();
+
+        let raw_sql = b"SELECT * FROM stuck_seqlock WHERE id = $1";
+        let compiled_sql = b"SELECT * FROM stuck_seqlock WHERE id = :p0";
+        let param_plan = b"\x91\xa2p0";
+        let hash = ShmStatementCache::compute_sql_hash(1, raw_sql);
+        let set_idx = (hash as usize) & (cache.header().set_mask as usize);
+        let base = set_idx * 4;
+
+        for way in 0..4 {
+            cache.slot(base + way).seq.store(1, Ordering::Release);
+        }
+
+        assert!(cache.insert(1, raw_sql, 2, compiled_sql, param_plan));
+        let entry = cache
+            .lookup(1, raw_sql)
+            .expect("recovered statement cache slot must be readable");
+        assert_eq!(entry.dialect_tag, 1);
+        assert_eq!(entry.param_count, 2);
+        assert_eq!(&entry.compiled_sql[..], compiled_sql);
+        assert_eq!(&entry.param_plan[..], param_plan);
+        assert_eq!(cache.slot(base).seq.load(Ordering::Acquire), 4);
+        assert_eq!(cache.stats().inserts, 1);
+        assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
+    fn test_broker_section_offset_alignment_and_bounds_rejection() {
+        let req_size = ShmStatementCache::required_size(16);
+        let padded_region = Arc::new(ShmRegion::create(req_size + 64).unwrap());
+        assert_eq!(
+            ShmStatementCache::from_region_at_offset(Arc::clone(&padded_region), 1, 16, false)
+                .err(),
+            Some(BrokerError::MisalignedRegion {
+                offset: 1,
+                align: std::mem::align_of::<ShmStatementHeader>(),
+            })
+        );
+
+        let exact_region = Arc::new(ShmRegion::create(req_size).unwrap());
+        let actual_len = exact_region.len();
+        let oversized_offset = actual_len & !63;
+        assert_eq!(
+            ShmStatementCache::from_region_at_offset(Arc::clone(&exact_region), 1, 16, false).err(),
+            Some(BrokerError::MisalignedRegion {
+                offset: 1,
+                align: std::mem::align_of::<ShmStatementHeader>(),
+            })
+        );
+        assert_eq!(
+            ShmStatementCache::from_region_at_offset(
+                Arc::clone(&exact_region),
+                oversized_offset,
+                16,
+                false,
+            )
+            .err(),
+            Some(BrokerError::RegionTooSmall {
+                expected: oversized_offset + req_size,
+                actual: actual_len,
+            })
+        );
+        assert_eq!(
+            ShmStatementCache::from_region_at_offset(
+                Arc::clone(&exact_region),
+                usize::MAX - 63,
+                16,
+                false,
+            )
+            .err(),
+            Some(BrokerError::RegionTooSmall {
+                expected: usize::MAX,
+                actual: actual_len,
+            })
+        );
+
+        let lease_req = ShmLeaseTable::required_size(2, 0);
+        let mut backing = vec![0u8; lease_req.max(req_size) + 128];
+        let raw_ptr = backing.as_mut_ptr();
+        let align_pad = (64 - (raw_ptr as usize % 64)) % 64;
+        // SAFETY: `backing` is at least `lease_req.max(req_size) + 128` bytes, so `align_pad + 1`
+        // leaves at least `lease_req.max(req_size)` valid bytes.
+        let unaligned_ptr = unsafe { raw_ptr.add(align_pad + 1) };
+        // SAFETY: `unaligned_ptr` points into `backing` and spans `req_size` valid bytes.
+        let unaligned_stmt_region =
+            unsafe { Arc::new(ShmRegion::from_raw(unaligned_ptr, req_size)) };
+        assert_eq!(
+            ShmStatementCache::from_region_at_offset(unaligned_stmt_region, 0, 16, false).err(),
+            Some(BrokerError::MisalignedRegion {
+                offset: 0,
+                align: std::mem::align_of::<ShmStatementHeader>(),
+            })
+        );
+        // SAFETY: `unaligned_ptr` points into `backing` and spans `lease_req` valid bytes.
+        let unaligned_lease_region = unsafe { ShmRegion::from_raw(unaligned_ptr, lease_req) };
+        assert_eq!(
+            ShmLeaseTable::attach_region(unaligned_lease_region).err(),
+            Some(BrokerError::MisalignedRegion {
+                offset: 0,
+                align: std::mem::align_of::<ShmLeaseHeader>(),
+            })
+        );
+
+        let table_region = ShmRegion::create(lease_req).unwrap();
+        let table = ShmLeaseTable::init_in_region(table_region, 2, 0).unwrap();
+        let orig_channel_offset = table.header().channel_offset;
+        assert!(table.channel_header_and_slots().is_some());
+
+        // SAFETY: `table.header` is a valid initialized `ShmLeaseHeader` with exclusive access in this test.
+        unsafe {
+            (&mut *table.header).channel_offset = orig_channel_offset + 1;
+        }
+        assert!(table.channel_header_and_slots().is_none());
+
+        // SAFETY: `table.header` is a valid initialized `ShmLeaseHeader` with exclusive access in this test.
+        unsafe {
+            (&mut *table.header).channel_offset = (usize::MAX - 63) as u64;
+        }
+        assert!(table.channel_header_and_slots().is_none());
+
+        // SAFETY: `table.header` is a valid initialized `ShmLeaseHeader` with exclusive access in this test.
+        unsafe {
+            (&mut *table.header).channel_offset = table.region.len() as u64;
+        }
+        assert!(table.channel_header_and_slots().is_none());
+
+        // SAFETY: `table.header` is a valid initialized `ShmLeaseHeader` with exclusive access in this test.
+        unsafe {
+            (&mut *table.header).channel_offset = orig_channel_offset;
+        }
+        assert!(table.channel_header_and_slots().is_some());
     }
 }

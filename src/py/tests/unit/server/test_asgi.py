@@ -190,7 +190,7 @@ def test_build_scope_native_vertebra_request() -> None:
     assert scope["method"] == "POST"
     assert scope["path"] == "/users"
     assert scope["raw_path"] == b"/users"
-    hdrs = scope["headers"]
+    hdrs = cast("list[tuple[bytes, bytes]]", scope["headers"])
     assert (b"content-type", b"application/json") in hdrs
     assert (b"x-req-id", b"abc") in hdrs
 
@@ -226,7 +226,7 @@ def test_asgi_receive_waits_for_disconnect_event() -> None:
         await recv()
 
         async def _trigger() -> None:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
             ev.set()
 
         task = asyncio.create_task(_trigger())
@@ -379,13 +379,16 @@ def test_asgi_runner_app_exception_after_start_returns_500() -> None:
 
 def test_asgi_runner_run_batch_concurrent() -> None:
     order: list[int] = []
+    fast_done = asyncio.Event()
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         path = scope["path"]
         idx = int(path.lstrip("/"))
         if idx == 0:
-            await asyncio.sleep(0.02)
+            await asyncio.wait_for(fast_done.wait(), timeout=2.0)
         order.append(idx)
+        if idx == 1:
+            fast_done.set()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": f"r{idx}".encode()})
 
@@ -442,8 +445,11 @@ def test_asgi_runner_custom_loop_not_closed_by_runner() -> None:
 def test_asgi_runner_Works_Inside_Running_Loop() -> None:
     """Runner uses run_coroutine_threadsafe when loop is already running."""
     loop = asyncio.new_event_loop()
+    started = threading.Event()
+    loop.call_soon(started.set)
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
+    assert started.wait(timeout=2.0)
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -649,13 +655,14 @@ async def test_drive_asgi_batch_unary_zero_task_and_suspending_fallback() -> Non
     assert seen_bodies == [b"b1", b"b2"]
 
     completed_async: list[str] = []
+    release_sleep = asyncio.Event()
 
     async def mixed_app(scope: Any, receive: Any, send: Any) -> None:
         path = scope["path"]
         if path == "/boom":
             raise RuntimeError("boom")
         if path == "/sleep":
-            await asyncio.sleep(0.005)
+            await asyncio.wait_for(release_sleep.wait(), timeout=2.0)
         await receive()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
@@ -672,6 +679,7 @@ async def test_drive_asgi_batch_unary_zero_task_and_suspending_fallback() -> Non
         inline_mixed = drive_asgi_batch(mixed_app, mixed_reqs, loop_obj=loop)
         assert inline_mixed == 2
         assert len(task_creations) == 1
+        release_sleep.set()
         await asyncio.gather(*task_creations)
     finally:
         setattr(loop, create_task_attr, orig_create_task)
@@ -801,13 +809,14 @@ async def test_drive_native_batch_and_flattened_compile_handler_spec() -> None:
         return t
 
     completed_tags: list[str] = []
+    release_slow = asyncio.Event()
 
     async def fast_coro() -> dict[str, Any]:
         completed_tags.append("fast")
         return {"ok": True}
 
     async def slow_coro() -> bytes:
-        await asyncio.sleep(0.002)
+        await asyncio.wait_for(release_slow.wait(), timeout=2.0)
         completed_tags.append("slow")
         return b"slow-done"
 
@@ -823,6 +832,7 @@ async def test_drive_native_batch_and_flattened_compile_handler_spec() -> None:
         )
         assert inline == 1
         assert len(task_creations) == 1
+        release_slow.set()
         await asyncio.gather(*task_creations)
     finally:
         setattr(loop, create_task_attr, orig_create_task)
@@ -1183,7 +1193,7 @@ def test_asgi_lifespan_startup_timeout_cancels_and_awaits_task() -> None:
         msg = await receive()
         assert msg["type"] == "lifespan.startup"
         try:
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             task_cancelled.set()
             raise

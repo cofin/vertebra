@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+import contextlib
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, ClassVar, Self
 
+import msgspec
 from anyio import CancelScope
 
-from vertebra.db.adapters.mysql.config import MySQLConfig
+from vertebra.db.adapters.mysql.config import (
+    MySQLConfig,
+    build_mysql_client_kwargs,
+    is_mysql_auth_rejection,
+)
 from vertebra.db.adapters.mysql.core import MySQLCore
 from vertebra.db.adapters.mysql.pipeline import AsyncMySQLPipeline
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
 from vertebra.db.driver import (
+    AZURE_MYSQL_SCOPE,
     AsyncDatabaseDriver,
+    AzureEntraTokenProvider,
     DatabaseError,
     NotFoundError,
     OperationalError,
@@ -49,18 +58,27 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
             merged.update(kwargs)
             config = MySQLConfig(**merged)
 
-        super().__init__(config, broker=broker if broker is not None else config.broker)
+        if isinstance(config.token_provider, AzureEntraTokenProvider):
+            config = msgspec.structs.replace(
+                config,
+                token_provider=config.token_provider.with_default_scope(AZURE_MYSQL_SCOPE),
+            )
+
+        super().__init__(config, broker=broker)
         self._client: Any = client
+        self._owns_client: bool = client is None
+        self._client_token: str | None = None
         self._dialer: Any = dialer
         self._savepoint_seq: int = 0
-        self._closed: bool = False
 
     def __repr__(self) -> str:
         """Return a redacted representation of the driver."""
+        provider_name = type(self.config.token_provider).__name__ if self.config.token_provider is not None else None
         return (
             f"AsyncMySQLDriver(host={self.config.host!r}, port={self.config.port}, "
             f"user={self.config.user!r}, database={self.config.database!r}, "
-            f"ssl_mode={self.config.canonical_ssl_mode!r}, password='***')"
+            f"ssl_mode={self.config.canonical_ssl_mode!r}, password='***', "
+            f"token_provider={provider_name!r})"
         )
 
     @property
@@ -100,13 +118,13 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         """Return the number of binary prepared statements cached in the session LRU."""
         if self._client is None:
             return 0
-        fn = getattr(self._client, "statement_cache_len", None)
+        fn: Callable[[], Any] | None = getattr(self._client, "statement_cache_len", None)
         return int(fn()) if callable(fn) else 0
 
     async def connect(self) -> Self:
         """Initialize the underlying native MySQL client and return `self`."""
         self._closed = False
-        self._get_client()
+        await self._get_client_async()
         return self
 
     async def close(self) -> None:
@@ -114,11 +132,15 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         if self._closed:
             return
         self._closed = True
-        if self._client is not None:
-            close_fn = getattr(self._client, "close", None)
+        client = self._client
+        if self._owns_client or (client is not None and bool(getattr(client, "is_closed", False))):
+            self._client = None
+            self._client_token = None
+        if client is not None:
+            close_fn: Callable[[], Any] | None = getattr(client, "close", None)
             if callable(close_fn):
                 res = close_fn()
-                if hasattr(res, "__await__"):
+                if inspect.isawaitable(res):
                     await res
 
     async def begin(
@@ -128,70 +150,39 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         readonly: bool = False,
     ) -> None:
         """Start an explicit transaction on a pinned connection."""
-        client = self._get_client()
-        try:
+
+        async def _op(client: Any) -> None:
             try:
                 await client.begin(isolation_level, readonly)
             except TypeError:
                 await client.begin()
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+
+        await self._run_with_client(_op, use_broker_lease=False)
 
     async def commit(self) -> None:
         """Commit the active transaction and return the connection to the pool."""
-        client = self._get_client()
-        try:
-            await client.commit()
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        await self._run_with_client(lambda client: client.commit(), use_broker_lease=False)
 
     async def rollback(self) -> None:
         """Roll back the active transaction and return the connection to the pool."""
-        client = self._get_client()
-        try:
-            await client.rollback()
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        await self._run_with_client(lambda client: client.rollback(), use_broker_lease=False)
 
     async def savepoint(self, name: str | None = None) -> str:
         """Create a `SAVEPOINT` inside the current transaction and return its identifier."""
-        client = self._get_client()
+        self._ensure_open()
         if name is None:
             self._savepoint_seq += 1
             name = f"vtb_sp_{self._savepoint_seq}"
-        try:
-            sp = await client.savepoint(name)
-            return str(sp)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        sp = await self._run_with_client(lambda client: client.savepoint(name), use_broker_lease=False)
+        return str(sp)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Roll back changes to savepoint `name`."""
-        client = self._get_client()
-        try:
-            await client.rollback_to_savepoint(name)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        await self._run_with_client(lambda client: client.rollback_to_savepoint(name), use_broker_lease=False)
 
     async def release_savepoint(self, name: str) -> None:
         """Release savepoint `name`."""
-        client = self._get_client()
-        try:
-            await client.release_savepoint(name)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        await self._run_with_client(lambda client: client.release_savepoint(name), use_broker_lease=False)
 
     @asynccontextmanager
     async def transaction(
@@ -201,7 +192,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         readonly: bool = False,
     ) -> AsyncIterator[Self]:
         """Async context manager for transactions with shielded rollback and nested `SAVEPOINT` support."""
-        self._get_client()
+        await self._get_client_async()
         if self.in_transaction:
             sp_name = await self.savepoint()
             try:
@@ -226,20 +217,16 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
 
     def pipeline(self) -> AsyncMySQLPipeline:
         """Return an `AsyncMySQLPipeline` context manager for batched transaction execution."""
-        self._get_client()
+        self._ensure_open()
+        if self.config.token_provider is None:
+            self._get_client()
         return AsyncMySQLPipeline(self)
 
     async def ping(self) -> bool:
         """Issue a MySQL `COM_PING` health check."""
         if self._closed:
             return False
-        client = self._get_client()
-        try:
-            return bool(await client.ping())
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        return bool(await self._run_with_client(lambda client: client.ping(), use_broker_lease=False))
 
     async def cancel_query(self, connection_id: int | None = None) -> bool:
         """Issue an out-of-band `KILL QUERY <conn_id>` and return whether a target was signalled."""
@@ -265,15 +252,11 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> int:
         """Execute a DML or DDL statement and return the affected row count."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            count = await client.execute(compiled_sql, params if params else None)
-            return int(count)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        return int(await self._run_with_client(lambda client: client.execute(compiled_sql, bound)))
 
     async def execute_many(
         self,
@@ -282,7 +265,7 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> int:
         """Execute a statement repeatedly across `parameter_sets` and return total affected rows."""
-        client = self._get_client()
+        self._ensure_open()
         if not parameter_sets:
             return 0
         compiled_sets: list[tuple[Any, ...]] = []
@@ -292,20 +275,17 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
             if idx == 0:
                 compiled_sql = norm_sql
             compiled_sets.append(params)
-        try:
-            count = await client.execute_many(compiled_sql, compiled_sets)
-            return int(count)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        param_count = len(compiled_sets[0]) if compiled_sets else 0
+        self._lookup_or_cache_statement(sql, param_count=param_count, compiled_sql=compiled_sql.encode("utf-8"))
+        return int(await self._run_with_client(lambda client: client.execute_many(compiled_sql, compiled_sets)))
 
     async def execute_script(self, sql: str) -> int:
         """Execute a semicolon-delimited SQL script via `COM_QUERY` multi-statement mode."""
-        client = self._get_client()
+        client = await self._get_client_async()
+        if hasattr(client, "execute_script"):
+            self._lookup_or_cache_statement(sql)
+            return int(await self._run_with_client(lambda c: c.execute_script(sql)))
         try:
-            if hasattr(client, "execute_script"):
-                return int(await client.execute_script(sql))
             total = 0
             for stmt in (part.strip() for part in sql.split(";") if part.strip()):
                 total += await self.execute(stmt)
@@ -332,11 +312,14 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute a statement and return `(tuple_rows, column_names)` preserving empty-result columns."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+
+        async def _op(client: Any) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
             if hasattr(client, "execute_with_description"):
-                raw = await client.execute_with_description(compiled_sql, params if params else None)
+                raw = await client.execute_with_description(compiled_sql, bound)
                 dict_rows, raw_cols = raw[0], raw[1]
                 col_names = tuple(str(col[0]) if isinstance(col, (tuple, list)) else str(col) for col in raw_cols)
                 if not col_names and dict_rows:
@@ -346,16 +329,14 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
                     for row in dict_rows
                 ]
                 return tuple_rows, col_names
-            rows = await client.fetch_all(compiled_sql, params if params else None)
+            rows = await client.fetch_all(compiled_sql, bound)
             if rows:
                 col_names = tuple(str(k) for k in rows[0])
                 tuple_rows = [tuple(row[c] for c in col_names) for row in rows]
                 return tuple_rows, col_names
             return [], ()
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+
+        return await self._run_with_client(_op)
 
     async def select(
         self,
@@ -369,15 +350,12 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         if schema_type is not None:
             tuple_rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
             return self.hydrate_rows(tuple_rows, cols, schema_type)
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            rows = await client.fetch_all(compiled_sql, params if params else None)
-            return [dict(r) for r in rows]
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        rows = await self._run_with_client(lambda client: client.fetch_all(compiled_sql, bound))
+        return [dict(r) for r in rows]
 
     async def select_one(
         self,
@@ -388,14 +366,11 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> Any:
         """Execute a `SELECT` query and return the first row or raise `NotFoundError`."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            row = await client.fetch_one(compiled_sql, params if params else None)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        row = await self._run_with_client(lambda client: client.fetch_one(compiled_sql, bound))
         if row is None:
             err = NotFoundError("Expected at least one row, got 0")
             err.sqlstate = "02000"
@@ -431,18 +406,15 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query and return at most `size` rows."""
-        client = self._get_client()
-        compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            if hasattr(client, "fetch_many"):
-                raw_rows = await client.fetch_many(compiled_sql, params if params else None, size)
-                rows = [dict(r) for r in raw_rows]
-            else:
-                rows = (await self.select(sql, parameters))[:size]
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        client = await self._get_client_async()
+        if hasattr(client, "fetch_many"):
+            compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
+            self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+            bound = params if params else None
+            raw_rows = await self._run_with_client(lambda c: c.fetch_many(compiled_sql, bound, size))
+            rows = [dict(r) for r in raw_rows]
+        else:
+            rows = (await self.select(sql, parameters))[:size]
         if schema_type is not None and rows:
             cols = tuple(rows[0].keys())
             tuple_rows = [tuple(r[c] for c in cols) for r in rows]
@@ -458,18 +430,15 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> Any:
         """Execute a `SELECT` query and return the first scalar value or raise `NotFoundError`."""
-        client = self._get_client()
-        compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            if hasattr(client, "select_value"):
-                val = await client.select_value(compiled_sql, params if params else None)
-            else:
-                row = await self.select_one(sql, parameters)
-                val = next(iter(row.values()), None)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        client = await self._get_client_async()
+        if hasattr(client, "select_value"):
+            compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
+            self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+            bound = params if params else None
+            val = await self._run_with_client(lambda c: c.select_value(compiled_sql, bound))
+        else:
+            row = await self.select_one(sql, parameters)
+            val = next(iter(row.values()), None)
         return MySQLCore.coerce_scalar_value(val, value_type)
 
     async def select_value_or_none(
@@ -512,15 +481,12 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Execute a multi-result query or `CALL` procedure and return all result sets."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            sets = await client.fetch_all_sets(compiled_sql, params if params else None)
-            return [[dict(r) for r in rs] for rs in sets]
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        sets = await self._run_with_client(lambda client: client.fetch_all_sets(compiled_sql, bound))
+        return [[dict(r) for r in rs] for rs in sets]
 
     async def select_to_arrow(
         self,
@@ -532,21 +498,16 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> ArrowCursor:
         """Execute a `SELECT` query and materialize results into a `VTBARROW` `ArrowCursor`."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            native_cursor = await client.select_to_arrow(
-                compiled_sql,
-                params if params else None,
-                batch_size=batch_size,
-            )
-            if isinstance(native_cursor, ArrowCursor):
-                return native_cursor
-            return ArrowCursor(native_cursor, used_shm=True, shm_cursor=native_cursor)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        native_cursor = await self._run_with_client(
+            lambda client: client.select_to_arrow(compiled_sql, bound, batch_size=batch_size)
+        )
+        if isinstance(native_cursor, ArrowCursor):
+            return native_cursor
+        return ArrowCursor(native_cursor, used_shm=True, shm_cursor=native_cursor)
 
     async def stream_arrow_batches(
         self,
@@ -557,18 +518,13 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> AsyncIterator[ArrowCursor]:
         """Stream a `SELECT` query as bounded `VTBARROW` `ArrowCursor` chunks."""
-        client = self._get_client()
+        self._ensure_open()
         compiled_sql, params = MySQLCore.compile_for_driver(sql, parameters)
-        try:
-            batches = await client.stream_arrow_batches(
-                compiled_sql,
-                params if params else None,
-                batch_size=batch_size,
-            )
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        self._lookup_or_cache_statement(sql, param_count=len(params), compiled_sql=compiled_sql.encode("utf-8"))
+        bound = params if params else None
+        batches = await self._run_with_client(
+            lambda client: client.stream_arrow_batches(compiled_sql, bound, batch_size=batch_size)
+        )
         for batch in batches:
             if isinstance(batch, ArrowCursor):
                 yield batch
@@ -585,27 +541,123 @@ class AsyncMySQLDriver(AsyncDatabaseDriver[MySQLConfig]):
         **kwargs: Any,
     ) -> int:
         """Bulk-load an `ArrowCursor`, PyArrow Table/RecordBatch, or `__arrow_c_stream__` into `table_name`."""
-        client = self._get_client()
+        self._ensure_open()
         source = data._shm_cursor if isinstance(data, ArrowCursor) and data._shm_cursor is not None else data
-        try:
-            inserted = await client.load_from_arrow(
-                table_name,
-                source,
-                columns=list(columns) if columns is not None else None,
-                batch_size=batch_size,
+        self._lookup_or_cache_statement(
+            f"LOAD DATA {table_name}", param_count=len(columns) if columns is not None else 0
+        )
+        col_list = list(columns) if columns is not None else None
+        return int(
+            await self._run_with_client(
+                lambda client: client.load_from_arrow(
+                    table_name,
+                    source,
+                    columns=col_list,
+                    batch_size=batch_size,
+                )
             )
-            return int(inserted)
-        except Exception as exc:
-            if isinstance(exc, DatabaseError):
-                raise
-            raise MySQLCore.map_exception(exc) from exc
+        )
 
-    def _get_client(self) -> Any:
+    def _ensure_open(self) -> None:
         if self._closed or (self._client is not None and bool(getattr(self._client, "is_closed", False))):
             msg = "AsyncMySQLDriver is closed"
             raise OperationalError(msg)
-        if self._client is None:
-            mod = MySQLCore.require_native_module()
-            connect_kwargs = MySQLCore.build_connect_kwargs(self.config)
-            self._client = mod.AsyncMySQLClient(**connect_kwargs)
+
+    def _create_native_client(self, token: str | None, *, skip_iam_sync: bool = False) -> Any:
+        mod = MySQLCore.require_native_module()
+        connect_kwargs = build_mysql_client_kwargs(self.config, token, skip_iam_sync=skip_iam_sync)
+        self._client = mod.AsyncMySQLClient(**connect_kwargs)
+        self._client_token = token
+        self._owns_client = True
         return self._client
+
+    def _get_client(self, *, force_refresh: bool = False) -> Any:
+        self._ensure_open()
+        token: str | None = None
+        if self._client is not None:
+            if self._owns_client and self.config.token_provider is not None and not self.in_transaction:
+                token = self.config.resolve_iam_password_sync(force_refresh=force_refresh)
+                if not force_refresh and token == self._client_token:
+                    return self._client
+                stale = self._client
+                self._client = None
+                self._client_token = None
+                close_fn: Callable[[], Any] | None = getattr(stale, "close", None)
+                if callable(close_fn):
+                    with contextlib.suppress(Exception):
+                        res = close_fn()
+                        if inspect.isawaitable(res):
+                            close_coro: Callable[[], Any] | None = getattr(res, "close", None)
+                            if callable(close_coro):
+                                close_coro()
+            else:
+                return self._client
+        elif self.config.token_provider is not None:
+            token = self.config.resolve_iam_password_sync(force_refresh=force_refresh)
+        return self._create_native_client(token)
+
+    async def _close_owned_client_async(self) -> None:
+        client = self._client
+        if self._owns_client:
+            self._client = None
+            self._client_token = None
+        if client is not None:
+            close_fn: Callable[[], Any] | None = getattr(client, "close", None)
+            if callable(close_fn):
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    res = close_fn()
+                    if inspect.isawaitable(res):
+                        await res
+
+    async def _get_client_async(self, *, force_refresh: bool = False) -> Any:
+        self._ensure_open()
+        token: str | None = None
+        if self._client is not None:
+            if self._owns_client and self.config.token_provider is not None and not self.in_transaction:
+                token = await self.config.resolve_iam_password_async(force_refresh=force_refresh)
+                if not force_refresh and token == self._client_token:
+                    return self._client
+                await self._close_owned_client_async()
+            else:
+                return self._client
+        elif self.config.token_provider is not None or self.config.enable_iam_auth:
+            token = await self.config.resolve_iam_password_async(force_refresh=force_refresh)
+        return self._create_native_client(token, skip_iam_sync=True)
+
+    async def _refresh_client_after_auth_error(self) -> None:
+        invalidate_fn: Callable[[], Any] | None = getattr(self.config.token_provider, "invalidate", None)
+        if callable(invalidate_fn):
+            invalidate_fn()
+        if self._owns_client:
+            await self._get_client_async(force_refresh=True)
+        else:
+            await self.config.resolve_iam_password_async(force_refresh=True)
+
+    async def _run_with_client[T](
+        self,
+        op: Callable[[Any], Awaitable[T]],
+        *,
+        use_broker_lease: bool = True,
+    ) -> T:
+        for attempt in (0, 1):
+            client = await self._get_client_async()
+            lease = self._acquire_broker_lease() if use_broker_lease else None
+            try:
+                return await op(client)
+            except Exception as exc:
+                if (
+                    attempt == 0
+                    and self.config.token_provider is not None
+                    and not self.in_transaction
+                    and is_mysql_auth_rejection(exc)
+                ):
+                    await self._refresh_client_after_auth_error()
+                    continue
+                if isinstance(exc, DatabaseError):
+                    raise
+                raise MySQLCore.map_exception(exc) from exc
+            finally:
+                if use_broker_lease:
+                    self._release_broker_lease(lease)
+        msg = "MySQL authentication retry exhausted"
+        raise OperationalError(msg)

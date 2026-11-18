@@ -1,4 +1,4 @@
-"""Self-extracting single-binary builder with zstd compression and VTB1FILE SHA-256 footer."""
+"""Self-extracting single-binary builder with zlib/zstd compression and VTB1FILE SHA-256 footer."""
 
 import hashlib
 import inspect
@@ -7,7 +7,7 @@ import os
 import tarfile
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from vertebra.build.packaging import _onefile_extract
 from vertebra.build.packaging._onefile_extract import (
@@ -18,7 +18,7 @@ from vertebra.build.packaging._onefile_extract import (
     inspect_trailer_bytes,
 )
 from vertebra.build.packaging.targets import BuildTarget
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
 
 __all__ = (
     "ONEFILE_MAGIC",
@@ -34,14 +34,24 @@ ONEFILE_TRAILER_SIZE: int = TRAILER_SIZE
 class OnefileBuilder:
     """Package a standalone distribution directory into a single-file executable with a VTB1FILE footer."""
 
-    __slots__ = ("dist_dir", "target")
+    __slots__ = ("compression", "dist_dir", "target")
 
-    def __init__(self, dist_dir: Path, target: BuildTarget) -> None:
+    def __init__(
+        self,
+        dist_dir: Path,
+        target: BuildTarget,
+        *,
+        compression: Literal["zlib", "zstd"] = "zlib",
+    ) -> None:
         if not dist_dir.exists():
             msg = f"Standalone distribution folder not found: {dist_dir}"
             raise ValueError(msg)
+        if compression not in {"zlib", "zstd"}:
+            msg = f"Unsupported onefile compression: {compression!r}"
+            raise ValueError(msg)
         self.dist_dir = dist_dir
         self.target = target
+        self.compression: Literal["zlib", "zstd"] = compression
 
     def build(self, output_path: Path) -> Path:
         """Create a single-file executable containing a launcher stub, compressed tar archive, and 48-byte footer."""
@@ -85,7 +95,7 @@ class OnefileBuilder:
             for item in sorted(self.dist_dir.iterdir()):
                 tar.add(item, arcname=item.name, filter=self._normalize_tar_member)
         tar_bytes = tar_buffer.getvalue()
-        return self._compress_payload(tar_bytes)
+        return self._compress_payload(tar_bytes, compression=self.compression)
 
     @classmethod
     def _normalize_tar_member(cls, info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -104,16 +114,21 @@ class OnefileBuilder:
         return int(raw) if raw.isdigit() else 0
 
     @classmethod
-    def _compress_payload(cls, raw_tar: bytes) -> bytes:
-        zstd = cls._load_zstd()
-        if zstd is not None:
+    def _compress_payload(
+        cls,
+        raw_tar: bytes,
+        *,
+        compression: Literal["zlib", "zstd"] = "zlib",
+    ) -> bytes:
+        """Compress a raw tar archive using stdlib zlib or optional zstandard."""
+        if compression == "zlib":
+            return b"ZLIB" + zlib.compress(raw_tar, level=9)
+        if compression == "zstd":
+            zstd = ensure_module("zstandard", package="zstandard", extra="zstandard")
             compressor = zstd.ZstdCompressor(level=19)
             return b"ZSTD" + bytes(compressor.compress(raw_tar))
-        return b"ZLIB" + zlib.compress(raw_tar, level=9)
-
-    @staticmethod
-    def _load_zstd() -> Any:
-        return import_optional("zstandard")
+        msg = f"Unsupported onefile compression: {compression!r}"
+        raise ValueError(msg)
 
     @classmethod
     def _launcher_stub(cls, short_hash: str) -> bytes:
@@ -138,5 +153,6 @@ class OnefileBuilder:
 
     @staticmethod
     def _quote_python_code(code: str) -> str:
-        escaped = code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+        """Double-quote Python source for /bin/sh -c without expanding backslashes, quotes, $, or backticks."""
+        escaped = code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
         return f'"{escaped}"'

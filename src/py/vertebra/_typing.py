@@ -24,7 +24,6 @@ from typing import (
 
 __all__ = (
     "ATTRS_INSTALLED",
-    "NANOID_INSTALLED",
     "NUMPY_INSTALLED",
     "PYDANTIC_INSTALLED",
     "UNSET",
@@ -189,10 +188,16 @@ class BaseModelStub:
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
 
+_MISSING_MODULE: Final = object()
+
+
 def module_available(module_name: str) -> bool:
     """Return True if the given module can be resolved."""
-    if module_name in sys.modules:
-        return sys.modules[module_name] is not None
+    cached_mod = sys.modules.get(module_name, _MISSING_MODULE)
+    if cached_mod is None:
+        return False
+    if cached_mod is not _MISSING_MODULE and not getattr(getattr(cached_mod, "__spec__", None), "_initializing", False):
+        return True
 
     cached = _dependency_cache.get(module_name)
     if cached is not None:
@@ -227,7 +232,6 @@ def attrs_asdict_stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 ATTRS_INSTALLED = dependency_flag("attrs")
-NANOID_INSTALLED = dependency_flag("fastnanoid")
 NUMPY_INSTALLED = dependency_flag("numpy")
 PYDANTIC_INSTALLED = dependency_flag("pydantic")
 UVLOOP_INSTALLED = dependency_flag("uvloop")

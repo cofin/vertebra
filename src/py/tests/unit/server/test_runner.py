@@ -5,7 +5,6 @@ import gc
 import inspect
 import os
 import threading
-import time
 import weakref
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -30,7 +29,9 @@ from vertebra.server._dispatch import (
     _resolve_handler_args,
     compile_handler_table,
     dispatch_batch,
+    get_worker_executor,
     partition_batch,
+    shutdown_worker_executor,
 )
 from vertebra.server._gil_audit import is_free_threaded
 from vertebra.server._loops import EventLoopPool
@@ -77,12 +78,32 @@ class MockResponse:
         self.request_id = request_id
 
 
+class _SubmitCollector:
+    """Thread-safe submission collector using a condition variable instead of polling."""
+
+    def __init__(self) -> None:
+        self.items: list[MockResponse] = []
+        self._cond = threading.Condition()
+
+    def append(self, response: MockResponse) -> None:
+        with self._cond:
+            self.items.append(response)
+            self._cond.notify_all()
+
+    def wait_for(self, count: int, timeout: float = 2.0) -> list[MockResponse]:
+        with self._cond:
+            if not self._cond.wait_for(lambda: len(self.items) >= count, timeout=timeout):
+                msg = f"Timed out waiting for {count} submissions; got {len(self.items)}"
+                raise TimeoutError(msg)
+            return self.items
+
+
 def test_single_loop_pool_replaces_async_runtime() -> None:
     """Verify EventLoopPool(size=1) executes single and batch coroutines cleanly without AsyncRuntime."""
     pool = EventLoopPool(size=1)
 
     async def add(a: int, b: int) -> int:
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0)
         return a + b
 
     try:
@@ -276,7 +297,7 @@ def test_dispatch_batch_async_handlers_run_concurrently() -> None:
 
     async def fast_handler() -> str:
         execution_order.append("fast_start")
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0)
         execution_order.append("fast_end")
         return "fast"
 
@@ -306,7 +327,7 @@ def test_dispatch_batch_mixed_batch_preserves_response_order() -> None:
         return "sync_val"
 
     async def async_h() -> str:
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0)
         return "async_val"
 
     handlers = {1: sync_h, 2: async_h}
@@ -366,7 +387,7 @@ def test_dispatch_batch_async_handler_exception_returns_500() -> None:
         raise RuntimeError("async boom")
 
     async def good_async() -> str:
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0)
         return "survived"
 
     handlers = {1: bad_async, 2: good_async}
@@ -465,14 +486,14 @@ def test_dispatch_batch_wsgi_mount_exception_returns_500() -> None:
 
 def test_dispatch_batch_async_mode_spawns_and_submits_independently() -> None:
     """In async_mode, fast handlers submit before slow handlers complete."""
-    submitted: list[MockResponse] = []
+    collector = _SubmitCollector()
 
     async def slow_handler() -> str:
         await asyncio.sleep(0.05)
         return "slow"
 
     async def fast_handler() -> str:
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0)
         return "fast"
 
     handlers = {1: slow_handler, 2: fast_handler}
@@ -490,14 +511,11 @@ def test_dispatch_batch_async_mode_spawns_and_submits_independently() -> None:
             MockResponse,
             pool,
             async_mode=True,
-            submit=submitted.append,
+            submit=collector.append,
         )
         assert result is None
 
-        deadline = time.monotonic() + 2.0
-        while len(submitted) < 2 and time.monotonic() < deadline:
-            time.sleep(0.005)
-
+        submitted = collector.wait_for(2)
         assert len(submitted) == 2
         assert submitted[0].request_id == 20
         assert submitted[0].body == b"fast"
@@ -561,7 +579,7 @@ def test_dispatch_batch_async_mode_unmatched_submits_404() -> None:
 
 def test_dispatch_batch_async_mode_error_handler_invoked_on_exception() -> None:
     """In async_mode, custom error_handler is called when a handler raises."""
-    submitted: list[MockResponse] = []
+    collector = _SubmitCollector()
 
     async def failing() -> str:
         raise ValueError("bad input")
@@ -581,13 +599,10 @@ def test_dispatch_batch_async_mode_error_handler_invoked_on_exception() -> None:
             MockResponse,
             pool,
             async_mode=True,
-            submit=submitted.append,
+            submit=collector.append,
             error_handler=custom_err,
         )
-        deadline = time.monotonic() + 2.0
-        while len(submitted) < 1 and time.monotonic() < deadline:
-            time.sleep(0.005)
-
+        submitted = collector.wait_for(1)
         assert len(submitted) == 1
         assert submitted[0].status == 422
         assert submitted[0].body == b"bad input"
@@ -768,7 +783,7 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
     assert compiled[block_id].sync_to_thread is True
     assert compiled[router_id].sync_to_thread is True
 
-    submitted: list[MockResponse] = []
+    collector = _SubmitCollector()
     exec_spy = _CountingExecutor()
     pool = EventLoopPool(size=1)
     try:
@@ -785,13 +800,10 @@ def test_sync_to_thread_route_executes_once_on_executor() -> None:
             MockResponse,
             pool,
             async_mode=True,
-            submit=submitted.append,
+            submit=collector.append,
             executor=exec_spy,
         )
-        deadline = time.monotonic() + 2.0
-        while len(submitted) < 3 and time.monotonic() < deadline:
-            time.sleep(0.005)
-
+        submitted = collector.wait_for(3)
         assert len(submitted) == 3
         assert exec_spy.submit_calls == 2
         assert fast_tids == [caller_tid]
@@ -843,7 +855,7 @@ def test_async_dispatch_unpins_request_before_await() -> None:
     entered = threading.Event()
     release_gate: asyncio.Event | None = None
     loop_holder: list[asyncio.AbstractEventLoop] = []
-    submitted: list[MockResponse] = []
+    collector = _SubmitCollector()
 
     async def waiting_handler() -> bytes:
         nonlocal release_gate
@@ -866,7 +878,7 @@ def test_async_dispatch_unpins_request_before_await() -> None:
             MockResponse,
             pool,
             async_mode=True,
-            submit=submitted.append,
+            submit=collector.append,
         )
         del req
         del plan
@@ -875,9 +887,7 @@ def test_async_dispatch_unpins_request_before_await() -> None:
         assert weak_req() is None
         assert release_gate is not None
         loop_holder[0].call_soon_threadsafe(release_gate.set)
-        deadline = time.monotonic() + 2.0
-        while not submitted and time.monotonic() < deadline:
-            time.sleep(0.005)
+        submitted = collector.wait_for(1)
         assert len(submitted) == 1
         assert submitted[0].body == b"done"
     finally:
@@ -1195,7 +1205,7 @@ def test_event_loop_pool_stop_drains_tasks_and_async_generators() -> None:
     async def wait_forever() -> None:
         started.set()
         try:
-            await asyncio.sleep(3600)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             cancelled.set()
             raise
@@ -1236,7 +1246,7 @@ def test_asgi_mount_runner_times_out_and_cancels_task() -> None:
 
     async def never_responds(scope: Any, receive: Any, send: Any) -> None:
         try:
-            await asyncio.sleep(3600)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             cancelled.set()
             raise
@@ -1248,6 +1258,45 @@ def test_asgi_mount_runner_times_out_and_cancels_task() -> None:
         assert cancelled.wait(timeout=2.0)
     finally:
         pool.stop()
+
+
+@pytest.mark.parametrize("raise_on_cancel", [False, True])
+def test_asgi_mount_runner_batch_timeout_cancels_scheduled_task_without_warnings(
+    raise_on_cancel: bool,
+) -> None:
+    """Timed-out _AsgiMountRunner batches cancel the scheduled asyncio.Task with zero unretrieved warnings."""
+    pool = EventLoopPool(size=2)
+    scheduled_tasks: list[asyncio.Task[Any]] = []
+    loop_errors: list[dict[str, Any]] = []
+
+    for shard_loop in pool.loops:
+        shard_loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(dict(ctx)))
+
+    async def slow_asgi(scope: Any, receive: Any, send: Any) -> None:
+        _ = (scope, receive, send)
+        task = asyncio.current_task()
+        assert task is not None
+        scheduled_tasks.append(task)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if raise_on_cancel:
+                raise RuntimeError("cleanup boom")
+
+    try:
+        runner = _AsgiMountRunner(slow_asgi, pool, batch_timeout=0.05)
+        responses = runner([MockRequest(handler_id=101, request_id=19, path="/hang")])
+        assert [(r.status, r.body, r.request_id) for r in responses] == [(504, b"Gateway Timeout", 19)]
+        assert len(scheduled_tasks) == 1
+        task = scheduled_tasks[0]
+        assert task.done()
+        if not raise_on_cancel:
+            assert task.cancelled()
+        gc.collect()
+    finally:
+        pool.stop()
+    assert all(not task_set for task_set in pool._task_sets)
+    assert loop_errors == []
 
 
 async def _ok_asgi(scope: Any, receive: Any, send: Any) -> None:
@@ -1300,7 +1349,7 @@ def test_dispatch_batch_buffered_async_native_times_out_with_504_and_cancels_tas
 
     async def slow_handler() -> bytes:
         try:
-            await asyncio.sleep(3600)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             cancelled.set()
             raise
@@ -1350,7 +1399,7 @@ def test_worker_run_raises_worker_startup_error_on_lifespan_or_rsgi_failure(
     async def timeout_asgi(scope: dict[str, Any], receive: Any, _send: Any) -> None:
         if scope["type"] == "lifespan":
             await receive()
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
 
     class FailingRsgiApp:
         def __rsgi_init__(self, _loop: Any) -> None:
@@ -1426,3 +1475,163 @@ def test_worker_run_unsupported_lifespan_mount_stays_non_fatal(
 
     w = Worker({}, mounts=[("/stateless", stateless_asgi, "asgi")], max_batches=1)
     w.run()
+
+
+@pytest.mark.parametrize("workload", ["pure_async", "sync_to_thread", "wsgi_concurrent"])
+def test_dispatch_batch_worker_executor_lazy_init_and_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    workload: str,
+) -> None:
+    """Worker executor initializes lazily only when needed, reuses one pool across batches, and joins cleanly."""
+    shutdown_worker_executor(wait=True)
+    created_kwargs: list[dict[str, Any]] = []
+    shutdown_waits: list[bool] = []
+    seen_none_during_shutdown: list[bool] = []
+
+    class _TrackedExecutor(ThreadPoolExecutor):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            created_kwargs.append(dict(kwargs))
+            super().__init__(*args, **kwargs)
+
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            seen_none_during_shutdown.append(_dispatch._WORKER_EXECUTOR is None)
+            shutdown_waits.append(wait)
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    monkeypatch.setattr(_dispatch, "ThreadPoolExecutor", _TrackedExecutor)
+    pool = EventLoopPool(size=1)
+    try:
+        if workload == "pure_async":
+            collector = _SubmitCollector()
+
+            async def async_route() -> bytes:
+                return b"async-ok"
+
+            compiled = compile_handler_table({1: async_route})
+            for req_id in (1, 2, 3):
+                plan = partition_batch([MockRequest(handler_id=1, request_id=req_id)], compiled, [])
+                dispatch_batch(
+                    plan,
+                    compiled,
+                    [],
+                    MockResponse,
+                    pool,
+                    async_mode=True,
+                    submit=collector.append,
+                )
+
+            submitted = collector.wait_for(3)
+            assert len(submitted) == 3
+            assert created_kwargs == []
+            assert shutdown_waits == []
+        elif workload == "sync_to_thread":
+            sync_collector = _SubmitCollector()
+            app = App()
+
+            @app.get("/work", sync_to_thread=True)
+            def blocking_route() -> bytes:
+                return b"sync-ok"
+
+            compiled = compile_handler_table(app._handlers)
+            handler_id = next(iter(compiled))
+            for req_id in (10, 11, 12):
+                plan = partition_batch(
+                    [MockRequest(handler_id=handler_id, request_id=req_id, path="/work")], compiled, []
+                )
+                dispatch_batch(
+                    plan,
+                    compiled,
+                    [],
+                    MockResponse,
+                    pool,
+                    async_mode=True,
+                    submit=sync_collector.append,
+                )
+
+            submitted_sync = sync_collector.wait_for(3)
+            assert len(submitted_sync) == 3
+            assert len(created_kwargs) == 1
+            assert created_kwargs[0]["thread_name_prefix"] == "vertebra-worker"
+
+            shutdown_worker_executor(wait=True)
+            assert shutdown_waits == [True]
+            assert seen_none_during_shutdown == [True]
+            shutdown_worker_executor(wait=True)
+            assert shutdown_waits == [True]
+        else:
+
+            def mock_wsgi(req: Any) -> MockResponse:
+                return MockResponse(status=200, body=b"wsgi-ok", request_id=req.request_id)
+
+            mounts = [("/legacy", mock_wsgi, "wsgi")]
+            for offset in (0, 2):
+                batch = [
+                    MockRequest(handler_id=99, request_id=20 + offset, path="/legacy/a"),
+                    MockRequest(handler_id=99, request_id=21 + offset, path="/legacy/b"),
+                ]
+                plan = partition_batch(batch, {}, mounts)
+                results = dispatch_batch(plan, {}, mounts, MockResponse, pool.primary_loop)
+                assert results is not None
+                assert [r.body for r in results] == [b"wsgi-ok", b"wsgi-ok"]
+
+            assert len(created_kwargs) == 1
+            assert created_kwargs[0]["thread_name_prefix"] == "vertebra-worker"
+            shutdown_worker_executor(wait=True)
+            assert shutdown_waits == [True]
+            assert seen_none_during_shutdown == [True]
+    finally:
+        shutdown_worker_executor(wait=True)
+        pool.stop()
+
+
+@pytest.mark.parametrize("exit_mode", ["normal_loop_exit", "exception_exit"])
+def test_worker_run_joins_worker_and_dispatch_executors_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_mode: str,
+) -> None:
+    """Worker.run calls shutdown(wait=True) for both its own executor and cached dispatch executor on exit."""
+    shutdown_worker_executor(wait=True)
+    worker_shutdowns: list[bool] = []
+    dispatch_shutdowns: list[bool] = []
+
+    class _WorkerTrackedExecutor(ThreadPoolExecutor):
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            worker_shutdowns.append(wait)
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    class _DispatchTrackedExecutor(ThreadPoolExecutor):
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            dispatch_shutdowns.append(wait)
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    app = App()
+
+    @app.get("/block", sync_to_thread=True)
+    def blocking_handler() -> bytes:
+        return b"ok"
+
+    monkeypatch.setattr(worker, "ThreadPoolExecutor", _WorkerTrackedExecutor)
+    monkeypatch.setattr(_dispatch, "ThreadPoolExecutor", _DispatchTrackedExecutor)
+    monkeypatch.setattr(worker, "get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr(worker, "get_batch", lambda _timeout: [object()])
+
+    def fake_process_batch(*_args: Any, **_kwargs: Any) -> None:
+        get_worker_executor()
+        if exit_mode == "exception_exit":
+            msg = "batch exploded"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(Worker, "_process_batch", fake_process_batch)
+
+    w = Worker(app._handlers, max_batches=1, batch_timeout_ms=10)
+    try:
+        if exit_mode == "exception_exit":
+            with pytest.raises(RuntimeError, match="batch exploded"):
+                w.run()
+        else:
+            w.run()
+        assert worker_shutdowns == [True]
+        assert dispatch_shutdowns == [True]
+        assert _dispatch._WORKER_EXECUTOR is None
+    finally:
+        shutdown_worker_executor(wait=True)

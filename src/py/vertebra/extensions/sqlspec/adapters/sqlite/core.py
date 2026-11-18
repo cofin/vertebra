@@ -1,13 +1,23 @@
 """SQLite adapter core helpers for statement config, bind formatting, PRAGMAs, and metadata shaping."""
 
+from __future__ import annotations
+
 import array
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlspec.core import DriverParameterProfile, ParameterStyle, StatementConfig, build_statement_config_from_profile
+from sqlspec.core import (
+    DriverParameterProfile,
+    ParameterStyle,
+    ParameterStyleConfig,
+    StatementConfig,
+    TypedParameter,
+    build_statement_config_from_profile,
+)
+from sqlspec.core.cache import get_cache_config
 from sqlspec.data_dictionary import IndexMetadata
 from sqlspec.data_dictionary.dialects.sqlite import list_sqlite_available_features, resolve_sqlite_json_type
 from sqlspec.data_dictionary.dialects.sqlite.config import (
@@ -37,7 +47,6 @@ from sqlspec.utils.serializers import from_json, to_json
 from sqlspec.utils.type_converters import build_decimal_converter, build_uuid_coercions
 
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
-from vertebra.extensions.sqlspec._driver import native_statement_config, unwrap_typed_parameters
 from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
@@ -58,6 +67,7 @@ __all__ = (
     "julian_to_datetime",
     "list_sqlite_available_features",
     "map_sqlite_exception",
+    "native_statement_config",
     "normalize_sqlite_many_parameters",
     "normalize_sqlite_parameters",
     "normalize_sqlite_schema_name",
@@ -71,6 +81,7 @@ __all__ = (
     "sqlite_object_ddl_result",
     "sqlite_schema_ddl_results",
     "unpack_embedding",
+    "unwrap_typed_parameters",
     "validate_fts_options",
 )
 
@@ -93,6 +104,60 @@ _QUOTED_SQL_SEGMENT = re.compile(
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*[\s\S]*?\*/|(?<!:):([A-Za-z_][A-Za-z0-9_]*)"
 )
 _EPOCH_UNIX = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
+    if isinstance(bound, dict):
+        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(unwrap_typed_parameters(value) for value in bound)
+    if isinstance(bound, list):
+        return [unwrap_typed_parameters(value) for value in bound]
+    if isinstance(bound, TypedParameter):
+        return unwrap_typed_parameters(bound.value)
+    return bound
+
+
+def native_statement_config(
+    dialect: str,
+    parameter_style: ParameterStyle,
+    **overrides: Any,
+) -> StatementConfig:
+    """Construct an isolated `StatementConfig` configured for the adapter's native bind syntax."""
+    default_style = overrides.pop("default_style", ParameterStyle.QMARK)
+    supported_styles = overrides.pop("supported_styles", None)
+    supported_execution_styles = overrides.pop("supported_execution_styles", None)
+    preserve_parameter_format = bool(overrides.pop("preserve_parameter_format", True))
+    enable_caching = overrides.pop("enable_caching", None)
+
+    if supported_styles is not None:
+        input_styles: Collection[ParameterStyle] = set(supported_styles)
+    elif parameter_style == ParameterStyle.NAMED_COLON:
+        input_styles = {ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}
+    else:
+        input_styles = {default_style, parameter_style}
+
+    exec_styles: Collection[ParameterStyle] = (
+        set(supported_execution_styles) if supported_execution_styles is not None else {parameter_style}
+    )
+    caching = get_cache_config().compiled_cache_enabled if enable_caching is None else enable_caching
+    parameter_config = overrides.pop(
+        "parameter_config",
+        ParameterStyleConfig(
+            default_parameter_style=default_style,
+            supported_parameter_styles=set(input_styles),
+            default_execution_parameter_style=parameter_style,
+            supported_execution_parameter_styles=set(exec_styles),
+            preserve_parameter_format=preserve_parameter_format,
+        ),
+    )
+    return StatementConfig(
+        dialect=dialect,
+        enable_caching=caching,
+        parameter_config=parameter_config,
+        **overrides,
+    )
 
 
 def driver_profile() -> DriverParameterProfile:

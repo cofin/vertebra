@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
@@ -34,7 +35,9 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Sequence
+
+    from vertebra.db.driver.capabilities import AsyncQueueStore
 
 __all__ = (
     "CLAIM_ORACLE_JOBS_SQL",
@@ -93,6 +96,25 @@ ORDER BY COALESCE(scheduled_at, enqueued_at) ASC, enqueued_at ASC
 FETCH FIRST :3 ROWS ONLY
 FOR UPDATE SKIP LOCKED
 """
+
+
+@runtime_checkable
+class _DeadLetterPopCapable(Protocol):
+    """Optional capability protocol for queue stores supporting atomic dead-letter pop."""
+
+    def pop_dead_letter(self, job_id: str) -> QueueEntry | Awaitable[QueueEntry | None] | None:
+        """Atomically remove and return a dead-lettered queue entry."""
+        ...
+
+
+async def _pop_dead_letter_entry(store: AsyncQueueStore, dlq_id: str) -> QueueEntry | None:
+    """Pop a dead-letter entry via ``pop_dead_letter`` when supported or fall back to ``get_entry``."""
+    if isinstance(store, _DeadLetterPopCapable):
+        result = store.pop_dead_letter(dlq_id)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return await store.get_entry(dlq_id)
 
 
 @runtime_checkable
@@ -540,11 +562,7 @@ class OracleQueueBackend:
     async def replay_dlq(self, dlq_id: str) -> TaskEnvelope | None:
         """Re-enqueue task from dead-letter queue and commit."""
         if self._store is not None:
-            pop_fn = getattr(self._store, "pop_dead_letter", None)
-            if callable(pop_fn):
-                entry = await pop_fn(dlq_id)
-            else:
-                entry = await self._store.get_entry(dlq_id)
+            entry = await _pop_dead_letter_entry(self._store, dlq_id)
             if entry is None:
                 return None
             try:

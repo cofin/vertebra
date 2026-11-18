@@ -350,6 +350,11 @@ impl VectorView {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Invoked by CPython's buffer protocol with the GIL attached (`slf` is a live
+    // `VectorView` and `view` is a valid non-null `Py_buffer*`). `PyBuffer_FillInfo` rejects
+    // `PyBUF_WRITABLE` (`readonly = 1`, returning `-1` before any `*view` writes) and sets
+    // `(*view).obj` to an incremented owning reference to `slf`, pinning `self.slab`,
+    // `this.shape_storage`, and `this.stride_storage` until `__releasebuffer__` / `PyBuffer_Release`.
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut ffi::Py_buffer,
@@ -358,9 +363,6 @@ impl VectorView {
         let py = slf.py();
         let this = slf.get();
         let slice = this.row_bytes()?;
-        // SAFETY: `view` is a valid `Py_buffer` pointer supplied by CPython's buffer
-        // protocol, `slf` is owned by `view->obj` until `__releasebuffer__`, and
-        // `this.shape_storage` / `this.stride_storage` live inside the pinned `VectorView`.
         let ret = ffi::PyBuffer_FillInfo(
             view,
             slf.as_ptr(),
@@ -388,6 +390,8 @@ impl VectorView {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Paired PEP 3118 release hook invoked by CPython on `PyBuffer_Release`; `VectorView`
+    // holds no per-view heap allocation and `(*view).obj` drop decrefs the pinned exporter.
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 
     pub fn __repr__(&self) -> String {
@@ -825,6 +829,11 @@ impl VectorBatchView {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Invoked by CPython's buffer protocol with the GIL attached (`slf` is a live
+    // `VectorBatchView` and `view` is a valid non-null `Py_buffer*`). `PyBuffer_FillInfo` rejects
+    // `PyBUF_WRITABLE` (`readonly = 1`, returning `-1` before any `*view` writes) and sets
+    // `(*view).obj` to an incremented owning reference to `slf`, pinning `self.slab`,
+    // `this.shape_storage`, and `this.stride_storage` until `__releasebuffer__` / `PyBuffer_Release`.
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut ffi::Py_buffer,
@@ -834,9 +843,6 @@ impl VectorBatchView {
         let this = slf.get();
         let ptr = this.slab.data_ptr();
         let byte_len = this.slab.data_byte_len();
-        // SAFETY: `view` is a valid `Py_buffer` pointer supplied by CPython's buffer
-        // protocol, `slf` is retained by `view->obj` until `__releasebuffer__`, and
-        // `this.shape_storage` / `this.stride_storage` live inside `VectorBatchView`.
         let ret = ffi::PyBuffer_FillInfo(
             view,
             slf.as_ptr(),
@@ -864,6 +870,8 @@ impl VectorBatchView {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Paired PEP 3118 release hook invoked by CPython on `PyBuffer_Release`;
+    // `VectorBatchView` holds no per-view heap allocation and `(*view).obj` drop decrefs the pinned exporter.
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 
     pub fn __repr__(&self) -> String {

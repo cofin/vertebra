@@ -7,6 +7,15 @@ from typing import TYPE_CHECKING, Any
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.postgres._typing import (
+        PostgresAsyncConnectionContext,
+        PostgresAsyncSessionContext,
+        PostgresConnectionParams,
+        PostgresDriverFeatures,
+        PostgresPoolParams,
+        PostgresSyncConnectionContext,
+        PostgresSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.postgres.adk import (
         PostgresAsyncADKArtifactStore,
         PostgresAsyncADKMemoryStore,
@@ -33,18 +42,25 @@ __all__ = (
     "PostgresAsyncADKMemoryStore",
     "PostgresAsyncADKStore",
     "PostgresAsyncConfig",
+    "PostgresAsyncConnectionContext",
     "PostgresAsyncDataDictionary",
     "PostgresAsyncDriver",
     "PostgresAsyncEventsBackend",
+    "PostgresAsyncSessionContext",
+    "PostgresConnectionParams",
+    "PostgresDriverFeatures",
     "PostgresEventQueueStore",
     "PostgresLitestarStore",
+    "PostgresPoolParams",
     "PostgresSyncADKArtifactStore",
     "PostgresSyncADKMemoryStore",
     "PostgresSyncADKStore",
     "PostgresSyncConfig",
+    "PostgresSyncConnectionContext",
     "PostgresSyncDataDictionary",
     "PostgresSyncDriver",
     "PostgresSyncEventsBackend",
+    "PostgresSyncSessionContext",
 )
 
 _EXPORTS: dict[str, tuple[str, str]] = {
@@ -55,6 +71,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "PostgresAsyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.postgres.adk", "PostgresAsyncADKMemoryStore"),
     "PostgresAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.postgres.adk", "PostgresAsyncADKStore"),
     "PostgresAsyncConfig": ("vertebra.extensions.sqlspec.adapters.postgres.config", "PostgresAsyncConfig"),
+    "PostgresAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresAsyncConnectionContext",
+    ),
     "PostgresAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.postgres.data_dictionary",
         "PostgresAsyncDataDictionary",
@@ -64,8 +84,24 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "vertebra.extensions.sqlspec.adapters.postgres.events",
         "PostgresAsyncEventsBackend",
     ),
+    "PostgresAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresAsyncSessionContext",
+    ),
+    "PostgresConnectionParams": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresConnectionParams",
+    ),
+    "PostgresDriverFeatures": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresDriverFeatures",
+    ),
     "PostgresEventQueueStore": ("vertebra.extensions.sqlspec.adapters.postgres.events", "PostgresEventQueueStore"),
     "PostgresLitestarStore": ("vertebra.extensions.sqlspec.adapters.postgres.litestar", "PostgresLitestarStore"),
+    "PostgresPoolParams": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresPoolParams",
+    ),
     "PostgresSyncADKArtifactStore": (
         "vertebra.extensions.sqlspec.adapters.postgres.adk",
         "PostgresSyncADKArtifactStore",
@@ -73,12 +109,20 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "PostgresSyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.postgres.adk", "PostgresSyncADKMemoryStore"),
     "PostgresSyncADKStore": ("vertebra.extensions.sqlspec.adapters.postgres.adk", "PostgresSyncADKStore"),
     "PostgresSyncConfig": ("vertebra.extensions.sqlspec.adapters.postgres.config", "PostgresSyncConfig"),
+    "PostgresSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresSyncConnectionContext",
+    ),
     "PostgresSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.postgres.data_dictionary",
         "PostgresSyncDataDictionary",
     ),
     "PostgresSyncDriver": ("vertebra.extensions.sqlspec.adapters.postgres.driver", "PostgresSyncDriver"),
     "PostgresSyncEventsBackend": ("vertebra.extensions.sqlspec.adapters.postgres.events", "PostgresSyncEventsBackend"),
+    "PostgresSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.postgres._typing",
+        "PostgresSyncSessionContext",
+    ),
 }
 
 

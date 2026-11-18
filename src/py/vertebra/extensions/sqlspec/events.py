@@ -9,7 +9,7 @@ import hashlib
 import threading
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 from uuid import uuid4
 
 from vertebra.db.cdc import CDCConfig, ChangeEvent, ChangeFeed
@@ -19,23 +19,23 @@ from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 try:
     from sqlspec.extensions.events import (
         MAX_NOTIFY_BYTES,
-        AsyncEventBackendProtocol,
         AsyncTableEventQueue,
         BaseEventQueueStore,
         EventMessage,
-        SyncEventBackendProtocol,
         SyncTableEventQueue,
+        build_queue_backend,
         decode_notify_payload,
         encode_notify_payload,
         fits_notify_payload,
         measure_notify_payload,
     )
+    from sqlspec.migrations.schema import ensure_schema_async, ensure_schema_sync
     from sqlspec.utils.serializers import from_json, to_json
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from vertebra.db.driver.capabilities import AsyncNotificationSource, SyncNotificationSource
 
@@ -121,7 +121,75 @@ def _decode_inline_notify(channel: str, raw_payload: bytes | str) -> EventMessag
     return decode_notify_payload(channel, text)
 
 
-class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
+def _checkpoint_row_params(checkpoint_key: str, channel: str, token: str) -> tuple[str, dict[str, Any]]:
+    """Build the checkpoint event ID and parameter mapping for EventQueueStore persistence."""
+    now = datetime.now(UTC)
+    event_id = _checkpoint_event_id(checkpoint_key, channel)
+    payload_json = to_json(
+        {
+            "checkpoint_key": checkpoint_key,
+            "channel": channel,
+            "resume_token": token,
+            "updated_at": now.isoformat(),
+        }
+    )
+    return event_id, {
+        "event_id": event_id,
+        "channel": _checkpoint_channel(channel),
+        "payload_json": payload_json,
+        "metadata_json": None,
+        "status": _CHECKPOINT_STATUS,
+        "available_at": now,
+        "lease_expires_at": None,
+        "attempts": 0,
+        "created_at": now,
+    }
+
+
+def _decode_checkpoint_rows(rows: Sequence[Any]) -> str | None:
+    """Extract a persisted resume token from EventQueueStore query rows."""
+    if not rows:
+        return None
+    raw = _extract_row_field(rows[0], "payload_json", 0)
+    if raw is None:
+        return None
+    decoded = (
+        from_json(bytes(raw) if isinstance(raw, bytearray) else raw)
+        if isinstance(raw, (str, bytes, bytearray))
+        else raw
+    )
+    if isinstance(decoded, dict) and decoded.get("resume_token") is not None:
+        return str(decoded["resume_token"])
+    return None
+
+
+def _plan_notify_batch(
+    events: Sequence[tuple[str, dict[str, Any], dict[str, Any] | None]],
+    ceiling_bytes: int,
+    *,
+    has_table_queue: bool,
+) -> tuple[list[str], list[tuple[str, str]], list[tuple[int, str, dict[str, Any], dict[str, Any] | None]]]:
+    """Partition batch events into inline notification frames and durable queue spills."""
+    event_ids: list[str] = [""] * len(events)
+    frames: list[tuple[str, str]] = [("", "")] * len(events)
+    spilled: list[tuple[int, str, dict[str, Any], dict[str, Any] | None]] = []
+    for idx, (channel, payload, metadata) in enumerate(events):
+        candidate_id = uuid4().hex
+        if _exceeds_notify_ceiling(candidate_id, payload, metadata, ceiling_bytes):
+            if not has_table_queue:
+                msg = (
+                    "Notification payload exceeds notify_ceiling_bytes and requires "
+                    "a configured BaseEventQueueStore for durable spill"
+                )
+                raise ImproperConfigurationError(msg)
+            spilled.append((idx, channel, payload, metadata))
+        else:
+            event_ids[idx] = candidate_id
+            frames[idx] = (channel, _encode_notify_frame(candidate_id, payload, metadata))
+    return event_ids, frames, spilled
+
+
+class ChangeFeedSyncEventBackend:
     """Synchronous SQLSpec event backend wrapping ``vertebra.db.cdc.ChangeFeed``.
 
     Supports optional durable checkpoint persistence via a configured
@@ -130,6 +198,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
     """
 
     supports_sync: ClassVar[bool] = True
+    supports_async: ClassVar[bool] = False
     backend_name: ClassVar[str] = "changefeed"
     __slots__ = (
         "_checkpoint_key",
@@ -175,9 +244,14 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         self._notify_source = notify_source
         self._checkpoint_key = checkpoint_key
         self._notify_ceiling_bytes = notify_ceiling_bytes
-        self._table_queue: SyncTableEventQueue | None = (
-            SyncTableEventQueue(queue_store._config) if queue_store is not None else None
-        )
+        table_queue: SyncTableEventQueue | None = None
+        if queue_store is not None:
+            resolved_queue = build_queue_backend(queue_store._config, queue_store.settings)
+            if not isinstance(resolved_queue, SyncTableEventQueue):
+                msg = "ChangeFeedSyncEventBackend requires a synchronous BaseEventQueueStore configuration"
+                raise ImproperConfigurationError(msg)
+            table_queue = resolved_queue
+        self._table_queue = table_queue
         self._schema_ready = False
         self._cond = threading.Condition()
         self._queues: dict[str, collections.deque[str]] = {}
@@ -198,12 +272,32 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         return self._feed
 
     def _ensure_queue_schema(self) -> None:
-        """Create the backing EventQueueStore table idempotently if configured."""
+        """Create and reconcile the backing EventQueueStore schema idempotently if configured."""
         if self._schema_ready or self._queue_store is None:
             return
+        manage_schema, create_schema = self._queue_store._schema_management_flags()
+        if not manage_schema:
+            self._schema_ready = True
+            return
         with self._queue_store._config.provide_session() as driver:
-            for statement in self._queue_store.create_statements():
-                driver.execute(statement)
+            self._queue_store.prepare_schema_sync(driver)
+            targets = self._queue_store.native_backend_targets(type(self).backend_name)
+            ensure_schema_sync(
+                driver,
+                self._queue_store.get_schema_targets(),
+                manage_schema=True,
+                create_schema=create_schema,
+                commit=False,
+                strict=True,
+            )
+            self._queue_store.reconcile_companion_objects_sync(driver)
+            self._queue_store.reconcile_native_backend_sync(
+                driver,
+                type(self).backend_name,
+                targets,
+                create_schema=create_schema,
+            )
+            driver.commit()
         self._schema_ready = True
 
     def save_checkpoint(self, channel: str, resume_token: str | int) -> str:
@@ -217,16 +311,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
             custom_saver(channel, token, checkpoint_key=self._checkpoint_key)
             return token
         self._ensure_queue_schema()
-        now = datetime.now(UTC)
-        event_id = _checkpoint_event_id(self._checkpoint_key, channel)
-        payload_json = to_json(
-            {
-                "checkpoint_key": self._checkpoint_key,
-                "channel": channel,
-                "resume_token": token,
-                "updated_at": now.isoformat(),
-            }
-        )
+        event_id, params = _checkpoint_row_params(self._checkpoint_key, channel, token)
         table = self._queue_store.table_name
         with self._queue_store._config.provide_session() as driver:
             driver.execute(
@@ -239,17 +324,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
                 "available_at, lease_expires_at, attempts, created_at) "
                 "VALUES (:event_id, :channel, :payload_json, :metadata_json, :status, "
                 ":available_at, :lease_expires_at, :attempts, :created_at)",
-                {
-                    "event_id": event_id,
-                    "channel": _checkpoint_channel(channel),
-                    "payload_json": payload_json,
-                    "metadata_json": None,
-                    "status": _CHECKPOINT_STATUS,
-                    "available_at": now,
-                    "lease_expires_at": None,
-                    "attempts": 0,
-                    "created_at": now,
-                },
+                params,
             )
             driver.commit()
         return token
@@ -274,21 +349,10 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
                 f"SELECT payload_json FROM {table} WHERE event_id = :event_id",
                 {"event_id": event_id},
             )
-        if not rows:
-            return None
-        raw = _extract_row_field(rows[0], "payload_json", 0)
-        if raw is None:
-            return None
-        decoded = (
-            from_json(bytes(raw) if isinstance(raw, bytearray) else raw)
-            if isinstance(raw, (str, bytes, bytearray))
-            else raw
-        )
-        if isinstance(decoded, dict) and decoded.get("resume_token") is not None:
-            token = str(decoded["resume_token"])
-            self._checkpoints[channel] = token
-            return token
-        return None
+        decoded_token = _decode_checkpoint_rows(rows)
+        if decoded_token is not None:
+            self._checkpoints[channel] = decoded_token
+        return decoded_token
 
     def publish(
         self,
@@ -337,8 +401,50 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
         self,
         events: Sequence[tuple[str, dict[str, Any], dict[str, Any] | None]],
     ) -> list[str]:
-        """Publish multiple events sequentially and return their generated event IDs."""
-        return [self.publish(ch, p, meta) for ch, p, meta in events]
+        """Publish multiple events in order, batching table-queue inserts and spills."""
+        if not events:
+            return []
+
+        if self._notify_source is not None:
+            event_ids, frames, spilled = _plan_notify_batch(
+                events,
+                self._notify_ceiling_bytes,
+                has_table_queue=self._table_queue is not None,
+            )
+            if spilled:
+                assert self._table_queue is not None
+                self._ensure_queue_schema()
+                spilled_ids = self._table_queue.publish_many([(ch, p, meta) for _, ch, p, meta in spilled])
+                for (idx, ch, _, _), spilled_id in zip(spilled, spilled_ids, strict=True):
+                    event_ids[idx] = spilled_id
+                    frames[idx] = (ch, _encode_wakeup_frame(spilled_id, ch))
+            for event_id, (ch, frame) in zip(event_ids, frames, strict=True):
+                self._notify_source.publish(ch, frame)
+                self._event_channels[event_id] = ch
+            return event_ids
+
+        if self._table_queue is not None and self._store is None:
+            self._ensure_queue_schema()
+            event_ids = self._table_queue.publish_many(events)
+            for event_id, (ch, _, _) in zip(event_ids, events, strict=True):
+                self._event_channels[event_id] = ch
+            return event_ids
+
+        event_ids = []
+        envelopes: list[tuple[str, str, str]] = []
+        for ch, payload, _meta in events:
+            wire_envelope, event = self._feed.publish_event(operation="publish", payload=payload)
+            event_id_str = str(event.event_id)
+            event_ids.append(event_id_str)
+            envelopes.append((ch, event_id_str, wire_envelope))
+        with self._cond:
+            for ch, event_id_str, wire_envelope in envelopes:
+                if ch not in self._queues:
+                    self._queues[ch] = collections.deque()
+                self._queues[ch].append(wire_envelope)
+                self._event_channels[event_id_str] = ch
+            self._cond.notify_all()
+        return event_ids
 
     def _pump_notify_sync(self, source: SyncNotificationSource) -> None:
         try:
@@ -404,7 +510,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
                     msg = "Received spilled wakeup frame without a configured BaseEventQueueStore"
                     raise ImproperConfigurationError(msg)
                 self._ensure_queue_schema()
-                message = self._table_queue.dequeue_by_event_id(spilled_id)
+                message = self._table_queue.dequeue_by_event_id(spilled_id, channel)
                 if message is not None:
                     self._queue_leased.add(message.event_id)
                     self._event_channels[message.event_id] = channel
@@ -497,7 +603,7 @@ class ChangeFeedSyncEventBackend(SyncEventBackendProtocol):
             self._subscribed_channels.clear()
 
 
-class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
+class ChangeFeedAsyncEventBackend:
     """Asynchronous SQLSpec event backend wrapping ``vertebra.db.cdc.ChangeFeed``.
 
     Supports optional durable checkpoint persistence via a configured
@@ -505,6 +611,7 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
     for notification payloads exceeding ``notify_ceiling_bytes`` (default ``7999``).
     """
 
+    supports_sync: ClassVar[bool] = False
     supports_async: ClassVar[bool] = True
     backend_name: ClassVar[str] = "changefeed"
     __slots__ = (
@@ -551,9 +658,14 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         self._notify_source = notify_source
         self._checkpoint_key = checkpoint_key
         self._notify_ceiling_bytes = notify_ceiling_bytes
-        self._table_queue: AsyncTableEventQueue | None = (
-            AsyncTableEventQueue(queue_store._config) if queue_store is not None else None
-        )
+        table_queue: AsyncTableEventQueue | None = None
+        if queue_store is not None:
+            resolved_queue = build_queue_backend(queue_store._config, queue_store.settings)
+            if not isinstance(resolved_queue, AsyncTableEventQueue):
+                msg = "ChangeFeedAsyncEventBackend requires an asynchronous BaseEventQueueStore configuration"
+                raise ImproperConfigurationError(msg)
+            table_queue = resolved_queue
+        self._table_queue = table_queue
         self._schema_ready = False
         self._queues: dict[str, collections.deque[str]] = {}
         self._queue_events: dict[str, asyncio.Event] = {}
@@ -573,12 +685,32 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         return self._feed
 
     async def _ensure_queue_schema(self) -> None:
-        """Create the backing EventQueueStore table idempotently if configured."""
+        """Create and reconcile the backing EventQueueStore schema idempotently if configured."""
         if self._schema_ready or self._queue_store is None:
             return
+        manage_schema, create_schema = self._queue_store._schema_management_flags()
+        if not manage_schema:
+            self._schema_ready = True
+            return
         async with self._queue_store._config.provide_session() as driver:
-            for statement in self._queue_store.create_statements():
-                await driver.execute(statement)
+            await self._queue_store.prepare_schema_async(driver)
+            targets = self._queue_store.native_backend_targets(type(self).backend_name)
+            await ensure_schema_async(
+                driver,
+                self._queue_store.get_schema_targets(),
+                manage_schema=True,
+                create_schema=create_schema,
+                commit=False,
+                strict=True,
+            )
+            await self._queue_store.reconcile_companion_objects_async(driver)
+            await self._queue_store.reconcile_native_backend_async(
+                driver,
+                type(self).backend_name,
+                targets,
+                create_schema=create_schema,
+            )
+            await driver.commit()
         self._schema_ready = True
 
     async def save_checkpoint(self, channel: str, resume_token: str | int) -> str:
@@ -587,21 +719,14 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         self._checkpoints[channel] = token
         if self._queue_store is None:
             return token
-        custom_saver = getattr(self._queue_store, "save_checkpoint_async", None)
+        custom_saver = cast(
+            "Callable[..., Awaitable[Any]] | None", getattr(self._queue_store, "save_checkpoint_async", None)
+        )
         if callable(custom_saver):
             await custom_saver(channel, token, checkpoint_key=self._checkpoint_key)
             return token
         await self._ensure_queue_schema()
-        now = datetime.now(UTC)
-        event_id = _checkpoint_event_id(self._checkpoint_key, channel)
-        payload_json = to_json(
-            {
-                "checkpoint_key": self._checkpoint_key,
-                "channel": channel,
-                "resume_token": token,
-                "updated_at": now.isoformat(),
-            }
-        )
+        event_id, params = _checkpoint_row_params(self._checkpoint_key, channel, token)
         table = self._queue_store.table_name
         async with self._queue_store._config.provide_session() as driver:
             await driver.execute(
@@ -614,17 +739,7 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
                 "available_at, lease_expires_at, attempts, created_at) "
                 "VALUES (:event_id, :channel, :payload_json, :metadata_json, :status, "
                 ":available_at, :lease_expires_at, :attempts, :created_at)",
-                {
-                    "event_id": event_id,
-                    "channel": _checkpoint_channel(channel),
-                    "payload_json": payload_json,
-                    "metadata_json": None,
-                    "status": _CHECKPOINT_STATUS,
-                    "available_at": now,
-                    "lease_expires_at": None,
-                    "attempts": 0,
-                    "created_at": now,
-                },
+                params,
             )
             await driver.commit()
         return token
@@ -633,7 +748,9 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         """Load the latest persisted resume token for ``channel``."""
         if self._queue_store is None:
             return self._checkpoints.get(channel)
-        custom_loader = getattr(self._queue_store, "load_checkpoint_async", None)
+        custom_loader = cast(
+            "Callable[..., Awaitable[Any]] | None", getattr(self._queue_store, "load_checkpoint_async", None)
+        )
         if callable(custom_loader):
             loaded = await custom_loader(channel, checkpoint_key=self._checkpoint_key)
             if loaded is not None:
@@ -649,21 +766,10 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
                 f"SELECT payload_json FROM {table} WHERE event_id = :event_id",
                 {"event_id": event_id},
             )
-        if not rows:
-            return None
-        raw = _extract_row_field(rows[0], "payload_json", 0)
-        if raw is None:
-            return None
-        decoded = (
-            from_json(bytes(raw) if isinstance(raw, bytearray) else raw)
-            if isinstance(raw, (str, bytes, bytearray))
-            else raw
-        )
-        if isinstance(decoded, dict) and decoded.get("resume_token") is not None:
-            token = str(decoded["resume_token"])
-            self._checkpoints[channel] = token
-            return token
-        return None
+        decoded_token = _decode_checkpoint_rows(rows)
+        if decoded_token is not None:
+            self._checkpoints[channel] = decoded_token
+        return decoded_token
 
     async def publish(
         self,
@@ -711,8 +817,46 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
         self,
         events: Sequence[tuple[str, dict[str, Any], dict[str, Any] | None]],
     ) -> list[str]:
-        """Publish multiple events asynchronously and return their generated event IDs."""
-        return [await self.publish(ch, p, meta) for ch, p, meta in events]
+        """Publish multiple events asynchronously in order, batching queue inserts and spills."""
+        if not events:
+            return []
+
+        if self._notify_source is not None:
+            event_ids, frames, spilled = _plan_notify_batch(
+                events,
+                self._notify_ceiling_bytes,
+                has_table_queue=self._table_queue is not None,
+            )
+            if spilled:
+                assert self._table_queue is not None
+                await self._ensure_queue_schema()
+                spilled_ids = await self._table_queue.publish_many([(ch, p, meta) for _, ch, p, meta in spilled])
+                for (idx, ch, _, _), spilled_id in zip(spilled, spilled_ids, strict=True):
+                    event_ids[idx] = spilled_id
+                    frames[idx] = (ch, _encode_wakeup_frame(spilled_id, ch))
+            for event_id, (ch, frame) in zip(event_ids, frames, strict=True):
+                await self._notify_source.publish(ch, frame)
+                self._event_channels[event_id] = ch
+            return event_ids
+
+        if self._table_queue is not None and self._store is None:
+            await self._ensure_queue_schema()
+            event_ids = await self._table_queue.publish_many(events)
+            for event_id, (ch, _, _) in zip(event_ids, events, strict=True):
+                self._event_channels[event_id] = ch
+            return event_ids
+
+        event_ids = []
+        for ch, payload, _meta in events:
+            wire_envelope, event = self._feed.publish_event(operation="publish", payload=payload)
+            if ch not in self._queues:
+                self._queues[ch] = collections.deque()
+            self._queues[ch].append(wire_envelope)
+            self._queue_events.setdefault(ch, asyncio.Event()).set()
+            event_id_str = str(event.event_id)
+            self._event_channels[event_id_str] = ch
+            event_ids.append(event_id_str)
+        return event_ids
 
     async def _pump_notify_async(self, source: AsyncNotificationSource) -> None:
         try:
@@ -779,7 +923,7 @@ class ChangeFeedAsyncEventBackend(AsyncEventBackendProtocol):
                     msg = "Received spilled wakeup frame without a configured BaseEventQueueStore"
                     raise ImproperConfigurationError(msg)
                 await self._ensure_queue_schema()
-                message = await self._table_queue.dequeue_by_event_id(spilled_id)
+                message = await self._table_queue.dequeue_by_event_id(spilled_id, channel)
                 if message is not None:
                     self._queue_leased.add(message.event_id)
                     self._event_channels[message.event_id] = channel

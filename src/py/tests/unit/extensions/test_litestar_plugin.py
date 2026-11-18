@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import subprocess
+import sys
+import warnings
 from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -17,8 +20,9 @@ import anyio
 import click
 import pytest
 from click.testing import CliRunner
-from litestar import Litestar, Request, get
+from litestar import Litestar, Request, get, post
 from litestar.channels import ChannelsPlugin
+from litestar.channels.backends.memory import MemoryChannelsBackend
 from litestar.cli.main import litestar_group as litestar_cli_group
 from litestar.config.compression import CompressionConfig
 from litestar.config.cors import CORSConfig
@@ -30,8 +34,10 @@ from litestar.testing import AsyncTestClient
 
 from vertebra.build import BuildOrchestrator
 from vertebra.extensions.litestar import (
+    MemoryStore,
     ObjectStoreFileSystemAdapter,
     ObjectStoreLitestarStore,
+    ResponseCacheStore,
     VertebraConfig,
     VertebraPlugin,
     enter_litestar_server_lifespan,
@@ -855,3 +861,136 @@ async def test_valkey_and_redis_store_operations_isolation_and_invalidation(
     finally:
         await store1.close()
         await store2.close()
+
+
+@pytest.mark.anyio
+async def test_swap_memory_channels_before_lifespan_regardless_of_plugin_order() -> None:
+    """Registering ChannelsPlugin before VertebraPlugin swaps _backend in on_app_init and delivers messages."""
+    channels_plugin = ChannelsPlugin(
+        backend=MemoryChannelsBackend(history=4),
+        channels=["events"],
+        create_ws_route_handlers=True,
+    )
+    vtb_plugin = VertebraPlugin(VertebraConfig(swap_memory_channels=True))
+
+    @post("/publish", sync_to_thread=False)
+    def publish_event() -> dict[str, bool]:
+        channels_plugin.publish({"event": "order_created"}, channels=["events"])
+        return {"published": True}
+
+    app = Litestar(route_handlers=[publish_event], plugins=[channels_plugin, vtb_plugin])
+
+    assert isinstance(channels_plugin._backend, ChannelsBackend)
+
+    async with AsyncTestClient(app=app) as client:
+        with await client.websocket_connect("/events") as ws:
+            resp = await client.post("/publish")
+            assert resp.status_code == 201
+            assert ws.receive_json() == {"event": "order_created"}
+
+
+@pytest.mark.parametrize(
+    ("swap_enabled", "use_custom_backend", "expected_swapped"),
+    [
+        (False, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+    ids=["swap-disabled", "custom-backend-preserved", "memory-backend-swapped"],
+)
+def test_swap_memory_channels_policy(
+    swap_enabled: bool,
+    use_custom_backend: bool,
+    expected_swapped: bool,
+) -> None:
+    """VertebraPlugin only replaces MemoryChannelsBackend when swap_memory_channels=True."""
+
+    class _CustomBackend(ChannelsBackend):
+        __slots__ = ()
+
+    initial_backend: Any = _CustomBackend() if use_custom_backend else MemoryChannelsBackend(history=2)
+    channels_plugin = ChannelsPlugin(backend=initial_backend, channels=["events"])
+    vtb_plugin = VertebraPlugin(VertebraConfig(swap_memory_channels=swap_enabled))
+    Litestar(route_handlers=[], plugins=[channels_plugin, vtb_plugin])
+
+    if expected_swapped:
+        assert type(channels_plugin._backend) is ChannelsBackend
+    else:
+        assert channels_plugin._backend is initial_backend
+
+
+@pytest.mark.anyio
+async def test_litestar_stores_subclass_base_store_without_deprecation_warnings() -> None:
+    """MemoryStore, ResponseCacheStore, ValkeyStore, and RedisStore subclass Store directly with zero DeprecationWarnings."""
+    for store_cls in (MemoryStore, ResponseCacheStore, ValkeyStore, RedisStore):
+        assert issubclass(store_cls, Store)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DeprecationWarning)
+        mem = MemoryStore()
+        resp_cache = ResponseCacheStore()
+        await mem.set("ttl_key", "hello", expires_in=timedelta(milliseconds=40))
+        assert await mem.get("ttl_key") == b"hello"
+        await asyncio.sleep(0.06)
+        assert await mem.get("ttl_key") is None
+
+        await resp_cache.set("resp", b"cached", expires_in=10)
+        assert await resp_cache.get("resp") == b"cached"
+        await mem.close()
+        await resp_cache.close()
+
+    abc_warnings = [w for w in caught if "ABC.register" in str(w.message) or "register" in str(w.message).lower()]
+    assert abc_warnings == []
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "vertebra.extensions.litestar.config",
+        "vertebra.extensions.litestar.plugin",
+        "vertebra.extensions.litestar.store",
+        "vertebra.extensions.litestar.channels",
+        "vertebra.extensions.litestar.offload",
+        "vertebra.extensions.litestar.openapi",
+        "vertebra.extensions.litestar.router",
+        "vertebra.extensions.litestar.fastpath",
+    ],
+)
+def test_core_litestar_modules_import_with_litestar_blocked(module_name: str) -> None:
+    """Core Litestar integration modules import cleanly when litestar is blocked in sys.modules."""
+    script = (
+        "import importlib, sys\n"
+        "for mod in ('litestar', 'litestar.stores', 'litestar.stores.base', 'litestar.channels', "
+        "'litestar.channels.backends', 'litestar.channels.backends.base', 'litestar.response'):\n"
+        "    sys.modules[mod] = None\n"
+        f"imported = importlib.import_module({module_name!r})\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        f"if {module_name!r} == 'vertebra.extensions.litestar.store':\n"
+        "    try:\n"
+        "        imported.MemoryStore()\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for MemoryStore')\n"
+        f"elif {module_name!r} == 'vertebra.extensions.litestar.channels':\n"
+        "    try:\n"
+        "        imported.ChannelsBackend()\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for ChannelsBackend')\n"
+        f"elif {module_name!r} == 'vertebra.extensions.litestar.openapi':\n"
+        "    try:\n"
+        "        imported.build_docs_route_handlers()\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for build_docs_route_handlers')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

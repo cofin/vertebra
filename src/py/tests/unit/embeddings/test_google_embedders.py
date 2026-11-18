@@ -667,6 +667,24 @@ async def test_embedder_default_factory_initializes_once_and_run_sync_reuses_por
     assert loop_id1 == loop_id2
 
 
+@pytest.mark.parametrize("provider_cls", [Embedder, VertexEmbedder, GeminiEmbedder])
+def test_embedder_cached_constructor_skips_duplicate_init(
+    provider_cls: type[Embedder] | type[VertexEmbedder] | type[GeminiEmbedder],
+) -> None:
+    """Repeated __init__ on an already-initialized Embedder skips duplicate initialization."""
+    instance = provider_cls("gemini-embedding-001", dimensions=128)
+    assert getattr(instance, "_initialized", False) is True
+    assert isinstance(instance, VertexEmbedder | GeminiEmbedder)
+    orig_queues = instance._queues
+    if isinstance(instance, VertexEmbedder):
+        VertexEmbedder.__init__(instance, "other-model", dimensions=256)
+    else:
+        GeminiEmbedder.__init__(instance, "other-model", dimensions=256)
+    assert instance.model == "gemini-embedding-001"
+    assert instance.dimensions == 128
+    assert instance._queues is orig_queues
+
+
 @pytest.mark.anyio
 async def test_gemini_embedder_multimodal_preserves_full_inline_data_and_rust_http2_default(
     monkeypatch: pytest.MonkeyPatch,

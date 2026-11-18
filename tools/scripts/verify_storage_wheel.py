@@ -66,7 +66,7 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
             "    SyncObjectStore('memory://')\n"
             "except MissingDependencyError as exc:\n"
             "    assert exc.install_package == 'vertebra-core[storage]', exc.install_package\n"
-            "    assert 'vertebra-core[storage]' in str(exc), str(exc)\n"
+            "    assert 'vertebra-core[storage]' in exc.hint, exc.hint\n"
             "else:\n"
             "    raise AssertionError('SyncObjectStore did not raise MissingDependencyError')\n"
         ),
@@ -107,7 +107,7 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
         leaked_core_attr="SyncSpannerClient",
         preinstall_probe=(
             "from vertebra.db.adapters.spanner import SpannerConfig, SyncSpannerDriver\n"
-            "driver = SyncSpannerDriver(SpannerConfig(database='projects/p/instances/i/databases/d'))\n"
+            "driver = SyncSpannerDriver(SpannerConfig(project_id='p', instance_id='i', database_id='d'))\n"
             "try:\n"
             "    driver.execute('SELECT 1')\n"
             "except MissingDependencyError as exc:\n"
@@ -138,7 +138,7 @@ COMPANION_SPECS: dict[CompanionPackage, CompanionWheelSpec] = {
             "else:\n"
             "    raise AssertionError('ensure_module did not raise MissingDependencyError for bundler')\n"
         ),
-        postinstall_probe="assert 'body{color:red}' in mod.minify_css('body { color: red; }')\n",
+        postinstall_probe="assert 'body{color:red;}' in mod.minify_css('body { color: red; }')\n",
     ),
 }
 

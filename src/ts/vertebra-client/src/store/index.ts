@@ -2,9 +2,11 @@
  * Session Store following the Google ADK pattern.
  * Provides lifecycle-aware state management with persistence prefixes.
  */
+export type StoreListener = (key: string, value: unknown) => void;
+
 class SessionStore {
-  private state: Map<string, any> = new Map();
-  private listeners: Set<(key: string, value: any) => void> = new Set();
+  private state: Map<string, unknown> = new Map();
+  private listeners: Set<StoreListener> = new Set();
 
   constructor() {
     this.loadPersistence();
@@ -15,7 +17,7 @@ class SessionStore {
    * - user: prefix -> Persists to localStorage
    * - temp: prefix -> Memory only, cleared on reload (default Map behavior)
    */
-  set(key: string, value: any): void {
+  set(key: string, value: unknown): void {
     this.state.set(key, value);
 
     if (key.startsWith("user:")) {
@@ -28,8 +30,8 @@ class SessionStore {
   /**
    * Get a value from the store.
    */
-  get<T = any>(key: string): T | undefined {
-    return this.state.get(key);
+  get<T = unknown>(key: string): T | undefined {
+    return this.state.get(key) as T | undefined;
   }
 
   /**
@@ -46,18 +48,18 @@ class SessionStore {
   /**
    * Subscribe to changes in the store.
    */
-  subscribe(callback: (key: string, value: any) => void): () => void {
+  subscribe(callback: StoreListener): () => void {
     this.listeners.add(callback);
     return () => this.listeners.delete(callback);
   }
 
-  private notify(key: string, value: any): void {
+  private notify(key: string, value: unknown): void {
     for (const listener of this.listeners) {
       listener(key, value);
     }
   }
 
-  private saveToDisk(key: string, value: any): void {
+  private saveToDisk(key: string, value: unknown): void {
     try {
       localStorage.setItem(`vtb:${key}`, JSON.stringify(value));
     } catch (e) {

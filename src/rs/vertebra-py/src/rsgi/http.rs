@@ -1069,10 +1069,14 @@ fn drive_rsgi_targets_inline(
         }
 
         let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+        // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
+        // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
         let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
         match send_res {
             ffi::PySendResult::PYGEN_RETURN => {
                 if !yielded.is_null() {
+                    // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a fresh owned
+                    // `PyObject*`; adopting and dropping it prevents a refcount leak.
                     unsafe {
                         let _ = Bound::from_owned_ptr(py, yielded);
                     }
@@ -1091,6 +1095,8 @@ fn drive_rsgi_targets_inline(
                 completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_NEXT => {
+                // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`
+                // produced by `PyIter_Send` while the GIL is attached.
                 let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
                 if let Some(resp) = proto_bound.get().take_completed_for_batch(py, false)? {
                     ready_responses.push(resp);

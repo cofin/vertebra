@@ -1,4 +1,4 @@
-"""Unit tests for Stage 1 subdomain consolidation, hot-path offload elimination, and 3.14t sharding."""
+"""Unit tests for server hot-path dispatch, subdomain consolidation, and free-threaded sharding."""
 
 from __future__ import annotations
 
@@ -132,7 +132,7 @@ def test_portal_and_sync_tools_loop_sharding() -> None:
     with PortalProvider() as portal:
 
         async def _double(x: int) -> int:
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0)
             return x * 2
 
         assert portal.call(_double, 21) == 42

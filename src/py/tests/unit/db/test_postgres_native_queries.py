@@ -25,7 +25,8 @@ from vertebra.db.adapters.postgres.types import (
     _project_public_row,
 )
 from vertebra.db.dbapi._async import AsyncDBAPIConnection
-from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, SyncQueueStore
+from vertebra.db.driver.capabilities import AsyncQueueStore, QueueEntry, QueueReservation, SyncQueueStore
+from vertebra.framework.queues.postgres import PostgreSQLQueueBackend
 
 
 def _frame(tag: bytes, body: bytes) -> bytes:
@@ -671,3 +672,153 @@ async def test_async_dbapi_cursor_awaits_lastrowid_across_insert_branches() -> N
     assert cur_sel.lastrowid == 404
     assert await cur_sel.fetchone() == (404,)
     await conn_sel.close()
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, -100])
+@pytest.mark.anyio
+async def test_postgres_queue_store_rejects_non_positive_limits(bad_limit: int) -> None:
+    """Sync and async Postgres queue stores raise ValueError for zero or negative limits."""
+    sync_store = SyncPostgresQueueStore(cast("Any", _FakeSyncPostgresDriver()))
+    async_store = AsyncPostgresQueueStore(cast("Any", _FakeAsyncPostgresDriver()))
+
+    with pytest.raises(ValueError, match="limit"):
+        sync_store.list_entries(limit=bad_limit)
+    with pytest.raises(ValueError, match="limit"):
+        sync_store.cleanup_terminal(before_ms=1000, limit=bad_limit)
+    with pytest.raises(ValueError, match="limit"):
+        sync_store.expire_overdue(now_ms=1000, limit=bad_limit)
+
+    with pytest.raises(ValueError, match="limit"):
+        await async_store.list_entries(limit=bad_limit)
+    with pytest.raises(ValueError, match="limit"):
+        await async_store.cleanup_terminal(before_ms=1000, limit=bad_limit)
+    with pytest.raises(ValueError, match="limit"):
+        await async_store.expire_overdue(now_ms=1000, limit=bad_limit)
+
+
+@pytest.mark.anyio
+async def test_postgres_queue_store_extended_capabilities_sync_and_async() -> None:
+    """Verify cleanup_terminal, identity reservations, heartbeats, expire_overdue, interrupt_task, and list_entries."""
+    sync_drv = _FakeSyncPostgresDriver()
+    async_drv = _FakeAsyncPostgresDriver()
+    sync_store = SyncPostgresQueueStore(cast("Any", sync_drv), table_name="custom_pg_jobs")
+    async_store = AsyncPostgresQueueStore(cast("Any", async_drv), table_name="custom_pg_jobs")
+
+    sync_drv.select_rows = [{"unique_key": "idem-k1"}]
+    assert sync_store.reserve_identity("idem-k1", job_id="j-1", task_name="t.run", ttl_seconds=None) is None
+    reserve_sql, reserve_params = sync_drv.executed[-1]
+    assert "ON CONFLICT (unique_key) DO UPDATE" in reserve_sql
+    assert "expires_at_ms IS NOT NULL" in reserve_sql
+    assert reserve_params[0] == "idem-k1"
+    assert reserve_params[1] == "j-1"
+    assert reserve_params[2] == "t.run"
+    assert reserve_params[3] is None
+
+    loser_calls: list[tuple[str, Any]] = []
+
+    class _ContendedAsyncDriver(_FakeAsyncPostgresDriver):
+        async def select(self, sql: str, parameters: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+            loser_calls.append((sql, parameters))
+            return []
+
+        async def select_one_or_none(self, sql: str, parameters: Sequence[Any] | None = None) -> dict[str, Any] | None:
+            loser_calls.append((sql, parameters))
+            return {
+                "unique_key": "idem-k1",
+                "job_id": "j-1",
+                "task_name": "t.run",
+                "created_at_ms": 1700000000000,
+            }
+
+    contended_store = AsyncPostgresQueueStore(cast("Any", _ContendedAsyncDriver()))
+    existing = await contended_store.reserve_identity("idem-k1", job_id="j-2", task_name="t.other", ttl_seconds=30.0)
+    assert existing == QueueReservation(
+        key="idem-k1",
+        job_id="j-1",
+        task_name="t.run",
+        created_at_ms=1700000000000,
+    )
+    assert "ON CONFLICT (unique_key) DO UPDATE" in loser_calls[0][0]
+    assert "expires_at_ms IS NULL OR expires_at_ms > $2" in loser_calls[1][0]
+
+    assert sync_store.reset_identity("idem-k1", expected_job_id="j-1") is True
+    assert sync_drv.executed[-1][0] == "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1 AND job_id = $2"
+    assert sync_drv.executed[-1][1] == ("idem-k1", "j-1")
+
+    assert await async_store.reset_identity("idem-k1") is True
+    assert async_drv.executed[-1][0] == "DELETE FROM vertebra_queue_unique_keys WHERE unique_key = $1"
+    assert async_drv.executed[-1][1] == ("idem-k1",)
+
+    assert sync_store.cleanup_terminal(before_ms=5000, limit=10) == 1
+    assert "WITH doomed AS" in sync_drv.executed[-2][0]
+    assert sync_drv.executed[-2][1] == (5000, 10)
+    assert "expires_at_ms IS NOT NULL AND expires_at_ms <= $1" in sync_drv.executed[-1][0]
+    assert sync_drv.executed[-1][1] == (5000,)
+
+    assert await async_store.cleanup_terminal(before_ms=9000) == 1
+    assert "DELETE FROM custom_pg_jobs" in async_drv.executed[-2][0]
+    assert async_drv.executed[-2][1] == (9000,)
+    assert "expires_at_ms IS NOT NULL AND expires_at_ms <= $1" in async_drv.executed[-1][0]
+
+    assert sync_store.assign_worker("j-1", worker_id="w-9", attempt=2) is True
+    assert "SET worker_id = $2" in sync_drv.executed[-1][0]
+    assert sync_drv.executed[-1][1][:3] == ("j-1", "w-9", 2)
+
+    assert await async_store.touch_heartbeats(["j-1", "j-2"], heartbeat_at_ms=12345) == 1
+    assert "SET heartbeat_at_ms = $1" in async_drv.executed[-1][0]
+    assert async_drv.executed[-1][1][0] == 12345
+    assert async_drv.executed[-1][1][2] == ["j-1", "j-2"]
+
+    assert sync_store.null_heartbeats(["j-1"]) == 1
+    assert "SET heartbeat_at_ms = NULL" in sync_drv.executed[-1][0]
+    assert sync_drv.executed[-1][1][1] == ["j-1"]
+
+    assert await async_store.interrupt_task("j-1", error="cancelled by operator") is True
+    assert "error = $3" in async_drv.executed[-1][0]
+    assert async_drv.executed[-1][1][0] == "j-1"
+    assert async_drv.executed[-1][1][2] == "cancelled by operator"
+
+    assert sync_store.expire_overdue(now_ms=7777, limit=25) == 1
+    assert "SET status = 'expired'" in sync_drv.executed[-1][0]
+    assert sync_drv.executed[-1][1] == (7777, 25)
+
+    sample_row = {
+        "job_id": "j-key-1",
+        "queue": "billing",
+        "task_name": "tasks.bill",
+        "payload": b"{}",
+        "attempt": 1,
+        "max_attempts": 3,
+        "lease_until_ms": 0,
+        "scheduled_at_ms": None,
+        "headers": '{"key": "k-bill"}',
+        "priority": 5,
+        "expires_at_ms": 99999,
+        "completed_at_ms": None,
+        "worker_id": "w-1",
+        "heartbeat_at_ms": 1111,
+        "result": None,
+        "error": None,
+    }
+    sync_drv.select_rows = [sample_row]
+    async_drv.select_rows = [sample_row]
+
+    by_key = sync_store.get_entry_by_key("k-bill", queue="billing")
+    assert by_key is not None
+    assert by_key.priority == 5
+    assert by_key.expires_at_ms == 99999
+    assert "LEFT JOIN vertebra_queue_unique_keys u ON u.job_id = j.job_id" in sync_drv.executed[-1][0]
+    assert sync_drv.executed[-1][1] == ("k-bill", "billing")
+
+    cross_queue = await async_store.list_entries(None, status="ready", limit=50)
+    assert len(cross_queue) == 1
+    assert cross_queue[0].worker_id == "w-1"
+    assert "WHERE status = $1" in async_drv.executed[-1][0]
+    assert async_drv.executed[-1][1] == ("ready", 50)
+
+    backend = PostgreSQLQueueBackend(store=async_store)
+    async_drv.select_rows = [sample_row]
+    replayed = await backend.replay_dlq("j-key-1")
+    assert replayed is not None
+    assert replayed.task_name == "tasks.bill"
+    assert any("DELETE FROM custom_pg_jobs" in sql for sql, _ in async_drv.executed)

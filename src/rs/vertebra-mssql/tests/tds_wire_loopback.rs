@@ -478,21 +478,27 @@ async fn tds_prelogin_login7_envchange_routing_and_rpc_lifecycle() {
         .expect("fetch_optional on empty set");
     assert!(opt_empty.rows.is_empty());
 
+    let missing_val_err = client
+        .select_value("SELECT ZERO_ROWS FROM users".to_string(), vec![])
+        .await
+        .expect_err("select_value on empty set must fail with NotFound");
+    assert_eq!(missing_val_err.kind, MssqlErrorKind::NotFound);
+
     // Transaction Manager lifecycle: BEGIN, SAVEPOINT, ROLLBACK TO SAVEPOINT, RELEASE, COMMIT, ROLLBACK
     client
         .begin_transaction(Some("READ_COMMITTED".to_string()))
         .await
         .expect("begin_transaction");
     client
-        .savepoint("sp_alpha".to_string())
+        .savepoint("vtb_sp1".to_string())
         .await
         .expect("savepoint");
     client
-        .rollback_to_savepoint("sp_alpha".to_string())
+        .rollback_to_savepoint("vtb_sp1".to_string())
         .await
         .expect("rollback_to_savepoint");
     client
-        .release_savepoint("sp_alpha".to_string())
+        .release_savepoint("vtb_sp1".to_string())
         .await
         .expect("release_savepoint");
     client
@@ -606,4 +612,131 @@ async fn tds_vtbarrow_shm_export_and_bulk_load_roundtrip() {
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].2, 1);
     assert_eq!(chunks[1].2, 1);
+}
+
+#[tokio::test]
+async fn tds_fedauth_aad_token_login7_wire_and_set_aad_token_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let captured_logins = Arc::new(tokio::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let captured_clone = Arc::clone(&captured_logins);
+
+    let server_task = tokio::spawn(async move {
+        for conn_idx in 0..2 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let (pkt_ty, _prelogin_payload) =
+                read_tds_message(&mut stream).await.expect("read prelogin");
+            assert_eq!(pkt_ty, PKT_PRELOGIN);
+            stream
+                .write_all(&build_prelogin_response_not_supported())
+                .await
+                .expect("write prelogin resp");
+
+            let (pkt_ty, login_payload) = read_tds_message(&mut stream).await.expect("read login7");
+            assert_eq!(pkt_ty, PKT_LOGIN7);
+            captured_clone.lock().await.push(login_payload);
+
+            let mut login_resp = Vec::new();
+            append_loginack_token(&mut login_resp);
+            append_done_token(&mut login_resp, 0xFD, 0, 0, 0);
+            stream
+                .write_all(&wrap_tds_packet(PKT_TABULAR_RESULT, &login_resp))
+                .await
+                .expect("write loginack");
+
+            if let Ok((cmd_ty, _)) = read_tds_message(&mut stream).await {
+                assert_eq!(cmd_ty, PKT_RPC);
+                let mut resp = Vec::new();
+                append_two_col_resultset(&mut resp, &[(1, "ok")]);
+                append_done_token(&mut resp, 0xFF, 0x0010, 0xC1, 1);
+                append_done_token(&mut resp, 0xFE, 0, 0, 0);
+                let _ = stream
+                    .write_all(&wrap_tds_packet(PKT_TABULAR_RESULT, &resp))
+                    .await;
+            }
+            if conn_idx == 0 {
+                drop(stream);
+            }
+        }
+    });
+
+    let mut cfg = loopback_config(addr);
+    cfg.password = "SqlServerSecretShouldNotBeSent".to_string();
+    cfg.aad_token = Some("test-token-placeholder-aad-1".to_string());
+    cfg.validate().expect("valid aad_token config");
+
+    let dbg_str = format!("{cfg:?}");
+    assert!(dbg_str.contains("[REDACTED]"));
+    assert!(!dbg_str.contains("test-token-placeholder-aad-1"));
+    assert!(!dbg_str.contains("SqlServerSecretShouldNotBeSent"));
+
+    let tib_dbg = format!(
+        "{:?}",
+        cfg.to_tiberius_config("127.0.0.1", addr.port(), false)
+    );
+    assert!(tib_dbg.contains("AADToken"));
+    assert!(!tib_dbg.contains("test-token-placeholder-aad-1"));
+
+    let mut blank_cfg = cfg.clone();
+    blank_cfg.aad_token = Some("   ".to_string());
+    assert!(blank_cfg.validate().is_err());
+
+    let client = MssqlClient::new(cfg).expect("client");
+    let rows = client
+        .query("SELECT 1".to_string(), vec![])
+        .await
+        .expect("first query with aad_token_1");
+    assert_eq!(rows.rows.len(), 1);
+
+    client
+        .config()
+        .set_aad_token(Some("   ".to_string()))
+        .expect_err("blank aad_token must be rejected");
+    client
+        .config()
+        .set_aad_token(Some("test-token-placeholder-aad-2".to_string()))
+        .expect("set_aad_token updates stored token");
+
+    let _ = client.query("SELECT 1".to_string(), vec![]).await;
+    let _ = client.query("SELECT 1".to_string(), vec![]).await;
+
+    let logins = captured_logins.lock().await;
+    assert_eq!(logins.len(), 2);
+    let first_utf16: Vec<u8> = "test-token-placeholder-aad-1"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let second_utf16: Vec<u8> = "test-token-placeholder-aad-2"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert!(
+        logins[0]
+            .windows(first_utf16.len())
+            .any(|w| w == first_utf16.as_slice()),
+        "first LOGIN7 must carry FEDAUTH AAD token 1"
+    );
+    assert!(
+        logins[1]
+            .windows(second_utf16.len())
+            .any(|w| w == second_utf16.as_slice()),
+        "second LOGIN7 after set_aad_token must carry FEDAUTH AAD token 2"
+    );
+
+    client
+        .config()
+        .set_aad_token(None)
+        .expect("clearing aad_token restores SQL auth");
+    let sql_tib_dbg = format!(
+        "{:?}",
+        client
+            .config()
+            .to_tiberius_config("127.0.0.1", addr.port(), false)
+    );
+    assert!(sql_tib_dbg.contains("SqlServer"));
+    assert!(!sql_tib_dbg.contains("AADToken"));
+
+    server_task.abort();
 }

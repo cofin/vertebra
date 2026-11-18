@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import gc
+import os
+import uuid
 
 import pyarrow as pa
 import pytest
@@ -12,6 +15,7 @@ from tests.unit.db.postgres_ports import (
     FakePostgresCluster,
     FakeSyncPostgresPool,
 )
+from vertebra._vertebra import ArrowCursor as NativeArrowCursor
 from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver
 from vertebra.db.adapters.postgres._sync import SyncPostgreSQLDriver
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
@@ -110,3 +114,96 @@ async def test_async_arrow_select_stream_and_load() -> None:
         (201, "seq-201"),
     ]
     await drv.close()
+
+
+def _serialize_ipc_stream(batches: list[pa.RecordBatch], schema: pa.Schema) -> bytes:
+    """Serialize Arrow batches and schema into an Arrow IPC stream byte buffer."""
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        for batch in batches:
+            writer.write_batch(batch)
+    return bytes(sink.getvalue().to_pybytes())
+
+
+@pytest.mark.parametrize(
+    ("batches", "expected_rows"),
+    [
+        (
+            [
+                pa.record_batch({"id": [1, 2], "label": ["alpha", "beta"]}),
+                pa.record_batch({"id": [3], "label": ["gamma"]}),
+            ],
+            [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}, {"id": 3, "label": "gamma"}],
+        ),
+        (
+            [],
+            [],
+        ),
+    ],
+    ids=["multi-batch", "empty-stream"],
+)
+def test_native_arrow_cursor_c_stream_round_trip(
+    batches: list[pa.RecordBatch],
+    expected_rows: list[dict[str, object]],
+) -> None:
+    """Native and wrapped ArrowCursor export Arrow C Stream PyCapsules consumed by PyArrow."""
+    schema = pa.schema([("id", pa.int64()), ("label", pa.string())])
+    payload = _serialize_ipc_stream(batches, schema)
+    shm_name = f"vtb-cstream-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    native_cursor = NativeArrowCursor.write_ipc_to_shm(shm_name, payload, len(expected_rows))
+    try:
+        assert hasattr(native_cursor, "__arrow_c_stream__")
+
+        table = pa.table(native_cursor)
+        assert table.schema.equals(schema)
+        assert table.to_pylist() == expected_rows
+
+        reader = pa.RecordBatchReader.from_stream(native_cursor)
+        stream_table = reader.read_all()
+        assert stream_table.schema.equals(schema)
+        assert stream_table.to_pylist() == expected_rows
+
+        same_schema_reader = pa.RecordBatchReader.from_stream(native_cursor, schema=schema)
+        assert same_schema_reader.read_all().to_pylist() == expected_rows
+
+        unconsumed = native_cursor.__arrow_c_stream__()
+        del unconsumed
+        gc.collect()
+
+        wrapper = ArrowCursor(native_cursor)
+        wrapper_table = pa.table(wrapper)
+        assert wrapper_table.schema.equals(schema)
+        assert wrapper_table.to_pylist() == expected_rows
+        assert wrapper._ipc_table_cache is None
+    finally:
+        native_cursor.release()
+
+
+def test_native_arrow_cursor_c_stream_errors() -> None:
+    """Released cursors, corrupt IPC payloads, and incompatible schema requests raise cleanly."""
+    schema = pa.schema([("id", pa.int64()), ("label", pa.string())])
+    payload = _serialize_ipc_stream(
+        [pa.record_batch({"id": [1], "label": ["row-1"]})],
+        schema,
+    )
+    shm_name = f"vtb-cstream-err-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    native_cursor = NativeArrowCursor.write_ipc_to_shm(shm_name, payload, 1)
+    try:
+        incompatible = pa.schema([("id", pa.int32()), ("label", pa.string())])
+        with pytest.raises(NotImplementedError):
+            pa.RecordBatchReader.from_stream(native_cursor, schema=incompatible)
+        with pytest.raises(ValueError, match="arrow_schema"):
+            native_cursor.__arrow_c_stream__(requested_schema="invalid")
+    finally:
+        assert native_cursor.release() is True
+
+    with pytest.raises(ValueError, match="released"):
+        native_cursor.__arrow_c_stream__()
+
+    corrupt_name = f"vtb-cstream-bad-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    corrupt_cursor = NativeArrowCursor.write_ipc_to_shm(corrupt_name, payload[: len(payload) // 2], 1)
+    try:
+        with pytest.raises(ValueError, match="Arrow IPC"):
+            corrupt_cursor.__arrow_c_stream__()
+    finally:
+        corrupt_cursor.release()

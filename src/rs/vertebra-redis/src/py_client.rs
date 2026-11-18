@@ -16,6 +16,18 @@ use crate::value::{py_seq_to_redis_args, py_to_redis_arg, redis_value_to_py};
 
 pub const REDIS_COMPLETION_DRAINER_ATTR: &str = "_vertebra_redis_completion_drainer";
 
+fn slot_map_to_py_dict(
+    py: Python<'_>,
+    map: std::collections::HashMap<u16, (String, u16)>,
+) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    for (slot, (host, port)) in map {
+        let tuple = (host, port).into_pyobject(py)?;
+        dict.set_item(slot, tuple)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
 fn parse_fields(fields: &Bound<'_, PyAny>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let mut out = Vec::new();
     if let Ok(dict) = fields.cast::<PyDict>() {
@@ -467,6 +479,10 @@ impl SyncRedisClient {
 
     pub fn drain_invalidations(&self) -> Vec<String> {
         self.client.drain_invalidations()
+    }
+
+    pub fn slot_map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        slot_map_to_py_dict(py, self.client.slot_map.snapshot())
     }
 
     // --- Stream Methods ---
@@ -990,6 +1006,10 @@ impl AsyncRedisClient {
 
     pub fn drain_invalidations(&self) -> Vec<String> {
         self.client.drain_invalidations()
+    }
+
+    pub fn slot_map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        slot_map_to_py_dict(py, self.client.slot_map.snapshot())
     }
 
     // --- Async Stream Methods ---

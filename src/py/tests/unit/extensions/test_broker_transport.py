@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -11,18 +13,27 @@ import time
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from vertebra._vertebra import BrokerEngineRegistry, StatementCache, stable_hash64
+from vertebra._vertebra import (
+    BrokerEngineRegistry,
+    DatabaseError,
+    DataError,
+    InterfaceError,
+    StatementCache,
+    stable_hash64,
+)
 from vertebra.extensions.alchemy.broker import AsyncSHMSessionBroker, SyncSHMSessionBroker
 from vertebra.extensions.broker import (
     DBRPC_HEADER_SIZE,
     DBRPC_VERSION,
+    AsyncBrokerStream,
+    AsyncConnectionLease,
     AsyncSHMBrokerTransport,
     BrokerAttachError,
     BrokerConfig,
@@ -220,14 +231,44 @@ def test_broker_dialect_tags_cover_all_nine_sql_dialects(dialect: str) -> None:
     transport.close()
 
 
-def test_async_shm_session_broker_int_transport_and_sync_checkout_checkin() -> None:
-    """Verify AsyncSHMSessionBroker(int) creates AsyncSHMBrokerTransport and sync checkout/checkin works without unawaited coroutines."""
+@pytest.mark.anyio
+async def test_async_shm_session_broker_int_transport_and_sync_checkout_checkin() -> None:
+    """Verify AsyncSHMSessionBroker async lifecycle, InterfaceError on sync hooks, and SyncSHMSessionBroker checkout/checkin."""
     broker = AsyncSHMSessionBroker(2)
     assert isinstance(broker.transport, AsyncSHMBrokerTransport)
     assert broker.capacity == 2
 
+    assert await broker.acquire() is True
+    assert broker.in_use == 1
+    assert broker.transport.metrics().active_leases == 1
+    await broker.release()
+    assert broker.in_use == 0
+    assert broker.transport.metrics().active_leases == 0
+
+    class FakeAsyncSession:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created_sessions: list[FakeAsyncSession] = []
+
+    def make_async_session() -> FakeAsyncSession:
+        sess = FakeAsyncSession()
+        created_sessions.append(sess)
+        return sess
+
+    async with broker.provide_session(make_async_session) as sess:
+        assert sess is created_sessions[-1]
+        assert broker.in_use == 1
+        assert broker.transport.metrics().active_leases == 1
+    assert created_sessions[-1].closed is True
+    assert broker.in_use == 0
+    assert broker.transport.metrics().active_leases == 0
+
     shm_async = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
-    session_broker = AsyncSHMSessionBroker(transport=shm_async, capacity=1)
+    async_session_broker = AsyncSHMSessionBroker(transport=shm_async, capacity=1)
 
     class FakeConn:
         pass
@@ -235,19 +276,28 @@ def test_async_shm_session_broker_int_transport_and_sync_checkout_checkin() -> N
     conn = FakeConn()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", RuntimeWarning)
-        session_broker.on_checkout(conn)
-        assert shm_async.metrics().active_leases == 1
-        session_broker.on_checkin(conn)
+        with pytest.raises(InterfaceError):
+            async_session_broker.on_checkout(conn)
+        with pytest.raises(InterfaceError):
+            async_session_broker.on_checkin(conn)
         assert shm_async.metrics().active_leases == 0
-        assert shm_async.metrics().total_released == 1
 
     runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
     assert runtime_warnings == []
-    broker.transport._close_sync() if hasattr(broker.transport, "_close_sync") else None
+
+    shm_sync = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    sync_session_broker = SyncSHMSessionBroker(transport=shm_sync, capacity=1)
+    sync_session_broker.on_checkout(conn)
+    assert shm_sync.metrics().active_leases == 1
+    assert sync_session_broker.in_use == 1
+    sync_session_broker.on_checkin(conn)
+    assert shm_sync.metrics().active_leases == 0
+    assert shm_sync.metrics().total_released == 1
+    assert sync_session_broker.in_use == 0
 
 
 def test_sync_shm_session_broker_multithreaded_contention() -> None:
-    """Verify SyncSHMSessionBroker wakes contended threads cleanly via threading.Condition."""
+    """Verify SyncSHMSessionBroker wakes contended threads cleanly via shared-memory transport."""
     broker = SyncSHMSessionBroker(capacity=1)
     assert broker.acquire(timeout=1.0) is True
     assert broker.in_use == 1
@@ -265,7 +315,6 @@ def test_sync_shm_session_broker_multithreaded_contention() -> None:
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
     assert ready.wait(timeout=1.0) is True
-    time.sleep(0.02)
     broker.release()
     worker.join(timeout=2.0)
 
@@ -542,3 +591,355 @@ def test_execute_dbrpc_and_rollback_raise_and_quarantine_on_nonzero_status(monke
     assert transport.quarantined_count() == 1
     transport.dispose_quarantined(lease)
     assert transport.quarantined_count() == 0
+
+
+@pytest.mark.parametrize("exc_cls", [DatabaseError, RuntimeError])
+def test_sync_lease_release_preserves_state_on_failure_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: type[Exception],
+) -> None:
+    """Verify SyncConnectionLease.release keeps _released False on failure until retry succeeds."""
+    transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    lease = transport.acquire(worker_id=81001)
+    original_release_impl = transport._release_impl
+    attempts = 0
+
+    def _flaky_release(lease_id: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise exc_cls("simulated sync release failure")
+        return original_release_impl(lease_id)
+
+    monkeypatch.setattr(transport, "_release_impl", _flaky_release)
+
+    with pytest.raises(exc_cls, match="simulated sync release failure"):
+        lease.release()
+    assert lease.is_released is False
+    assert transport.metrics().active_leases == 1
+
+    lease.release()
+    assert lease.is_released is True
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_released == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("exc_cls", [DatabaseError, RuntimeError])
+async def test_async_lease_release_preserves_state_on_failure_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: type[Exception],
+) -> None:
+    """Verify AsyncConnectionLease.release keeps _released False on failure until retry succeeds."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    lease = await transport.acquire(worker_id=81002)
+    original_release_impl = transport._release_impl
+    attempts = 0
+
+    def _flaky_release(lease_id: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise exc_cls("simulated async release failure")
+        return original_release_impl(lease_id)
+
+    monkeypatch.setattr(transport, "_release_impl", _flaky_release)
+
+    with pytest.raises(exc_cls, match="simulated async release failure"):
+        await lease.release()
+    assert lease.is_released is False
+    assert transport.metrics().active_leases == 1
+
+    await lease.release()
+    assert lease.is_released is True
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_released == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("exc_cls", [DatabaseError, RuntimeError])
+async def test_async_lease_release_sync_preserves_state_on_failure_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: type[Exception],
+) -> None:
+    """Verify AsyncConnectionLease.release_sync keeps _released False on failure until retry succeeds."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    lease = await transport.acquire(worker_id=81003)
+    original_release_impl = transport._release_impl
+    attempts = 0
+
+    def _flaky_release(lease_id: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise exc_cls("simulated release_sync failure")
+        return original_release_impl(lease_id)
+
+    monkeypatch.setattr(transport, "_release_impl", _flaky_release)
+
+    with pytest.raises(exc_cls, match="simulated release_sync failure"):
+        lease.release_sync()
+    assert lease.is_released is False
+    assert transport.metrics().active_leases == 1
+
+    lease.release_sync()
+    assert lease.is_released is True
+    assert transport.metrics().active_leases == 0
+    assert transport.metrics().total_released == 1
+
+
+@pytest.mark.anyio
+async def test_async_lease_release_sync_uses_native_path_and_rejects_async_only_transport() -> None:
+    """Verify release_sync runs synchronously on SHM transport and raises InterfaceError on async-only stubs."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    lease = await transport.acquire(worker_id=81004)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        lease.release_sync()
+
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+    assert lease.is_released is True
+    assert transport.metrics().active_leases == 0
+
+    release_calls = 0
+
+    class _AsyncOnlyTransport:
+        async def release(self, _lease_id: str) -> bool:
+            nonlocal release_calls
+            release_calls += 1
+            return True
+
+    async_only_lease = AsyncConnectionLease(
+        lease_id="0:1",
+        worker_id=81005,
+        acquired_at_ns=1,
+        ttl_ns=1_000_000,
+        bind_key="default",
+        is_overflow=False,
+        slot_index=0,
+        generation=1,
+        transport=_AsyncOnlyTransport(),
+    )
+
+    with warnings.catch_warnings(record=True) as stub_caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        with pytest.raises(InterfaceError, match="synchronous"):
+            async_only_lease.release_sync()
+
+    assert release_calls == 0
+    assert async_only_lease.is_released is False
+    assert [w for w in stub_caught if issubclass(w.category, RuntimeWarning)] == []
+
+
+def test_broker_config_millisecond_timeouts_and_rejected_aliases() -> None:
+    """Verify BrokerConfig enforces millisecond timeout fields and rejects removed second-unit kwargs."""
+    default_cfg = BrokerConfig()
+    assert default_cfg.acquire_timeout_ms == 5_000
+    assert default_cfg.lease_ttl_ms == 30_000
+
+    custom_cfg = BrokerConfig(acquire_timeout_ms=250, lease_ttl_ms=1500)
+    assert custom_cfg.acquire_timeout_ms == 250
+    assert custom_cfg.lease_ttl_ms == 1500
+
+    transport = SyncSHMBrokerTransport(custom_cfg)
+    assert transport.config.acquire_timeout_ms == 250
+    assert transport.config.lease_ttl_ms == 1500
+
+
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"acquire_timeout": 0.5},
+        {"lease_ttl": 10.0},
+        {"acquire_timeout": 0.5, "lease_ttl": 10.0},
+    ],
+)
+def test_broker_config_rejects_removed_float_timeout_kwargs(bad_kwargs: dict[str, float]) -> None:
+    """Verify removed acquire_timeout and lease_ttl fields raise TypeError on BrokerConfig."""
+    broker_cls: Any = BrokerConfig
+    with pytest.raises(TypeError):
+        broker_cls(**bad_kwargs)
+
+
+@pytest.mark.anyio
+async def test_async_broker_stream_multi_frame_order_and_idempotent_aclose() -> None:
+    """Verify AsyncSHMBrokerTransport.stream_dbrpc returns AsyncBrokerStream with ordered iteration and idempotent aclose."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100))
+    lease = await transport.acquire(worker_id=82001)
+    try:
+        frame_1 = encode_dbrpc_response(DbRpcResponse(request_id=10, status=0, rowcount=1, rows=((1, "a"),)))
+        frame_2 = encode_dbrpc_response(DbRpcResponse(request_id=10, status=0, rowcount=1, rows=((2, "b"),)))
+        frame_3 = DbRpcResponse(request_id=10, status=0, rowcount=1, rows=((3, "c"),))
+
+        stream = transport.stream_dbrpc(
+            6,
+            None,
+            chunk_source=[frame_1, frame_2, frame_3],
+            lease=lease,
+        )
+        assert isinstance(stream, AsyncBrokerStream)
+        received = [chunk async for chunk in stream]
+        assert [item.rows for item in received] == [((1, "a"),), ((2, "b"),), ((3, "c"),)]
+
+        await stream.aclose()
+        await stream.aclose()
+        assert lease.quarantined is False
+
+        closed_flags: list[bool] = []
+
+        def _gen_frames() -> Any:
+            try:
+                yield frame_1
+                yield frame_2
+                yield frame_3
+            finally:
+                closed_flags.append(True)
+
+        early_stream = transport.stream_dbrpc(6, None, chunk_source=_gen_frames, lease=lease)
+        async with contextlib.aclosing(early_stream):
+            first = await anext(early_stream)
+            assert first.rows == ((1, "a"),)
+        assert closed_flags == [True]
+        assert lease.quarantined is False
+        with pytest.raises(StopAsyncIteration):
+            await anext(early_stream)
+
+        BrokerEngineDiscovery.register_installed()
+        pool_id = BrokerEngineRegistry.open_pool(6, ":memory:", 2)
+        try:
+            arrow_stream = transport.stream_dbrpc(
+                6,
+                pool_id,
+                "SELECT i, 'row-' || i AS label FROM range(0, 150) AS t(i)",
+                lease=lease,
+                chunk_size=128,
+            )
+            arrow_chunks = [chunk async for chunk in arrow_stream]
+            assert len(arrow_chunks) == 1
+            assert arrow_chunks[0].arrow_shm is not None and arrow_chunks[0].arrow_shm.startswith("/vtb-dd-")
+            assert arrow_chunks[0].rowcount == 150
+
+            cancel_lease = await transport.acquire(worker_id=82002)
+            cancel_called: list[bool] = []
+            cancel_stream = transport.stream_dbrpc(
+                6,
+                pool_id,
+                chunk_source=[frame_1, frame_2],
+                lease=cancel_lease,
+                on_cancel=lambda: cancel_called.append(True),
+            )
+            first_item = await anext(cancel_stream)
+            assert first_item.rows == ((1, "a"),)
+            await cancel_stream.cancel()
+            assert cancel_called == [True]
+            assert cancel_lease.quarantined is True
+            with pytest.raises(LeaseQuarantinedError):
+                await anext(cancel_stream)
+            await transport.dispose_quarantined(cancel_lease)
+        finally:
+            BrokerEngineRegistry.close_pool(6, pool_id)
+    finally:
+        await lease.release()
+        await transport.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "corrupt_frame",
+    [
+        b"",
+        b"\x99\x01",
+        b"corrupt-dbrpc-frame",
+        b"\x00",
+    ],
+)
+async def test_broker_streams_raise_data_error_on_malformed_dbrpc_frames(corrupt_frame: bytes) -> None:
+    """Verify both BrokerStream and AsyncBrokerStream fail closed with DataError on malformed DBRPC frames."""
+    sync_transport = SyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    sync_stream = sync_transport.stream_dbrpc(6, None, chunk_source=[corrupt_frame])
+    try:
+        with pytest.raises(DataError):
+            next(sync_stream)
+    finally:
+        sync_stream.close()
+        sync_transport.close()
+
+    async_transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    async_stream = async_transport.stream_dbrpc(6, None, chunk_source=[corrupt_frame])
+    try:
+        with pytest.raises(DataError):
+            await anext(async_stream)
+    finally:
+        await async_stream.aclose()
+        await async_transport.close()
+
+
+@pytest.mark.parametrize("method_name", ["acquire_sync", "release_sync", "quarantine_sync", "close_sync"])
+def test_async_shm_broker_transport_removes_sync_methods(method_name: str) -> None:
+    """Verify AsyncSHMBrokerTransport exposes no public *_sync methods."""
+    assert hasattr(AsyncSHMBrokerTransport, method_name) is False
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=1, max_overflow=0))
+    assert hasattr(transport, method_name) is False
+
+
+@pytest.mark.anyio
+async def test_async_shm_broker_transport_offloads_shm_ops_and_pins_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pinned session APIs and SyncPool offloading do not block an active event-loop heartbeat task."""
+    transport = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0, acquire_timeout_ms=100))
+    try:
+        pinned = await transport.pin_session("sess-async", bind_key="sess-async")
+        assert await transport.get_pinned_session("sess-async") is pinned
+        unpinned = await transport.unpin_session("sess-async")
+        assert unpinned is pinned
+        assert await transport.get_pinned_session("sess-async") is None
+        assert await transport.unpin_session("sess-async") is None
+
+        entered = threading.Event()
+        release_gate = threading.Event()
+        original_publish = transport._publish_impl
+
+        def _gated_publish(channel: str, payload: bytes, lease_id: str | None = None) -> Any:
+            entered.set()
+            assert release_gate.wait(timeout=2.0)
+            return original_publish(channel, payload, lease_id)
+
+        monkeypatch.setattr(transport, "_publish_impl", _gated_publish)
+
+        heartbeat_ticks = 0
+
+        async def _heartbeat() -> None:
+            nonlocal heartbeat_ticks
+            while not release_gate.is_set():
+                heartbeat_ticks += 1
+                if entered.is_set() and heartbeat_ticks >= 3:
+                    release_gate.set()
+                await asyncio.sleep(0)
+
+        hb_task = asyncio.create_task(_heartbeat())
+        msg = await transport.publish("events", b"payload", lease_id=pinned.lease_id)
+        await hb_task
+        assert msg.payload == b"payload"
+        assert heartbeat_ticks >= 3
+
+        drained = await transport.drain_channel("events")
+        assert len(drained) == 1
+        assert await transport.drain_all_channels() == []
+
+        assert await transport.release(pinned.lease_id) is True
+
+        q_lease = await transport.acquire(worker_id=83001)
+        await transport.quarantine(q_lease)
+        assert transport.quarantined_count() == 1
+        await transport.dispose_quarantined(q_lease)
+        assert transport.quarantined_count() == 0
+
+        r_lease = await transport.acquire(worker_id=83002)
+        reclaimed = await transport.reclaim_worker_leases(83002)
+        assert len(reclaimed) == 1
+        assert r_lease.quarantined is True
+        await transport.dispose_quarantined(reclaimed[0].slot_index, reclaimed[0].generation)
+    finally:
+        await transport.close()

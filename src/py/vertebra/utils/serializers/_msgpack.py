@@ -9,21 +9,19 @@ import datetime
 import enum
 import os
 import pathlib
+import threading
 import uuid as _uuid_mod
+from collections import OrderedDict
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, ClassVar, Final, cast
+from typing import Any, ClassVar, Final
 
 from msgspec.msgpack import Decoder, Encoder
 
 from vertebra import typing as vertebra_typing
-from vertebra.typing import (
-    PYDANTIC_INSTALLED,
-    UUID_UTILS_INSTALLED,
-)
-from vertebra.utils.module_loader import import_optional_attr
+from vertebra.typing import PYDANTIC_INSTALLED
 from vertebra.utils.serializers._numpy import numpy_array_enc_hook
-from vertebra.utils.serializers._schema import _dump_msgspec_fields
+from vertebra.utils.serializers._schema import _dump_msgspec_fields, is_uuid_instance
 from vertebra.utils.type_guards import (
     dataclass_to_dict,
     is_attrs_instance,
@@ -39,32 +37,30 @@ __all__ = (
     "get_default_msgpack_serializer",
 )
 
-_UNLOADED_UUID_TYPE: Final[object] = object()
-
-
-class _MsgPackUUIDTypeCache:
-    """Class-scoped holder for lazy UUID backend."""
-
-    uuid_utils_type: ClassVar[Any] = _UNLOADED_UUID_TYPE
+_DEFAULT_LOCK: Final[threading.Lock] = threading.Lock()
+_MAX_TYPED_DECODERS: Final[int] = 1024
 
 
 class MsgPackSerializer:
     """Msgspec-based MessagePack serializer supporting custom hooks and typed decoding."""
 
-    __slots__ = ("_decoder", "_encoder", "_typed_decoders")
+    __slots__ = ("_decoder", "_decoder_lock", "_encoder", "_typed_decoders")
 
     _default: ClassVar[MsgPackSerializer | None] = None
 
     def __init__(self) -> None:
         self._encoder: Final[Encoder] = Encoder(enc_hook=_normalize_msgpack_enc_value)
         self._decoder: Final[Decoder[Any]] = Decoder(dec_hook=_normalize_msgpack_dec_value)
-        self._typed_decoders: dict[Any, Decoder[Any]] = {}
+        self._decoder_lock: Final[threading.Lock] = threading.Lock()
+        self._typed_decoders: OrderedDict[Any, Decoder[Any]] = OrderedDict()
 
     @classmethod
     def default(cls) -> MsgPackSerializer:
         """Return the process-global default MsgPackSerializer instance."""
         if cls._default is None:
-            cls._default = cls()
+            with _DEFAULT_LOCK:
+                if cls._default is None:
+                    cls._default = cls()
         return cls._default
 
     def encode(self, value: Any) -> bytes:
@@ -84,14 +80,19 @@ class MsgPackSerializer:
         if type is Any or type is object:
             return self._decoder.decode(raw)
         try:
-            decoder = self._typed_decoders.get(type)
-            if decoder is None:
-                decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
-                self._typed_decoders[type] = decoder
-            return decoder.decode(raw)
+            with self._decoder_lock:
+                decoder = self._typed_decoders.get(type)
+                if decoder is not None:
+                    self._typed_decoders.move_to_end(type)
+                else:
+                    decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
+                    if len(self._typed_decoders) >= _MAX_TYPED_DECODERS:
+                        self._typed_decoders.popitem(last=False)
+                    self._typed_decoders[type] = decoder
         except TypeError:
             decoder = Decoder(type=type, dec_hook=_normalize_msgpack_dec_value)
             return decoder.decode(raw)
+        return decoder.decode(raw)
 
 
 def get_default_msgpack_serializer() -> MsgPackSerializer:
@@ -114,25 +115,6 @@ def decode_msgpack(raw: bytes | bytearray | memoryview, *, type: Any = Any) -> A
     return get_default_msgpack_serializer().decode(raw, type=type)
 
 
-def _get_msgpack_uuid_utils_type() -> type[Any] | None:
-    """Lazy-resolve and cache the uuid-utils UUID type when installed."""
-    if _MsgPackUUIDTypeCache.uuid_utils_type is not _UNLOADED_UUID_TYPE:
-        return cast("type[Any] | None", _MsgPackUUIDTypeCache.uuid_utils_type)
-    if not UUID_UTILS_INSTALLED:
-        _MsgPackUUIDTypeCache.uuid_utils_type = None
-        return None
-    _MsgPackUUIDTypeCache.uuid_utils_type = import_optional_attr("uuid_utils", "UUID")
-    return cast("type[Any] | None", _MsgPackUUIDTypeCache.uuid_utils_type)
-
-
-def _is_uuid_instance(value: Any) -> bool:
-    """Return True when value is an instance of stdlib UUID or uuid_utils.UUID."""
-    if isinstance(value, _uuid_mod.UUID):
-        return True
-    uuid_type = _get_msgpack_uuid_utils_type()
-    return uuid_type is not None and isinstance(value, uuid_type)
-
-
 def _dump_pydantic_model(value: Any) -> Any:
     """Dump a Pydantic model instance to a dictionary."""
     if hasattr(value, "model_dump"):
@@ -144,7 +126,7 @@ def _normalize_msgpack_enc_value(value: Any) -> Any:
     """Convert non-native values into MessagePack-compatible types."""
     if isinstance(value, (os.PathLike, Path)):
         return str(value)
-    if _is_uuid_instance(value):
+    if is_uuid_instance(value):
         return str(value)
     if isinstance(value, Decimal):
         return float(value)

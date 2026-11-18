@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import re
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
 
 import msgspec
 
-from vertebra.extensions.starlette.router import (
-    _compile_match_regex,
-    _extract_param_types_from_path,
-    _join_mount_path,
+from vertebra.server._routing import (
     convert_path_params,
+    make_handler_id,
     normalize_path_for_matchit,
 )
-from vertebra.server._routing import make_handler_id
-
-if TYPE_CHECKING:
-    import re
 
 __all__ = (
     "ExtractedRoute",
@@ -27,6 +25,18 @@ __all__ = (
     "extract_routes",
     "normalize_path_for_matchit",
 )
+
+_SEGMENT_PARAM_RE = re.compile(r"^\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-zA-Z0-9_]+))?\}$")
+_ANNOTATION_TYPE_NAMES: dict[Any, str] = {
+    int: "int",
+    float: "float",
+    UUID: "uuid",
+    Decimal: "decimal",
+    date: "date",
+    datetime: "datetime",
+    time: "time",
+    timedelta: "timedelta",
+}
 
 
 class ExtractedRoute(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -128,6 +138,51 @@ def extract_route_entries(app: Any) -> list[ExtractedRoute]:
     return list(extract_routes(app).routes.values())
 
 
+def _join_mount_path(prefix: str, path: str) -> str:
+    clean_prefix = prefix.rstrip("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if not clean_prefix:
+        return clean_path
+    if clean_path == "/":
+        return clean_prefix or "/"
+    return f"{clean_prefix}{clean_path}"
+
+
+def _extract_param_types_from_path(path: str, dependant: Any = None) -> dict[str, str]:
+    param_types: dict[str, str] = {}
+    for segment in path.split("/"):
+        matched = _SEGMENT_PARAM_RE.match(segment)
+        if matched is not None:
+            param_types[matched.group(1)] = matched.group(2) or "str"
+    for field in getattr(dependant, "path_params", None) or ():
+        name = getattr(field, "name", None)
+        if not isinstance(name, str):
+            continue
+        if param_types.get(name, "str") != "str":
+            continue
+        ann = getattr(field, "type_", None) or getattr(getattr(field, "field_info", None), "annotation", None)
+        type_name = _ANNOTATION_TYPE_NAMES.get(ann)
+        if type_name is not None:
+            param_types[name] = type_name
+    return param_types
+
+
+def _compile_match_regex(path_template: str) -> re.Pattern[str]:
+    parts: list[str] = []
+    for segment in path_template.split("/"):
+        matched = _SEGMENT_PARAM_RE.match(segment)
+        if matched is None:
+            parts.append(re.escape(segment))
+            continue
+        param_name, param_type = matched.group(1), matched.group(2) or "str"
+        if param_type == "path":
+            parts.append(f"(?P<{param_name}>.+)")
+        else:
+            parts.append(f"(?P<{param_name}>[^/]+)")
+    pattern = "/".join(parts) or "/"
+    return re.compile(f"^{pattern}$")
+
+
 def _walk_fastapi_routes(routes: Any, *, prefix: str, out: dict[int, ExtractedRoute]) -> None:
     for route in routes:
         cls_name = type(route).__name__
@@ -148,10 +203,10 @@ def _walk_fastapi_routes(routes: Any, *, prefix: str, out: dict[int, ExtractedRo
 
         full_path = _join_mount_path(prefix, route_path)
         matchit_path = normalize_path_for_matchit(full_path)
-        param_types = _extract_param_types_from_path(full_path)
+        dependant = getattr(route, "dependant", None)
+        param_types = _extract_param_types_from_path(full_path, dependant=dependant)
         regex_pattern = _compile_match_regex(full_path)
         route_name = getattr(route, "name", None)
-        dependant = getattr(route, "dependant", None)
         body_field = getattr(route, "body_field", None)
         response_field = getattr(route, "secure_cloned_response_field", None) or getattr(route, "response_field", None)
         raw_status = getattr(route, "status_code", None)

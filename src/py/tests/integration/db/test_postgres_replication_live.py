@@ -103,7 +103,7 @@ async def _wait_for_slot_state(
                 return int(active_pid) if active_pid is not None else None
             if accept_pid_replacement and pid_changed:
                 return int(active_pid)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
     raise AssertionError(f"Slot {slot_name!r} did not reach active={expect_active!r} within {timeout}s")
 
 

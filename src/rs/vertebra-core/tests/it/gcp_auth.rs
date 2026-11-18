@@ -414,21 +414,21 @@ async fn gcloud_cli_token_fetch_is_async_and_times_out() {
     let ticked = Arc::new(AtomicBool::new(false));
     let ticked_clone = Arc::clone(&ticked);
     let ticker = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
         ticked_clone.store(true, Ordering::SeqCst);
     });
 
     let outcome = cache.get_or_refresh().await;
+    assert!(
+        ticked.load(Ordering::SeqCst),
+        "tokio runtime was blocked during gcloud token fetch"
+    );
     let _ = ticker.await;
     assert!(outcome.is_err());
     let err = outcome.unwrap_err();
     assert!(
         err.contains("timed out after 200 ms"),
         "unexpected error: {err}"
-    );
-    assert!(
-        ticked.load(Ordering::SeqCst),
-        "tokio runtime was blocked during gcloud token fetch"
     );
 }
 
@@ -679,18 +679,22 @@ async fn explicit_login_scopes_passed_to_gcloud_without_unscoped_fallback() {
     assert!(err.contains("adc failed"));
 }
 
-static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-struct EnvVarGuard {
+struct EnvVarGuard<'a> {
+    _lock: &'a tokio::sync::MutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<String>)>,
 }
 
-impl EnvVarGuard {
-    fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+impl<'a> EnvVarGuard<'a> {
+    fn set(
+        lock: &'a tokio::sync::MutexGuard<'static, ()>,
+        vars: &[(&'static str, Option<&str>)],
+    ) -> Self {
         let mut saved = Vec::with_capacity(vars.len());
         for (key, val) in vars {
             saved.push((*key, std::env::var(key).ok()));
-            // SAFETY: Caller holds `ENV_MUTATION_LOCK` for the full lifetime of this guard.
+            // SAFETY: Caller holds `ENV_MUTATION_LOCK` via `lock` for the full lifetime of this guard.
             unsafe {
                 match val {
                     Some(v) => std::env::set_var(key, v),
@@ -698,14 +702,14 @@ impl EnvVarGuard {
                 }
             }
         }
-        Self { saved }
+        Self { _lock: lock, saved }
     }
 }
 
-impl Drop for EnvVarGuard {
+impl Drop for EnvVarGuard<'_> {
     fn drop(&mut self) {
         for (key, prev) in self.saved.iter().rev() {
-            // SAFETY: Caller holds `ENV_MUTATION_LOCK` across construction and drop.
+            // SAFETY: Caller holds `ENV_MUTATION_LOCK` via `_lock` across construction and drop.
             unsafe {
                 match prev {
                     Some(v) => std::env::set_var(key, v),
@@ -1267,7 +1271,7 @@ async fn id_token_impersonation_user_adc_cli_and_static_rejection() {
 
 #[test]
 fn canonical_adc_explicit_error_isolation_and_metadata_fallback() {
-    let _lock = ENV_MUTATION_LOCK.lock().expect("env lock");
+    let lock = ENV_MUTATION_LOCK.blocking_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let valid_sa_path = dir.path().join("ambient_sa.json");
     std::fs::write(
@@ -1288,16 +1292,19 @@ fn canonical_adc_explicit_error_isolation_and_metadata_fallback() {
     let valid_sa_str = valid_sa_path.to_string_lossy().into_owned();
     let empty_home_str = empty_home.to_string_lossy().into_owned();
 
-    let _guard = EnvVarGuard::set(&[
-        (
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            Some(valid_sa_str.as_str()),
-        ),
-        ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
-        ("HOME", Some(empty_home_str.as_str())),
-        ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
-        ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
-    ]);
+    let _guard = EnvVarGuard::set(
+        &lock,
+        &[
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                Some(valid_sa_str.as_str()),
+            ),
+            ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
+            ("HOME", Some(empty_home_str.as_str())),
+            ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
+            ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
+        ],
+    );
 
     let mut bad_opts = HashMap::new();
     bad_opts.insert(
@@ -1320,13 +1327,16 @@ fn canonical_adc_explicit_error_isolation_and_metadata_fallback() {
     );
 
     drop(_guard);
-    let _no_adc_guard = EnvVarGuard::set(&[
-        ("GOOGLE_APPLICATION_CREDENTIALS", None),
-        ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
-        ("HOME", Some(empty_home_str.as_str())),
-        ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
-        ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
-    ]);
+    let _no_adc_guard = EnvVarGuard::set(
+        &lock,
+        &[
+            ("GOOGLE_APPLICATION_CREDENTIALS", None),
+            ("CLOUDSDK_CONFIG", Some(empty_home_str.as_str())),
+            ("HOME", Some(empty_home_str.as_str())),
+            ("GOOGLE_OAUTH_ACCESS_TOKEN", None),
+            ("CLOUDSDK_AUTH_ACCESS_TOKEN", None),
+        ],
+    );
 
     let fallback_cache = GcpTokenCache::from_options(&HashMap::new(), DEFAULT_GCP_SCOPES)
         .expect("ambient ADC discovery must end with MetadataServer");
@@ -1341,4 +1351,541 @@ fn canonical_adc_explicit_error_isolation_and_metadata_fallback() {
         GcpTokenCache::from_options(&no_ambient_opts, DEFAULT_GCP_SCOPES).is_none(),
         "allow_ambient_adc=false must disable MetadataServer fallback"
     );
+}
+
+#[tokio::test]
+async fn external_account_file_and_url_oidc_sts_exchange_and_impersonation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let oidc_calls = Arc::new(AtomicUsize::new(0));
+    let sts_calls = Arc::new(AtomicUsize::new(0));
+    let iam_calls = Arc::new(AtomicUsize::new(0));
+    let id_token_calls = Arc::new(AtomicUsize::new(0));
+    let sts_status_fail = Arc::new(AtomicBool::new(false));
+
+    let oidc_calls_srv = Arc::clone(&oidc_calls);
+    let sts_calls_srv = Arc::clone(&sts_calls);
+    let iam_calls_srv = Arc::clone(&iam_calls);
+    let id_token_calls_srv = Arc::clone(&id_token_calls);
+    let sts_fail_srv = Arc::clone(&sts_status_fail);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let oidc_calls = Arc::clone(&oidc_calls_srv);
+            let sts_calls = Arc::clone(&sts_calls_srv);
+            let iam_calls = Arc::clone(&iam_calls_srv);
+            let id_token_calls = Arc::clone(&id_token_calls_srv);
+            let sts_fail = Arc::clone(&sts_fail_srv);
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let first_line = req.lines().next().unwrap_or("");
+                let (headers_part, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+
+                async fn send_json(stream: &mut tokio::net::TcpStream, status: &str, json: String) {
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+
+                if first_line.starts_with("GET /oidc ") {
+                    let seq = oidc_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("x-oidc-auth: header-secret"),
+                        "expected custom credential_source header, got:\n{headers_part}"
+                    );
+                    let json = serde_json::json!({
+                        "access_token": format!("url-subject-token-{seq}")
+                    })
+                    .to_string();
+                    send_json(&mut stream, "200 OK", json).await;
+                } else if first_line.starts_with("POST /sts/token ") {
+                    let seq = sts_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if sts_fail.load(Ordering::SeqCst) {
+                        send_json(
+                            &mut stream,
+                            "401 Unauthorized",
+                            r#"{"error":"invalid_grant"}"#.to_string(),
+                        )
+                        .await;
+                        return;
+                    }
+                    let form: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    assert_eq!(
+                        form.get("grant_type").map(String::as_str),
+                        Some("urn:ietf:params:oauth:grant-type:token-exchange")
+                    );
+                    assert_eq!(
+                        form.get("requested_token_type").map(String::as_str),
+                        Some("urn:ietf:params:oauth:token-type:access_token")
+                    );
+                    assert_eq!(
+                        form.get("audience").map(String::as_str),
+                        Some(
+                            "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/prov"
+                        )
+                    );
+                    let json = serde_json::json!({
+                        "access_token": format!("sts-federated-token-{seq}"),
+                        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    })
+                    .to_string();
+                    send_json(&mut stream, "200 OK", json).await;
+                } else if first_line.contains(":generateAccessToken ") {
+                    let seq = iam_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer sts-federated-token-"),
+                        "expected STS federated token as bearer auth"
+                    );
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(body).expect("impersonation JSON body");
+                    assert_eq!(
+                        parsed["scope"],
+                        serde_json::json!(["https://www.googleapis.com/auth/devstorage.read_only"])
+                    );
+                    let json = serde_json::json!({
+                        "accessToken": format!("impersonated-access-token-{seq}"),
+                        "expireTime": "2099-01-01T00:00:00Z"
+                    })
+                    .to_string();
+                    send_json(&mut stream, "200 OK", json).await;
+                } else if first_line.contains(":generateIdToken ") {
+                    id_token_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer sts-federated-token-"),
+                        "expected STS federated token as bearer auth on generateIdToken"
+                    );
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(body).expect("generateIdToken body");
+                    let aud = parsed["audience"].as_str().expect("audience");
+                    let tok = sign_test_id_token(serde_json::json!(aud), 3600);
+                    let json = serde_json::json!({ "token": tok }).to_string();
+                    send_json(&mut stream, "200 OK", json).await;
+                } else {
+                    send_json(&mut stream, "404 Not Found", "{}".to_string()).await;
+                }
+            });
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text_tok_path = dir.path().join("oidc-text.jwt");
+    std::fs::write(&text_tok_path, "test-token-placeholder-text-1\n").expect("write text tok");
+
+    let text_adc_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/prov",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "quota_project_id": "wif-quota-proj",
+        "credential_source": {
+            "file": text_tok_path.to_string_lossy(),
+            "format": { "type": "text" }
+        }
+    })
+    .to_string();
+
+    let mut text_opts = HashMap::new();
+    text_opts.insert("external_account_json".to_string(), text_adc_json);
+    text_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    let text_cache = GcpTokenCache::from_options(&text_opts, DEFAULT_GCP_SCOPES)
+        .expect("file text external_account");
+    assert_eq!(text_cache.quota_project_id(), Some("wif-quota-proj"));
+    let snap1 = text_cache.get_or_refresh().await.expect("sts exchange");
+    assert_eq!(snap1.access_token, "sts-federated-token-1");
+    assert_eq!(snap1.quota_project_id.as_deref(), Some("wif-quota-proj"));
+
+    let id_err = GcpIdTokenCache::new(Arc::clone(&text_cache), GcpIdTokenOptions::default())
+        .expect("id cache wraps external_account")
+        .get_or_refresh("https://svc.run.app", false)
+        .await
+        .expect_err("external_account without impersonation cannot mint ID tokens");
+    assert!(id_err.contains("service_account_impersonation_url"));
+
+    let json_tok_path = dir.path().join("oidc-json.json");
+    std::fs::write(
+        &json_tok_path,
+        serde_json::json!({ "id_token": "test-token-placeholder-json-1" }).to_string(),
+    )
+    .expect("write json tok");
+    let json_adc_path = dir.path().join("adc-json.json");
+    std::fs::write(
+        &json_adc_path,
+        serde_json::json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/prov",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": format!("{base_url}/sts/token"),
+            "service_account_impersonation_url": format!(
+                "{base_url}/v1/projects/-/serviceAccounts/runner@proj.iam.gserviceaccount.com:generateAccessToken"
+            ),
+            "credential_source": {
+                "file": json_tok_path.to_string_lossy(),
+                "format": {
+                    "type": "json",
+                    "subject_token_field_name": "id_token"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write adc json");
+
+    let mut json_opts = HashMap::new();
+    json_opts.insert(
+        "application_credentials_path".to_string(),
+        json_adc_path.to_string_lossy().into_owned(),
+    );
+    json_opts.insert(
+        "scopes".to_string(),
+        "https://www.googleapis.com/auth/devstorage.read_only".to_string(),
+    );
+    json_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    let json_cache = GcpTokenCache::from_options(&json_opts, DEFAULT_GCP_SCOPES)
+        .expect("file json external_account");
+    let imp_snap = json_cache.get_or_refresh().await.expect("impersonated sts");
+    assert_eq!(imp_snap.access_token, "impersonated-access-token-1");
+    assert_eq!(iam_calls.load(Ordering::SeqCst), 1);
+    assert!(imp_snap.expires_at_unix_ms > 4_000_000_000_000);
+
+    let id_cache = GcpIdTokenCache::new(Arc::clone(&json_cache), GcpIdTokenOptions::default())
+        .expect("id cache with impersonation");
+    let id_snap = id_cache
+        .get_or_refresh("https://wif-id.run.app", false)
+        .await
+        .expect("impersonated wif id token");
+    assert_eq!(id_snap.audience, "https://wif-id.run.app");
+    assert_eq!(id_token_calls.load(Ordering::SeqCst), 1);
+
+    let url_adc_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/prov",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "credential_source": {
+            "url": format!("{base_url}/oidc"),
+            "headers": { "X-OIDC-Auth": "header-secret" },
+            "format": {
+                "type": "json",
+                "subject_token_field_name": "access_token"
+            }
+        }
+    })
+    .to_string();
+
+    let mut url_opts = HashMap::new();
+    url_opts.insert("credentials_json".to_string(), url_adc_json);
+    url_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    let url_cache =
+        GcpTokenCache::from_options(&url_opts, DEFAULT_GCP_SCOPES).expect("url external_account");
+    let url_snap1 = url_cache.get_or_refresh().await.expect("url sts 1");
+    assert!(url_snap1.access_token.starts_with("sts-federated-token-"));
+    assert_eq!(oidc_calls.load(Ordering::SeqCst), 1);
+    let url_snap2 = url_cache
+        .get_or_refresh_with_force(true)
+        .await
+        .expect("url sts 2 forces subject token re-fetch");
+    assert_ne!(url_snap1.access_token, url_snap2.access_token);
+    assert_eq!(oidc_calls.load(Ordering::SeqCst), 2);
+
+    sts_status_fail.store(true, Ordering::SeqCst);
+    let sts_err = url_cache
+        .get_or_refresh_with_force(true)
+        .await
+        .expect_err("STS HTTP 401 must fail loud");
+    assert!(sts_err.contains("401"));
+    sts_status_fail.store(false, Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn external_account_aws1_imds_and_env_sigv4_signing_and_errors() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let imdsv2_calls = Arc::new(AtomicUsize::new(0));
+    let region_calls = Arc::new(AtomicUsize::new(0));
+    let creds_calls = Arc::new(AtomicUsize::new(0));
+    let captured_subject_tokens: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let imdsv2_srv = Arc::clone(&imdsv2_calls);
+    let region_srv = Arc::clone(&region_calls);
+    let creds_srv = Arc::clone(&creds_calls);
+    let tokens_srv = Arc::clone(&captured_subject_tokens);
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let imdsv2_calls = Arc::clone(&imdsv2_srv);
+            let region_calls = Arc::clone(&region_srv);
+            let creds_calls = Arc::clone(&creds_srv);
+            let captured_tokens = Arc::clone(&tokens_srv);
+            tokio::spawn(async move {
+                let req = read_http_request(&mut stream).await;
+                let first_line = req.lines().next().unwrap_or("");
+                let (headers_part, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+
+                if first_line.starts_with("PUT /latest/api/token ") {
+                    imdsv2_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("x-aws-ec2-metadata-token-ttl-seconds: 300"),
+                        "expected clamped IMDSv2 TTL header"
+                    );
+                    let tok = "imds-session-token-123";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{tok}",
+                        tok.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else if first_line
+                    .starts_with("GET /latest/meta-data/placement/availability-zone ")
+                {
+                    region_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("x-aws-ec2-metadata-token: imds-session-token-123")
+                    );
+                    let az = "us-east-1a";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{az}",
+                        az.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else if first_line.starts_with("GET /latest/meta-data/iam/security-credentials ")
+                {
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("x-aws-ec2-metadata-token: imds-session-token-123")
+                    );
+                    let role = "my-ec2-role";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{role}",
+                        role.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else if first_line
+                    .starts_with("GET /latest/meta-data/iam/security-credentials/my-ec2-role ")
+                {
+                    creds_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        headers_part
+                            .to_ascii_lowercase()
+                            .contains("x-aws-ec2-metadata-token: imds-session-token-123")
+                    );
+                    let json = serde_json::json!({
+                        "AccessKeyId": "AKIATESTIMDS12345",
+                        "SecretAccessKey": "test-secret-access-key-imds",
+                        "Token": "test-session-token-imds"
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else if first_line.starts_with("POST /sts/token ") {
+                    let form: HashMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    let sub_tok = form.get("subject_token").expect("subject_token").clone();
+                    captured_tokens.lock().expect("lock").push(sub_tok);
+                    let json = serde_json::json!({
+                        "access_token": "aws-sts-federated-token",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+        }
+    });
+
+    let aws_adc_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/aws-pool/providers/aws-prov",
+        "subject_token_type": "urn:ietf:params:aws:token-type:aws4_request",
+        "token_url": format!("{base_url}/sts/token"),
+        "credential_source": {
+            "environment_id": "aws1",
+            "imdsv2_session_token_url": format!("{base_url}/latest/api/token"),
+            "region_url": format!("{base_url}/latest/meta-data/placement/availability-zone"),
+            "url": format!("{base_url}/latest/meta-data/iam/security-credentials"),
+            "regional_cred_verification_url": "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+        }
+    })
+    .to_string();
+
+    {
+        let lock = ENV_MUTATION_LOCK.lock().await;
+        let _guard = EnvVarGuard::set(
+            &lock,
+            &[
+                ("AWS_REGION", None),
+                ("AWS_DEFAULT_REGION", None),
+                ("AWS_ACCESS_KEY_ID", None),
+                ("AWS_SECRET_ACCESS_KEY", None),
+                ("AWS_SESSION_TOKEN", None),
+            ],
+        );
+        let mut opts = HashMap::new();
+        opts.insert("external_account_json".to_string(), aws_adc_json.clone());
+        opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+        let cache = GcpTokenCache::from_options(&opts, DEFAULT_GCP_SCOPES).expect("aws1 imds");
+        let snap = cache.get_or_refresh().await.expect("aws1 sts exchange");
+        assert_eq!(snap.access_token, "aws-sts-federated-token");
+        assert_eq!(imdsv2_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(region_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(creds_calls.load(Ordering::SeqCst), 1);
+    }
+
+    {
+        let lock = ENV_MUTATION_LOCK.lock().await;
+        let _guard = EnvVarGuard::set(
+            &lock,
+            &[
+                ("AWS_REGION", Some("eu-west-2")),
+                ("AWS_ACCESS_KEY_ID", Some("AKIATESTENV67890")),
+                ("AWS_SECRET_ACCESS_KEY", Some("test-secret-access-key-env")),
+                ("AWS_SESSION_TOKEN", Some("test-session-token-env")),
+            ],
+        );
+        let mut opts = HashMap::new();
+        opts.insert("external_account_json".to_string(), aws_adc_json);
+        opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+        let cache = GcpTokenCache::from_options(&opts, DEFAULT_GCP_SCOPES).expect("aws1 env");
+        let snap = cache.get_or_refresh().await.expect("aws1 env sts exchange");
+        assert_eq!(snap.access_token, "aws-sts-federated-token");
+        assert_eq!(imdsv2_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(region_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(creds_calls.load(Ordering::SeqCst), 1);
+    }
+
+    let tokens = captured_subject_tokens.lock().expect("lock").clone();
+    assert_eq!(tokens.len(), 2);
+    let imds_payload: serde_json::Value =
+        serde_json::from_str(&tokens[0]).expect("imds subject_token JSON");
+    assert_eq!(
+        imds_payload["url"],
+        "https://sts.us-east-1.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+    );
+    assert_eq!(imds_payload["method"], "POST");
+    let imds_headers = imds_payload["headers"].as_array().expect("headers array");
+    let auth_val = imds_headers
+        .iter()
+        .find(|h| h["key"] == "Authorization")
+        .and_then(|h| h["value"].as_str())
+        .expect("Authorization header");
+    assert!(auth_val.starts_with("AWS4-HMAC-SHA256 Credential=AKIATESTIMDS12345/"));
+    assert!(auth_val.contains("/us-east-1/sts/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token;x-goog-cloud-target-resource, Signature="));
+
+    let env_payload: serde_json::Value =
+        serde_json::from_str(&tokens[1]).expect("env subject_token JSON");
+    assert_eq!(
+        env_payload["url"],
+        "https://sts.eu-west-2.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+    );
+    let env_headers = env_payload["headers"].as_array().expect("headers array");
+    let env_auth = env_headers
+        .iter()
+        .find(|h| h["key"] == "Authorization")
+        .and_then(|h| h["value"].as_str())
+        .expect("Authorization header");
+    assert!(env_auth.contains("/eu-west-2/sts/aws4_request"));
+
+    let executable_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "credential_source": {
+            "executable": { "command": "/bin/echo nope" }
+        }
+    })
+    .to_string();
+    let mut exec_opts = HashMap::new();
+    exec_opts.insert("external_account_json".to_string(), executable_json);
+    exec_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    assert!(
+        GcpTokenCache::from_options(&exec_opts, DEFAULT_GCP_SCOPES).is_none(),
+        "executable credential_source must be rejected"
+    );
+    let exec_err = GcpTokenCache::from_scoped_options(Some(&exec_opts), &[])
+        .expect_err("from_scoped_options must surface executable rejection");
+    assert!(exec_err.contains("executable"));
+
+    let missing_field_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "credential_source": {
+            "file": "/tmp/unused",
+            "format": { "type": "json" }
+        }
+    })
+    .to_string();
+    let mut missing_field_opts = HashMap::new();
+    missing_field_opts.insert("external_account_json".to_string(), missing_field_json);
+    assert!(GcpTokenCache::from_options(&missing_field_opts, DEFAULT_GCP_SCOPES).is_none());
+
+    let missing_file_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "credential_source": {
+            "file": "/tmp/vertebra-definitely-missing-oidc-token-file"
+        }
+    })
+    .to_string();
+    let mut missing_file_opts = HashMap::new();
+    missing_file_opts.insert("external_account_json".to_string(), missing_file_json);
+    missing_file_opts.insert("allow_ambient_adc".to_string(), "false".to_string());
+    let missing_file_cache =
+        GcpTokenCache::from_options(&missing_file_opts, DEFAULT_GCP_SCOPES).expect("valid config");
+    assert!(missing_file_cache.get_or_refresh().await.is_err());
+
+    let ud_mismatch_json = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{base_url}/sts/token"),
+        "universe_domain": "custom.universe.goog",
+        "credential_source": {
+            "file": "/tmp/unused"
+        }
+    })
+    .to_string();
+    let mut ud_opts = HashMap::new();
+    ud_opts.insert("external_account_json".to_string(), ud_mismatch_json);
+    assert!(GcpTokenCache::from_options(&ud_opts, DEFAULT_GCP_SCOPES).is_none());
+    ud_opts.insert(
+        "universe_domain".to_string(),
+        "custom.universe.goog".to_string(),
+    );
+    assert!(GcpTokenCache::from_options(&ud_opts, DEFAULT_GCP_SCOPES).is_some());
 }

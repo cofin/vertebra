@@ -211,6 +211,8 @@ def test_worker_main_asgi_app_avoids_double_mount(monkeypatch: pytest.MonkeyPatc
     def fake_run_worker(handlers: dict[int, Any], *, mounts: list[tuple[str, Any, str]], **_kwargs: Any) -> None:
         captured.append((dict(handlers), list(mounts)))
 
+    monkeypatch.setenv("VERTEBRA_SERVER_ACTIVE", "0")
+    monkeypatch.delenv("VERTEBRA_SERVER_ACTIVE")
     monkeypatch.setattr(supervisor_worker, "run_worker", fake_run_worker)
 
     monkeypatch.setenv("VERTEBRA_APP", "demo:mounted")

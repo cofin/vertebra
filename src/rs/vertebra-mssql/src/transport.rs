@@ -196,11 +196,19 @@ impl MssqlSession {
     /// Transmit a TDS `0x06` `ATTENTION` packet and drain the server's `DONE_ATTN` response token.
     pub async fn send_attention(&mut self) -> Result<(), MssqlError> {
         self.cancel_state.take_armed();
-        if let Err(err) = self.client.cancel_query().await {
-            self.broken = true;
-            return Err(MssqlError::from(err));
+        match tokio::time::timeout(Duration::from_secs(5), self.client.cancel_query()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => {
+                self.broken = true;
+                Err(MssqlError::from(err))
+            }
+            Err(_) => {
+                self.broken = true;
+                Err(MssqlError::cancelled(
+                    "MSSQL TDS ATTENTION acknowledgement timed out after 5s; session marked broken",
+                ))
+            }
         }
-        Ok(())
     }
 
     async fn run_cancellable<T, F>(&mut self, op: F) -> Result<T, MssqlError>
@@ -210,7 +218,12 @@ impl MssqlSession {
         ) -> BoxFuture<'_, Result<T, MssqlError>>,
     {
         if self.cancel_state.take_armed() {
-            let _ = self.client.cancel_query().await;
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(5), self.client.cancel_query()).await,
+                Ok(Ok(())),
+            ) {
+                self.broken = true;
+            }
             return Err(MssqlError::cancelled(
                 "MSSQL query cancelled via TDS ATTENTION before execution",
             ));
@@ -244,7 +257,10 @@ impl MssqlSession {
             }
             Err(reason) => {
                 cancel_state.take_armed();
-                if self.client.cancel_query().await.is_err() {
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(5), self.client.cancel_query()).await,
+                    Ok(Ok(())),
+                ) {
                     self.broken = true;
                 }
                 match reason {
@@ -372,13 +388,14 @@ impl MssqlSession {
         Ok(())
     }
 
-    /// Create a named transaction savepoint (`SAVE TRANSACTION`).
+    /// Create a named transaction savepoint (`SAVE TRANSACTION <name>`).
     pub async fn save_transaction(&mut self, name: &str) -> Result<(), MssqlError> {
         validate_savepoint_identifier(name)?;
-        let name_owned = name.to_string();
+        let stmt = format!("SAVE TRANSACTION [{name}]");
         self.run_cancellable(|client| {
             Box::pin(async move {
-                client.save_transaction(&name_owned).await?;
+                let mut stream = client.simple_query(stmt).await?;
+                while stream.try_next().await?.is_some() {}
                 Ok(())
             })
         })
@@ -502,10 +519,11 @@ impl Connection for MssqlSession {
 
     fn close(self) -> BoxFuture<'static, Result<(), TransportError>> {
         Box::pin(async move {
-            self.client
-                .close()
-                .await
-                .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))
+            match tokio::time::timeout(Duration::from_secs(5), self.client.close()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(TransportError::Io(std::io::Error::other(e.to_string()))),
+                Err(_) => Ok(()),
+            }
         })
     }
 }

@@ -10,11 +10,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
-use rsa::RsaPrivateKey;
-use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
+use rsa::pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey};
+use rsa::pkcs1v15::{Signature as RsaSignature, SigningKey, VerifyingKey};
+use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
+use rsa::signature::{SignatureEncoding, Signer, Verifier};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use url::Url;
@@ -103,7 +103,7 @@ pub(crate) fn rfc3986_encode(input: &str, encode_slash: bool) -> String {
     out
 }
 
-fn percent_decode_utf8(input: &str) -> Result<String, SigningError> {
+pub(crate) fn percent_decode_utf8(input: &str) -> Result<String, SigningError> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut idx = 0;
@@ -142,6 +142,24 @@ pub(crate) fn parse_rsa_private_key(pem: &str) -> Result<RsaPrivateKey, SigningE
     RsaPrivateKey::from_pkcs8_pem(trimmed)
         .or_else(|_| RsaPrivateKey::from_pkcs1_pem(trimmed))
         .map_err(|e| SigningError::InvalidKey(format!("invalid RSA private key PEM: {e}")))
+}
+
+pub(crate) fn parse_rsa_public_key(pem: &str) -> Result<RsaPublicKey, SigningError> {
+    let trimmed = pem.trim();
+    if trimmed.is_empty() {
+        return Err(SigningError::InvalidKey(
+            "RSA public key PEM must not be empty".to_string(),
+        ));
+    }
+    if let Ok(pub_key) = RsaPublicKey::from_public_key_pem(trimmed) {
+        return Ok(pub_key);
+    }
+    if let Ok(pub_key) = RsaPublicKey::from_pkcs1_pem(trimmed) {
+        return Ok(pub_key);
+    }
+    parse_rsa_private_key(trimmed)
+        .map(|priv_key| RsaPublicKey::from(&priv_key))
+        .map_err(|e| SigningError::InvalidKey(format!("invalid RSA verification key PEM: {e}")))
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> Result<Vec<u8>, SigningError> {
@@ -596,15 +614,38 @@ pub fn build_gcs_v4_canonical_request(
     now_unix: i64,
     endpoint: Option<&str>,
 ) -> Result<GcsV4CanonicalRequest, SigningError> {
+    build_gcs_v4_canonical_request_with_algorithm(
+        "GOOG4-RSA-SHA256",
+        bucket,
+        service_account_email,
+        method,
+        object_path,
+        expires_in_secs,
+        now_unix,
+        endpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_gcs_v4_canonical_request_with_algorithm(
+    algorithm: &str,
+    bucket: &str,
+    credential_identity: &str,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+    endpoint: Option<&str>,
+) -> Result<GcsV4CanonicalRequest, SigningError> {
     validate_expires_in_secs(expires_in_secs)?;
     let trimmed_bucket = bucket.trim();
     if trimmed_bucket.is_empty() {
         return Err(SigningError::InvalidInput("empty GCS bucket".to_string()));
     }
-    let trimmed_email = service_account_email.trim();
-    if trimmed_email.is_empty() {
+    let trimmed_identity = credential_identity.trim();
+    if trimmed_identity.is_empty() {
         return Err(SigningError::InvalidKey(
-            "missing GCS service_account_email".to_string(),
+            "missing GCS service_account_email or access_key_id".to_string(),
         ));
     }
     let trimmed_object = object_path.trim_start_matches('/');
@@ -634,13 +675,10 @@ pub fn build_gcs_v4_canonical_request(
         )
     };
     let credential_scope = format!("{datestamp}/auto/storage/goog4_request");
-    let credential = format!("{trimmed_email}/{credential_scope}");
+    let credential = format!("{trimmed_identity}/{credential_scope}");
 
     let mut query_params = [
-        (
-            "X-Goog-Algorithm".to_string(),
-            "GOOG4-RSA-SHA256".to_string(),
-        ),
+        ("X-Goog-Algorithm".to_string(), algorithm.to_string()),
         ("X-Goog-Credential".to_string(), credential),
         ("X-Goog-Date".to_string(), goog_date.clone()),
         ("X-Goog-Expires".to_string(), expires_in_secs.to_string()),
@@ -662,7 +700,8 @@ pub fn build_gcs_v4_canonical_request(
         host
     );
     let string_to_sign = format!(
-        "GOOG4-RSA-SHA256\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
+        algorithm,
         goog_date,
         credential_scope,
         sha256_hex(canonical_request.as_bytes())
@@ -728,6 +767,338 @@ pub fn sign_gcs_v4_url(
     let signature = signing_key.sign(canonical.string_to_sign.as_bytes());
     let hex_sig = hex::encode(signature.to_bytes());
     assemble_gcs_iam_v4_url(&canonical, &hex_sig)
+}
+
+/// Configuration for offline verification of GCS V4 (`GOOG4-RSA-SHA256` and `GOOG4-HMAC-SHA256`) presigned URLs.
+#[derive(Clone, Debug)]
+pub struct GcsVerifyConfig {
+    pub bucket: String,
+    pub service_account_email: String,
+    pub verify_key_pem: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+fn derive_gcs_v4_hmac_key(
+    secret_access_key: &str,
+    datestamp: &str,
+    region: &str,
+) -> Result<Vec<u8>, SigningError> {
+    let secret = format!("GOOG4{secret_access_key}");
+    let k_date = hmac_sha256(secret.as_bytes(), datestamp.as_bytes())?;
+    let k_region = hmac_sha256(&k_date, region.as_bytes())?;
+    let k_service = hmac_sha256(&k_region, b"storage")?;
+    hmac_sha256(&k_service, b"goog4_request")
+}
+
+/// Sign a GCS V4 presigned URL using GCS XML HMAC interoperability credentials (`GOOG4-HMAC-SHA256`).
+#[allow(clippy::too_many_arguments)]
+pub fn sign_gcs_v4_hmac_url(
+    bucket: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    method: &str,
+    object_path: &str,
+    expires_in_secs: u64,
+    now_unix: i64,
+    endpoint: Option<&str>,
+) -> Result<String, SigningError> {
+    let trimmed_secret = secret_access_key.trim();
+    if trimmed_secret.is_empty() {
+        return Err(SigningError::InvalidKey(
+            "missing GCS HMAC secret_access_key".to_string(),
+        ));
+    }
+    let canonical = build_gcs_v4_canonical_request_with_algorithm(
+        "GOOG4-HMAC-SHA256",
+        bucket,
+        access_key_id,
+        method,
+        object_path,
+        expires_in_secs,
+        now_unix,
+        endpoint,
+    )?;
+    let timestamp: DateTime<Utc> = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .ok_or_else(|| SigningError::InvalidExpiry("invalid unix timestamp".to_string()))?;
+    let datestamp = timestamp.format("%Y%m%d").to_string();
+    let k_signing = derive_gcs_v4_hmac_key(trimmed_secret, &datestamp, "auto")?;
+    let hex_sig = hex::encode(hmac_sha256(
+        &k_signing,
+        canonical.string_to_sign.as_bytes(),
+    )?);
+    assemble_gcs_iam_v4_url(&canonical, &hex_sig)
+}
+
+/// Verify a GCS V4 (`GOOG4-RSA-SHA256` or `GOOG4-HMAC-SHA256`) presigned URL offline.
+pub fn verify_gcs_v4_url(
+    config: &GcsVerifyConfig,
+    method: &str,
+    signed_url: &str,
+    now_unix: i64,
+) -> Result<bool, SigningError> {
+    let trimmed_bucket = config.bucket.trim();
+    if trimmed_bucket.is_empty() {
+        return Err(SigningError::InvalidInput("empty GCS bucket".to_string()));
+    }
+    let (expected_base_url, expected_host, expected_endpoint_prefix) =
+        resolve_gcs_endpoint_origin(config.endpoint.as_deref())?;
+    let has_rsa = config
+        .verify_key_pem
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_hmac = config
+        .access_key_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        && config
+            .secret_access_key
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+    if !has_rsa && !has_hmac {
+        return Err(SigningError::InvalidKey(
+            "GCS URL verification requires verify_key_pem or access_key_id/secret_access_key"
+                .to_string(),
+        ));
+    }
+
+    let upper_method = method.trim().to_ascii_uppercase();
+    if upper_method.is_empty() {
+        return Ok(false);
+    }
+
+    let Ok(parsed) = Url::parse(signed_url) else {
+        return Ok(false);
+    };
+    if parsed.fragment().is_some() {
+        return Ok(false);
+    }
+    let expected_origin = Url::parse(&expected_base_url).map_err(|e| {
+        SigningError::InvalidInput(format!("invalid GCS endpoint `{expected_base_url}`: {e}"))
+    })?;
+    if parsed.scheme() != expected_origin.scheme()
+        || parsed.host_str() != expected_origin.host_str()
+        || parsed.port_or_known_default() != expected_origin.port_or_known_default()
+    {
+        return Ok(false);
+    }
+
+    let mut algorithm: Option<String> = None;
+    let mut credential: Option<String> = None;
+    let mut goog_date: Option<String> = None;
+    let mut expires_str: Option<String> = None;
+    let mut signed_headers: Option<String> = None;
+    let mut signature: Option<String> = None;
+    let mut canonical_pairs: Vec<(String, String)> = Vec::new();
+
+    for (k, v) in parsed.query_pairs() {
+        let key = k.into_owned();
+        let val = v.into_owned();
+        match key.as_str() {
+            "X-Goog-Signature" => {
+                if signature.is_some() {
+                    return Ok(false);
+                }
+                signature = Some(val);
+            }
+            "X-Goog-Algorithm" => {
+                if algorithm.is_some() {
+                    return Ok(false);
+                }
+                algorithm = Some(val.clone());
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+            "X-Goog-Credential" => {
+                if credential.is_some() {
+                    return Ok(false);
+                }
+                credential = Some(val.clone());
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+            "X-Goog-Date" => {
+                if goog_date.is_some() {
+                    return Ok(false);
+                }
+                goog_date = Some(val.clone());
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+            "X-Goog-Expires" => {
+                if expires_str.is_some() {
+                    return Ok(false);
+                }
+                expires_str = Some(val.clone());
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+            "X-Goog-SignedHeaders" => {
+                if signed_headers.is_some() {
+                    return Ok(false);
+                }
+                signed_headers = Some(val.clone());
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+            _ => {
+                canonical_pairs.push((rfc3986_encode(&key, true), rfc3986_encode(&val, true)));
+            }
+        }
+    }
+
+    let (
+        Some(algorithm),
+        Some(credential),
+        Some(goog_date),
+        Some(expires_str),
+        Some(signed_headers),
+        Some(signature),
+    ) = (
+        algorithm,
+        credential,
+        goog_date,
+        expires_str,
+        signed_headers,
+        signature,
+    )
+    else {
+        return Ok(false);
+    };
+
+    if signed_headers != "host" {
+        return Ok(false);
+    }
+
+    let Ok(expires_secs) = expires_str.parse::<u64>() else {
+        return Ok(false);
+    };
+    if validate_expires_in_secs(expires_secs).is_err() {
+        return Ok(false);
+    }
+    let Ok(signed_dt) = chrono::NaiveDateTime::parse_from_str(&goog_date, "%Y%m%dT%H%M%SZ") else {
+        return Ok(false);
+    };
+    let signed_unix = signed_dt.and_utc().timestamp();
+    if now_unix > signed_unix.saturating_add(expires_secs as i64) {
+        return Ok(false);
+    }
+
+    let cred_parts: Vec<&str> = credential.split('/').collect();
+    if cred_parts.len() != 5 {
+        return Ok(false);
+    }
+    let (cred_id, datestamp, region, service, terminator) = (
+        cred_parts[0],
+        cred_parts[1],
+        cred_parts[2],
+        cred_parts[3],
+        cred_parts[4],
+    );
+    if cred_id.is_empty()
+        || datestamp != &goog_date[..8]
+        || region.is_empty()
+        || service != "storage"
+        || terminator != "goog4_request"
+    {
+        return Ok(false);
+    }
+    let credential_scope = format!("{datestamp}/{region}/storage/goog4_request");
+
+    let encoded_bucket = rfc3986_encode(trimmed_bucket, true);
+    let path_prefix = if expected_endpoint_prefix.is_empty() {
+        format!("/{encoded_bucket}/")
+    } else {
+        format!(
+            "/{}/{encoded_bucket}/",
+            rfc3986_encode(&expected_endpoint_prefix, false)
+        )
+    };
+    let Some(raw_encoded_key) = parsed.path().strip_prefix(&path_prefix) else {
+        return Ok(false);
+    };
+    if raw_encoded_key.is_empty() {
+        return Ok(false);
+    }
+    let Ok(decoded_object) = percent_decode_utf8(raw_encoded_key) else {
+        return Ok(false);
+    };
+    let trimmed_object = decoded_object.trim_start_matches('/');
+    if trimmed_object.is_empty() {
+        return Ok(false);
+    }
+    let expected_canonical_uri = format!("{path_prefix}{}", rfc3986_encode(trimmed_object, false));
+    if parsed.path() != expected_canonical_uri {
+        return Ok(false);
+    }
+
+    canonical_pairs.sort();
+    let canonical_querystring = canonical_pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let canonical_request = format!(
+        "{upper_method}\n{expected_canonical_uri}\n{canonical_querystring}\nhost:{expected_host}\n\nhost\nUNSIGNED-PAYLOAD"
+    );
+    let string_to_sign = format!(
+        "{algorithm}\n{goog_date}\n{credential_scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let Ok(sig_bytes) = hex::decode(signature.as_bytes()) else {
+        return Ok(false);
+    };
+
+    match algorithm.as_str() {
+        "GOOG4-RSA-SHA256" => {
+            let pem = config
+                .verify_key_pem
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SigningError::InvalidKey("missing GCS RSA verify_key_pem".to_string())
+                })?;
+            let public_key = parse_rsa_public_key(pem)?;
+            let expected_email = config.service_account_email.trim();
+            if !expected_email.is_empty()
+                && !constant_time_eq(cred_id.as_bytes(), expected_email.as_bytes())
+            {
+                return Ok(false);
+            }
+            let Ok(rsa_sig) = RsaSignature::try_from(sig_bytes.as_slice()) else {
+                return Ok(false);
+            };
+            let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+            Ok(verifying_key
+                .verify(string_to_sign.as_bytes(), &rsa_sig)
+                .is_ok())
+        }
+        "GOOG4-HMAC-SHA256" => {
+            let ak = config
+                .access_key_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SigningError::InvalidKey("missing GCS HMAC access_key_id".to_string())
+                })?;
+            let sk = config
+                .secret_access_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SigningError::InvalidKey("missing GCS HMAC secret_access_key".to_string())
+                })?;
+            if !constant_time_eq(cred_id.as_bytes(), ak.as_bytes()) {
+                return Ok(false);
+            }
+            let k_signing = derive_gcs_v4_hmac_key(sk, datestamp, region)?;
+            let expected_sig = hmac_sha256(&k_signing, string_to_sign.as_bytes())?;
+            Ok(constant_time_eq(&sig_bytes, &expected_sig))
+        }
+        _ => Ok(false),
+    }
 }
 
 #[derive(Serialize)]
@@ -1209,6 +1580,189 @@ pub fn sign_azure_sas_url(
     config
         .sign_sas_url(method, blob_path, expires_in_secs, now_unix)
         .map_err(StorageError::from)
+}
+
+/// Verify an Azure Shared Key Blob SAS URL (`sv=2020-12-06` or `sv=2022-11-02`) offline in constant time.
+pub fn verify_azure_sas_url(
+    config: &AzureSasConfig,
+    method: &str,
+    signed_url: &str,
+    now_unix: i64,
+) -> Result<bool, SigningError> {
+    let account = config.account.trim();
+    if account.is_empty() {
+        return Err(SigningError::InvalidInput(
+            "empty Azure Storage account".to_string(),
+        ));
+    }
+    let container = config.container.trim();
+    if container.is_empty() {
+        return Err(SigningError::InvalidInput(
+            "empty Azure Blob container".to_string(),
+        ));
+    }
+    let key_b64 = config.access_key_b64.trim();
+    if key_b64.is_empty() {
+        return Err(SigningError::InvalidKey(
+            "Azure account access_key_b64 must not be empty".to_string(),
+        ));
+    }
+    let raw_key = BASE64_STANDARD
+        .decode(key_b64.as_bytes())
+        .map_err(|e| SigningError::InvalidKey(format!("invalid Azure Shared Key base64: {e}")))?;
+    if raw_key.is_empty() {
+        return Err(SigningError::InvalidKey(
+            "decoded Azure Shared Key must not be empty".to_string(),
+        ));
+    }
+
+    let base_endpoint = config
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://{account}.blob.core.windows.net"));
+    let expected_origin = Url::parse(&base_endpoint).map_err(|e| {
+        SigningError::InvalidInput(format!("invalid Azure endpoint `{base_endpoint}`: {e}"))
+    })?;
+
+    let upper_method = method.trim().to_ascii_uppercase();
+    if upper_method.is_empty() {
+        return Ok(false);
+    }
+
+    let Ok(parsed) = Url::parse(signed_url) else {
+        return Ok(false);
+    };
+    if parsed.fragment().is_some() {
+        return Ok(false);
+    }
+    if parsed.scheme() != expected_origin.scheme()
+        || parsed.host_str() != expected_origin.host_str()
+        || parsed.port_or_known_default() != expected_origin.port_or_known_default()
+    {
+        return Ok(false);
+    }
+
+    let encoded_container = rfc3986_encode(container, true);
+    let endpoint_prefix = expected_origin.path().trim_matches('/');
+    let path_prefix = if endpoint_prefix.is_empty() {
+        format!("/{encoded_container}/")
+    } else {
+        format!(
+            "/{}/{encoded_container}/",
+            rfc3986_encode(endpoint_prefix, false)
+        )
+    };
+    let Some(raw_blob) = parsed.path().strip_prefix(&path_prefix) else {
+        return Ok(false);
+    };
+    if raw_blob.is_empty() {
+        return Ok(false);
+    }
+    let Ok(decoded_blob) = percent_decode_utf8(raw_blob) else {
+        return Ok(false);
+    };
+    let trimmed_blob = decoded_blob.trim_start_matches('/');
+    if trimmed_blob.is_empty() {
+        return Ok(false);
+    }
+
+    let mut params: HashMap<String, String> = HashMap::new();
+    for (k, v) in parsed.query_pairs() {
+        let key = k.into_owned();
+        if !matches!(
+            key.as_str(),
+            "sv" | "st"
+                | "se"
+                | "sr"
+                | "sp"
+                | "spr"
+                | "sig"
+                | "si"
+                | "sip"
+                | "ses"
+                | "rscc"
+                | "rscd"
+                | "rsce"
+                | "rscl"
+                | "rsct"
+        ) {
+            return Ok(false);
+        }
+        if params.insert(key, v.into_owned()).is_some() {
+            return Ok(false);
+        }
+    }
+
+    let (Some(sv), Some(se), Some(sr), Some(sp), Some(sig)) = (
+        params.get("sv"),
+        params.get("se"),
+        params.get("sr"),
+        params.get("sp"),
+        params.get("sig"),
+    ) else {
+        return Ok(false);
+    };
+    if sr != "b" {
+        return Ok(false);
+    }
+
+    let method_allowed = match upper_method.as_str() {
+        "GET" | "HEAD" => sp.contains('r'),
+        "PUT" | "POST" => sp.contains('w') || sp.contains('c'),
+        "DELETE" => sp.contains('d'),
+        _ => false,
+    };
+    if !method_allowed {
+        return Ok(false);
+    }
+
+    let Ok(se_dt) = DateTime::parse_from_rfc3339(se) else {
+        return Ok(false);
+    };
+    let se_unix = se_dt.timestamp();
+    if now_unix > se_unix {
+        return Ok(false);
+    }
+    let st = params.get("st").map(String::as_str).unwrap_or("");
+    if !st.is_empty() {
+        let Ok(st_dt) = DateTime::parse_from_rfc3339(st) else {
+            return Ok(false);
+        };
+        let st_unix = st_dt.timestamp();
+        if now_unix < st_unix || st_unix > se_unix {
+            return Ok(false);
+        }
+    }
+
+    let si = params.get("si").map(String::as_str).unwrap_or("");
+    let sip = params.get("sip").map(String::as_str).unwrap_or("");
+    let spr = params.get("spr").map(String::as_str).unwrap_or("");
+    let ses = params.get("ses").map(String::as_str).unwrap_or("");
+    let rscc = params.get("rscc").map(String::as_str).unwrap_or("");
+    let rscd = params.get("rscd").map(String::as_str).unwrap_or("");
+    let rsce = params.get("rsce").map(String::as_str).unwrap_or("");
+    let rscl = params.get("rscl").map(String::as_str).unwrap_or("");
+    let rsct = params.get("rsct").map(String::as_str).unwrap_or("");
+
+    let canonicalized_resource = format!("/blob/{account}/{container}/{trimmed_blob}");
+    let string_to_sign = match sv.as_str() {
+        "2020-12-06" => format!(
+            "{sp}\n{st}\n{se}\n{canonicalized_resource}\n{si}\n{sip}\n{spr}\n{sv}\n{sr}\n\n{rscc}\n{rscd}\n{rsce}\n{rscl}\n{rsct}"
+        ),
+        "2022-11-02" => format!(
+            "{sp}\n{st}\n{se}\n{canonicalized_resource}\n{si}\n{sip}\n{spr}\n{sv}\n{sr}\n\n{ses}\n{rscc}\n{rscd}\n{rsce}\n{rscl}\n{rsct}"
+        ),
+        _ => return Ok(false),
+    };
+
+    let Ok(decoded_sig) = BASE64_STANDARD.decode(sig.as_bytes()) else {
+        return Ok(false);
+    };
+    let expected_sig = hmac_sha256(&raw_key, string_to_sign.as_bytes())?;
+    Ok(constant_time_eq(&decoded_sig, &expected_sig))
 }
 
 #[derive(Clone, Debug)]

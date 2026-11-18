@@ -32,6 +32,8 @@ pub enum ChannelError {
     BufferTooSmall { len: usize, capacity: usize },
     #[error("corrupted slot in shared memory")]
     CorruptedSlot,
+    #[error("corrupted shared-memory segment: {0}")]
+    CorruptedSegment(&'static str),
     #[error("slot already borrowed")]
     SlotBorrowed,
     #[error("shared memory error: {0}")]
@@ -56,9 +58,11 @@ pub struct SlotView {
     released: bool,
 }
 
-// SAFETY: SlotView holds an Arc to the ring, ensuring the underlying memory is valid.
-// The data pointer points into the ring's shared memory which is thread-safe.
+// SAFETY: `SlotView` holds an `Arc<SpscRing>` keeping the shared-memory backing valid, and
+// `SpscRing` enforces single-borrow semantics (`slot_borrowed`) across threads until drop.
 unsafe impl Send for SlotView {}
+// SAFETY: Shared references to `SlotView` only expose immutable payload bytes via `as_slice()`
+// while the slot cannot be overwritten until `SlotView::drop` advances `read_head`.
 unsafe impl Sync for SlotView {}
 
 impl SlotView {
@@ -156,7 +160,11 @@ pub struct SpscRing {
     cached_generation: AtomicU32,
 }
 
+// SAFETY: `SpscRing` owns an `Arc<ShmRegion>` and synchronizes all header and slot accesses
+// via atomic Acquire/Release/SeqCst operations on cache-line-aligned header fields.
 unsafe impl Send for SpscRing {}
+// SAFETY: Concurrent access through `&SpscRing` is governed by atomic head/tail/waiter fields
+// and single-producer / single-consumer protocol invariants.
 unsafe impl Sync for SpscRing {}
 
 #[derive(Debug, Copy, Clone)]
@@ -165,6 +173,83 @@ pub struct RingStats {
     pub slots: usize,
     pub read_head: u64,
     pub write_head: u64,
+}
+
+fn validate_region_for_layout(
+    region: &ShmRegion,
+    layout: &RingLayout,
+    min_align: usize,
+) -> Result<(), ChannelError> {
+    if layout.slots == 0
+        || !layout.is_power_of_two()
+        || layout.slot_size < core::mem::size_of::<SlotHeader>()
+        || !layout
+            .slot_size
+            .is_multiple_of(core::mem::align_of::<SlotHeader>())
+        || layout.header_size < core::mem::size_of::<ShmHeader>()
+    {
+        return Err(ChannelError::InvalidLayout);
+    }
+    let Some(ring_offset) = layout.header_size.checked_add(layout.seq_size) else {
+        return Err(ChannelError::CorruptedSegment("ring offset overflow"));
+    };
+    if layout.total_size < ring_offset {
+        return Err(ChannelError::InvalidLayout);
+    }
+    let Some(required_ring_size) = layout.slots.checked_mul(layout.slot_size) else {
+        return Err(ChannelError::CorruptedSegment("ring size overflow"));
+    };
+    if layout.ring_size < required_ring_size {
+        return Err(ChannelError::InvalidLayout);
+    }
+    let Some(ring_end) = ring_offset.checked_add(layout.ring_size) else {
+        return Err(ChannelError::CorruptedSegment("ring bounds overflow"));
+    };
+    if ring_end > layout.total_size {
+        return Err(ChannelError::CorruptedSegment(
+            "ring exceeds layout total_size",
+        ));
+    }
+    if region.len() < layout.total_size {
+        return Err(ChannelError::CorruptedSegment(
+            "region shorter than layout total_size",
+        ));
+    }
+    let base_addr = region.as_ptr() as usize;
+    if min_align > 0 && !base_addr.is_multiple_of(min_align) {
+        return Err(ChannelError::CorruptedSegment(
+            "region pointer misaligned for header",
+        ));
+    }
+    if layout.mode == ChannelMode::Mpmc {
+        let seq_align = core::mem::align_of::<CacheLine<AtomicU64>>();
+        let Some(seq_bytes) = layout
+            .slots
+            .checked_mul(core::mem::size_of::<CacheLine<AtomicU64>>())
+        else {
+            return Err(ChannelError::CorruptedSegment("sequence array overflow"));
+        };
+        if layout.seq_size < seq_bytes {
+            return Err(ChannelError::InvalidLayout);
+        }
+        let Some(seq_end) = layout.seq_offset().checked_add(seq_bytes) else {
+            return Err(ChannelError::CorruptedSegment("sequence offset overflow"));
+        };
+        if seq_end > ring_offset || seq_end > region.len() {
+            return Err(ChannelError::CorruptedSegment(
+                "sequence array exceeds region bounds",
+            ));
+        }
+        let Some(seq_addr) = base_addr.checked_add(layout.seq_offset()) else {
+            return Err(ChannelError::CorruptedSegment("sequence address overflow"));
+        };
+        if !seq_addr.is_multiple_of(seq_align) {
+            return Err(ChannelError::CorruptedSegment(
+                "sequence array pointer misaligned",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl SpscRing {
@@ -185,8 +270,9 @@ impl SpscRing {
         if region.len() < layout.total_size {
             return Err(ChannelError::InvalidLayout);
         }
-        // SAFETY: caller guarantees exclusive initialization and valid mapping.
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: Caller guarantees exclusive initialization, `ShmHeader` alignment, and
+        // `region.len() >= layout.total_size` (verified above) covering `ShmHeader`.
         let header_ref = unsafe { &mut *header };
         header_ref.magic = MAGIC;
         header_ref.abi_version = ABI_VERSION;
@@ -208,6 +294,8 @@ impl SpscRing {
         header_ref.recv_waiters.0.store(0, Ordering::Relaxed);
         header_ref.consumer_sleeping.0.store(0, Ordering::Relaxed);
         header_ref.active_flags.0.store(0, Ordering::Relaxed);
+        // SAFETY: `ShmHeader` fields were just initialized above; `from_region` validates
+        // alignment and layout bounds before constructing `Self`.
         unsafe { Self::from_region(region, layout) }
     }
 
@@ -216,8 +304,9 @@ impl SpscRing {
     /// # Safety
     /// Caller must ensure the region stays mapped for the lifetime of the ring.
     pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
-        // SAFETY: caller guarantees region is initialized and mapped.
+        validate_region_for_layout(&region, &layout, core::mem::align_of::<ShmHeader>())?;
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: `validate_region_for_layout` verified `region` is aligned and covers `ShmHeader`.
         let header_ref = unsafe { &*header };
         if header_ref.magic != MAGIC || header_ref.abi_version != ABI_VERSION {
             return Err(ChannelError::NotReady);
@@ -225,6 +314,7 @@ impl SpscRing {
         if header_ref.state.load(Ordering::Acquire) != RegionState::Ready as u32 {
             return Err(ChannelError::NotReady);
         }
+        // SAFETY: header magic, ABI version, and ready state are verified above.
         unsafe { Self::from_region(region, layout) }
     }
 
@@ -236,15 +326,14 @@ impl SpscRing {
         region: Arc<ShmRegion>,
         layout: RingLayout,
     ) -> Result<Self, ChannelError> {
-        if !layout.is_power_of_two() {
-            return Err(ChannelError::InvalidLayout);
-        }
-        // SAFETY: region is a valid shared memory mapping.
+        validate_region_for_layout(&region, &layout, core::mem::align_of::<ShmHeader>())?;
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: `validate_region_for_layout` verified `region` is aligned and covers `ShmHeader`.
         let header_ref = unsafe { &*header };
         let init_read = header_ref.read_head.0.load(Ordering::Acquire);
         let init_write = header_ref.write_head.0.load(Ordering::Acquire);
         let init_gen = header_ref.generation.load(Ordering::Acquire);
+        // SAFETY: `validate_region_for_layout` verified `layout.header_size <= layout.total_size <= region.len()`.
         let data = unsafe { region.as_ptr().add(layout.header_size) };
         Ok(Self {
             region,
@@ -304,6 +393,8 @@ impl SpscRing {
 
     #[inline]
     fn sync_generation(&self) {
+        // SAFETY: `self.header` points to a `ShmHeader` validated by `validate_region_for_layout`
+        // and kept alive by `self.region`; `generation` is an `AtomicU32` safe for shared Acquire reads.
         let generation = unsafe { (*self.header).generation.load(Ordering::Acquire) };
         let cached = self.cached_generation.load(Ordering::Relaxed);
         if generation != cached {
@@ -343,12 +434,14 @@ impl SpscRing {
     /// Access the Dekker `consumer_sleeping` flag in `ShmHeader`.
     #[inline]
     pub fn consumer_sleeping(&self) -> &AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).consumer_sleeping.0 }
     }
 
     /// Access the `active_flags` bitmask in `ShmHeader`.
     #[inline]
     pub fn active_flags(&self) -> &AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).active_flags.0 }
     }
 
@@ -404,6 +497,8 @@ impl SpscRing {
         if !self.has_producer_space(next) {
             return Err(ChannelError::Full);
         }
+        // SAFETY: `has_producer_space(next)` confirmed slot `tail` is free and owned exclusively by
+        // the producer, and `payload.len() <= self.payload_capacity()` was checked above.
         unsafe {
             self.write_slot(tail, payload, flags);
         }
@@ -433,6 +528,8 @@ impl SpscRing {
         impl Drop for SpscSendGuard {
             fn drop(&mut self) {
                 if self.armed {
+                    // SAFETY: `self.header` points to the un-published slot exclusively held by the
+                    // producer until `publish_write` stores `write_head` with Release ordering.
                     unsafe {
                         (*self.header).len = 0;
                     }
@@ -440,6 +537,9 @@ impl SpscRing {
             }
         }
 
+        // SAFETY: `slot_ptr(tail)` returns a `SlotHeader`-aligned pointer inside the validated ring
+        // region; the slot is exclusively owned by the producer until `publish_write`, and
+        // `len <= self.payload_capacity()` guarantees `payload_slice` stays within the slot.
         unsafe {
             let slot = self.slot_ptr(tail);
             let header = slot.cast::<SlotHeader>();
@@ -627,6 +727,8 @@ impl SpscRing {
         if head == tail {
             return Err(ChannelError::Empty);
         }
+        // SAFETY: `load_consumer_tail` synchronized the producer's Release write via Acquire load;
+        // `head != tail` guarantees slot `head` is published and exclusively readable by the consumer.
         let len = unsafe { self.read_slot(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.publish_read(next)?;
@@ -642,6 +744,8 @@ impl SpscRing {
         if head == tail {
             return Err(ChannelError::Empty);
         }
+        // SAFETY: `load_consumer_tail` synchronized the producer's Release write via Acquire load;
+        // `head != tail` guarantees slot `head` is published and exclusively readable by the consumer.
         let (len, flags) = unsafe { self.read_slot_with_flags(head, out)? };
         let next = head.wrapping_add(1) & self.mask;
         self.publish_read(next)?;
@@ -797,7 +901,8 @@ impl SpscRing {
             return Err(ChannelError::Empty);
         }
 
-        // Get slot data without advancing the cursor
+        // SAFETY: `load_consumer_tail` synchronized the producer's Release write via Acquire load;
+        // `head != tail` guarantees slot `head` is published and valid until `SlotView` drops.
         let (data_ptr, length, flags) = unsafe { self.peek_slot(head) };
         if length > self.payload_capacity() {
             self.slot_borrowed.store(false, Ordering::Release);
@@ -883,10 +988,19 @@ impl SpscRing {
     ///
     /// For N messages: O(1) atomic stores instead of O(N).
     /// Wake syscall amortized across batch.
-    pub fn try_recv_batch(&self, max: usize) -> Vec<(Vec<u8>, u32)> {
+    /// Drain up to `max` messages without blocking.
+    ///
+    /// Returns a vector of `(payload, flags)` tuples, or an empty `Vec` if the ring is empty or
+    /// currently borrowed by a `SlotView`.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::CorruptedSlot`] if an unread slot header claims a payload length
+    /// exceeding [`Self::payload_capacity`]. Any slots validated prior to the corrupted slot are
+    /// committed to `read_head`; `read_head` does not advance past the corrupted slot.
+    pub fn try_recv_batch(&self, max: usize) -> Result<Vec<(Vec<u8>, u32)>, ChannelError> {
         let mut results = Vec::with_capacity(max.min(self.layout.slots));
         if self.slot_borrowed.load(Ordering::Acquire) {
-            return results;
+            return Ok(results);
         }
 
         // PERF: Relaxed loads for availability check
@@ -894,7 +1008,7 @@ impl SpscRing {
         let tail = self.write_head().load(Ordering::Relaxed);
 
         if head == tail {
-            return results; // Empty - fast return
+            return Ok(results); // Empty - fast return
         }
 
         // CRITICAL: Acquire fence before reading any slot data
@@ -902,12 +1016,19 @@ impl SpscRing {
 
         // Drain available messages up to max
         let mut count = 0;
+        let mut batch_err = None;
         while head != tail && count < max {
-            // Read slot data (safe: head < tail means slot is written)
-            let (payload, flags) = unsafe { self.read_slot_to_vec(head) };
-            results.push((payload, flags));
-            head = head.wrapping_add(1) & self.mask;
-            count += 1;
+            match self.read_slot_to_vec(head) {
+                Ok((payload, flags)) => {
+                    results.push((payload, flags));
+                    head = head.wrapping_add(1) & self.mask;
+                    count += 1;
+                }
+                Err(err) => {
+                    batch_err = Some(err);
+                    break;
+                }
+            }
         }
 
         if count > 0 {
@@ -923,7 +1044,11 @@ impl SpscRing {
             }
         }
 
-        results
+        if let Some(err) = batch_err {
+            return Err(err);
+        }
+
+        Ok(results)
     }
 
     /// Drain up to `max_items` slots in-place without allocating heap `Vec<u8>` buffers,
@@ -1017,22 +1142,34 @@ impl SpscRing {
         Ok(guard.count)
     }
 
-    /// Helper to read a slot into a new Vec without requiring a pre-allocated buffer.
+    /// Read a slot into a new `Vec` without requiring a pre-allocated buffer.
     ///
-    /// # Safety
-    /// Caller must ensure the slot at `index` contains valid data.
-    unsafe fn read_slot_to_vec(&self, index: u64) -> (Vec<u8>, u32) {
-        unsafe {
-            let slot = self.slot_ptr(index);
-            let header = &*slot.cast::<SlotHeader>();
-            let len = header.len as usize;
-            let flags = header.flags;
-            let payload_ptr = slot.add(core::mem::size_of::<SlotHeader>());
-
-            let mut payload = vec![0u8; len];
-            ptr::copy_nonoverlapping(payload_ptr, payload.as_mut_ptr(), len);
-            (payload, flags)
+    /// # Errors
+    /// Returns [`ChannelError::CorruptedSlot`] if the slot header's `len` exceeds
+    /// [`Self::payload_capacity`].
+    pub fn read_slot_to_vec(&self, index: u64) -> Result<(Vec<u8>, u32), ChannelError> {
+        std::sync::atomic::fence(Ordering::Acquire);
+        // SAFETY: `self.slot_ptr(index)` masks `index` with `self.mask` (`slots - 1`) inside the
+        // validated `layout.ring_size` region, and `layout.slot_size >= size_of::<SlotHeader>()`.
+        let slot = unsafe { self.slot_ptr(index) };
+        // SAFETY: `slot` lies within the validated ring region and is aligned to `SlotHeader`.
+        let header = unsafe { &*slot.cast::<SlotHeader>() };
+        let len = header.len as usize;
+        if len > self.payload_capacity() {
+            return Err(ChannelError::CorruptedSlot);
         }
+        let flags = header.flags;
+        // SAFETY: `SlotHeader` sits at the start of the slot; `payload_ptr` is within the slot's
+        // `payload_capacity()` bytes and `len <= self.payload_capacity()` was checked above.
+        let payload_ptr = unsafe { slot.add(core::mem::size_of::<SlotHeader>()) };
+
+        let mut payload = vec![0u8; len];
+        // SAFETY: `payload_ptr` points to `len` readable bytes inside the slot and `payload` is a
+        // freshly allocated non-overlapping `Vec<u8>` of `len` bytes.
+        unsafe {
+            ptr::copy_nonoverlapping(payload_ptr, payload.as_mut_ptr(), len);
+        }
+        Ok((payload, flags))
     }
 
     /// Reset the ring to empty state. Used for reclaiming rings from dead workers.
@@ -1052,7 +1189,8 @@ impl SpscRing {
         self.cached_read_head.0.store(0, Ordering::Release);
         self.cached_write_head.0.store(0, Ordering::Release);
         self.slot_borrowed.store(false, Ordering::Release);
-        // Bump generation to invalidate any stale references
+        // SAFETY: `self.header` points to a validated `ShmHeader` kept alive by `self.region`, and
+        // `generation` is an `AtomicU32` safe to reference under shared `&self`.
         let header = unsafe { &*self.header };
         let next_gen = header
             .generation
@@ -1062,37 +1200,47 @@ impl SpscRing {
     }
 
     fn read_head(&self) -> &core::sync::atomic::AtomicU64 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).read_head.0 }
     }
 
     fn write_head(&self) -> &core::sync::atomic::AtomicU64 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).write_head.0 }
     }
 
     fn wait_read_ptr(&self) -> &core::sync::atomic::AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).wait_read.0 }
     }
 
     fn wait_write_ptr(&self) -> &core::sync::atomic::AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).wait_write.0 }
     }
 
     /// Counter for threads blocked waiting to send (ring full).
     fn send_waiters(&self) -> &core::sync::atomic::AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).send_waiters.0 }
     }
 
     /// Counter for threads blocked waiting to recv (ring empty).
     fn recv_waiters(&self) -> &core::sync::atomic::AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).recv_waiters.0 }
     }
 
     unsafe fn slot_ptr(&self, index: u64) -> *mut u8 {
         let offset = (index as usize & self.mask as usize) * self.layout.slot_size;
+        // SAFETY: `index & self.mask < self.layout.slots` and `validate_region_for_layout` verified
+        // `slots * slot_size <= layout.ring_size` within `self.region`.
         unsafe { self.data.add(offset) }
     }
 
     unsafe fn write_slot(&self, index: u64, payload: &[u8], flags: u32) {
+        // SAFETY: Caller guarantees exclusive producer ownership of slot `index` and
+        // `payload.len() <= self.payload_capacity()`; `slot_ptr(index)` is `SlotHeader`-aligned.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = slot.cast::<SlotHeader>();
@@ -1104,6 +1252,8 @@ impl SpscRing {
     }
 
     unsafe fn read_slot(&self, index: u64, out: &mut [u8]) -> Result<usize, ChannelError> {
+        // SAFETY: Caller guarantees slot `index` was published via Acquire load of `write_head`
+        // and no producer overwrites it before `publish_read`; `len` is bounds-checked before copy.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
@@ -1128,6 +1278,8 @@ impl SpscRing {
         index: u64,
         out: &mut [u8],
     ) -> Result<(usize, u32), ChannelError> {
+        // SAFETY: Caller guarantees slot `index` was published via Acquire load of `write_head`
+        // and no producer overwrites it before `publish_read`; `len` is bounds-checked before copy.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
@@ -1154,6 +1306,8 @@ impl SpscRing {
     /// # Safety
     /// Caller must ensure the index is valid (head <= index < tail).
     unsafe fn peek_slot(&self, index: u64) -> (*const u8, usize, u32) {
+        // SAFETY: Caller guarantees `index` is published and readable (`head <= index < tail`);
+        // `slot_ptr(index)` is `SlotHeader`-aligned inside the validated ring region.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
@@ -1180,9 +1334,11 @@ pub struct MpmcSlotView {
     released: bool,
 }
 
-// SAFETY: MpmcSlotView holds an Arc<MpmcRing> keeping the underlying SHM region mapped,
-// and the slot remains exclusively owned by this consumer until release_sequence is stored.
+// SAFETY: `MpmcSlotView` holds an `Arc<MpmcRing>` keeping the underlying SHM region mapped,
+// and the slot remains exclusively owned by this consumer until `release_sequence` is stored.
 unsafe impl Send for MpmcSlotView {}
+// SAFETY: Shared references to `MpmcSlotView` only expose immutable payload bytes via `as_slice()`
+// while the slot cannot be reclaimed by producers until `release_sequence` is published on drop.
 unsafe impl Sync for MpmcSlotView {}
 
 impl MpmcSlotView {
@@ -1260,7 +1416,11 @@ pub struct MpmcRing {
     mask: u64,
 }
 
+// SAFETY: `MpmcRing` owns an `Arc<ShmRegion>` and synchronizes all header, sequence, and slot
+// accesses across producers and consumers via atomic CAS and Acquire/Release operations.
 unsafe impl Send for MpmcRing {}
+// SAFETY: Concurrent access through `&MpmcRing` is governed by atomic `head`/`tail`/`sequence`
+// slot ownership protocol without unsynchronized interior mutation.
 unsafe impl Sync for MpmcRing {}
 
 impl MpmcRing {
@@ -1286,6 +1446,8 @@ impl MpmcRing {
         }
 
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: Caller guarantees exclusive initialization, `ShmHeader` alignment, and
+        // `region.len() >= layout.total_size` (verified above) covering `ShmHeader`.
         let header_ref = unsafe { &mut *header };
         header_ref.magic = MAGIC;
         header_ref.abi_version = ABI_VERSION;
@@ -1308,7 +1470,8 @@ impl MpmcRing {
         header_ref.consumer_sleeping.0.store(0, Ordering::Relaxed);
         header_ref.active_flags.0.store(0, Ordering::Relaxed);
 
-        // Initialize cache-line-padded sequences
+        // SAFETY: Caller guarantees exclusive initialization and valid region bounds for `layout`;
+        // `sequences` covers `layout.slots` cache-line-aligned entries before `Self::from_region`.
         unsafe {
             let sequences = region
                 .as_ptr()
@@ -1326,7 +1489,16 @@ impl MpmcRing {
     /// # Safety
     /// Caller must ensure the region stays mapped for the lifetime of the ring.
     pub unsafe fn attach(region: Arc<ShmRegion>, layout: RingLayout) -> Result<Self, ChannelError> {
+        validate_region_for_layout(
+            &region,
+            &layout,
+            core::mem::align_of::<ShmHeader>().max(core::mem::align_of::<CacheLine<AtomicU64>>()),
+        )?;
+        if layout.mode != ChannelMode::Mpmc {
+            return Err(ChannelError::InvalidLayout);
+        }
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: `validate_region_for_layout` verified `region` is aligned and covers `ShmHeader`.
         let header_ref = unsafe { &*header };
         if header_ref.magic != MAGIC || header_ref.abi_version != ABI_VERSION {
             return Err(ChannelError::NotReady);
@@ -1334,9 +1506,7 @@ impl MpmcRing {
         if header_ref.state.load(Ordering::Acquire) != RegionState::Ready as u32 {
             return Err(ChannelError::NotReady);
         }
-        if layout.mode != ChannelMode::Mpmc {
-            return Err(ChannelError::InvalidLayout);
-        }
+        // SAFETY: header magic, ABI version, ready state, and MPMC layout are verified above.
         unsafe { Self::from_region(region, layout) }
     }
 
@@ -1348,16 +1518,23 @@ impl MpmcRing {
         region: Arc<ShmRegion>,
         layout: RingLayout,
     ) -> Result<Self, ChannelError> {
-        if !layout.is_power_of_two() {
+        validate_region_for_layout(
+            &region,
+            &layout,
+            core::mem::align_of::<ShmHeader>().max(core::mem::align_of::<CacheLine<AtomicU64>>()),
+        )?;
+        if layout.mode != ChannelMode::Mpmc {
             return Err(ChannelError::InvalidLayout);
         }
         let header = region.as_ptr().cast::<ShmHeader>();
+        // SAFETY: `validate_region_for_layout` verified `seq_offset` alignment and bounds for `slots` entries.
         let sequences = unsafe {
             region
                 .as_ptr()
                 .add(layout.seq_offset())
                 .cast::<CacheLine<AtomicU64>>()
         };
+        // SAFETY: `validate_region_for_layout` verified `ring_offset + ring_size <= region.len()`.
         let data = unsafe { region.as_ptr().add(layout.ring_offset()) };
         Ok(Self {
             region,
@@ -1373,6 +1550,7 @@ impl MpmcRing {
     pub fn new(slot_size: usize, slots: usize) -> Result<Self, ChannelError> {
         let layout = RingLayout::new(slot_size, slots, ChannelMode::Mpmc);
         let region = Arc::new(ShmRegion::create(layout.total_size)?);
+        // SAFETY: `region` was freshly created with `layout.total_size` bytes and exclusive ownership.
         unsafe { Self::initialize(region, layout, 0, 0) }
     }
 
@@ -1415,26 +1593,32 @@ impl MpmcRing {
     }
 
     fn head(&self) -> &AtomicU64 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).read_head.0 }
     }
 
     fn tail(&self) -> &AtomicU64 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).write_head.0 }
     }
 
     fn sequence(&self, index: usize) -> &AtomicU64 {
+        // SAFETY: Callers mask `index` with `self.mask` (`slots - 1`) and `validate_region_for_layout`
+        // verified `self.sequences` is aligned and covers `slots` `CacheLine<AtomicU64>` entries.
         unsafe { &(*self.sequences.add(index)).0 }
     }
 
     /// Access the Dekker `consumer_sleeping` flag in `ShmHeader`.
     #[inline]
     pub fn consumer_sleeping(&self) -> &AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).consumer_sleeping.0 }
     }
 
     /// Access the `active_flags` bitmask in `ShmHeader`.
     #[inline]
     pub fn active_flags(&self) -> &AtomicU32 {
+        // SAFETY: `self.header` is aligned and valid for the lifetime of `self.region`.
         unsafe { &(*self.header).active_flags.0 }
     }
 
@@ -1505,6 +1689,8 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        // SAFETY: CAS claimed exclusive producer ownership of `index` (`seq == tail`),
+                        // and `payload.len() <= self.payload_capacity()` was checked above.
                         unsafe {
                             self.write_slot(index, payload, flags);
                         }
@@ -1557,6 +1743,8 @@ impl MpmcRing {
                         impl<'a> Drop for MpmcSendGuard<'a> {
                             fn drop(&mut self) {
                                 if self.armed {
+                                    // SAFETY: `self.header` points to the claimed slot exclusively
+                                    // owned by this producer until `self.seq.store(Release)` below.
                                     unsafe {
                                         (*self.header).len = 0;
                                         (*self.header).flags = SLOT_FLAG_ABORTED;
@@ -1566,6 +1754,7 @@ impl MpmcRing {
                             }
                         }
 
+                        // SAFETY: `index` is masked by `self.mask` inside the validated ring region.
                         let slot = unsafe { self.slot_ptr(index) };
                         let header = slot.cast::<SlotHeader>();
                         let mut guard = MpmcSendGuard {
@@ -1575,7 +1764,11 @@ impl MpmcRing {
                             armed: true,
                         };
 
+                        // SAFETY: `SlotHeader` sits at the start of `slot`, leaving
+                        // `self.payload_capacity()` writable bytes inside the claimed slot.
                         let payload_ptr = unsafe { slot.add(core::mem::size_of::<SlotHeader>()) };
+                        // SAFETY: `payload_ptr` is exclusively owned by this producer for
+                        // `self.payload_capacity()` bytes until `sequence.store(Release)`.
                         let payload_slice = unsafe {
                             core::slice::from_raw_parts_mut(payload_ptr, self.payload_capacity())
                         };
@@ -1586,6 +1779,7 @@ impl MpmcRing {
                                 capacity: self.payload_capacity(),
                             });
                         }
+                        // SAFETY: `header` points to the exclusively claimed `SlotHeader`.
                         unsafe {
                             (*header).len = written as u32;
                             (*header).flags = flags;
@@ -1635,7 +1829,10 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        // SAFETY: `index` is masked by `self.mask` inside the validated ring region.
                         let slot = unsafe { self.slot_ptr(index) };
+                        // SAFETY: Acquire load of `sequence` synchronized producer writes and CAS
+                        // granted exclusive consumer ownership of `SlotHeader` until release below.
                         let header = unsafe { &*slot.cast::<SlotHeader>() };
                         if (header.flags & SLOT_FLAG_ABORTED) != 0 {
                             self.sequence(index)
@@ -1643,6 +1840,8 @@ impl MpmcRing {
                             head = self.head().load(Ordering::Relaxed);
                             continue;
                         }
+                        // SAFETY: Slot `index` is exclusively claimed by this consumer until
+                        // `sequence.store(Release)` advances the slot's cycle.
                         let res = unsafe { self.read_slot(index, out) };
                         self.sequence(index)
                             .store(head + self.mask + 1, Ordering::Release);
@@ -1676,7 +1875,10 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        // SAFETY: `index` is masked by `self.mask` inside the validated ring region.
                         let slot = unsafe { self.slot_ptr(index) };
+                        // SAFETY: Acquire load of `sequence` synchronized producer writes and CAS
+                        // granted exclusive consumer ownership of `SlotHeader` until release below.
                         let header = unsafe { &*slot.cast::<SlotHeader>() };
                         if (header.flags & SLOT_FLAG_ABORTED) != 0 {
                             self.sequence(index)
@@ -1684,6 +1886,8 @@ impl MpmcRing {
                             head = self.head().load(Ordering::Relaxed);
                             continue;
                         }
+                        // SAFETY: Slot `index` is exclusively claimed by this consumer until
+                        // `sequence.store(Release)` advances the slot's cycle.
                         let res = unsafe { self.read_slot_with_flags(index, out) };
                         self.sequence(index)
                             .store(head + self.mask + 1, Ordering::Release);
@@ -1754,6 +1958,8 @@ impl MpmcRing {
                 ) {
                     Ok(_) => {
                         let release_sequence = head + self.mask + 1;
+                        // SAFETY: Acquire load of `sequence` synchronized producer writes and CAS
+                        // granted exclusive consumer ownership of slot `index` until `release_sequence`.
                         let (len, flags, payload_ptr) = unsafe {
                             let slot = self.slot_ptr(index);
                             let header = &*slot.cast::<SlotHeader>();
@@ -1817,6 +2023,8 @@ impl MpmcRing {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        // SAFETY: Acquire load of `sequence` synchronized producer writes and CAS
+                        // granted exclusive consumer ownership of slot `index` until `sequence.store(Release)`.
                         let (len, flags, payload_ptr) = unsafe {
                             let slot = self.slot_ptr(index);
                             let header = &*slot.cast::<SlotHeader>();
@@ -1837,6 +2045,8 @@ impl MpmcRing {
                                 .store(head + self.mask + 1, Ordering::Release);
                             return Err(ChannelError::CorruptedSlot);
                         }
+                        // SAFETY: `len <= self.payload_capacity()` was checked above and the slot
+                        // remains exclusively owned by this consumer until `sequence.store(Release)`.
                         let result = unsafe {
                             let payload_slice = core::slice::from_raw_parts(payload_ptr, len);
                             reader(payload_slice, flags)
@@ -1885,10 +2095,14 @@ impl MpmcRing {
 
     unsafe fn slot_ptr(&self, index: usize) -> *mut u8 {
         let offset = index * self.layout.slot_size;
+        // SAFETY: Callers mask `index` with `self.mask` (`slots - 1`) and
+        // `validate_region_for_layout` verified `slots * slot_size <= layout.ring_size`.
         unsafe { self.data.add(offset) }
     }
 
     unsafe fn write_slot(&self, index: usize, payload: &[u8], flags: u32) {
+        // SAFETY: Caller guarantees exclusive producer ownership of slot `index` and
+        // `payload.len() <= self.payload_capacity()`; `slot_ptr(index)` is `SlotHeader`-aligned.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = slot.cast::<SlotHeader>();
@@ -1900,6 +2114,8 @@ impl MpmcRing {
     }
 
     unsafe fn read_slot(&self, index: usize, out: &mut [u8]) -> Result<usize, ChannelError> {
+        // SAFETY: Caller guarantees slot `index` was synchronized via Acquire load of `sequence`
+        // and exclusively claimed until release; `len` is bounds-checked before copy.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
@@ -1924,6 +2140,8 @@ impl MpmcRing {
         index: usize,
         out: &mut [u8],
     ) -> Result<(usize, u32), ChannelError> {
+        // SAFETY: Caller guarantees slot `index` was synchronized via Acquire load of `sequence`
+        // and exclusively claimed until release; `len` is bounds-checked before copy.
         unsafe {
             let slot = self.slot_ptr(index);
             let header = &*slot.cast::<SlotHeader>();
@@ -1982,7 +2200,8 @@ impl MpmcRing {
         self.tail().store(0, Ordering::Release);
         self.consumer_sleeping().store(0, Ordering::Release);
         self.active_flags().store(0, Ordering::Release);
-        // Reset sequences
+        // SAFETY: Caller guarantees exclusive access (no concurrent readers/writers); `self.sequences`
+        // covers `self.layout.slots` entries and `self.header` is valid for `self.region`.
         unsafe {
             for i in 0..self.layout.slots {
                 (*self.sequences.add(i))
@@ -2009,15 +2228,21 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
         let payload = b"hello";
         ring.send(payload, 0).unwrap();
         let mut out = [0u8; 32];
         let len = ring.recv(&mut out).unwrap();
         assert_eq!(&out[..len], payload);
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2029,9 +2254,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
         let payload = [1u8; 8];
         ring.send(&payload, 0).unwrap();
@@ -2045,6 +2273,9 @@ mod tests {
             .recv_timeout(&mut out, std::time::Duration::from_millis(1))
             .unwrap();
         assert!(recv.is_none());
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2056,8 +2287,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
         let payload = [1u8; 8];
         ring.try_send(&payload, 0).unwrap();
@@ -2068,6 +2303,9 @@ mod tests {
         let mut out = [0u8; 8];
         ring.try_recv(&mut out).unwrap();
         assert!(matches!(ring.try_recv(&mut out), Err(ChannelError::Empty)));
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2079,9 +2317,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
         let ring_tx = Arc::clone(&ring);
@@ -2101,6 +2342,9 @@ mod tests {
                 }
             });
         });
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2112,9 +2356,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // Pre-fill with data
@@ -2129,6 +2376,9 @@ mod tests {
             .expect("should receive immediately");
         assert_eq!(&out[..len], payload);
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2136,32 +2386,53 @@ mod tests {
 
     #[test]
     fn spsc_recv_hybrid_wakeup() {
+        use std::sync::atomic::AtomicBool;
+
         let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let done = Arc::new(AtomicBool::new(false));
         let ring_clone = Arc::clone(&ring);
+        let barrier_clone = Arc::clone(&barrier);
+        let done_clone = Arc::clone(&done);
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_micros(50));
+            barrier_clone.wait();
+            while ring_clone.recv_waiters().load(Ordering::Acquire) == 0
+                && !done_clone.load(Ordering::Acquire)
+            {
+                std::thread::yield_now();
+            }
             ring_clone.send(b"delayed", 0).unwrap();
         });
 
         // recv_hybrid should spin briefly then block, then wake on send
+        barrier.wait();
         let mut out = [0u8; 32];
         let len = ring
-            .recv_hybrid(&mut out, 5, std::time::Duration::from_millis(100))
+            .recv_hybrid(&mut out, 5, std::time::Duration::from_millis(500))
             .unwrap()
             .expect("should wake up on send");
+        done.store(true, Ordering::Release);
         assert_eq!(&out[..len], b"delayed");
 
         handle.join().unwrap();
 
+        // SAFETY: `ring` and `region` are dropped after `handle.join()` or no longer accessed; wait:
+        // `ring` and `region` are still in scope, so drop them before freeing `ptr`.
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all references via `region`/`ring` are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2173,9 +2444,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // recv_hybrid should timeout with no data
@@ -2185,6 +2459,9 @@ mod tests {
             .unwrap();
         assert!(result.is_none());
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2231,8 +2508,12 @@ mod tests {
             let alloc_layout =
                 std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                     .unwrap();
+            // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
             let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+            assert!(!ptr.is_null());
+            // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
             let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+            // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
             let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
             for value in &values {
                 ring.send(&[*value], 0).unwrap();
@@ -2243,6 +2524,9 @@ mod tests {
                 prop_assert_eq!(len, 1);
                 prop_assert_eq!(out[0], value);
             }
+            drop(ring);
+            drop(region);
+            // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
             unsafe {
                 std::alloc::dealloc(ptr, alloc_layout);
             }
@@ -2254,8 +2538,12 @@ mod tests {
             let alloc_layout =
                 std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                     .unwrap();
+            // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
             let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+            assert!(!ptr.is_null());
+            // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
             let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+            // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
             let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
             for value in &values {
                 ring.send(&[*value], 0).unwrap();
@@ -2268,6 +2556,9 @@ mod tests {
                 received.push(out[0]);
             }
             prop_assert_eq!(received, values);
+            drop(ring);
+            drop(region);
+            // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
             unsafe {
                 std::alloc::dealloc(ptr, alloc_layout);
             }
@@ -2280,9 +2571,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
@@ -2308,6 +2602,9 @@ mod tests {
         // Now ring is truly empty
         assert!(matches!(ring.try_recv_view(), Err(ChannelError::Empty)));
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2319,9 +2616,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
@@ -2337,11 +2637,14 @@ mod tests {
             ring.try_recv_with_flags(&mut buf),
             Err(ChannelError::SlotBorrowed)
         ));
-        assert!(ring.try_recv_batch(4).is_empty());
+        assert!(ring.try_recv_batch(4).unwrap().is_empty());
 
         drop(view);
         assert!(matches!(ring.try_recv(&mut buf), Err(ChannelError::Empty)));
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2353,8 +2656,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
@@ -2365,6 +2672,10 @@ mod tests {
         let slice: &[u8] = view.as_ref();
         assert_eq!(slice, b"test");
 
+        drop(view);
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2376,8 +2687,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring =
             Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
@@ -2394,6 +2709,11 @@ mod tests {
         let view2 = ring.try_recv_view().unwrap();
         assert_eq!(view2.as_slice(), b"msg2");
 
+        drop(view2);
+        drop(view1);
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2405,15 +2725,21 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // Empty ring returns empty Vec
-        let batch = ring.try_recv_batch(10);
+        let batch = ring.try_recv_batch(10).unwrap();
         assert!(batch.is_empty());
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2425,9 +2751,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // Send 3 messages
@@ -2436,7 +2765,7 @@ mod tests {
         ring.send(b"msg3", 3).unwrap();
 
         // Request max 2 - should get partial drain
-        let batch = ring.try_recv_batch(2);
+        let batch = ring.try_recv_batch(2).unwrap();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].0, b"msg1");
         assert_eq!(batch[0].1, 1);
@@ -2444,11 +2773,14 @@ mod tests {
         assert_eq!(batch[1].1, 2);
 
         // Third message should still be available
-        let batch = ring.try_recv_batch(10);
+        let batch = ring.try_recv_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].0, b"msg3");
         assert_eq!(batch[0].1, 3);
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2460,9 +2792,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // Send 5 messages
@@ -2471,7 +2806,7 @@ mod tests {
         }
 
         // Request more than available - should drain all
-        let batch = ring.try_recv_batch(100);
+        let batch = ring.try_recv_batch(100).unwrap();
         assert_eq!(batch.len(), 5);
         for (i, (payload, flags)) in batch.iter().enumerate() {
             assert_eq!(payload, &[i as u8]);
@@ -2479,8 +2814,11 @@ mod tests {
         }
 
         // Ring should now be empty
-        assert!(ring.try_recv_batch(1).is_empty());
+        assert!(ring.try_recv_batch(1).unwrap().is_empty());
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2492,9 +2830,12 @@ mod tests {
         let alloc_layout =
             std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
                 .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
         let ptr = unsafe { std::alloc::alloc(alloc_layout) };
         assert!(!ptr.is_null());
+        // SAFETY: `ptr` was allocated with `alloc_layout` (`layout.total_size` bytes) and outlives `region`.
         let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
         let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
 
         // Send messages with increasing values
@@ -2503,12 +2844,15 @@ mod tests {
         }
 
         // Batch receive should preserve FIFO order
-        let batch = ring.try_recv_batch(10);
+        let batch = ring.try_recv_batch(10).unwrap();
         assert_eq!(batch.len(), 10);
         for (i, (payload, _)) in batch.iter().enumerate() {
             assert_eq!(payload, &[i as u8], "Message {} out of order", i);
         }
 
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
         unsafe {
             std::alloc::dealloc(ptr, alloc_layout);
         }
@@ -2568,5 +2912,187 @@ mod tests {
 
         // Ring should now be empty
         assert!(ring.try_recv_batch(1).is_empty());
+    }
+
+    #[test]
+    fn spsc_read_slot_to_vec_and_try_recv_batch_reject_corrupted_slot_without_advancing_head() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout =
+            std::alloc::Layout::from_size_align(layout.total_size, crate::buffer::CACHELINE_BYTES)
+                .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size (`layout.total_size`).
+        let ptr = unsafe { std::alloc::alloc_zeroed(alloc_layout) };
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is valid for `layout.total_size` bytes and outlives `region`.
+        let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+        // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
+        let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
+
+        ring.send(b"valid-0", 1).unwrap();
+        ring.send(b"valid-1", 2).unwrap();
+        ring.send(b"to-corrupt", 3).unwrap();
+
+        let bad_len = ring.payload_capacity() as u32 + 64;
+        // SAFETY: slot 2 lies inside the initialized ring region and is aligned to `SlotHeader`.
+        unsafe {
+            let slot2 = ring.slot_ptr(2).cast::<SlotHeader>();
+            (*slot2).len = bad_len;
+        }
+
+        assert!(matches!(
+            ring.read_slot_to_vec(2),
+            Err(ChannelError::CorruptedSlot)
+        ));
+        assert!(matches!(
+            ring.try_recv_batch(4),
+            Err(ChannelError::CorruptedSlot)
+        ));
+        assert_eq!(ring.read_head().load(Ordering::Acquire), 2);
+        assert!(matches!(
+            ring.try_recv_batch(4),
+            Err(ChannelError::CorruptedSlot)
+        ));
+        assert_eq!(ring.read_head().load(Ordering::Acquire), 2);
+
+        drop(ring);
+        drop(region);
+        // SAFETY: `ptr` was allocated with `alloc_layout` and all ring/region handles are dropped.
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+        }
+    }
+
+    #[test]
+    fn validate_region_rejects_invalid_layout_short_and_misaligned_segments() {
+        let layout = RingLayout::new(256, 8, ChannelMode::Spsc);
+        let alloc_layout = std::alloc::Layout::from_size_align(
+            layout.total_size + 64,
+            crate::buffer::CACHELINE_BYTES,
+        )
+        .unwrap();
+        // SAFETY: `alloc_layout` has non-zero size.
+        let ptr = unsafe { std::alloc::alloc_zeroed(alloc_layout) };
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is valid for `layout.total_size` bytes and outlives `valid_region`.
+        let valid_region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+
+        let mut zero_slots = layout;
+        zero_slots.slots = 0;
+        assert!(matches!(
+            validate_region_for_layout(&valid_region, &zero_slots, 1),
+            Err(ChannelError::InvalidLayout)
+        ));
+
+        let mut non_pow2 = layout;
+        non_pow2.slots = 3;
+        assert!(matches!(
+            validate_region_for_layout(&valid_region, &non_pow2, 1),
+            Err(ChannelError::InvalidLayout)
+        ));
+
+        let mut total_lt_offset = layout;
+        total_lt_offset.total_size = layout.ring_offset() - 1;
+        assert!(matches!(
+            validate_region_for_layout(&valid_region, &total_lt_offset, 1),
+            Err(ChannelError::InvalidLayout)
+        ));
+
+        let mut overflow_ring = layout;
+        overflow_ring.ring_size = usize::MAX;
+        assert!(matches!(
+            validate_region_for_layout(&valid_region, &overflow_ring, 1),
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        // SAFETY: `ptr` is valid for `layout.total_size - 8` bytes and outlives `short_region`.
+        let short_region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size - 8) });
+        // SAFETY: `SpscRing::attach` rejects `short_region` before reading the header.
+        assert!(matches!(
+            unsafe { SpscRing::attach(Arc::clone(&short_region), layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+        // SAFETY: `SpscRing::from_region` rejects `short_region` before reading the header.
+        assert!(matches!(
+            unsafe { SpscRing::from_region(Arc::clone(&short_region), layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        // SAFETY: `ptr.add(1)` is within the `layout.total_size + 64` allocation.
+        let misaligned_region =
+            Arc::new(unsafe { ShmRegion::from_raw(ptr.add(1), layout.total_size) });
+        // SAFETY: `SpscRing::attach` rejects `misaligned_region` before reading the header.
+        assert!(matches!(
+            unsafe { SpscRing::attach(Arc::clone(&misaligned_region), layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+        // SAFETY: `SpscRing::from_region` rejects `misaligned_region` before reading the header.
+        assert!(matches!(
+            unsafe { SpscRing::from_region(Arc::clone(&misaligned_region), layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        let mpmc_layout = RingLayout::new(256, 8, ChannelMode::Mpmc);
+        let mpmc_alloc = std::alloc::Layout::from_size_align(
+            mpmc_layout.total_size + 64,
+            crate::buffer::CACHELINE_BYTES,
+        )
+        .unwrap();
+        // SAFETY: `mpmc_alloc` has non-zero size.
+        let mpmc_ptr = unsafe { std::alloc::alloc_zeroed(mpmc_alloc) };
+        assert!(!mpmc_ptr.is_null());
+        // SAFETY: `mpmc_ptr` is valid for `mpmc_layout.total_size - 8` bytes.
+        let mpmc_short =
+            Arc::new(unsafe { ShmRegion::from_raw(mpmc_ptr, mpmc_layout.total_size - 8) });
+        // SAFETY: `MpmcRing::attach` rejects `mpmc_short` before reading the header.
+        assert!(matches!(
+            unsafe { MpmcRing::attach(Arc::clone(&mpmc_short), mpmc_layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+        // SAFETY: `MpmcRing::from_region` rejects `mpmc_short` before reading the header.
+        assert!(matches!(
+            unsafe { MpmcRing::from_region(Arc::clone(&mpmc_short), mpmc_layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        // SAFETY: `mpmc_ptr.add(1)` is within the `mpmc_layout.total_size + 64` allocation.
+        let mpmc_misaligned =
+            Arc::new(unsafe { ShmRegion::from_raw(mpmc_ptr.add(1), mpmc_layout.total_size) });
+        // SAFETY: `MpmcRing::attach` rejects `mpmc_misaligned` before reading the header.
+        assert!(matches!(
+            unsafe { MpmcRing::attach(Arc::clone(&mpmc_misaligned), mpmc_layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+        // SAFETY: `MpmcRing::from_region` rejects `mpmc_misaligned` before reading the header.
+        assert!(matches!(
+            unsafe { MpmcRing::from_region(Arc::clone(&mpmc_misaligned), mpmc_layout) },
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        let mut bad_seq_offset_layout = mpmc_layout;
+        bad_seq_offset_layout.header_size += 1;
+        bad_seq_offset_layout.total_size += 1;
+        // SAFETY: `mpmc_ptr` is valid for `bad_seq_offset_layout.total_size` bytes inside `mpmc_alloc`.
+        let mpmc_bad_seq_region =
+            Arc::new(unsafe { ShmRegion::from_raw(mpmc_ptr, bad_seq_offset_layout.total_size) });
+        assert!(matches!(
+            validate_region_for_layout(
+                &mpmc_bad_seq_region,
+                &bad_seq_offset_layout,
+                core::mem::align_of::<ShmHeader>()
+            ),
+            Err(ChannelError::CorruptedSegment(_))
+        ));
+
+        drop(mpmc_bad_seq_region);
+        drop(mpmc_misaligned);
+        drop(mpmc_short);
+        drop(misaligned_region);
+        drop(short_region);
+        drop(valid_region);
+        // SAFETY: `ptr` and `mpmc_ptr` were allocated with `alloc_layout` and `mpmc_alloc`.
+        unsafe {
+            std::alloc::dealloc(ptr, alloc_layout);
+            std::alloc::dealloc(mpmc_ptr, mpmc_alloc);
+        }
     }
 }

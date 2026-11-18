@@ -43,13 +43,17 @@ from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_msgpack, encode_msgpack_bytes
 
 try:
+    from sqlspec.exceptions import MissingDependencyError as SQLSpecMissingDependencyError
+    from sqlspec.protocols import ObjectStoreProtocol
     from sqlspec.storage.backends.base import ObjectStoreBase
+    from sqlspec.storage.registry import StorageRegistry
 except ImportError as exc:
     raise MissingDependencyError("sqlspec", install_package="sqlspec", extra="sqlspec") from exc
 
 if TYPE_CHECKING:
-    from sqlspec.protocols import ObjectStoreProtocol
-    from sqlspec.storage.registry import StorageRegistry
+    from contextlib import AbstractAsyncContextManager, AbstractContextManager
+
+    from sqlspec.storage.pipeline import StorageFormat
     from sqlspec.typing import ArrowRecordBatch, ArrowTable
 
     from vertebra._storage import StorageBuffer
@@ -58,6 +62,8 @@ if TYPE_CHECKING:
 __all__ = (
     "ArrowFlightSerializer",
     "ObjectStoreBackend",
+    "ObjectStoreRegistry",
+    "get_object_store_registry",
     "register_storage_alias",
 )
 
@@ -84,7 +90,6 @@ class ObjectStoreBackend(ObjectStoreBase):
     """SQLSpec ObjectStoreBase implementation backed by Vertebra's native ObjectStore."""
 
     backend_type: ClassVar[str] = "vertebra"
-    supports_direct_arrow_write: ClassVar[bool] = True
     __slots__ = ("_async_store", "_base_path", "_sync_store", "protocol", "store_uri")
 
     def __init__(
@@ -197,31 +202,52 @@ class ObjectStoreBackend(ObjectStoreBase):
             return f"{authority}/{joined}" if joined else authority
         return f"{authority}{joined}"
 
+    def supports_direct_arrow_write(self, file_format: StorageFormat, *, overwrite: bool = True) -> bool:
+        """Return True when the backend supports direct streaming writes for `file_format`."""
+        _ = overwrite
+        lowered = str(file_format).strip().lower()
+        return lowered in {"parquet", "arrow", "ipc", "arrow-ipc", "feather", "csv"}
+
     def read_bytes_sync(self, path: str | Path, **kwargs: Any) -> bytes:
         """Read full object bytes synchronously."""
         return self._sync_store.get(self._qualify(path), expected_sha256=kwargs.get("expected_sha256"))
 
-    def write_bytes_sync(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
+    def write_bytes_sync(self, path: str | Path, data: bytes, *, overwrite: bool = True, **kwargs: Any) -> None:
         """Write full object bytes synchronously."""
-        self._sync_store.put(self._qualify(path), data, **self._write_options(kwargs))
+        self._sync_store.put(self._qualify(path), data, **self._write_options(kwargs, overwrite=overwrite))
 
     def read_text_sync(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object synchronously."""
         return self.read_bytes_sync(path, **kwargs).decode(encoding)
 
-    def write_text_sync(self, path: str | Path, data: str, encoding: str = "utf-8", **kwargs: Any) -> None:
+    def write_text_sync(
+        self, path: str | Path, data: str, encoding: str = "utf-8", *, overwrite: bool = True, **kwargs: Any
+    ) -> None:
         """Encode and write text to an object synchronously."""
-        self.write_bytes_sync(path, data.encode(encoding), **kwargs)
+        self.write_bytes_sync(path, data.encode(encoding), overwrite=overwrite, **kwargs)
 
     def exists_sync(self, path: str | Path, **kwargs: Any) -> bool:
         """Return True if the object exists synchronously."""
         _ = kwargs
         return self._sync_store.exists(self._qualify(path))
 
-    def delete_sync(self, path: str | Path, **kwargs: Any) -> None:
-        """Delete an object synchronously."""
+    def delete_sync(self, path: str | Path, *, recursive: bool = False, **kwargs: Any) -> None:
+        """Delete an object or key prefix synchronously."""
         _ = kwargs
-        self._sync_store.delete(self._qualify(path))
+        qualified = self._qualify(path).rstrip("/")
+        if recursive:
+            items = self._sync_store.list(qualified)
+            for item in items:
+                self._sync_store.delete(item.path)
+            if qualified and self._sync_store.exists(qualified):
+                self._sync_store.delete(qualified)
+            return
+        is_exact = bool(qualified) and self._sync_store.exists(qualified)
+        if not is_exact and self._sync_store.list(qualified):
+            msg = f"Cannot delete directory without recursive=True: {path}"
+            raise IsADirectoryError(msg)
+        if qualified:
+            self._sync_store.delete(qualified)
 
     def copy_sync(self, source: str | Path, destination: str | Path, **kwargs: Any) -> None:
         """Copy an object within the store synchronously."""
@@ -334,6 +360,15 @@ class ObjectStoreBackend(ObjectStoreBase):
         """Upload buffer chunks incrementally with native write options."""
         return self._sync_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
 
+    def open_write_stream_sync(
+        self, path: str | Path, *, overwrite: bool = True, **kwargs: Any
+    ) -> AbstractContextManager[Any]:
+        """Open a synchronous streaming byte writer backed by native multipart uploads."""
+        return self._sync_store.open_writer(
+            self._qualify(path),
+            **self._write_options(kwargs, overwrite=overwrite, allow_part_size=True),
+        )
+
     def list_page_sync(
         self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
     ) -> tuple[list[str], str | None]:
@@ -394,18 +429,20 @@ class ObjectStoreBackend(ObjectStoreBase):
         """Read full object bytes asynchronously."""
         return await self._async_store.get(self._qualify(path), expected_sha256=kwargs.get("expected_sha256"))
 
-    async def write_bytes_async(self, path: str | Path, data: bytes, **kwargs: Any) -> None:
+    async def write_bytes_async(self, path: str | Path, data: bytes, *, overwrite: bool = True, **kwargs: Any) -> None:
         """Write full object bytes asynchronously."""
-        await self._async_store.put(self._qualify(path), data, **self._write_options(kwargs))
+        await self._async_store.put(self._qualify(path), data, **self._write_options(kwargs, overwrite=overwrite))
 
     async def read_text_async(self, path: str | Path, encoding: str = "utf-8", **kwargs: Any) -> str:
         """Read and decode UTF-8 text from an object asynchronously."""
         raw = await self.read_bytes_async(path, **kwargs)
         return raw.decode(encoding)
 
-    async def write_text_async(self, path: str | Path, data: str, encoding: str = "utf-8", **kwargs: Any) -> None:
+    async def write_text_async(
+        self, path: str | Path, data: str, encoding: str = "utf-8", *, overwrite: bool = True, **kwargs: Any
+    ) -> None:
         """Encode and write text to an object asynchronously."""
-        await self.write_bytes_async(path, data.encode(encoding), **kwargs)
+        await self.write_bytes_async(path, data.encode(encoding), overwrite=overwrite, **kwargs)
 
     async def stream_read_async(
         self,
@@ -423,10 +460,23 @@ class ObjectStoreBackend(ObjectStoreBase):
         _ = kwargs
         return await self._async_store.exists(self._qualify(path))
 
-    async def delete_async(self, path: str | Path, **kwargs: Any) -> None:
-        """Delete an object asynchronously."""
+    async def delete_async(self, path: str | Path, *, recursive: bool = False, **kwargs: Any) -> None:
+        """Delete an object or key prefix asynchronously."""
         _ = kwargs
-        await self._async_store.delete(self._qualify(path))
+        qualified = self._qualify(path).rstrip("/")
+        if recursive:
+            items = await self._async_store.list(qualified)
+            for item in items:
+                await self._async_store.delete(item.path)
+            if qualified and await self._async_store.exists(qualified):
+                await self._async_store.delete(qualified)
+            return
+        is_exact = bool(qualified) and await self._async_store.exists(qualified)
+        if not is_exact and await self._async_store.list(qualified):
+            msg = f"Cannot delete directory without recursive=True: {path}"
+            raise IsADirectoryError(msg)
+        if qualified:
+            await self._async_store.delete(qualified)
 
     async def list_objects_async(self, prefix: str = "", recursive: bool = True, **kwargs: Any) -> list[str]:
         """List relative object keys matching the optional prefix asynchronously."""
@@ -514,6 +564,15 @@ class ObjectStoreBackend(ObjectStoreBase):
     ) -> PutResult:
         """Upload synchronous or asynchronous chunks incrementally."""
         return await self._async_store.put_stream(self._qualify(path), chunks, **self._write_options(kwargs))
+
+    def open_write_stream_async(
+        self, path: str | Path, *, overwrite: bool = True, **kwargs: Any
+    ) -> AbstractAsyncContextManager[Any]:
+        """Open an asynchronous streaming byte writer backed by native multipart uploads."""
+        return self._async_store.open_writer(
+            self._qualify(path),
+            **self._write_options(kwargs, overwrite=overwrite, allow_part_size=True),
+        )
 
     async def list_page_async(
         self, prefix: str = "", *, cursor: str | None = None, limit: int = 1000
@@ -681,9 +740,11 @@ class ObjectStoreBackend(ObjectStoreBase):
             raise ValueError(msg)
 
     @staticmethod
-    def _write_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _write_options(
+        kwargs: dict[str, Any], *, overwrite: bool = True, allow_part_size: bool = False
+    ) -> dict[str, Any]:
         """Select supported native conditional, metadata, and integrity write options."""
-        return {
+        options: dict[str, Any] = {
             key: kwargs[key]
             for key in (
                 "content_type",
@@ -698,6 +759,11 @@ class ObjectStoreBackend(ObjectStoreBase):
             )
             if key in kwargs
         }
+        if allow_part_size and "part_size" in kwargs:
+            options["part_size"] = kwargs["part_size"]
+        if not overwrite:
+            options["if_not_exists"] = True
+        return options
 
     @staticmethod
     def _filter_recursive(paths: list[str], *, prefix: str, recursive: bool) -> list[str]:
@@ -753,28 +819,88 @@ class ObjectStoreBackend(ObjectStoreBase):
         return lowered
 
 
+_NATIVE_ONLY_SCHEMES: frozenset[str] = frozenset({"memory", "oci", "r2"})
+_OBJECT_STORE_REGISTRY: ObjectStoreRegistry | None = None
+
+
+class ObjectStoreRegistry(StorageRegistry):
+    """SQLSpec `StorageRegistry` resolving `memory://` and cloud URIs through `ObjectStoreBackend`."""
+
+    __slots__ = ("_fallback_registry",)
+
+    def __init__(self, *, fallback_registry: StorageRegistry | None = None) -> None:
+        super().__init__()
+        self._fallback_registry = fallback_registry
+
+    def get(self, uri_or_alias: str | Path, *, backend: str | None = None, **kwargs: Any) -> ObjectStoreProtocol:
+        """Resolve a storage URI or named alias using native `ObjectStoreBackend` fallback."""
+        path_str = str(uri_or_alias)
+        if path_str:
+            potential_alias = path_str.split("/", 1)[0]
+            if (
+                not self.is_alias_registered(potential_alias)
+                and self._fallback_registry is not None
+                and self._fallback_registry.is_alias_registered(potential_alias)
+            ):
+                return self._fallback_registry.get(uri_or_alias, backend=backend, **kwargs)
+            scheme = self._scheme(path_str)
+            if scheme == "memory" and backend in (None, "vertebra"):
+                uri_or_alias = "memory://"
+        return super().get(uri_or_alias, backend=backend, **kwargs)
+
+    def _backend_from_uri(self, uri: str, *, backend_override: str | None = None, **kwargs: Any) -> ObjectStoreProtocol:
+        """Instantiate a backend for `uri`, preferring `ObjectStoreBackend` when third-party stores are absent."""
+        if backend_override == "vertebra":
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+        scheme = self._scheme(uri)
+        if backend_override is None and scheme in _NATIVE_ONLY_SCHEMES:
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+        try:
+            return super()._backend_from_uri(uri, backend_override=backend_override, **kwargs)
+        except SQLSpecMissingDependencyError:
+            return cast("ObjectStoreProtocol", ObjectStoreBackend(uri, **kwargs))
+
+    def _determine_backend_class(self, uri: str) -> type[ObjectStoreProtocol]:
+        """Select the backend class for `uri`, falling back to `ObjectStoreBackend`."""
+        scheme = self._scheme(uri)
+        if scheme in _NATIVE_ONLY_SCHEMES:
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+        try:
+            return super()._determine_backend_class(uri)
+        except SQLSpecMissingDependencyError:
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+
+    def _backend_class(self, backend_type: str) -> type[ObjectStoreProtocol]:
+        """Return the backend class for `backend_type`, adding `"vertebra"`."""
+        if backend_type == "vertebra":
+            return cast("type[ObjectStoreProtocol]", ObjectStoreBackend)
+        return super()._backend_class(backend_type)
+
+
+def get_object_store_registry() -> ObjectStoreRegistry:
+    """Return the shared `ObjectStoreRegistry` delegating global aliases to SQLSpec's `storage_registry`."""
+    global _OBJECT_STORE_REGISTRY
+    if _OBJECT_STORE_REGISTRY is None:
+        reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
+        _OBJECT_STORE_REGISTRY = ObjectStoreRegistry(fallback_registry=reg_mod.storage_registry)
+    return _OBJECT_STORE_REGISTRY
+
+
 def register_storage_alias(
     alias: str,
     uri_or_store: str | SyncObjectStore | AsyncObjectStore,
     *,
     registry: StorageRegistry | None = None,
+    backend: str | None = None,
     base_path: str = "",
     **kwargs: Any,
 ) -> None:
-    """Register `ObjectStoreBackend` under `alias` in SQLSpec's `storage_registry`."""
+    """Register a storage URI or native ObjectStore URL under `alias` in SQLSpec's `storage_registry`."""
     reg_mod = ensure_module("sqlspec.storage.registry", package="sqlspec", extra="sqlspec")
-    target_registry = reg_mod.storage_registry if registry is None else registry
-    backend_config: dict[str, Any] = dict(kwargs)
-    if base_path:
-        backend_config["base_path"] = base_path
-    if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)):
-        stored_uri = uri_or_store.url
-        backend_config["store"] = uri_or_store
-    else:
-        stored_uri = uri_or_store
-    target_registry._alias_configs[alias] = (
-        cast("type[ObjectStoreProtocol]", ObjectStoreBackend),
-        stored_uri,
-        backend_config,
-    )
-    target_registry.clear_cache(alias)
+    uri = uri_or_store.url if isinstance(uri_or_store, (SyncObjectStore, AsyncObjectStore)) else uri_or_store
+    if registry is not None:
+        registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
+        return
+    get_object_store_registry().register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)
+    with contextlib.suppress(SQLSpecMissingDependencyError, ValueError):
+        reg_mod.storage_registry.register_alias(alias, uri, backend=backend, base_path=base_path, **kwargs)

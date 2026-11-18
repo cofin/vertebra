@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from vertebra.db.adapters.postgres.types import PostgresReplicationIdentity, PostgresReplicationRecord
@@ -15,11 +15,12 @@ from vertebra.db.driver import (
     SerializationFailure,
 )
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
     from vertebra._postgres import AsyncPostgresReplication
+    from vertebra.db.adapters.postgres._async import AsyncPostgreSQLDriver
     from vertebra.db.adapters.postgres.events import PostgresReplicationDriver
 
 __all__ = (
@@ -30,9 +31,62 @@ __all__ = (
     "PostgresCheckpointConflictError",
     "PostgresCheckpointStore",
     "PostgresReplicationGapError",
+    "SqlPostgresCheckpointStore",
 )
 
 type IdentityKey = tuple[str, str, str, str]
+
+
+def _validate_identity_key(identity_key: IdentityKey) -> IdentityKey:
+    """Validate a 4-tuple replication identity key and its slot identifier."""
+    if (
+        not isinstance(identity_key, tuple)
+        or len(identity_key) != 4
+        or any(not isinstance(part, str) or not part for part in identity_key)
+    ):
+        raise ValueError(
+            "identity_key must be a 4-tuple of non-empty strings "
+            "(system_identifier, database, slot, publication_fingerprint)"
+        )
+    validate_identifier(identity_key[2], "slot", allow_dots=False)
+    return identity_key
+
+
+def _encode_identity_key(identity_key: IdentityKey) -> str:
+    """Serialize a validated 4-tuple IdentityKey as a canonical JSON array."""
+    validated = _validate_identity_key(identity_key)
+    return encode_json(list(validated))
+
+
+def _decode_identity_key(raw: str) -> IdentityKey:
+    """Decode and validate a canonical JSON array string into an IdentityKey."""
+    if not isinstance(raw, str):
+        raise ValueError("Encoded identity_key must be a JSON string")
+    try:
+        decoded = decode_json(raw)
+    except Exception as exc:
+        raise ValueError(f"Invalid encoded identity_key: {exc}") from exc
+    if not isinstance(decoded, list) or len(decoded) != 4:
+        raise ValueError(
+            "identity_key must decode to a 4-element JSON array "
+            "(system_identifier, database, slot, publication_fingerprint)"
+        )
+    key: IdentityKey = (decoded[0], decoded[1], decoded[2], decoded[3])
+    return _validate_identity_key(key)
+
+
+def _extract_checkpoint_row(row: Any) -> tuple[int, int, int]:
+    """Extract ``(commit_end_lsn, next_event_id, version)`` from a driver row."""
+    if isinstance(row, Mapping):
+        return (int(row["commit_end_lsn"]), int(row["next_event_id"]), int(row["version"]))
+    return (int(row[0]), int(row[1]), int(row[2]))
+
+
+def _extract_version(row: Any) -> int:
+    """Extract the scalar ``version`` column from a driver RETURNING row."""
+    if isinstance(row, Mapping):
+        return int(row["version"])
+    return int(row[0])
 
 
 class PostgresCheckpointConflictError(SerializationFailure):
@@ -137,12 +191,7 @@ class PostgresCheckpoint(FrozenBaseStruct, frozen=True, gc=False):
 
     def __post_init__(self) -> None:
         """Validate 4-part replication identity key and monotone counters."""
-        if len(self.identity_key) != 4 or any(not isinstance(part, str) or not part for part in self.identity_key):
-            raise ValueError(
-                "identity_key must be a 4-tuple of non-empty strings "
-                "(system_identifier, database, slot, publication_fingerprint)"
-            )
-        validate_identifier(self.identity_key[2], "slot", allow_dots=False)
+        _validate_identity_key(self.identity_key)
         if self.commit_end_lsn < 0:
             raise ValueError("commit_end_lsn must be non-negative")
         if self.next_event_id < 1:
@@ -272,6 +321,165 @@ class MemoryPostgresCheckpointStore:
                     )
             self._checkpoints[checkpoint.identity_key] = checkpoint
             return checkpoint
+
+
+class SqlPostgresCheckpointStore:
+    """SQL-backed PostgreSQL optimistic CAS checkpoint store."""
+
+    __slots__ = ("_driver", "_initialized", "_lock", "_table_name")
+
+    def __init__(
+        self,
+        driver: AsyncPostgreSQLDriver | Any,
+        *,
+        table_name: str = "vertebra_pg_cdc_checkpoints",
+    ) -> None:
+        """Initialize the SQL checkpoint store with a validated table identifier."""
+        self._driver = driver
+        self._table_name = validate_identifier(table_name, "table_name")
+        self._lock = asyncio.Lock()
+        self._initialized = False
+
+    def ddl(self) -> str:
+        """Return deterministic PostgreSQL DDL for creating the checkpoint table."""
+        return (
+            f"CREATE TABLE IF NOT EXISTS {self._table_name} ("
+            "identity_key TEXT PRIMARY KEY, "
+            "commit_end_lsn BIGINT NOT NULL, "
+            "next_event_id BIGINT NOT NULL, "
+            "version BIGINT NOT NULL DEFAULT 1)"
+        )
+
+    async def ensure_table(self) -> None:
+        """Create the checkpoint table idempotently once behind an async lock."""
+        if self._initialized:
+            return
+        async with self._lock:
+            if self._initialized:
+                return
+            await self._driver.execute(self.ddl())
+            self._initialized = True
+
+    async def load(self, identity_key: IdentityKey) -> PostgresCheckpoint | None:
+        """Load the persisted checkpoint for ``identity_key`` or return ``None``."""
+        encoded_key = _encode_identity_key(identity_key)
+        await self.ensure_table()
+        sql = f"SELECT commit_end_lsn, next_event_id, version FROM {self._table_name} WHERE identity_key = $1"
+        row = await self._driver.select_one_or_none(sql, (encoded_key,))
+        if row is None:
+            return None
+        commit_end_lsn, next_event_id, version = _extract_checkpoint_row(row)
+        return PostgresCheckpoint(
+            identity_key=identity_key,
+            commit_end_lsn=commit_end_lsn,
+            next_event_id=next_event_id,
+            version=version,
+        )
+
+    async def save(
+        self,
+        checkpoint: PostgresCheckpoint,
+        *,
+        expected: PostgresCheckpoint | None = None,
+    ) -> PostgresCheckpoint:
+        """Persist ``checkpoint`` atomically with CAS version and monotonicity checks."""
+        encoded_key = _encode_identity_key(checkpoint.identity_key)
+        await self.ensure_table()
+        if expected is None:
+            if checkpoint.version != 1:
+                raise PostgresCheckpointConflictError(
+                    "Initial checkpoint save requires version == 1",
+                    identity_key=checkpoint.identity_key,
+                    expected_version=1,
+                    actual_version=checkpoint.version,
+                )
+            insert_sql = (
+                f"INSERT INTO {self._table_name} "
+                "(identity_key, commit_end_lsn, next_event_id, version) "
+                "VALUES ($1, $2, $3, 1) "
+                "ON CONFLICT (identity_key) DO NOTHING "
+                "RETURNING version"
+            )
+            row = await self._driver.select_one_or_none(
+                insert_sql,
+                (encoded_key, checkpoint.commit_end_lsn, checkpoint.next_event_id),
+            )
+            if row is None:
+                raise PostgresCheckpointConflictError(
+                    "Checkpoint already exists for identity_key",
+                    identity_key=checkpoint.identity_key,
+                    expected_version=None,
+                    actual_version=None,
+                )
+            persisted_version = _extract_version(row)
+            return PostgresCheckpoint(
+                identity_key=checkpoint.identity_key,
+                commit_end_lsn=checkpoint.commit_end_lsn,
+                next_event_id=checkpoint.next_event_id,
+                version=persisted_version,
+            )
+
+        if expected.identity_key != checkpoint.identity_key:
+            raise PostgresCheckpointConflictError(
+                "Checkpoint identity_key does not match expected checkpoint",
+                identity_key=checkpoint.identity_key,
+                expected_version=expected.version,
+                actual_version=None,
+            )
+        if checkpoint.version != expected.version + 1:
+            raise PostgresCheckpointConflictError(
+                "Checkpoint CAS version must increment by 1",
+                identity_key=checkpoint.identity_key,
+                expected_version=expected.version + 1,
+                actual_version=checkpoint.version,
+            )
+        if checkpoint.commit_end_lsn < expected.commit_end_lsn:
+            raise PostgresCheckpointConflictError(
+                "Checkpoint commit_end_lsn cannot regress",
+                identity_key=checkpoint.identity_key,
+                expected_version=expected.version,
+                actual_version=None,
+            )
+        if checkpoint.next_event_id < expected.next_event_id:
+            raise PostgresCheckpointConflictError(
+                "Checkpoint next_event_id cannot regress",
+                identity_key=checkpoint.identity_key,
+                expected_version=expected.version,
+                actual_version=None,
+            )
+
+        update_sql = (
+            f"UPDATE {self._table_name} "
+            "SET commit_end_lsn = $2, next_event_id = $3, version = version + 1 "
+            "WHERE identity_key = $1 "
+            "AND version = $4 "
+            "AND commit_end_lsn <= $2 "
+            "AND next_event_id <= $3 "
+            "RETURNING version"
+        )
+        row = await self._driver.select_one_or_none(
+            update_sql,
+            (
+                encoded_key,
+                checkpoint.commit_end_lsn,
+                checkpoint.next_event_id,
+                expected.version,
+            ),
+        )
+        if row is None:
+            raise PostgresCheckpointConflictError(
+                "Stale checkpoint writer detected during CAS save",
+                identity_key=checkpoint.identity_key,
+                expected_version=expected.version,
+                actual_version=None,
+            )
+        persisted_version = _extract_version(row)
+        return PostgresCheckpoint(
+            identity_key=checkpoint.identity_key,
+            commit_end_lsn=checkpoint.commit_end_lsn,
+            next_event_id=checkpoint.next_event_id,
+            version=persisted_version,
+        )
 
 
 class PostgresChangeSource(AsyncChangeSource):

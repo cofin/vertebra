@@ -268,7 +268,7 @@ describe("SseClient & WebSocketClient", () => {
 
   it("HttpClient.subscribe delegates to WebSocketClient and unsubscribes when last listener leaves", () => {
     const client = new HttpClient({ baseURL: "http://api.test", wsURL: "ws://api.test/__vertebra/ws" });
-    const received: any[] = [];
+    const received: string[] = [];
     const unsubscribe1 = client.subscribe<string>("chat", (data) => received.push(data));
     const unsubscribe2 = client.subscribe<string>("chat", (data) => received.push(data));
 
@@ -300,7 +300,11 @@ describe("SseClient & WebSocketClient", () => {
   });
 
   it("initHotReload connects and registers window.__vertebra_hmr without top-level import side-effects", () => {
-    const fakeWindow: any = {
+    const fakeWindow: {
+      location: { protocol: string; host: string; reload: ReturnType<typeof vi.fn> };
+      dispatchEvent: ReturnType<typeof vi.fn>;
+      __vertebra_hmr?: HotReloadClient;
+    } = {
       location: { protocol: "http:", host: "localhost:3000", reload: vi.fn() },
       dispatchEvent: vi.fn(),
     };

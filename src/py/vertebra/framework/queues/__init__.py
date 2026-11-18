@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from vertebra.framework.queues._asgi import (
+    attach_queue_service,
+    get_queue_service,
+    queue_lifespan,
+)
 from vertebra.framework.queues.backends import (
     SHMQueueBackend,
 )
@@ -87,7 +92,10 @@ __all__ = (
     "ValkeyQueueBackend",
     "ValkeyStreamClient",
     "WorkerRunner",
+    "attach_queue_service",
+    "get_queue_service",
     "parse_lanes",
+    "queue_lifespan",
     "run_oneshot",
     "task",
 )

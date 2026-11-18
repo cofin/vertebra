@@ -136,6 +136,9 @@ impl WsgiInput {
     #[getter]
     pub fn body_view(slf: Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        // SAFETY: `py` witnesses the attached GIL, `slf.as_ptr()` is a valid borrowed `WsgiInput`
+        // implementing PEP 3118 (`__getbuffer__`), and on non-null return `PyMemoryView_FromObject`
+        // yields a fresh owned `PyObject*` whose reference `Bound::from_owned_ptr` adopts.
         unsafe {
             let mv = ffi::PyMemoryView_FromObject(slf.as_ptr());
             if mv.is_null() {
@@ -210,6 +213,11 @@ impl WsgiInput {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Invoked by CPython's buffer protocol with the GIL attached (`slf` is a live
+    // `WsgiInput` and `view` is a valid non-null `Py_buffer*`). `PyBuffer_FillInfo` rejects
+    // `PyBUF_WRITABLE` (`readonly = 1`, returning `-1`) and sets `(*view).obj` to an incremented
+    // owning reference to `slf`, pinning `self.source` until `__releasebuffer__` /
+    // `PyBuffer_Release` even when `slice` is empty (dangling non-null ptr).
     unsafe fn __getbuffer__(
         slf: Bound<'_, Self>,
         view: *mut ffi::Py_buffer,
@@ -241,6 +249,8 @@ impl WsgiInput {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    // SAFETY: Paired PEP 3118 release hook invoked by CPython on `PyBuffer_Release`; `WsgiInput`
+    // holds no per-view heap allocation and `(*view).obj` drop decrefs the pinned exporter.
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
 }
 

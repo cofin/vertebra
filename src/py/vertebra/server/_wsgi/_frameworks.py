@@ -5,7 +5,7 @@ import logging
 import os
 import traceback
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vertebra._vertebra import WsgiFileWrapper, WsgiInput
 from vertebra.utils.module_loader import import_optional
@@ -66,7 +66,7 @@ class LargeBodyBypass:
     ) -> None:
         self._threshold = threshold
         if callable(target):
-            self._app: Callable[..., Iterable[bytes]] | None = target
+            self._app: Callable[..., Iterable[bytes]] | None = cast("Callable[..., Iterable[bytes]]", target)
             self._environ: Any = None
         else:
             self._app = None

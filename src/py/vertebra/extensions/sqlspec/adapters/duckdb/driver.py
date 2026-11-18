@@ -1,7 +1,9 @@
 """DuckDB synchronous and asynchronous SQLSpec driver adapters over `vertebra._duckdb`."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import ExecutionResult, validate_savepoint_name
@@ -22,11 +24,16 @@ from vertebra.extensions.sqlspec.adapters.duckdb.data_dictionary import (
     DuckDBSyncDataDictionary,
 )
 
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.duckdb._typing import DuckDBDriverFeatures
+
 __all__ = ("DuckDBAsyncDriver", "DuckDBSyncDriver")
 
 
 class DuckDBSyncDriver(BaseSyncDriver):
     """Synchronous DuckDB SQLSpec driver backed by Vertebra `SyncDuckDBDriver`."""
+
+    __slots__ = ("_data_dictionary",)
 
     dialect: str = "duckdb"
     _execution_parameter_style = ParameterStyle.QMARK
@@ -35,7 +42,7 @@ class DuckDBSyncDriver(BaseSyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: DuckDBDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -44,7 +51,7 @@ class DuckDBSyncDriver(BaseSyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -149,6 +156,8 @@ class DuckDBSyncDriver(BaseSyncDriver):
 class DuckDBAsyncDriver(BaseAsyncDriver):
     """Asynchronous DuckDB SQLSpec driver backed by Vertebra `AsyncDuckDBDriver`."""
 
+    __slots__ = ("_data_dictionary",)
+
     dialect: str = "duckdb"
     _execution_parameter_style = ParameterStyle.QMARK
 
@@ -156,7 +165,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: DuckDBDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -165,7 +174,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -195,7 +204,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
             return
         await self.connection.execute(f"SAVEPOINT {valid}")
 
@@ -204,7 +213,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "release_savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
             return
         await self.connection.execute(f"RELEASE SAVEPOINT {valid}")
 
@@ -213,7 +222,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "rollback_to_savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
             return
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 

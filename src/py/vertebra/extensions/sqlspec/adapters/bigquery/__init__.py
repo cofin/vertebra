@@ -1,10 +1,21 @@
 """Lazy PEP 562 public exports for the Vertebra BigQuery SQLSpec adapter."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any, Final
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.bigquery._typing import (
+        BigQueryAsyncConnectionContext,
+        BigQueryAsyncSessionContext,
+        BigQueryConnectionParams,
+        BigQueryDriverFeatures,
+        BigQueryPoolParams,
+        BigQuerySyncConnectionContext,
+        BigQuerySyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.bigquery.adk import (
         BigQueryADKConfig,
         BigQueryAsyncADKArtifactStore,
@@ -53,21 +64,28 @@ __all__ = (
     "BigQueryAsyncADKMemoryStore",
     "BigQueryAsyncADKStore",
     "BigQueryAsyncConfig",
+    "BigQueryAsyncConnectionContext",
     "BigQueryAsyncDataDictionary",
     "BigQueryAsyncDriver",
+    "BigQueryAsyncSessionContext",
+    "BigQueryConnectionParams",
     "BigQueryConnectionQueryJob",
     "BigQueryConnectionShim",
+    "BigQueryDriverFeatures",
     "BigQueryEventQueueStore",
     "BigQueryEventsConfig",
     "BigQueryLitestarConfig",
     "BigQueryLitestarStore",
     "BigQueryMetadataScope",
+    "BigQueryPoolParams",
     "BigQuerySyncADKArtifactStore",
     "BigQuerySyncADKMemoryStore",
     "BigQuerySyncADKStore",
     "BigQuerySyncConfig",
+    "BigQuerySyncConnectionContext",
     "BigQuerySyncDataDictionary",
     "BigQuerySyncDriver",
+    "BigQuerySyncSessionContext",
     "build_profile",
     "build_statement_config",
     "default_statement_config",
@@ -88,14 +106,26 @@ _EXPORT_MAP: Final[dict[str, tuple[str, str]]] = {
     ),
     "BigQueryAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.bigquery.adk", "BigQueryAsyncADKStore"),
     "BigQueryAsyncConfig": ("vertebra.extensions.sqlspec.adapters.bigquery.config", "BigQueryAsyncConfig"),
+    "BigQueryAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.bigquery._typing",
+        "BigQueryAsyncConnectionContext",
+    ),
     "BigQueryAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.bigquery.data_dictionary",
         "BigQueryAsyncDataDictionary",
     ),
     "BigQueryAsyncDriver": ("vertebra.extensions.sqlspec.adapters.bigquery.driver", "BigQueryAsyncDriver"),
+    "BigQueryAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.bigquery._typing",
+        "BigQueryAsyncSessionContext",
+    ),
+    "BigQueryConnectionParams": (
+        "vertebra.extensions.sqlspec.adapters.bigquery._typing",
+        "BigQueryConnectionParams",
+    ),
     "BigQueryConnectionQueryJob": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "BigQueryConnectionQueryJob"),
     "BigQueryConnectionShim": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "BigQueryConnectionShim"),
-    "map_bigquery_exception": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "map_bigquery_exception"),
+    "BigQueryDriverFeatures": ("vertebra.extensions.sqlspec.adapters.bigquery._typing", "BigQueryDriverFeatures"),
     "BigQueryEventQueueStore": ("vertebra.extensions.sqlspec.adapters.bigquery.events", "BigQueryEventQueueStore"),
     "BigQueryEventsConfig": ("vertebra.extensions.sqlspec.adapters.bigquery.events", "BigQueryEventsConfig"),
     "BigQueryLitestarConfig": ("vertebra.extensions.sqlspec.adapters.bigquery.litestar", "BigQueryLitestarConfig"),
@@ -104,6 +134,7 @@ _EXPORT_MAP: Final[dict[str, tuple[str, str]]] = {
         "vertebra.extensions.sqlspec.adapters.bigquery.data_dictionary",
         "BigQueryMetadataScope",
     ),
+    "BigQueryPoolParams": ("vertebra.extensions.sqlspec.adapters.bigquery._typing", "BigQueryPoolParams"),
     "BigQuerySyncADKArtifactStore": (
         "vertebra.extensions.sqlspec.adapters.bigquery.adk",
         "BigQuerySyncADKArtifactStore",
@@ -114,19 +145,29 @@ _EXPORT_MAP: Final[dict[str, tuple[str, str]]] = {
     ),
     "BigQuerySyncADKStore": ("vertebra.extensions.sqlspec.adapters.bigquery.adk", "BigQuerySyncADKStore"),
     "BigQuerySyncConfig": ("vertebra.extensions.sqlspec.adapters.bigquery.config", "BigQuerySyncConfig"),
+    "BigQuerySyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.bigquery._typing",
+        "BigQuerySyncConnectionContext",
+    ),
     "BigQuerySyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.bigquery.data_dictionary",
         "BigQuerySyncDataDictionary",
     ),
     "BigQuerySyncDriver": ("vertebra.extensions.sqlspec.adapters.bigquery.driver", "BigQuerySyncDriver"),
+    "BigQuerySyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.bigquery._typing",
+        "BigQuerySyncSessionContext",
+    ),
     "build_profile": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "build_profile"),
     "build_statement_config": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "build_statement_config"),
     "default_statement_config": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "default_statement_config"),
     "driver_profile": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "driver_profile"),
+    "map_bigquery_exception": ("vertebra.extensions.sqlspec.adapters.bigquery.core", "map_bigquery_exception"),
 }
 
 
 def __getattr__(name: str) -> Any:
+    """Resolve exported BigQuery adapter symbols lazily via PEP 562 module lookup."""
     target = _EXPORT_MAP.get(name)
     if target is None:
         msg = f"module {__name__!r} has no attribute {name!r}"
@@ -138,4 +179,5 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """Return sorted public attribute names exposed by this package."""
     return sorted(__all__)

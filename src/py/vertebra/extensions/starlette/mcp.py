@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra.agent.mcp.controllers import (
     PromptController,
@@ -24,7 +23,13 @@ from vertebra.agent.mcp.webmcp import (
     build_webmcp_manifest,
     render_webmcp_manifest_json,
 )
-from vertebra.utils.module_loader import import_optional
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    import starlette.responses as _starlette_responses
+    import starlette.routing as _starlette_routing
+
+    _ = (_starlette_responses, _starlette_routing)
 
 __all__ = (
     "AsgiMcpApp",
@@ -80,29 +85,19 @@ def mount_mcp_routes(
 
     routes = getattr(app, "routes", None)
     if isinstance(routes, list):
-        routing_mod = import_optional("starlette.routing")
-        responses_mod = import_optional("starlette.responses")
+        routing_mod = ensure_module("starlette.routing", package="starlette", extra="starlette")
+        responses_mod = ensure_module("starlette.responses", package="starlette", extra="starlette")
         existing_paths = {getattr(r, "path", None) for r in routes}
 
         if resolved_config.path not in existing_paths:
-            if routing_mod is not None and hasattr(routing_mod, "Route"):
-                routes.append(
-                    routing_mod.Route(
-                        resolved_config.path,
-                        endpoint=mcp_app.handle_starlette_request,
-                        methods=["POST", "GET", "OPTIONS"],
-                        include_in_schema=False,
-                    )
+            routes.append(
+                routing_mod.Route(
+                    resolved_config.path,
+                    endpoint=mcp_app.handle_starlette_request,
+                    methods=["POST", "GET", "OPTIONS"],
+                    include_in_schema=False,
                 )
-            else:
-                routes.append(
-                    SimpleNamespace(
-                        path=resolved_config.path,
-                        endpoint=mcp_app.handle_starlette_request,
-                        methods=["POST", "GET", "OPTIONS"],
-                        name="_vertebra_mcp_endpoint",
-                    )
-                )
+            )
 
         if resolved_config.expose_well_known and resolved_config.well_known_path not in existing_paths:
             skill_names = [s.name for s in resolved_skills.list_skills()] if resolved_skills is not None else None
@@ -113,28 +108,16 @@ def mount_mcp_routes(
             )
 
             async def _serve_well_known(_request: Any) -> Any:
-                if responses_mod is not None and hasattr(responses_mod, "Response"):
-                    return responses_mod.Response(content=well_known_bytes, media_type="application/json")
-                return well_known_bytes
+                return responses_mod.Response(content=well_known_bytes, media_type="application/json")
 
-            if routing_mod is not None and hasattr(routing_mod, "Route"):
-                routes.append(
-                    routing_mod.Route(
-                        resolved_config.well_known_path,
-                        endpoint=_serve_well_known,
-                        methods=["GET"],
-                        include_in_schema=False,
-                    )
+            routes.append(
+                routing_mod.Route(
+                    resolved_config.well_known_path,
+                    endpoint=_serve_well_known,
+                    methods=["GET"],
+                    include_in_schema=False,
                 )
-            else:
-                routes.append(
-                    SimpleNamespace(
-                        path=resolved_config.well_known_path,
-                        endpoint=_serve_well_known,
-                        methods=["GET"],
-                        name="_vertebra_mcp_well_known",
-                    )
-                )
+            )
 
         if (
             resolved_webmcp is not None
@@ -144,26 +127,14 @@ def mount_mcp_routes(
             manifest_bytes = render_webmcp_manifest_json(resolved_registry, config=resolved_webmcp)
 
             async def _serve_webmcp(_request: Any) -> Any:
-                if responses_mod is not None and hasattr(responses_mod, "Response"):
-                    return responses_mod.Response(content=manifest_bytes, media_type="application/json")
-                return manifest_bytes
+                return responses_mod.Response(content=manifest_bytes, media_type="application/json")
 
-            if routing_mod is not None and hasattr(routing_mod, "Route"):
-                routes.append(
-                    routing_mod.Route(
-                        resolved_webmcp.manifest_path,
-                        endpoint=_serve_webmcp,
-                        methods=["GET"],
-                        include_in_schema=False,
-                    )
+            routes.append(
+                routing_mod.Route(
+                    resolved_webmcp.manifest_path,
+                    endpoint=_serve_webmcp,
+                    methods=["GET"],
+                    include_in_schema=False,
                 )
-            else:
-                routes.append(
-                    SimpleNamespace(
-                        path=resolved_webmcp.manifest_path,
-                        endpoint=_serve_webmcp,
-                        methods=["GET"],
-                        name="_vertebra_webmcp_manifest",
-                    )
-                )
+            )
     return resolved_registry

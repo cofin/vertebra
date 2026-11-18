@@ -17,6 +17,35 @@ from vertebra.telemetry.otel import (
     calculate_percentile,
 )
 
+__all__ = (
+    "A2A_TASK_ID",
+    "A2A_TASK_STATE",
+    "CostTable",
+    "GEN_AI_AGENT_NAME",
+    "GEN_AI_OPERATION_NAME",
+    "GEN_AI_REQUEST_MODEL",
+    "GEN_AI_SYSTEM",
+    "GEN_AI_TOOL_CALL_ID",
+    "GEN_AI_TOOL_NAME",
+    "GEN_AI_USAGE_CACHED_INPUT_TOKENS",
+    "GEN_AI_USAGE_COST_USD",
+    "GEN_AI_USAGE_INPUT_TOKENS",
+    "GEN_AI_USAGE_OUTPUT_TOKENS",
+    "GEN_AI_USAGE_THOUGHT_TOKENS",
+    "GenAiUsage",
+    "HistogramBucket",
+    "HistogramSnapshot",
+    "MCP_METHOD_NAME",
+    "MCP_RESOURCE_URI",
+    "MCP_SKILL_NAME",
+    "ModelPricing",
+    "VERTEBRA_WORKFLOW_NAME",
+    "VERTEBRA_WORKFLOW_NODE",
+    "calculate_percentile",
+    "extract_w3c_trace_context",
+    "inject_w3c_trace_context",
+)
+
 GEN_AI_OPERATION_NAME: str = "gen_ai.operation.name"
 GEN_AI_SYSTEM: str = "gen_ai.system"
 GEN_AI_REQUEST_MODEL: str = "gen_ai.request.model"
@@ -78,33 +107,3 @@ def inject_w3c_trace_context(
         meta = rpc_params.setdefault("_meta", {})
         if isinstance(meta, dict):
             meta["traceparent"] = header_val
-
-
-__all__ = [
-    "A2A_TASK_ID",
-    "A2A_TASK_STATE",
-    "CostTable",
-    "GEN_AI_AGENT_NAME",
-    "GEN_AI_OPERATION_NAME",
-    "GEN_AI_REQUEST_MODEL",
-    "GEN_AI_SYSTEM",
-    "GEN_AI_TOOL_CALL_ID",
-    "GEN_AI_TOOL_NAME",
-    "GEN_AI_USAGE_CACHED_INPUT_TOKENS",
-    "GEN_AI_USAGE_COST_USD",
-    "GEN_AI_USAGE_INPUT_TOKENS",
-    "GEN_AI_USAGE_OUTPUT_TOKENS",
-    "GEN_AI_USAGE_THOUGHT_TOKENS",
-    "GenAiUsage",
-    "HistogramBucket",
-    "HistogramSnapshot",
-    "MCP_METHOD_NAME",
-    "MCP_RESOURCE_URI",
-    "MCP_SKILL_NAME",
-    "ModelPricing",
-    "VERTEBRA_WORKFLOW_NAME",
-    "VERTEBRA_WORKFLOW_NODE",
-    "calculate_percentile",
-    "extract_w3c_trace_context",
-    "inject_w3c_trace_context",
-]

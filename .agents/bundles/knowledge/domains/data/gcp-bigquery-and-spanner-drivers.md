@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: GCP BigQuery & Spanner Native Drivers
-description: Standalone free-threaded PyO3 BigQuery and Spanner driver crates, zero-copy VTBARROW and AppendRows framing, shared multicloud ObjectStoreStaging, and adapter ToolProvider contracts.
+description: Standalone free-threaded PyO3 BigQuery and Spanner driver crates, zero-copy VTBARROW and AppendRows framing, Google Cloud Workload Identity Federation, FarmHash shard hashing, shared multicloud ObjectStoreStaging, and adapter ToolProvider contracts.
 status: stable
 tags:
   - domains
@@ -15,6 +15,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-07T03:55:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T01:22:00Z"
+    commit: 5a833832
   - by: agent:flow-completion
     at: "2026-11-14T21:38:00Z"
     commit: c526639f
@@ -27,7 +30,7 @@ verified:
 sources:
   - id: src-vertebra-core-src-gcp-auth-rs
     resource: src/rs/vertebra-core/src/gcp_auth.rs
-    title: Shared GcpTokenCache, ProxyPolicy, and GcloudCli ADC provider
+    title: Shared GcpTokenCache, ProxyPolicy, ExternalAccount WIF, and GcloudCli ADC provider
   - id: src-vertebra-db-src-gcp-rs
     resource: src/rs/vertebra-db/src/gcp.rs
     title: Optional gcp feature credential adapter and error classification
@@ -93,7 +96,7 @@ sources:
     title: Sync/AsyncSpannerSnapshot and interactive Sync/AsyncSpannerTransaction contexts
   - id: src-db-spanner-queue-py
     resource: src/py/vertebra/db/adapters/spanner/queue.py
-    title: SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres
+    title: SyncSpannerQueueStore, AsyncSpannerQueueStore, and FarmHash compute_spanner_shard_id
   - id: src-db-spanner-tools-py
     resource: src/py/vertebra/db/adapters/spanner/tools.py
     title: SpannerToolProvider operations and staleness snapshot policies
@@ -106,23 +109,23 @@ sources:
 
 <!-- truth: start -->
 - **Standalone `gil_used = false` Optional Wheels (`vertebra-bigquery`, `vertebra-spanner`, `vertebra-db/src/gcp.rs`)**: `vertebra-bigquery` (`vertebra._bigquery`, `[bigquery]`, `google-cloud-bigquery =0.19.0`) and `vertebra-spanner` (`vertebra._spanner`, `[spanner]`, `google-cloud-spanner =0.34.8-preview`) compile as optional PyO3 wheels over `vertebra_db::gcp` (`feature = "gcp"`), keeping `vertebra-py` and default `vertebra-db` free of `google-cloud-*` and `tonic`.
-- **Crate Decomposition (`{lib,client,errors,arrow_ipc,codec}.rs` + `rw_tx.rs`)**: Both `vertebra-bigquery` and `vertebra-spanner` split PyO3 bindings (`lib.rs`), gRPC/REST transport (`client.rs`), lazy `PyOnceLock` exception resolution (`errors.rs`), unregistered `VTBARROW` / IPC framing (`arrow_ipc.rs`), and SQL/mutation codecs (`codec.rs`), with `vertebra-spanner/src/rw_tx.rs` providing stateful interactive `ReadWrite` transactions (`SyncSpannerReadWriteTransaction` / `AsyncSpannerReadWriteTransaction`).
-- **Zero-Copy `ArrowAppendPlan` Framing (`vertebra-bigquery/src/arrow_ipc.rs`)**: `ArrowAppendPlan::build` / `ArrowAppendPlan::build_bytes(stream: Bytes, mode: BigQueryWriteMode)` slices schema and record-batch frames zero-copy via `Bytes::slice`, rejects dictionary batches (`header_type == 2`) and frames exceeding `MAX_APPEND_ROWS_CHUNK_BYTES` (`9 MiB`), and validates response counts and stream offsets in `verify_responses`.
-- **5-Argument Async Drainer & Cross-`.so` `ShmCapsule` (`vertebra-db/src/py_async.rs`)**: `spawn_rust_db_task_with_attr(py, fut, map_ok, map_err, attr_name)` isolates `_vertebra_bigquery_completion_drainer` and `_vertebra_spanner_completion_drainer` on the active `asyncio` loop, while `construct_py_arrow_cursor` transfers unregistered `Arc<ShmRegion>` segments across `.so` boundaries via `c"vertebra.ShmCapsule"`.
+- **Clean Driver `close()` & Crate Decomposition (`_sync.py`/`_async.py`, `{lib,client,errors,arrow_ipc,codec}.rs`)**: Both `vertebra-bigquery` and `vertebra-spanner` split PyO3 bindings (`lib.rs`), gRPC/REST transport (`client.rs`), lazy `PyOnceLock` exception resolution (`errors.rs`), unregistered `VTBARROW` / IPC framing (`arrow_ipc.rs`), and SQL/mutation codecs (`codec.rs`), with `vertebra-spanner/src/rw_tx.rs` providing stateful interactive `ReadWrite` transactions. On teardown, `SyncBigQueryDriver.close()`, `AsyncBigQueryDriver.close()`, `SyncSpannerDriver.close()`, and `AsyncSpannerDriver.close()` roll back any active transaction/session, invoke `client.close()` (awaiting async teardown when awaitable), and clear `_client` before setting `_closed = True`.
+- **Workload Identity Federation (`external_account` in `gcp_auth.rs`) & FarmHash Shard Hashing (`queue.py`)**: `GcpTokenCache` (`gcp_auth.rs`) supports `GcpAuthSource::ExternalAccount` (`parse_external_account_json`) across file, URL/OIDC, and AWS SigV4 (`aws1`) subject token sources with RFC 8693 STS token exchange (`ExternalAccountStsRequest`) and optional `service_account_impersonation_url`, while rejecting `executable` credential sources. Spanner's `compute_spanner_shard_id` computes Google FarmHash `Fingerprint64` matching `MOD(ABS(FARM_FINGERPRINT(task_id)), shard_count)`.
+- **Zero-Copy `ArrowAppendPlan` Framing & 5-Argument Async Drainer**: `ArrowAppendPlan::build` / `ArrowAppendPlan::build_bytes(stream: Bytes, mode: BigQueryWriteMode)` slices schema and record-batch frames zero-copy via `Bytes::slice`, rejects dictionary batches (`header_type == 2`) and frames above `MAX_APPEND_ROWS_CHUNK_BYTES` (`9 MiB`), and pairs with `spawn_rust_db_task_with_attr` (`_vertebra_bigquery_completion_drainer` / `_vertebra_spanner_completion_drainer`) and `ShmCapsule` (`c"vertebra.ShmCapsule"`).
 - **Shared Multicloud `ObjectStoreStaging` (`src/py/vertebra/db/_staging.py`)**: `ObjectStoreStaging` validates targets (`validate_staging_target`, `validate_gcs_uri`, rejecting implicit `memory://` URIs) and streams `ArrowCursor` exports/loads (`write_cursor_sync`/`write_cursor_async`, `read_cursor_sync`/`read_cursor_async`) across `SyncObjectStore`, `AsyncObjectStore`, and `ObjectStoreBackend` (`parquet`, `arrow-ipc`, `csv`, `jsonl`).
 <!-- truth: end -->
 
 `vertebra-bigquery` and `vertebra-spanner` implement Vertebra's standalone Rust-native Google Cloud analytical and distributed SQL drivers, integrating with the base contracts in [Database Drivers & Cloud Dialers](database-drivers-and-dialers.md), multicloud [Object Storage](../storage/object-storage.md), and the wheel ownership boundaries recorded in [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md).
 
-## Shared GCP Auth, Async Drainer & Exception Bridge
+## Shared GCP Auth (`external_account` WIF), Async Drainer & Exception Bridge
 
-- **Scoped ADC & Transport Classification (`gcp_auth.rs`, `gcp.rs`)**: [`GcpTokenCache::from_options(raw_opts, default_scopes)`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] requires explicit OAuth scopes, evaluates canonical ADC precedence (`explicit options -> ambient ADC file -> ambient env bearer tokens -> GCE metadata server`, ending ambient discovery at `MetadataServer`), applies `ProxyPolicy` to token/IAM endpoints while keeping metadata-server requests direct, and supports `GcpAuthSource::GcloudCli` when explicitly selected (`kill_on_drop(true)`, `GCLOUD_CLI_TIMEOUT = 30s`). [`vertebra_db::gcp`](../../../../../src/rs/vertebra-db/src/gcp.rs)[^src-vertebra-db-src-gcp-rs] adapts `GcpTokenCache` to `google-cloud-auth` `CredentialsProvider` and normalizes HTTP status codes before generic transport fallbacks.
+- **Scoped ADC, Workload Identity Federation & Transport Classification (`gcp_auth.rs`, `gcp.rs`)**: [`GcpTokenCache::from_options(raw_opts, default_scopes)`](../../../../../src/rs/vertebra-core/src/gcp_auth.rs)[^src-vertebra-core-src-gcp-auth-rs] requires explicit OAuth scopes, evaluates canonical ADC precedence (`explicit options -> ambient ADC file -> ambient env bearer tokens -> GCE metadata server`, ending ambient discovery at `MetadataServer`), applies `ProxyPolicy` to token/IAM endpoints while keeping metadata-server requests direct, and supports `GcpAuthSource::GcloudCli` when explicitly selected (`kill_on_drop(true)`, `GCLOUD_CLI_TIMEOUT = 30s`). For Workload Identity Federation (`"type": "external_account"` or `external_account_json`), `parse_external_account_json` validates `audience`, `subject_token_type`, `token_url`, `universe_domain`, and optional `service_account_impersonation_url`; retrieves subject tokens from local files, HTTP/HTTPS URLs (`url` + headers, optional `json` `subject_token_field_name`), or AWS IMDS/SigV4 (`environment_id = "aws1"`, rejecting `executable` sources for security reasons); exchanges the subject token via RFC 8693 STS (`ExternalAccountStsRequest`); and optionally mints an impersonated Google access token via IAMCredentials. [`vertebra_db::gcp`](../../../../../src/rs/vertebra-db/src/gcp.rs)[^src-vertebra-db-src-gcp-rs] adapts `GcpTokenCache` to `google-cloud-auth` `CredentialsProvider` and normalizes HTTP status codes before generic transport fallbacks.
 - **5-Argument Completion Drainer & `ShmCapsule` (`py_async.rs`)**: [`spawn_rust_db_task_with_attr(py, fut, map_ok, map_err, attr_name)`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] registers per-extension `AsyncCompletionQueue` drainers (`_vertebra_bigquery_completion_drainer` and `_vertebra_spanner_completion_drainer`), binds Python `Future.cancel()` to Tokio `AbortHandle`, and pairs with `construct_py_arrow_cursor` (`c"vertebra.ShmCapsule"`) so optional `.so` crates never retain leaked `ShmRegion` entries.
 - **Multi-Base Exceptions (`vertebra-py/src/errors.rs`)**: [`vertebra_py::errors`](../../../../../src/rs/vertebra-py/src/errors.rs)[^src-vertebra-py-src-errors-rs] defines `BigQueryError(GoogleCloudError, DatabaseError)`, `BigQueryRowError(BigQueryError, DataError)`, `SpannerError(GoogleCloudError, DatabaseError)`, and `SpannerAbortedError(SpannerError, SerializationFailure)` (`sqlstate = "40001"`), resolved lazily via `PyOnceLock` in each wheel's `errors.rs` (falling back to standalone types in Rust-only unit tests).
 
 ## `vertebra-bigquery` Submodules & Wire Pipeline (`vertebra._bigquery`)
 
-[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, [`object_tables.py`](../../../../../src/py/vertebra/db/adapters/bigquery/object_tables.py)[^src-db-bigquery-object-tables-py] validating `limit > 0`, single-pass `_split_uri_bucket_and_key`, and `(DatabaseError, OSError)` fallback, plus `SyncBigQueryDriver` / `AsyncBigQueryDriver` in `_sync.py` / `_async.py`) wraps the five-module `vertebra-bigquery` crate:
+[`adapters/bigquery/`](../../../../../src/py/vertebra/db/adapters/bigquery/__init__.py)[^src-db-bigquery-init-py] (`BigQueryConfig`, `BigQueryCore`, [`object_tables.py`](../../../../../src/py/vertebra/db/adapters/bigquery/object_tables.py)[^src-db-bigquery-object-tables-py] validating `limit > 0`, single-pass `_split_uri_bucket_and_key`, and `(DatabaseError, OSError)` fallback, plus `SyncBigQueryDriver` / `AsyncBigQueryDriver` in `_sync.py` / `_async.py` whose `close()` methods roll back active sessions and call `client.close()` before clearing `_client`) wraps the five-module `vertebra-bigquery` crate:
 
 | Module | Key Types & Responsibilities |
 |---|---|
@@ -134,11 +137,11 @@ sources:
 
 ## `vertebra-spanner` Submodules & Wire Pipeline (`vertebra._spanner`)
 
-[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with dialect-aware `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py], [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], [`queue.py`](../../../../../src/py/vertebra/db/adapters/spanner/queue.py)[^src-db-spanner-queue-py] implementing `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` via atomic `SELECT ... FOR UPDATE` -> `UPDATE ... THEN RETURN *` / `RETURNING *` inside `run_in_transaction`, and `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py`) wraps `vertebra-spanner` across GoogleSQL and Spangres dialects:
+[`adapters/spanner/`](../../../../../src/py/vertebra/db/adapters/spanner/__init__.py)[^src-db-spanner-init-py] (`SpannerConfig`, `SpannerCore` with dialect-aware `_encode_parameters_payload`, [`mutations.py`](../../../../../src/py/vertebra/db/adapters/spanner/mutations.py)[^src-db-spanner-mutations-py], [`transactions.py`](../../../../../src/py/vertebra/db/adapters/spanner/transactions.py)[^src-db-spanner-transactions-py], [`queue.py`](../../../../../src/py/vertebra/db/adapters/spanner/queue.py)[^src-db-spanner-queue-py] implementing `SyncSpannerQueueStore` / `AsyncSpannerQueueStore` via atomic `SELECT ... FOR UPDATE` -> `UPDATE ... THEN RETURN *` / `RETURNING *` inside `run_in_transaction` and FarmHash `Fingerprint64` shard selection via `compute_spanner_shard_id` matching `MOD(ABS(FARM_FINGERPRINT(task_id)), shard_count)`, and `SyncSpannerDriver` / `AsyncSpannerDriver` in `_sync.py` / `_async.py` whose `close()` methods roll back active transactions and call `client.close()` before clearing `_client`) wraps `vertebra-spanner` across GoogleSQL and Spangres dialects:
 
 | Module | Key Types & Responsibilities |
 |---|---|
-| [`lib.rs`](../../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs] | `#[pymodule(gil_used = false)]` `vertebra._spanner` exposing `SyncSpannerClient`, `AsyncSpannerClient`, `SyncSpannerReadWriteTransaction`, and `AsyncSpannerReadWriteTransaction` (`begin_read_write_transaction`, `query`, `execute_dml`, `execute_batch_dml`, `commit`, `rollback`, `transaction_id`). |
+| [`lib.rs`](../../../../../src/rs/vertebra-spanner/src/lib.rs)[^src-vertebra-spanner-src-lib-rs] | `#[pymodule(gil_used = false)]` `vertebra._spanner` exposing `SyncSpannerClient`, `AsyncSpannerClient`, `SyncSpannerReadWriteTransaction`, and `AsyncSpannerReadWriteTransaction` (`begin_read_write_transaction`, `query`, `execute_dml`, `execute_batch_dml`, `commit`, `rollback`, `transaction_id`, `close`). |
 | [`rw_tx.rs`](../../../../../src/rs/vertebra-spanner/src/rw_tx.rs)[^src-vertebra-spanner-src-rw-tx-rs] | `SpannerReadWriteTx` managing `BeginTransaction` (`multiplexed_session_previous_transaction_id`, `transaction_tag`), `TransactionSelector::Id` + monotonic 1-based `seqno`, leader routing, highest-`seq_num` `MultiplexedSessionPrecommitToken` tracking, `Commit` (`MultiplexedSessionRetry` replay), and `Rollback`. `driver.run_in_transaction(fn)` retries `SpannerAbortedError` honoring server `retry_delay_ms` and `previous_transaction_id`, while `with driver.transaction():` / `async with driver.transaction():` runs a single-attempt interactive scope. |
 | [`client.rs`](../../../../../src/rs/vertebra-spanner/src/client.rs)[^src-vertebra-spanner-src-client-rs] | Multiplexed sessions (`CreateSession`), `ExecuteStreamingSql`, `ExecuteBatchDml`, inline-`BeginTransaction` single-shot `Commit`, `BatchWrite` (`MAX_MUTATION_CELLS_PER_BATCH = 80_000`), `PartitionQuery` (`SpannerCore.is_partitioned_query_fallback_error` on `code in {3, 7, 9, 12, 14}`), REST `DatabaseAdmin` `update_database_ddl` (`admin_endpoint`, `DEFAULT_DDL_TIMEOUT = 600s`), and `ca_pem` Omni TLS for non-`*.googleapis.com` HTTPS endpoints. |
 | [`arrow_ipc.rs`](../../../../../src/rs/vertebra-spanner/src/arrow_ipc.rs)[^src-vertebra-spanner-src-arrow-ipc-rs] | Allocates `/vtb-sp-*` `ShmArrowStreamWriter` segments (`DEFAULT_SPANNER_ARROW_SHM_CAPACITY = 64 KiB`) and finalizes unregistered `VTBARROW` `ShmRegion` cursors. |
@@ -150,7 +153,7 @@ sources:
 - **Shared Multicloud Staging (`_staging.py`)**: [`ObjectStoreStaging`](../../../../../src/py/vertebra/db/_staging.py)[^src-db-staging-py] backs driver `export_to_object_store` and `load_from_object_store` pipelines across GCS (`gs://`), S3 (`s3://`), R2 (`r2://`), Azure (`az://`/`abfss://`), OCI (`oci://`), HTTP(S), and local `file://` targets. `validate_staging_target` and `validate_gcs_uri` validate destinations upfront and reject implicit `memory://` URIs without an explicit store instance; `resolve_sync_store` / `resolve_async_store`, `write_cursor_sync` / `write_cursor_async`, and `read_cursor_sync` / `read_cursor_async` bridge `SyncObjectStore`, `AsyncObjectStore`, and `ObjectStoreBackend` across `parquet` (`ZSTD` default), `arrow-ipc`, `csv`, and `jsonl`.
 - **Neutral Adapter `ToolProvider` Implementations (`typing.py`, `tools.py`)**: [`BigQueryToolProvider`](../../../../../src/py/vertebra/db/adapters/bigquery/tools.py)[^src-db-bigquery-tools-py] and [`SpannerToolProvider`](../../../../../src/py/vertebra/db/adapters/spanner/tools.py)[^src-db-spanner-tools-py] implement the neutral [`ToolProvider`](../../../../../src/py/vertebra/typing.py)[^src-typing-public-py] protocol without importing agent or HTTP framework layers. Simple `SELECT` reads stay ungated while DML and unclassified `WITH` statements require consumer approval; `BigQueryToolProvider` enforces the minimum provider, per-call, and driver `maximum_bytes_billed` cap (plus optional dry-run budget checks), `SpannerToolProvider` preserves strong or bounded-staleness snapshots and binds `information_schema` inspection parameters, and policy denials raise `ToolPolicyError`.
 
-[^src-vertebra-core-src-gcp-auth-rs]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared GcpTokenCache, ProxyPolicy, and GcloudCli ADC provider.
+[^src-vertebra-core-src-gcp-auth-rs]: `src/rs/vertebra-core/src/gcp_auth.rs` — Shared GcpTokenCache, ProxyPolicy, ExternalAccount WIF, and GcloudCli ADC provider.
 [^src-vertebra-db-src-gcp-rs]: `src/rs/vertebra-db/src/gcp.rs` — Optional gcp feature credential adapter and error classification.
 [^src-vertebra-db-src-py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — 5-argument spawn_rust_db_task_with_attr and ShmCapsule bridge.
 [^src-vertebra-py-src-errors-rs]: `src/rs/vertebra-py/src/errors.rs` — Multi-base BigQueryError and SpannerError exception definitions.
@@ -172,6 +175,6 @@ sources:
 [^src-db-spanner-init-py]: `src/py/vertebra/db/adapters/spanner/__init__.py` — SpannerConfig, SpannerCore, and Sync/AsyncSpannerDriver exports.
 [^src-db-spanner-mutations-py]: `src/py/vertebra/db/adapters/spanner/mutations.py` — Mutation, MutationGroup, and StalenessBound structs.
 [^src-db-spanner-transactions-py]: `src/py/vertebra/db/adapters/spanner/transactions.py` — Sync/AsyncSpannerSnapshot and interactive Sync/AsyncSpannerTransaction contexts.
-[^src-db-spanner-queue-py]: `src/py/vertebra/db/adapters/spanner/queue.py` — SyncSpannerQueueStore and AsyncSpannerQueueStore across GoogleSQL and Spangres.
+[^src-db-spanner-queue-py]: `src/py/vertebra/db/adapters/spanner/queue.py` — SyncSpannerQueueStore, AsyncSpannerQueueStore, and FarmHash compute_spanner_shard_id.
 [^src-db-spanner-tools-py]: `src/py/vertebra/db/adapters/spanner/tools.py` — SpannerToolProvider operations and staleness snapshot policies.
 [^src-typing-public-py]: `src/py/vertebra/typing.py` — Neutral ToolProvider protocol and ToolPolicyError exception.

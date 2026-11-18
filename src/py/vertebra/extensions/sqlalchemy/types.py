@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.1 custom vector, spatial, and JSON types and query descriptors."""
+"""SQLAlchemy 2.1 custom vector, spatial, and JSON types with Comparator expressions."""
 
 from __future__ import annotations
 
@@ -7,33 +7,31 @@ import struct
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-import msgspec
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Float, literal
+from sqlalchemy.dialects import mssql, oracle, postgresql, sqlite
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.types import JSON, NVARCHAR, TypeDecorator, UserDefinedType
+from sqlalchemy.sql.expression import ColumnElement
+from sqlalchemy.sql.operators import OperatorClass
+from sqlalchemy.sql.visitors import InternalTraversal
+from sqlalchemy.types import JSON, TypeDecorator, UserDefinedType
 
 from vertebra import _vertebra
 from vertebra.utils.serializers import decode_json, encode_json
 
 if TYPE_CHECKING:
     from sqlalchemy.engine.interfaces import Dialect
+    from sqlalchemy.sql.compiler import SQLCompiler
     from sqlalchemy.sql.type_api import TypeEngine
 
 __all__ = (
     "BigQueryGeography",
-    "BinaryJSON",
-    "DeleteUsingClause",
     "HalfVector",
-    "InsertSentinelSpec",
     "MsgspecJSON",
     "OracleVector",
-    "ParameterizedSQL",
     "PgVector",
-    "SelectInLoadSpec",
     "SpannerVector",
     "SparseVector",
     "Vector",
-    "VectorDistanceExpr",
     "VectorDistanceMetric",
     "VectorStorageFormat",
 )
@@ -41,113 +39,149 @@ __all__ = (
 type VectorStorageFormat = Literal["float32", "float64", "int8", "binary"]
 type VectorDistanceMetric = Literal["cosine", "l2", "inner_product"]
 
+_PGVECTOR_OPERATORS: dict[str, str] = {
+    "cosine": "<=>",
+    "l2": "<->",
+    "l1": "<+>",
+    "inner_product": "<#>",
+}
 
-class VectorDistanceExpr:
-    """Dialect-aware SQL expression descriptor for vector similarity operations."""
+_ORACLE_METRICS: dict[str, str] = {
+    "cosine": "COSINE",
+    "l2": "EUCLIDEAN",
+    "l1": "MANHATTAN",
+    "inner_product": "DOT",
+}
 
-    __slots__ = ("_approximate", "_column_name", "_metric", "_num_leaves_to_search", "_param_name", "_query_vector")
+_MYSQL_DISTANCE_FUNCTIONS: dict[str, str] = {
+    "cosine": "DISTANCE_COSINE",
+    "l2": "DISTANCE_EUCLIDEAN",
+    "inner_product": "DISTANCE_DOT",
+}
+
+_GCP_DISTANCE_FUNCTIONS: dict[str, str] = {
+    "cosine": "COSINE_DISTANCE",
+    "l2": "EUCLIDEAN_DISTANCE",
+    "inner_product": "DOT_PRODUCT",
+}
+
+_SPANNER_APPROX_FUNCTIONS: dict[str, str] = {
+    "cosine": "APPROX_COSINE_DISTANCE",
+    "l2": "APPROX_EUCLIDEAN_DISTANCE",
+    "inner_product": "APPROX_DOT_PRODUCT",
+}
+
+
+class _VectorDistance(ColumnElement[float]):
+    """Dialect-deferred vector distance expression returning a float column element."""
+
+    inherit_cache = True
+    _traverse_internals = [
+        ("left", InternalTraversal.dp_clauseelement),
+        ("right", InternalTraversal.dp_clauseelement),
+        ("metric", InternalTraversal.dp_string),
+        ("approximate", InternalTraversal.dp_boolean),
+        ("options_json", InternalTraversal.dp_string),
+    ]
 
     def __init__(
         self,
-        column_name: str,
-        query_vector: Sequence[float],
+        left: ColumnElement[Any],
+        right: ColumnElement[Any],
+        metric: str,
         *,
-        metric: VectorDistanceMetric = "cosine",
-        param_name: str = "query_vec",
         approximate: bool = False,
-        num_leaves_to_search: int | None = None,
+        options_json: str = "",
     ) -> None:
-        """Initialize vector distance expression with target column, vector, and metric."""
-        self._column_name = column_name
-        self._query_vector = tuple(float(v) for v in query_vector)
-        self._metric = metric
-        self._param_name = param_name
-        self._approximate = approximate
-        self._num_leaves_to_search = num_leaves_to_search
+        """Initialize a dialect-deferred vector distance AST node."""
+        self.left = left
+        self.right = right
+        self.metric = metric
+        self.approximate = approximate
+        self.options_json = options_json
+        self.type = Float()
 
-    @property
-    def column_name(self) -> str:
-        """Return the target vector column name."""
-        return self._column_name
 
-    @property
-    def query_vector(self) -> tuple[float, ...]:
-        """Return the query vector values."""
-        return self._query_vector
+class _VectorComparator(UserDefinedType.Comparator[Any]):
+    """Dialect-aware vector distance operators for similarity search."""
 
-    @property
-    def metric(self) -> VectorDistanceMetric:
-        """Return the similarity metric."""
-        return self._metric
+    def _distance(
+        self,
+        other: Sequence[float] | ColumnElement[Any],
+        metric: str,
+        *,
+        approximate: bool = False,
+        options_json: str = "",
+    ) -> _VectorDistance:
+        operand: ColumnElement[Any] = (
+            other if isinstance(other, ColumnElement) else literal([float(v) for v in other], type_=self.type)
+        )
+        return _VectorDistance(
+            self.expr,
+            operand,
+            metric,
+            approximate=approximate,
+            options_json=options_json,
+        )
 
-    @property
-    def param_name(self) -> str:
-        """Return the bind parameter name."""
-        return self._param_name
+    def cosine_distance(self, other: Sequence[float] | ColumnElement[Any]) -> _VectorDistance:
+        """Build a cosine distance SQL expression."""
+        return self._distance(other, "cosine")
 
-    @property
-    def approximate(self) -> bool:
-        """Return True when compiling an approximate ANN distance function."""
-        return self._approximate
+    def l2_distance(self, other: Sequence[float] | ColumnElement[Any]) -> _VectorDistance:
+        """Build an L2 Euclidean distance SQL expression."""
+        return self._distance(other, "l2")
 
-    def compile_sql(self, dialect_name: str = "postgresql") -> str:
-        """Compile the vector distance expression for the target database dialect."""
-        lowered = dialect_name.lower()
-        base = lowered.split("+", 1)[0]
-        if base == "spangres":
-            op = {
-                "cosine": "<=>",
-                "l2": "<->",
-                "inner_product": "<#>",
-            }[self._metric]
-            return f"{self._column_name} {op} :{self._param_name}"
-        if base in ("bigquery", "spanner"):
-            if self._approximate and base == "spanner":
-                approx_fn = {
-                    "cosine": "APPROX_COSINE_DISTANCE",
-                    "l2": "APPROX_EUCLIDEAN_DISTANCE",
-                    "inner_product": "APPROX_DOT_PRODUCT",
-                }[self._metric]
-                if self._num_leaves_to_search is not None:
-                    return (
-                        f"{approx_fn}({self._column_name}, @{self._param_name}, "
-                        f"options => JSON '{{\"num_leaves_to_search\": {int(self._num_leaves_to_search)}}}')"
-                    )
-                return f"{approx_fn}({self._column_name}, @{self._param_name})"
-            gcp_fn = {
-                "cosine": "COSINE_DISTANCE",
-                "l2": "EUCLIDEAN_DISTANCE",
-                "inner_product": "DOT_PRODUCT",
-            }[self._metric]
-            return f"{gcp_fn}({self._column_name}, @{self._param_name})"
-        if base == "oracle":
-            ora_metric = {
-                "cosine": "COSINE",
-                "l2": "EUCLIDEAN",
-                "inner_product": "DOT",
-            }[self._metric]
-            return f"VECTOR_DISTANCE({self._column_name}, :{self._param_name}, {ora_metric})"
-        if base in ("postgres", "postgresql"):
-            op = {
-                "cosine": "<=>",
-                "l2": "<->",
-                "inner_product": "<#>",
-            }[self._metric]
-            return f"{self._column_name} {op} :{self._param_name}"
-        if base in ("mysql", "mariadb"):
-            fn = {
-                "cosine": "DISTANCE_COSINE",
-                "l2": "DISTANCE_EUCLIDEAN",
-                "inner_product": "DISTANCE_DOT",
-            }[self._metric]
-            return f"{fn}({self._column_name}, :{self._param_name})"
-        return f"vec_distance_{self._metric}({self._column_name}, :{self._param_name})"
+    def l1_distance(self, other: Sequence[float] | ColumnElement[Any]) -> _VectorDistance:
+        """Build an L1 Manhattan distance SQL expression."""
+        return self._distance(other, "l1")
+
+    def inner_product(self, other: Sequence[float] | ColumnElement[Any]) -> _VectorDistance:
+        """Build an inner-product distance SQL expression."""
+        return self._distance(other, "inner_product")
+
+    def max_inner_product(self, other: Sequence[float] | ColumnElement[Any]) -> _VectorDistance:
+        """Build a maximum inner-product SQL expression."""
+        return self._distance(other, "inner_product")
+
+    def approx_cosine_distance(
+        self,
+        other: Sequence[float] | ColumnElement[Any],
+        *,
+        num_leaves_to_search: int | None = None,
+    ) -> _VectorDistance:
+        """Build an approximate cosine distance SQL expression."""
+        options_json = (
+            encode_json({"num_leaves_to_search": int(num_leaves_to_search)}) if num_leaves_to_search is not None else ""
+        )
+        return self._distance(
+            other,
+            "cosine",
+            approximate=True,
+            options_json=options_json,
+        )
+
+
+def _decode_text_vector(value: str) -> list[float]:
+    trimmed = value.strip().lstrip("[").rstrip("]")
+    if not trimmed:
+        return []
+    try:
+        decoded = decode_json(f"[{trimmed}]")
+        if isinstance(decoded, list):
+            return [float(x) for x in decoded]
+    except Exception:
+        pass
+    return [float(item) for item in trimmed.split(",") if item.strip()]
 
 
 class Vector(UserDefinedType[Any]):
-    """Dense vector column type supporting PostgreSQL, Oracle 23ai, MySQL 9.0, SQLite, MSSQL, and DuckDB."""
+    """Dense vector column type supporting PostgreSQL, Spangres, Oracle 23ai, MySQL 9.0, SQLite, MSSQL, BigQuery, Spanner, and DuckDB."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    Comparator = _VectorComparator
+    comparator_factory = _VectorComparator
     __slots__ = ("binary_format", "column_name", "dimensions", "precision")
 
     def __init__(
@@ -164,13 +198,13 @@ class Vector(UserDefinedType[Any]):
         resolved_dim = dim if dim is not None else dimensions
         resolved_prec = storage_format if storage_format is not None else precision
         self.dimensions = resolved_dim
-        self.precision = resolved_prec
+        self.precision: VectorStorageFormat = resolved_prec
         self.column_name = column_name
         self.binary_format = binary_format
 
     @property
     def dim(self) -> int | None:
-        """Return dimensions for backward compatibility with existing tests."""
+        """Return dimensions."""
         return self.dimensions
 
     @property
@@ -251,7 +285,7 @@ class Vector(UserDefinedType[Any]):
                 return array.array(typecode, value.to_list())
             if base == "sqlite":
                 return value.to_sqlite_blob()
-            if base in ("postgres", "postgresql") and self.binary_format:
+            if base in ("postgres", "postgresql", "spangres") and self.binary_format:
                 return value.to_pgvector_bytes()
             return "[" + ",".join(str(float(x)) for x in value.to_list()) + "]"
 
@@ -268,7 +302,7 @@ class Vector(UserDefinedType[Any]):
                 return bytes(value)
             arr = value if isinstance(value, array.array) else array.array(typecode, [float(x) for x in value])
             return arr.tobytes()
-        if base in ("postgres", "postgresql") and self.binary_format:
+        if base in ("postgres", "postgresql", "spangres") and self.binary_format:
             return _vertebra.encode_pgvector_f32(value)
         return "[" + ",".join(str(float(x)) for x in value) + "]"
 
@@ -291,63 +325,23 @@ class Vector(UserDefinedType[Any]):
             base = dialect_name.split("+", 1)[0].lower()
             if base == "oracle" and len(raw) >= 8 and raw[0] == 0xDB:
                 return _vertebra.decode_oracle_vector_f32(raw)
-            if base in ("postgres", "postgresql") and len(raw) >= 4:
+            if base in ("postgres", "postgresql", "spangres") and len(raw) >= 4:
                 dim, unused = struct.unpack(">HH", raw[:4])
                 if unused == 0 and len(raw) == 4 + dim * 4:
                     return _vertebra.decode_pgvector_f32(raw)
             count = len(raw) // 4
             return list(struct.unpack(f"<{count}f", raw))
         if isinstance(value, str):
-            trimmed = value.strip().lstrip("[").rstrip("]")
-            if not trimmed:
-                return []
-            try:
-                decoded = decode_json(f"[{trimmed}]")
-                if isinstance(decoded, list):
-                    return [float(x) for x in decoded]
-            except Exception:
-                pass
-            return [float(item) for item in trimmed.split(",") if item.strip()]
+            return _decode_text_vector(value)
         return list(value)
-
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression for this vector column."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def approx_cosine_distance(
-        self,
-        query_vector: Sequence[float],
-        *,
-        param_name: str = "query_vec",
-        num_leaves_to_search: int | None = None,
-    ) -> VectorDistanceExpr:
-        """Build an approximate cosine distance expression."""
-        return VectorDistanceExpr(
-            self.column_name,
-            query_vector,
-            metric="cosine",
-            param_name=param_name,
-            approximate=True,
-            num_leaves_to_search=num_leaves_to_search,
-        )
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 distance expression for this vector column."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an inner-product distance expression for this vector column."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a maximum inner-product expression for this vector column."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
 
 
 class PgVector(UserDefinedType[Any]):
     """PostgreSQL pgvector dense vector column type."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    comparator_factory = _VectorComparator
     __slots__ = ("column_name", "dimensions")
 
     def __init__(
@@ -410,41 +404,18 @@ class PgVector(UserDefinedType[Any]):
                 count = len(raw) // 4
                 return list(struct.unpack(f"<{count}f", raw))
             if isinstance(value, str):
-                trimmed = value.strip().lstrip("[").rstrip("]")
-                if not trimmed:
-                    return []
-                try:
-                    decoded = decode_json(f"[{trimmed}]")
-                    if isinstance(decoded, list):
-                        return [float(x) for x in decoded]
-                except Exception:
-                    pass
-                return [float(item) for item in trimmed.split(",") if item.strip()]
+                return _decode_text_vector(value)
             return [float(x) for x in value]
 
         return _process
-
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 Euclidean distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a maximum inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
 
 
 class HalfVector(UserDefinedType[Any]):
     """PostgreSQL pgvector 16-bit halfvec column type."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    comparator_factory = _VectorComparator
     __slots__ = ("column_name", "dimensions")
 
     def __init__(
@@ -499,41 +470,18 @@ class HalfVector(UserDefinedType[Any]):
             if isinstance(value, (list, tuple)):
                 return [float(x) for x in value]
             if isinstance(value, str):
-                trimmed = value.strip().lstrip("[").rstrip("]")
-                if not trimmed:
-                    return []
-                try:
-                    decoded = decode_json(f"[{trimmed}]")
-                    if isinstance(decoded, list):
-                        return [float(x) for x in decoded]
-                except Exception:
-                    pass
-                return [float(item) for item in trimmed.split(",") if item.strip()]
+                return _decode_text_vector(value)
             return [float(x) for x in value]
 
         return _process
-
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 Euclidean distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a maximum inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
 
 
 class SparseVector(UserDefinedType[Any]):
     """PostgreSQL pgvector sparsevec column type."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    comparator_factory = _VectorComparator
     __slots__ = ("column_name", "dimensions")
 
     def __init__(
@@ -579,27 +527,13 @@ class SparseVector(UserDefinedType[Any]):
 
         return _process
 
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 Euclidean distance expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a maximum inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an inner-product expression."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
 
 class OracleVector(UserDefinedType[Any]):
     """Oracle 23ai native VECTOR column type."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    comparator_factory = _VectorComparator
     __slots__ = ("binary_format", "column_name", "dimensions", "precision")
 
     def __init__(
@@ -675,27 +609,13 @@ class OracleVector(UserDefinedType[Any]):
 
         return _process
 
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression for Oracle 23ai."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 distance expression for Oracle 23ai."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a dot-product expression for Oracle 23ai."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a dot-product expression for Oracle 23ai."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
 
 class SpannerVector(UserDefinedType[Any]):
     """Google Cloud Spanner ARRAY<FLOAT32> vector column type."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
+    comparator_factory = _VectorComparator
     __slots__ = ("column_name", "dimensions", "precision")
 
     def __init__(
@@ -750,44 +670,12 @@ class SpannerVector(UserDefinedType[Any]):
 
         return _process
 
-    def cosine_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a cosine distance expression for Cloud Spanner."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="cosine", param_name=param_name)
-
-    def approx_cosine_distance(
-        self,
-        query_vector: Sequence[float],
-        *,
-        param_name: str = "query_vec",
-        num_leaves_to_search: int | None = None,
-    ) -> VectorDistanceExpr:
-        """Build an approximate cosine distance expression for Cloud Spanner ScaNN."""
-        return VectorDistanceExpr(
-            self.column_name,
-            query_vector,
-            metric="cosine",
-            param_name=param_name,
-            approximate=True,
-            num_leaves_to_search=num_leaves_to_search,
-        )
-
-    def l2_distance(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build an L2 Euclidean distance expression for Cloud Spanner."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="l2", param_name=param_name)
-
-    def max_inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a dot-product expression for Cloud Spanner."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
-    def inner_product(self, query_vector: Sequence[float], *, param_name: str = "query_vec") -> VectorDistanceExpr:
-        """Build a dot-product expression for Cloud Spanner."""
-        return VectorDistanceExpr(self.column_name, query_vector, metric="inner_product", param_name=param_name)
-
 
 class BigQueryGeography(UserDefinedType[Any]):
     """Google BigQuery GEOGRAPHY column type for spatial data."""
 
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
     __slots__ = ()
 
     def get_col_spec(self, dialect_name: str | None = None, **kw: Any) -> str:
@@ -830,22 +718,47 @@ class MsgspecJSON(TypeDecorator[Any]):
     """Cross-database JSON/JSONB column type serialized through centralized msgspec encode/decode."""
 
     impl = JSON
-    cache_ok: bool = True
+    cache_ok: bool | None = True
+    operator_classes = OperatorClass.ANY
     __slots__ = ()
 
     def load_dialect_impl(self, dialect: Dialect | Any) -> TypeEngine[Any]:
         """Select the dialect-native JSON type implementation."""
         name = getattr(dialect, "name", "").lower()
         if name in ("postgresql", "cockroachdb", "spangres"):
-            return dialect.type_descriptor(JSONB())
+            return dialect.type_descriptor(postgresql.JSONB())
+        if name == "sqlite":
+            return dialect.type_descriptor(sqlite.JSONB())
         if name == "mssql":
-            return dialect.type_descriptor(NVARCHAR(None))
+            return dialect.type_descriptor(mssql.NVARCHAR(None))
+        if name == "oracle":
+            sv = getattr(dialect, "server_version_info", None)
+            if sv is not None and sv[0] < 21:
+                return dialect.type_descriptor(oracle.JSON(use_blob=True))
+            return dialect.type_descriptor(oracle.JSON())
         return dialect.type_descriptor(JSON())
 
+    def bind_processor(self, dialect: Dialect | Any) -> Any:
+        """Return a processor calling process_bind_param without double-encoding via sqltypes.JSON."""
+
+        def _process(value: Any) -> Any:
+            return self.process_bind_param(value, dialect)
+
+        return _process
+
+    def result_processor(self, dialect: Dialect | Any, coltype: Any) -> Any:
+        """Return a processor calling process_result_value directly on DBAPI results."""
+        _ = coltype
+
+        def _process(value: Any) -> Any:
+            return self.process_result_value(value, dialect)
+
+        return _process
+
     def process_bind_param(self, value: Any, dialect: Dialect | Any) -> Any:
-        """Encode Python structures to JSON strings using encode_json."""
+        """Encode Python values including str to JSON strings using encode_json."""
         _ = dialect
-        if value is None or isinstance(value, (bytes, str)):
+        if value is None or isinstance(value, bytes):
             return value
         return encode_json(value)
 
@@ -882,10 +795,71 @@ class MsgspecJSON(TypeDecorator[Any]):
         return "JSON"
 
 
-class BinaryJSON(MsgspecJSON):
-    """Compatibility subclass for legacy BinaryJSON references."""
+@compiles(_VectorDistance)
+def _compile_vector_distance_unsupported(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    _ = (element, kw)
+    dialect_name = getattr(compiler.dialect, "name", "unknown")
+    msg = (
+        f"Vector distance operations require a native vector backend; "
+        f"dialect {dialect_name!r} has no native distance operator."
+    )
+    raise NotImplementedError(msg)
 
-    __slots__ = ()
+
+@compiles(_VectorDistance, "postgresql")
+@compiles(_VectorDistance, "spangres")
+def _compile_vector_distance_postgresql(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    op = _PGVECTOR_OPERATORS.get(element.metric)
+    if op is None:
+        msg = f"Unsupported vector distance metric for pgvector: {element.metric!r}"
+        raise NotImplementedError(msg)
+    return f"({compiler.process(element.left, **kw)} {op} {compiler.process(element.right, **kw)})"
+
+
+@compiles(_VectorDistance, "oracle")
+def _compile_vector_distance_oracle(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    metric = _ORACLE_METRICS.get(element.metric)
+    if metric is None:
+        msg = f"Unsupported vector distance metric for Oracle 23ai: {element.metric!r}"
+        raise NotImplementedError(msg)
+    return f"VECTOR_DISTANCE({compiler.process(element.left, **kw)}, {compiler.process(element.right, **kw)}, {metric})"
+
+
+@compiles(_VectorDistance, "mysql")
+def _compile_vector_distance_mysql(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    fn = _MYSQL_DISTANCE_FUNCTIONS.get(element.metric)
+    if fn is None:
+        msg = f"Unsupported vector distance metric for MySQL: {element.metric!r}"
+        raise NotImplementedError(msg)
+    return f"{fn}({compiler.process(element.left, **kw)}, {compiler.process(element.right, **kw)})"
+
+
+@compiles(_VectorDistance, "bigquery")
+def _compile_vector_distance_bigquery(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    fn = _GCP_DISTANCE_FUNCTIONS.get(element.metric)
+    if fn is None or element.approximate:
+        msg = f"Unsupported vector distance metric for BigQuery: {element.metric!r}"
+        raise NotImplementedError(msg)
+    return f"{fn}({compiler.process(element.left, **kw)}, {compiler.process(element.right, **kw)})"
+
+
+@compiles(_VectorDistance, "spanner")
+def _compile_vector_distance_spanner(element: _VectorDistance, compiler: SQLCompiler, **kw: Any) -> str:
+    left_sql = compiler.process(element.left, **kw)
+    right_sql = compiler.process(element.right, **kw)
+    if element.approximate:
+        approx_fn = _SPANNER_APPROX_FUNCTIONS.get(element.metric)
+        if approx_fn is None:
+            msg = f"Unsupported approximate vector distance metric for Cloud Spanner: {element.metric!r}"
+            raise NotImplementedError(msg)
+        if element.options_json:
+            return f"{approx_fn}({left_sql}, {right_sql}, options => JSON '{element.options_json}')"
+        return f"{approx_fn}({left_sql}, {right_sql})"
+    fn = _GCP_DISTANCE_FUNCTIONS.get(element.metric)
+    if fn is None:
+        msg = f"Unsupported vector distance metric for Cloud Spanner: {element.metric!r}"
+        raise NotImplementedError(msg)
+    return f"{fn}({left_sql}, {right_sql})"
 
 
 @compiles(Vector, "bigquery")
@@ -904,6 +878,7 @@ def _compile_vector_spanner(element: Vector, compiler: Any, **kw: Any) -> str:
 
 
 @compiles(Vector, "postgresql")
+@compiles(Vector, "spangres")
 def _compile_vector_postgresql(element: Vector, compiler: Any, **kw: Any) -> str:
     _ = (compiler, kw)
     return f"VECTOR({element.dimensions})" if element.dimensions is not None else "VECTOR"
@@ -988,163 +963,3 @@ def _compile_spanner_vector(element: SpannerVector, compiler: Any, **kw: Any) ->
 def _compile_bq_geography(element: BigQueryGeography, compiler: Any, **kw: Any) -> str:
     _ = (element, compiler, kw)
     return "GEOGRAPHY"
-
-
-class SelectInLoadSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """SQLAlchemy 2.1 selectinload(chunksize=..., omit_join=...) configuration."""
-
-    relationship_name: str
-    chunksize: int = 500
-    omit_join: bool = True
-    recursion_depth: int | None = None
-
-    @property
-    def batch_size(self) -> int:
-        """Return the batch chunk size."""
-        return self.chunksize
-
-    def num_batches(self, total_keys: int) -> int:
-        """Return the number of IN (...) batches required for total_keys."""
-        if total_keys <= 0:
-            return 0
-        return (total_keys + self.chunksize - 1) // self.chunksize
-
-    @classmethod
-    def create(
-        cls,
-        relationship_name: str | Any,
-        *,
-        recursion_depth: int | None = None,
-        batch_size: int | None = None,
-        chunksize: int = 500,
-        omit_join: bool = True,
-    ) -> SelectInLoadSpec:
-        """Configure SQLAlchemy 2.1 selectinload with chunksize and omit_join=True."""
-        effective_chunksize = batch_size if batch_size is not None else chunksize
-        if effective_chunksize <= 0 or effective_chunksize > 1000:
-            msg = f"selectinload chunksize must be between 1 and 1000 (got {effective_chunksize})"
-            raise ValueError(msg)
-        name = (
-            relationship_name
-            if isinstance(relationship_name, str)
-            else getattr(relationship_name, "key", str(relationship_name))
-        )
-        return cls(
-            relationship_name=name,
-            chunksize=effective_chunksize,
-            omit_join=omit_join,
-            recursion_depth=recursion_depth,
-        )
-
-
-class InsertSentinelSpec(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """SQLAlchemy 2.1 orm_insert_sentinel() descriptor for deterministic bulk INSERT ... RETURNING."""
-
-    column_name: str = "_insert_sentinel"
-    table_name: str = ""
-    page_size: int = 1000
-    use_insertmanyvalues: bool = True
-    insert_executemany_returning: bool = True
-
-    @property
-    def sentinel_column(self) -> str:
-        """Return the sentinel column name."""
-        return self.column_name
-
-    @classmethod
-    def create(
-        cls,
-        table_name: str = "",
-        *,
-        sentinel_column: str = "_insert_sentinel",
-        column_name: str | None = None,
-        page_size: int = 1000,
-    ) -> InsertSentinelSpec:
-        """Configure SQLAlchemy 2.1 orm_insert_sentinel() for bulk INSERT ... RETURNING correlation."""
-        resolved_col = column_name if column_name is not None else sentinel_column
-        return cls(
-            column_name=resolved_col,
-            table_name=table_name,
-            page_size=page_size,
-        )
-
-
-class DeleteUsingClause(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """SQLAlchemy 2.1 Delete.using() multi-table delete descriptor."""
-
-    target_table: str
-    using_tables: tuple[str, ...]
-    where_sql: str | None = None
-
-    def to_sql(self) -> str:
-        """Render the DELETE FROM target USING tables WHERE statement."""
-        using_part = ", ".join(self.using_tables)
-        stmt = f"DELETE FROM {self.target_table} USING {using_part}"
-        if self.where_sql:
-            stmt = f"{stmt} WHERE {self.where_sql}"
-        return stmt
-
-    @classmethod
-    def create(
-        cls,
-        target_table: str,
-        *using_tables: str,
-        join_condition: str | None = None,
-        where_condition: str | None = None,
-        where_sql: str | None = None,
-    ) -> DeleteUsingClause:
-        """Build a SQLAlchemy 2.1 Delete.using() multi-table delete statement."""
-        if not using_tables:
-            msg = "Delete.using() requires at least one USING table"
-            raise ValueError(msg)
-        resolved_tables = list(using_tables)
-        inferred_join: str | None = None
-        if len(resolved_tables) >= 2 and ("=" in resolved_tables[-1] or " " in resolved_tables[-1].strip()):
-            inferred_join = resolved_tables.pop()
-        conditions = [c for c in (inferred_join, join_condition, where_condition, where_sql) if c]
-        combined_where = " AND ".join(conditions) if conditions else None
-        return cls(
-            target_table=target_table,
-            using_tables=tuple(resolved_tables),
-            where_sql=combined_where,
-        )
-
-
-class ParameterizedSQL(msgspec.Struct, frozen=True, gc=False, kw_only=True):
-    """Compiled parameterized SQL statement produced from a PEP 750 / SQLAlchemy 2.1 template."""
-
-    sql: str
-    params: dict[str, Any]
-
-    @classmethod
-    def from_template(
-        cls,
-        template: Any,
-        parts: Sequence[Any] | None = None,
-        *,
-        param_prefix: str = "p",
-    ) -> ParameterizedSQL:
-        """Compile static template parts and interpolated values into a bind-parameterized SQL query."""
-        if hasattr(template, "strings") and hasattr(template, "interpolations"):
-            static_parts: Sequence[str] = tuple(template.strings)
-            interpolated_values: Sequence[Any] = tuple(
-                getattr(interp, "value", interp) for interp in template.interpolations
-            )
-        elif isinstance(template, str):
-            raw_pairs = list(parts or ())
-            return cls(sql=template, params=dict(raw_pairs))
-        else:
-            static_parts = tuple(template)
-            interpolated_values = tuple(parts or ())
-
-        if len(static_parts) != len(interpolated_values) + 1:
-            msg = "static_parts must have length len(interpolated_values) + 1"
-            raise ValueError(msg)
-        fragments: list[str] = [static_parts[0]]
-        params: dict[str, Any] = {}
-        for idx, val in enumerate(interpolated_values, start=1):
-            pname = f"{param_prefix}_{idx}"
-            params[pname] = val
-            fragments.append(f":{pname}")
-            fragments.append(static_parts[idx])
-        return cls(sql="".join(fragments), params=params)

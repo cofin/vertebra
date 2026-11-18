@@ -19,10 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      agents: ${{ steps.filter.outputs.agents }}
       python: ${{ steps.filter.outputs.python }}
       rust: ${{ steps.filter.outputs.rust }}
+      rust_macos: ${{ steps.filter.outputs.rust_macos }}
       typescript: ${{ steps.filter.outputs.typescript }}
+      packaging: ${{ steps.filter.outputs.packaging }}
       docs: ${{ steps.filter.outputs.docs }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -34,11 +35,6 @@ jobs:
         id: filter
         with:
           filters: |
-            agents:
-              - '.agents/**'
-              - '.codex/**'
-              - 'AGENTS.md'
-              - '.github/workflows/ci.yml'
             python:
               - 'src/py/**'
               - 'tools/**'
@@ -46,8 +42,18 @@ jobs:
               - 'uv.lock'
             rust:
               - 'src/rs/**'
+            rust_macos:
+              - 'src/rs/**'
+              - '.github/workflows/ci.yml'
             typescript:
               - 'src/ts/**'
+            packaging:
+              - 'src/rs/vertebra-*/**'
+              - 'src/py/vertebra/**'
+              - 'tools/scripts/*wheel*.py'
+              - 'pyproject.toml'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
             docs:
               - 'docs/**'
               - 'zensical.toml'
@@ -61,23 +67,6 @@ jobs:
               - 'Makefile'
               - '.pre-commit-config.yaml'
               - 'biome.json'
-
-  review-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [changes]
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agents == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci == 'true'
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          python-version: "3.12"
-      - name: Validate review setup and OKF bundles
-        run: uv run --no-project --python 3.12 --with "msgspec>=0.18" python -m tools.scripts.review_setup validate
 
   lint:
     runs-on: ubuntu-latest
@@ -95,13 +84,21 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          python-version: "3.12"
       - name: Install dependencies
-        run: make ts-install
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          uv sync --frozen --all-extras --group test --group lint --group build --no-install-local
+          make ts-install && make ts-build
+          UV_NO_SYNC=1 make dev
       - name: Run lint
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -114,7 +111,7 @@ jobs:
     needs: [changes, lint]
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
@@ -127,6 +124,7 @@ jobs:
           workspaces: "src/rs"
           key: "py-${{ matrix.python-version }}"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: astral-sh/setup-uv@v7
         with:
@@ -136,10 +134,10 @@ jobs:
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
-        run: make py-test
+        run: uv sync --frozen --group test && UV_NO_SYNC=1 make py-test
       - name: Generate coverage
         if: matrix.python-version == '3.12'
-        run: make coverage
+        run: UV_NO_SYNC=1 make coverage
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v7
@@ -159,11 +157,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
+      - name: Provision Python runtime for embedded PyO3 tests
+        run: uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "msgspec>=0.18"
       - name: Check Windows target portability
         working-directory: src/rs
         run: cargo check -p vertebra-core --target x86_64-pc-windows-msvc --no-default-features
@@ -177,7 +182,7 @@ jobs:
 
   test-rust-macos:
     needs: [changes, lint]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust_macos == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -185,17 +190,29 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
-      - name: Test with macOS ulock and feature flags
+      - name: Provision Python runtime for embedded PyO3 tests
+        run: uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python "msgspec>=0.18"
+      - name: Test with macOS feature flags
         working-directory: src/rs
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
-        run: cargo test --workspace --features tls,http3,compression,gcp,macos-ulock
+        run: |
+          PY_BIN="$(realpath "$GITHUB_WORKSPACE/.venv/bin/python")"
+          PY_PREFIX="$("$PY_BIN" -c 'import sys; print(sys.base_prefix)')"
+          PY_LIBDIR="$("$PY_BIN" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+          PY_SITE="$("$GITHUB_WORKSPACE/.venv/bin/python" -c 'import os, site; print(os.pathsep.join(site.getsitepackages()))')"
+          PYTHONPATH="$GITHUB_WORKSPACE/src/py:$PY_SITE" PYTHONHOME="$PY_PREFIX" DYLD_FALLBACK_LIBRARY_PATH="$PY_LIBDIR" PYO3_PYTHON="$PY_BIN" cargo test --workspace --features tls,http3,compression,gcp
 
   test-typescript:
     runs-on: ubuntu-latest
@@ -246,6 +263,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -276,6 +294,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -283,9 +302,16 @@ jobs:
           enable-cache: true
           python-version: "3.12"
       - name: Install build and runtime dependencies
-        run: uv sync --frozen --group build
+        run: uv sync --frozen --group build --group test --group lint
       - name: Build TypeScript client bundle
         run: make ts-install && make ts-build
+      - name: Build _vertebra and _sqlite extensions for sqlite-test
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          uv run --no-sync maturin develop --manifest-path src/rs/vertebra-py/Cargo.toml
+          uv run --no-sync maturin develop --manifest-path src/rs/vertebra-sqlite/Cargo.toml
       - name: Verify vertebra-sqlite wheel isolation and run sqlite test suite
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -306,6 +332,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -336,6 +363,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -366,6 +394,7 @@ jobs:
         with:
           workspaces: "src/rs"
           shared-key: "vertebra"
+          cache-bin: false
           cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
       - uses: astral-sh/setup-uv@v7
@@ -381,6 +410,41 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: make valkey-wheel-check
+
+  optional-wheel-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes, lint]
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.packaging == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [duckdb, mysql, mssql, oracle, storage, bigquery, spanner, bundler]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src/rs"
+          key: "wheel-${{ matrix.package }}"
+          shared-key: "vertebra"
+          cache-on-failure: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install build and runtime dependencies
+        run: uv sync --frozen --group build
+      - name: Build TypeScript client bundle
+        run: make ts-install && make ts-build
+      - name: Verify vertebra-${{ matrix.package }} wheel isolation
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: make ${{ matrix.package }}-wheel-check
 
   postgres-conformance:
     runs-on: ubuntu-latest
@@ -512,7 +576,6 @@ jobs:
   conformance-oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
     needs: [changes, lint]
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     steps:
@@ -530,6 +593,10 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+      - name: Free runner disk space for Oracle 23ai image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
       - name: Build native extensions
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"

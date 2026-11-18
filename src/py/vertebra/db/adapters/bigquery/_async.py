@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Mapping, Sequence
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, Self
@@ -60,7 +61,7 @@ class AsyncBigQueryClientProtocol(Protocol):
         job_timeout_ms: int | None = None,
         priority: str | None = None,
         labels: dict[str, str] | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Execute a GoogleSQL query asynchronously."""
         ...
 
@@ -68,7 +69,7 @@ class AsyncBigQueryClientProtocol(Protocol):
         self,
         sql: str,
         params_json: str | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Validate ``sql`` asynchronously via ``jobs.insert(dryRun=True)``."""
         ...
 
@@ -90,7 +91,7 @@ class AsyncBigQueryClientProtocol(Protocol):
         parent_table: str,
         arrow_ipc_bytes: bytes,
         mode: str = "_default",
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Append an Arrow IPC stream asynchronously via the Storage Write API."""
         ...
 
@@ -181,14 +182,21 @@ class AsyncBigQueryDriver(AsyncDatabaseDriver[BigQueryConfig]):
         return self
 
     async def close(self) -> None:
-        """Roll back any active transaction and release the session and Rust client handle."""
-        if self._in_transaction:
-            with suppress(Exception):
-                await self.rollback()
-        self._session_id = None
-        self._in_transaction = False
-        self._client = None
-        self._closed = True
+        """Roll back any active transaction, close the Rust client, and release references."""
+        client = self._client
+        try:
+            if self._in_transaction:
+                with suppress(Exception):
+                    await self.rollback()
+            if client is not None:
+                res = client.close()
+                if inspect.isawaitable(res):
+                    await res
+        finally:
+            self._session_id = None
+            self._in_transaction = False
+            self._client = None
+            self._closed = True
 
     async def execute(
         self,

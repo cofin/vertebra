@@ -4,9 +4,12 @@ This module provides TaskRecord and MCPTaskStore implementing io.modelcontextpro
 with owner isolation, TTL expiry, and background queue lane integration.
 """
 
+import inspect
 import secrets
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 import anyio
 import msgspec
@@ -14,7 +17,9 @@ import msgspec
 from vertebra.agent.core.cursor import paginate_sequence
 from vertebra.agent.core.sse import SseFrame, SseStreamBroker
 from vertebra.agent.telemetry import AgentTelemetryRecorder
-from vertebra.utils.serializers import encode_json_bytes
+from vertebra.cache import SyncCacheStore
+from vertebra.framework.queues.base import TaskDef, TaskLane
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 MCPTaskStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
 _UNSCOPED_OWNER: Any = object()
@@ -68,7 +73,7 @@ class MCPTaskConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     """Configuration options for MCP tasks execution."""
 
     enabled: bool = True
-    """Enable durable `tasks/get`, `tasks/list`, `tasks/result`, and `tasks/cancel` methods."""
+    """Enable durable `tasks/get`, `tasks/list`, `tasks/update`, and `tasks/cancel` methods."""
     default_ttl_ms: int = 300_000
     """Default retention TTL in milliseconds (`5 minutes`) for newly created tasks."""
     max_ttl_ms: int = 3_600_000
@@ -86,13 +91,59 @@ class MCPTaskStore:
         queue_service: Any | None = None,
         telemetry: AgentTelemetryRecorder | None = None,
         stream_broker: SseStreamBroker | None = None,
+        _clock: Callable[[], float] | None = None,
     ) -> None:
         self.config = config if config is not None else MCPTaskConfig()
         self.queue_service = queue_service
         self.telemetry = telemetry if telemetry is not None else AgentTelemetryRecorder()
         self.stream_broker = stream_broker
+        self._clock: Callable[[], float] = _clock if _clock is not None else time.time
         self._tasks: dict[str, TaskRecord] = {}
+        self._created_at_ms: dict[str, int] = {}
         self._events: dict[str, anyio.Event] = {}
+
+    def prune_expired(self) -> int:
+        """Remove task records whose creation timestamp plus ttl_ms has elapsed."""
+        now_ms = int(self._clock() * 1000)
+        expired_ids: list[str] = []
+        for task_id, task in self._tasks.items():
+            created_ms = self._created_at_ms.get(task_id)
+            if created_ms is None:
+                created_ms = int(datetime.fromisoformat(task.created_at_iso).timestamp() * 1000)
+            if now_ms >= created_ms + task.ttl_ms:
+                expired_ids.append(task_id)
+        for task_id in expired_ids:
+            self._remove_task(task_id)
+        return len(expired_ids)
+
+    async def enqueue_execution(
+        self,
+        task_id: str,
+        runner: Callable[..., Any],
+        *,
+        task_name: str = "vertebra.mcp.execute_task",
+        lane: str = "agent",
+        **kwargs: Any,
+    ) -> Any:
+        """Schedule async task execution through the configured QueueService."""
+        if self.queue_service is None:
+            return None
+        if (
+            callable(getattr(self.queue_service, "register", None))
+            and isinstance(getattr(self.queue_service, "registered_tasks", None), dict)
+            and task_name not in self.queue_service.registered_tasks
+        ):
+            self.queue_service.register(TaskDef(name=task_name, fn=runner, lane=cast("TaskLane", lane)))
+        outcome = self.queue_service.enqueue(
+            task_name,
+            task_id=task_id,
+            lane=lane,
+            idempotency_key=task_id,
+            **kwargs,
+        )
+        if inspect.isawaitable(outcome):
+            return await outcome
+        return outcome
 
     def create(
         self,
@@ -102,7 +153,9 @@ class MCPTaskStore:
         poll_interval_ms: int | None = None,
     ) -> TaskRecord:
         """Create and persist a new task record in working state."""
+        self.prune_expired()
         task_id = f"task_{secrets.token_hex(12)}"
+        now_ms = int(self._clock() * 1000)
         now = self._now_iso()
         actual_ttl = min(ttl_ms or self.config.default_ttl_ms, self.config.max_ttl_ms)
         poll_interval = poll_interval_ms or self.config.poll_interval_ms
@@ -117,7 +170,7 @@ class MCPTaskStore:
             ttl_ms=actual_ttl,
             poll_interval_ms=poll_interval,
         )
-        self._tasks[task_id] = task
+        self._store_task(task, created_at_ms=now_ms)
         self._get_event(task_id)
         self._emit_status(task)
         return task
@@ -130,7 +183,8 @@ class MCPTaskStore:
 
     def get(self, task_id: str, owner_id: str | None = _UNSCOPED_OWNER) -> TaskRecord:
         """Retrieve a task record enforcing owner isolation."""
-        task = self._tasks.get(task_id)
+        self.prune_expired()
+        task = self._fetch_task(task_id)
         if task is None:
             raise TaskLookupError(f"Task '{task_id}' not found")
         if owner_id is not _UNSCOPED_OWNER and task.owner_id != owner_id:
@@ -144,8 +198,9 @@ class MCPTaskStore:
         limit: int = 50,
     ) -> tuple[list[TaskRecord], str | None]:
         """List tasks matching owner_id using cursor pagination."""
+        self.prune_expired()
         matched: list[TaskRecord] = []
-        for t in self._tasks.values():
+        for t in self._iter_tasks(owner_id=owner_id):
             if t.owner_id == owner_id:
                 matched.append(t)
         matched.sort(key=lambda t: t.created_at_iso, reverse=True)
@@ -197,7 +252,7 @@ class MCPTaskStore:
             result=current.result,
             error=current.error,
         )
-        self._tasks[task_id] = updated
+        self._store_task(updated)
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
@@ -227,7 +282,7 @@ class MCPTaskStore:
             result=current.result,
             error=current.error,
         )
-        self._tasks[task_id] = updated
+        self._store_task(updated)
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
@@ -257,7 +312,7 @@ class MCPTaskStore:
             result=current.result,
             error=current.error,
         )
-        self._tasks[task_id] = updated
+        self._store_task(updated)
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
@@ -282,7 +337,7 @@ class MCPTaskStore:
             result=dict(result),
             error=None,
         )
-        self._tasks[task_id] = updated
+        self._store_task(updated)
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
@@ -307,13 +362,30 @@ class MCPTaskStore:
             result=None,
             error=dict(error),
         )
-        self._tasks[task_id] = updated
+        self._store_task(updated)
         self._get_event(task_id).set()
         self._emit_status(updated)
         return updated
 
+    def _store_task(self, task: TaskRecord, *, created_at_ms: int | None = None) -> None:
+        self._tasks[task.task_id] = task
+        if created_at_ms is not None:
+            self._created_at_ms[task.task_id] = created_at_ms
+
+    def _fetch_task(self, task_id: str) -> TaskRecord | None:
+        return self._tasks.get(task_id)
+
+    def _iter_tasks(self, *, owner_id: str | None = None) -> list[TaskRecord]:
+        _ = owner_id
+        return list(self._tasks.values())
+
+    def _remove_task(self, task_id: str) -> None:
+        self._tasks.pop(task_id, None)
+        self._created_at_ms.pop(task_id, None)
+        self._events.pop(task_id, None)
+
     def _now_iso(self) -> str:
-        return datetime.now(UTC).isoformat()
+        return datetime.fromtimestamp(self._clock(), tz=UTC).isoformat()
 
     def _get_event(self, task_id: str) -> anyio.Event:
         if task_id not in self._events:
@@ -341,7 +413,190 @@ class MCPTaskStore:
             self.stream_broker.broadcast(frame)
 
 
+class CacheMCPTaskStore(MCPTaskStore):
+    """Distributed owner-scoped MCP task store backed by SyncCacheStore."""
+
+    def __init__(
+        self,
+        store: SyncCacheStore | None = None,
+        *,
+        cache_url: str = "memory://",
+        key_prefix: str = "vtb:mcp:task:",
+        config: MCPTaskConfig | None = None,
+        queue_service: Any | None = None,
+        telemetry: AgentTelemetryRecorder | None = None,
+        stream_broker: SseStreamBroker | None = None,
+        _clock: Callable[[], float] | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            queue_service=queue_service,
+            telemetry=telemetry,
+            stream_broker=stream_broker,
+            _clock=_clock,
+        )
+        self.key_prefix = key_prefix
+        self._owns_store = store is None
+        self._store: SyncCacheStore = (
+            store if store is not None else SyncCacheStore(cache_url, key_prefix=key_prefix, _clock=_clock)
+        )
+
+    def prune_expired(self) -> int:
+        """Remove cached task records whose creation timestamp plus ttl_ms has elapsed."""
+        now_ms = int(self._clock() * 1000)
+        task_ids = self._load_id_list(self._all_key())
+        if not task_ids:
+            return 0
+        kept_ids: list[str] = []
+        pruned = 0
+        for task_id in task_ids:
+            entry = self._load_entry(task_id)
+            if entry is None:
+                pruned += 1
+                self._events.pop(task_id, None)
+                continue
+            task, created_ms = entry
+            if now_ms >= created_ms + task.ttl_ms:
+                self._store.delete(self._item_key(task_id))
+                self._events.pop(task_id, None)
+                pruned += 1
+            else:
+                kept_ids.append(task_id)
+        if pruned:
+            self._save_id_list(self._all_key(), kept_ids)
+        return pruned
+
+    async def wait_for_result(
+        self,
+        task_id: str,
+        owner_id: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> TaskRecord:
+        """Wait until a cached task reaches a terminal state or requires input."""
+        task = self.get(task_id, owner_id)
+        if task.is_terminal or task.status == "input_required":
+            return task
+
+        event = self._get_event(task_id)
+        with anyio.fail_after(timeout_s):
+            while not task.is_terminal and str(task.status) != "input_required":
+                with anyio.move_on_after(0.02):
+                    await event.wait()
+                event = anyio.Event()
+                self._events[task_id] = event
+                task = self.get(task_id, owner_id)
+        return task
+
+    def close(self) -> None:
+        """Release the backing SyncCacheStore if owned by this task store."""
+        if self._owns_store:
+            self._store.close()
+
+    def _item_key(self, task_id: str) -> str:
+        return f"{self.key_prefix}item:{task_id}"
+
+    def _owner_key(self, owner_id: str | None) -> str:
+        encoded = owner_id if owner_id is not None else "__anonymous__"
+        return f"{self.key_prefix}owner:{encoded}"
+
+    def _all_key(self) -> str:
+        return f"{self.key_prefix}all"
+
+    def _load_entry(self, task_id: str) -> tuple[TaskRecord, int] | None:
+        raw = self._store.get(self._item_key(task_id))
+        if raw is None:
+            return None
+        parsed = decode_json(raw)
+        if not isinstance(parsed, dict) or "task" not in parsed:
+            return None
+        task = msgspec.convert(parsed["task"], TaskRecord)
+        created_ms = int(
+            parsed.get(
+                "created_at_ms",
+                int(datetime.fromisoformat(task.created_at_iso).timestamp() * 1000),
+            )
+        )
+        return task, created_ms
+
+    def _load_id_list(self, key: str) -> list[str]:
+        raw = self._store.get(key)
+        if raw is None:
+            return []
+        parsed = decode_json(raw)
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed]
+
+    def _save_id_list(self, key: str, ids: list[str]) -> None:
+        if not ids:
+            self._store.delete(key)
+            return
+        unique_ids = list(dict.fromkeys(ids))
+        self._store.set(key, encode_json_bytes(unique_ids), ttl=max(self.config.max_ttl_ms / 1000.0, 3600.0))
+
+    def _store_task(self, task: TaskRecord, *, created_at_ms: int | None = None) -> None:
+        existing = self._load_entry(task.task_id)
+        effective_created_ms = created_at_ms
+        if existing is not None:
+            existing_task, existing_created_ms = existing
+            if existing_task.is_terminal:
+                return
+            if effective_created_ms is None:
+                effective_created_ms = existing_created_ms
+        if effective_created_ms is None:
+            effective_created_ms = int(self._clock() * 1000)
+
+        elapsed_ms = max(0, int(self._clock() * 1000) - effective_created_ms)
+        remaining_ttl_s = max(0.001, (task.ttl_ms - elapsed_ms) / 1000.0)
+        payload = {"task": msgspec.to_builtins(task), "created_at_ms": effective_created_ms}
+        self._store.set(self._item_key(task.task_id), encode_json_bytes(payload), ttl=remaining_ttl_s)
+
+        all_ids = self._load_id_list(self._all_key())
+        if task.task_id not in all_ids:
+            all_ids.append(task.task_id)
+            self._save_id_list(self._all_key(), all_ids)
+
+        owner_key = self._owner_key(task.owner_id)
+        owner_ids = self._load_id_list(owner_key)
+        if task.task_id not in owner_ids:
+            owner_ids.append(task.task_id)
+            self._save_id_list(owner_key, owner_ids)
+
+    def _fetch_task(self, task_id: str) -> TaskRecord | None:
+        entry = self._load_entry(task_id)
+        if entry is None:
+            return None
+        task, created_ms = entry
+        now_ms = int(self._clock() * 1000)
+        if now_ms >= created_ms + task.ttl_ms:
+            self._remove_task(task_id)
+            return None
+        return task
+
+    def _iter_tasks(self, *, owner_id: str | None = None) -> list[TaskRecord]:
+        owner_key = self._owner_key(owner_id)
+        task_ids = self._load_id_list(owner_key)
+        tasks: list[TaskRecord] = []
+        kept_ids: list[str] = []
+        dirty = False
+        for task_id in task_ids:
+            task = self._fetch_task(task_id)
+            if task is not None:
+                tasks.append(task)
+                kept_ids.append(task_id)
+            else:
+                dirty = True
+        if dirty:
+            self._save_id_list(owner_key, kept_ids)
+        return tasks
+
+    def _remove_task(self, task_id: str) -> None:
+        self._store.delete(self._item_key(task_id))
+        self._events.pop(task_id, None)
+
+
 __all__ = [
+    "CacheMCPTaskStore",
     "MCPTaskConfig",
     "MCPTaskStatus",
     "MCPTaskStore",

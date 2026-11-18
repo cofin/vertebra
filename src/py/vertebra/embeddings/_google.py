@@ -98,6 +98,8 @@ class _GoogleEmbedder(Embedder):
         provider_label: str = "Google",
     ) -> None:
         """Initialize shared token cache normalization, transport, and per-loop micro-batching."""
+        if getattr(self, "_initialized", False):
+            return
         super().__init__(model=model, dimensions=dimensions, cache=cache)
         self._endpoint = endpoint.rstrip("/")
         if isinstance(token_cache, SyncGcpTokenCache):
@@ -376,6 +378,8 @@ class VertexEmbedder(_GoogleEmbedder):
         transport: GrpcTransportCallable | None = None,
     ) -> None:
         """Initialize the Vertex AI REST embedder without eager network I/O."""
+        if getattr(self, "_initialized", False):
+            return
         resolved_endpoint = (
             endpoint
             if endpoint is not None
@@ -690,6 +694,8 @@ class GeminiEmbedder(_GoogleEmbedder):
         transport: GrpcTransportCallable | None = None,
     ) -> None:
         """Initialize the Gemini embedder with API key or ADC authentication."""
+        if getattr(self, "_initialized", False):
+            return
         super().__init__(
             model=model,
             dimensions=dimensions,

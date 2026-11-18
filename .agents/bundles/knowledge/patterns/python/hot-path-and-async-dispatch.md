@@ -80,7 +80,6 @@ class HandlerSpec(msgspec.Struct, frozen=True, gc=False, cache_hash=True):
     invoker: Callable[..., Any]
     sync_to_thread: bool = False
 
-
 def compile_handler_table(handlers: Mapping[int, Callable[..., Any]]) -> dict[int, HandlerSpec]:
     """Pre-compile dispatch specs for all registered handler callables."""
     return {hid: compile_handler_spec(fn) for hid, fn in handlers.items()}

@@ -7,9 +7,12 @@ import re
 import subprocess
 import sys
 import tomllib
+import types
 import zipfile
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -45,6 +48,7 @@ from tools.pgo.rust_pgo import (
     validate_profdata,
 )
 from tools.scripts import build_server_binary as build_server_binary_mod
+from tools.scripts import check_extras as check_extras_mod
 from tools.scripts import smoke_vtb_run as smoke_vtb_run_mod
 from tools.scripts.build_server_binary import ServerBinaryBuilder, ServerBinaryTarget
 from tools.scripts.smoke_vtb_run import SmokeScenario, VtbRunSmoke
@@ -61,6 +65,7 @@ from vertebra.build.packaging import (
 )
 from vertebra.cli import cli
 from vertebra.cli.build import build as build_command
+from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import decode_json
 
@@ -290,9 +295,6 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     assert all(manifest.is_file() for manifest in EXTENSION_MANIFESTS)
     assert extension_module_name(rs_root / "vertebra-py" / "Cargo.toml") == "vertebra._vertebra"
     assert extension_module_name(rs_root / "vertebra-storage" / "Cargo.toml") == "vertebra._storage"
-    for name in ("pgo", "RustPGOConfig", "run_pgo_pipeline", "EXTENSION_MANIFESTS", "PythonBuildInfo"):
-        assert not hasattr(packaging_mod, name)
-        assert name not in packaging_mod.__all__
     assert not (repo_root / "src" / "py" / "vertebra" / "build" / "packaging" / "pgo.py").exists()
     extension_count = len(EXTENSION_MANIFESTS)
 
@@ -343,6 +345,17 @@ def test_resolve_cargo_release_dir_and_multi_extension_manifests(
     build_optimized_extensions(cfg_with_bin, valid_profdata)
     assert len(recorded_cmds) == extension_count
     assert all(f"-Cprofile-use={valid_profdata}" in flags for _, flags in recorded_cmds)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["pgo", "RustPGOConfig", "run_pgo_pipeline", "EXTENSION_MANIFESTS", "PythonBuildInfo"],
+    ids=["pgo", "RustPGOConfig", "run_pgo_pipeline", "EXTENSION_MANIFESTS", "PythonBuildInfo"],
+)
+def test_packaging_module_excludes_pgo_symbol(name: str) -> None:
+    """Verify PGO symbols remain excluded from vertebra.build.packaging and its __all__."""
+    assert not hasattr(packaging_mod, name)
+    assert name not in packaging_mod.__all__
 
 
 def test_build_optimized_falls_back_when_profdata_invalid(
@@ -1496,3 +1509,154 @@ def test_makefile_and_ci_release_workflows_wire_core_wheel_smoke_and_arm64() -> 
     assert "linux-arm64" in targets
     assert targets["linux-arm64"]["os"] == "ubuntu-24.04-arm"
     assert targets["linux-arm64"]["bin_name"] == "vertebra-server-linux-arm64"
+
+
+def test_check_extras_bidirectional_parity_on_repo() -> None:
+    """Verify check_extras reports zero mismatches on the finished repository."""
+    repo_root = Path(__file__).resolve().parents[5]
+    assert check_extras_mod.find_extras_mismatches(repo_root) == []
+    assert check_extras_mod.main(["--repo-root", str(repo_root)]) == 0
+
+
+@pytest.mark.parametrize(
+    ("extra_toml", "source_body", "expected_fragment"),
+    [
+        (
+            "",
+            'from vertebra.utils.module_loader import import_optional\nimport_optional("missing_pkg")\n',
+            "missing_pkg",
+        ),
+        (
+            'unused_extra = ["unused-pkg>=1.0"]\n',
+            "VALUE = 1\n",
+            "unused_extra",
+        ),
+        (
+            'extra_a = ["pkg-a>=1.0"]\n',
+            'import importlib\nimportlib.import_module("zstandard")\n',
+            "zstandard",
+        ),
+    ],
+)
+def test_check_extras_flags_unmapped_imports_and_unused_extras(
+    tmp_path: Path,
+    extra_toml: str,
+    source_body: str,
+    expected_fragment: str,
+) -> None:
+    """Verify check_extras flags both missing extras and extras lacking importers."""
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "sample"\nversion = "0.1.0"\n[project.optional-dependencies]\n{extra_toml}',
+        encoding="utf-8",
+    )
+    src_pkg = tmp_path / "src" / "py" / "vertebra"
+    src_pkg.mkdir(parents=True)
+    (src_pkg / "mod.py").write_text(source_body, encoding="utf-8")
+
+    mismatches = check_extras_mod.find_extras_mismatches(tmp_path)
+    assert mismatches
+    assert any(expected_fragment in item for item in mismatches)
+    assert check_extras_mod.main(["--repo-root", str(tmp_path)]) == 1
+
+
+def test_onefile_builder_compression_defaults_zstd_and_backtick_escaping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify OnefileBuilder defaults to zlib, supports zstd via CLI, and escapes shell backticks."""
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "__main__.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    (dist_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    target = BuildTarget.resolve("linux-x86_64", python_version="3.12")
+
+    class _FakeZstdCompressor:
+        def __init__(self, *, level: int = 19) -> None:
+            self.level = level
+
+        def compress(self, data: bytes) -> bytes:
+            return zlib.compress(data, level=1)
+
+    class _FakeZstdDecompressor:
+        def decompress(self, data: bytes) -> bytes:
+            return zlib.decompress(data)
+
+    fake_zstd: Any = types.ModuleType("zstandard")
+    fake_zstd.ZstdCompressor = _FakeZstdCompressor
+    fake_zstd.ZstdDecompressor = _FakeZstdDecompressor
+
+    with pytest.raises(ValueError, match="Unsupported onefile compression"):
+        OnefileBuilder(dist_dir, target, compression=cast("Any", "lz4"))
+
+    monkeypatch.setitem(sys.modules, "zstandard", fake_zstd)
+    default_bin = tmp_path / "default-bin"
+    OnefileBuilder(dist_dir, target).build(default_bin)
+    raw_default = default_bin.read_bytes()
+    meta_default = OnefileBuilder.inspect_trailer(default_bin)
+    payload_default = raw_default[meta_default["stub_size"] : meta_default["stub_size"] + meta_default["payload_size"]]
+    assert payload_default[:4] == b"ZLIB"
+
+    zstd_bin = tmp_path / "zstd-bin"
+    OnefileBuilder(dist_dir, target, compression="zstd").build(zstd_bin)
+    raw_zstd = zstd_bin.read_bytes()
+    meta_zstd = OnefileBuilder.inspect_trailer(zstd_bin)
+    payload_zstd = raw_zstd[meta_zstd["stub_size"] : meta_zstd["stub_size"] + meta_zstd["payload_size"]]
+    assert payload_zstd[:4] == b"ZSTD"
+    extracted_zstd = tmp_path / "extracted_zstd"
+    OnefileBuilder.extract_to(zstd_bin, extracted_zstd)
+    assert (extracted_zstd / "__main__.py").is_file()
+
+    project_dir = tmp_path / "cli_comp_app"
+    (project_dir / "app").mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "comp-app"\nversion = "0.1.0"\n', encoding="utf-8")
+    (project_dir / "app" / "__init__.py").write_text('"""App."""\n', encoding="utf-8")
+    cli_zstd_bin = tmp_path / "cli-zstd-bin"
+    res = CliRunner().invoke(
+        build_command,
+        [
+            "--project-dir",
+            str(project_dir),
+            "--standalone",
+            "--onefile",
+            "--compression",
+            "zstd",
+            "--target",
+            "linux-x86_64",
+            "--output",
+            str(cli_zstd_bin),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    cli_meta = OnefileBuilder.inspect_trailer(cli_zstd_bin)
+    cli_raw = cli_zstd_bin.read_bytes()
+    cli_payload = cli_raw[cli_meta["stub_size"] : cli_meta["stub_size"] + cli_meta["payload_size"]]
+    assert cli_payload[:4] == b"ZSTD"
+
+    monkeypatch.delitem(sys.modules, "zstandard", raising=False)
+    monkeypatch.setattr("vertebra.build.packaging.onefile.ensure_module", _raise_missing_zstd)
+    with pytest.raises(MissingDependencyError, match="zstandard") as exc_info:
+        OnefileBuilder(dist_dir, target, compression="zstd").build(tmp_path / "missing-zstd-bin")
+    assert exc_info.value.install_package == "vertebra-core[zstandard]"
+
+    sample_code = 'import sys\nsys.stdout.write("`backticks`")\n'
+    quoted = OnefileBuilder._quote_python_code(sample_code)
+    proc = subprocess.run(
+        ["/bin/sh", "-c", f"{sys.executable} -c {quoted}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "`backticks`"
+
+
+def _raise_missing_zstd(
+    module_name: str,
+    *,
+    package: str | None = None,
+    extra: str | None = None,
+    install_package: str | None = None,
+) -> object:
+    """Test helper raising MissingDependencyError for absent zstandard."""
+    _ = module_name
+    raise MissingDependencyError(package or "zstandard", install_package=install_package, extra=extra)

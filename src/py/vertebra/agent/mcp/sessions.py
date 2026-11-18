@@ -14,9 +14,12 @@ import anyio
 import msgspec
 
 from vertebra.agent.mcp.models import McpLogLevel
+from vertebra.cache import AsyncCacheStore
 from vertebra.typing import VertebraError
+from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = [
+    "CacheMCPSessionStore",
     "MCPSession",
     "MCPSessionStore",
     "SessionLimitExceededError",
@@ -197,3 +200,220 @@ class MCPSessionStore:
             entry = self._sessions.pop(session_id, None)
             if entry is not None:
                 self._remove_subscriptions_from_index(session_id, entry[0].subscriptions)
+
+
+class CacheMCPSessionStore:
+    """Distributed owner-scoped MCP session store backed by AsyncCacheStore."""
+
+    def __init__(
+        self,
+        store: AsyncCacheStore | None = None,
+        *,
+        cache_url: str = "memory://",
+        key_prefix: str = "vtb:mcp:sess:",
+        default_ttl: float = 3600.0,
+        max_sessions: int = 10_000,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        if default_ttl <= 0:
+            raise ValueError("default_ttl must be positive")
+        if max_sessions < 0:
+            raise ValueError("max_sessions must be non-negative")
+        self.default_ttl = float(default_ttl)
+        self.ttl_seconds = self.default_ttl
+        self.max_sessions = max_sessions
+        self.key_prefix = key_prefix
+        self._owns_store = store is None
+        self._store: AsyncCacheStore = (
+            store
+            if store is not None
+            else AsyncCacheStore(
+                cache_url,
+                default_ttl=self.default_ttl,
+                key_prefix=key_prefix,
+                _clock=clock,
+            )
+        )
+        self._lock = anyio.Lock()
+
+    async def create(
+        self,
+        *,
+        owner_id: str | None,
+        protocol_version: str,
+        client_capabilities: Mapping[str, Any] | None = None,
+        client_info: Mapping[str, Any] | None = None,
+        log_level: McpLogLevel = "info",
+    ) -> MCPSession:
+        """Create and persist a new owner-scoped session if within capacity."""
+        async with self._lock:
+            live_ids, _ = await self._load_active_sessions()
+            if len(live_ids) >= self.max_sessions:
+                raise SessionLimitExceededError(f"Maximum active MCP sessions ({self.max_sessions}) exceeded")
+            session_id = f"mcp_{secrets.token_hex(16)}"
+            now_unix_ms = int(time.time() * 1000)
+            ttl_ms = int(self.default_ttl * 1000)
+            session = MCPSession(
+                session_id=session_id,
+                owner_id=owner_id,
+                protocol_version=protocol_version,
+                client_capabilities=dict(client_capabilities) if client_capabilities is not None else {},
+                client_info=dict(client_info) if client_info is not None else {},
+                log_level=log_level,
+                subscriptions=frozenset(),
+                created_at_unix_ms=now_unix_ms,
+                expires_at_unix_ms=now_unix_ms + ttl_ms,
+            )
+            await self._store.set(self._item_key(session_id), encode_json_bytes(session), ttl=self.default_ttl)
+            live_ids.append(session_id)
+            await self._save_id_list(self._active_key(), live_ids)
+            return session
+
+    async def get(self, session_id: str, owner_id: str | None) -> MCPSession | None:
+        """Retrieve an active session if it exists and matches owner_id exactly."""
+        async with self._lock:
+            session = await self._load_session(session_id)
+            if session is None or session.owner_id != owner_id:
+                return None
+            return session
+
+    async def update(
+        self,
+        session_id: str,
+        owner_id: str | None,
+        *,
+        log_level: McpLogLevel | None = None,
+        subscriptions: frozenset[str] | None = None,
+    ) -> MCPSession | None:
+        """Update mutable session attributes while preserving owner isolation."""
+        async with self._lock:
+            current = await self._load_session(session_id)
+            if current is None or current.owner_id != owner_id:
+                return None
+            next_level = log_level if log_level is not None else current.log_level
+            next_subs = subscriptions if subscriptions is not None else current.subscriptions
+            updated = msgspec.structs.replace(
+                current,
+                log_level=next_level,
+                subscriptions=next_subs,
+            )
+            remaining_ttl = max(0.001, (current.expires_at_unix_ms - int(time.time() * 1000)) / 1000.0)
+            effective_ttl = min(self.default_ttl, remaining_ttl)
+            await self._store.set(self._item_key(session_id), encode_json_bytes(updated), ttl=effective_ttl)
+            if subscriptions is not None and subscriptions != current.subscriptions:
+                await self._remove_subscriptions_from_index(session_id, current.subscriptions - subscriptions)
+                await self._add_subscriptions_to_index(session_id, subscriptions - current.subscriptions)
+            return updated
+
+    async def delete(self, session_id: str, owner_id: str | None) -> MCPSession | None:
+        """Delete an active session and clear its subscription index entries."""
+        async with self._lock:
+            current = await self._load_session(session_id)
+            if current is None or current.owner_id != owner_id:
+                return None
+            await self._store.delete(self._item_key(session_id))
+            active_ids = await self._load_id_list(self._active_key())
+            if session_id in active_ids:
+                active_ids = [sid for sid in active_ids if sid != session_id]
+                await self._save_id_list(self._active_key(), active_ids)
+            await self._remove_subscriptions_from_index(session_id, current.subscriptions)
+            return current
+
+    async def subscribed_session_ids(self, uri: str) -> tuple[str, ...]:
+        """Return active session IDs currently subscribed to the specified resource URI."""
+        async with self._lock:
+            sub_key = self._sub_key(uri)
+            raw_ids = await self._load_id_list(sub_key)
+            if not raw_ids:
+                return ()
+            valid_ids: list[str] = []
+            dirty = False
+            for sid in raw_ids:
+                session = await self._load_session(sid)
+                if session is not None and uri in session.subscriptions:
+                    valid_ids.append(sid)
+                else:
+                    dirty = True
+            if dirty:
+                await self._save_id_list(sub_key, valid_ids)
+            return tuple(sorted(valid_ids))
+
+    async def active_session_ids(self) -> tuple[str, ...]:
+        """Return all non-expired session IDs currently tracked by the store."""
+        async with self._lock:
+            live_ids, _ = await self._load_active_sessions()
+            return tuple(live_ids)
+
+    async def active_sessions(self) -> tuple[MCPSession, ...]:
+        """Return all non-expired session snapshots currently tracked by the store."""
+        async with self._lock:
+            _, sessions = await self._load_active_sessions()
+            return tuple(sessions)
+
+    async def aclose(self) -> None:
+        """Release the backing AsyncCacheStore if owned by this session store."""
+        if self._owns_store:
+            await self._store.aclose()
+
+    def _item_key(self, session_id: str) -> str:
+        return f"{self.key_prefix}item:{session_id}"
+
+    def _active_key(self) -> str:
+        return f"{self.key_prefix}active"
+
+    def _sub_key(self, uri: str) -> str:
+        return f"{self.key_prefix}sub:{uri}"
+
+    async def _load_session(self, session_id: str) -> MCPSession | None:
+        raw = await self._store.get(self._item_key(session_id))
+        if raw is None:
+            return None
+        return msgspec.convert(decode_json(raw), MCPSession)
+
+    async def _load_id_list(self, key: str) -> list[str]:
+        raw = await self._store.get(key)
+        if raw is None:
+            return []
+        parsed = decode_json(raw)
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed]
+
+    async def _save_id_list(self, key: str, ids: list[str]) -> None:
+        if not ids:
+            await self._store.delete(key)
+            return
+        unique_ids = list(dict.fromkeys(ids))
+        await self._store.set(key, encode_json_bytes(unique_ids), ttl=max(self.default_ttl, 86400.0))
+
+    async def _load_active_sessions(self) -> tuple[list[str], list[MCPSession]]:
+        raw_ids = await self._load_id_list(self._active_key())
+        live_ids: list[str] = []
+        sessions: list[MCPSession] = []
+        dirty = False
+        for sid in raw_ids:
+            session = await self._load_session(sid)
+            if session is not None:
+                live_ids.append(sid)
+                sessions.append(session)
+            else:
+                dirty = True
+        if dirty:
+            await self._save_id_list(self._active_key(), live_ids)
+        return live_ids, sessions
+
+    async def _remove_subscriptions_from_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
+        for uri in subscriptions:
+            sub_key = self._sub_key(uri)
+            current_ids = await self._load_id_list(sub_key)
+            if session_id in current_ids:
+                updated_ids = [sid for sid in current_ids if sid != session_id]
+                await self._save_id_list(sub_key, updated_ids)
+
+    async def _add_subscriptions_to_index(self, session_id: str, subscriptions: frozenset[str]) -> None:
+        for uri in subscriptions:
+            sub_key = self._sub_key(uri)
+            current_ids = await self._load_id_list(sub_key)
+            if session_id not in current_ids:
+                current_ids.append(session_id)
+                await self._save_id_list(sub_key, current_ids)

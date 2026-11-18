@@ -125,16 +125,23 @@ async def test_handle_ws_ping_pong(middleware: DevMiddleware) -> None:
 
 
 @pytest.mark.anyio()
-async def test_dev_middleware_serves_wheel_bundled_client_and_hmr_subpath(middleware: DevMiddleware) -> None:
+@pytest.mark.parametrize(
+    "req_path",
+    ["/__vertebra/client/index.js", "/__vertebra/client/hmr.js"],
+    ids=["client-index", "client-hmr"],
+)
+async def test_dev_middleware_serves_wheel_bundled_client_and_hmr_subpath(
+    middleware: DevMiddleware,
+    req_path: str,
+) -> None:
     """DevMiddleware serves /__vertebra/client/index.js and /__vertebra/client/hmr.js from the wheel bundle."""
-    for req_path in ("/__vertebra/client/index.js", "/__vertebra/client/hmr.js"):
-        send = AsyncMock()
-        await middleware({"type": "http", "path": req_path}, AsyncMock(), send)
-        sent = [c.args[0] for c in send.call_args_list]
-        start = next(m for m in sent if m["type"] == "http.response.start")
-        body = next(m for m in sent if m["type"] == "http.response.body")
-        assert start["status"] == 200
-        assert len(body["body"]) > 50
+    send = AsyncMock()
+    await middleware({"type": "http", "path": req_path}, AsyncMock(), send)
+    sent = [c.args[0] for c in send.call_args_list]
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = next(m for m in sent if m["type"] == "http.response.body")
+    assert start["status"] == 200
+    assert len(body["body"]) > 50
 
 
 @pytest.mark.anyio()

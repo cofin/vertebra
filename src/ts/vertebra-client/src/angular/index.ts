@@ -23,7 +23,7 @@ export class ClientService {
 /**
  * Angular 21 Signal-based query.
  */
-export function injectQuery<TInput = any, TOutput = any>(
+export function injectQuery<TInput = unknown, TOutput = unknown>(
   method: string,
   path: string,
   input: () => TInput,
@@ -46,9 +46,9 @@ export function injectQuery<TInput = any, TOutput = any>(
       if (seq === requestSeq) {
         data.set(result);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (seq === requestSeq) {
-        error.set(err);
+        error.set(err instanceof Error ? err : new Error(String(err)));
       }
     } finally {
       if (seq === requestSeq) {
@@ -74,7 +74,7 @@ export function injectQuery<TInput = any, TOutput = any>(
 /**
  * Angular 21 Signal-based mutation.
  */
-export function injectMutation<TInput = any, TOutput = any>(method: string, path: string) {
+export function injectMutation<TInput = unknown, TOutput = unknown>(method: string, path: string) {
   const service = inject(ClientService);
   const loading = signal(false);
   const error = signal<Error | null>(null);
@@ -84,8 +84,8 @@ export function injectMutation<TInput = any, TOutput = any>(method: string, path
     error.set(null);
     try {
       return await service.getClient().call<TInput, TOutput>(method, path, input);
-    } catch (err: any) {
-      error.set(err);
+    } catch (err: unknown) {
+      error.set(err instanceof Error ? err : new Error(String(err)));
       throw err;
     } finally {
       loading.set(false);

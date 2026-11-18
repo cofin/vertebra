@@ -15,6 +15,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-17T08:15:00Z"
+    commit: 5a833832
+  - by: agent:flow-executor
     at: "2026-11-09T15:06:00Z"
     commit: af1b3d30
   - by: agent:flow-setup
@@ -34,8 +37,8 @@ sources:
   resource: src/py/vertebra/db/registry.py
   title: Declarative adapter configuration registration and lazy driver resolution
 - id: src-db-boundary-tests
-  resource: src/py/tests/unit/db/test_native_db_drivers.py
-  title: Native DB import boundaries and channel capability regressions
+  resource: src/py/tests/unit/db/test_db_capabilities_and_purity_gates.py
+  title: Driver capability protocols, pool_key isolation, and AST import boundary regressions
 - id: src-agent-tools
   resource: src/py/vertebra/agent/tools/__init__.py
   title: Generic typed ToolProvider adaptation and caller-bound confirmation
@@ -104,7 +107,7 @@ The registry's declarative config registration and annotation-only driver import
 
 ## Consequences
 
-- `vertebra-db` implements shared transport, framing, completion queues, `VTBARROW` SHM cursors, cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`), and RESP3 codecs with zero external C client libraries required at runtime; `vertebra-bigquery`, `vertebra-spanner`, `vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, and `vertebra-duckdb` ship standalone PyO3 driver wheels (`vertebra._*`), `sqlite` uses Python stdlib `sqlite3`, and `redis`/`valkey` pair `vertebra-db` RESP3 codecs with Python network streams.
+- `vertebra-db` implements shared transport, framing, completion queues, `VTBARROW` SHM cursors, and cloud dialers (`CloudSqlDialer` `:3307`, `AlloyDbDialer` `:5433`) with zero external C client libraries required at runtime. All 10 database and cache drivers (`vertebra-bigquery`, `vertebra-spanner`, `vertebra-postgres`, `vertebra-mysql`, `vertebra-mssql`, `vertebra-oracle`, `vertebra-duckdb`, `vertebra-sqlite`, `vertebra-redis`, and `vertebra-valkey`) ship standalone PyO3 driver wheels (`vertebra._*`, alongside `vertebra-bundler` and `vertebra-storage` for 12 total companion PyO3 crates).
 - `vertebra.extensions.sqlspec`, `vertebra.extensions.alchemy`, and `vertebra.extensions.sqlalchemy` expose drop-in adapter configs and `+vtb` dialects backed by `LeaseBroker`, `StatementCache`, and `hydrate_rows_vectorcall`.
 
 Provenance sources: [^src-vertebra-core-src-broker-rs], [^src-vertebra-db-src-lib-rs], [^src-db-init-py], [^src-extensions-sqlspec-init-py], [^src-extensions-alchemy-init-py], [^src-extensions-sqlalchemy-dialects-py].
@@ -114,11 +117,11 @@ Provenance sources: [^src-vertebra-core-src-broker-rs], [^src-vertebra-db-src-li
 [^src-db-init-py]: `src/py/vertebra/db/__init__.py` — Python implementation module (src/py/vertebra/db/__init__.py).
 [^src-extensions-sqlspec-init-py]: `src/py/vertebra/extensions/sqlspec/__init__.py` — Python implementation module (src/py/vertebra/extensions/sqlspec/__init__.py).
 [^src-extensions-alchemy-init-py]: `src/py/vertebra/extensions/alchemy/__init__.py` — Python implementation module (src/py/vertebra/extensions/alchemy/__init__.py).
-[^src-extensions-sqlalchemy-dialects-py]: `src/py/vertebra/extensions/sqlalchemy/dialects.py` — Python implementation module (src/py/vertebra/extensions/sqlalchemy/dialects.py).
+[^src-extensions-sqlalchemy-dialects-py]: `src/py/vertebra/extensions/sqlalchemy/dialects/__init__.py` — Per-engine SQLAlchemy 2.1 sync and async dialects.
 
 [^src-db-contracts]: `src/py/vertebra/db/driver/_common.py` — Generic configuration contract and broker dialect identifiers.
 [^src-db-registry]: `src/py/vertebra/db/registry.py` — Declarative adapter configuration registration and lazy driver resolution.
-[^src-db-boundary-tests]: `src/py/tests/unit/db/test_native_db_drivers.py` — Native DB import boundaries and channel capability regressions.
+[^src-db-boundary-tests]: `src/py/tests/unit/db/test_db_capabilities_and_purity_gates.py` — Driver capability protocols, `pool_key` isolation, and AST import boundary regressions.
 [^src-agent-tools]: `src/py/vertebra/agent/tools/__init__.py` — Generic typed ToolProvider adaptation and caller-bound confirmation.
 [^src-tool-contracts]: `src/py/vertebra/_typing.py` — Neutral ToolProvider and ToolPolicyError contracts exported through vertebra.typing.
 [^src-tool-typing-facade]: `src/py/vertebra/typing.py` — Public neutral provider contract exports.

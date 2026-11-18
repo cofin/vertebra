@@ -1,6 +1,8 @@
 """SQL Server (MSSQL) synchronous and asynchronous SQLSpec drivers over Vertebra TDS 7.4."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import ExecutionResult, validate_savepoint_name
@@ -17,11 +19,16 @@ from vertebra.extensions.sqlspec.adapters.mssql.data_dictionary import (
     MSSQLSyncDataDictionary,
 )
 
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.mssql._typing import MSSQLDriverFeatures
+
 __all__ = ("MSSQLAsyncDriver", "MSSQLSyncDriver")
 
 
 class MSSQLSyncDriver(BaseSyncDriver):
     """Synchronous SQL Server SQLSpec driver backed by Vertebra `SyncMSSQLDriver` (`tsql`)."""
+
+    __slots__ = ("_data_dictionary",)
 
     dialect: str = "tsql"
     _execution_parameter_style = ParameterStyle.QMARK
@@ -30,7 +37,7 @@ class MSSQLSyncDriver(BaseSyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: MSSQLDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -39,7 +46,7 @@ class MSSQLSyncDriver(BaseSyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -98,7 +105,7 @@ class MSSQLSyncDriver(BaseSyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = exec_many_fn(sql, param_sets)
+            res = cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0
@@ -111,6 +118,8 @@ class MSSQLSyncDriver(BaseSyncDriver):
 class MSSQLAsyncDriver(BaseAsyncDriver):
     """Asynchronous SQL Server SQLSpec driver backed by Vertebra `AsyncMSSQLDriver` (`tsql`)."""
 
+    __slots__ = ("_data_dictionary",)
+
     dialect: str = "tsql"
     _execution_parameter_style = ParameterStyle.QMARK
 
@@ -118,7 +127,7 @@ class MSSQLAsyncDriver(BaseAsyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: MSSQLDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -127,7 +136,7 @@ class MSSQLAsyncDriver(BaseAsyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -157,7 +166,7 @@ class MSSQLAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
             return
         await self.connection.execute(f"SAVE TRANSACTION {valid}")
 
@@ -166,14 +175,14 @@ class MSSQLAsyncDriver(BaseAsyncDriver):
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "release_savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Roll back to a T-SQL savepoint asynchronously via `ROLLBACK TRANSACTION <name>`."""
         valid = validate_savepoint_name(name)
         fn = getattr(self.connection, "rollback_to_savepoint", None)
         if callable(fn):
-            await fn(valid)
+            await cast("Any", fn)(valid)
             return
         await self.connection.execute(f"ROLLBACK TRANSACTION {valid}")
 
@@ -186,7 +195,7 @@ class MSSQLAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = await exec_many_fn(sql, param_sets)
+            res = await cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0

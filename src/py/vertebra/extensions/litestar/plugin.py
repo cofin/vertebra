@@ -1,12 +1,13 @@
 """First-class Litestar plugin activating Vertebra Rust accelerations and CLI server lifespan hooks."""
 
+from __future__ import annotations
+
 import contextlib
 import os
 import sys
-from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 
@@ -18,6 +19,7 @@ from vertebra.cli._launch import (
 )
 from vertebra.cli.banner import render_banner
 from vertebra.cli.errors import EXIT_CONFIG_ERROR, CLIError
+from vertebra.extensions.litestar import channels as litestar_channels
 from vertebra.extensions.litestar.config import VertebraConfig
 from vertebra.extensions.litestar.fastpath import (
     CompiledRoute,
@@ -26,16 +28,19 @@ from vertebra.extensions.litestar.fastpath import (
 )
 from vertebra.extensions.litestar.offload import (
     OffloadPlan,
-    _is_rust_offload_active,
     offload_middlewares,
 )
 from vertebra.extensions.litestar.router import extract_routes
 from vertebra.extensions.litestar.store import swap_response_cache_store
 from vertebra.server._fastpath_core import FASTPATH_ATTR, get_attached_fastpath, set_attached_fastpath
 from vertebra.server._loops import LOOP_BACKEND_CHOICES
+from vertebra.server._offload import is_rust_offload_active
 from vertebra.supervisor._supervisor import build_server_command, run_supervisor
 from vertebra.typing import MissingDependencyError
 from vertebra.utils.module_loader import import_optional
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 __all__ = (
     "VertebraPlugin",
@@ -88,7 +93,7 @@ class VertebraPlugin:
             backend = str(getattr(app_config.compression_config, "backend", "gzip") or "gzip").strip().lower()
             if backend in {"gzip", "brotli", "br", "zstd"}:
                 app_config.state["_vertebra_offloaded_compression_config"] = app_config.compression_config
-                if _is_rust_offload_active():
+                if is_rust_offload_active():
                     app_config.compression_config = None
 
         if self._config.offload_cors and app_config.cors_config is not None:
@@ -96,8 +101,9 @@ class VertebraPlugin:
 
         if self._config.enable_health_endpoint:
             health_path = self._config.health_path
+            litestar_get = _load_litestar_get()
 
-            @_litestar_get(health_path, include_in_schema=False)
+            @litestar_get(health_path, include_in_schema=False)
             async def _vertebra_health_probe() -> dict[str, str]:
                 return {"status": "ok"}
 
@@ -144,6 +150,9 @@ class VertebraPlugin:
                     raw_plugin.on_app_init = lambda cfg: cfg
                     app_config = original_on_init(app_config)
 
+        if self._config.swap_memory_channels:
+            self._swap_memory_channels(app_config)
+
         if self._config.enable_fastpath_bypass:
             try:
                 self._router_table = extract_routes(app_config)
@@ -163,7 +172,7 @@ class VertebraPlugin:
             plugin_ref = self
 
             @contextlib.asynccontextmanager
-            async def _vertebra_finalize_lifespan(app: Any) -> Any:
+            async def _vertebra_finalize_lifespan(app: Any) -> AsyncIterator[None]:
                 plugin_ref.ensure_finalized(app)
                 yield
 
@@ -192,8 +201,25 @@ class VertebraPlugin:
         self.ensure_finalized(app)
         yield
 
+    def _swap_memory_channels(self, app_config: Any) -> None:
+        configured_plugins = getattr(app_config, "plugins", None) or ()
+        mem_mod = import_optional("litestar.channels.backends.memory")
+        mem_backend_cls = getattr(mem_mod, "MemoryChannelsBackend", None) if mem_mod is not None else None
+        for raw_plugin in configured_plugins:
+            backend = getattr(raw_plugin, "_backend", None)
+            if backend is None:
+                continue
+            is_memory_backend = (
+                isinstance(backend, mem_backend_cls)
+                if mem_backend_cls is not None
+                else type(backend).__name__ == "MemoryChannelsBackend"
+            )
+            if is_memory_backend:
+                history = int(getattr(backend, "_max_history_length", getattr(backend, "history", 0)) or 0)
+                raw_plugin._backend = litestar_channels.ChannelsBackend(history=history)
+
     def _finalize_app_acceleration(self, app: Any) -> None:
-        rust_active = _is_rust_offload_active()
+        rust_active = is_rust_offload_active()
         self._offload_plan = offload_middlewares(
             app,
             config=self._config,
@@ -273,7 +299,7 @@ def enter_litestar_server_lifespan(app: Any, *, app_path: str | None = None) -> 
         for plugin in cli_plugins:
             lifespan_fn = getattr(plugin, "server_lifespan", None)
             if callable(lifespan_fn):
-                stack.enter_context(lifespan_fn(app))
+                stack.enter_context(cast("contextlib.AbstractContextManager[Any]", lifespan_fn(app)))
         if state is not None and hasattr(state, "get"):
             offload_json = state.get("vertebra_offload_config_json")
             if isinstance(offload_json, str) and offload_json:
@@ -524,14 +550,7 @@ def _build_litestar_run_command(plugin: VertebraPlugin) -> click.Command:
 
 def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
     mod = import_optional("litestar")
-    plugins_mod = import_optional("litestar.plugins")
-    if mod is not None and plugins_mod is not None:
-        for proto_name in ("InitPluginProtocol", "CLIPlugin", "CLIPluginProtocol"):
-            proto = getattr(plugins_mod, proto_name, None)
-            reg = getattr(proto, "register", None)
-            if callable(reg):
-                with contextlib.suppress(TypeError):
-                    reg(VertebraPlugin)
+    if mod is not None:
         get_fn: Callable[..., Callable[[Callable[..., Any]], Any]] = mod.get
         return get_fn
 
@@ -549,6 +568,3 @@ def _load_litestar_get() -> Callable[..., Callable[[Callable[..., Any]], Any]]:
         return wrap
 
     return fallback_get
-
-
-_litestar_get = _load_litestar_get()

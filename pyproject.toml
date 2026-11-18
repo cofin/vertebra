@@ -59,18 +59,15 @@ vtb = "vertebra.cli:cli"
 
 [project.optional-dependencies]
 sqlspec = [
-    "sqlspec>=0.71.1",
+    "sqlspec>=0.72.0",
 ]
 adk = [
-    "google-adk>=1.0.0",
+    "google-adk>=2.14.1",
 ]
 alchemy = [
-    "advanced-alchemy>=1.12.0",
-    "sqlalchemy>=2.0.36",
-    "alembic>=1.14.0",
-]
-dogpile = [
-    "dogpile.cache>=1.3.3",
+    "advanced-alchemy>=1.13.0b1",
+    "sqlalchemy>=2.1.0",
+    "alembic>=1.18.0",
 ]
 arrow = [
     "pyarrow>=18.0.0",
@@ -96,6 +93,7 @@ fastapi = [
 ]
 flask = [
     "flask>=3.0.0",
+    "flask-caching>=2.3.0",
 ]
 django = [
     "django>=6.0",
@@ -139,6 +137,33 @@ embeddings = [
 ]
 iap = [
     "pyjwt[crypto]>=2.9.0",
+]
+cryptography = [
+    "cryptography>=42.0",
+]
+datafusion = [
+    "datafusion>=40.0",
+]
+google-genai = [
+    "google-genai>=1.0",
+]
+httpx = [
+    "httpx>=0.27",
+]
+numpy = [
+    "numpy>=1.26",
+]
+pandas = [
+    "pandas>=2.2",
+]
+uuid-utils = [
+    "uuid-utils>=0.9",
+]
+wasmtime = [
+    "wasmtime>=25.0",
+]
+zstandard = [
+    "zstandard>=0.23",
 ]
 bigquery = [
     "vertebra-bigquery==0.3.0",
@@ -208,13 +233,18 @@ doc = [
 test = [
     "pytest",
     "pytest-cov>=5.0",
-    "pytest-databases>=0.20.0b1",
+    "pytest-databases>=0.20.0b3",
     "pytest-xdist>=3.6.1",
     "anyio",
-    "sqlspec>=0.71.1",
-    "advanced-alchemy>=1.12.0",
-    "sqlalchemy>=2.0.36",
-    "alembic>=1.14.0",
+    "sqlspec>=0.72.0",
+    "google-adk>=2.14.1",
+    "advanced-alchemy>=1.13.0b1",
+    "sqlalchemy>=2.1.0",
+    "alembic>=1.18.0",
+    "duckdb-engine; python_version < '3.14'",
+    "sqlalchemy-bigquery; python_version < '3.14'",
+    "sqlalchemy-spanner; python_version < '3.14'",
+    "protobuf>=5.0",
     "pyarrow>=18.0.0",
     "pydantic>=2.9.0",
     "attrs>=24.0.0",
@@ -222,8 +252,8 @@ test = [
     "starlette>=0.40.0",
     "fastapi>=0.115.0",
     "flask>=3.0.0",
+    "flask-caching>=2.3.0",
     "django>=6.0",
-    "dogpile.cache>=1.3.3",
     "litestar-queues>=0.14.0",
     "litestar-security>=0.6.0",
     "litestar-autowire>=0.2.0",
@@ -238,6 +268,7 @@ test = [
 lint = [
     "ruff",
     "mypy",
+    "pyright==1.1.381",
     "django-stubs>=6.1.2",
 ]
 build = [
@@ -332,8 +363,28 @@ markers = [
     "postgres_benchmark: live PostgreSQL comparative benchmark suite against psycopg and asyncpg",
 ]
 
+[tool.coverage.run]
+source = ["src/py/vertebra"]
+omit = [
+    "src/py/vertebra/server/_js/**",
+    "src/py/tests/**",
+]
+
 [tool.coverage.report]
-ignore_errors = true
+omit = [
+    "src/py/vertebra/server/_js/**",
+    "src/py/tests/**",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["src/py/vertebra"]
+exclude = ["**/__pycache__", "src/py/vertebra/server/_js/bundle"]
+typeCheckingMode = "standard"
+reportMissingImports = "error"
+reportMissingTypeStubs = "none"
+reportUnusedImport = "error"
+reportUnusedVariable = "warning"
 
 [tool.mypy]
 python_version = "3.12"
@@ -362,31 +413,16 @@ module = [
     "rloop",
     "zuvloop",
     "concurrent.interpreters",
-    "duckdb_engine",
-    "duckdb_engine.*",
     "sqlalchemy_bigquery",
     "sqlalchemy_bigquery.*",
     "google.cloud.sqlalchemy_spanner",
     "google.cloud.sqlalchemy_spanner.*",
-    "google.cloud.*",
-    "dogpile",
-    "dogpile.*",
     "django_spanner",
     "django_spanner.*",
     "spikard",
     "spikard.*",
 ]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [
-    "vertebra.extensions.sqlalchemy.dialects.spanner",
-    "vertebra.extensions.sqlalchemy.dialects.bigquery",
-    "vertebra.extensions.sqlalchemy.dialects.duckdb",
-    "vertebra.extensions.alchemy.cache",
-    "vertebra.extensions.django.db.backends.*",
-]
-disallow_subclassing_any = false
 
 [tool.bumpversion]
 allow_dirty = true
@@ -556,3 +592,63 @@ replace = 'version = "{new_version}"'
 filename = "src/ts/vertebra-client/package.json"
 search = '"version": "{current_version}"'
 replace = '"version": "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-bigquery/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-bundler/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-duckdb/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-mssql/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-mysql/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-oracle/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-postgres/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-redis/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-spanner/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-sqlite/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-storage/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "src/rs/vertebra-valkey/pyproject.toml"
+search = 'vertebra-core=={current_version}'
+replace = 'vertebra-core=={new_version}'

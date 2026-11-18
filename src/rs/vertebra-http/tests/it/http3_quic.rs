@@ -12,17 +12,22 @@ use tempfile::NamedTempFile;
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
+use vertebra_core::bridge::BatchBridge;
 use vertebra_http::batcher::PendingRequest;
 use vertebra_http::body::{FrameReceiver, PendingResponse};
-use vertebra_http::config::{ServerConfig, TlsConfig};
+use vertebra_http::config::{ServerConfig, TlsConfig, Topology};
 use vertebra_http::dispatcher::Dispatcher;
 use vertebra_http::http3::{
     Http3Config, build_quic_server_config, format_alt_svc_header, inject_alt_svc_header,
-    serve_http3_endpoint, strip_hop_by_hop_headers,
+    serve_http3_endpoint, serve_http3_with_webtransport, strip_hop_by_hop_headers,
 };
 use vertebra_http::payload::PayloadLimits;
 use vertebra_http::routing::{RouteTable, Router};
 use vertebra_http::server;
+use vertebra_http::webtransport::{
+    WEBTRANSPORT_BI_STREAM_TYPE, WebTransportSession, decode_quarter_stream_datagram,
+    decode_varint, encode_bidi_stream_header, encode_quarter_stream_datagram,
+};
 
 async fn connect_h3_client(
     addr: SocketAddr,
@@ -112,6 +117,7 @@ async fn test_http3_quic_unary_and_streaming_roundtrip() {
         alt_svc_max_age: 86_400,
         max_concurrent_bidi_streams: 128,
         keep_alive_interval_ms: 5_000,
+        ..Default::default()
     };
 
     let quic_server_config = build_quic_server_config(tls_config, &h3_cfg).unwrap();
@@ -337,6 +343,7 @@ async fn test_run_with_listener_serves_live_http3_and_advertises_alt_svc() {
             alt_svc_max_age: 7200,
             max_concurrent_bidi_streams: 64,
             keep_alive_interval_ms: 5_000,
+            ..Default::default()
         },
         ..ServerConfig::default()
     });
@@ -650,4 +657,513 @@ async fn test_run_with_listener_omits_alt_svc_when_http3_disabled_and_fails_loud
         err.to_string().contains("TLS"),
         "expected error mentioning TLS, got: {err}"
     );
+}
+
+fn build_test_tls_server_config() -> (
+    rustls::ServerConfig,
+    rustls::pki_types::CertificateDer<'static>,
+) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
+    );
+    let tls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .unwrap();
+    (tls_config, cert_der)
+}
+
+async fn connect_webtransport_h3_client(
+    addr: SocketAddr,
+    cert_der: &[u8],
+) -> (
+    quinn::Endpoint,
+    quinn::Connection,
+    h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(cert_der.to_vec()))
+        .unwrap();
+    let mut client_tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_tls.alpn_protocols = vec![b"h3".to_vec()];
+
+    let quic_client_cfg = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).unwrap();
+    let mut transport = quinn::TransportConfig::default();
+    transport.datagram_receive_buffer_size(Some(65_536));
+    transport.datagram_send_buffer_size(65_536);
+
+    let mut quinn_client_cfg = quinn::ClientConfig::new(Arc::new(quic_client_cfg));
+    quinn_client_cfg.transport_config(Arc::new(transport));
+
+    let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client_endpoint.set_default_client_config(quinn_client_cfg);
+
+    let conn = client_endpoint
+        .connect(addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (mut driver, send_req) = h3::client::builder()
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .build(h3_quinn::Connection::new(conn.clone()))
+        .await
+        .unwrap();
+    let driver_task = tokio::spawn(async move {
+        while futures_util::future::poll_fn(|cx| driver.inner.poll_control(cx))
+            .await
+            .is_ok()
+        {}
+    });
+    (client_endpoint, conn, send_req, driver_task)
+}
+
+#[tokio::test]
+async fn test_webtransport_connect_bidi_streams_datagrams_and_concurrent_h3() {
+    use bytes::Buf as _;
+
+    let (tls_config, cert_der) = build_test_tls_server_config();
+    let h3_cfg = Http3Config {
+        enabled: true,
+        enable_webtransport: true,
+        max_webtransport_sessions: 16,
+        ..Default::default()
+    };
+    let quic_server_config = build_quic_server_config(tls_config, &h3_cfg).unwrap();
+    let endpoint =
+        quinn::Endpoint::server(quic_server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let local_addr = endpoint.local_addr().unwrap();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (session_closed_tx, session_closed_rx) = oneshot::channel::<()>();
+    let session_closed_tx = Arc::new(std::sync::Mutex::new(Some(session_closed_tx)));
+
+    let http_handler = Arc::new(|req: Request<Bytes>| async move {
+        let mut out = b"h3-ok:".to_vec();
+        out.extend_from_slice(req.body());
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Either::<Full<Bytes>, FrameReceiver>::Left(Full::new(
+                Bytes::from(out),
+            )))
+            .unwrap()
+    });
+
+    let wt_handler = Arc::new(move |session: WebTransportSession| {
+        let session_closed_tx = Arc::clone(&session_closed_tx);
+        tokio::spawn(async move {
+            assert_eq!(session.path(), "/wt?room=1");
+            assert!(
+                session
+                    .headers()
+                    .iter()
+                    .any(|(k, v)| k == b"x-wt-client" && v == b"yes")
+            );
+            let session = Arc::new(session);
+
+            let push_stream = session.open_bi().await.unwrap();
+            push_stream.send(b"server-push").await.unwrap();
+            push_stream.finish().await.unwrap();
+
+            let s_bidi = Arc::clone(&session);
+            let bidi_task = tokio::spawn(async move {
+                while let Ok(stream) = s_bidi.accept_bi().await {
+                    let payload = stream.recv(1024).await.unwrap();
+                    let mut reply = b"echo:".to_vec();
+                    reply.extend_from_slice(&payload);
+                    stream.send(&reply).await.unwrap();
+                    stream.finish().await.unwrap();
+                }
+            });
+
+            let s_dgram = Arc::clone(&session);
+            let dgram_task = tokio::spawn(async move {
+                while let Ok(payload) = s_dgram.recv_datagram().await {
+                    let mut reply = b"dgram:".to_vec();
+                    reply.extend_from_slice(&payload);
+                    let _ = s_dgram.send_datagram(&reply);
+                }
+            });
+
+            let _ = tokio::join!(bidi_task, dgram_task);
+            if let Some(tx) = session_closed_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+    });
+
+    let server_task = tokio::spawn(async move {
+        serve_http3_with_webtransport(
+            endpoint,
+            h3_cfg,
+            4096,
+            http_handler,
+            Some(wt_handler),
+            shutdown_rx,
+        )
+        .await
+        .unwrap();
+    });
+
+    let (client_endpoint, conn, mut send_req, driver_task) =
+        connect_webtransport_h3_client(local_addr, cert_der.as_ref()).await;
+
+    let mut connect_req = Request::builder()
+        .method(http::Method::CONNECT)
+        .uri("https://localhost/wt?room=1")
+        .header("x-wt-client", "yes")
+        .body(())
+        .unwrap();
+    connect_req
+        .extensions_mut()
+        .insert(h3::ext::Protocol::WEB_TRANSPORT);
+
+    let mut connect_stream = send_req.send_request(connect_req).await.unwrap();
+    let resp = connect_stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session_id = connect_stream.id().into_inner();
+
+    let (mut client_send, mut client_recv) = conn.open_bi().await.unwrap();
+    let hdr = encode_bidi_stream_header(session_id).unwrap();
+    client_send.write_all(&hdr).await.unwrap();
+    client_send.write_all(b"ping-bidi").await.unwrap();
+    client_send.finish().unwrap();
+    let echoed = client_recv.read_to_end(1024).await.unwrap();
+    assert_eq!(echoed, b"echo:ping-bidi");
+
+    let (_srv_send, mut srv_recv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi())
+        .await
+        .expect("server-initiated bidi stream must arrive")
+        .unwrap();
+    let srv_raw = srv_recv.read_to_end(1024).await.unwrap();
+    let mut srv_buf = Bytes::from(srv_raw);
+    assert_eq!(
+        decode_varint(&mut srv_buf).unwrap(),
+        WEBTRANSPORT_BI_STREAM_TYPE
+    );
+    assert_eq!(decode_varint(&mut srv_buf).unwrap(), session_id);
+    assert_eq!(srv_buf.as_ref(), b"server-push");
+
+    let dgram = encode_quarter_stream_datagram(session_id, b"ping-dgram").unwrap();
+    conn.send_datagram(dgram).unwrap();
+    let echoed_dgram = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
+        .await
+        .expect("echoed datagram must arrive")
+        .unwrap();
+    let (echoed_sid, echoed_payload) = decode_quarter_stream_datagram(echoed_dgram).unwrap();
+    assert_eq!(echoed_sid, session_id);
+    assert_eq!(echoed_payload.as_ref(), b"dgram:ping-dgram");
+
+    let h3_req = Request::builder()
+        .method("POST")
+        .uri("https://localhost/echo")
+        .body(())
+        .unwrap();
+    let mut h3_stream = send_req.send_request(h3_req).await.unwrap();
+    h3_stream
+        .send_data(Bytes::from_static(b"concurrent"))
+        .await
+        .unwrap();
+    h3_stream.finish().await.unwrap();
+    let h3_resp = h3_stream.recv_response().await.unwrap();
+    assert_eq!(h3_resp.status(), StatusCode::OK);
+    let mut h3_body = Vec::new();
+    while let Some(mut chunk) = h3_stream.recv_data().await.unwrap() {
+        h3_body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    assert_eq!(h3_body, b"h3-ok:concurrent");
+
+    connect_stream.finish().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), session_closed_rx)
+        .await
+        .expect("WebTransport session task must exit after CONNECT stream finishes")
+        .unwrap();
+
+    drop(send_req);
+    let _ = shutdown_tx.send(true);
+    client_endpoint.close(0u32.into(), b"done");
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server must shut down cleanly")
+        .unwrap();
+    let _ = driver_task.await;
+}
+
+#[tokio::test]
+async fn test_webtransport_connect_returns_501_when_disabled_or_unattached() {
+    for enable_wt in [false, true] {
+        let (tls_config, cert_der) = build_test_tls_server_config();
+        let h3_cfg = Http3Config {
+            enabled: true,
+            enable_webtransport: enable_wt,
+            ..Default::default()
+        };
+        let quic_server_config = build_quic_server_config(tls_config, &h3_cfg).unwrap();
+        let endpoint =
+            quinn::Endpoint::server(quic_server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let local_addr = endpoint.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let http_handler = Arc::new(|_req: Request<Bytes>| async move {
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Either::<Full<Bytes>, FrameReceiver>::Left(Full::new(
+                    Bytes::new(),
+                )))
+                .unwrap()
+        });
+
+        let wt_handler = enable_wt
+            .then_some(None::<Arc<fn(WebTransportSession)>>)
+            .flatten();
+        let server_task = if !enable_wt {
+            let sink = Arc::new(|_s: WebTransportSession| {});
+            tokio::spawn(async move {
+                serve_http3_with_webtransport(
+                    endpoint,
+                    h3_cfg,
+                    1024,
+                    http_handler,
+                    Some(sink),
+                    shutdown_rx,
+                )
+                .await
+                .unwrap();
+            })
+        } else {
+            tokio::spawn(async move {
+                serve_http3_with_webtransport(
+                    endpoint,
+                    h3_cfg,
+                    1024,
+                    http_handler,
+                    wt_handler,
+                    shutdown_rx,
+                )
+                .await
+                .unwrap();
+            })
+        };
+
+        let (client_endpoint, _conn, mut send_req, driver_task) =
+            connect_webtransport_h3_client(local_addr, cert_der.as_ref()).await;
+
+        let mut connect_req = Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://localhost/wt")
+            .body(())
+            .unwrap();
+        connect_req
+            .extensions_mut()
+            .insert(h3::ext::Protocol::WEB_TRANSPORT);
+        let mut connect_stream = send_req.send_request(connect_req).await.unwrap();
+        let resp = connect_stream.recv_response().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+        drop(connect_stream);
+        drop(send_req);
+        let _ = shutdown_tx.send(true);
+        client_endpoint.close(0u32.into(), b"done");
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server must shut down cleanly")
+            .unwrap();
+        let _ = driver_task.await;
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_server_webtransport_connect_guards_shm_and_bridges_embedded_sink() {
+    let _guard = crate::BRIDGE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ = BatchBridge::init(256, 1_048_576, 4, 1);
+    if let Some(bridge) = BatchBridge::get() {
+        bridge.clear_webtransport_sink();
+    }
+
+    for topology in [Topology::Shm, Topology::Embedded] {
+        let (cert_file, key_file, cert_der) = generate_test_tls_files();
+        let router = Arc::new(Router::from_entries(RouteTable::new().into_entries()).unwrap());
+        let dispatcher = Arc::new(Dispatcher::new());
+        let collector_tx = spawn_echo_and_stream_worker();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = Arc::new(ServerConfig {
+            bind: addr,
+            topology,
+            tls: Some(TlsConfig {
+                cert_path: cert_file.path().to_path_buf(),
+                key_path: key_file.path().to_path_buf(),
+                ..Default::default()
+            }),
+            http3: Http3Config {
+                enabled: true,
+                enable_webtransport: true,
+                ..Default::default()
+            },
+            ..ServerConfig::default()
+        });
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            server::run_with_listener(
+                listener,
+                config,
+                router,
+                dispatcher,
+                vec![collector_tx],
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let (client_endpoint, _conn, mut send_req, driver_task) =
+            connect_webtransport_h3_client(addr, cert_der.as_ref()).await;
+
+        let mut connect_req = Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://localhost/wt")
+            .body(())
+            .unwrap();
+        connect_req
+            .extensions_mut()
+            .insert(h3::ext::Protocol::WEB_TRANSPORT);
+        let mut connect_stream = send_req.send_request(connect_req).await.unwrap();
+        let resp = connect_stream.recv_response().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+        drop(connect_stream);
+        drop(send_req);
+        let _ = shutdown_tx.send(());
+        client_endpoint.close(0u32.into(), b"done");
+        tokio::time::timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server must shut down cleanly")
+            .unwrap();
+        let _ = driver_task.await;
+    }
+
+    let bridge = BatchBridge::get().expect("bridge initialized");
+    bridge.set_webtransport_sink(Arc::new(|session| {
+        tokio::spawn(async move {
+            let s_bidi = Arc::clone(&session);
+            let bidi_task = tokio::spawn(async move {
+                if let Ok(stream) = s_bidi.accept_bi().await {
+                    let payload = Arc::clone(&stream).recv(1024).await.unwrap();
+                    let mut reply = b"bridge:".to_vec();
+                    reply.extend_from_slice(&payload);
+                    Arc::clone(&stream).send(Bytes::from(reply)).await.unwrap();
+                    stream.finish().await.unwrap();
+                }
+            });
+            let s_dgram = Arc::clone(&session);
+            let dgram_task = tokio::spawn(async move {
+                if let Ok(payload) = Arc::clone(&s_dgram).recv_datagram().await {
+                    let mut reply = b"bridge-dg:".to_vec();
+                    reply.extend_from_slice(&payload);
+                    let _ = s_dgram.send_datagram(&reply);
+                }
+            });
+            let _ = tokio::join!(bidi_task, dgram_task);
+        });
+    }));
+
+    let (cert_file, key_file, cert_der) = generate_test_tls_files();
+    let router = Arc::new(Router::from_entries(RouteTable::new().into_entries()).unwrap());
+    let dispatcher = Arc::new(Dispatcher::new());
+    let collector_tx = spawn_echo_and_stream_worker();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = Arc::new(ServerConfig {
+        bind: addr,
+        topology: Topology::Embedded,
+        tls: Some(TlsConfig {
+            cert_path: cert_file.path().to_path_buf(),
+            key_path: key_file.path().to_path_buf(),
+            ..Default::default()
+        }),
+        http3: Http3Config {
+            enabled: true,
+            enable_webtransport: true,
+            ..Default::default()
+        },
+        ..ServerConfig::default()
+    });
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        server::run_with_listener(
+            listener,
+            config,
+            router,
+            dispatcher,
+            vec![collector_tx],
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let (client_endpoint, conn, mut send_req, driver_task) =
+        connect_webtransport_h3_client(addr, cert_der.as_ref()).await;
+
+    let mut connect_req = Request::builder()
+        .method(http::Method::CONNECT)
+        .uri("https://localhost/wt-bridge")
+        .body(())
+        .unwrap();
+    connect_req
+        .extensions_mut()
+        .insert(h3::ext::Protocol::WEB_TRANSPORT);
+    let mut connect_stream = send_req.send_request(connect_req).await.unwrap();
+    let resp = connect_stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session_id = connect_stream.id().into_inner();
+
+    let (mut client_send, mut client_recv) = conn.open_bi().await.unwrap();
+    let hdr = encode_bidi_stream_header(session_id).unwrap();
+    client_send.write_all(&hdr).await.unwrap();
+    client_send.write_all(b"ping").await.unwrap();
+    client_send.finish().unwrap();
+    let echoed = client_recv.read_to_end(1024).await.unwrap();
+    assert_eq!(echoed, b"bridge:ping");
+
+    let dgram = encode_quarter_stream_datagram(session_id, b"dg").unwrap();
+    conn.send_datagram(dgram).unwrap();
+    let echoed_dgram = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
+        .await
+        .expect("bridge datagram echo must arrive")
+        .unwrap();
+    let (echoed_sid, echoed_payload) = decode_quarter_stream_datagram(echoed_dgram).unwrap();
+    assert_eq!(echoed_sid, session_id);
+    assert_eq!(echoed_payload.as_ref(), b"bridge-dg:dg");
+
+    bridge.clear_webtransport_sink();
+    drop(connect_stream);
+    drop(send_req);
+    let _ = shutdown_tx.send(());
+    client_endpoint.close(0u32.into(), b"done");
+    tokio::time::timeout(Duration::from_secs(5), server_handle)
+        .await
+        .expect("server must shut down cleanly")
+        .unwrap();
+    let _ = driver_task.await;
 }

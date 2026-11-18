@@ -1,9 +1,7 @@
 ---
 type: Pattern
 title: Serialization & Python Utility Conventions
-description: How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding,
-  Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration,
-  async/sync bridging, free-threaded worker pools, optional imports, and config lookup.
+description: "How `vertebra.utils` centralizes JSON and MessagePack encoding and decoding, Rust-accelerated text/humanize/UUID primitives, type dispatch, schema hydration, async/sync bridging, free-threaded worker pools, optional imports, and config lookup."
 status: stable
 tags:
 - patterns
@@ -16,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: '2026-11-04T04:33:00Z'
 verified:
+- by: agent:flow-executor
+  at: '2026-11-17T08:02:00Z'
+  commit: 5a833832
 - by: agent:flow-learn
   at: '2026-11-08T18:26:31.591504Z'
   commit: 067fa901
@@ -101,6 +102,7 @@ sources:
 
 <!-- truth: start -->
 - No module under `src/py/vertebra` outside `utils/serializers/` calls `msgspec.json.encode`, `msgspec.json.decode`, `msgspec.msgpack.encode`, `msgspec.msgpack.decode`, `json.dumps`, `json.loads`, or `orjson`.
+- `JSONSerializer.default()` and `MsgPackSerializer.default()` use double-checked locking (`_DEFAULT_LOCK`), typed decoders use a lock-protected bounded LRU `OrderedDict` (`_typed_decoders`, max `1024`), and `serializers/_schema.py` provides shared `is_uuid_instance` across JSON and MessagePack encoders.
 - `vertebra.utils.{text,humanize,uuids}` bind directly to mandatory compiled Rust functions in `vertebra._vertebra` (`vertebra-core::{text,id}`) and stdlib `uuid` without pure-Python `_py_*` fallback tables or `_load_uuid_utils` test hooks, and `import_optional` fast-paths `sys.modules.get(module_name)` hits before probing `module_available`.
 - `BaseStruct`, `CamelizedBaseStruct`, `FrozenBaseStruct`, and `FrozenCamelizedStruct` configure `gc=False, omit_defaults=True, repr_omit_defaults=True` (with `frozen=True` on the frozen variants and `rename="camel"` on the camelized variants) and expose `.to_dict()` via `msgspec.structs.asdict`.
 - `async_` dispatches to `SyncPool.default()` only when `sys._is_gil_enabled()` returns `False`, and `SyncPool`, `CapacityLimiter`, and `PortalManager` rebuild their executor, semaphores, or provider when `os.getpid()` changes.
@@ -111,18 +113,18 @@ sources:
 
 ## 1. JSON & MessagePack Go Through `vertebra.utils.serializers`
 
-Every JSON or MessagePack encode or decode in `src/py/vertebra` goes through [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py)[^src-utils-serializers-init-py]. The package uses `msgspec.json` behind a lazily created process-wide `JSONSerializer` (`get_default_json_serializer()` in [`_json.py`](../../../../../src/py/vertebra/utils/serializers/_json.py)[^src-utils-serializers-json-py]) and `msgspec.msgpack` behind [`MsgPackSerializer`](../../../../../src/py/vertebra/utils/serializers/_msgpack.py)[^src-utils-serializers-msgpack-py] (`get_default_msgpack_serializer()`, `encode_msgpack_bytes`, `encode_msgpack_into`, `decode_msgpack`).
+Every JSON or MessagePack encode or decode in `src/py/vertebra` goes through [`vertebra.utils.serializers`](../../../../../src/py/vertebra/utils/serializers/__init__.py)[^src-utils-serializers-init-py]. The package uses `msgspec.json` behind a lazily created process-wide `JSONSerializer` (`JSONSerializer.default()` / `get_default_json_serializer()` in [`_json.py`](../../../../../src/py/vertebra/utils/serializers/_json.py)[^src-utils-serializers-json-py]) and `msgspec.msgpack` behind [`MsgPackSerializer`](../../../../../src/py/vertebra/utils/serializers/_msgpack.py)[^src-utils-serializers-msgpack-py] (`MsgPackSerializer.default()` / `get_default_msgpack_serializer()`, `encode_msgpack_bytes`, `encode_msgpack_into`, `decode_msgpack`). Both `JSONSerializer.default()` and `MsgPackSerializer.default()` initialize `_default` under double-checked `_DEFAULT_LOCK = threading.Lock()`, and both `decode(...)` methods cache typed `Decoder` instances in a bounded LRU `OrderedDict` (`_typed_decoders`, capped at `_MAX_TYPED_DECODERS = 1024`) guarded by `self._decoder_lock` (promoting hits with `move_to_end`, evicting the oldest entry via `popitem(last=False)`, and falling back to an uncached `Decoder` when an unhashable `type` raises `TypeError`).
 
 | Function | Behavior |
 |---|---|
 | `encode_json(data, *, as_bytes=False)` | Returns `str` (or `bytes` with `as_bytes=True`), typed with overloads. |
 | `encode_json_bytes(data)` | Returns UTF-8 `bytes`. Use it on hot paths and before writing to sockets, queues, or stores. |
 | `encode_json_into(data, buffer, offset=0)` | `msgspec` `Encoder.encode_into` into a caller-owned `bytearray` with zero stdlib fallback. |
-| `decode_json(data, *, decode_bytes=True, type=Any)` | Accepts `str` or `bytes` and caches typed `Decoder(type=...)` instances. With `decode_bytes=False`, `bytes` input is returned unchanged. |
+| `decode_json(data, *, decode_bytes=True, type=Any)` | Accepts `str` or `bytes` and caches typed `Decoder(type=...)` instances in the bounded LRU `_typed_decoders`. With `decode_bytes=False`, `bytes` input is returned unchanged. |
 | `format_json(value, *, indent=2)` | Pretty-prints with `msgspec.json.format`. |
-| `encode_msgpack_bytes(value)` / `encode_msgpack_into(value, buffer, offset=0)` / `decode_msgpack(raw, *, type=Any)` | Centralized MessagePack encoding and typed decoding via `MsgPackSerializer`. |
+| `encode_msgpack_bytes(value)` / `encode_msgpack_into(value, buffer, offset=0)` / `decode_msgpack(raw, *, type=Any)` | Centralized MessagePack encoding and bounded-LRU typed decoding via `MsgPackSerializer`. |
 
-`_normalize_supported_value` is the encoder `enc_hook`: it converts `datetime` (naive treated as UTC, `+00:00` → `Z`) and `date` to ISO 8601, `uuid.UUID`/`uuid_utils.UUID` to `str`, `Decimal` to `float` (encode exact decimals as `str` first), `Enum` to `.value`, Pydantic/dataclass/attrs/`msgspec.Struct` instances to `dict`, and NumPy arrays/scalars to Python lists/scalars; unsupported types raise `TypeError("unsupported JSON value: ...")` directly without stdlib `json` fallback. `_numpy.py` exports `numpy_array_enc_hook`, `numpy_array_dec_hook`, and `numpy_array_predicate` (no-op when NumPy is absent).
+`_normalize_supported_value` is the encoder `enc_hook`: it converts `datetime` (naive treated as UTC, `+00:00` → `Z`) and `date` to ISO 8601, `uuid.UUID`/`uuid_utils.UUID` (detected via shared `is_uuid_instance`) to `str`, `Decimal` to `float` (encode exact decimals as `str` first), `Enum` to `.value`, Pydantic/dataclass/attrs/`msgspec.Struct` instances to `dict`, and NumPy arrays/scalars to Python lists/scalars; unsupported types raise `TypeError("unsupported JSON value: ...")` directly without stdlib `json` fallback. `_numpy.py` exports `numpy_array_enc_hook`, `numpy_array_dec_hook`, and `numpy_array_predicate` (no-op when NumPy is absent).
 
 [`_zero_copy.py`](../../../../../src/py/vertebra/utils/serializers/_zero_copy.py)[^src-utils-serializers-zero-copy-py] provides `ZeroCopyCodecRegistry` (`TypeAdapterPlan` classification across `msgspec_struct`, `pydantic`, `dataclass`, `attrs`, `typeddict`, `namedtuple`, `dict`, and `primitive`), thread-local `bytearray` scratch-arena encoders (`encode_json_into_arena`, `encode_msgpack_into_arena`), zero-copy gRPC Length-Prefixed-Message helpers (`encode_grpc_frame_bytes`, `encode_grpc_frame_into`, `decode_grpc_frame`, `decode_grpc_frames`), and `hydrate_rows_vectorcall` / `hydrate_one_vectorcall` / `orm_to_struct_vectorcall` wrappers that delegate to `vertebra._vertebra` when compiled and fall back cleanly to pure Python during documentation builds (`--only-group doc`).
 
@@ -132,7 +134,7 @@ Every JSON or MessagePack encode or decode in `src/py/vertebra` goes through [`v
 - `BaseStruct(Struct, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `CamelizedBaseStruct(BaseStruct, rename="camel")` for mutable state objects.
 - `FrozenBaseStruct(Struct, frozen=True, gc=False, omit_defaults=True, repr_omit_defaults=True)` and `FrozenCamelizedStruct(FrozenBaseStruct, rename="camel", frozen=True)` for immutable wire models and configs.
 
-`_dump_msgspec_fields(value)` in [`_schema.py`](../../../../../src/py/vertebra/utils/serializers/_schema.py)[^src-utils-serializers-schema-py] extracts `msgspec.Struct` fields into a plain dictionary when invoked through the serializer `enc_hook`. CDC change-feed envelope decoding and shared-feed local fan-out rules are documented in [Query Pipeline, CDC & Multi-Tenancy](../../domains/data/query-pipeline-cdc-and-tenancy.md).
+`_dump_msgspec_fields(value)` in [`_schema.py`](../../../../../src/py/vertebra/utils/serializers/_schema.py)[^src-utils-serializers-schema-py] extracts `msgspec.Struct` fields into a plain dictionary when invoked through the serializer `enc_hook`, while `resolve_uuid_utils_type()` (double-checked under `_UUID_CACHE_LOCK` using `UUID_UTILS_INSTALLED`) and `is_uuid_instance(value)` centralize `uuid.UUID` / `uuid_utils.UUID` detection for both `_json.py` and `_msgpack.py`. CDC change-feed envelope decoding and shared-feed local fan-out rules are documented in [Query Pipeline, CDC & Multi-Tenancy](../../domains/data/query-pipeline-cdc-and-tenancy.md).
 
 ## 3. Async/Sync Bridging (`sync_tools.py`, `portal.py`)
 

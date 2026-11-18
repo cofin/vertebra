@@ -101,3 +101,112 @@ async def test_async_pipeline_pooled_and_transactional_scopes() -> None:
 
     assert len(pool.active) == 0
     await drv.close()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+def test_sync_postgres_pipeline_exit_contract(scenario: str) -> None:
+    """SyncPostgresPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    cluster = FakePostgresCluster()
+    _seed_accounts_table(cluster)
+    pool = FakeSyncPostgresPool(cluster, max_size=1)
+    drv = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
+    try:
+        if scenario == "auto_flush":
+            with drv.pipeline() as pipe:
+                pipe.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "ada", 100))
+            assert drv.in_transaction is False
+            assert drv.select("SELECT id, owner, balance FROM accounts ORDER BY id") == [
+                {"id": 1, "owner": "ada", "balance": 100},
+            ]
+        elif scenario == "caller_tx_rollback":
+            drv.begin()
+            drv.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "outer", 50))
+            with drv.pipeline() as pipe:
+                pipe.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (2, "inner", 75))
+            assert drv.in_transaction is True
+            assert drv.select("SELECT id FROM accounts ORDER BY id") == [{"id": 1}, {"id": 2}]
+            drv.rollback()
+            assert drv.select("SELECT id FROM accounts") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"), drv.pipeline() as pipe:
+                pipe.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "discarded", 100))
+                raise RuntimeError("abort")
+            assert drv.in_transaction is False
+            assert drv.select("SELECT id FROM accounts") == []
+        else:
+            drv.begin()
+            drv.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "outer_kept", 50))
+            with pytest.raises(RuntimeError, match="abort_inner"), drv.pipeline() as pipe:
+                pipe.execute(
+                    "INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (2, "inner_discarded", 99)
+                )
+                raise RuntimeError("abort_inner")
+            assert drv.in_transaction is True
+            drv.commit()
+            assert drv.select("SELECT id, owner, balance FROM accounts ORDER BY id") == [
+                {"id": 1, "owner": "outer_kept", "balance": 50},
+            ]
+    finally:
+        assert len(pool.active) == 0
+        drv.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "caller_tx_rollback", "exception_discard", "caller_tx_exception"],
+)
+async def test_async_postgres_pipeline_exit_contract(scenario: str) -> None:
+    """AsyncPostgresPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    cluster = FakePostgresCluster()
+    _seed_accounts_table(cluster)
+    pool = FakeAsyncPostgresPool(cluster, max_size=1)
+    drv = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=pool)
+    try:
+        if scenario == "auto_flush":
+            async with drv.pipeline() as pipe:
+                pipe.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "ada", 100))
+            assert drv.in_transaction is False
+            assert await drv.select("SELECT id, owner, balance FROM accounts ORDER BY id") == [
+                {"id": 1, "owner": "ada", "balance": 100},
+            ]
+        elif scenario == "caller_tx_rollback":
+            await drv.begin()
+            await drv.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "outer", 50))
+            async with drv.pipeline() as pipe:
+                pipe.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (2, "inner", 75))
+            assert drv.in_transaction is True
+            assert await drv.select("SELECT id FROM accounts ORDER BY id") == [{"id": 1}, {"id": 2}]
+            await drv.rollback()
+            assert await drv.select("SELECT id FROM accounts") == []
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"):
+                async with drv.pipeline() as pipe:
+                    pipe.execute(
+                        "INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)",
+                        (1, "discarded", 100),
+                    )
+                    raise RuntimeError("abort")
+            assert drv.in_transaction is False
+            assert await drv.select("SELECT id FROM accounts") == []
+        else:
+            await drv.begin()
+            await drv.execute("INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)", (1, "outer_kept", 50))
+            with pytest.raises(RuntimeError, match="abort_inner"):
+                async with drv.pipeline() as pipe:
+                    pipe.execute(
+                        "INSERT INTO accounts (id, owner, balance) VALUES ($1, $2, $3)",
+                        (2, "inner_discarded", 99),
+                    )
+                    raise RuntimeError("abort_inner")
+            assert drv.in_transaction is True
+            await drv.commit()
+            assert await drv.select("SELECT id, owner, balance FROM accounts ORDER BY id") == [
+                {"id": 1, "owner": "outer_kept", "balance": 50},
+            ]
+    finally:
+        assert len(pool.active) == 0
+        await drv.close()

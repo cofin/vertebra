@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
-from vertebra._vertebra import NotFoundError
+from vertebra._vertebra import NotFoundError, OperationalError
 from vertebra.db.adapters.mssql.config import MSSQLConfig
 from vertebra.db.adapters.mssql.core import (
     MSSQL_DIALECT_TAG,
@@ -36,6 +36,7 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
 
     __slots__ = (
         "_client",
+        "_client_token",
         "_dialer",
         "_in_transaction",
         "_last_rewritten_sql",
@@ -54,8 +55,15 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         super().__init__(resolved, broker=broker)
         self._dialer = dialer
         self._client: AsyncMSSQLClient | Any = (
-            client if client is not None else MSSQLCore.create_async_rust_client(resolved, dialer=dialer)
+            client
+            if client is not None
+            else MSSQLCore.create_async_rust_client(
+                resolved,
+                dialer=dialer,
+                resolve_token=(resolved.token_provider is None),
+            )
         )
+        self._client_token: str | None = None
         self._in_transaction: bool = False
         self._last_rewritten_sql: str = ""
 
@@ -91,22 +99,35 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         return AsyncMSSQLPipeline(self)
 
     async def connect(self) -> Self:
-        """Ensure the underlying native `AsyncMSSQLClient` is ready."""
-        if self._client is None:
-            self._client = MSSQLCore.create_async_rust_client(self.config, dialer=self._dialer)
+        """Ensure the underlying native `AsyncMSSQLClient` is ready with a fresh Entra token if configured."""
+        if self._client is None or getattr(self._client, "closed", False):
+            token = await self.config.resolve_aad_token_async()
+            self._client = MSSQLCore.create_async_rust_client(
+                self.config,
+                dialer=self._dialer,
+                aad_token=token,
+                resolve_token=False,
+            )
+            self._client_token = token
+        else:
+            await self._refresh_aad_token_async()
         self._closed = False
         return self
 
     async def ping(self) -> bool:
         """Execute an asynchronous health check against the SQL Server session."""
-        return bool(await self._client.ping())
+        return bool(await self._run_with_client(lambda client: client.ping(), use_broker_lease=False))
 
     async def begin(self, isolation_level: str | None = None) -> None:
         """Begin an explicit SQL Server transaction."""
-        if isolation_level is not None:
-            await self._client.begin(isolation_level)
-        else:
-            await self._client.begin()
+
+        async def _op(client: Any) -> None:
+            if isolation_level is not None:
+                await client.begin(isolation_level)
+            else:
+                await client.begin()
+
+        await self._run_with_client(_op, use_broker_lease=False)
         self._in_transaction = True
 
     async def commit(self) -> None:
@@ -157,11 +178,13 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     ) -> int:
         """Execute a DML or DDL statement asynchronously and return affected row count."""
         _ = kwargs
-        grant = self._prepare_and_lease(sql)
-        try:
-            return int(await self._client.execute(self._last_rewritten_sql, parameters))
-        finally:
-            self._release_mssql_lease(grant)
+        rewritten = self._prepare_sql(sql)
+        return int(
+            await self._run_with_client(
+                lambda client: client.execute(rewritten, parameters),
+                use_broker_lease=True,
+            )
+        )
 
     async def execute_many(
         self,
@@ -173,11 +196,14 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         _ = kwargs
         if not parameter_sets:
             return 0
-        grant = self._prepare_and_lease(sql)
-        try:
-            return int(await self._client.execute_many(self._last_rewritten_sql, list(parameter_sets)))
-        finally:
-            self._release_mssql_lease(grant)
+        rewritten = self._prepare_sql(sql)
+        param_list = list(parameter_sets)
+        return int(
+            await self._run_with_client(
+                lambda client: client.execute_many(rewritten, param_list),
+                use_broker_lease=True,
+            )
+        )
 
     async def execute_tuples(
         self,
@@ -197,20 +223,18 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL asynchronously and return `(rows, column_names)`."""
         _ = kwargs
-        grant = self._prepare_and_lease(sql)
-        try:
-            if hasattr(self._client, "execute_with_description"):
-                rows, cols = await self._client.execute_with_description(
-                    self._last_rewritten_sql,
-                    parameters,
-                )
+        rewritten = self._prepare_sql(sql)
+
+        async def _op(client: Any) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            if hasattr(client, "execute_with_description"):
+                rows, cols = await client.execute_with_description(rewritten, parameters)
                 return list(rows), tuple(cols)
-            raw = await self._client.query(self._last_rewritten_sql, parameters)
+            raw = await client.query(rewritten, parameters)
             cols = tuple(str(c) for c in raw.get("columns", ()))
             rows = [tuple(r) for r in raw.get("rows", ())]
             return rows, cols
-        finally:
-            self._release_mssql_lease(grant)
+
+        return await self._run_with_client(_op, use_broker_lease=True)
 
     async def select(
         self,
@@ -223,11 +247,13 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         """Execute a `SELECT` query asynchronously and return rows as dictionaries or `schema_type` instances."""
         _ = kwargs
         if schema_type is None or schema_type is dict:
-            grant = self._prepare_and_lease(sql)
-            try:
-                return list(await self._client.fetch_all(self._last_rewritten_sql, parameters))
-            finally:
-                self._release_mssql_lease(grant)
+            rewritten = self._prepare_sql(sql)
+            return list(
+                await self._run_with_client(
+                    lambda client: client.fetch_all(rewritten, parameters),
+                    use_broker_lease=True,
+                )
+            )
         rows, cols = await self.execute_with_description(sql, parameters)
         return _hydrate_rows_with_schema(rows, cols, schema_type)
 
@@ -242,11 +268,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         """Execute a query asynchronously and return the first row, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
         if schema_type is None or schema_type is dict:
-            grant = self._prepare_and_lease(sql)
-            try:
-                return await self._client.fetch_one(self._last_rewritten_sql, parameters)
-            finally:
-                self._release_mssql_lease(grant)
+            rewritten = self._prepare_sql(sql)
+            return await self._run_with_client(
+                lambda client: client.fetch_one(rewritten, parameters),
+                use_broker_lease=True,
+            )
         rows = await self.select(sql, parameters, schema_type=schema_type)
         if not rows:
             msg = "Query returned no rows"
@@ -264,11 +290,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         """Execute a query asynchronously and return the first row or `None` when empty."""
         _ = kwargs
         if schema_type is None or schema_type is dict:
-            grant = self._prepare_and_lease(sql)
-            try:
-                return await self._client.fetch_optional(self._last_rewritten_sql, parameters)
-            finally:
-                self._release_mssql_lease(grant)
+            rewritten = self._prepare_sql(sql)
+            return await self._run_with_client(
+                lambda client: client.fetch_optional(rewritten, parameters),
+                use_broker_lease=True,
+            )
         rows = await self.select(sql, parameters, schema_type=schema_type)
         return rows[0] if rows else None
 
@@ -282,11 +308,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     ) -> Any:
         """Execute a query asynchronously and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
-        grant = self._prepare_and_lease(sql)
-        try:
-            val = await self._client.select_value(self._last_rewritten_sql, parameters)
-        finally:
-            self._release_mssql_lease(grant)
+        rewritten = self._prepare_sql(sql)
+        val = await self._run_with_client(
+            lambda client: client.select_value(rewritten, parameters),
+            use_broker_lease=True,
+        )
         if value_type is not None and val is not None:
             return to_value_type(val, value_type)
         return val
@@ -313,14 +339,14 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
     ) -> ArrowCursor:
         """Execute a query asynchronously and materialize the result set as a zero-copy `VTBARROW` `ArrowCursor`."""
         _ = (threshold_rows, kwargs)
-        grant = self._prepare_and_lease(sql)
-        try:
-            raw_cursor = await self._client.select_to_arrow(self._last_rewritten_sql, parameters)
-            if isinstance(raw_cursor, ArrowCursor):
-                return raw_cursor
-            return ArrowCursor(raw_cursor)
-        finally:
-            self._release_mssql_lease(grant)
+        rewritten = self._prepare_sql(sql)
+        raw_cursor = await self._run_with_client(
+            lambda client: client.select_to_arrow(rewritten, parameters),
+            use_broker_lease=True,
+        )
+        if isinstance(raw_cursor, ArrowCursor):
+            return raw_cursor
+        return ArrowCursor(raw_cursor)
 
     async def stream_arrow_batches(
         self,
@@ -333,15 +359,11 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         """Execute a query asynchronously and yield `VTBARROW` `ArrowCursor` chunks."""
         _ = kwargs
         chunk = max(1, int(batch_size))
-        grant = self._prepare_and_lease(sql)
-        try:
-            raw_batches = await self._client.stream_arrow_batches(
-                self._last_rewritten_sql,
-                parameters,
-                chunk,
-            )
-        finally:
-            self._release_mssql_lease(grant)
+        rewritten = self._prepare_sql(sql)
+        raw_batches = await self._run_with_client(
+            lambda client: client.stream_arrow_batches(rewritten, parameters, chunk),
+            use_broker_lease=True,
+        )
         for item in raw_batches:
             yield item if isinstance(item, ArrowCursor) else ArrowCursor(item)
 
@@ -362,11 +384,13 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         source, col_list = MSSQLCore.coerce_arrow_source(data, columns)
         if source is None:
             return 0
-        grant = self._prepare_and_lease(f"INSERT BULK {table_name}")
-        try:
-            return int(await self._client.load_from_arrow(table_name, source, col_list))
-        finally:
-            self._release_mssql_lease(grant)
+        self._prepare_sql(f"INSERT BULK {table_name}")
+        return int(
+            await self._run_with_client(
+                lambda client: client.load_from_arrow(table_name, source, col_list),
+                use_broker_lease=True,
+            )
+        )
 
     def lease_stats(self) -> dict[str, int]:
         """Return broker connection lease telemetry counters."""
@@ -377,10 +401,55 @@ class AsyncMSSQLDriver(AsyncDatabaseDriver[MSSQLConfig]):
         stats = self._client.statement_cache_stats()
         return dict(stats) if stats is not None else None
 
-    def _prepare_and_lease(self, sql: str) -> Any:
-        rewritten, grant = MSSQLCore.prepare_and_lease(self._broker, sql)
-        self._last_rewritten_sql = rewritten
-        return grant
+    async def _refresh_aad_token_async(self, *, force_refresh: bool = False) -> None:
+        if self.config.token_provider is None or self._client is None:
+            return
+        token = await self.config.resolve_aad_token_async(force_refresh=force_refresh)
+        if token != self._client_token:
+            set_fn = getattr(self._client, "set_aad_token", None)
+            if callable(set_fn):
+                set_fn(token)
+            self._client_token = token
 
-    def _release_mssql_lease(self, grant: Any) -> None:
-        MSSQLCore.release_broker_lease(self._broker, grant)
+    async def _run_with_client[T](
+        self,
+        op: Callable[[Any], Awaitable[T]],
+        *,
+        use_broker_lease: bool = False,
+    ) -> T:
+        for attempt in (0, 1):
+            if self.config.token_provider is not None and not self.in_transaction:
+                await self._refresh_aad_token_async()
+            grant = self._acquire_broker_lease() if use_broker_lease else None
+            try:
+                return await op(self._client)
+            except Exception as exc:
+                if (
+                    attempt == 0
+                    and self.config.token_provider is not None
+                    and not self.in_transaction
+                    and MSSQLCore.is_auth_rejection(exc)
+                ):
+                    invalidate_fn = getattr(self.config.token_provider, "invalidate", None)
+                    if callable(invalidate_fn):
+                        invalidate_fn()
+                    await self._refresh_aad_token_async(force_refresh=True)
+                    continue
+                raise
+            finally:
+                if use_broker_lease:
+                    self._release_broker_lease(grant)
+        msg = "MSSQL authentication retry exhausted"
+        raise OperationalError(msg)
+
+    def _prepare_sql(self, sql: str) -> str:
+        rewritten, param_count = MSSQLCore.rewrite_placeholders(sql)
+        plan = self._lookup_or_cache_statement(
+            sql,
+            param_count=param_count,
+            compiled_sql=rewritten.encode("utf-8"),
+        )
+        if plan is not None and plan.compiled_sql:
+            rewritten = plan.compiled_sql.decode("utf-8")
+        self._last_rewritten_sql = rewritten
+        return rewritten

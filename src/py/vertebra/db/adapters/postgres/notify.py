@@ -240,12 +240,13 @@ class AsyncPostgresNotificationSource(AsyncNotificationSource):
         self,
     ) -> Callable[..., Awaitable[AsyncPostgresListener]]:
         """Return the driver's async listener opener or raise NotSupportedError."""
-        open_listener = getattr(self._driver, "_open_notification_listener", None)
+        open_listener: Callable[..., Awaitable[AsyncPostgresListener]] | None = getattr(
+            self._driver, "_open_notification_listener", None
+        )
         if not callable(open_listener):
             msg = "Live PostgreSQL LISTEN streaming requires the native Rust PostgreSQL driver"
             raise NotSupportedError(msg)
-        result: Callable[..., Awaitable[AsyncPostgresListener]] = open_listener
-        return result
+        return open_listener
 
     async def _reconcile_initial_channels(
         self,
@@ -577,12 +578,13 @@ class SyncPostgresNotificationSource(SyncNotificationSource):
         self,
     ) -> Callable[..., SyncPostgresListener]:
         """Return the driver's sync listener opener or raise NotSupportedError."""
-        open_listener = getattr(self._driver, "_open_sync_notification_listener", None)
+        open_listener: Callable[..., SyncPostgresListener] | None = getattr(
+            self._driver, "_open_sync_notification_listener", None
+        )
         if not callable(open_listener):
             msg = "Live PostgreSQL LISTEN streaming requires the native Rust PostgreSQL driver"
             raise NotSupportedError(msg)
-        result: Callable[..., SyncPostgresListener] = open_listener
-        return result
+        return open_listener
 
     def _hydrate_payload(self, raw_payload: bytes) -> bytes:
         """Decode UTF-8 notification text and hydrate ChangeFeed or b64-prefixed binary payloads."""

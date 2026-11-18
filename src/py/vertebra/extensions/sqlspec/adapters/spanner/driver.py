@@ -1,9 +1,10 @@
 """Cloud Spanner synchronous and asynchronous SQLSpec drivers over pure-Rust Vertebra drivers."""
 
-from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Literal, cast
+from __future__ import annotations
 
-import pyarrow as pa
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+
 from sqlspec.core import SQL, ArrowResult, ParameterStyle, StackResult, StatementConfig, StatementStack
 from sqlspec.driver import ExecutionResult
 from sqlspec.storage import StorageBridgeJob
@@ -32,6 +33,12 @@ from vertebra.extensions.sqlspec.adapters.spanner.data_dictionary import (
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.typing import ImproperConfigurationError
+from vertebra.utils.module_loader import ensure_pyarrow
+
+if TYPE_CHECKING:
+    from sqlspec.storage import StorageDestination, StorageFormat, StorageTelemetry
+
+    from vertebra.extensions.sqlspec.adapters.spanner._typing import SpannerDriverFeatures
 
 __all__ = (
     "SpannerAsyncDriver",
@@ -95,6 +102,7 @@ def _normalize_row_dicts(
 
 
 def _arrow_cursor_to_pyarrow(arrow_cursor: Any, return_format: str) -> tuple[Any, int]:
+    pa = ensure_pyarrow()
     table = arrow_cursor.to_arrow_table() if hasattr(arrow_cursor, "to_arrow_table") else arrow_cursor
     if not isinstance(table, pa.Table):
         if hasattr(arrow_cursor, "to_arrow_ipc"):
@@ -129,7 +137,7 @@ def _execute_sync_select(
     if active_snapshot is not None:
         snap_desc = getattr(active_snapshot, "execute_with_description", None)
         if callable(snap_desc):
-            raw_rows, col_names = snap_desc(sql, params)
+            raw_rows, col_names = cast("Any", snap_desc)(sql, params)
             return _normalize_row_dicts(raw_rows, col_names)
         snap_query = getattr(active_snapshot, "query", None)
         if callable(snap_query):
@@ -142,9 +150,9 @@ def _execute_sync_select(
     desc_fn = getattr(cursor, "execute_with_description", None)
     if callable(desc_fn):
         if staleness is not None:
-            raw_rows, col_names = desc_fn(sql, params, staleness=staleness)
+            raw_rows, col_names = cast("Any", desc_fn)(sql, params, staleness=staleness)
         else:
-            raw_rows, col_names = desc_fn(sql, params)
+            raw_rows, col_names = cast("Any", desc_fn)(sql, params)
         return _normalize_row_dicts(raw_rows, col_names)
     if callable(getattr(cursor, "select", None)):
         if staleness is not None:
@@ -171,22 +179,22 @@ async def _execute_async_select(
     if active_snapshot is not None:
         snap_desc = getattr(active_snapshot, "execute_with_description", None)
         if callable(snap_desc):
-            raw_rows, col_names = await snap_desc(sql, params)
+            raw_rows, col_names = await cast("Any", snap_desc)(sql, params)
             return _normalize_row_dicts(raw_rows, col_names)
         snap_query = getattr(active_snapshot, "query", None)
         if callable(snap_query):
-            raw_rows = await snap_query(sql, params)
+            raw_rows = await cast("Any", snap_query)(sql, params)
             return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
         snap_select = getattr(active_snapshot, "select", None)
         if callable(snap_select):
-            raw_rows = await snap_select(sql, params)
+            raw_rows = await cast("Any", snap_select)(sql, params)
             return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
     desc_fn = getattr(cursor, "execute_with_description", None)
     if callable(desc_fn):
         if staleness is not None:
-            raw_rows, col_names = await desc_fn(sql, params, staleness=staleness)
+            raw_rows, col_names = await cast("Any", desc_fn)(sql, params, staleness=staleness)
         else:
-            raw_rows, col_names = await desc_fn(sql, params)
+            raw_rows, col_names = await cast("Any", desc_fn)(sql, params)
         return _normalize_row_dicts(raw_rows, col_names)
     if callable(getattr(cursor, "select", None)):
         if staleness is not None:
@@ -198,15 +206,46 @@ async def _execute_async_select(
     description = getattr(cursor, "description", None)
     col_names = [str(col[0]) for col in description] if description else None
     fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = await fetchall() if callable(fetchall) else []
+    raw_rows = await cast("Any", fetchall)() if callable(fetchall) else []
     return _normalize_row_dicts(raw_rows, col_names)
+
+
+class _DriverDialectDescriptor:
+    """Slot-compatible descriptor exposing class-level default dialect and per-instance overrides."""
+
+    __slots__ = ("_default",)
+
+    def __init__(self, default: str) -> None:
+        self._default = default
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> str:
+        _ = owner
+        if instance is None:
+            return self._default
+        value = getattr(instance, "_dialect_value", None)
+        return str(value) if value is not None else self._default
+
+    def __set__(self, instance: Any, value: str) -> None:
+        instance._dialect_value = str(value)
 
 
 class SpannerSyncDriver(BaseSyncDriver):
     """Cloud Spanner synchronous SQLSpec driver supporting GoogleSQL and Spangres."""
 
-    dialect: Any = "spanner"
-    _execution_parameter_style: ClassVar[ParameterStyle] = ParameterStyle.NAMED_AT
+    __slots__ = (
+        "_active_snapshot",
+        "_data_dictionary",
+        "_dialect_value",
+        "_in_transaction",
+        "_read_only",
+        "_session_managed_tx",
+        "_spanner_dialect",
+        "_staleness",
+        "_storage_backend",
+    )
+
+    dialect: Any = _DriverDialectDescriptor("spanner")
+    _execution_parameter_style: ClassVar[ParameterStyle | None] = ParameterStyle.NAMED_AT
     _arrow_execution_options: ClassVar[tuple[str, ...]] = (
         *BaseSyncDriver._arrow_execution_options,
         "data_boost",
@@ -214,11 +253,16 @@ class SpannerSyncDriver(BaseSyncDriver):
         "staleness",
     )
 
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build the default GoogleSQL Spanner ``StatementConfig``."""
+        return default_statement_config()
+
     def __init__(
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: SpannerDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -238,12 +282,12 @@ class SpannerSyncDriver(BaseSyncDriver):
         super().__init__(
             connection,
             resolved_stmt,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
         self._spanner_dialect: Literal["googlesql", "spangres"] = inferred
-        self.dialect = sqlspec_dialect_name(inferred)
+        self._dialect_value: str = sqlspec_dialect_name(inferred)
         self._read_only: bool = bool(read_only)
         self._in_transaction: bool = bool(in_transaction)
         self._session_managed_tx: bool = bool(in_transaction)
@@ -329,7 +373,7 @@ class SpannerSyncDriver(BaseSyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         batch_fn = getattr(cursor, "execute_batch_dml", None)
         if callable(batch_fn):
-            counts = batch_fn([(sql, param_set) for param_set in param_sets])
+            counts = cast("Sequence[Any]", batch_fn([(sql, param_set) for param_set in param_sets]))
             total = sum(int(c) for c in counts)
             return self.create_execution_result(cursor, rowcount_override=total, is_many_result=True)
         execute_many_fn = getattr(cursor, "execute_many", None)
@@ -421,7 +465,7 @@ class SpannerSyncDriver(BaseSyncDriver):
             if all_dml and compiled_batch:
                 exc_handler = self.handle_database_exceptions()
                 with exc_handler:
-                    counts = batch_fn(compiled_batch)
+                    counts = cast("Sequence[Any]", batch_fn(compiled_batch))
                     return tuple(StackResult(rows_affected=int(count)) for count in counts)
                 self._check_pending_exception(exc_handler)
         return super().execute_stack(stack, continue_on_error=continue_on_error)
@@ -561,6 +605,7 @@ class SpannerSyncDriver(BaseSyncDriver):
         **kwargs: Any,
     ) -> ArrowResult:
         """Execute a parallel ``PartitionQuery`` scan into a SQLSpec ``ArrowResult``."""
+        _ = ensure_pyarrow()
         native_arrow_fn = getattr(self.connection, "select_to_arrow", None)
         if callable(native_arrow_fn):
             stmt_kwargs = dict(kwargs)
@@ -604,6 +649,31 @@ class SpannerSyncDriver(BaseSyncDriver):
             **kwargs,
         )
 
+    def select_to_storage(
+        self,
+        statement: SQL | str,
+        destination: StorageDestination,
+        /,
+        *parameters: Any,
+        statement_config: StatementConfig | None = None,
+        partitioner: dict[str, object] | None = None,
+        format_hint: StorageFormat | None = None,
+        telemetry: StorageTelemetry | None = None,
+        **kwargs: Any,
+    ) -> StorageBridgeJob:
+        """Stream a Spanner SELECT query directly into object storage via Arrow."""
+        _ = ensure_pyarrow()
+        arrow_result = self._select_for_storage(statement, *parameters, statement_config=statement_config, **kwargs)
+        sync_pipeline = self._storage_pipeline()
+        telemetry_payload = self._write_storage_result(
+            arrow_result,
+            destination,
+            format_hint=format_hint,
+            pipeline=sync_pipeline,
+        )
+        self._attach_partition_telemetry(telemetry_payload, partitioner)
+        return self._storage_job(telemetry_payload, telemetry)
+
     def load_from_arrow(
         self,
         table: str,
@@ -634,6 +704,7 @@ class SpannerSyncDriver(BaseSyncDriver):
             type_casts,
         )
         self._require_writable("load_from_arrow")
+        _ = ensure_pyarrow()
         load_fn = getattr(self.connection, "load_from_arrow", None)
         if not callable(load_fn):
             return super().load_from_arrow(
@@ -645,7 +716,7 @@ class SpannerSyncDriver(BaseSyncDriver):
             )
         exc_handler = self.handle_database_exceptions()
         with exc_handler:
-            loaded = int(load_fn(table, source, upsert=not overwrite))
+            loaded = int(cast("Any", load_fn)(table, source, upsert=not overwrite))
             return self._storage_job(
                 {
                     "destination": table,
@@ -690,8 +761,20 @@ class SpannerSyncDriver(BaseSyncDriver):
 class SpannerAsyncDriver(BaseAsyncDriver):
     """Cloud Spanner asynchronous SQLSpec driver supporting GoogleSQL and Spangres."""
 
-    dialect: Any = "spanner"
-    _execution_parameter_style: ClassVar[ParameterStyle] = ParameterStyle.NAMED_AT
+    __slots__ = (
+        "_active_snapshot",
+        "_data_dictionary",
+        "_dialect_value",
+        "_in_transaction",
+        "_read_only",
+        "_session_managed_tx",
+        "_spanner_dialect",
+        "_staleness",
+        "_storage_backend",
+    )
+
+    dialect: Any = _DriverDialectDescriptor("spanner")
+    _execution_parameter_style: ClassVar[ParameterStyle | None] = ParameterStyle.NAMED_AT
     _arrow_execution_options: ClassVar[tuple[str, ...]] = (
         *BaseAsyncDriver._arrow_execution_options,
         "data_boost",
@@ -699,11 +782,16 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         "staleness",
     )
 
+    @classmethod
+    def _default_statement_config(cls) -> StatementConfig:
+        """Build the default GoogleSQL Spanner ``StatementConfig``."""
+        return default_statement_config()
+
     def __init__(
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: SpannerDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -723,12 +811,12 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         super().__init__(
             connection,
             resolved_stmt,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
         self._spanner_dialect: Literal["googlesql", "spangres"] = inferred
-        self.dialect = sqlspec_dialect_name(inferred)
+        self._dialect_value: str = sqlspec_dialect_name(inferred)
         self._read_only: bool = bool(read_only)
         self._in_transaction: bool = bool(in_transaction)
         self._session_managed_tx: bool = bool(in_transaction)
@@ -814,12 +902,12 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         batch_fn = getattr(cursor, "execute_batch_dml", None)
         if callable(batch_fn):
-            counts = await batch_fn([(sql, param_set) for param_set in param_sets])
+            counts = await cast("Any", batch_fn)([(sql, param_set) for param_set in param_sets])
             total = sum(int(c) for c in counts)
             return self.create_execution_result(cursor, rowcount_override=total, is_many_result=True)
         execute_many_fn = getattr(cursor, "execute_many", None)
         if callable(execute_many_fn):
-            affected = await execute_many_fn(sql, param_sets)
+            affected = await cast("Any", execute_many_fn)(sql, param_sets)
             return self.create_execution_result(
                 cursor,
                 rowcount_override=int(affected) if isinstance(affected, int) else len(param_sets),
@@ -844,7 +932,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         if ddl_batch and len(ddl_batch) == len(statements):
             update_ddl_fn = getattr(cursor, "update_ddl", None)
             if callable(update_ddl_fn):
-                await update_ddl_fn(ddl_batch)
+                await cast("Any", update_ddl_fn)(ddl_batch)
             else:
                 for stmt in ddl_batch:
                     await cursor.execute(stmt, None)
@@ -906,7 +994,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             if all_dml and compiled_batch:
                 exc_handler = self.handle_database_exceptions()
                 async with exc_handler:
-                    counts = await batch_fn(compiled_batch)
+                    counts = await cast("Any", batch_fn)(compiled_batch)
                     return tuple(StackResult(rows_affected=int(count)) for count in counts)
                 self._check_pending_exception(exc_handler)
         return await super().execute_stack(stack, continue_on_error=continue_on_error)
@@ -1046,6 +1134,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
         **kwargs: Any,
     ) -> ArrowResult:
         """Asynchronously execute a parallel ``PartitionQuery`` scan into a SQLSpec ``ArrowResult``."""
+        _ = ensure_pyarrow()
         native_arrow_fn = getattr(self.connection, "select_to_arrow", None)
         if callable(native_arrow_fn):
             stmt_kwargs = dict(kwargs)
@@ -1074,7 +1163,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             sql, params = self._compile_for_native(prepared)
             exc_handler = self.handle_database_exceptions()
             async with exc_handler:
-                cursor = await native_arrow_fn(sql, params, **native_kwargs)
+                cursor = await cast("Any", native_arrow_fn)(sql, params, **native_kwargs)
                 arrow_data, num_rows = _arrow_cursor_to_pyarrow(cursor, return_format)
                 return ArrowResult(statement=prepared, data=arrow_data, rows_affected=num_rows)
             self._check_pending_exception(exc_handler)
@@ -1088,6 +1177,33 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             arrow_schema=arrow_schema,
             **kwargs,
         )
+
+    async def select_to_storage(
+        self,
+        statement: SQL | str,
+        destination: StorageDestination,
+        /,
+        *parameters: Any,
+        statement_config: StatementConfig | None = None,
+        partitioner: dict[str, object] | None = None,
+        format_hint: StorageFormat | None = None,
+        telemetry: StorageTelemetry | None = None,
+        **kwargs: Any,
+    ) -> StorageBridgeJob:
+        """Asynchronously stream a Spanner SELECT query directly into object storage via Arrow."""
+        _ = ensure_pyarrow()
+        arrow_result = await self._select_for_storage(
+            statement, *parameters, statement_config=statement_config, **kwargs
+        )
+        async_pipeline = self._storage_pipeline()
+        telemetry_payload = await self._write_storage_result(
+            arrow_result,
+            destination,
+            format_hint=format_hint,
+            pipeline=async_pipeline,
+        )
+        self._attach_partition_telemetry(telemetry_payload, partitioner)
+        return self._storage_job(telemetry_payload, telemetry)
 
     async def load_from_arrow(
         self,
@@ -1119,6 +1235,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             type_casts,
         )
         self._require_writable("load_from_arrow")
+        _ = ensure_pyarrow()
         load_fn = getattr(self.connection, "load_from_arrow", None)
         if not callable(load_fn):
             return await super().load_from_arrow(
@@ -1130,7 +1247,7 @@ class SpannerAsyncDriver(BaseAsyncDriver):
             )
         exc_handler = self.handle_database_exceptions()
         async with exc_handler:
-            loaded = int(await load_fn(table, source, upsert=not overwrite))
+            loaded = int(await cast("Any", load_fn)(table, source, upsert=not overwrite))
             return self._storage_job(
                 {
                     "destination": table,

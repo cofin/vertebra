@@ -79,7 +79,7 @@ class PostgreSQLCore:
         )
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None:
-            native_fn = getattr(native_mod, "encode_pg_jsonb", None)
+            native_fn: Callable[[bytes], Buffer] | None = getattr(native_mod, "encode_pg_jsonb", None)
             if callable(native_fn):
                 return bytes(native_fn(raw_arg))
 
@@ -113,7 +113,9 @@ class PostgreSQLCore:
         ]
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None and flags == 0 and not ext_bytes:
-            native_fn = getattr(native_mod, "encode_pgcopy_rows", None)
+            native_fn: Callable[[list[list[bytes | None]]], Buffer] | None = getattr(
+                native_mod, "encode_pgcopy_rows", None
+            )
             if callable(native_fn):
                 return bytes(native_fn(normalized_rows))
 
@@ -152,7 +154,9 @@ class PostgreSQLCore:
 
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None:
-            native_fn = getattr(native_mod, "decode_pgcopy_rows", None)
+            native_fn: Callable[[bytes], Iterable[Iterable[Buffer | None]]] | None = getattr(
+                native_mod, "decode_pgcopy_rows", None
+            )
             if callable(native_fn):
                 try:
                     res = native_fn(bytes(raw))

@@ -10,6 +10,7 @@ from typing import Any, Literal
 import msgspec
 
 from vertebra.agent.core.schema import Tool, ToolCall
+from vertebra.agent.workflow import DynamicWorkflow, WorkflowNode
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 TRANSFER_TOOL_NAME: str = "transfer_to_agent"
@@ -303,10 +304,8 @@ class SpecTree:
             tree._nodes[node.id] = node
         return tree
 
-    def to_workflow(self, agents: Mapping[str, Agent] | None = None) -> Any:
+    def to_workflow(self, agents: Mapping[str, Agent] | None = None) -> DynamicWorkflow:
         """Compile this SpecTree into an executable DynamicWorkflow DAG."""
-        from vertebra.agent.workflow import DynamicWorkflow, WorkflowNode
-
         workflow = DynamicWorkflow(name=f"workflow_{self.root_id}")
         agent_map = dict(agents or {})
 

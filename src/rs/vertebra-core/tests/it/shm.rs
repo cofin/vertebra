@@ -11,6 +11,7 @@ fn create_anonymous_region() {
 #[test]
 fn write_and_read_anonymous() {
     let mut region = ShmRegion::create(4096).expect("create failed");
+    // SAFETY: `region` is exclusively owned in this test and mapped for at least 4096 bytes.
     unsafe {
         region.as_mut_slice()[0] = 0xDE;
         region.as_mut_slice()[1] = 0xAD;
@@ -34,10 +35,12 @@ fn named_region_create_open_cleanup() {
         Err(ShmError::Sys(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(e) => panic!("create_named failed: {e:?}"),
     };
+    // SAFETY: `region` is exclusively owned in this test prior to opening `second`.
     unsafe {
         region.as_mut_slice()[42] = 0xFF;
     }
     let second = ShmRegion::open_named(&name, 4096).expect("open_named failed");
+    // SAFETY: `second` maps the same SHM backing and no concurrent writes occur during this read.
     unsafe {
         assert_eq!(second.as_slice()[42], 0xFF, "data visible across mappings");
     }
@@ -86,7 +89,7 @@ fn live_owner_blocks_create_named_with_in_use_and_reaps_dead_owner() {
             std::mem::forget(region);
             println!("READY");
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::park();
             }
         }
         return;
@@ -327,6 +330,8 @@ fn tiered_ring_set_default_absorbs_256_burst_active_mask_and_zero_copy_drain() {
     let req_region = Arc::new(ShmRegion::create(req_layout.total_size).expect("req region"));
     let region_start = req_region.as_ptr() as usize;
     let region_end = region_start + req_region.len();
+    // SAFETY: `req_region` was freshly allocated with `req_layout.total_size` bytes and is
+    // uniquely owned prior to initializing the ring header.
     let req_ring = Arc::new(unsafe {
         MpmcRing::initialize(Arc::clone(&req_region), req_layout, 0, 0).expect("init mpmc")
     });

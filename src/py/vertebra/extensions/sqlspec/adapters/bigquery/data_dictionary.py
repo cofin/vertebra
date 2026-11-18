@@ -1,6 +1,9 @@
 """BigQuery synchronous and asynchronous SQLSpec data dictionaries over catalog SQL."""
 
-from collections.abc import Sequence
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from sqlspec.data_dictionary import (
@@ -14,25 +17,25 @@ from sqlspec.data_dictionary import (
     MetadataRisk,
     MetadataSource,
     MetadataSupport,
+    ObjectIdentity,
     PartitionMetadata,
     TableMetadata,
     VersionInfo,
-    get_data_dictionary_loader,
 )
 from sqlspec.data_dictionary.dialects.bigquery import (
-    BIGQUERY_CONFIG,
     format_bigquery_information_schema_tables,
     format_bigquery_schema_prefix,
 )
 from sqlspec.driver import AsyncDataDictionaryBase, SyncDataDictionaryBase
 
-if TYPE_CHECKING:
-    from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
-
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     resolve_dataset_id,
     resolve_project_id,
 )
+from vertebra.typing import ImproperConfigurationError
+
+if TYPE_CHECKING:
+    from sqlspec.driver import AsyncDriverAdapterBase, SyncDriverAdapterBase
 
 __all__ = (
     "BigQueryAsyncDataDictionary",
@@ -66,6 +69,24 @@ _SUPPORTED_DOMAINS: Final[tuple[str, ...]] = (
 )
 
 
+_BQ_PROJECT_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_BQ_DATASET_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+_BQ_REGION_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _validate_scope_part(value: str | None, *, name: str, pattern: re.Pattern[str]) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"BigQuery {name} scope must be a string, got {type(value).__name__}"
+        raise ImproperConfigurationError(msg)
+    cleaned = value.strip()
+    if not cleaned or ".." in cleaned or not pattern.match(cleaned):
+        msg = f"Invalid BigQuery {name} scope: {value!r}"
+        raise ImproperConfigurationError(msg)
+    return cleaned
+
+
 class BigQueryMetadataScope:
     """Normalized BigQuery dataset and region scope used to format ``INFORMATION_SCHEMA`` queries."""
 
@@ -78,9 +99,9 @@ class BigQueryMetadataScope:
         dataset: str | None = None,
         region: str | None = None,
     ) -> None:
-        self.project = project
-        self.dataset = dataset
-        self.region = region
+        self.project = _validate_scope_part(project, name="project", pattern=_BQ_PROJECT_RE)
+        self.dataset = _validate_scope_part(dataset, name="dataset", pattern=_BQ_DATASET_RE)
+        self.region = _validate_scope_part(region, name="region", pattern=_BQ_REGION_RE)
 
 
 def _normalize_schema_and_prefix(schema: str | None, driver: Any) -> tuple[str | None, str]:
@@ -96,7 +117,10 @@ def _normalize_schema_and_prefix(schema: str | None, driver: Any) -> tuple[str |
     if project_id and dataset_name:
         return dataset_name, f"`{project_id}`.`{dataset_name}`."
     if dataset_name:
-        return dataset_name, str(format_bigquery_schema_prefix(dataset_name))
+        try:
+            return dataset_name, str(format_bigquery_schema_prefix(dataset_name))
+        except ValueError as exc:
+            raise ImproperConfigurationError(str(exc)) from exc
     return None, ""
 
 
@@ -332,54 +356,79 @@ def _partition_metadata_from_rows(rows: list[dict[str, Any]], dataset_name: str 
     return result
 
 
-def _require_catalog_query(domain: str, name: str) -> str:
-    query_text = get_data_dictionary_loader().get_domain_query_text("bigquery", domain, name)
-    if query_text is None:
-        msg = f"Missing BigQuery catalog query {domain}/{name}"
-        raise RuntimeError(msg)
-    return query_text
+def _ddl_result_from_row(
+    row: Mapping[str, Any],
+    *,
+    default_name: str,
+    default_object_type: str,
+    default_schema: str | None,
+) -> DDLResult:
+    object_name = str(row.get("object_name") or default_name)
+    object_type = str(row.get("object_type") or default_object_type)
+    schema_raw = row.get("schema_name") or row.get("table_schema") or default_schema
+    schema_name = str(schema_raw) if schema_raw is not None and str(schema_raw) else None
+    ddl_raw = row.get("ddl")
+    ddl_text = str(ddl_raw) if ddl_raw is not None else None
+    identity = ObjectIdentity(
+        name=object_name,
+        object_type=object_type,
+        schema=schema_name,
+        dialect="bigquery",
+        source=MetadataSource.INFORMATION_SCHEMA,
+    )
+    if ddl_text is None:
+        return DDLResult.unsupported(identity, source=MetadataSource.INFORMATION_SCHEMA)
+    return DDLResult(
+        identity=identity,
+        status=MetadataSupport.SUPPORTED,
+        fidelity=str(row.get("fidelity") or MetadataFidelity.NATIVE.value),
+        source=MetadataSource.INFORMATION_SCHEMA,
+        ddl=ddl_text,
+    )
 
 
 class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
     """BigQuery synchronous SQLSpec data dictionary over ``INFORMATION_SCHEMA`` catalog SQL."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "bigquery"
 
-    def get_version(self, driver: "SyncDriverAdapterBase") -> VersionInfo | None:
+    def get_version(self, driver: SyncDriverAdapterBase) -> VersionInfo | None:
         """Return None because BigQuery is a versionless managed cloud service."""
         _ = driver
         return None
 
-    def get_feature_flag(self, driver: "SyncDriverAdapterBase", feature: str) -> bool:
+    def get_feature_flag(self, driver: SyncDriverAdapterBase, feature: str) -> bool:
         """Return whether ``feature`` is enabled by BigQuery GoogleSQL capabilities."""
         _ = driver
-        return bool(BIGQUERY_CONFIG.feature_flags.get(feature, False))
+        return bool(self.get_dialect_config().get_feature_flag(feature))
 
-    def get_optimal_type(self, driver: "SyncDriverAdapterBase", type_category: str) -> str:
+    def get_optimal_type(self, driver: SyncDriverAdapterBase, type_category: str) -> str:
         """Return the canonical BigQuery SQL type name for ``type_category``."""
         _ = driver
-        return str(BIGQUERY_CONFIG.type_mappings.get(type_category, "STRING"))
+        return self.get_dialect_config().get_optimal_type(type_category)
 
     def get_metadata_capabilities(
-        self, driver: "SyncDriverAdapterBase", domains: Sequence[str] | None = None
+        self, driver: SyncDriverAdapterBase, domains: Sequence[str] | None = None
     ) -> MetadataCapabilityProfile:
         """Describe supported BigQuery metadata domains and billing/scope warnings."""
         _ = driver
         return _bigquery_capabilities(domains, type(self).__name__)
 
-    def get_tables(self, driver: "SyncDriverAdapterBase", schema: str | None = None) -> list[TableMetadata]:
+    def get_tables(self, driver: SyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """List base tables sorted topologically by FK dependency depth."""
-        query_text = _require_catalog_query("tables", "by_schema")
+        query_text = self.get_query_text("tables", "by_schema")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         rows = [dict(row) for row in driver.select(sql, schema_name=dataset_name)]
         return _table_metadata_from_rows(rows, dataset_name)
 
     def get_columns(
-        self, driver: "SyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ColumnMetadata]:
         """Retrieve column metadata for a specific table or dataset schema."""
         query_name = "by_table" if table is not None else "by_schema"
-        query_text = _require_catalog_query("columns", query_name)
+        query_text = self.get_query_text("columns", query_name)
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         params: dict[str, Any] = {"schema_name": dataset_name}
         if table is not None:
@@ -388,23 +437,23 @@ class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
         return _column_metadata_from_rows(rows, table, dataset_name)
 
     def get_indexes(
-        self, driver: "SyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[IndexMetadata]:
         """List BigQuery search and vector indexes for a table or dataset."""
         rows: list[dict[str, Any]] = []
         dataset_name: str | None = None
         for query_name in ("search_by_dataset", "vector_by_dataset"):
-            query_text = _require_catalog_query("indexes", query_name)
+            query_text = self.get_query_text("indexes", query_name)
             dataset_name, sql = _format_catalog_query(query_text, schema, driver)
             rows.extend(dict(row) for row in driver.select(sql, schema_name=dataset_name, table_name=table))
         return _index_metadata_from_rows(rows, dataset_name)
 
     def get_foreign_keys(
-        self, driver: "SyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ForeignKeyMetadata]:
         """Retrieve un-enforced BigQuery ``KEY_COLUMN_USAGE`` foreign key constraints."""
         query_name = "by_table" if table is not None else "by_schema"
-        query_text = _require_catalog_query("foreign_keys", query_name)
+        query_text = self.get_query_text("foreign_keys", query_name)
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         params: dict[str, Any] = {"schema_name": dataset_name}
         if table is not None:
@@ -413,64 +462,55 @@ class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
         return _foreign_key_metadata_from_rows(rows, dataset_name)
 
     def get_partitions(
-        self, driver: "SyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: SyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[PartitionMetadata]:
         """Retrieve BigQuery table partition storage statistics."""
-        query_text = _require_catalog_query("tables", "partitions_by_dataset")
+        query_text = self.get_query_text("tables", "partitions_by_dataset")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         rows = [dict(row) for row in driver.select(sql, schema_name=dataset_name, table_name=table)]
         return _partition_metadata_from_rows(rows, dataset_name)
 
     def _get_native_object_ddl(
         self,
-        driver: "SyncDriverAdapterBase",
+        driver: SyncDriverAdapterBase,
         object_name: str,
         *,
-        schema: str | None = None,
-        object_type: str | None = None,
-        include_dependencies: bool = False,
-        redact: bool = False,
+        schema: str | None,
+        object_type: str,
+        include_dependencies: bool,
+        redact: bool,
     ) -> DDLResult | None:
-        _ = (object_type, include_dependencies, redact)
-        query_text = _require_catalog_query("ddl", "by_object")
+        _ = (include_dependencies, redact)
+        query_text = self.get_query_text("ddl", "by_object")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         rows = [dict(row) for row in driver.select(sql, schema_name=dataset_name, table_name=object_name)]
         if not rows:
             return None
-        row = rows[0]
-        return cast(
-            DDLResult,
-            {
-                "object_name": str(row.get("object_name") or object_name),
-                "object_type": str(row.get("object_type") or "table"),
-                "schema_name": str(row.get("table_schema") or dataset_name or ""),
-                "ddl": str(row.get("ddl") or ""),
-                "fidelity": str(row.get("fidelity") or "native"),
-            },
+        return _ddl_result_from_row(
+            rows[0],
+            default_name=object_name,
+            default_object_type=object_type,
+            default_schema=dataset_name,
         )
 
     def _get_native_schema_ddl(
         self,
-        driver: "SyncDriverAdapterBase",
-        schema: str | None = None,
+        driver: SyncDriverAdapterBase,
+        schema: str | None,
         *,
-        include_dependencies: bool = False,
-        redact: bool = False,
+        include_dependencies: bool,
+        redact: bool,
     ) -> list[DDLResult]:
         _ = (include_dependencies, redact)
-        query_text = _require_catalog_query("ddl", "by_schema")
+        query_text = self.get_query_text("ddl", "by_schema")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         rows = [dict(row) for row in driver.select(sql, schema_name=dataset_name)]
         return [
-            cast(
-                DDLResult,
-                {
-                    "object_name": str(row.get("object_name") or ""),
-                    "object_type": str(row.get("object_type") or "table"),
-                    "schema_name": str(row.get("schema_name") or dataset_name or ""),
-                    "ddl": str(row.get("ddl") or ""),
-                    "fidelity": str(row.get("fidelity") or "native"),
-                },
+            _ddl_result_from_row(
+                row,
+                default_name="",
+                default_object_type="table",
+                default_schema=dataset_name,
             )
             for row in rows
         ]
@@ -479,44 +519,46 @@ class BigQuerySyncDataDictionary(SyncDataDictionaryBase):
 class BigQueryAsyncDataDictionary(AsyncDataDictionaryBase):
     """BigQuery asynchronous SQLSpec data dictionary over ``INFORMATION_SCHEMA`` catalog SQL."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "bigquery"
 
-    async def get_version(self, driver: "AsyncDriverAdapterBase") -> VersionInfo | None:
+    async def get_version(self, driver: AsyncDriverAdapterBase) -> VersionInfo | None:
         """Return None because BigQuery is a versionless managed cloud service."""
         _ = driver
         return None
 
-    async def get_feature_flag(self, driver: "AsyncDriverAdapterBase", feature: str) -> bool:
+    async def get_feature_flag(self, driver: AsyncDriverAdapterBase, feature: str) -> bool:
         """Return whether ``feature`` is enabled by BigQuery GoogleSQL capabilities."""
         _ = driver
-        return bool(BIGQUERY_CONFIG.feature_flags.get(feature, False))
+        return bool(self.get_dialect_config().get_feature_flag(feature))
 
-    async def get_optimal_type(self, driver: "AsyncDriverAdapterBase", type_category: str) -> str:
+    async def get_optimal_type(self, driver: AsyncDriverAdapterBase, type_category: str) -> str:
         """Return the canonical BigQuery SQL type name for ``type_category``."""
         _ = driver
-        return str(BIGQUERY_CONFIG.type_mappings.get(type_category, "STRING"))
+        return self.get_dialect_config().get_optimal_type(type_category)
 
     async def get_metadata_capabilities(
-        self, driver: "AsyncDriverAdapterBase", domains: Sequence[str] | None = None
+        self, driver: AsyncDriverAdapterBase, domains: Sequence[str] | None = None
     ) -> MetadataCapabilityProfile:
         """Describe supported BigQuery metadata domains and billing/scope warnings."""
         _ = driver
         return _bigquery_capabilities(domains, type(self).__name__)
 
-    async def get_tables(self, driver: "AsyncDriverAdapterBase", schema: str | None = None) -> list[TableMetadata]:
+    async def get_tables(self, driver: AsyncDriverAdapterBase, schema: str | None = None) -> list[TableMetadata]:
         """List base tables sorted topologically by FK dependency depth."""
-        query_text = _require_catalog_query("tables", "by_schema")
+        query_text = self.get_query_text("tables", "by_schema")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         raw_rows = await driver.select(sql, schema_name=dataset_name)
         rows = [dict(row) for row in raw_rows]
         return _table_metadata_from_rows(rows, dataset_name)
 
     async def get_columns(
-        self, driver: "AsyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ColumnMetadata]:
         """Retrieve column metadata for a specific table or dataset schema."""
         query_name = "by_table" if table is not None else "by_schema"
-        query_text = _require_catalog_query("columns", query_name)
+        query_text = self.get_query_text("columns", query_name)
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         params: dict[str, Any] = {"schema_name": dataset_name}
         if table is not None:
@@ -526,24 +568,24 @@ class BigQueryAsyncDataDictionary(AsyncDataDictionaryBase):
         return _column_metadata_from_rows(rows, table, dataset_name)
 
     async def get_indexes(
-        self, driver: "AsyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[IndexMetadata]:
         """List BigQuery search and vector indexes for a table or dataset."""
         rows: list[dict[str, Any]] = []
         dataset_name: str | None = None
         for query_name in ("search_by_dataset", "vector_by_dataset"):
-            query_text = _require_catalog_query("indexes", query_name)
+            query_text = self.get_query_text("indexes", query_name)
             dataset_name, sql = _format_catalog_query(query_text, schema, driver)
             raw_rows = await driver.select(sql, schema_name=dataset_name, table_name=table)
             rows.extend(dict(row) for row in raw_rows)
         return _index_metadata_from_rows(rows, dataset_name)
 
     async def get_foreign_keys(
-        self, driver: "AsyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[ForeignKeyMetadata]:
         """Retrieve un-enforced BigQuery ``KEY_COLUMN_USAGE`` foreign key constraints."""
         query_name = "by_table" if table is not None else "by_schema"
-        query_text = _require_catalog_query("foreign_keys", query_name)
+        query_text = self.get_query_text("foreign_keys", query_name)
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         params: dict[str, Any] = {"schema_name": dataset_name}
         if table is not None:
@@ -553,10 +595,10 @@ class BigQueryAsyncDataDictionary(AsyncDataDictionaryBase):
         return _foreign_key_metadata_from_rows(rows, dataset_name)
 
     async def get_partitions(
-        self, driver: "AsyncDriverAdapterBase", table: str | None = None, schema: str | None = None
+        self, driver: AsyncDriverAdapterBase, table: str | None = None, schema: str | None = None
     ) -> list[PartitionMetadata]:
         """Retrieve BigQuery table partition storage statistics."""
-        query_text = _require_catalog_query("tables", "partitions_by_dataset")
+        query_text = self.get_query_text("tables", "partitions_by_dataset")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         raw_rows = await driver.select(sql, schema_name=dataset_name, table_name=table)
         rows = [dict(row) for row in raw_rows]
@@ -564,56 +606,47 @@ class BigQueryAsyncDataDictionary(AsyncDataDictionaryBase):
 
     async def _get_native_object_ddl(
         self,
-        driver: "AsyncDriverAdapterBase",
+        driver: AsyncDriverAdapterBase,
         object_name: str,
         *,
-        schema: str | None = None,
-        object_type: str | None = None,
-        include_dependencies: bool = False,
-        redact: bool = False,
+        schema: str | None,
+        object_type: str,
+        include_dependencies: bool,
+        redact: bool,
     ) -> DDLResult | None:
-        _ = (object_type, include_dependencies, redact)
-        query_text = _require_catalog_query("ddl", "by_object")
+        _ = (include_dependencies, redact)
+        query_text = self.get_query_text("ddl", "by_object")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         raw_rows = await driver.select(sql, schema_name=dataset_name, table_name=object_name)
         rows = [dict(row) for row in raw_rows]
         if not rows:
             return None
-        row = rows[0]
-        return cast(
-            DDLResult,
-            {
-                "object_name": str(row.get("object_name") or object_name),
-                "object_type": str(row.get("object_type") or "table"),
-                "schema_name": str(row.get("table_schema") or dataset_name or ""),
-                "ddl": str(row.get("ddl") or ""),
-                "fidelity": str(row.get("fidelity") or "native"),
-            },
+        return _ddl_result_from_row(
+            rows[0],
+            default_name=object_name,
+            default_object_type=object_type,
+            default_schema=dataset_name,
         )
 
     async def _get_native_schema_ddl(
         self,
-        driver: "AsyncDriverAdapterBase",
-        schema: str | None = None,
+        driver: AsyncDriverAdapterBase,
+        schema: str | None,
         *,
-        include_dependencies: bool = False,
-        redact: bool = False,
+        include_dependencies: bool,
+        redact: bool,
     ) -> list[DDLResult]:
         _ = (include_dependencies, redact)
-        query_text = _require_catalog_query("ddl", "by_schema")
+        query_text = self.get_query_text("ddl", "by_schema")
         dataset_name, sql = _format_catalog_query(query_text, schema, driver)
         raw_rows = await driver.select(sql, schema_name=dataset_name)
         rows = [dict(row) for row in raw_rows]
         return [
-            cast(
-                DDLResult,
-                {
-                    "object_name": str(row.get("object_name") or ""),
-                    "object_type": str(row.get("object_type") or "table"),
-                    "schema_name": str(row.get("schema_name") or dataset_name or ""),
-                    "ddl": str(row.get("ddl") or ""),
-                    "fidelity": str(row.get("fidelity") or "native"),
-                },
+            _ddl_result_from_row(
+                row,
+                default_name="",
+                default_object_type="table",
+                default_schema=dataset_name,
             )
             for row in rows
         ]

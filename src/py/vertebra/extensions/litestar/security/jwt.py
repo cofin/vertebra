@@ -1,38 +1,29 @@
-"""Accelerated JWT authentication mechanism backed by Rust JWTGuard."""
+"""Accelerated JWT authentication mechanism delegating to neutral security guards."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from litestar.openapi.spec import SecurityScheme
-
-from vertebra._vertebra import JWTGuard
-from vertebra.typing import MissingDependencyError
+from vertebra.framework.security import JWKSVerifier, JWTAuthGuard
 from vertebra.utils.module_loader import ensure_module
-from vertebra.utils.serializers import decode_json
-
-try:
-    from litestar_security import (
-        Authenticated,
-        AuthenticationEvidence,
-        AuthenticationMechanism,
-        InvalidCredentials,
-        NoCredentials,
-        PresentedCredential,
-        Principal,
-    )
-except ImportError as exc:
-    raise MissingDependencyError(
-        "litestar-security",
-        install_package="litestar-security",
-        extra="security",
-    ) from exc
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from litestar.connection import ASGIConnection
+    from litestar.openapi.spec import SecurityScheme
+    from litestar_security import AuthenticationMechanism
+
+__all__ = (
+    "BearerTokenSlot",
+    "JWTAuthenticationMechanism",
+    "JWTAuthenticator",
+    "JWTIdentityResolver",
+    "create_jwt_authentication_mechanism",
+)
+
+_CACHED_MECHANISM_CLS: type[Any] | None = None
 
 
 class BearerTokenSlot:
@@ -42,40 +33,46 @@ class BearerTokenSlot:
 
     def __init__(self, name: str = "bearer") -> None:
         """Initialize the bearer token slot."""
+        ensure_module("litestar_security", extra="security")
         self.name = name
 
     def extract(self, connection: ASGIConnection[Any, Any, Any, Any]) -> Any:
         """Extract Bearer credential from connection headers."""
+        sec_mod = ensure_module("litestar_security", extra="security")
         auth_header = connection.headers.get("authorization")
         if not auth_header:
-            return NoCredentials()
+            return sec_mod.NoCredentials()
         parts = auth_header.split(" ", 1)
         if len(parts) != 2 or parts[0].lower() != "bearer":
-            return InvalidCredentials("Malformed Authorization header; expected 'Bearer <token>'")
+            return sec_mod.InvalidCredentials("Malformed Authorization header; expected 'Bearer <token>'")
         token = parts[1].strip()
         if not token:
-            return InvalidCredentials("Empty Bearer token in Authorization header")
-        return PresentedCredential(token)
+            return sec_mod.InvalidCredentials("Empty Bearer token in Authorization header")
+        return sec_mod.PresentedCredential(token)
 
 
 class JWTAuthenticator:
-    """Async credential verifier using Rust JWTGuard for zero-copy HS256 validation."""
+    """Async credential verifier delegating HS256 or asymmetric JWKS validation to neutral guards."""
 
-    __slots__ = ("_guard", "name", "participates_by_default", "slot")
+    __slots__ = ("_guard", "_jwks_verifier", "name", "participates_by_default", "slot")
 
     def __init__(
         self,
-        secret: str | bytes,
+        secret: str | bytes | None = None,
         *,
         leeway_secs: int = 60,
         name: str = "jwt",
         slot: str = "bearer",
         participates_by_default: bool = True,
+        jwks_verifier: JWKSVerifier | None = None,
     ) -> None:
-        """Initialize the JWT authenticator with secret and validation leeway."""
+        """Initialize the JWT authenticator with secret or JWKS verifier and leeway."""
         ensure_module("litestar_security", extra="security")
-        secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else secret
-        self._guard = JWTGuard(secret_bytes, leeway_secs)
+        if jwks_verifier is None and secret is None:
+            msg = "Either secret or jwks_verifier must be provided"
+            raise ValueError(msg)
+        self._jwks_verifier = jwks_verifier
+        self._guard = JWTAuthGuard(secret, leeway_secs=leeway_secs) if secret is not None else None
         self.name = name
         self.slot = slot
         self.participates_by_default = participates_by_default
@@ -87,27 +84,33 @@ class JWTAuthenticator:
     ) -> Any:
         """Verify the presented JWT token and produce claims."""
         _ = connection
+        sec_mod = ensure_module("litestar_security", extra="security")
         token = getattr(credential, "value", credential)
         if not isinstance(token, str):
-            return InvalidCredentials("Invalid token format")
+            return sec_mod.InvalidCredentials("Invalid token format")
         try:
-            claims_json = self._guard.validate(token)
-            claims = decode_json(claims_json)
-        except (ValueError, Exception) as exc:
-            return InvalidCredentials(f"Invalid or expired JWT: {exc}")
+            if self._jwks_verifier is not None:
+                principal = await self._jwks_verifier.verify_token(token)
+            elif self._guard is not None:
+                principal = self._guard.verify_token(token)
+            else:
+                return sec_mod.InvalidCredentials("JWT verifier is not configured")
+            claims = dict(principal.claims)
+        except Exception as exc:
+            return sec_mod.InvalidCredentials(f"Invalid or expired JWT: {exc}")
 
         expires_at: datetime | None = None
         exp = claims.get("exp")
         if isinstance(exp, (int, float)):
             expires_at = datetime.fromtimestamp(exp, tz=UTC)
 
-        evidence = AuthenticationEvidence(
+        evidence = sec_mod.AuthenticationEvidence(
             mechanism=self.name,
             slot=self.slot,
             authenticated_at=datetime.now(UTC),
             expires_at=expires_at,
         )
-        return Authenticated(claims=claims, evidence=evidence)
+        return sec_mod.Authenticated(claims=claims, evidence=evidence)
 
 
 class JWTIdentityResolver:
@@ -120,29 +123,31 @@ class JWTIdentityResolver:
         principal_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         """Initialize the identity resolver with an optional principal factory."""
+        ensure_module("litestar_security", extra="security")
         self._principal_factory = principal_factory
 
     async def resolve(self, claims: dict[str, Any]) -> Any:
         """Resolve verified claims to an application principal."""
+        sec_mod = ensure_module("litestar_security", extra="security")
         sub = claims.get("sub")
         if sub is None:
-            return InvalidCredentials("Missing subject claim in JWT")
+            return sec_mod.InvalidCredentials("Missing subject claim in JWT")
 
         user = self._principal_factory(claims) if self._principal_factory is not None else claims
 
-        return Principal(
+        return sec_mod.Principal(
             id=str(sub),
             display_name=claims.get("name"),
             user=user,
         )
 
 
-class JWTAuthenticationMechanism(AuthenticationMechanism[Any, dict[str, Any], Any]):
-    """Pair a Rust-accelerated JWT authenticator with an identity resolver and OpenAPI scheme."""
+class _JWTAuthenticationMechanismImpl:
+    """Pair a JWT authenticator with an identity resolver and OpenAPI scheme."""
 
     def __init__(
         self,
-        secret: str | bytes,
+        secret: str | bytes | None = None,
         *,
         leeway_secs: int = 60,
         scheme_name: str = "BearerAuth",
@@ -150,17 +155,25 @@ class JWTAuthenticationMechanism(AuthenticationMechanism[Any, dict[str, Any], An
         principal_factory: Callable[[dict[str, Any]], Any] | None = None,
         slot: str = "bearer",
         session_capable: bool = False,
+        jwks_verifier: JWKSVerifier | None = None,
     ) -> None:
-        """Initialize the JWT authentication mechanism with Rust verification."""
-        ensure_module("litestar_security", extra="security")
-        authenticator = JWTAuthenticator(secret, leeway_secs=leeway_secs, slot=slot)
+        """Initialize the JWT authentication mechanism."""
+        sec_mod = ensure_module("litestar_security", extra="security")
+        spec_mod = ensure_module("litestar.openapi.spec", extra="litestar")
+        authenticator = JWTAuthenticator(
+            secret,
+            leeway_secs=leeway_secs,
+            slot=slot,
+            jwks_verifier=jwks_verifier,
+        )
         resolver = JWTIdentityResolver(principal_factory)
         resolved_scheme = (
             security_scheme
             if security_scheme is not None
-            else SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
+            else spec_mod.SecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
         )
-        super().__init__(
+        sec_mod.AuthenticationMechanism.__init__(
+            self,
             authenticator=authenticator,
             resolver=resolver,
             scheme_name=scheme_name,
@@ -169,8 +182,45 @@ class JWTAuthenticationMechanism(AuthenticationMechanism[Any, dict[str, Any], An
         )
 
 
+if TYPE_CHECKING:
+
+    class JWTAuthenticationMechanism(
+        _JWTAuthenticationMechanismImpl, AuthenticationMechanism[Any, dict[str, Any], Any]
+    ):
+        """Pair a JWT authenticator with an identity resolver and OpenAPI scheme."""
+
+
+def _get_mechanism_cls() -> type[JWTAuthenticationMechanism]:
+    global _CACHED_MECHANISM_CLS
+    if _CACHED_MECHANISM_CLS is None:
+        sec_mod = ensure_module("litestar_security", extra="security")
+        base_cls = sec_mod.AuthenticationMechanism
+        _CACHED_MECHANISM_CLS = type(
+            "JWTAuthenticationMechanism",
+            (_JWTAuthenticationMechanismImpl, base_cls),
+            {
+                "__module__": __name__,
+                "__doc__": _JWTAuthenticationMechanismImpl.__doc__,
+            },
+        )
+    return cast("type[JWTAuthenticationMechanism]", _CACHED_MECHANISM_CLS)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily bind ``JWTAuthenticationMechanism`` to ``litestar_security.AuthenticationMechanism``."""
+    if name == "JWTAuthenticationMechanism":
+        return _get_mechanism_cls()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+def __dir__() -> list[str]:
+    """Return module attributes including lazily bound ``JWTAuthenticationMechanism``."""
+    return sorted(set(globals()) | set(__all__))
+
+
 def create_jwt_authentication_mechanism(
-    secret: str | bytes,
+    secret: str | bytes | None = None,
     *,
     leeway_secs: int = 60,
     scheme_name: str = "BearerAuth",
@@ -178,9 +228,11 @@ def create_jwt_authentication_mechanism(
     principal_factory: Callable[[dict[str, Any]], Any] | None = None,
     slot: str = "bearer",
     session_capable: bool = False,
+    jwks_verifier: JWKSVerifier | None = None,
 ) -> AuthenticationMechanism[Any, Any, Any]:
-    """Create an AuthenticationMechanism backed by Rust JWTGuard."""
-    return JWTAuthenticationMechanism(
+    """Create an AuthenticationMechanism backed by neutral JWTAuthGuard or JWKSVerifier."""
+    mechanism_cls = _get_mechanism_cls()
+    return mechanism_cls(
         secret,
         leeway_secs=leeway_secs,
         scheme_name=scheme_name,
@@ -188,4 +240,5 @@ def create_jwt_authentication_mechanism(
         principal_factory=principal_factory,
         slot=slot,
         session_capable=session_capable,
+        jwks_verifier=jwks_verifier,
     )

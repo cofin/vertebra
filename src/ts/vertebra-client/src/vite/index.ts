@@ -27,8 +27,22 @@ export interface VitePluginOptions {
  * 3. HMR integration for type changes.
  * 4. Immediate type poll when .py files change.
  */
+interface ManifestRouteEntry {
+  method?: string;
+  route?: string;
+}
+
+interface ManifestPayload {
+  routes?: Record<string, ManifestRouteEntry>;
+  websocketRoutes?: Record<string, ManifestRouteEntry>;
+}
+
+const EMPTY_MANIFEST_MODULE =
+  "export const routes = Object.freeze({});\nexport const websocketRoutes = Object.freeze({});\n";
+
 export function vitePlugin(options: VitePluginOptions = {}): Plugin {
   const { serverUrl = "http://localhost:8000", hmr = true, virtualModuleName = "virtual:vertebra-types" } = options;
+  const cleanServerUrl = serverUrl.replace(/\/+$/, "");
 
   const resolvedVirtualModuleId = `\0${virtualModuleName}`;
   let lastVersion = "";
@@ -37,7 +51,7 @@ export function vitePlugin(options: VitePluginOptions = {}): Plugin {
   const pollTypes = async () => {
     if (!devServer) return;
     try {
-      const response = await fetch(`${serverUrl}/__vertebra/types/version`);
+      const response = await fetch(`${cleanServerUrl}/__vertebra/types/version`);
       if (!response.ok) return;
       const version = await response.text();
 
@@ -76,12 +90,31 @@ export function vitePlugin(options: VitePluginOptions = {}): Plugin {
     async load(id) {
       if (id === resolvedVirtualModuleId) {
         try {
-          const response = await fetch(`${serverUrl}/__vertebra/types.d.ts`);
+          const response = await fetch(`${cleanServerUrl}/__vertebra/manifest.json`);
           if (!response.ok) throw new Error(`Server returned ${response.status}`);
-          return await response.text();
+          const manifest = (await response.json()) as ManifestPayload;
+          const routes: Record<string, { method: string; path: string }> = {};
+          if (manifest.routes && typeof manifest.routes === "object") {
+            for (const [name, entry] of Object.entries(manifest.routes)) {
+              routes[name] = {
+                method: typeof entry?.method === "string" ? entry.method : "GET",
+                path: typeof entry?.route === "string" ? entry.route : "",
+              };
+            }
+          }
+          const websocketRoutes: Record<string, { method: string; path: string }> = {};
+          if (manifest.websocketRoutes && typeof manifest.websocketRoutes === "object") {
+            for (const [name, entry] of Object.entries(manifest.websocketRoutes)) {
+              websocketRoutes[name] = {
+                method: "WS",
+                path: typeof entry?.route === "string" ? entry.route : "",
+              };
+            }
+          }
+          return `export const routes = Object.freeze(${JSON.stringify(routes)});\nexport const websocketRoutes = Object.freeze(${JSON.stringify(websocketRoutes)});\n`;
         } catch (err) {
-          console.warn("[vertebra] Failed to fetch types, using stubs:", err);
-          return "export namespace Procedures { /* stubs */ }";
+          console.warn("[vertebra] Failed to fetch manifest, using empty stubs:", err);
+          return EMPTY_MANIFEST_MODULE;
         }
       }
       return null;

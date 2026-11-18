@@ -168,10 +168,17 @@ execution, including when its optional dry-run guard is disabled.
 ::: vertebra.agent.workflow.WorkflowEngine
     options:
       heading_level: 3
+      members: false
+      show_bases: false
+      show_source: false
 
 ::: vertebra.agent.sessions.MemorySessionStore
     options:
       heading_level: 3
+      members:
+        - load
+        - save
+        - delete
 
 ::: vertebra.agent.sessions.SQLSpecSessionStore
     options:

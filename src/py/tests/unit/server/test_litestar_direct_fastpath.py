@@ -635,8 +635,10 @@ async def test_direct_dispatch_file_pathsend_and_sse_ping_offload(tmp_path: Path
     sent_messages.clear()
     sse_scope = _make_scope(app, method="GET", path="/events", route_handler=sse_compiled.route_handler)
 
+    disconnect_gate = asyncio.Event()
+
     async def sse_receive() -> dict[str, Any]:
-        await asyncio.sleep(100)
+        await disconnect_gate.wait()
         return {"type": "http.disconnect"}
 
     sse_res = await dispatch_handler_direct(

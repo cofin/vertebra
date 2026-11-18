@@ -6,12 +6,16 @@ import base64
 import hashlib
 import hmac
 import json
+import subprocess
+import sys
 import time
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from litestar import Litestar, get
 from litestar.exceptions import PermissionDeniedException
+from litestar.testing import TestClient
 
 from vertebra.extensions.litestar.security import (
     BearerTokenSlot,
@@ -212,3 +216,66 @@ def test_missing_dependency_error_on_missing_security(monkeypatch: pytest.Monkey
     with pytest.raises(MissingDependencyError) as exc_info:
         ensure_module("litestar_security", extra="security")
     assert "security" in exc_info.value.install_package
+
+
+def test_rate_limit_guard_on_litestar_route() -> None:
+    """RateLimitGuard delegates to neutral RateLimitGuard and enforces HTTP 403 on real Litestar routes."""
+    guard = RateLimitGuard(capacity=2, refill_rate_per_sec=0.01, key_func=lambda _conn: "client-1")
+
+    @get("/limited", guards=[guard], sync_to_thread=False)
+    def limited_endpoint() -> dict[str, str]:
+        return {"status": "ok"}
+
+    app = Litestar(route_handlers=[limited_endpoint])
+    with TestClient(app=app) as client:
+        assert client.get("/limited").status_code == 200
+        assert client.get("/limited").status_code == 200
+        assert client.get("/limited").status_code == 403
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "vertebra.extensions.litestar.security.ingress",
+        "vertebra.extensions.litestar.security.jwt",
+        "vertebra.extensions.litestar.security.ratelimit",
+    ],
+)
+def test_security_submodules_import_with_host_packages_blocked(module_name: str) -> None:
+    """Security submodules import cleanly when litestar and litestar_security are blocked in sys.modules."""
+    script = (
+        "import importlib, sys\n"
+        "for mod in ('litestar', 'litestar.exceptions', 'litestar.openapi', 'litestar.openapi.spec', "
+        "'litestar_security'):\n"
+        "    sys.modules[mod] = None\n"
+        f"imported = importlib.import_module({module_name!r})\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        f"if {module_name!r}.endswith('ratelimit'):\n"
+        "    try:\n"
+        "        imported.RateLimitGuard()\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for RateLimitGuard')\n"
+        f"elif {module_name!r}.endswith('jwt'):\n"
+        "    try:\n"
+        "        imported.JWTAuthenticator('test-token-placeholder')\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for JWTAuthenticator')\n"
+        f"elif {module_name!r}.endswith('ingress'):\n"
+        "    try:\n"
+        "        imported.create_ingress_identity_mechanism()\n"
+        "    except MissingDependencyError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError for create_ingress_identity_mechanism')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

@@ -1,6 +1,8 @@
 """MySQL synchronous and asynchronous SQLSpec driver adapters over Vertebra `vertebra._mysql`."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlspec.core import SQL, ParameterStyle, StatementConfig
 from sqlspec.driver import ExecutionResult
@@ -17,11 +19,16 @@ from vertebra.extensions.sqlspec.adapters.mysql.data_dictionary import (
     MySQLSyncDataDictionary,
 )
 
+if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.mysql._typing import MySQLDriverFeatures
+
 __all__ = ("MySQLAsyncDriver", "MySQLSyncDriver")
 
 
 class MySQLSyncDriver(BaseSyncDriver):
     """Synchronous MySQL/MariaDB SQLSpec driver backed by Vertebra `SyncMySQLDriver`."""
+
+    __slots__ = ("_data_dictionary",)
 
     dialect: str = "mysql"
     _execution_parameter_style = ParameterStyle.QMARK
@@ -30,7 +37,7 @@ class MySQLSyncDriver(BaseSyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: MySQLDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -39,7 +46,7 @@ class MySQLSyncDriver(BaseSyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -73,7 +80,7 @@ class MySQLSyncDriver(BaseSyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = exec_many_fn(sql, param_sets)
+            res = cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0
@@ -86,6 +93,8 @@ class MySQLSyncDriver(BaseSyncDriver):
 class MySQLAsyncDriver(BaseAsyncDriver):
     """Asynchronous MySQL/MariaDB SQLSpec driver backed by Vertebra `AsyncMySQLDriver`."""
 
+    __slots__ = ("_data_dictionary",)
+
     dialect: str = "mysql"
     _execution_parameter_style = ParameterStyle.QMARK
 
@@ -93,7 +102,7 @@ class MySQLAsyncDriver(BaseAsyncDriver):
         self,
         connection: Any,
         statement_config: StatementConfig | None = None,
-        driver_features: dict[str, Any] | None = None,
+        driver_features: MySQLDriverFeatures | dict[str, Any] | None = None,
         observability: Any = None,
         *,
         shared_pool: bool = False,
@@ -102,7 +111,7 @@ class MySQLAsyncDriver(BaseAsyncDriver):
         super().__init__(
             connection,
             statement_config=statement_config,
-            driver_features=driver_features,
+            driver_features=cast("dict[str, Any] | None", driver_features),
             observability=observability,
             shared_pool=shared_pool,
         )
@@ -136,7 +145,7 @@ class MySQLAsyncDriver(BaseAsyncDriver):
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
         exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
         if callable(exec_many_fn):
-            res = await exec_many_fn(sql, param_sets)
+            res = await cast("Any", exec_many_fn)(sql, param_sets)
             rowcount = int(res) if res is not None else 0
         else:
             rowcount = 0

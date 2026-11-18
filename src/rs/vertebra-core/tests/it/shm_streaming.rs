@@ -56,6 +56,7 @@ fn response_slot_encode_buffer_too_small_returns_error() {
 fn spsc_ring_multi_frame_streaming_lifecycle() {
     let layout = RingLayout::new(16 * 1024, 8, ChannelMode::Spsc);
     let region = Arc::new(ShmRegion::create(layout.total_size).expect("create shm"));
+    // SAFETY: `region` was freshly created with `layout.total_size` bytes for exclusive initialization.
     let ring = Arc::new(unsafe {
         SpscRing::initialize(region, layout, std::process::id(), 1).expect("init ring")
     });

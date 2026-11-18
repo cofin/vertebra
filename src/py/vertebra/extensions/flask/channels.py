@@ -13,10 +13,13 @@ import msgspec
 from vertebra.db.driver import InterfaceError
 from vertebra.framework.channels import create_channels_backend
 from vertebra.server._channels import ChannelBus
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+
+    from flask import Flask
 
     from vertebra.db.driver import SyncNotificationSource
 
@@ -190,11 +193,12 @@ class ChannelsBackend:
 
 
 def attach_channels(
-    app: Any,
+    app: Flask | Any,
     backend: ChannelsBackend | None = None,
     **kwargs: Any,
 ) -> ChannelsBackend:
     """Attach ChannelsBackend to Flask app.extensions."""
+    ensure_module("flask", extra="flask")
     resolved = backend if backend is not None else ChannelsBackend(**kwargs)
     extensions = getattr(app, "extensions", None)
     if extensions is not None and isinstance(extensions, dict):

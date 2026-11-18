@@ -45,15 +45,24 @@ def test_vtb_ai_help_and_mcp_removed_from_root(runner: CliRunner) -> None:
     assert "models" in ai_help.output
     assert "mcp" in ai_help.output
 
-    models_help = runner.invoke(cli, ["ai", "models", "--help"])
-    assert models_help.exit_code == 0, models_help.output
-    for subcmd in ("list", "pull", "stage", "warm"):
-        assert subcmd in models_help.output
 
-    mcp_help = runner.invoke(cli, ["ai", "mcp", "--help"])
-    assert mcp_help.exit_code == 0, mcp_help.output
-    for subcmd in ("serve", "bridge"):
-        assert subcmd in mcp_help.output
+@pytest.mark.parametrize(
+    ("args", "subcmd"),
+    [
+        (["ai", "models", "--help"], "list"),
+        (["ai", "models", "--help"], "pull"),
+        (["ai", "models", "--help"], "stage"),
+        (["ai", "models", "--help"], "warm"),
+        (["ai", "mcp", "--help"], "serve"),
+        (["ai", "mcp", "--help"], "bridge"),
+    ],
+    ids=["models-list", "models-pull", "models-stage", "models-warm", "mcp-serve", "mcp-bridge"],
+)
+def test_vtb_ai_subcommand_help_lists_expected_command(runner: CliRunner, args: list[str], subcmd: str) -> None:
+    """Verify vtb ai models and vtb ai mcp --help outputs list each expected subcommand."""
+    help_result = runner.invoke(cli, args)
+    assert help_result.exit_code == 0, help_result.output
+    assert subcmd in help_result.output
 
 
 def test_vtb_ai_models_list_json_and_provider_filter(runner: CliRunner, tmp_path: Path) -> None:
@@ -62,18 +71,6 @@ def test_vtb_ai_models_list_json_and_provider_filter(runner: CliRunner, tmp_path
     assert result.exit_code == 0, result.output
     entries = decode_json(result.output.encode("utf-8"))
     assert isinstance(entries, list)
-    names = {item["name"] for item in entries}
-    for expected in (
-        "gemini-embedding-001",
-        "gemini-embedding-2",
-        "text-embedding-005",
-        "embeddinggemma-2-270m",
-        "embeddinggemma-300m",
-        "BAAI/bge-small-en-v1.5",
-        "nomic-ai/nomic-embed-text-v1.5",
-        "minishlab/potion-base-8M",
-    ):
-        assert expected in names
 
     gemma_only = runner.invoke(
         cli,
@@ -82,6 +79,39 @@ def test_vtb_ai_models_list_json_and_provider_filter(runner: CliRunner, tmp_path
     assert gemma_only.exit_code == 0, gemma_only.output
     gemma_entries = decode_json(gemma_only.output.encode("utf-8"))
     assert {item["name"] for item in gemma_entries} == {"embeddinggemma-2-270m", "embeddinggemma-300m"}
+
+
+@pytest.mark.parametrize(
+    "expected_model",
+    [
+        "gemini-embedding-001",
+        "gemini-embedding-2",
+        "text-embedding-005",
+        "embeddinggemma-2-270m",
+        "embeddinggemma-300m",
+        "BAAI/bge-small-en-v1.5",
+        "nomic-ai/nomic-embed-text-v1.5",
+        "minishlab/potion-base-8M",
+    ],
+    ids=[
+        "gemini-embedding-001",
+        "gemini-embedding-2",
+        "text-embedding-005",
+        "embeddinggemma-2-270m",
+        "embeddinggemma-300m",
+        "bge-small-en-v1.5",
+        "nomic-embed-text-v1.5",
+        "potion-base-8M",
+    ],
+)
+def test_vtb_ai_models_list_includes_builtin_model(runner: CliRunner, tmp_path: Path, expected_model: str) -> None:
+    """Verify vtb ai models list --json includes each built-in ModelSpec entry."""
+    result = runner.invoke(cli, ["ai", "models", "list", "--json", "--cache-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    entries = decode_json(result.output.encode("utf-8"))
+    assert isinstance(entries, list)
+    names = {item["name"] for item in entries}
+    assert expected_model in names
 
 
 def test_vtb_ai_models_pull_stage_and_warm_shm_roundtrip(

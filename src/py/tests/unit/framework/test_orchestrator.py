@@ -3,8 +3,9 @@
 import importlib
 import socket
 import textwrap
-import time
+import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -245,12 +246,41 @@ def test_native_build_real_extension_writes_bundle(tmp_path: Path) -> None:
     assert "42" in output_js.read_text(encoding="utf-8")
 
 
-def test_native_dev_retains_watcher_and_rebuilds_on_change(tmp_path: Path) -> None:
+def test_native_dev_retains_watcher_and_rebuilds_on_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """BuildOrchestrator.dev() should keep native watcher alive and rebuild on source change."""
+    import vertebra._bundler as bundler_mod
+
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     main_ts = src_dir / "main.ts"
     main_ts.write_text("export const answer: number = 42;\n", encoding="utf-8")
+
+    poll_ready = threading.Event()
+    write_applied = threading.Event()
+    rebuilt = threading.Event()
+    orig_bundler_cls = bundler_mod.Bundler
+
+    class _BundlerProxy:
+        def __init__(self) -> None:
+            self._inner = orig_bundler_cls()
+
+        def build(self, config: Any) -> Any:
+            result = self._inner.build(config)
+            if write_applied.is_set():
+                rebuilt.set()
+            return result
+
+        def poll_events(self, timeout_ms: int) -> Any:
+            poll_ready.set()
+            return self._inner.poll_events(timeout_ms)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(bundler_mod, "Bundler", _BundlerProxy)
 
     config = BuildConfig(entry="src/main.ts", outdir="dist", bundler="native")
     orch = BuildOrchestrator(tmp_path, config)
@@ -261,13 +291,11 @@ def test_native_dev_retains_watcher_and_rebuilds_on_change(tmp_path: Path) -> No
         assert output_js.is_file()
         assert "42" in output_js.read_text(encoding="utf-8")
 
-        time.sleep(0.1)
+        assert poll_ready.wait(timeout=2.0)
+        write_applied.set()
         main_ts.write_text("export const answer: number = 99;\n", encoding="utf-8")
 
-        for _ in range(30):
-            time.sleep(0.1)
-            if "99" in output_js.read_text(encoding="utf-8"):
-                break
+        assert rebuilt.wait(timeout=3.0)
         assert "99" in output_js.read_text(encoding="utf-8")
     finally:
         orch.stop()

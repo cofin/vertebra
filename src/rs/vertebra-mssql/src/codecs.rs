@@ -1,7 +1,7 @@
 //! TDS 7.3+ column value decoding and Python object materialization for `vertebra-mssql`.
 //!
 //! Decodes `tiberius::Row` cells across all SQL Server wire types:
-//! - Exact numerics (`Numeric` / `DECIMAL` / `NUMERIC` / `MONEY` / `SMALLMONEY` via `rust_decimal::Decimal`)
+//! - Exact numerics (`Numeric` / `DECIMAL` / `NUMERIC` / `MONEY` / `SMALLMONEY` via `tiberius::numeric::Numeric` up to 38 digits)
 //! - Integers (`TINYINT` `u8`, `SMALLINT` `i16`, `INT` `i32`, `BIGINT` `i64`) and `BIT` (`bool`)
 //! - Floating point (`REAL` `f32`, `FLOAT` `f64`)
 //! - Temporal types (`DATE`, `TIME`, `DATETIME`, `SMALLDATETIME`, `DATETIME2`, `DATETIMEOFFSET`)
@@ -12,12 +12,26 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTim
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
-use rust_decimal::Decimal;
+use tiberius::numeric::Numeric;
 use tiberius::xml::XmlData;
 use tiberius::{ColumnType, Row};
 use uuid::Uuid;
 
 use crate::errors::MssqlError;
+
+/// Format a 128-bit TDS [`Numeric`] preserving exact scale (`0..=38`) without a spurious `.0` when `scale == 0`.
+pub fn format_numeric(num: Numeric) -> String {
+    if num.scale() == 0 {
+        return num.value().to_string();
+    }
+    let sign = if num.value() < 0 { "-" } else { "" };
+    format!(
+        "{sign}{}.{:0pad$}",
+        num.int_part().unsigned_abs(),
+        num.dec_part().unsigned_abs(),
+        pad = usize::from(num.scale()),
+    )
+}
 
 /// Metadata describing a single SQL Server result column.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +49,7 @@ pub enum MssqlCellValue {
     Float64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Decimal(Decimal),
+    Decimal(Numeric),
     Uuid(Uuid),
     Date(NaiveDate),
     Time(NaiveTime),
@@ -137,7 +151,7 @@ fn decode_column_cell(
                 None => Ok(MssqlCellValue::Null),
             }
         }
-        ColumnType::Decimaln | ColumnType::Numericn => match row.try_get::<Decimal, usize>(idx)? {
+        ColumnType::Decimaln | ColumnType::Numericn => match row.try_get::<Numeric, usize>(idx)? {
             Some(d) => Ok(MssqlCellValue::Decimal(d)),
             None => Ok(MssqlCellValue::Null),
         },
@@ -237,7 +251,7 @@ pub fn cell_to_py(py: Python<'_>, cell: &MssqlCellValue) -> PyResult<Py<PyAny>> 
         MssqlCellValue::Bytes(b) => Ok(PyBytes::new(py, b).into_any().unbind()),
         MssqlCellValue::Decimal(d) => {
             let imp = codec_importers(py)?;
-            let obj = imp.decimal_cls.bind(py).call1((d.to_string(),))?;
+            let obj = imp.decimal_cls.bind(py).call1((format_numeric(*d),))?;
             Ok(obj.unbind())
         }
         MssqlCellValue::Uuid(u) => {
@@ -366,19 +380,27 @@ pub fn query_result_to_py_rows_and_cols(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use super::*;
+    use crate::params::parse_decimal_numeric;
 
     #[test]
     fn python_cell_materialization_preserves_decimal_uuid_and_temporal_types() {
         Python::initialize();
         Python::attach(|py| {
-            let dec = MssqlCellValue::Decimal(Decimal::from_str("12345.6789").unwrap());
+            let dec = MssqlCellValue::Decimal(parse_decimal_numeric("12345.6789").unwrap());
             let py_dec = cell_to_py(py, &dec).unwrap();
             assert_eq!(
                 py_dec.bind(py).str().unwrap().to_str().unwrap(),
                 "12345.6789"
+            );
+
+            let dec38 = MssqlCellValue::Decimal(
+                parse_decimal_numeric("1234567890123456789012345678.0123456789").unwrap(),
+            );
+            let py_dec38 = cell_to_py(py, &dec38).unwrap();
+            assert_eq!(
+                py_dec38.bind(py).str().unwrap().to_str().unwrap(),
+                "1234567890123456789012345678.0123456789"
             );
 
             let uid = MssqlCellValue::Uuid(Uuid::nil());

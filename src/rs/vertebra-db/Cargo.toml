@@ -17,7 +17,6 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
-futures = { workspace = true }
 google-cloud-auth = { workspace = true, optional = true }
 google-cloud-gax = { workspace = true, optional = true }
 google-cloud-rpc = { workspace = true, optional = true }
@@ -63,7 +62,7 @@ gcp = [
     "dep:google-cloud-rpc",
     "dep:google-cloud-wkt",
 ]
-pyo3 = ["dep:pyo3"]
+pyo3 = ["dep:pyo3", "vertebra-core/pyo3"]
 
 [[test]]
 name = "gcp_credentials_tests"

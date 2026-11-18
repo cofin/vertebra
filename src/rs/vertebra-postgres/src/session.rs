@@ -53,6 +53,23 @@ use self::statements::{PoolerCapabilities, PoolerMode, StatementCache, Statement
 /// Default maximum materialized result / portal chunk byte budget (`64 MiB`).
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
 
+/// CockroachDB retryable serialization SQLSTATE (`40001`, `"restart transaction"`).
+pub const CRDB_RETRY_SERIALIZATION: &str = "40001";
+
+impl PostgresError {
+    /// Return `true` when this error is a retryable serialization failure (`SQLSTATE 40001` / CockroachDB `"restart transaction"`).
+    pub fn is_retryable_serialization(&self) -> bool {
+        match self {
+            Self::Server(err) => err.sqlstate == CRDB_RETRY_SERIALIZATION,
+            Self::AfterCompletion { source, .. } | Self::PipelineValidation { source, .. } => {
+                source.is_retryable_serialization()
+            }
+            Self::PipelineAborted(fail) => fail.first_error.is_retryable_serialization(),
+            _ => false,
+        }
+    }
+}
+
 /// Non-renewing single-`Instant` command I/O budget computed at native operation reservation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CommandBudget(Option<Instant>);
@@ -329,6 +346,7 @@ pub struct PostgresConnection {
     pub(crate) deadline_write_uncertain: bool,
     pub(crate) defer_deadline_read_close: bool,
     pub(crate) copy_in_owned_tx: bool,
+    pub(crate) cockroach_restart_active: bool,
     pub(crate) closed: bool,
 }
 
@@ -356,6 +374,11 @@ impl PostgresConnection {
     /// Return `true` when the underlying transport negotiated TLS.
     pub const fn is_tls(&self) -> bool {
         self.tls_negotiated
+    }
+
+    /// Return `true` when the connected backend advertised CockroachDB `crdb_version` in `ParameterStatus`.
+    pub fn is_cockroachdb(&self) -> bool {
+        self.parameters.contains_key("crdb_version")
     }
 
     /// Construct an authenticated [`PostgresConnection`] over a custom async duplex stream (used by protocol wire harnesses).
@@ -421,6 +444,7 @@ impl PostgresConnection {
             deadline_write_uncertain: false,
             defer_deadline_read_close: false,
             copy_in_owned_tx: false,
+            cockroach_restart_active: false,
             closed: false,
         }
     }
@@ -762,6 +786,9 @@ impl PostgresConnection {
     pub fn set_transaction_status_from_wire(&mut self, status: TransactionStatus) {
         self.transaction_status = status;
         self.transaction_state.sync_from_wire(status);
+        if status == TransactionStatus::Idle {
+            self.cockroach_restart_active = false;
+        }
     }
 
     /// Return the resolved [`PoolerCapabilities`] for this session.
@@ -1063,7 +1090,107 @@ impl PostgresConnection {
         Ok(TransactionDisposition::RolledBackToSavepoint(token))
     }
 
-    /// Execute the conservative pool-return reset sequence (`ROLLBACK` + portal close + `DISCARD ALL` + baseline GUC restore + cache invalidation).
+    /// Create the CockroachDB retry savepoint (`SAVEPOINT cockroach_restart`) inside an active `'T'` transaction.
+    pub async fn savepoint_cockroach_restart(&mut self) -> Result<(), PostgresError> {
+        match self.transaction_status {
+            TransactionStatus::InTransaction => {}
+            TransactionStatus::Idle => {
+                return Err(PostgresError::Interface(
+                    "cannot create SAVEPOINT cockroach_restart outside an active transaction ('I')"
+                        .to_string(),
+                ));
+            }
+            TransactionStatus::Failed => {
+                return Err(PostgresError::Interface(
+                    "cannot create SAVEPOINT cockroach_restart while transaction is aborted ('E')"
+                        .to_string(),
+                ));
+            }
+        }
+        let results = self.simple_query("SAVEPOINT cockroach_restart").await?;
+        let tag = results
+            .last()
+            .map(|r| r.command_tag.as_str())
+            .unwrap_or_default();
+        if self.transaction_status != TransactionStatus::InTransaction || tag != "SAVEPOINT" {
+            return Err(PostgresError::Protocol(format!(
+                "expected SAVEPOINT -> InTransaction ('T'), got tag={tag:?} status={:?}",
+                self.transaction_status
+            )));
+        }
+        self.cockroach_restart_active = true;
+        Ok(())
+    }
+
+    /// Release the CockroachDB retry savepoint (`RELEASE SAVEPOINT cockroach_restart`) in `'T'`.
+    pub async fn release_cockroach_restart(&mut self) -> Result<(), PostgresError> {
+        match self.transaction_status {
+            TransactionStatus::Idle => {
+                return Err(PostgresError::Interface(
+                    "cannot RELEASE SAVEPOINT cockroach_restart outside an active transaction ('I')"
+                        .to_string(),
+                ));
+            }
+            TransactionStatus::Failed => {
+                return Err(PostgresError::Interface(
+                    "cannot RELEASE SAVEPOINT cockroach_restart while transaction is aborted ('E')"
+                        .to_string(),
+                ));
+            }
+            TransactionStatus::InTransaction => {}
+        }
+        if !self.cockroach_restart_active {
+            return Err(PostgresError::Interface(
+                "savepoint cockroach_restart is not active on this transaction".to_string(),
+            ));
+        }
+        let results = self
+            .simple_query("RELEASE SAVEPOINT cockroach_restart")
+            .await?;
+        let tag = results
+            .last()
+            .map(|r| r.command_tag.as_str())
+            .unwrap_or_default();
+        if self.transaction_status != TransactionStatus::InTransaction || tag != "RELEASE" {
+            return Err(PostgresError::Protocol(format!(
+                "expected RELEASE -> InTransaction ('T'), got tag={tag:?} status={:?}",
+                self.transaction_status
+            )));
+        }
+        self.cockroach_restart_active = false;
+        Ok(())
+    }
+
+    /// Roll back to the CockroachDB retry savepoint (`ROLLBACK TO SAVEPOINT cockroach_restart`), restoring `'T'`.
+    pub async fn rollback_to_cockroach_restart(&mut self) -> Result<(), PostgresError> {
+        if self.transaction_status == TransactionStatus::Idle {
+            return Err(PostgresError::Interface(
+                "cannot ROLLBACK TO SAVEPOINT cockroach_restart outside an active transaction ('I')"
+                    .to_string(),
+            ));
+        }
+        if !self.cockroach_restart_active {
+            return Err(PostgresError::Interface(
+                "savepoint cockroach_restart is not active on this transaction".to_string(),
+            ));
+        }
+        let results = self
+            .simple_query("ROLLBACK TO SAVEPOINT cockroach_restart")
+            .await?;
+        let tag = results
+            .last()
+            .map(|r| r.command_tag.as_str())
+            .unwrap_or_default();
+        if self.transaction_status != TransactionStatus::InTransaction || tag != "ROLLBACK" {
+            return Err(PostgresError::Protocol(format!(
+                "expected ROLLBACK TO SAVEPOINT -> InTransaction ('T'), got tag={tag:?} status={:?}",
+                self.transaction_status
+            )));
+        }
+        Ok(())
+    }
+
+    /// Execute the conservative pool-return reset sequence (`ROLLBACK` + portal close + `DISCARD ALL` / CockroachDB `RESET ALL` + baseline GUC restore + cache invalidation).
     pub async fn reset_for_pool_return(&mut self) -> Result<(), PostgresError> {
         if self.closed {
             return Err(PostgresError::Transport(
@@ -1125,6 +1252,7 @@ impl PostgresConnection {
         self.type_catalog.invalidate_all();
         self.unnamed_statement_valid = false;
         self.copy_in_owned_tx = false;
+        self.cockroach_restart_active = false;
         self.notifications.clear();
 
         if matches!(
@@ -1134,11 +1262,16 @@ impl PostgresConnection {
             for (k, v) in &self.startup_parameters {
                 self.parameters.insert(k.clone(), v.clone());
             }
-            self.simple_query("DISCARD ALL").await?;
+            let reset_sql = if self.is_cockroachdb() {
+                "RESET ALL"
+            } else {
+                "DISCARD ALL"
+            };
+            self.simple_query(reset_sql).await?;
             if self.transaction_status != TransactionStatus::Idle {
                 self.mark_closed();
                 return Err(PostgresError::Protocol(format!(
-                    "pool reset DISCARD ALL did not finish in Idle ('I'), got {:?}",
+                    "pool reset {reset_sql} did not finish in Idle ('I'), got {:?}",
                     self.transaction_status
                 )));
             }
@@ -1155,7 +1288,7 @@ impl PostgresConnection {
                 ));
             }
             for (k, v) in &self.configured_session_gucs {
-                if k.eq_ignore_ascii_case("client_encoding") {
+                if k.eq_ignore_ascii_case("client_encoding") || k.eq_ignore_ascii_case("options") {
                     continue;
                 }
                 restore_stmts.push(format_set_guc_sql(k, v));
@@ -1164,7 +1297,9 @@ impl PostgresConnection {
                 let batch_sql = restore_stmts.join("; ");
                 self.simple_query(&batch_sql).await?;
                 for (k, v) in &self.configured_session_gucs {
-                    if !k.eq_ignore_ascii_case("client_encoding") {
+                    if !k.eq_ignore_ascii_case("client_encoding")
+                        && !k.eq_ignore_ascii_case("options")
+                    {
                         self.parameters.insert(k.clone(), v.clone());
                     }
                 }
@@ -1307,6 +1442,7 @@ impl PostgresConnection {
                         || tag.starts_with("DROP ")
                         || tag.starts_with("CREATE ")
                         || tag.eq_ignore_ascii_case("DISCARD ALL")
+                        || tag.eq_ignore_ascii_case("RESET ALL")
                         || tag.starts_with("DEALLOCATE")
                     {
                         self.statement_descriptions.clear();
@@ -1858,6 +1994,7 @@ impl PostgresConnection {
                                 || tag.starts_with("DROP ")
                                 || tag.starts_with("CREATE ")
                                 || tag.eq_ignore_ascii_case("DISCARD ALL")
+                                || tag.eq_ignore_ascii_case("RESET ALL")
                                 || tag.starts_with("DEALLOCATE")
                             {
                                 self.statement_descriptions.clear();
@@ -2041,6 +2178,7 @@ impl PostgresConnection {
                         || tag.starts_with("DROP ")
                         || tag.starts_with("CREATE ")
                         || tag.eq_ignore_ascii_case("DISCARD ALL")
+                        || tag.eq_ignore_ascii_case("RESET ALL")
                         || tag.starts_with("DEALLOCATE")
                     {
                         self.statement_descriptions.clear();
@@ -2720,6 +2858,15 @@ enum SessionState {
     Ready(SessionBacking),
     InFlight { generation: u64 },
     Closed { generation: u64 },
+}
+
+impl SessionState {
+    fn is_cockroachdb(&self) -> bool {
+        match self {
+            Self::Ready(conn) => conn.parameters.contains_key("crdb_version"),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3953,6 +4100,22 @@ impl SessionHandle {
         }
     }
 
+    /// Return `true` when the active session advertised CockroachDB `crdb_version` in `ParameterStatus`.
+    pub fn is_cockroachdb(&self) -> bool {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .expect("SessionHandle lock poisoned");
+        if guard.state.is_cockroachdb() {
+            return true;
+        }
+        matches!(
+            guard.state,
+            SessionState::InFlight { .. } | SessionState::Closed { .. }
+        ) && guard.parameters.contains_key("crdb_version")
+    }
+
     /// Mutably borrow the established [`PostgresConnection`] if `Ready` and uniquely owned.
     pub fn connection_mut(&mut self) -> Option<&mut PostgresConnection> {
         let shared = Arc::get_mut(&mut self.shared)?;
@@ -5141,6 +5304,51 @@ impl SessionHandle {
             SessionAccess::Ordinary,
             owner,
             move |conn, _meta| Box::pin(async move { conn.rollback_to_savepoint(token).await }),
+        )
+        .await
+    }
+
+    /// Create the CockroachDB retry savepoint (`SAVEPOINT cockroach_restart`) under `owner`.
+    pub async fn savepoint_cockroach_restart_as(
+        &self,
+        owner: TransactionOwner,
+    ) -> Result<(), PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            Some(owner),
+            move |conn, _meta| Box::pin(async move { conn.savepoint_cockroach_restart().await }),
+        )
+        .await
+    }
+
+    /// Release the CockroachDB retry savepoint (`RELEASE SAVEPOINT cockroach_restart`) under `owner`.
+    pub async fn release_cockroach_restart_as(
+        &self,
+        owner: TransactionOwner,
+    ) -> Result<(), PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            Some(owner),
+            move |conn, _meta| Box::pin(async move { conn.release_cockroach_restart().await }),
+        )
+        .await
+    }
+
+    /// Roll back to the CockroachDB retry savepoint (`ROLLBACK TO SAVEPOINT cockroach_restart`) under `owner`.
+    pub async fn rollback_to_cockroach_restart_as(
+        &self,
+        owner: TransactionOwner,
+    ) -> Result<(), PostgresError> {
+        let op_gen = self.reserve_operation_generation();
+        self.run_cancellable_operation(
+            op_gen,
+            SessionAccess::Ordinary,
+            Some(owner),
+            move |conn, _meta| Box::pin(async move { conn.rollback_to_cockroach_restart().await }),
         )
         .await
     }
@@ -6403,6 +6611,7 @@ async fn establish_postgres_connection_with_mode(
                     deadline_write_uncertain: false,
                     defer_deadline_read_close: false,
                     copy_in_owned_tx: false,
+                    cockroach_restart_active: false,
                     closed: false,
                 });
             }

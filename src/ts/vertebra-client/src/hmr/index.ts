@@ -94,8 +94,8 @@ function hideErrorOverlay(): void {
 class HotReloadClient {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
-  private reconnectTimer: any = null;
-  private pingTimer: any = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private _connected = false;
   private hmrPath: string;
 
@@ -155,14 +155,19 @@ class HotReloadClient {
   private onMessage(event: MessageEvent): void {
     this.resetPingTimer();
 
-    let msg: Record<string, any>;
+    let rawMsg: unknown;
     try {
-      msg = JSON.parse(event.data as string);
+      rawMsg = JSON.parse(String(event.data)) as unknown;
     } catch {
       return;
     }
 
-    const kind: string | undefined = msg.type ?? msg.event;
+    if (rawMsg === null || typeof rawMsg !== "object" || Array.isArray(rawMsg)) {
+      return;
+    }
+
+    const msg = rawMsg as Record<string, unknown>;
+    const kind = typeof msg.type === "string" ? msg.type : typeof msg.event === "string" ? msg.event : undefined;
 
     switch (kind) {
       case "connected":
@@ -171,7 +176,14 @@ class HotReloadClient {
 
       case "update":
         if (Array.isArray(msg.updates)) {
-          this.handleUpdate(msg.updates);
+          const updates = msg.updates.filter(
+            (item): item is { path: string; timestamp: number } =>
+              item !== null &&
+              typeof item === "object" &&
+              typeof (item as Record<string, unknown>).path === "string" &&
+              typeof (item as Record<string, unknown>).timestamp === "number",
+          );
+          this.handleUpdate(updates);
         }
         break;
 
@@ -182,7 +194,7 @@ class HotReloadClient {
         break;
 
       case "full-reload":
-        console.log(`[vertebra] full reload: ${msg.reason ?? msg.path ?? ""}`);
+        console.log(`[vertebra] full reload: ${String(msg.reason ?? msg.path ?? "")}`);
         window.location.reload();
         break;
 
@@ -192,7 +204,7 @@ class HotReloadClient {
 
       case "types-update":
       case "vertebra:types-changed":
-        console.log(`[vertebra] types updated: ${msg.version ?? msg.generation ?? ""}`);
+        console.log(`[vertebra] types updated: ${String(msg.version ?? msg.generation ?? "")}`);
         window.dispatchEvent(new CustomEvent("vertebra:types-update", { detail: msg }));
         break;
 

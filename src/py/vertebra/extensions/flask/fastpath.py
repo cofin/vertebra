@@ -197,8 +197,8 @@ class FastPath:
         return wrap_asgi_fastpath(self, fallback_app or _default_fallback)
 
 
-def vertebra_route[F: Callable[..., Any]](
-    fn: F | None = None,
+def vertebra_route(
+    fn: Callable[..., Any] | None = None,
     *,
     status_code: int = 200,
 ) -> Any:
@@ -212,7 +212,7 @@ def vertebra_route[F: Callable[..., Any]](
         Decorated callable with ``__vertebra_fastpath__ = True``.
     """
 
-    def _decorate(target: F) -> F:
+    def _decorate(target: Callable[..., Any]) -> Callable[..., Any]:
         dyn = cast("Any", target)
         dyn.__vertebra_fastpath__ = True
         dyn.__vertebra_status_code__ = status_code

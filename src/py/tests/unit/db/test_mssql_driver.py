@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib
 import socket
@@ -45,6 +46,7 @@ from vertebra.db.adapters.mssql import (
     SyncMSSQLPipeline,
     rewrite_mssql_placeholders,
 )
+from vertebra.db.driver import AZURE_MSSQL_SCOPE, AzureEntraTokenProvider
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError
 from vertebra.utils.module_loader import reset_dependency_cache
 
@@ -193,16 +195,31 @@ class _TdsWireBuilder:
 class _LoopbackTdsServer:
     """In-process TCP TDS 7.4 loopback server for exercising `SyncMSSQLDriver` and `AsyncMSSQLDriver`."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        reject_login_predicate: Any = None,
+        close_after_query: bool = False,
+    ) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
         self.port: int = int(self._sock.getsockname()[1])
         self._stop = threading.Event()
+        self._reject_login_predicate = reject_login_predicate
+        self._close_after_query = close_after_query
+        self.received_logins: list[bytes] = []
         self.received_packet_types: list[int] = []
+        self.received_payloads: list[tuple[int, bytes]] = []
+        self.received_tx_requests: list[int] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
+
+    def has_wire_text(self, needle: str) -> bool:
+        """Return whether ``needle`` appeared UTF-16-LE encoded in any received TDS payload."""
+        raw = needle.encode("utf-16-le")
+        return any(raw in payload for _, payload in self.received_payloads)
 
     @property
     def dsn(self) -> str:
@@ -265,6 +282,12 @@ class _LoopbackTdsServer:
             login = self._read_message(conn)
             if login is None or login[0] != 0x10:
                 return
+            self.received_logins.append(login[1])
+            if self._reject_login_predicate is not None and self._reject_login_predicate(login[1]):
+                err = _TdsWireBuilder.error_token(18456, 1, 14, "Login failed for user 'entra_user'")
+                done = _TdsWireBuilder.done_token(0x0002, 0, 0)
+                conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, err + done))
+                return
             conn.sendall(_TdsWireBuilder.login_success_packet())
 
             while not self._stop.is_set():
@@ -273,6 +296,7 @@ class _LoopbackTdsServer:
                     break
                 pkt_type, payload = msg
                 self.received_packet_types.append(pkt_type)
+                self.received_payloads.append((pkt_type, payload))
                 utf16_text = payload.decode("utf-16-le", errors="ignore")
 
                 if pkt_type == 0x06:
@@ -297,6 +321,7 @@ class _LoopbackTdsServer:
 
                 if pkt_type == 0x0E:
                     req_type = struct.unpack("<H", payload[22:24])[0] if len(payload) >= 24 else 0
+                    self.received_tx_requests.append(req_type)
                     resp = bytearray()
                     if req_type == 5:
                         resp.extend([0xE3, 11, 0, 8, 8])
@@ -326,6 +351,8 @@ class _LoopbackTdsServer:
                     conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, colmeta))
                 elif "SELECT 1" in utf16_text:
                     conn.sendall(_TdsWireBuilder.select_int_response("probe", 1))
+                    if self._close_after_query:
+                        break
                 elif "RAISE_DUP" in utf16_text:
                     err = _TdsWireBuilder.error_token(2627, 1, 14, "Violation of PRIMARY KEY constraint")
                     done = _TdsWireBuilder.done_token(0x0002, 0xC1, 0)
@@ -618,8 +645,9 @@ def test_sync_mssql_pipeline_commit_rollback_and_savepoint_nesting() -> None:
         with driver.pipeline() as pipe:
             pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (3, "gamma"))
             pipe.results()
-            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (4, "unflushed"))
+            pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (4, "tail_auto_flushed"))
         assert driver.in_transaction is False
+        assert server.has_wire_text("tail_auto_flushed")
 
         with driver.transaction():
             assert driver.in_transaction is True
@@ -777,3 +805,284 @@ def test_mssql_driver_and_pipeline_resolution_identity(
     mod = importlib.import_module(target_module)
     exp_mod = importlib.import_module(expected_module)
     assert getattr(mod, symbol_name) is getattr(exp_mod, symbol_name)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "caller_tx_clean", "exception_discard", "caller_tx_exception"],
+)
+def test_sync_mssql_pipeline_exit_contract(scenario: str) -> None:
+    """SyncMSSQLPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    server = _LoopbackTdsServer()
+    driver = SyncMSSQLDriver(server.dsn)
+    try:
+        if scenario == "auto_flush":
+            with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "auto_sync"))
+            assert driver.in_transaction is False
+            assert server.has_wire_text("auto_sync")
+            assert server.received_tx_requests == [5, 7]
+        elif scenario == "caller_tx_clean":
+            with driver.transaction():
+                assert driver.in_transaction is True
+                with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "nested_auto"))
+                assert driver.in_transaction is True
+                assert server.has_wire_text("nested_auto")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"), driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (3, "flushed_before_err"))
+                pipe.results()
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (4, "never_sent"))
+                raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert server.has_wire_text("flushed_before_err")
+            assert not server.has_wire_text("never_sent")
+            assert server.received_tx_requests == [5, 8]
+        else:
+            with driver.transaction():
+                with pytest.raises(RuntimeError, match="abort_inner"), driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (5, "inner_flushed"))
+                    pipe.results()
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (6, "inner_never_sent"))
+                    raise RuntimeError("abort_inner")
+                assert driver.in_transaction is True
+                assert server.has_wire_text("inner_flushed")
+                assert not server.has_wire_text("inner_never_sent")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.has_wire_text("ROLLBACK TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
+    finally:
+        driver.close()
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scenario",
+    ["auto_flush", "caller_tx_clean", "exception_discard", "caller_tx_exception"],
+)
+async def test_async_mssql_pipeline_exit_contract(scenario: str) -> None:
+    """AsyncMSSQLPipeline honors unified R1.14 flush, commit, discard, and caller tx ownership."""
+    server = _LoopbackTdsServer()
+    driver = AsyncMSSQLDriver(server.dsn)
+    try:
+        if scenario == "auto_flush":
+            async with driver.pipeline() as pipe:
+                pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "auto_async"))
+            assert driver.in_transaction is False
+            assert server.has_wire_text("auto_async")
+            assert server.received_tx_requests == [5, 7]
+        elif scenario == "caller_tx_clean":
+            async with driver.transaction():
+                assert driver.in_transaction is True
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (2, "nested_auto"))
+                assert driver.in_transaction is True
+                assert server.has_wire_text("nested_auto")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
+        elif scenario == "exception_discard":
+            with pytest.raises(RuntimeError, match="abort"):
+                async with driver.pipeline() as pipe:
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (3, "flushed_before_err"))
+                    await pipe.results()
+                    pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (4, "never_sent"))
+                    raise RuntimeError("abort")
+            assert driver.in_transaction is False
+            assert server.has_wire_text("flushed_before_err")
+            assert not server.has_wire_text("never_sent")
+            assert server.received_tx_requests == [5, 8]
+        else:
+            async with driver.transaction():
+                with pytest.raises(RuntimeError, match="abort_inner"):
+                    async with driver.pipeline() as pipe:
+                        pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (5, "inner_flushed"))
+                        await pipe.results()
+                        pipe.execute("INSERT INTO items (id, label) VALUES (?, ?)", (6, "inner_never_sent"))
+                        raise RuntimeError("abort_inner")
+                assert driver.in_transaction is True
+                assert server.has_wire_text("inner_flushed")
+                assert not server.has_wire_text("inner_never_sent")
+                assert server.has_wire_text("SAVE TRANSACTION [_vtb_pipe_")
+                assert server.has_wire_text("ROLLBACK TRANSACTION [_vtb_pipe_")
+                assert server.received_tx_requests == [5]
+            assert server.received_tx_requests == [5, 7]
+    finally:
+        await driver.close()
+        server.close()
+
+
+@pytest.mark.parametrize(
+    ("explicit_scope", "expected_scope"),
+    [
+        (None, AZURE_MSSQL_SCOPE),
+        ("https://custom.database.windows.net/.default", "https://custom.database.windows.net/.default"),
+    ],
+)
+def test_mssql_config_azure_entra_scope_and_redaction(
+    explicit_scope: str | None,
+    expected_scope: str,
+) -> None:
+    """Verify `MSSQLConfig` injects `AZURE_MSSQL_SCOPE`, redacts Entra tokens, and rejects blank tokens."""
+    seen_scopes: list[str] = []
+
+    def _fetch(scope: str) -> tuple[str, float]:
+        seen_scopes.append(scope)
+        return (f"test-token-placeholder-{scope}", 5000.0)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="mssql-client",
+        client_secret="test-client-secret-placeholder",
+        scope=explicit_scope,
+        fetcher=_fetch,
+        clock=lambda: 1000.0,
+    )
+    cfg = MSSQLConfig(
+        dsn="mssql://entra_user@127.0.0.1:1433/appdb?encrypt=not_supported",
+        token_provider=provider,
+    )
+    assert cfg.token_provider.scope == expected_scope
+
+    rendered = repr(cfg)
+    assert "AzureEntraTokenProvider" in rendered
+    assert "test-client-secret-placeholder" not in rendered
+
+    sync_client = MSSQLCore.create_sync_rust_client(cfg)
+    async_client = MSSQLCore.create_async_rust_client(cfg)
+    assert seen_scopes == [expected_scope]
+    for client_repr in (repr(sync_client), repr(async_client)):
+        assert "test-token-placeholder-" not in client_repr
+        assert "[REDACTED]" in client_repr
+
+    with pytest.raises(InterfaceError, match="aad_token"):
+        mssql_native.SyncMSSQLClient("mssql://127.0.0.1:1433/master", aad_token="   ")
+    with pytest.raises(InterfaceError, match="aad_token"):
+        mssql_native.AsyncMSSQLClient("mssql://127.0.0.1:1433/master", aad_token="")
+    with pytest.raises(InterfaceError, match="aad_token"):
+        sync_client.set_aad_token("   ")
+    with pytest.raises(InterfaceError, match="aad_token"):
+        async_client.set_aad_token(" \t\n ")
+
+    blank_provider = AzureEntraTokenProvider(
+        scope=AZURE_MSSQL_SCOPE,
+        fetcher=lambda _scope: "   ",
+        clock=lambda: 1000.0,
+    )
+    blank_cfg = MSSQLConfig(
+        dsn="mssql://entra_user@127.0.0.1:1433/appdb?encrypt=not_supported",
+        token_provider=blank_provider,
+    )
+    with pytest.raises(ImproperConfigurationError, match="empty"):
+        blank_cfg.resolve_aad_token_sync()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_mssql_driver_azure_entra_token_wire_and_reconnect_refresh(mode: str) -> None:
+    """Verify Sync and Async MSSQL drivers pass `FEDAUTH` tokens on `LOGIN7` and refresh via `set_aad_token`."""
+    now = [1000.0]
+    issued: list[str] = []
+    seen_scopes: list[str] = []
+
+    def _sync_fetch(scope: str) -> dict[str, Any]:
+        seen_scopes.append(scope)
+        tok = f"test-token-placeholder-mssql-{len(issued) + 1}"
+        issued.append(tok)
+        return {"access_token": tok, "expires_in": 600}
+
+    async def _async_fetch(scope: str) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return _sync_fetch(scope)
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="mssql-client",
+        client_secret="test-client-secret-placeholder",
+        refresh_margin_seconds=120.0,
+        clock=lambda: now[0],
+        fetcher=_async_fetch if mode == "async" else _sync_fetch,
+    )
+
+    reject_stale = {"active": False}
+
+    def _reject_stale(login_payload: bytes) -> bool:
+        if not reject_stale["active"] or not issued:
+            return False
+        return issued[0].encode("utf-16-le") in login_payload
+
+    server = _LoopbackTdsServer(reject_login_predicate=_reject_stale)
+    cfg = MSSQLConfig.from_url(
+        f"mssql://entra_user@127.0.0.1:{server.port}/master?encrypt=not_supported",
+        token_provider=provider,
+    )
+
+    try:
+        if mode == "sync":
+            driver = SyncMSSQLDriver(cfg)
+            try:
+                assert driver.config.token_provider.scope == AZURE_MSSQL_SCOPE
+                initial_client = driver._client
+                assert len(issued) == 1
+
+                now[0] = 1485.0
+                assert driver.select_value("SELECT 1", value_type=int) == 1
+                assert driver._client is initial_client
+                assert len(issued) == 2
+                assert issued[1].encode("utf-16-le") in server.received_logins[0]
+            finally:
+                driver.close()
+
+            issued.clear()
+            now[0] = 1000.0
+            cfg.token_provider.invalidate()
+            driver2 = SyncMSSQLDriver(cfg)
+            try:
+                initial_client2 = driver2._client
+                reject_stale["active"] = True
+                assert driver2.select_value("SELECT 1", value_type=int) == 1
+                assert driver2._client is initial_client2
+                assert len(issued) == 2
+                assert issued[0].encode("utf-16-le") in server.received_logins[1]
+                assert issued[1].encode("utf-16-le") in server.received_logins[2]
+            finally:
+                driver2.close()
+        else:
+            async_driver = AsyncMSSQLDriver(cfg)
+            try:
+                assert async_driver.config.token_provider.scope == AZURE_MSSQL_SCOPE
+                initial_client = async_driver._client
+                await async_driver.connect()
+                assert len(issued) == 1
+
+                now[0] = 1485.0
+                assert await async_driver.select_value("SELECT 1", value_type=int) == 1
+                assert async_driver._client is initial_client
+                assert len(issued) == 2
+                assert issued[1].encode("utf-16-le") in server.received_logins[0]
+            finally:
+                await async_driver.close()
+
+            issued.clear()
+            now[0] = 1000.0
+            cfg.token_provider.invalidate()
+            async_driver2 = AsyncMSSQLDriver(cfg)
+            try:
+                initial_client2 = async_driver2._client
+                reject_stale["active"] = True
+                assert await async_driver2.select_value("SELECT 1", value_type=int) == 1
+                assert async_driver2._client is initial_client2
+                assert len(issued) == 2
+                assert issued[0].encode("utf-16-le") in server.received_logins[1]
+                assert issued[1].encode("utf-16-le") in server.received_logins[2]
+            finally:
+                await async_driver2.close()
+    finally:
+        server.close()
+    assert all(s == AZURE_MSSQL_SCOPE for s in seen_scopes)

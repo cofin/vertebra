@@ -1,5 +1,7 @@
 """DuckDB SQLSpec core statement configuration, parameter, COPY, and error mapping helpers."""
 
+from __future__ import annotations
+
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -10,7 +12,13 @@ from uuid import UUID
 
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
-from sqlspec.core import DriverParameterProfile, ParameterStyle, StatementConfig, build_statement_config_from_profile
+from sqlspec.core import (
+    DriverParameterProfile,
+    ParameterStyle,
+    StatementConfig,
+    TypedParameter,
+    build_statement_config_from_profile,
+)
 from sqlspec.exceptions import (
     CheckViolationError,
     DatabaseConnectionError,
@@ -32,7 +40,6 @@ from sqlspec.utils.text import quote_identifier, split_qualified_identifier
 from sqlspec.utils.type_converters import build_decimal_converter, build_uuid_coercions, time_iso_convert
 
 from vertebra.db.adapters.duckdb.config import DuckDBConfig
-from vertebra.extensions.sqlspec._driver import unwrap_typed_parameters
 from vertebra.typing import ImproperConfigurationError
 
 __all__ = (
@@ -59,6 +66,7 @@ __all__ = (
     "normalize_duckdb_parameters",
     "order_duckdb_copy_parameters",
     "split_schema_and_table",
+    "unwrap_typed_parameters",
 )
 
 ARROW_MIN_ROWS: Final[int] = 64
@@ -375,6 +383,19 @@ def normalize_duckdb_scalar(value: Any) -> Any:
     return value
 
 
+def unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
+    if isinstance(bound, dict):
+        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(unwrap_typed_parameters(value) for value in bound)
+    if isinstance(bound, list):
+        return [unwrap_typed_parameters(value) for value in bound]
+    if isinstance(bound, TypedParameter):
+        return unwrap_typed_parameters(bound.value)
+    return bound
+
+
 def normalize_duckdb_parameters(params: Any) -> Any:
     """Unwrap `TypedParameter` markers and normalize bind shapes for DuckDB execution."""
     if params is None:
@@ -496,12 +517,12 @@ def format_duckdb_identifier(identifier: str) -> str:
 def split_schema_and_table(table_name: str, *, default_schema: str = "main") -> tuple[str, str]:
     """Split an optionally qualified DuckDB table name into `(schema, bare_table)`."""
     parts = split_qualified_identifier(table_name.strip(), quote_chars='"')
-    if not parts:
-        msg = "DuckDB table name must not be empty."
-        raise ValueError(msg)
+    if len(parts) == 1:
+        return default_schema, parts[0]
     if len(parts) > 1:
         return parts[-2], parts[-1]
-    return default_schema, parts[0]
+    msg = "DuckDB table name must not be empty."
+    raise ValueError(msg)
 
 
 def duckdb_row_value(row: Any, key: str, index: int = 0) -> Any:

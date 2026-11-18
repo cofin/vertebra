@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Awaitable, Buffer, Callable
 from contextlib import suppress
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra.db.arrow import ArrowCursor
@@ -38,6 +38,22 @@ _PAYLOAD_TOO_LARGE_HEADERS: list[tuple[bytes, bytes]] = [
     (b"content-type", b"text/plain; charset=utf-8"),
     (b"content-length", b"17"),
 ]
+
+
+class _BodyBytesFn(Protocol):
+    """Callable protocol for zero-copy prebuffered body byte extractors."""
+
+    def __call__(self) -> bytes:
+        """Return prebuffered request body bytes."""
+        ...
+
+
+class _BufferFn(Protocol):
+    """Callable protocol for deferred buffer producers cached in scope."""
+
+    def __call__(self) -> Buffer:
+        """Return a readable byte buffer."""
+        ...
 
 
 class PayloadTooLargeError(VertebraError):
@@ -106,7 +122,7 @@ async def extract_scope_body_fast(
         scope_checked = True
         cached = scope["_vertebra_body_bytes"]
         if callable(cached):
-            resolved_cached = bytes(cached())
+            resolved_cached = bytes(cast("_BufferFn", cached)())
             _cache_scope_body(scope, resolved_cached)
             return _enforce_body_limit(resolved_cached, max_body_size)
         if isinstance(cached, bytes):
@@ -119,7 +135,7 @@ async def extract_scope_body_fast(
     if not scope_checked:
         body_bytes_fn = getattr(scope, "body_bytes", None)
         if callable(body_bytes_fn):
-            snap_bytes: bytes = body_bytes_fn()
+            snap_bytes: bytes = cast("_BodyBytesFn", body_bytes_fn)()
             if snap_bytes:
                 _cache_scope_body(scope, snap_bytes)
                 return _enforce_body_limit(snap_bytes, max_body_size)
@@ -127,16 +143,17 @@ async def extract_scope_body_fast(
     recv_owner = getattr(receive, "__self__", None)
     owner_body_fn = getattr(recv_owner, "body_bytes", None)
     if callable(owner_body_fn):
-        owner_bytes: bytes = owner_body_fn()
+        owner_bytes: bytes = cast("_BodyBytesFn", owner_body_fn)()
         _cache_scope_body(scope, owner_bytes)
         return _enforce_body_limit(owner_bytes, max_body_size)
     if not callable(receive):
         return b""
 
+    receive_fn = cast("Callable[[], Awaitable[Any]]", receive)
     chunks: list[bytes] = []
     total_bytes = 0
     while True:
-        message = await receive()
+        message = await receive_fn()
         if not isinstance(message, dict):
             break
         if message.get("type") == "http.disconnect":
@@ -408,7 +425,7 @@ def _probe_and_cache_prebuffered_body(
     if hasattr(scope, "__contains__") and "_vertebra_body_bytes" in scope:
         cached = scope["_vertebra_body_bytes"]
         if callable(cached):
-            resolved = bytes(cached())
+            resolved = bytes(cast("_BufferFn", cached)())
             _cache_scope_body(scope, resolved)
             _enforce_body_limit(resolved, max_body_size)
             return True
@@ -426,13 +443,13 @@ def _probe_and_cache_prebuffered_body(
         return callable(body_bytes_fn) or callable(owner_body_fn)
 
     if callable(body_bytes_fn):
-        snap_bytes: bytes = body_bytes_fn()
+        snap_bytes: bytes = cast("_BodyBytesFn", body_bytes_fn)()
         if snap_bytes:
             _cache_scope_body(scope, snap_bytes)
             _enforce_body_limit(snap_bytes, max_body_size)
             return True
         if callable(owner_body_fn):
-            owner_bytes: bytes = owner_body_fn()
+            owner_bytes: bytes = cast("_BodyBytesFn", owner_body_fn)()
             _cache_scope_body(scope, owner_bytes)
             _enforce_body_limit(owner_bytes, max_body_size)
             return True
@@ -440,7 +457,7 @@ def _probe_and_cache_prebuffered_body(
         return False
 
     if callable(owner_body_fn):
-        owner_bytes = owner_body_fn()
+        owner_bytes = cast("_BodyBytesFn", owner_body_fn)()
         _cache_scope_body(scope, owner_bytes)
         _enforce_body_limit(owner_bytes, max_body_size)
         return True

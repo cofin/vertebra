@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 from vertebra.utils.module_loader import lazy_exports
 
 if TYPE_CHECKING:
+    from vertebra.db.adapters.sqlite._async import AsyncSQLiteDriver
+    from vertebra.db.adapters.sqlite._sync import SyncSQLiteDriver
     from vertebra.db.adapters.sqlite.config import SQLiteConfig
     from vertebra.db.adapters.sqlite.core import SQLiteCore
-    from vertebra.db.adapters.sqlite.driver import AsyncSQLiteDriver, SyncSQLiteDriver
     from vertebra.db.adapters.sqlite.pipeline import AsyncSQLitePipeline, SyncSQLitePipeline
     from vertebra.db.arrow import ArrowCursor
 
@@ -24,20 +25,21 @@ __all__ = (
 )
 
 __lazy_modules__ = [
+    "vertebra.db.adapters.sqlite._async",
+    "vertebra.db.adapters.sqlite._sync",
     "vertebra.db.adapters.sqlite.config",
     "vertebra.db.adapters.sqlite.core",
-    "vertebra.db.adapters.sqlite.driver",
     "vertebra.db.adapters.sqlite.pipeline",
     "vertebra.db.arrow",
 ]
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
-    "AsyncSQLiteDriver": ("vertebra.db.adapters.sqlite.driver", "AsyncSQLiteDriver"),
+    "AsyncSQLiteDriver": ("vertebra.db.adapters.sqlite._async", "AsyncSQLiteDriver"),
     "AsyncSQLitePipeline": ("vertebra.db.adapters.sqlite.pipeline", "AsyncSQLitePipeline"),
     "SQLiteConfig": ("vertebra.db.adapters.sqlite.config", "SQLiteConfig"),
     "SQLiteCore": ("vertebra.db.adapters.sqlite.core", "SQLiteCore"),
-    "SyncSQLiteDriver": ("vertebra.db.adapters.sqlite.driver", "SyncSQLiteDriver"),
+    "SyncSQLiteDriver": ("vertebra.db.adapters.sqlite._sync", "SyncSQLiteDriver"),
     "SyncSQLitePipeline": ("vertebra.db.adapters.sqlite.pipeline", "SyncSQLitePipeline"),
 }
 

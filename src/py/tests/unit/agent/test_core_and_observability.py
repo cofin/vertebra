@@ -4,6 +4,8 @@ import ast
 import dataclasses
 import inspect
 import json
+import subprocess
+import sys
 import time
 import urllib.error
 from collections.abc import Mapping
@@ -11,10 +13,11 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 import anyio
+import httpx
 import jwt
 import msgspec
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from starlette.requests import Request
 
 import vertebra.agent as agent_pkg
@@ -32,6 +35,7 @@ from vertebra.agent.core.cursor import (
     paginate_sequence,
 )
 from vertebra.agent.core.guards import (
+    BearerAuthGuard,
     GuardChain,
     PermissionDeniedError,
     RateLimitExceededError,
@@ -39,6 +43,7 @@ from vertebra.agent.core.guards import (
     RequireRoles,
     RequireScopes,
     TokenBucketGuard,
+    UnauthorizedError,
 )
 from vertebra.agent.core.identity import (
     IAP_ASSERTION_HEADER,
@@ -46,6 +51,7 @@ from vertebra.agent.core.identity import (
     CallableIdentitySource,
     IapIdentitySource,
     IdentityRequest,
+    JwksIdentitySource,
     MtlsIdentitySource,
 )
 from vertebra.agent.core.jsonrpc import (
@@ -83,6 +89,7 @@ from vertebra.agent.telemetry import (
     AgentTelemetryRecorder,
 )
 from vertebra.agent.tools import build_tools
+from vertebra.framework.security import JWKSConfig, JWKSVerifier
 from vertebra.telemetry.genai import GenAiUsage
 from vertebra.telemetry.logger import LogSink
 from vertebra.telemetry.otel import SpanExporter
@@ -565,22 +572,36 @@ async def test_provider_tools_resolve_schemas_and_validate_before_policy() -> No
     assert {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "integer"}}} in schema[
         "properties"
     ]["params"]["anyOf"]
-    for arguments, pointer in (
-        ({}, "/sql"),
-        ({"sql": 3}, "/sql"),
-        ({"sql": "SELECT 1", "params": {"ids": ["bad"]}}, "/params"),
-    ):
-        with pytest.raises(ToolArgumentError) as exc:
-            await tool.invoke(arguments)
-        assert exc.value.pointer == pointer
-    assert provider.policy_calls == []
-    assert provider.calls == []
     assert await tool.invoke({"sql": "SELECT 1", "params": {"ids": (1, 2)}}) == {
         "sql": "SELECT 1",
         "params": {"ids": [1, 2]},
         "limit": 10,
     }
     assert provider.policy_calls == provider.calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("arguments", "pointer"),
+    [
+        ({}, "/sql"),
+        ({"sql": 3}, "/sql"),
+        ({"sql": "SELECT 1", "params": {"ids": ["bad"]}}, "/params"),
+    ],
+    ids=["missing-sql", "non-str-sql", "invalid-param-ids"],
+)
+async def test_provider_tools_reject_invalid_arguments_before_policy(
+    arguments: dict[str, Any],
+    pointer: str,
+) -> None:
+    """Invalid provider arguments fail validation with JSON pointer details before policy or invocation."""
+    provider = _TypedToolProvider()
+    tool = build_tools(provider)["records"]
+    with pytest.raises(ToolArgumentError) as exc:
+        await tool.invoke(arguments)
+    assert exc.value.pointer == pointer
+    assert provider.policy_calls == []
+    assert provider.calls == []
 
 
 @pytest.mark.parametrize("reserved", ["context", "confirmation_token"])
@@ -1124,3 +1145,175 @@ def test_iap_identity_source_unreachable_jwk_url_fails_closed(monkeypatch: pytes
     )
     source = IapIdentitySource(audience, key_url="https://127.0.0.1:1/unreachable-jwks")
     assert source.resolve(IdentityRequest(headers={IAP_ASSERTION_HEADER: token})) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("token_case", "expect_valid"),
+    [
+        ("valid", True),
+        ("missing", False),
+        ("expired", False),
+        ("tampered", False),
+        ("wrong_audience", False),
+    ],
+)
+async def test_jwks_identity_source_agent_context_and_bearer_guard(
+    token_case: str,
+    expect_valid: bool,
+) -> None:
+    """Verify JwksIdentitySource, AgentContext, and BearerAuthGuard propagate claims and reject invalid JWTs."""
+    rsa_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk_doc = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(rsa_priv.public_key()))
+    jwk_doc["kid"] = "agent-rsa-1"
+    jwk_doc["alg"] = "RS256"
+    jwk_doc["use"] = "sig"
+
+    def _jwks_response(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"keys": [jwk_doc]})
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(_jwks_response))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(_jwks_response))
+    verifier = JWKSVerifier(
+        JWKSConfig(
+            jwks_url="https://idp.example.com/.well-known/jwks.json",
+            issuer="https://idp.example.com",
+            audience="agent-api",
+        ),
+        async_client=async_client,
+        sync_client=sync_client,
+    )
+    source = JwksIdentitySource(verifier)
+    bearer_guard = BearerAuthGuard(verifier, required_scopes=("agents:run",))
+    auth_guard = RequireAuthenticated(jwks_verifier=verifier, required_scopes=("agents:run",))
+
+    try:
+        now = int(time.time())
+        headers: dict[str, str] = {}
+        if token_case != "missing":
+            signing_key = other_priv if token_case == "tampered" else rsa_priv
+            exp = now - 60 if token_case == "expired" else now + 300
+            aud = "wrong-aud" if token_case == "wrong_audience" else "agent-api"
+            token = jwt.encode(
+                {
+                    "sub": "user-42",
+                    "tenant_id": "tenant-alpha",
+                    "scope": "agents:run tools:read",
+                    "iss": "https://idp.example.com",
+                    "aud": aud,
+                    "exp": exp,
+                },
+                signing_key,
+                algorithm="RS256",
+                headers={"kid": "agent-rsa-1"},
+            )
+            headers["Authorization"] = f"Bearer {token}"
+
+        ctx_sync = AgentContext.from_headers(headers, identity_source=source)
+        fake_conn = SimpleNamespace(
+            headers=headers,
+            scope={"type": "http", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]},
+        )
+        ctx_with_headers = AgentContext(metadata={"headers": headers})
+
+        if expect_valid:
+            assert ctx_sync.identity.is_authenticated is True
+            assert ctx_sync.identity.user_id == "user-42"
+            assert ctx_sync.identity.tenant_id == "tenant-alpha"
+            assert ctx_sync.identity.scopes == ("agents:run", "tools:read")
+            assert ctx_sync.identity.auth_scheme == "jwt"
+
+            await GuardChain((bearer_guard,)).execute(AgentContext(), connection=fake_conn, route_handler="route")
+            conn_identity = fake_conn.scope["user"]
+            assert isinstance(conn_identity, CallerIdentity)
+            assert conn_identity.user_id == "user-42"
+            assert conn_identity.tenant_id == "tenant-alpha"
+            assert conn_identity.scopes == ("agents:run", "tools:read")
+
+            await auth_guard(ctx_with_headers)
+            assert ctx_with_headers.identity.user_id == "user-42"
+            assert ctx_with_headers.identity.tenant_id == "tenant-alpha"
+            assert ctx_with_headers.identity.scopes == ("agents:run", "tools:read")
+        else:
+            assert ctx_sync.identity.is_authenticated is False
+            assert ctx_sync.identity.user_id is None
+            assert ctx_sync.identity.scopes == ()
+
+            with pytest.raises(UnauthorizedError) as exc_info:
+                await GuardChain((bearer_guard,)).execute(AgentContext(), connection=fake_conn, route_handler="route")
+            assert exc_info.value.status_code == 401
+
+            with pytest.raises(UnauthorizedError) as guard_exc:
+                await auth_guard(ctx_with_headers)
+            assert guard_exc.value.status_code == 401
+            assert ctx_with_headers.identity.is_authenticated is False
+    finally:
+        await verifier.aclose()
+        verifier.close()
+        await async_client.aclose()
+        sync_client.close()
+
+
+class NestedTeam(msgspec.Struct, frozen=True, gc=False):
+    lead: UserRecord
+    members: tuple[UserRecord, ...] = ()
+
+
+class NestedEnvelope(msgspec.Struct, frozen=True, gc=False):
+    team: NestedTeam
+    label: str = "primary"
+
+
+@pytest.mark.parametrize(
+    "import_order",
+    [
+        ("vertebra.agent.spec", "vertebra.agent.workflow"),
+        ("vertebra.agent.workflow", "vertebra.agent.spec"),
+        ("vertebra.agent", "vertebra.agent.spec", "vertebra.agent.workflow"),
+    ],
+)
+def test_agent_spec_and_workflow_fresh_interpreter_import_order(import_order: tuple[str, ...]) -> None:
+    """Verify spec and workflow import cleanly in any order in a fresh interpreter."""
+    imports_stmt = "; ".join(f"import {mod}" for mod in import_order)
+    code = (
+        f"{imports_stmt}; "
+        "from vertebra.agent.spec import SpecNode, SpecTree; "
+        "from vertebra.agent.workflow import DynamicWorkflow; "
+        "tree = SpecTree(root_id='root'); "
+        "tree.add_node(SpecNode(id='step1', title='Step 1')); "
+        "wf = tree.to_workflow(); "
+        "assert isinstance(wf, DynamicWorkflow); "
+        "assert 'step1' in wf.nodes"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+
+def test_schema_builder_nested_structs_preserves_defs_via_serializer() -> None:
+    """Verify SchemaBuilder delegates to serializers.schema_components and preserves nested #/$defs."""
+    source_tree = ast.parse(inspect.getsource(schema_mod))
+    direct_calls = [
+        ast.unparse(node)
+        for node in ast.walk(source_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "schema_components"
+        and ast.unparse(node) != "schema_components"
+    ]
+    assert direct_calls == []
+
+    def dispatch_team(envelope: NestedEnvelope) -> NestedTeam:
+        return envelope.team
+
+    builder = SchemaBuilder()
+    input_schema = builder.build_callable_schema(dispatch_team)
+    assert input_schema["properties"]["envelope"]["$ref"] == "#/$defs/NestedEnvelope"
+    assert "NestedEnvelope" in input_schema["$defs"]
+    assert "NestedTeam" in input_schema["$defs"]
+    assert "UserRecord" in input_schema["$defs"]
+    assert input_schema["$defs"]["NestedTeam"]["properties"]["lead"]["$ref"] == "#/$defs/UserRecord"
+
+    output_schema = builder.build_output_schema(dispatch_team)
+    assert output_schema is not None
+    assert output_schema["properties"]["lead"]["$ref"] == "#/$defs/UserRecord"
+    assert "UserRecord" in output_schema["$defs"]

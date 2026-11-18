@@ -14,9 +14,26 @@ import msgspec
 import pydantic
 import pytest
 
+from vertebra.framework.openapi import (
+    AsyncAPIDocsConfig,
+    ElementsDocsConfig,
+    OpenAPIConfig,
+    OpenAPISpecBuilder,
+    RapiDocDocsConfig,
+    RedocDocsConfig,
+    ScalarDocsConfig,
+    SwaggerDocsConfig,
+    render_asyncapi_html,
+    render_elements_html,
+    render_rapidoc_html,
+    render_redoc_html,
+    render_scalar_html,
+    render_swagger_html,
+)
 from vertebra.typing import UNSET, CamelizedBaseStruct, Empty
 from vertebra.utils.dispatch import TypeDispatcher
 from vertebra.utils.schema import to_schema, to_value_type, transform_dict_keys
+from vertebra.utils.serializers import schema_components
 from vertebra.utils.text import camelize, kebabize, snake_case
 from vertebra.utils.type_converters import (
     DEFAULT_SPECIAL_CHARS,
@@ -462,3 +479,116 @@ def test_model_class_type_guards(
     """Verify is_msgspec_struct_type and is_pydantic_model_type match model classes only."""
     assert is_msgspec_struct_type(candidate) is expected_msgspec_type
     assert is_pydantic_model_type(candidate) is expected_pydantic_type
+
+
+class _FlatSchemaStruct(msgspec.Struct):
+    count: int
+    label: str
+
+
+class _NestedInnerStruct(msgspec.Struct):
+    code: str
+
+
+class _NestedOuterStruct(msgspec.Struct):
+    inner: _NestedInnerStruct
+    payload: int | str
+
+
+@pytest.mark.parametrize(
+    ("types", "ref_template", "expected_ref_prefix", "expected_defs"),
+    [
+        ((), "#/$defs/{name}", "", set()),
+        ((_FlatSchemaStruct,), "#/$defs/{name}", "#/$defs/_FlatSchemaStruct", {"_FlatSchemaStruct"}),
+        (
+            (_NestedOuterStruct,),
+            "#/$defs/{name}",
+            "#/$defs/_NestedOuterStruct",
+            {"_NestedOuterStruct", "_NestedInnerStruct"},
+        ),
+        (
+            (_NestedOuterStruct,),
+            "#/components/schemas/{name}",
+            "#/components/schemas/_NestedOuterStruct",
+            {"_NestedOuterStruct", "_NestedInnerStruct"},
+        ),
+    ],
+)
+def test_schema_components_extraction(
+    types: tuple[type[Any], ...],
+    ref_template: str,
+    expected_ref_prefix: str,
+    expected_defs: set[str],
+) -> None:
+    """Verify schema_components extracts normalized schemas and defs across empty, flat, nested, and union types."""
+    schemas, defs = schema_components(types, ref_template=ref_template)
+    assert isinstance(schemas, tuple)
+    assert isinstance(defs, dict)
+    if not types:
+        assert schemas == ()
+        assert defs == {}
+        return
+    assert schemas[0]["$ref"] == expected_ref_prefix
+    assert expected_defs.issubset(defs.keys())
+    if _NestedOuterStruct in types:
+        outer_props = defs["_NestedOuterStruct"]["properties"]
+        expected_inner_ref = ref_template.format(name="_NestedInnerStruct")
+        assert outer_props["inner"]["$ref"] == expected_inner_ref
+        assert {"anyOf"} <= set(outer_props["payload"].keys())
+
+
+@pytest.mark.parametrize(
+    ("config_obj", "renderer_fn", "expected_marker"),
+    [
+        (ScalarDocsConfig(), render_scalar_html, "data-url='/spec/openapi.json'"),
+        (SwaggerDocsConfig(), render_swagger_html, "SwaggerUIBundle"),
+        (RedocDocsConfig(), render_redoc_html, "<redoc spec-url='/spec/openapi.json'"),
+        (ElementsDocsConfig(), render_elements_html, "apiDescriptionUrl='/spec/openapi.json'"),
+        (RapiDocDocsConfig(), render_rapidoc_html, "<rapi-doc spec-url='/spec/openapi.json'"),
+        (AsyncAPIDocsConfig(schema_path="/spec/openapi.json"), render_asyncapi_html, "/spec/openapi.json"),
+    ],
+)
+def test_openapi_neutral_portal_configs_and_renderers(
+    config_obj: Any,
+    renderer_fn: Any,
+    expected_marker: str,
+) -> None:
+    """Verify canonical OpenAPI portal configs and neutral HTML renderers produce valid HTML snippets."""
+    title = "Vertebra Portal Test"
+    spec_url = "/spec/openapi.json"
+    if isinstance(config_obj, AsyncAPIDocsConfig):
+        from_method = config_obj.render_html(title=title)
+        from_fn = renderer_fn(config_obj, title=title, schema_url=spec_url)
+    elif isinstance(config_obj, ScalarDocsConfig):
+        from_method = config_obj.render_html(title=title, default_schema_url=spec_url)
+        from_fn = renderer_fn(config_obj, title=title, schema_url=spec_url)
+    else:
+        from_method = config_obj.render_html(title=title, schema_url=spec_url)
+        from_fn = renderer_fn(config_obj, title=title, schema_url=spec_url)
+    assert title in from_method
+    assert expected_marker in from_method
+    assert from_fn == from_method
+
+
+def test_openapi_config_validation_and_spec_builder_schema_components() -> None:
+    """Verify OpenAPIConfig rejects invalid backends at init and OpenAPISpecBuilder emits component schemas."""
+    invalid_backend = cast("Any", "unknown_backend")
+    with pytest.raises(ValueError, match="Unsupported docs backend"):
+        OpenAPIConfig(enabled_docs=("scalar", invalid_backend))
+
+    with pytest.raises(ValueError, match="Unsupported docs backend"):
+        OpenAPIConfig(default_docs=invalid_backend)
+
+    builder = OpenAPISpecBuilder(OpenAPIConfig(title="Schema Test"))
+    builder.add_operation(
+        "/orders",
+        "POST",
+        request_body_schema=_NestedOuterStruct,
+        response_schema=_FlatSchemaStruct,
+    )
+    spec = builder.build()
+    schemas = spec["components"]["schemas"]
+    assert "_NestedOuterStruct" in schemas
+    assert "_NestedInnerStruct" in schemas
+    assert "_FlatSchemaStruct" in schemas
+    assert schemas["_NestedOuterStruct"]["properties"]["inner"]["$ref"] == "#/components/schemas/_NestedInnerStruct"

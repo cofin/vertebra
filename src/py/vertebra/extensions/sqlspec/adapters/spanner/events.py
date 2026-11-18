@@ -1,11 +1,15 @@
 """Cloud Spanner hash-sharded event queue store with ``BYTES`` payloads and TTL deletion policy."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired
 from uuid import uuid4
 
+from sqlspec.config import EventsConfig
 from sqlspec.extensions.events import BaseEventQueueStore
+from sqlspec.migrations.schema import DropStatement, SchemaTarget
 from sqlspec.utils.serializers import from_json, to_json
 from sqlspec.utils.sync_tools import async_
 
@@ -22,35 +26,11 @@ __all__ = (
 )
 
 
-class SpannerEventsConfig(TypedDict, total=False):
+class SpannerEventsConfig(EventsConfig):
     """Typed extension configuration keys supported by ``SpannerEventQueueStore``."""
 
-    backend: str
-    """Selected event delivery backend identifier."""
-    cleanup_on_ack: bool
+    cleanup_on_ack: NotRequired[bool]
     """Delete acknowledged event rows immediately on acknowledgement."""
-    create_schema: bool
-    """Create the event queue table when it does not already exist."""
-    event_poll_interval: float
-    """Interval in seconds between event queue poll ticks."""
-    lease_seconds: int
-    """Default visibility timeout in seconds for claimed events."""
-    manage_schema: bool
-    """Create or migrate the event queue schema automatically on startup."""
-    migrations_path: str
-    """Filesystem path to custom migration scripts for the event queue."""
-    poll_interval: float
-    """Polling interval in seconds when waiting for available events."""
-    queue_table: str
-    """Cloud Spanner table name for the event queue."""
-    retention_seconds: int
-    """Row TTL retention window in seconds before cleanup."""
-    select_for_update: bool
-    """Use read-write locking hints when claiming queue rows."""
-    shard_count: int
-    """Number of hotspot-mitigating hash shards used for event keys."""
-    skip_locked: bool
-    """Skip locked rows when polling in Spangres dialect mode."""
 
 
 def _encode_payload_bytes(payload: Any) -> bytes:
@@ -100,6 +80,32 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
 
     def _is_async_config(self) -> bool:
         return bool(getattr(self._config, "is_async", False))
+
+    def _split_table_name(self) -> tuple[str | None, str]:
+        table = validate_spanner_identifier(self.table_name, "queue_table")
+        schema_name, dot, bare_table = table.partition(".")
+        if dot:
+            return schema_name, bare_table
+        return None, table
+
+    def _index_existence_target(self) -> tuple[str | None, str]:
+        return self._split_table_name()
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered ``SchemaTarget`` definitions for the Cloud Spanner event queue table."""
+        schema_name, bare_table = self._split_table_name()
+        parse_dialect = "postgres" if self._dialect() == "spangres" else "spanner"
+        return [
+            SchemaTarget.from_ddl(bare_table, self.create_statements()[0], schema=schema_name, dialect=parse_dialect)
+        ]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion queue index on a synchronous driver without committing."""
+        super().reconcile_companion_objects_sync(driver)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion queue index on an asynchronous driver without committing."""
+        await super().reconcile_companion_objects_async(driver)
 
     def _column_types(self) -> tuple[str, str, str]:
         """Return ``(payload_type, metadata_type, timestamp_type)`` for Spanner queue DDL."""
@@ -179,6 +185,21 @@ class SpannerEventQueueStore(BaseEventQueueStore[Any]):
     def ddl_statements(self) -> tuple[str, ...]:
         """Return idempotent Cloud Spanner queue table and covering index DDL statements."""
         return tuple(self.create_statements())
+
+    def drop_statements(self) -> list[str]:
+        """Return idempotent Cloud Spanner ``DROP INDEX`` and ``DROP TABLE`` statements."""
+        table = validate_spanner_identifier(self.table_name, "queue_table")
+        index_name = validate_spanner_identifier(self._index_name(), "queue_index")
+        schema_name, _ = self._split_table_name()
+        qualified_index = f"{schema_name}.{index_name}" if schema_name else index_name
+        return [
+            f"DROP INDEX IF EXISTS {qualified_index}",
+            f"DROP TABLE IF EXISTS {table}",
+        ]
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return index-before-table downgrade drop statements for the Spanner event queue."""
+        return [DropStatement(statement) for statement in self.drop_statements()]
 
     def compute_shard_id(self, event_id: str) -> int:
         """Return the deterministic hash shard prefix for ``event_id``."""

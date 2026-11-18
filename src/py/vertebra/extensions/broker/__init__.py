@@ -21,6 +21,7 @@ from vertebra.extensions.broker.host import BrokerHost, ShutdownReport
 from vertebra.extensions.broker.plugin import BrokerPlugin
 from vertebra.extensions.broker.transport import (
     AsyncBrokerLeaseSource,
+    AsyncBrokerStream,
     AsyncConnectionLease,
     AsyncSHMBrokerTransport,
     BrokerConfig,
@@ -38,6 +39,7 @@ __all__ = (
     "DBRPC_HEADER_SIZE",
     "DBRPC_VERSION",
     "AsyncBrokerLeaseSource",
+    "AsyncBrokerStream",
     "AsyncConnectionLease",
     "AsyncSHMBrokerTransport",
     "BrokerAttachError",

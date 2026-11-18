@@ -41,6 +41,7 @@ pub struct WorkerLifecycle {
     pub broker_shm_size: usize,
     pub broker_pool_size: u32,
     pub broker_max_overflow: u32,
+    pub broker_stmt_capacity: u32,
     pub lease_table: Option<Arc<ShmLeaseTable>>,
 }
 
@@ -79,6 +80,7 @@ impl WorkerLifecycle {
             broker_shm_size: 0,
             broker_pool_size: 20,
             broker_max_overflow: 10,
+            broker_stmt_capacity: 512,
             lease_table: None,
         }
     }
@@ -215,6 +217,10 @@ impl WorkerLifecycle {
                 "VERTEBRA_BROKER_MAX_OVERFLOW",
                 self.broker_max_overflow.to_string(),
             );
+            cmd.env(
+                "VERTEBRA_BROKER_STMT_CAPACITY",
+                self.broker_stmt_capacity.to_string(),
+            );
         }
 
         #[cfg(target_os = "linux")]
@@ -251,12 +257,13 @@ pub struct RingFactory {
     #[cfg(unix)]
     broker_shm_fd: std::os::fd::RawFd,
     broker_shm_size: usize,
+    broker_stmt_capacity: u32,
 }
 
 impl RingFactory {
     /// Create ring pairs for `worker_count` workers.
     pub fn new(worker_count: usize, config: RingPairConfig) -> Result<Self, RingPairError> {
-        Self::with_broker_config(worker_count, config, 20, 10)
+        Self::with_broker_config(worker_count, config, 20, 10, 512)
     }
 
     /// Create ring pairs and an atomic shared-memory connection broker lease table.
@@ -265,6 +272,7 @@ impl RingFactory {
         config: RingPairConfig,
         pool_size: u32,
         max_overflow: u32,
+        stmt_capacity: u32,
     ) -> Result<Self, RingPairError> {
         let mut pairs = Vec::with_capacity(worker_count);
         for i in 0..worker_count {
@@ -280,8 +288,9 @@ impl RingFactory {
             pairs.push(Arc::new(pair));
         }
 
+        let stmt_cap = stmt_capacity.max(1);
         let broker_shm_size =
-            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, 512);
+            ShmLeaseTable::required_size_with_statements(pool_size, max_overflow, stmt_cap);
         let region = ShmRegion::create(broker_shm_size).map_err(RingPairError::Shm)?;
 
         #[cfg(unix)]
@@ -294,8 +303,13 @@ impl RingFactory {
         };
 
         let broker_table = Arc::new(
-            ShmLeaseTable::init_in_region_with_statements(region, pool_size, max_overflow, 512)
-                .map_err(|e| RingPairError::Io(std::io::Error::other(e.to_string())))?,
+            ShmLeaseTable::init_in_region_with_statements(
+                region,
+                pool_size,
+                max_overflow,
+                stmt_cap,
+            )
+            .map_err(|e| RingPairError::Io(std::io::Error::other(e.to_string())))?,
         );
 
         Ok(Self {
@@ -305,6 +319,7 @@ impl RingFactory {
             #[cfg(unix)]
             broker_shm_fd,
             broker_shm_size,
+            broker_stmt_capacity: stmt_cap,
         })
     }
 
@@ -382,6 +397,10 @@ impl RingFactory {
                 "VERTEBRA_BROKER_MAX_OVERFLOW",
                 self.broker_table.max_overflow().to_string(),
             );
+            cmd.env(
+                "VERTEBRA_BROKER_STMT_CAPACITY",
+                self.broker_stmt_capacity.to_string(),
+            );
         }
 
         #[cfg(target_os = "linux")]
@@ -448,6 +467,7 @@ impl RingFactory {
                 lc.broker_shm_size = self.broker_shm_size;
                 lc.broker_pool_size = pool_size;
                 lc.broker_max_overflow = max_overflow;
+                lc.broker_stmt_capacity = self.broker_stmt_capacity;
                 lc.lease_table = Some(Arc::clone(&self.broker_table));
                 lc
             })
@@ -465,6 +485,7 @@ impl RingFactory {
         }
         lifecycle.broker_pool_size = self.broker_table.pool_size();
         lifecycle.broker_max_overflow = self.broker_table.max_overflow();
+        lifecycle.broker_stmt_capacity = self.broker_stmt_capacity;
         if lifecycle.lease_table.is_none() {
             lifecycle.lease_table = Some(Arc::clone(&self.broker_table));
         }
@@ -478,6 +499,8 @@ impl RingFactory {
 
         for child in children.iter_mut() {
             let pid = child.id();
+            // SAFETY: `child` is an unreaped `Child` owned by `children`, so its OS PID has not
+            // been recycled and `pid as i32` is a valid target for `SIGTERM`.
             unsafe {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
@@ -675,6 +698,10 @@ impl EmbeddedSupervisor {
                 .env(
                     "VERTEBRA_BROKER_MAX_OVERFLOW",
                     self.broker_table.max_overflow().to_string(),
+                )
+                .env(
+                    "VERTEBRA_BROKER_STMT_CAPACITY",
+                    self.broker_table.stmt_capacity().to_string(),
                 );
         }
 
@@ -927,6 +954,8 @@ mod tests {
 
         pair.request_ring.try_send(b"test data", 0).expect("send");
 
+        // SAFETY: `pair` is exclusively owned by this test with no spawned worker or reader
+        // task accessing its shared-memory rings.
         unsafe {
             pair.reclaim();
         }
@@ -961,6 +990,7 @@ mod tests {
         let fds = pair.all_fds();
 
         for fd in &fds {
+            // SAFETY: `*fd` is an open file descriptor owned by `pair` for the life of this test.
             let flags = unsafe { libc::fcntl(*fd, libc::F_GETFD) };
             assert!(flags >= 0, "fcntl should succeed");
             assert!(
@@ -972,9 +1002,9 @@ mod tests {
 
     #[test]
     fn factory_broker_colocates_statement_cache_and_reclaims_leases() {
-        let mut factory =
-            RingFactory::with_broker_config(1, RingPairConfig::default(), 4, 2).expect("factory");
-        assert_eq!(factory.broker_table().stmt_capacity(), 512);
+        let mut factory = RingFactory::with_broker_config(1, RingPairConfig::default(), 4, 2, 1024)
+            .expect("factory");
+        assert_eq!(factory.broker_table().stmt_capacity(), 1024);
         let stmt_cache = factory
             .broker_table()
             .statement_cache()
@@ -1018,6 +1048,7 @@ mod tests {
         assert_eq!(sup.broker_table().max_overflow(), 2);
         assert_eq!(sup.broker_table().stmt_capacity(), 128);
         assert!(sup.broker_shm_fd >= 0);
+        // SAFETY: `sup.broker_shm_fd` is non-negative and remains open in `sup` across this call.
         let flags = unsafe { libc::fcntl(sup.broker_shm_fd, libc::F_GETFD) };
         assert!(flags >= 0 && (flags & libc::FD_CLOEXEC) == 0);
     }

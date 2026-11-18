@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import socket
 import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, urlsplit
 
 import anyio
 import pytest
@@ -27,7 +32,17 @@ from vertebra.db.dialer.cloudsql import (
     EphemeralCertBundle,
     SyncCloudSQLDialer,
 )
-from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.db.driver import (
+    AZURE_MSSQL_SCOPE,
+    AZURE_MYSQL_SCOPE,
+    AZURE_POSTGRES_SCOPE,
+    AZURE_REDIS_SCOPE,
+    AwsAuroraDsqlIamTokenProvider,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+    DatabaseTokenProvider,
+)
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -574,3 +589,550 @@ async def test_cloud_dialers_async_connect_uses_cached_cert_bundle() -> None:
         t2.join(timeout=2.0)
     finally:
         server_sock.close()
+
+
+def _expected_sigv4_signature(
+    *,
+    host_header: str,
+    region: str,
+    service: str,
+    secret_access_key: str,
+    amz_date: str,
+    query_pairs: dict[str, list[str]],
+) -> str:
+    """Independently compute the expected AWS SigV4 presigned query signature."""
+    date_stamp = amz_date[:8]
+    canonical_items = sorted(
+        (quote(k, safe="-._~"), quote(v[0], safe="-._~")) for k, v in query_pairs.items() if k != "X-Amz-Signature"
+    )
+    canonical_query = "&".join(f"{k}={v}" for k, v in canonical_items)
+    payload_hash = hashlib.sha256(b"").hexdigest()
+    canonical_request = f"GET\n/\n{canonical_query}\nhost:{host_header}\n\nhost\n{payload_hash}"
+    hashed_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashed_request}"
+    k_date = hmac.new(f"AWS4{secret_access_key}".encode(), date_stamp.encode("utf-8"), hashlib.sha256).digest()
+    k_region = hmac.new(k_date, region.encode("utf-8"), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode("utf-8"), hashlib.sha256).digest()
+    k_signing = hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
+    return hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("endpoint_host", "session_token", "expected_authority"),
+    [
+        ("db.example.us-east-1.rds.amazonaws.com", None, "db.example.us-east-1.rds.amazonaws.com:5432"),
+        (
+            "https://db.example.us-east-1.rds.amazonaws.com/",
+            "test-token-placeholder",
+            "db.example.us-east-1.rds.amazonaws.com:5432",
+        ),
+    ],
+)
+def test_aws_rds_iam_token_provider_signing_and_scheme_stripping(
+    endpoint_host: str,
+    session_token: str | None,
+    expected_authority: str,
+) -> None:
+    """Verify RDS IAM SigV4 presigned query token format, optional STS token, and repr redaction."""
+    fixed_ts = 1_794_873_600.0
+    access_key = "test-access-key-placeholder"
+    secret_key = "test-secret-access-key-placeholder"
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host=endpoint_host,
+        port=5432,
+        region="us-east-1",
+        username="iam_user",
+        access_key_id=access_key,
+        secret_access_key=secret_key,
+        session_token=session_token,
+        clock=lambda: fixed_ts,
+    )
+    assert isinstance(provider, DatabaseTokenProvider)
+    rendered = repr(provider)
+    assert access_key not in rendered
+    assert secret_key not in rendered
+    if session_token is not None:
+        assert session_token not in rendered
+
+    token = provider.resolve_sync()
+    assert not token.startswith("https://")
+    assert not token.startswith("http://")
+    parsed = urlsplit(f"https://{token}")
+    assert parsed.netloc == expected_authority
+    assert parsed.path == "/"
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    assert qs["Action"] == ["connect"]
+    assert qs["DBUser"] == ["iam_user"]
+    assert qs["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert qs["X-Amz-Expires"] == ["900"]
+    assert qs["X-Amz-SignedHeaders"] == ["host"]
+    amz_date = qs["X-Amz-Date"][0]
+    assert qs["X-Amz-Credential"] == [f"{access_key}/{amz_date[:8]}/us-east-1/rds-db/aws4_request"]
+    if session_token is not None:
+        assert qs["X-Amz-Security-Token"] == [session_token]
+    else:
+        assert "X-Amz-Security-Token" not in qs
+
+    expected_sig = _expected_sigv4_signature(
+        host_header=expected_authority,
+        region="us-east-1",
+        service="rds-db",
+        secret_access_key=secret_key,
+        amz_date=amz_date,
+        query_pairs=qs,
+    )
+    assert qs["X-Amz-Signature"] == [expected_sig]
+
+
+@pytest.mark.anyio
+async def test_aws_iam_token_provider_caching_refresh_and_env_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify fake-clock pre-expiry refresh, force_refresh, invalidate, and env credentials."""
+    now = [1000.0]
+    minted_calls = 0
+
+    def _custom_signer(*, now_ts: float, endpoint_host: str, port: int) -> str:
+        nonlocal minted_calls
+        minted_calls += 1
+        return f"https://{endpoint_host}:{port}/?Action=connect&call={minted_calls}&ts={int(now_ts)}"
+
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host="db.internal",
+        port=5432,
+        region="us-west-2",
+        username="app_user",
+        refresh_margin_seconds=60.0,
+        token_ttl_seconds=900,
+        clock=lambda: now[0],
+        signer=_custom_signer,
+    )
+
+    first = provider.resolve_sync()
+    assert first == "db.internal:5432/?Action=connect&call=1&ts=1000"
+    assert minted_calls == 1
+
+    now[0] = 1839.0
+    assert provider.resolve_sync() == first
+    assert minted_calls == 1
+
+    now[0] = 1840.0
+    refreshed = provider.resolve_sync()
+    assert refreshed == "db.internal:5432/?Action=connect&call=2&ts=1840"
+    assert minted_calls == 2
+
+    forced = provider.resolve_sync(force_refresh=True)
+    assert forced == "db.internal:5432/?Action=connect&call=3&ts=1840"
+    assert minted_calls == 3
+
+    provider.invalidate()
+    async_token = await provider.resolve_async()
+    assert async_token == "db.internal:5432/?Action=connect&call=4&ts=1840"
+    assert minted_calls == 4
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATESTENV12345")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-env-secret-placeholder")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "test-env-session-placeholder")
+    env_provider = AwsRdsIamTokenProvider(
+        endpoint_host="db.env.internal",
+        region="eu-west-1",
+        username="env_user",
+        clock=lambda: 1_794_873_600.0,
+    )
+    env_token = env_provider.resolve_sync()
+    env_qs = parse_qs(urlsplit(f"https://{env_token}").query)
+    assert env_qs["X-Amz-Security-Token"] == ["test-env-session-placeholder"]
+    assert env_qs["DBUser"] == ["env_user"]
+
+
+@pytest.mark.parametrize(
+    ("admin", "expected_action"),
+    [
+        (False, "DbConnect"),
+        (True, "DbConnectAdmin"),
+    ],
+)
+def test_aws_aurora_dsql_iam_token_provider_actions_and_signing(
+    admin: bool,
+    expected_action: str,
+) -> None:
+    """Verify Aurora DSQL SigV4 token signing for DbConnect and DbConnectAdmin actions."""
+    fixed_ts = 1_794_873_600.0
+    access_key = "AKIADSQLKEY12345"
+    secret_key = "test-dsql-secret-placeholder"
+    provider = AwsAuroraDsqlIamTokenProvider(
+        hostname="https://example.dsql.us-east-1.on.aws/",
+        region="us-east-1",
+        admin=admin,
+        access_key_id=access_key,
+        secret_access_key=secret_key,
+        session_token="test-token-placeholder",
+        clock=lambda: fixed_ts,
+    )
+    rendered = repr(provider)
+    assert access_key not in rendered
+    assert secret_key not in rendered
+    assert "test-token-placeholder" not in rendered
+
+    token = provider.resolve_sync()
+    assert not token.startswith("https://")
+    parsed = urlsplit(f"https://{token}")
+    assert parsed.netloc == "example.dsql.us-east-1.on.aws"
+    qs = parse_qs(parsed.query)
+    assert qs["Action"] == [expected_action]
+    assert "DBUser" not in qs
+    assert qs["X-Amz-Expires"] == ["900"]
+    assert qs["X-Amz-Security-Token"] == ["test-token-placeholder"]
+    amz_date = qs["X-Amz-Date"][0]
+    assert qs["X-Amz-Credential"] == [f"{access_key}/{amz_date[:8]}/us-east-1/dsql/aws4_request"]
+    expected_sig = _expected_sigv4_signature(
+        host_header="example.dsql.us-east-1.on.aws",
+        region="us-east-1",
+        service="dsql",
+        secret_access_key=secret_key,
+        amz_date=amz_date,
+        query_pairs=qs,
+    )
+    assert qs["X-Amz-Signature"] == [expected_sig]
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        (AwsRdsIamTokenProvider, {"endpoint_host": "", "region": "us-east-1", "username": "u"}),
+        (AwsRdsIamTokenProvider, {"endpoint_host": "db.local", "port": 0, "region": "us-east-1", "username": "u"}),
+        (AwsRdsIamTokenProvider, {"endpoint_host": "db.local", "region": "", "username": "u"}),
+        (AwsRdsIamTokenProvider, {"endpoint_host": "db.local", "region": "us-east-1", "username": ""}),
+        (
+            AwsRdsIamTokenProvider,
+            {"endpoint_host": "db.local", "region": "us-east-1", "username": "u", "token_ttl_seconds": 0},
+        ),
+        (
+            AwsRdsIamTokenProvider,
+            {"endpoint_host": "db.local", "region": "us-east-1", "username": "u", "refresh_margin_seconds": -1.0},
+        ),
+        (
+            AwsRdsIamTokenProvider,
+            {"endpoint_host": "db.local", "region": "us-east-1", "username": "u", "refresh_margin_seconds": 900.0},
+        ),
+        (AwsAuroraDsqlIamTokenProvider, {"hostname": "", "region": "us-east-1"}),
+        (AwsAuroraDsqlIamTokenProvider, {"hostname": "c.dsql.on.aws", "region": ""}),
+        (AwsAuroraDsqlIamTokenProvider, {"hostname": "c.dsql.on.aws", "region": "us-east-1", "token_ttl_seconds": -5}),
+    ],
+)
+def test_aws_iam_token_provider_validation_errors(
+    factory: type[AwsRdsIamTokenProvider] | type[AwsAuroraDsqlIamTokenProvider],
+    kwargs: dict[str, Any],
+) -> None:
+    """Verify invalid host, region, username, port, TTL, and refresh margin raise ImproperConfigurationError."""
+    with pytest.raises(ImproperConfigurationError):
+        factory(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_aws_iam_token_provider_missing_credentials_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify missing AWS static/env keys and custom signer raise ImproperConfigurationError without unsigned tokens."""
+    for env_key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        monkeypatch.delenv(env_key, raising=False)
+
+    rds_provider = AwsRdsIamTokenProvider(
+        endpoint_host="db.example.internal",
+        region="us-east-1",
+        username="iam_user",
+    )
+    with pytest.raises(ImproperConfigurationError):
+        rds_provider.resolve_sync()
+    with pytest.raises(ImproperConfigurationError):
+        await rds_provider.resolve_async()
+
+    dsql_provider = AwsAuroraDsqlIamTokenProvider(
+        hostname="cluster.dsql.us-east-1.on.aws",
+        region="us-east-1",
+    )
+    with pytest.raises(ImproperConfigurationError):
+        dsql_provider.resolve_sync()
+
+
+@pytest.mark.parametrize(
+    "engine_scope",
+    [
+        AZURE_POSTGRES_SCOPE,
+        AZURE_MYSQL_SCOPE,
+        AZURE_MSSQL_SCOPE,
+        AZURE_REDIS_SCOPE,
+    ],
+)
+def test_azure_entra_token_provider_default_scope_injection(engine_scope: str) -> None:
+    """Verify AzureEntraTokenProvider.with_default_scope injects unset engine scopes and preserves explicit ones."""
+    seen_scopes: list[str] = []
+
+    def _fetch(scope: str) -> tuple[str, float]:
+        seen_scopes.append(scope)
+        return ("test-token-placeholder", 5000.0)
+
+    unscoped = AzureEntraTokenProvider(fetcher=_fetch, clock=lambda: 1000.0)
+    scoped = unscoped.with_default_scope(engine_scope)
+    assert scoped.scope == engine_scope
+    assert scoped.resolve_sync() == "test-token-placeholder"
+    assert seen_scopes == [engine_scope]
+
+    explicit_scope = "https://custom.database.windows.net/.default"
+    explicit = AzureEntraTokenProvider(scope=explicit_scope, fetcher=_fetch, clock=lambda: 1000.0)
+    preserved = explicit.with_default_scope(engine_scope)
+    assert preserved is explicit
+    assert preserved.scope == explicit_scope
+    assert preserved.resolve_sync() == "test-token-placeholder"
+    assert seen_scopes == [engine_scope, explicit_scope]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auth_mode", ["client_credentials", "imds", "custom_fetcher"])
+@pytest.mark.parametrize("exec_mode", ["sync", "async"])
+async def test_azure_entra_token_provider_modes_and_pre_expiry_refresh(
+    auth_mode: str,
+    exec_mode: str,
+) -> None:
+    """Verify AzureEntraTokenProvider across client-credentials, IMDS, custom fetcher, and pre-expiry refresh."""
+    now = [1000.0]
+    recorded_requests: list[dict[str, Any]] = []
+    issued_tokens: list[str] = []
+
+    class _EntraHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw_body = self.rfile.read(length).decode("utf-8")
+            form = parse_qs(raw_body, keep_blank_values=True)
+            recorded_requests.append({"method": "POST", "path": self.path, "form": form})
+            tok = f"test-token-placeholder-cc-{len(issued_tokens) + 1}"
+            issued_tokens.append(tok)
+            payload = encode_json_bytes({"token_type": "Bearer", "expires_in": 600, "access_token": tok})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            parsed = urlsplit(self.path)
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            recorded_requests.append(
+                {
+                    "method": "GET",
+                    "path": parsed.path,
+                    "query": qs,
+                    "metadata_header": self.headers.get("Metadata"),
+                }
+            )
+            tok = f"test-token-placeholder-imds-{len(issued_tokens) + 1}"
+            issued_tokens.append(tok)
+            payload = encode_json_bytes({"access_token": tok, "expires_in": "600", "token_type": "Bearer"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server: ThreadingHTTPServer | None = None
+    srv_thread: threading.Thread | None = None
+    if auth_mode in {"client_credentials", "imds"}:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _EntraHandler)
+        port = server.server_address[1]
+        srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        srv_thread.start()
+    else:
+        port = 0
+
+    try:
+        if auth_mode == "client_credentials":
+            provider = AzureEntraTokenProvider(
+                tenant_id="11111111-2222-3333-4444-555555555555",
+                client_id="app-client-id",
+                client_secret="test-client-secret-placeholder",
+                scope=AZURE_POSTGRES_SCOPE,
+                token_endpoint=f"http://127.0.0.1:{port}/oauth2/v2.0/token",
+                refresh_margin_seconds=120.0,
+                clock=lambda: now[0],
+            )
+        elif auth_mode == "imds":
+            provider = AzureEntraTokenProvider(
+                client_id="uami-client-id",
+                scope=AZURE_POSTGRES_SCOPE,
+                imds_endpoint=f"http://127.0.0.1:{port}/metadata/identity/oauth2/token",
+                api_version="2019-08-01",
+                refresh_margin_seconds=120.0,
+                clock=lambda: now[0],
+            )
+        else:
+
+            def _sync_fetcher(scope: str) -> dict[str, Any]:
+                recorded_requests.append({"method": "FETCHER", "scope": scope})
+                tok = f"test-token-placeholder-fetch-{len(issued_tokens) + 1}"
+                issued_tokens.append(tok)
+                return {"access_token": tok, "expires_in": 600}
+
+            async def _async_fetcher(scope: str) -> dict[str, Any]:
+                await anyio.sleep(0)
+                return _sync_fetcher(scope)
+
+            provider = AzureEntraTokenProvider(
+                scope=AZURE_POSTGRES_SCOPE,
+                refresh_margin_seconds=120.0,
+                clock=lambda: now[0],
+                fetcher=_async_fetcher if exec_mode == "async" else _sync_fetcher,
+            )
+
+        assert isinstance(provider, DatabaseTokenProvider)
+
+        async def _resolve(*, force_refresh: bool = False) -> str:
+            if exec_mode == "sync":
+                return provider.resolve_sync(force_refresh=force_refresh)
+            return await provider.resolve_async(force_refresh=force_refresh)
+
+        first = await _resolve()
+        assert first == issued_tokens[0]
+        assert len(issued_tokens) == 1
+
+        rendered = repr(provider)
+        assert "test-client-secret-placeholder" not in rendered
+        assert first not in rendered
+
+        now[0] = 1479.0
+        assert await _resolve() == first
+        assert len(issued_tokens) == 1
+
+        now[0] = 1480.0
+        refreshed = await _resolve()
+        assert refreshed == issued_tokens[1]
+        assert refreshed != first
+        assert len(issued_tokens) == 2
+
+        forced = await _resolve(force_refresh=True)
+        assert forced == issued_tokens[2]
+        assert len(issued_tokens) == 3
+
+        provider.invalidate()
+        after_invalidate = await _resolve()
+        assert after_invalidate == issued_tokens[3]
+        assert len(issued_tokens) == 4
+
+        if auth_mode == "client_credentials":
+            req = recorded_requests[0]
+            assert req["method"] == "POST"
+            assert req["form"]["grant_type"] == ["client_credentials"]
+            assert req["form"]["client_id"] == ["app-client-id"]
+            assert req["form"]["client_secret"] == ["test-client-secret-placeholder"]
+            assert req["form"]["scope"] == [AZURE_POSTGRES_SCOPE]
+        elif auth_mode == "imds":
+            req = recorded_requests[0]
+            assert req["method"] == "GET"
+            assert req["metadata_header"] == "true"
+            assert req["query"]["api-version"] == ["2019-08-01"]
+            assert req["query"]["resource"] == ["https://ossrdbms-aad.database.windows.net"]
+            assert req["query"]["client_id"] == ["uami-client-id"]
+        else:
+            assert recorded_requests[0]["scope"] == AZURE_POSTGRES_SCOPE
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if srv_thread is not None:
+            srv_thread.join(timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"refresh_margin_seconds": -0.5, "scope": AZURE_POSTGRES_SCOPE},
+        {"refresh_margin_seconds": float("nan"), "scope": AZURE_POSTGRES_SCOPE},
+        {"tenant_id": "", "client_id": "cid", "client_secret": "test-token-placeholder", "scope": AZURE_POSTGRES_SCOPE},
+        {
+            "tenant_id": "../evil",
+            "client_id": "cid",
+            "client_secret": "test-token-placeholder",
+            "scope": AZURE_POSTGRES_SCOPE,
+        },
+        {
+            "tenant_id": "tenant/bad",
+            "client_id": "cid",
+            "client_secret": "test-token-placeholder",
+            "scope": AZURE_POSTGRES_SCOPE,
+        },
+        {"client_id": "cid", "client_secret": "test-token-placeholder", "scope": AZURE_POSTGRES_SCOPE},
+        {
+            "tenant_id": "contoso.onmicrosoft.com",
+            "client_secret": "test-token-placeholder",
+            "scope": AZURE_POSTGRES_SCOPE,
+        },
+        {"scope": ""},
+        {"imds_endpoint": "ftp://169.254.169.254/token"},
+    ],
+)
+def test_azure_entra_token_provider_validation_errors(kwargs: dict[str, Any]) -> None:
+    """Verify invalid refresh margin, tenant_id, client credentials, scope, and URL raise ImproperConfigurationError."""
+    with pytest.raises(ImproperConfigurationError):
+        AzureEntraTokenProvider(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> None:
+    """Verify missing standalone scope and malformed token JSON fail loudly without leaking secrets."""
+    unscoped = AzureEntraTokenProvider(fetcher=lambda scope: ("test-token-placeholder", 5000.0))
+    with pytest.raises(ImproperConfigurationError, match="scope"):
+        unscoped.resolve_sync()
+    with pytest.raises(ImproperConfigurationError, match="scope"):
+        await unscoped.resolve_async()
+
+    malformed_bodies: list[tuple[int, bytes]] = [
+        (200, b"not-valid-json"),
+        (200, encode_json_bytes(["unexpected-list"])),
+        (200, encode_json_bytes({"expires_in": 300})),
+        (200, encode_json_bytes({"access_token": "test-token-placeholder-secret", "expires_in": "bogus"})),
+        (200, encode_json_bytes({"access_token": "test-token-placeholder-secret"})),
+        (401, b'{"error":"invalid_client","secret":"test-client-secret-placeholder"}'),
+    ]
+    idx = [0]
+
+    class _MalformedHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            status, body = malformed_bodies[idx[0]]
+            idx[0] += 1
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MalformedHandler)
+    port = server.server_address[1]
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+    try:
+        provider = AzureEntraTokenProvider(
+            tenant_id="contoso.onmicrosoft.com",
+            client_id="cid",
+            client_secret="test-client-secret-placeholder",
+            scope=AZURE_POSTGRES_SCOPE,
+            token_endpoint=f"http://127.0.0.1:{port}/token",
+        )
+        for _ in malformed_bodies:
+            with pytest.raises(ImproperConfigurationError) as exc_info:
+                provider.resolve_sync()
+            err_text = str(exc_info.value)
+            assert "test-client-secret-placeholder" not in err_text
+            assert "test-token-placeholder-secret" not in err_text
+        assert idx[0] == len(malformed_bodies)
+    finally:
+        server.shutdown()
+        server.server_close()
+        srv_thread.join(timeout=2.0)

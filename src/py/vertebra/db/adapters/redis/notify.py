@@ -7,7 +7,7 @@ import base64
 import collections
 import contextlib
 import os
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
@@ -558,9 +558,9 @@ class AsyncRedisNotificationSource(AsyncNotificationSource):
 
     def _attach_reader(self, listener: AsyncRedisListener) -> bool:
         """Register event-loop fd wakeup reader when listener exposes notifier_fd."""
-        notifier_fn = getattr(listener, "notifier_fd", None)
-        drain_comp_fn = getattr(listener, "drain_completions", None)
-        drain_msg_fn = getattr(listener, "drain_messages", None)
+        notifier_fn: Callable[[], int] | None = getattr(listener, "notifier_fd", None)
+        drain_comp_fn: Callable[[], Any] | None = getattr(listener, "drain_completions", None)
+        drain_msg_fn: Callable[[], Any] | None = getattr(listener, "drain_messages", None)
         if not (callable(notifier_fn) and callable(drain_comp_fn) and callable(drain_msg_fn)):
             return False
         fd = notifier_fn()
@@ -628,7 +628,7 @@ class AsyncRedisNotificationSource(AsyncNotificationSource):
         items: list[str],
     ) -> None:
         """Submit a pub/sub control command via notifier_fd completions or thread fallback."""
-        submit_fn = getattr(listener, submit_name, None)
+        submit_fn: Callable[[list[str]], int] | None = getattr(listener, submit_name, None)
         if self._reader_registered and callable(submit_fn):
             loop = asyncio.get_running_loop()
             fut: asyncio.Future[None] = loop.create_future()
@@ -639,12 +639,12 @@ class AsyncRedisNotificationSource(AsyncNotificationSource):
                 await fut
             except asyncio.CancelledError:
                 self._pending_ops.pop(op_id, None)
-                cancel_fn = getattr(listener, "cancel_operation", None)
+                cancel_fn: Callable[[int], Any] | None = getattr(listener, "cancel_operation", None)
                 if callable(cancel_fn):
                     cancel_fn(op_id)
                 raise
             return
-        sync_fn = getattr(listener, sync_name)
+        sync_fn: Callable[[list[str]], Any] = getattr(listener, sync_name)
         await asyncio.to_thread(sync_fn, items)
 
     def _hydrate_payload(self, raw_payload: bytes) -> bytes:

@@ -136,3 +136,63 @@ async fn pubsub_broker_forwards_across_workers_via_shm_broadcast_ring() {
     let self_drained = worker1.poll_shm_ring(&mut worker1_cursor);
     assert_eq!(self_drained, 0);
 }
+
+#[tokio::test]
+async fn pubsub_broker_forwards_shm_lease_table_channel_frames_to_subscribers() {
+    use tokio_util::sync::CancellationToken;
+    use vertebra_core::bridge::{SHM_PUBSUB_CHANNEL, encode_shm_pubsub_frame};
+    use vertebra_core::broker::ShmLeaseTable;
+    use vertebra_core::shm::ShmRegion;
+
+    let size = ShmLeaseTable::required_size_with_statements(4, 2, 16);
+    let region = ShmRegion::create(size).expect("shm region");
+    let lease_table =
+        Arc::new(ShmLeaseTable::init_in_region_with_statements(region, 4, 2, 16).unwrap());
+
+    let sse_hub = Arc::new(SseHub::new(32, Duration::from_secs(30)));
+    let broker = Arc::new(PubSubBroker::new(0, 32, Some(Arc::clone(&sse_hub)), None));
+
+    let mut raw_rx = broker.subscribe_raw("orders");
+    let sse_resp = sse_hub.subscribe_response("orders", None);
+    let shutdown = CancellationToken::new();
+    let forwarder = broker.spawn_shm_channel_forwarder(Arc::clone(&lease_table), shutdown.clone());
+
+    let frame1 = encode_shm_pubsub_frame("orders", b"{\"id\":42}", Some("k1")).unwrap();
+    let dup_frame = encode_shm_pubsub_frame("orders", b"{\"id\":42}", Some("k1")).unwrap();
+    let frame2 = encode_shm_pubsub_frame("orders", b"{\"id\":43}", None).unwrap();
+
+    assert!(lease_table.publish_channel(SHM_PUBSUB_CHANNEL, &frame1, 1, None));
+    assert!(lease_table.publish_channel(SHM_PUBSUB_CHANNEL, &dup_frame, 2, None));
+    assert!(lease_table.publish_channel(SHM_PUBSUB_CHANNEL, &frame2, 3, None));
+
+    let msg1 = tokio::time::timeout(Duration::from_secs(2), raw_rx.recv())
+        .await
+        .expect("timed out waiting for first forwarded frame")
+        .unwrap();
+    assert_eq!(msg1, Bytes::from_static(b"{\"id\":42}"));
+
+    let msg2 = tokio::time::timeout(Duration::from_secs(2), raw_rx.recv())
+        .await
+        .expect("timed out waiting for second forwarded frame")
+        .unwrap();
+    assert_eq!(msg2, Bytes::from_static(b"{\"id\":43}"));
+
+    let mut body = sse_resp.into_body();
+    let sse_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("timed out waiting for forwarded SSE frame")
+        .expect("sse frame")
+        .expect("infallible")
+        .into_data()
+        .expect("data");
+    assert_eq!(
+        sse_frame,
+        Bytes::from_static(b"id: 1\r\nevent: orders\r\ndata: {\"id\":42}\r\n\r\n")
+    );
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), forwarder)
+        .await
+        .expect("forwarder shutdown timeout")
+        .expect("forwarder join");
+}

@@ -1,9 +1,18 @@
 """Tests for import map generation."""
 
+import importlib.metadata
 from pathlib import Path
 
+import pytest
+
+from vertebra import __version__ as vertebra_version
 from vertebra.build import JsConfig
-from vertebra.build._import_map import _CLIENT_SUBPATHS, ImportMapGenerator, load_client_subpaths
+from vertebra.build._import_map import (
+    _CLIENT_SUBPATHS,
+    ImportMapGenerator,
+    _resolve_client_version,
+    load_client_subpaths,
+)
 from vertebra.utils.serializers import decode_json
 
 
@@ -121,13 +130,35 @@ def test_generate_import_map_include_client_and_sync_wheel_bundle(tmp_path: Path
     assert mapped["imports"]["@vertebra/client"] == "/__vertebra/client/index.js"
     assert mapped["imports"]["@vertebra/client/"] == "/__vertebra/client/"
 
+    ts_pkg = Path(__file__).resolve().parents[4] / "ts" / "vertebra-client" / "package.json"
+    expected_version = decode_json(ts_pkg.read_text(encoding="utf-8"))["version"]
+
     client_dir = ImportMapGenerator.sync_wheel_client(tmp_path)
     assert client_dir is not None
     assert (client_dir / "index.js").is_file()
     assert (client_dir / "index.d.ts").is_file()
     pkg = decode_json((client_dir / "package.json").read_text(encoding="utf-8"))
     assert pkg["name"] == "@vertebra/client"
+    assert pkg["version"] == expected_version
+    assert pkg["version"] != "0.1.0"
     assert "./react" in pkg["exports"]
+
+
+def test_resolve_client_version_fallback_when_package_json_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_client_version falls back to installed distribution metadata or vertebra.__version__."""
+    missing = (tmp_path / "missing_a" / "package.json", tmp_path / "missing_b" / "package.json")
+    monkeypatch.setattr("vertebra.build._import_map._client_package_json_candidates", lambda: missing)
+    monkeypatch.setattr("importlib.metadata.version", lambda _dist: "9.8.7")
+    assert _resolve_client_version() == "9.8.7"
+
+    def _raise_not_found(_dist: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(_dist)
+
+    monkeypatch.setattr("importlib.metadata.version", _raise_not_found)
+    assert _resolve_client_version() == vertebra_version
 
 
 def test_client_subpaths_derived_dynamically_from_package_json(tmp_path: Path) -> None:

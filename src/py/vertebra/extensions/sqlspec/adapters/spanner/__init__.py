@@ -1,10 +1,21 @@
 """Lazy PEP 562 public exports for the Vertebra Cloud Spanner SQLSpec adapter."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any, Final
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.spanner._typing import (
+        SpannerAsyncConnectionContext,
+        SpannerAsyncSessionContext,
+        SpannerConnectionParams,
+        SpannerDriverFeatures,
+        SpannerPoolParams,
+        SpannerSyncConnectionContext,
+        SpannerSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.spanner.adk import (
         SpannerADKConfig,
         SpannerAsyncADKArtifactStore,
@@ -67,20 +78,27 @@ __all__ = (
     "SpannerAsyncADKMemoryStore",
     "SpannerAsyncADKStore",
     "SpannerAsyncConfig",
+    "SpannerAsyncConnectionContext",
     "SpannerAsyncDataDictionary",
     "SpannerAsyncDriver",
+    "SpannerAsyncSessionContext",
     "SpannerConnectionBatch",
+    "SpannerConnectionParams",
     "SpannerConnectionShim",
+    "SpannerDriverFeatures",
     "SpannerEventQueueStore",
     "SpannerEventsConfig",
     "SpannerLitestarConfig",
     "SpannerLitestarStore",
+    "SpannerPoolParams",
     "SpannerSyncADKArtifactStore",
     "SpannerSyncADKMemoryStore",
     "SpannerSyncADKStore",
     "SpannerSyncConfig",
+    "SpannerSyncConnectionContext",
     "SpannerSyncDataDictionary",
     "SpannerSyncDriver",
+    "SpannerSyncSessionContext",
     "default_statement_config",
     "encode_spanner_batch_parameters",
     "encode_spanner_parameters",
@@ -113,17 +131,28 @@ _EXPORT_MAP: Final[dict[str, tuple[str, str]]] = {
     ),
     "SpannerAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.spanner.adk", "SpannerAsyncADKStore"),
     "SpannerAsyncConfig": ("vertebra.extensions.sqlspec.adapters.spanner.config", "SpannerAsyncConfig"),
+    "SpannerAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.spanner._typing",
+        "SpannerAsyncConnectionContext",
+    ),
     "SpannerAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.spanner.data_dictionary",
         "SpannerAsyncDataDictionary",
     ),
     "SpannerAsyncDriver": ("vertebra.extensions.sqlspec.adapters.spanner.driver", "SpannerAsyncDriver"),
+    "SpannerAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.spanner._typing",
+        "SpannerAsyncSessionContext",
+    ),
     "SpannerConnectionBatch": ("vertebra.extensions.sqlspec.adapters.spanner.core", "SpannerConnectionBatch"),
+    "SpannerConnectionParams": ("vertebra.extensions.sqlspec.adapters.spanner._typing", "SpannerConnectionParams"),
     "SpannerConnectionShim": ("vertebra.extensions.sqlspec.adapters.spanner.core", "SpannerConnectionShim"),
+    "SpannerDriverFeatures": ("vertebra.extensions.sqlspec.adapters.spanner._typing", "SpannerDriverFeatures"),
     "SpannerEventQueueStore": ("vertebra.extensions.sqlspec.adapters.spanner.events", "SpannerEventQueueStore"),
     "SpannerEventsConfig": ("vertebra.extensions.sqlspec.adapters.spanner.events", "SpannerEventsConfig"),
     "SpannerLitestarConfig": ("vertebra.extensions.sqlspec.adapters.spanner.litestar", "SpannerLitestarConfig"),
     "SpannerLitestarStore": ("vertebra.extensions.sqlspec.adapters.spanner.litestar", "SpannerLitestarStore"),
+    "SpannerPoolParams": ("vertebra.extensions.sqlspec.adapters.spanner._typing", "SpannerPoolParams"),
     "SpannerSyncADKArtifactStore": (
         "vertebra.extensions.sqlspec.adapters.spanner.adk",
         "SpannerSyncADKArtifactStore",
@@ -134,11 +163,19 @@ _EXPORT_MAP: Final[dict[str, tuple[str, str]]] = {
     ),
     "SpannerSyncADKStore": ("vertebra.extensions.sqlspec.adapters.spanner.adk", "SpannerSyncADKStore"),
     "SpannerSyncConfig": ("vertebra.extensions.sqlspec.adapters.spanner.config", "SpannerSyncConfig"),
+    "SpannerSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.spanner._typing",
+        "SpannerSyncConnectionContext",
+    ),
     "SpannerSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.spanner.data_dictionary",
         "SpannerSyncDataDictionary",
     ),
     "SpannerSyncDriver": ("vertebra.extensions.sqlspec.adapters.spanner.driver", "SpannerSyncDriver"),
+    "SpannerSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.spanner._typing",
+        "SpannerSyncSessionContext",
+    ),
     "default_statement_config": ("vertebra.extensions.sqlspec.adapters.spanner.core", "default_statement_config"),
     "encode_spanner_batch_parameters": (
         "vertebra.extensions.sqlspec.adapters.spanner.core",

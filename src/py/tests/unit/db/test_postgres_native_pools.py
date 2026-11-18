@@ -281,13 +281,13 @@ def test_async_pool_pid_pinning_and_cancelled_acquire_recovers_permits() -> None
         assert (await c1.query("SELECT pg_backend_pid() AS pid")).rows[0][0] == pid1
 
         waiter1 = asyncio.ensure_future(pool.acquire())
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0)
         waiter1.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter1
 
         waiter2 = asyncio.ensure_future(pool.acquire())
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         close_task = asyncio.ensure_future(c1.close())
         waiter2.cancel()
         await close_task

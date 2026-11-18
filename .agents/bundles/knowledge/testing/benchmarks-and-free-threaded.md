@@ -14,6 +14,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-17T08:15:00Z"
+    commit: 5a833832
+  - by: agent:flow-executor
     at: "2026-11-14T18:05:00Z"
     commit: 1b191388
   - by: agent:flow-learn
@@ -123,7 +126,7 @@ The workflow runs on `workflow_dispatch` (input `full_benchmark`) and published 
 
 Keep benchmark-only dependencies (`duckdb>=1.0; python_version < '3.14'` in `duckdb` and `bench` solely for `tools.benchmarks.store` result persistence, `uvicorn`/`httptools`/`uvloop`/`granian`/`spikard` in `bench`, and `asyncpg>=0.30` / `psycopg[binary]>=3.2,<3.4` with `python_version < '3.14'` in `postgres-bench`) strictly in `[dependency-groups]` in [`pyproject.toml`](../../../../pyproject.toml)[^src-pyproject-toml], never in `[project.dependencies]`, `[project.optional-dependencies]`, or `dev`:
 
-- `pyproject.toml` sets no `[tool.uv] default-groups`; `make install`, `make upgrade`, `make py-test`, and `make coverage` build and exercise all 10 native PyO3 extensions (`vertebra._duckdb` included) without syncing `--group duckdb`.
+- `pyproject.toml` sets no `[tool.uv] default-groups`; `make install`, `make upgrade`, `make py-test`, and `make coverage` build and exercise all 13 native PyO3 extensions (`vertebra._duckdb`, `_sqlite`, `_redis`, and `_valkey` included) without syncing `--group duckdb`.
 - `make bench*` passes `--group bench`, `make postgres-bench` passes `--group postgres-bench`, and `test_bench_infrastructure.py` plus `test_optional_driver_wheels.py` guard group isolation offline.
 
 ## 6. Free-Threaded Build (`make bench-ft`)
@@ -136,12 +139,13 @@ PyO3 links different CPython ABI symbols when `Py_GIL_DISABLED` is set, so free-
 
 `make clean` removes both `src/rs/target` and `src/rs/target-ft`.
 
-## 7. Free-Threaded Test Gate
+## 7. Free-Threaded & Static Type Test Gate
 
-- The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both.
-- All 10 PyO3 extension modules (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`) declare `#[pymodule(gil_used = false)]`.
-- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False`, enforces `Py_TPFLAGS_IMMUTABLETYPE` across all 14 `_postgres` classes, runs 8-thread `SyncPostgresClient`/`AsyncPostgresClient`/`SyncPostgresPool`/`AsyncPostgresPool` concurrent construction proofs, and verifies isolated child `sys._is_gil_enabled() is False` after `import vertebra._postgres`.
-- `unit/server/test_stage1_hotpath_and_314t.py` and `unit/server/test_runtime_tuning.py` cover the free-threaded dispatch, loop backend selection, and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
+- The CI `test-python` matrix includes `3.14t` and `3.15t` and runs `make py-test` on both; `test-db-conformance` also exercises `duckdb`, `sqlite`, `redis`, `valkey`, and `mysql` (`8.4`) on `3.14t`.
+- All 13 PyO3 extension modules (`_vertebra`, `_bundler`, `_storage`, `_mysql`, `_bigquery`, `_mssql`, `_spanner`, `_duckdb`, `_oracle`, `_postgres`, `_sqlite`, `_redis`, `_valkey`) declare `#[pymodule(gil_used = false)]`.
+- [`test_freethreaded_gil.py`](../../../../src/py/tests/unit/test_freethreaded_gil.py)[^src-tests-unit-test-freethreaded-gil-py] asserts `GIL_USED` is `False` across all 13 modules, enforces `Py_TPFLAGS_IMMUTABLETYPE` across native classes (including 15 `_postgres` classes), runs 8-thread concurrent construction proofs for Oracle and PostgreSQL, and verifies isolated child `sys._is_gil_enabled() is False` after `import vertebra._postgres`.
+- `unit/server/test_hotpath_dispatch_and_freethreaded.py` and `unit/server/test_runtime_tuning.py` cover the free-threaded dispatch, loop backend selection, and `EventLoopPool` paths; `GilAuditReport` (`server/_gil_audit.py`) reports native extensions that re-enable the GIL.
+- `make lint` and `make lint-all` also enforce `bunx tsc --noEmit`, `pyright src/py/vertebra`, `tools/scripts/check_extras.py`, and fail-loud 13-extension `mypy.stubtest` verification ahead of the test matrices.
 
 Provenance sources: [^src-makefile], [^src-tools-benchmarks-runner-py], [^src-tools-benchmarks-postgres-py], [^src-tools-benchmarks-scenarios-py], [^src-tools-benchmarks-targets-py], [^src-tools-benchmarks-store-py], [^src-tools-pgo-init-py], [^src-benchmark-yml], [^src-vertebra-core-cargo-toml], [^src-vertebra-http-cargo-toml], [^src-vertebra-postgres-cargo-toml], [^src-postgres-native-bench-rs].
 

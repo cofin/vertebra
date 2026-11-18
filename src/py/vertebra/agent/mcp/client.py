@@ -20,26 +20,6 @@ from vertebra.agent.mcp.models import MCP_PROTOCOL_VERSION
 from vertebra.telemetry.genai import inject_w3c_trace_context
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
-try:
-    from vertebra._vertebra import classify_jsonrpc_frame
-except ImportError:
-
-    def classify_jsonrpc_frame(payload: bytes) -> tuple[int, str | None, str | None]:
-        data = decode_json(payload)
-        if isinstance(data, list):
-            return 2, None, None
-        if not isinstance(data, dict):
-            raise ValueError("Expected object or list")
-        method = data.get("method")
-        req_id = data.get("id")
-        id_str = str(req_id) if req_id is not None else None
-        if method is not None:
-            if req_id is not None:
-                return 1, method, id_str
-            return 0, method, None
-        return 3, None, id_str
-
-
 MCP_NAME_FIELDS: dict[str, str] = {
     "tools/call": "name",
     "prompts/get": "name",
@@ -48,7 +28,6 @@ MCP_NAME_FIELDS: dict[str, str] = {
     "resources/subscribe": "uri",
     "resources/unsubscribe": "uri",
     "tasks/get": "taskId",
-    "tasks/result": "taskId",
     "tasks/update": "taskId",
     "tasks/cancel": "taskId",
 }

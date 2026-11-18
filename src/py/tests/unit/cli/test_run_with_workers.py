@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -231,10 +230,12 @@ def test_worker_binds_resolved_queue_service_from_app_state(
     """Worker.run resolves QueueService from VERTEBRA_QUEUE_SERVICE state and executes queued tasks."""
     qs = QueueService()
     executed: list[int] = []
+    task_done = threading.Event()
 
     @task(lane="io")
     async def process_item(item_id: int) -> int:
         executed.append(item_id)
+        task_done.set()
         return item_id * 2
 
     qs.register(process_item)
@@ -248,7 +249,7 @@ def test_worker_binds_resolved_queue_service_from_app_state(
         nonlocal batches_seen
         batches_seen += 1
         if batches_seen == 1:
-            time.sleep(0.12)
+            assert task_done.wait(timeout=2.0)
         return [object()]
 
     monkeypatch.setenv("VERTEBRA_WITH_WORKERS", "1")
@@ -270,12 +271,15 @@ def test_vtb_workers_run_continuous_mode_executes_queued_task_until_stopped(
     """execute_worker_cli with run_until_stopped=True processes queued work and stops cleanly."""
     qs = QueueService()
     done_event = threading.Event()
+    async_waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
     executed: list[str] = []
 
     @task(lane="io")
     async def process_job(label: str) -> None:
         executed.append(label)
         done_event.set()
+        for target_loop, target_event in async_waiters:
+            target_loop.call_soon_threadsafe(target_event.set)
 
     qs.register(process_job)
     asyncio.run(qs.enqueue("process_job", "continuous"))
@@ -286,9 +290,13 @@ def test_vtb_workers_run_continuous_mode_executes_queued_task_until_stopped(
     orig_run = WorkerRunner.run
 
     async def stop_after_task(self: WorkerRunner, **kwargs: Any) -> None:
+        async_done_event = asyncio.Event()
+        async_waiters.append((asyncio.get_running_loop(), async_done_event))
+        if done_event.is_set():
+            async_done_event.set()
+
         async def _trigger_stop() -> None:
-            while not done_event.is_set():
-                await asyncio.sleep(0.01)
+            await asyncio.wait_for(async_done_event.wait(), timeout=2.0)
             self._stopping = True
 
         stopper = asyncio.create_task(_trigger_stop())
@@ -372,6 +380,16 @@ def test_vtb_run_worker_only_serves_health_probe_and_exits_cleanly(
         probe_sock.bind(("127.0.0.1", 0))
         probe_port = probe_sock.getsockname()[1]
 
+    probe_ready = threading.Event()
+    orig_set_var = ZPagesRegistry.set_var
+
+    def signal_probe_ready(self: ZPagesRegistry, key: str, value: Any) -> None:
+        orig_set_var(self, key, value)
+        if key == "worker_state" and value == "ready":
+            probe_ready.set()
+
+    monkeypatch.setattr(ZPagesRegistry, "set_var", signal_probe_ready)
+
     result_box: list[int] = []
 
     def run_worker_only_thread() -> None:
@@ -388,15 +406,10 @@ def test_vtb_run_worker_only_serves_health_probe_and_exits_cleanly(
     thread = threading.Thread(target=run_worker_only_thread, daemon=True)
     thread.start()
     try:
-        response_bytes = b""
-        for _ in range(40):
-            try:
-                with socket.create_connection(("127.0.0.1", probe_port), timeout=0.5) as client:
-                    client.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                    response_bytes = client.recv(4096)
-                    break
-            except OSError:
-                time.sleep(0.05)
+        assert probe_ready.wait(timeout=5.0)
+        with socket.create_connection(("127.0.0.1", probe_port), timeout=2.0) as client:
+            client.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            response_bytes = client.recv(4096)
 
         assert b"200 OK" in response_bytes
         runner = app_state.get("vertebra_worker_runner")

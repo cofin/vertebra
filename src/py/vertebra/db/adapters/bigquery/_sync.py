@@ -60,7 +60,7 @@ class SyncBigQueryClientProtocol(Protocol):
         job_timeout_ms: int | None = None,
         priority: str | None = None,
         labels: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Execute a GoogleSQL query via ``jobs.query``."""
         ...
 
@@ -68,7 +68,7 @@ class SyncBigQueryClientProtocol(Protocol):
         self,
         sql: str,
         params_json: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Validate ``sql`` via ``jobs.insert(dryRun=True)``."""
         ...
 
@@ -90,7 +90,7 @@ class SyncBigQueryClientProtocol(Protocol):
         parent_table: str,
         arrow_ipc_bytes: bytes,
         mode: str = "_default",
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Append an Arrow IPC stream via the Storage Write API."""
         ...
 
@@ -181,14 +181,19 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         return self
 
     def close(self) -> None:
-        """Roll back any active transaction and release the session and Rust client handle."""
-        if self._in_transaction:
-            with suppress(Exception):
-                self.rollback()
-        self._session_id = None
-        self._in_transaction = False
-        self._client = None
-        self._closed = True
+        """Roll back any active transaction, close the Rust client, and release references."""
+        client = self._client
+        try:
+            if self._in_transaction:
+                with suppress(Exception):
+                    self.rollback()
+            if client is not None:
+                client.close()
+        finally:
+            self._session_id = None
+            self._in_transaction = False
+            self._client = None
+            self._closed = True
 
     def execute(
         self,

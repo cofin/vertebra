@@ -253,19 +253,19 @@ impl MssqlClient {
         Ok(res)
     }
 
-    /// Execute a scalar query and return the first column of the first row.
+    /// Execute a scalar query and return the first column of the first row, raising `NotFoundError` (`02000`) when empty.
     pub async fn select_value(
         &self,
         sql: String,
         params: Vec<MssqlParam>,
     ) -> Result<MssqlCellValue, MssqlError> {
         let res = self.query(sql, params).await?;
-        Ok(res
-            .rows
-            .into_iter()
-            .next()
-            .and_then(|r| r.into_iter().next())
-            .unwrap_or(MssqlCellValue::Null))
+        let Some(first_row) = res.rows.into_iter().next() else {
+            return Err(MssqlError::not_found(
+                "select_value query returned zero rows",
+            ));
+        };
+        Ok(first_row.into_iter().next().unwrap_or(MssqlCellValue::Null))
     }
 
     /// Begin a transaction with an optional isolation level name.

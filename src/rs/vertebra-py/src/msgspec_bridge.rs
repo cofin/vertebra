@@ -6,14 +6,18 @@
 //! `attrs`, and Protobuf message types.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ptr;
 use std::sync::{OnceLock, RwLock};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::pyclass::{PyTraverseError, PyVisit};
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyBytes, PyCFunction, PyDict, PyList, PyString, PyTuple, PyWeakrefMethods, PyWeakrefReference,
+};
 
 /// Length of the gRPC 5-byte Length-Prefixed Message (LPM) header.
 pub const GRPC_LPM_HEADER_LEN: usize = 5;
@@ -23,11 +27,33 @@ static MSGSPEC_MSGPACK_DECODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MSGSPEC_JSON_DECODER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MSGSPEC_MSGPACK_DECODER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-type DecoderCacheMap = HashMap<(usize, bool), Py<PyAny>>;
+#[pyclass(name = "_CachedCallableBox", module = "vertebra._vertebra", weakref)]
+struct CachedCallableBox {
+    callable: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl CachedCallableBox {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.callable)
+    }
+
+    fn __clear__(&mut self) {
+        self.callable = None;
+    }
+}
+
+struct WeakCacheEntry {
+    target_ref: Py<PyWeakrefReference>,
+    box_ref: Py<PyWeakrefReference>,
+}
+
+type DecoderCacheMap = HashMap<(usize, bool), WeakCacheEntry>;
+type TypeCacheMap = HashMap<usize, WeakCacheEntry>;
 static MSGSPEC_DECODER_CACHE: OnceLock<RwLock<DecoderCacheMap>> = OnceLock::new();
-static PYDANTIC_VALIDATOR_CACHE: OnceLock<RwLock<HashMap<usize, Py<PyAny>>>> = OnceLock::new();
-static PROTOBUF_DECODER_CACHE: OnceLock<RwLock<HashMap<usize, Py<PyAny>>>> = OnceLock::new();
-static STRUCT_FIELDS_CACHE: OnceLock<RwLock<HashMap<usize, Py<PyTuple>>>> = OnceLock::new();
+static PYDANTIC_VALIDATOR_CACHE: OnceLock<RwLock<TypeCacheMap>> = OnceLock::new();
+static PROTOBUF_DECODER_CACHE: OnceLock<RwLock<TypeCacheMap>> = OnceLock::new();
+static STRUCT_FIELDS_CACHE: OnceLock<RwLock<TypeCacheMap>> = OnceLock::new();
 
 #[inline]
 fn decoder_cache() -> &'static RwLock<DecoderCacheMap> {
@@ -35,18 +61,104 @@ fn decoder_cache() -> &'static RwLock<DecoderCacheMap> {
 }
 
 #[inline]
-fn pydantic_cache() -> &'static RwLock<HashMap<usize, Py<PyAny>>> {
+fn pydantic_cache() -> &'static RwLock<TypeCacheMap> {
     PYDANTIC_VALIDATOR_CACHE.get_or_init(|| RwLock::new(HashMap::with_capacity(64)))
 }
 
 #[inline]
-fn protobuf_cache() -> &'static RwLock<HashMap<usize, Py<PyAny>>> {
+fn protobuf_cache() -> &'static RwLock<TypeCacheMap> {
     PROTOBUF_DECODER_CACHE.get_or_init(|| RwLock::new(HashMap::with_capacity(64)))
 }
 
 #[inline]
-fn struct_fields_cache() -> &'static RwLock<HashMap<usize, Py<PyTuple>>> {
+fn struct_fields_cache() -> &'static RwLock<TypeCacheMap> {
     STRUCT_FIELDS_CACHE.get_or_init(|| RwLock::new(HashMap::with_capacity(64)))
+}
+
+fn lookup_weak_cache<K: Eq + Hash>(
+    py: Python<'_>,
+    cache: &RwLock<HashMap<K, WeakCacheEntry>>,
+    key: &K,
+    target: &Bound<'_, PyAny>,
+) -> Option<Py<PyAny>> {
+    let (target_ref, box_ref) = {
+        let Ok(guard) = cache.read() else {
+            return None;
+        };
+        let entry = guard.get(key)?;
+        (entry.target_ref.clone_ref(py), entry.box_ref.clone_ref(py))
+    };
+
+    let live_target = target_ref.bind(py).upgrade()?;
+    if live_target.as_ptr() != target.as_ptr() {
+        return None;
+    }
+    let live_box = box_ref.bind(py).upgrade()?;
+    let box_cell = live_box.cast::<CachedCallableBox>().ok()?;
+    box_cell
+        .borrow()
+        .callable
+        .as_ref()
+        .map(|callable| callable.clone_ref(py))
+}
+
+fn store_weak_cache<K>(
+    py: Python<'_>,
+    cache_fn: fn() -> &'static RwLock<HashMap<K, WeakCacheEntry>>,
+    key: K,
+    target: &Bound<'_, PyAny>,
+    attr_name: &str,
+    value: &Py<PyAny>,
+) where
+    K: Eq + Hash + Copy + Send + Sync + 'static,
+{
+    let Ok(boxed) = Py::new(
+        py,
+        CachedCallableBox {
+            callable: Some(value.clone_ref(py)),
+        },
+    ) else {
+        return;
+    };
+    let Ok(box_ref) = PyWeakrefReference::new(boxed.bind(py).as_any()) else {
+        return;
+    };
+    let Ok(cleanup_cb) = PyCFunction::new_closure(py, None, None, move |args, _| {
+        let removed = if let Ok(mut guard) = cache_fn().write() {
+            let matches_weakref = args.get_item(0).ok().is_some_and(|wref| {
+                guard
+                    .get(&key)
+                    .is_some_and(|entry| entry.target_ref.as_ptr() == wref.as_ptr())
+            });
+            if matches_weakref {
+                guard.remove(&key)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        drop(removed);
+    }) else {
+        return;
+    };
+    let Ok(target_ref) = PyWeakrefReference::new_with(target, cleanup_cb) else {
+        return;
+    };
+    if target.setattr(attr_name, boxed.bind(py)).is_err() {
+        return;
+    }
+
+    let new_entry = WeakCacheEntry {
+        target_ref: target_ref.unbind(),
+        box_ref: box_ref.unbind(),
+    };
+    let old_entry = if let Ok(mut guard) = cache_fn().write() {
+        guard.insert(key, new_entry)
+    } else {
+        None
+    };
+    drop(old_entry);
 }
 
 #[inline]
@@ -90,10 +202,8 @@ fn get_bound_msgspec_decoder(
     is_msgpack: bool,
 ) -> PyResult<Py<PyAny>> {
     let key = (target_type.as_ptr() as usize, is_msgpack);
-    if let Ok(guard) = decoder_cache().read()
-        && let Some(cached) = guard.get(&key)
-    {
-        return Ok(cached.clone_ref(py));
+    if let Some(cached) = lookup_weak_cache(py, decoder_cache(), &key, target_type) {
+        return Ok(cached);
     }
 
     let decoder_cls = if is_msgpack {
@@ -114,19 +224,34 @@ fn get_bound_msgspec_decoder(
 
     let decoder_instance = decoder_cls.call1((target_type,))?;
     let bound_decode = decoder_instance.getattr("decode")?.unbind();
-    if let Ok(mut guard) = decoder_cache().write() {
-        guard.insert(key, bound_decode.clone_ref(py));
-    }
+    let attr_name = if is_msgpack {
+        "_vertebra_msgspec_msgpack_decoder_box"
+    } else {
+        "_vertebra_msgspec_json_decoder_box"
+    };
+    store_weak_cache(
+        py,
+        decoder_cache,
+        key,
+        target_type,
+        attr_name,
+        &bound_decode,
+    );
     Ok(bound_decode)
 }
 
 #[inline]
+// SAFETY: `py` witnesses the attached GIL, `callable_ptr` is a valid borrowed callable
+// `PyObject*`, and `slice` remains valid and immutable for the synchronous `PyObject_Vectorcall`.
 unsafe fn vectorcall_with_memoryview<'py>(
     py: Python<'py>,
     callable_ptr: *mut ffi::PyObject,
     slice: &[u8],
     fallback_on_type_error: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // SAFETY: `PyMemoryView_FromMemory` / `PyBytes_FromStringAndSize` yield freshly owned pointers
+    // decref'd right after `PyObject_Vectorcall` (slot 0 reserved for `PY_VECTORCALL_ARGUMENTS_OFFSET`),
+    // and `Bound::from_owned_ptr` adopts the non-null owned result under the attached GIL (`py`).
     unsafe {
         let ptr = if slice.is_empty() {
             std::ptr::NonNull::<u8>::dangling().as_ptr()
@@ -191,6 +316,8 @@ pub fn decode_msgspec_from_slice<'py>(
         Some(ty) if !ty.is_none() => get_bound_msgspec_decoder(py, ty, is_msgpack)?,
         _ => get_msgspec_decode_fn(py, is_msgpack)?.clone().unbind(),
     };
+    // SAFETY: `py` witnesses the attached GIL, `callable.as_ptr()` is a live borrowed `PyObject*`,
+    // and `slice` outlives the synchronous vectorcall.
     unsafe { vectorcall_with_memoryview(py, callable.as_ptr(), slice, false) }
 }
 
@@ -209,6 +336,10 @@ pub fn decode_msgspec_from_buffer<'py>(
         _ => get_msgspec_decode_fn(py, is_msgpack)?.clone().unbind(),
     };
 
+    // SAFETY: `py` witnesses the attached GIL, `buffer_owner_ptr` is a valid borrowed PEP 3118
+    // `PyObject*`, `PyMemoryView_FromObject` returns a fresh owned view decref'd after
+    // `PyObject_Vectorcall` (slot 0 reserved for `PY_VECTORCALL_ARGUMENTS_OFFSET`), and
+    // `Bound::from_owned_ptr` adopts the non-null owned result.
     unsafe {
         let mv = ffi::PyMemoryView_FromObject(buffer_owner_ptr);
         if mv.is_null() {
@@ -235,10 +366,8 @@ fn get_pydantic_validate_json(
     validator_or_type: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let key = validator_or_type.as_ptr() as usize;
-    if let Ok(guard) = pydantic_cache().read()
-        && let Some(cached) = guard.get(&key)
-    {
-        return Ok(cached.clone_ref(py));
+    if let Some(cached) = lookup_weak_cache(py, pydantic_cache(), &key, validator_or_type) {
+        return Ok(cached);
     }
     let resolved = if let Ok(v) = validator_or_type.getattr("__pydantic_validator__") {
         v.getattr("validate_json")?.unbind()
@@ -249,19 +378,22 @@ fn get_pydantic_validate_json(
     } else {
         validator_or_type.clone().unbind()
     };
-    if let Ok(mut guard) = pydantic_cache().write() {
-        guard.insert(key, resolved.clone_ref(py));
-    }
+    store_weak_cache(
+        py,
+        pydantic_cache,
+        key,
+        validator_or_type,
+        "_vertebra_pydantic_validator_box",
+        &resolved,
+    );
     Ok(resolved)
 }
 
 /// Resolve and cache a Protobuf deserialization callable (`FromString`, `from_bytes`, or `parse`) for `target_type`.
 fn get_protobuf_decoder(py: Python<'_>, target_type: &Bound<'_, PyAny>) -> Option<Py<PyAny>> {
     let key = target_type.as_ptr() as usize;
-    if let Ok(guard) = protobuf_cache().read()
-        && let Some(cached) = guard.get(&key)
-    {
-        return Some(cached.clone_ref(py));
+    if let Some(cached) = lookup_weak_cache(py, protobuf_cache(), &key, target_type) {
+        return Some(cached);
     }
     let resolved = if let Ok(m) = target_type.getattr("FromString") {
         Some(m.unbind())
@@ -270,9 +402,14 @@ fn get_protobuf_decoder(py: Python<'_>, target_type: &Bound<'_, PyAny>) -> Optio
     } else {
         None
     }?;
-    if let Ok(mut guard) = protobuf_cache().write() {
-        guard.insert(key, resolved.clone_ref(py));
-    }
+    store_weak_cache(
+        py,
+        protobuf_cache,
+        key,
+        target_type,
+        "_vertebra_protobuf_decoder_box",
+        &resolved,
+    );
     Some(resolved)
 }
 
@@ -285,6 +422,9 @@ pub fn decode_pydantic_from_buffer<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let validate_fn = get_pydantic_validate_json(py, validator_or_type)?;
 
+    // SAFETY: `py` witnesses the attached GIL, `PyBytes_FromStringAndSize` returns a fresh owned
+    // `PyBytes*` decref'd after `PyObject_Vectorcall` (slot 0 reserved for `PY_VECTORCALL_ARGUMENTS_OFFSET`),
+    // `validate_fn.as_ptr()` stays borrowed, and `Bound::from_owned_ptr` adopts the non-null result.
     unsafe {
         let py_bytes = ffi::PyBytes_FromStringAndSize(
             raw_fallback.as_ptr() as *const std::os::raw::c_char,
@@ -342,13 +482,19 @@ pub fn decode_grpc_payload_slice<'py>(
         if is_proto_format(format)
             && let Some(proto_fn) = get_protobuf_decoder(py, ty)
         {
+            // SAFETY: `py` witnesses the attached GIL, `proto_fn.as_ptr()` is a live borrowed
+            // callable `PyObject*`, and `payload` outlives the synchronous vectorcall.
             return unsafe { vectorcall_with_memoryview(py, proto_fn.as_ptr(), payload, true) };
         }
         if ty.hasattr("__pydantic_validator__")? && !is_msgpack_format(format) {
             let val_fn = get_pydantic_validate_json(py, ty)?;
+            // SAFETY: `py` witnesses the attached GIL, `val_fn.as_ptr()` is a live borrowed
+            // callable `PyObject*`, and `payload` outlives the synchronous vectorcall.
             return unsafe { vectorcall_with_memoryview(py, val_fn.as_ptr(), payload, true) };
         }
         if let Some(proto_fn) = get_protobuf_decoder(py, ty) {
+            // SAFETY: `py` witnesses the attached GIL, `proto_fn.as_ptr()` is a live borrowed
+            // callable `PyObject*`, and `payload` outlives the synchronous vectorcall.
             return unsafe { vectorcall_with_memoryview(py, proto_fn.as_ptr(), payload, true) };
         }
     }
@@ -406,6 +552,9 @@ pub fn decode_grpc_frames_from_slice<'py>(
         offset += GRPC_LPM_HEADER_LEN + msg_len;
     }
 
+    // SAFETY: `py` witnesses the attached GIL; `PyList_New` allocates an owned list of exact
+    // `slices.len()`, `PyList_SET_ITEM` steals each freshly owned `item.into_ptr()` at `i < len`,
+    // errors decref `out_list`, and `Bound::from_owned_ptr` adopts the populated `PyList*`.
     unsafe {
         let out_list = ffi::PyList_New(slices.len() as ffi::Py_ssize_t);
         if out_list.is_null() {
@@ -455,10 +604,10 @@ fn resolve_struct_fields<'py>(
         return Ok(f.clone());
     }
     let key = schema_type.as_ptr() as usize;
-    if let Ok(guard) = struct_fields_cache().read()
-        && let Some(cached) = guard.get(&key)
+    if let Some(cached) = lookup_weak_cache(py, struct_fields_cache(), &key, schema_type)
+        && let Ok(tuple) = cached.into_bound(py).cast_into::<PyTuple>()
     {
-        return Ok(cached.bind(py).clone());
+        return Ok(tuple);
     }
 
     let tuple: Bound<'py, PyTuple> = if let Ok(sf) = schema_type.getattr("__struct_fields__")
@@ -487,10 +636,16 @@ fn resolve_struct_fields<'py>(
         PyTuple::empty(py)
     };
 
-    if !tuple.is_empty()
-        && let Ok(mut guard) = struct_fields_cache().write()
-    {
-        guard.insert(key, tuple.clone().unbind());
+    if !tuple.is_empty() {
+        let value = tuple.clone().into_any().unbind();
+        store_weak_cache(
+            py,
+            struct_fields_cache,
+            key,
+            schema_type,
+            "_vertebra_struct_fields_box",
+            &value,
+        );
     }
     Ok(tuple)
 }
@@ -516,6 +671,9 @@ pub fn call_vectorcall<'py>(
     args: Option<&Bound<'py, PyTuple>>,
     kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // SAFETY: `py` witnesses the attached GIL; `callable`, `args`, and `kwargs` stay borrowed,
+    // `PyTuple_GET_ITEM` reads in-bounds `0..nargs`, slot 0 is reserved for
+    // `PY_VECTORCALL_ARGUMENTS_OFFSET`, and `Bound::from_owned_ptr` adopts the non-null result.
     unsafe {
         let nargs = args.map_or(0, |t| t.len());
         let kwargs_ptr = match kwargs {
@@ -597,6 +755,8 @@ pub fn call_vectorcall<'py>(
 }
 
 #[inline]
+// SAFETY: `py` witnesses the attached GIL and `item_ptr` is a valid non-null borrowed
+// `PyObject*` kept alive by the caller for the hydration call; returns a fresh owned `PyObject*`.
 unsafe fn hydrate_single_item<'py>(
     py: Python<'py>,
     schema_type: &Bound<'py, PyAny>,
@@ -604,6 +764,10 @@ unsafe fn hydrate_single_item<'py>(
     item_ptr: *mut ffi::PyObject,
     kwnames: &Bound<'py, PyTuple>,
 ) -> PyResult<*mut ffi::PyObject> {
+    // SAFETY: `item_ptr` is a valid borrowed `PyObject*` under `py`; borrowed sequence items and
+    // owned `PyObject_GetItem`/`PyObject_GetAttr` values remain valid across `PyObject_Vectorcall`
+    // (slot 0 reserved for `PY_VECTORCALL_ARGUMENTS_OFFSET`), owned temporaries are decref'd, and
+    // `Ok` returns a freshly owned `PyObject*`.
     unsafe {
         if ffi::PyObject_IsInstance(item_ptr, schema_type.as_ptr()) == 1 {
             ffi::Py_INCREF(item_ptr);
@@ -748,12 +912,18 @@ unsafe fn hydrate_single_item<'py>(
 }
 
 #[inline]
+// SAFETY: `py` witnesses the attached GIL and `orm_ptr` is a valid non-null borrowed `PyObject*`
+// kept alive by the caller for attribute lookup and vectorcall; returns a fresh owned `PyObject*`.
 unsafe fn hydrate_orm_ptr<'py>(
     py: Python<'py>,
     schema_type: &Bound<'py, PyAny>,
     orm_ptr: *mut ffi::PyObject,
     kwnames: &Bound<'py, PyTuple>,
 ) -> PyResult<*mut ffi::PyObject> {
+    // SAFETY: `orm_ptr` and `kwnames` are valid borrowed pointers under `py`; `PyTuple_GET_ITEM`
+    // reads in-bounds `0..n`, every owned attribute from `PyObject_GetAttr` is decref'd on error
+    // or after `PyObject_Vectorcall` (slot 0 reserved for `PY_VECTORCALL_ARGUMENTS_OFFSET`), and
+    // `Ok` returns a freshly owned `PyObject*`.
     unsafe {
         let n = kwnames.len();
         let kwnames_ptr = kwnames.as_ptr();
@@ -856,6 +1026,9 @@ pub fn hydrate_one_vectorcall<'py>(
         .getattr("__pydantic_validator__")
         .ok()
         .and_then(|v| v.getattr("validate_python").ok());
+    // SAFETY: `py` witnesses the attached GIL, `row.as_ptr()` is a valid borrowed `PyObject*` kept
+    // alive by `row`, and `hydrate_single_item` returns a freshly owned `PyObject*` adopted by
+    // `Bound::from_owned_ptr`.
     unsafe {
         let ptr = hydrate_single_item(
             py,
@@ -883,6 +1056,10 @@ pub fn hydrate_rows_vectorcall<'py>(
         .ok()
         .and_then(|v| v.getattr("validate_python").ok());
 
+    // SAFETY: `py` witnesses the attached GIL; `rows_ptr` is a live `PyList*` or `PyTuple*`,
+    // `item_ptr` is borrowed from `rows` per element, `PyList_SET_ITEM` steals each freshly owned
+    // hydrated pointer at `i < len` (decref'ing `out_list` on error), and `Bound::from_owned_ptr`
+    // adopts the populated `PyList*`.
     unsafe {
         let rows_ptr = rows.as_ptr();
         let is_list = ffi::PyList_Check(rows_ptr) != 0;
@@ -927,6 +1104,8 @@ pub fn hydrate_rows_vectorcall<'py>(
     let out = PyList::empty(py);
     for item_res in rows.try_iter()? {
         let item = item_res?;
+        // SAFETY: `py` witnesses the attached GIL and `item.as_ptr()` is a valid borrowed
+        // `PyObject*` kept alive by `item` for `hydrate_single_item`.
         let hydrated_ptr = unsafe {
             hydrate_single_item(
                 py,
@@ -936,6 +1115,7 @@ pub fn hydrate_rows_vectorcall<'py>(
                 &kwnames,
             )?
         };
+        // SAFETY: `hydrate_single_item` returned a non-null freshly owned `PyObject*` under `py`.
         let hydrated = unsafe { Bound::from_owned_ptr(py, hydrated_ptr) };
         out.append(hydrated)?;
     }
@@ -952,6 +1132,9 @@ pub fn orm_to_struct_vectorcall<'py>(
     fields: Option<&Bound<'py, PyTuple>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwnames = resolve_struct_fields(py, schema_type, fields)?;
+    // SAFETY: `py` witnesses the attached GIL; for `list`/`tuple` inputs `elem_ptr` stays borrowed
+    // from `orm_obj`, `PyList_SET_ITEM` steals each freshly owned hydrated pointer into `out_list`
+    // (decref'd on error), and `Bound::from_owned_ptr` adopts the non-null owned result.
     unsafe {
         let obj_ptr = orm_obj.as_ptr();
         let is_list = ffi::PyList_Check(obj_ptr) != 0;

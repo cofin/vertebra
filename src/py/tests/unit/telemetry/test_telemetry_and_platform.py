@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import msgspec
+import pytest
 
 from vertebra.server.platform import (
     CgroupQuota,
@@ -28,7 +30,7 @@ from vertebra.telemetry import (
     SqlTracePropagator,
     TraceContext,
 )
-from vertebra.telemetry.otel import DbPoolMetricSample
+from vertebra.telemetry.otel import DbPoolMetricSample, DbPoolRecorder
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -293,3 +295,135 @@ def test_worker_sigterm_enters_lame_duck_and_validates_shm_policy() -> None:
     assert msgspec.json.decode(body_after)["status"] == "lame_duck"
     _, varz_body = zpages.handle_zpage("/varz")
     assert msgspec.json.decode(varz_body)["worker_state"] == "draining"
+
+
+@pytest.mark.parametrize("recorder_kind", ["span", "genai", "db_pool"])
+def test_telemetry_recorders_conserve_items_under_concurrent_record_and_drain(recorder_kind: str) -> None:
+    """Verify SpanExporter, GenAiRecorder, and DbPoolRecorder lose or duplicate zero items under concurrency."""
+    writer_count = 4
+    items_per_writer = 200
+    total_expected = writer_count * items_per_writer
+    barrier = threading.Barrier(writer_count + 1)
+    drained_ids: list[str] = []
+    errors: list[BaseException] = []
+
+    if recorder_kind == "span":
+        exporter = SpanExporter(capacity=2048)
+
+        def _write_span(worker_id: int) -> None:
+            try:
+                barrier.wait(timeout=5.0)
+                for idx in range(items_per_writer):
+                    exporter.record_span(
+                        SpanData(
+                            name=f"w{worker_id}:{idx}",
+                            trace_id="4bf92f3577b34da6a3ce929d0e0e4736",
+                            span_id="00f067aa0ba902b7",
+                        )
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+
+        def _drain_span() -> list[str]:
+            return [item.name for item in exporter.drain_spans()]
+
+        writer_fn = _write_span
+        drain_fn = _drain_span
+    elif recorder_kind == "genai":
+        genai_rec = GenAiRecorder(max_samples=2048)
+
+        def _write_genai(worker_id: int) -> None:
+            try:
+                barrier.wait(timeout=5.0)
+                for idx in range(items_per_writer):
+                    genai_rec.record_generation(
+                        model=f"w{worker_id}:{idx}",
+                        input_tokens=1,
+                        output_tokens=1,
+                        duration_seconds=0.01,
+                        usd_cost=0.0,
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+
+        def _drain_genai() -> list[str]:
+            return [item.model for item in genai_rec.drain()]
+
+        writer_fn = _write_genai
+        drain_fn = _drain_genai
+    else:
+        pool_rec = DbPoolRecorder()
+
+        def _write_pool(worker_id: int) -> None:
+            try:
+                barrier.wait(timeout=5.0)
+                for idx in range(items_per_writer):
+                    pool_rec.record_sample(
+                        DbPoolMetricSample(
+                            pool_name=f"w{worker_id}:{idx}",
+                            active_leases=1,
+                            primary_in_use=1,
+                            overflow_in_use=0,
+                            max_capacity=4,
+                            waiting_threads=0,
+                            total_timeouts=0,
+                            total_reclaimed=0,
+                            statement_cache_hits=0,
+                            statement_cache_misses=0,
+                        )
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+
+        def _drain_pool() -> list[str]:
+            return [item.pool_name for item in pool_rec.drain_samples()]
+
+        writer_fn = _write_pool
+        drain_fn = _drain_pool
+
+    done_writing = threading.Event()
+
+    def _drainer() -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            while not done_writing.is_set():
+                drained_ids.extend(drain_fn())
+            drained_ids.extend(drain_fn())
+        except BaseException as exc:
+            errors.append(exc)
+
+    writers = [threading.Thread(target=writer_fn, args=(wid,)) for wid in range(writer_count)]
+    drainer = threading.Thread(target=_drainer)
+    drainer.start()
+    for t in writers:
+        t.start()
+    for t in writers:
+        t.join(timeout=10.0)
+    done_writing.set()
+    drainer.join(timeout=10.0)
+
+    assert not errors
+    assert len(drained_ids) == total_expected
+    assert len(set(drained_ids)) == total_expected
+
+
+def test_genai_module_places_tuple_dunder_all_at_module_top() -> None:
+    """Verify telemetry/genai.py defines __all__ as a tuple ahead of functions and classes."""
+    repo_root = Path(__file__).resolve().parents[5]
+    genai_path = repo_root / "src" / "py" / "vertebra" / "telemetry" / "genai.py"
+    tree = ast.parse(genai_path.read_text(encoding="utf-8"), filename=str(genai_path))
+
+    all_assign_line: int | None = None
+    first_def_line: int | None = None
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__all__" for target in stmt.targets
+        ):
+            assert isinstance(stmt.value, ast.Tuple)
+            all_assign_line = stmt.lineno
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and first_def_line is None:
+            first_def_line = stmt.lineno
+
+    assert all_assign_line is not None
+    assert first_def_line is not None
+    assert all_assign_line < first_def_line

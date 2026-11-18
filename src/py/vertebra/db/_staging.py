@@ -6,8 +6,11 @@ import csv
 import inspect
 import io
 import os
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from vertebra.db.arrow import ArrowCursor, write_arrow_shm
 from vertebra.storage import AsyncObjectStore, SyncObjectStore
@@ -79,7 +82,7 @@ class ObjectStoreStaging:
 
         resolved_store, object_key = cls.resolve_sync_store(store, destination_uri)
         payload = cls._serialize_cursor(cursor, format=format, compression=compression)
-        put_fn = getattr(resolved_store, "put", None)
+        put_fn: Callable[[str, bytes], Any] | None = getattr(resolved_store, "put", None)
         if callable(put_fn):
             put_fn(object_key, payload)
             return
@@ -116,7 +119,7 @@ class ObjectStoreStaging:
 
         resolved_store, object_key = cls.resolve_async_store(store, destination_uri)
         payload = cls._serialize_cursor(cursor, format=format, compression=compression)
-        put_fn = getattr(resolved_store, "put", None)
+        put_fn: Callable[[str, bytes], Any] | None = getattr(resolved_store, "put", None)
         if callable(put_fn):
             res = put_fn(object_key, payload)
             if inspect.isawaitable(res):
@@ -147,7 +150,9 @@ class ObjectStoreStaging:
                 return cls._deserialize_bytes(raw_text.encode("utf-8"), format=format)
 
         resolved_store, object_key = cls.resolve_sync_store(store, uri)
-        get_fn = getattr(resolved_store, "get_bytes", None) or getattr(resolved_store, "get", None)
+        get_fn: Callable[[str], Any] | None = getattr(resolved_store, "get_bytes", None) or getattr(
+            resolved_store, "get", None
+        )
         if callable(get_fn):
             raw = bytes(get_fn(object_key))
             return cls._deserialize_bytes(raw, format=format)
@@ -176,7 +181,9 @@ class ObjectStoreStaging:
                 return cls._deserialize_bytes(raw_text.encode("utf-8"), format=format)
 
         resolved_store, object_key = cls.resolve_async_store(store, uri)
-        get_fn = getattr(resolved_store, "get_bytes", None) or getattr(resolved_store, "get", None)
+        get_fn: Callable[[str], Any] | None = getattr(resolved_store, "get_bytes", None) or getattr(
+            resolved_store, "get", None
+        )
         if callable(get_fn):
             res = get_fn(object_key)
             if inspect.isawaitable(res):

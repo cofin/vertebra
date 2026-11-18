@@ -1,92 +1,85 @@
-"""Rust JWTGuard and RateLimiter security integration for Starlette and FastAPI applications."""
+"""Security guards, JWT/JWKS authentication, CSRF, and rate limiting for Starlette and FastAPI apps."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import msgspec
-
-from vertebra._vertebra import JWTGuard, RateLimiter
-from vertebra.utils.serializers import decode_json
+from vertebra.framework.security import (
+    AuthenticatedPrincipal,
+    CsrfConfig,
+    CsrfMiddleware,
+    Guard,
+    JWKSConfig,
+    JWKSVerifier,
+    JWTAuthGuard,
+    PermissionDeniedError,
+    Principal,
+    RateLimitConfig,
+    RateLimiter,
+    RateLimitGuard,
+    SecurityConfig,
+    SecurityContext,
+    requires_capability,
+    requires_role,
+    requires_scope,
+    requires_tenant,
+)
 
 __all__ = (
     "AuthenticatedPrincipal",
+    "CsrfConfig",
+    "CsrfMiddleware",
+    "Guard",
     "JWTAuthBackend",
+    "JWTAuthGuard",
+    "JWKSConfig",
+    "JWKSVerifier",
+    "PermissionDeniedError",
+    "Principal",
+    "RateLimitConfig",
     "RateLimitGuard",
+    "RateLimiter",
+    "SecurityConfig",
+    "SecurityContext",
+    "requires_capability",
+    "requires_role",
+    "requires_scope",
+    "requires_tenant",
 )
 
 
-class AuthenticatedPrincipal(msgspec.Struct, frozen=True, gc=False):
-    """Decoded JWT principal returned by JWTAuthBackend."""
-
-    sub: str
-    scopes: tuple[str, ...] = ()
-    claims: dict[str, Any] = {}
-
-    @property
-    def is_authenticated(self) -> bool:
-        """Return True for authenticated principals."""
-        return True
-
-    @property
-    def display_name(self) -> str:
-        """Return the principal subject identifier."""
-        return self.sub
-
-
 class JWTAuthBackend:
-    """Starlette AuthenticationBackend backed by Rust zero-GIL JWTGuard."""
+    """Starlette authentication backend delegating to neutral JWTAuthGuard or JWKSVerifier."""
 
-    __slots__ = ("_guard", "_header_name", "_scheme")
+    __slots__ = ("_guard", "_header_name", "_jwks_verifier")
 
     def __init__(
         self,
-        secret: str | bytes,
+        secret: str | bytes = b"",
         *,
         header_name: str = "authorization",
         scheme: str = "Bearer",
+        leeway_secs: int = 60,
+        jwks_verifier: JWKSVerifier | None = None,
     ) -> None:
-        raw_secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
-        self._guard = JWTGuard(raw_secret)
+        self._jwks_verifier = jwks_verifier
+        self._guard = JWTAuthGuard(secret, leeway_secs=leeway_secs, scheme=scheme) if jwks_verifier is None else None
         self._header_name = header_name.lower()
-        self._scheme = scheme.lower()
 
     async def authenticate(self, conn: Any) -> tuple[tuple[str, ...], AuthenticatedPrincipal] | None:
-        """Validate Bearer JWT token on ``conn`` using Rust JWTGuard."""
+        """Validate Bearer JWT token on ``conn`` using neutral JWTAuthGuard or JWKSVerifier."""
         headers = getattr(conn, "headers", None) or {}
         auth_val = headers.get(self._header_name)
         if not auth_val or not isinstance(auth_val, str):
             return None
-        parts = auth_val.strip().split(" ", 1)
-        if len(parts) != 2 or parts[0].lower() != self._scheme:
-            return None
-        token = parts[1].strip()
         try:
-            payload_json = self._guard.validate(token)
+            if self._jwks_verifier is not None:
+                principal = await self._jwks_verifier.verify_header(auth_val)
+            else:
+                assert self._guard is not None
+                principal = self._guard.verify_header(auth_val)
         except ValueError:
             return None
-        claims = decode_json(payload_json.encode("utf-8") if isinstance(payload_json, str) else payload_json)
-        if not isinstance(claims, dict):
+        if principal is None:
             return None
-        sub = str(claims.get("sub", ""))
-        raw_scopes = claims.get("scope") or claims.get("scopes") or ()
-        if isinstance(raw_scopes, str):
-            scopes = tuple(s for s in raw_scopes.split() if s)
-        elif isinstance(raw_scopes, (list, tuple)):
-            scopes = tuple(str(s) for s in raw_scopes)
-        else:
-            scopes = ()
-        return scopes, AuthenticatedPrincipal(sub=sub, scopes=scopes, claims=claims)
-
-
-class RateLimitGuard:
-    """Token-bucket rate limit guard backed by Rust RateLimiter."""
-
-    __slots__ = ("_limiter",)
-
-    def __init__(self, *, capacity: int = 100, refill_rate: float = 100.0) -> None:
-        self._limiter = RateLimiter(int(capacity), float(refill_rate))
-
-    def allow(self, key: str = "default", tokens: int = 1) -> bool:
-        """Return True if the request for ``key`` is within rate limits."""
-        return bool(self._limiter.acquire(key, int(tokens)))
+        return principal.scopes, principal

@@ -1,7 +1,6 @@
 """Unit tests for review infrastructure setup validator, router, and ledger checker."""
 
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -347,20 +346,24 @@ def test_agents_catches_write_tool_on_reviewer_and_forbidden_command(
     assert any("Allowed Commands contains forbidden command pattern" in i.message for i in issues)
 
 
-def test_agents_rejects_unregistered_lazy_mcp_tools(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "bad_tool",
+    ["call_mcp_tool", "list_resources", "read_resource"],
+    ids=["call_mcp_tool", "list_resources", "read_resource"],
+)
+def test_agents_rejects_unregistered_lazy_mcp_tools(tmp_path: Path, bad_tool: str) -> None:
     """Verify agents rule rejects lazy MCP multiplexer tools absent from the subagent tool registry."""
     repo = build_minimal_review_tree(tmp_path)
     rev_path = repo / ".agents/agents/runtime-ipc-reviewer.md"
     rev_text = rev_path.read_text(encoding="utf-8").replace(
         "  - send_message\n",
-        "  - call_mcp_tool\n  - list_resources\n  - read_resource\n  - send_message\n",
+        f"  - {bad_tool}\n  - send_message\n",
     )
     rev_path.write_text(rev_text, encoding="utf-8")
 
     validator = ReviewSetupValidator(repo)
     issues = validator.validate(frozenset({"agents"}))
-    for bad_tool in ("call_mcp_tool", "list_resources", "read_resource"):
-        assert any(f"declared tool '{bad_tool}' is not in valid_tools" in i.message for i in issues)
+    assert any(f"declared tool '{bad_tool}' is not in valid_tools" in i.message for i in issues)
 
 
 def test_index_catches_missing_area_row(tmp_path: Path) -> None:
@@ -540,30 +543,9 @@ def test_bundles_rejects_malformed_commit_shas(
     assert any(expected_fragment in i.message for i in issues)
 
 
-def test_bundles_rejects_unreachable_git_commit_sha(tmp_path: Path) -> None:
-    """Verify bundles rule rejects commit SHAs that are not ancestors of HEAD in Git repositories."""
+def test_bundles_accepts_squash_merged_hex_commit_shas(tmp_path: Path) -> None:
+    """Verify bundles rule accepts valid 7-40 char lowercase hex SHAs regardless of squash-merge ancestry."""
     repo = build_minimal_review_tree(tmp_path)
-    git_env = {
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@example.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@example.com",
-    }
-    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=git_env,
-    )
-    head_sha = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
     chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
     chapter.write_text(
         "---\n"
@@ -573,56 +555,7 @@ def test_bundles_rejects_unreachable_git_commit_sha(tmp_path: Path) -> None:
         "status: stable\n"
         "verified:\n"
         "  - by: agent\n"
-        f"    commit: {head_sha}\n"
-        "  - by: agent\n"
-        "    commit: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"
-        "---\n\n"
-        "<!-- truth: start -->\n- Valid truth\n<!-- truth: end -->\n",
-        encoding="utf-8",
-    )
-
-    validator = ReviewSetupValidator(repo)
-    issues = validator.validate(frozenset({"bundles"}))
-    assert any(
-        "verified.commit 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' is not an ancestor of HEAD" in i.message
-        for i in issues
-    )
-    assert not any(head_sha in i.message for i in issues)
-
-
-def test_bundles_skips_ancestry_check_in_shallow_git_clone(tmp_path: Path) -> None:
-    """Verify shallow Git clones skip ancestry checks while enforcing commit SHA syntax."""
-    repo = build_minimal_review_tree(tmp_path)
-    git_env = {
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@example.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@example.com",
-    }
-    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=git_env,
-    )
-    head_sha = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    (repo / ".git" / "shallow").write_text(f"{head_sha}\n", encoding="utf-8")
-
-    chapter = repo / ".agents/bundles/knowledge/patterns/rust/sample.md"
-    chapter.write_text(
-        "---\n"
-        "type: Pattern\n"
-        "title: Sample Pattern\n"
-        "description: Pattern description.\n"
-        "status: stable\n"
-        "verified:\n"
+        "    commit: d4ffd666\n"
         "  - by: agent\n"
         "    commit: 80ff8a65e43a2bcef9e48a7763e89a7352118232\n"
         "---\n\n"

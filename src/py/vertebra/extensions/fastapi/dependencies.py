@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
 
 import anyio.to_thread
 import msgspec
@@ -38,7 +38,7 @@ class CompiledDependantNode(msgspec.Struct, frozen=True, gc=False, kw_only=True)
     sub_param_names: tuple[tuple[str, tuple[Any, tuple[str, ...]]], ...]
     request_param_name: str | None
     path_param_names: tuple[str, ...]
-    query_param_names: tuple[tuple[str, Any, Any], ...]
+    query_param_names: tuple[tuple[str, Callable[[str], Any], Any], ...]
 
 
 class CompiledDependantPlan(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -49,6 +49,27 @@ class CompiledDependantPlan(msgspec.Struct, frozen=True, gc=False, kw_only=True)
     has_generator_dependencies: bool
     has_security_requirements: bool
     needs_request: bool = False
+    has_unsupported_params: bool = False
+
+
+def _dependant_has_unsupported_params(dep: Any) -> bool:
+    return bool(
+        getattr(dep, "header_params", None)
+        or getattr(dep, "cookie_params", None)
+        or getattr(dep, "response_param_name", None)
+        or getattr(dep, "background_tasks_param_name", None)
+        or getattr(dep, "websocket_param_name", None)
+        or getattr(dep, "http_connection_param_name", None)
+    )
+
+
+def _dependant_has_security(dep: Any) -> bool:
+    return bool(
+        getattr(dep, "security_requirements", None)
+        or getattr(dep, "own_oauth_scopes", None)
+        or getattr(dep, "parent_oauth_scopes", None)
+        or getattr(dep, "security_scopes_param_name", None)
+    )
 
 
 def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None = None) -> CompiledDependantPlan | None:
@@ -60,15 +81,18 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
     ordered_nodes: list[CompiledDependantNode] = []
     visited_keys: set[tuple[Any, tuple[str, ...]]] = set()
     has_generators = False
-    has_security = bool(getattr(dependant, "security_requirements", None))
+    has_security = _dependant_has_security(dependant)
+    has_unsupported = _dependant_has_unsupported_params(dependant)
 
     def _visit(dep: Any) -> tuple[Any, tuple[str, ...]] | None:
-        nonlocal has_generators, has_security
+        nonlocal has_generators, has_security, has_unsupported
+        if _dependant_has_security(dep):
+            has_security = True
+        if _dependant_has_unsupported_params(dep):
+            has_unsupported = True
         call = getattr(dep, "call", None)
         if not callable(call):
             return None
-        if getattr(dep, "security_requirements", None):
-            has_security = True
 
         raw_key = getattr(dep, "cache_key", None)
         cache_key: tuple[Any, tuple[str, ...]] = (
@@ -95,15 +119,19 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
 
         req_param = getattr(dep, "request_param_name", None)
         dep_path_params: list[str] = []
-        dep_query_params: list[tuple[str, Any, Any]] = []
+        dep_query_params: list[tuple[str, Callable[[str], Any], Any]] = []
         sub_name_set = {name for name, _ in sub_params}
 
         try:
             sig = inspect.signature(call)
+            try:
+                hints = get_type_hints(call, include_extras=True)
+            except Exception:
+                hints = {}
             for p_name, param in sig.parameters.items():
                 if p_name in sub_name_set or p_name == req_param:
                     continue
-                ann = param.annotation
+                ann = hints.get(p_name, param.annotation)
                 if p_name == "request" or getattr(ann, "__name__", "") == "Request":
                     req_param = p_name
                 elif p_name in known_path_params:
@@ -146,6 +174,7 @@ def compile_dependant_plan(dependant: Any, *, path_param_names: set[str] | None 
         has_generator_dependencies=has_generators,
         has_security_requirements=has_security,
         needs_request=any(n.request_param_name is not None for n in ordered_nodes),
+        has_unsupported_params=has_unsupported,
     )
 
 

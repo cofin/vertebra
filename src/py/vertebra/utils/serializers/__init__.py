@@ -24,6 +24,7 @@ from vertebra.utils.serializers._schema import (
     CamelizedBaseStruct,
     FrozenBaseStruct,
     FrozenCamelizedStruct,
+    schema_components,
 )
 
 if TYPE_CHECKING:
@@ -67,6 +68,7 @@ __all__ = (
     "format_json",
     "get_default_json_serializer",
     "get_default_msgpack_serializer",
+    "schema_components",
 )
 
 _ZERO_COPY_MODULE = "vertebra.utils.serializers._zero_copy"

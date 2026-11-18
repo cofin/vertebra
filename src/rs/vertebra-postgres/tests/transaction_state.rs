@@ -262,3 +262,127 @@ async fn begin_nested_savepoints_failed_branch_recovery_and_owner_affinity() {
 
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn cockroachdb_40001_retryable_serialization_and_cockroach_restart_savepoint_flow() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup(&mut sock).await;
+
+        let mut greeting = Vec::new();
+        greeting.extend_from_slice(&frame(b'R', &0i32.to_be_bytes()));
+        greeting.extend_from_slice(&frame(b'S', b"client_encoding\0UTF8\0"));
+        greeting.extend_from_slice(&frame(b'S', b"crdb_version\0CCL v24.1.0\0"));
+        greeting.extend_from_slice(&frame(b'K', &[0, 0, 0, 1, 0, 0, 0, 2]));
+        greeting.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&greeting).await.unwrap();
+
+        assert_eq!(read_simple_query(&mut sock).await, "BEGIN");
+        sock.write_all(&cmd_complete("BEGIN", b'T')).await.unwrap();
+
+        assert_eq!(
+            read_simple_query(&mut sock).await,
+            "SAVEPOINT cockroach_restart"
+        );
+        sock.write_all(&cmd_complete("SAVEPOINT", b'T'))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_simple_query(&mut sock).await,
+            "UPDATE accounts SET balance = balance - 10 WHERE id = 1"
+        );
+        sock.write_all(&err_response(
+            "40001",
+            "restart transaction: TransactionRetryWithProtoRefreshError: WriteTooOldError",
+            b'E',
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read_simple_query(&mut sock).await,
+            "ROLLBACK TO SAVEPOINT cockroach_restart"
+        );
+        sock.write_all(&cmd_complete("ROLLBACK", b'T'))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_simple_query(&mut sock).await,
+            "UPDATE accounts SET balance = balance - 10 WHERE id = 1"
+        );
+        sock.write_all(&cmd_complete("UPDATE 1", b'T'))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_simple_query(&mut sock).await,
+            "RELEASE SAVEPOINT cockroach_restart"
+        );
+        sock.write_all(&cmd_complete("RELEASE", b'T'))
+            .await
+            .unwrap();
+
+        assert_eq!(read_simple_query(&mut sock).await, "COMMIT");
+        sock.write_all(&cmd_complete("COMMIT", b'I')).await.unwrap();
+    });
+
+    let mut handle = loopback_handle(port);
+    handle.connect().await.unwrap();
+    assert!(handle.is_cockroachdb());
+    let owner = TransactionOwner::new(7, handle.generation());
+
+    assert!(matches!(
+        handle.savepoint_cockroach_restart_as(owner).await,
+        Err(PostgresError::Interface(_))
+    ));
+
+    handle.begin_as(owner).await.unwrap();
+    assert!(matches!(
+        handle.release_cockroach_restart_as(owner).await,
+        Err(PostgresError::Interface(_))
+    ));
+    handle.savepoint_cockroach_restart_as(owner).await.unwrap();
+
+    let retry_err = handle
+        .connection_mut()
+        .unwrap()
+        .simple_query("UPDATE accounts SET balance = balance - 10 WHERE id = 1")
+        .await
+        .unwrap_err();
+    assert!(retry_err.is_retryable_serialization());
+    assert!(retry_err.is_transient());
+    assert_eq!(retry_err.sqlstate(), Some("40001"));
+    assert_eq!(handle.transaction_status(), TransactionStatus::Failed);
+
+    let non_retry = PostgresError::server("ERROR", "22012", "division by zero", vec![]).unwrap();
+    assert!(!non_retry.is_retryable_serialization());
+
+    handle
+        .rollback_to_cockroach_restart_as(owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.transaction_status(),
+        TransactionStatus::InTransaction
+    );
+
+    handle
+        .connection_mut()
+        .unwrap()
+        .simple_query("UPDATE accounts SET balance = balance - 10 WHERE id = 1")
+        .await
+        .unwrap();
+    handle.release_cockroach_restart_as(owner).await.unwrap();
+    assert_eq!(
+        handle.commit_as(owner).await.unwrap(),
+        TransactionDisposition::Committed
+    );
+    assert_eq!(handle.transaction_status(), TransactionStatus::Idle);
+
+    server.await.unwrap();
+}

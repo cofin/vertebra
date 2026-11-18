@@ -1,10 +1,21 @@
 """Vertebra MySQL/MariaDB SQLSpec adapter package with PEP 562 lazy attribute loading."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.mysql._typing import (
+        MySQLAsyncConnectionContext,
+        MySQLAsyncSessionContext,
+        MySQLConnectionParams,
+        MySQLDriverFeatures,
+        MySQLPoolParams,
+        MySQLSyncConnectionContext,
+        MySQLSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.mysql.adk import (
         MySQLADKConfig,
         MySQLAsyncADKArtifactStore,
@@ -36,18 +47,25 @@ __all__ = (
     "MySQLAsyncADKMemoryStore",
     "MySQLAsyncADKStore",
     "MySQLAsyncConfig",
+    "MySQLAsyncConnectionContext",
     "MySQLAsyncDataDictionary",
     "MySQLAsyncDriver",
+    "MySQLAsyncSessionContext",
+    "MySQLConnectionParams",
+    "MySQLDriverFeatures",
     "MySQLEventQueueStore",
     "MySQLEventsConfig",
     "MySQLLitestarConfig",
     "MySQLLitestarStore",
+    "MySQLPoolParams",
     "MySQLSyncADKArtifactStore",
     "MySQLSyncADKMemoryStore",
     "MySQLSyncADKStore",
     "MySQLSyncConfig",
+    "MySQLSyncConnectionContext",
     "MySQLSyncDataDictionary",
     "MySQLSyncDriver",
+    "MySQLSyncSessionContext",
     "build_connection_config",
     "build_statement_config",
     "default_statement_config",
@@ -61,24 +79,43 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "MySQLAsyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.mysql.adk", "MySQLAsyncADKMemoryStore"),
     "MySQLAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.mysql.adk", "MySQLAsyncADKStore"),
     "MySQLAsyncConfig": ("vertebra.extensions.sqlspec.adapters.mysql.config", "MySQLAsyncConfig"),
+    "MySQLAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.mysql._typing",
+        "MySQLAsyncConnectionContext",
+    ),
     "MySQLAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.mysql.data_dictionary",
         "MySQLAsyncDataDictionary",
     ),
     "MySQLAsyncDriver": ("vertebra.extensions.sqlspec.adapters.mysql.driver", "MySQLAsyncDriver"),
+    "MySQLAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.mysql._typing",
+        "MySQLAsyncSessionContext",
+    ),
+    "MySQLConnectionParams": ("vertebra.extensions.sqlspec.adapters.mysql._typing", "MySQLConnectionParams"),
+    "MySQLDriverFeatures": ("vertebra.extensions.sqlspec.adapters.mysql._typing", "MySQLDriverFeatures"),
     "MySQLEventQueueStore": ("vertebra.extensions.sqlspec.adapters.mysql.events", "MySQLEventQueueStore"),
     "MySQLEventsConfig": ("vertebra.extensions.sqlspec.adapters.mysql.events", "MySQLEventsConfig"),
     "MySQLLitestarConfig": ("vertebra.extensions.sqlspec.adapters.mysql.litestar", "MySQLLitestarConfig"),
     "MySQLLitestarStore": ("vertebra.extensions.sqlspec.adapters.mysql.litestar", "MySQLLitestarStore"),
+    "MySQLPoolParams": ("vertebra.extensions.sqlspec.adapters.mysql._typing", "MySQLPoolParams"),
     "MySQLSyncADKArtifactStore": ("vertebra.extensions.sqlspec.adapters.mysql.adk", "MySQLSyncADKArtifactStore"),
     "MySQLSyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.mysql.adk", "MySQLSyncADKMemoryStore"),
     "MySQLSyncADKStore": ("vertebra.extensions.sqlspec.adapters.mysql.adk", "MySQLSyncADKStore"),
     "MySQLSyncConfig": ("vertebra.extensions.sqlspec.adapters.mysql.config", "MySQLSyncConfig"),
+    "MySQLSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.mysql._typing",
+        "MySQLSyncConnectionContext",
+    ),
     "MySQLSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.mysql.data_dictionary",
         "MySQLSyncDataDictionary",
     ),
     "MySQLSyncDriver": ("vertebra.extensions.sqlspec.adapters.mysql.driver", "MySQLSyncDriver"),
+    "MySQLSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.mysql._typing",
+        "MySQLSyncSessionContext",
+    ),
     "build_connection_config": ("vertebra.extensions.sqlspec.adapters.mysql.core", "build_connection_config"),
     "build_statement_config": ("vertebra.extensions.sqlspec.adapters.mysql.core", "build_statement_config"),
     "default_statement_config": ("vertebra.extensions.sqlspec.adapters.mysql.core", "default_statement_config"),

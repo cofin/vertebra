@@ -5,12 +5,25 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib
+import importlib.util
+import io
+import json
+import sys
 import threading
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from alembic.ddl.impl import DefaultImpl
+from django.db.backends.base.base import BaseDatabaseWrapper
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, insert, select
+from sqlalchemy import exc as sa_exc
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy.schema import CreateTable
 
 import vertebra._bigquery as bigquery_native
 import vertebra._spanner as spanner_native
@@ -41,6 +54,7 @@ from vertebra.db.adapters.bigquery import (
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.postgres import PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SpannerToolProvider, SyncSpannerDriver
+from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
 from vertebra.db.driver import DatabaseError
 from vertebra.extensions.alchemy import (
     create_async_alchemy_config,
@@ -84,16 +98,11 @@ from vertebra.extensions.litestar.fastpath import (
 from vertebra.extensions.sqlalchemy import (
     ALL_DIALECT_SCHEMES,
     DIALECT_DESCRIPTORS,
-    AsyncBigQueryDialect,
-    AsyncSpangresDialect,
-    AsyncSpannerDialect,
     BigQueryAlembicImpl,
-    BinaryJSON,
     CreateVectorIndexOp,
+    MsgspecJSON,
+    SpangresAlembicImpl,
     SpannerAlembicImpl,
-    SyncBigQueryDialect,
-    SyncSpangresDialect,
-    SyncSpannerDialect,
     Vector,
 )
 from vertebra.extensions.sqlalchemy import dialects as sqlalchemy_dialects_mod
@@ -114,7 +123,50 @@ from vertebra.server._fastpath import (
 )
 from vertebra.server._fastpath_core import DirectPlan
 from vertebra.storage import StreamingStorageResponse, SyncObjectStore
-from vertebra.typing import MissingDependencyError, ToolPolicyError, ToolProvider
+from vertebra.typing import (
+    ImproperConfigurationError,
+    MissingDependencyError,
+    ToolPolicyError,
+    ToolProvider,
+    reset_dependency_cache,
+)
+
+_HAS_SQLALCHEMY_GCP = (
+    importlib.util.find_spec("sqlalchemy_bigquery") is not None
+    and importlib.util.find_spec("google.cloud.sqlalchemy_spanner") is not None
+)
+AsyncBigQueryDialect: Any = None
+AsyncSpangresDialect: Any = None
+AsyncSpannerDialect: Any = None
+SyncBigQueryDialect: Any = None
+SyncSpangresDialect: Any = None
+SyncSpannerDialect: Any = None
+if _HAS_SQLALCHEMY_GCP:
+    from vertebra.extensions.sqlalchemy import (
+        AsyncBigQueryDialect as _AsyncBigQueryDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        AsyncSpangresDialect as _AsyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        AsyncSpannerDialect as _AsyncSpannerDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncBigQueryDialect as _SyncBigQueryDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncSpangresDialect as _SyncSpangresDialect,
+    )
+    from vertebra.extensions.sqlalchemy import (
+        SyncSpannerDialect as _SyncSpannerDialect,
+    )
+
+    AsyncBigQueryDialect = _AsyncBigQueryDialect
+    AsyncSpangresDialect = _AsyncSpangresDialect
+    AsyncSpannerDialect = _AsyncSpannerDialect
+    SyncBigQueryDialect = _SyncBigQueryDialect
+    SyncSpangresDialect = _SyncSpangresDialect
+    SyncSpannerDialect = _SyncSpannerDialect
 
 
 @pytest.mark.anyio
@@ -305,16 +357,23 @@ def test_django_backends_and_shared_provider_fingerprinting(monkeypatch: pytest.
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("vertebra.extensions.django.db.backends.bigquery")
 
-    with pytest.raises(MissingDependencyError) as exc_info:
-        SpannerDjangoDatabaseWrapper(
-            {
-                "PROJECT": "core-proj",
-                "INSTANCE": "prod-inst",
-                "NAME": "ledger-db",
-                "DIALECT": "POSTGRESQL",
-            }
-        )
-    assert "django-spanner" in str(exc_info.value)
+    monkeypatch.setitem(sys.modules, "django_spanner", None)
+    monkeypatch.setitem(sys.modules, "django_spanner.base", None)
+    reset_dependency_cache("django_spanner.base")
+    try:
+        with pytest.raises(MissingDependencyError) as exc_info:
+            SpannerDjangoDatabaseWrapper(
+                {
+                    "PROJECT": "core-proj",
+                    "INSTANCE": "prod-inst",
+                    "NAME": "ledger-db",
+                    "DIALECT": "POSTGRESQL",
+                }
+            )
+        assert "django-google-spanner" in str(exc_info.value)
+        assert "django-spanner" in exc_info.value.hint
+    finally:
+        reset_dependency_cache("django_spanner.base")
 
     monkeypatch.setattr(
         "vertebra.extensions.django.db.backends.spanner.base.ensure_module",
@@ -328,6 +387,7 @@ def test_django_backends_and_shared_provider_fingerprinting(monkeypatch: pytest.
             "DIALECT": "POSTGRESQL",
         }
     )
+    assert isinstance(spanner_wrapper, BaseDatabaseWrapper)
     assert spanner_wrapper.vendor == "spanner"
     assert spanner_wrapper.display_name == "Cloud Spanner (Vertebra)"
     assert spanner_wrapper.driver_scheme == "spanner"
@@ -969,36 +1029,15 @@ def test_gcp_sqlalchemy_dialect_schemes_registered(scheme: str) -> None:
     assert scheme in DIALECT_DESCRIPTORS
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
-    """Verify SQLAlchemy 2.1 +vtb dialects, Vector/BinaryJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
+    """Verify SQLAlchemy 2.1 +vtb dialects, Vector/MsgspecJSON types, CreateVectorIndexOp, and SpannerAlembicImpl."""
 
     assert SyncBigQueryDialect.paramstyle == "named"
     assert AsyncBigQueryDialect.is_async is True
-    merge_sql = SyncBigQueryDialect.compile_merge_upsert(
-        "analytics.events",
-        "analytics.staging_events",
-        on_keys=("event_id",),
-        update_columns=("payload", "updated_at"),
-    )
-    assert "MERGE INTO analytics.events AS T USING analytics.staging_events AS S" in merge_sql
-    assert "T.event_id = S.event_id" in merge_sql
-    assert "WHEN MATCHED THEN UPDATE SET T.payload = S.payload" in merge_sql
 
     assert SyncSpannerDialect.paramstyle == "named"
     assert AsyncSpannerDialect.is_async is True
-    upsert_sql = SyncSpannerDialect.compile_insert_or_update(
-        "Singers",
-        ("SingerId", "FirstName", "LastName"),
-    )
-    assert (
-        upsert_sql
-        == "INSERT OR UPDATE INTO Singers (SingerId, FirstName, LastName) VALUES (@SingerId, @FirstName, @LastName)"
-    )
-    interleave_sql = SyncSpannerDialect.compile_interleave_clause(
-        "Singers",
-        on_delete="CASCADE",
-    )
-    assert interleave_sql == ", INTERLEAVE IN PARENT Singers ON DELETE CASCADE"
 
     assert SyncSpangresDialect.paramstyle == "numeric_dollar"
     assert AsyncSpangresDialect.is_async is True
@@ -1010,24 +1049,28 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     assert vec64.get_col_spec(dialect_name="spanner") == "ARRAY<FLOAT64>(vector_length=>768)"
     assert vec32.get_col_spec(dialect_name="spangres") == "VECTOR(768)"
 
-    cos_expr = vec32.cosine_distance([0.1, 0.2], param_name="q")
-    assert cos_expr.compile_sql(dialect_name="bigquery") == "COSINE_DISTANCE(embedding, @q)"
-    assert cos_expr.compile_sql(dialect_name="spanner") == "COSINE_DISTANCE(embedding, @q)"
-
-    approx_expr = vec32.approx_cosine_distance(
-        [0.1, 0.2],
-        param_name="q",
-        num_leaves_to_search=10,
+    tbl = Table("Documents", MetaData(), Column("embedding", vec32))
+    bq_sql = str(
+        select(tbl).where(tbl.c.embedding.cosine_distance([0.1, 0.2]) < 0.5).compile(dialect=SyncBigQueryDialect())
     )
-    assert (
-        approx_expr.compile_sql(dialect_name="spanner")
-        == "APPROX_COSINE_DISTANCE(embedding, @q, options => JSON '{\"num_leaves_to_search\": 10}')"
-    )
+    assert "COSINE_DISTANCE(`Documents`.`embedding`," in bq_sql
 
-    bjson = BinaryJSON()
-    assert bjson.get_col_spec(dialect_name="bigquery") == "JSON"
-    assert bjson.get_col_spec(dialect_name="spanner") == "JSON"
-    assert bjson.get_col_spec(dialect_name="spangres") == "JSONB"
+    sp_dialect: Any = SyncSpannerDialect()
+    sp_sql = str(select(tbl).where(tbl.c.embedding.cosine_distance([0.1, 0.2]) < 0.5).compile(dialect=sp_dialect))
+    assert "COSINE_DISTANCE(`Documents`.embedding," in sp_sql
+
+    approx_sql = str(
+        select(tbl)
+        .order_by(tbl.c.embedding.approx_cosine_distance([0.1, 0.2], num_leaves_to_search=10))
+        .compile(dialect=sp_dialect)
+    )
+    assert "APPROX_COSINE_DISTANCE(`Documents`.embedding," in approx_sql
+    assert "options => JSON '{\"num_leaves_to_search\":10}'" in approx_sql
+
+    mjson = MsgspecJSON()
+    assert mjson.get_col_spec(dialect_name="bigquery") == "JSON"
+    assert mjson.get_col_spec(dialect_name="spanner") == "JSON"
+    assert mjson.get_col_spec(dialect_name="spangres") == "JSONB"
 
     spanner_idx = CreateVectorIndexOp(
         index_name="idx_docs_embedding",
@@ -1054,29 +1097,11 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
         == "CREATE VECTOR INDEX idx_events_embedding ON analytics.events(embedding) OPTIONS(index_type = 'IVF', distance_type = 'COSINE')"
     )
 
-    bq_alembic = BigQueryAlembicImpl()
-    assert bq_alembic.transactional_ddl is False
-
-    sp_alembic = SpannerAlembicImpl()
-    sp_alembic.buffer_ddl("CREATE TABLE Singers (SingerId INT64 NOT NULL) PRIMARY KEY (SingerId);")
-    sp_alembic.buffer_ddl(
-        "CREATE TABLE Albums (SingerId INT64 NOT NULL, AlbumId INT64 NOT NULL) PRIMARY KEY (SingerId, AlbumId), INTERLEAVE IN PARENT Singers ON DELETE CASCADE;"
-    )
-    assert len(sp_alembic.buffered_ddl) == 2
-
-    sp_driver = SyncSpannerDriver(
-        SpannerConfig(
-            project_id="core-proj",
-            instance_id="prod-inst",
-            database_id="music-db",
-            endpoint="http://localhost:9010",
-        ),
-        client=_ClosableFakeSpannerClient(),
-    )
-    lro_result = sp_alembic.flush_ddl_batch_sync(sp_driver)
-    assert isinstance(lro_result, str)
-    assert lro_result
-    assert not sp_alembic.buffered_ddl
+    assert DefaultImpl.get_by_dialect(SyncBigQueryDialect()) is BigQueryAlembicImpl
+    assert BigQueryAlembicImpl.transactional_ddl is False
+    assert DefaultImpl.get_by_dialect(sp_dialect) is SpannerAlembicImpl
+    spangres_dialect: Any = cast("Any", SyncSpangresDialect)()
+    assert DefaultImpl.get_by_dialect(spangres_dialect) is SpangresAlembicImpl
 
     assert normalize_alchemy_url("bigquery://proj/dataset", is_async=True) == "bigquery+vtb_async://proj/dataset"
     assert normalize_alchemy_url("bigquery://proj/dataset", is_async=False) == "bigquery+vtb://proj/dataset"
@@ -1087,6 +1112,84 @@ def test_sqlalchemy_vtb_dialects_types_and_alembic_batching() -> None:
     sync_cfg = create_sync_alchemy_config("spanner://proj/inst/db")
     assert async_cfg.connection_string == "bigquery+vtb_async://proj/dataset"
     assert sync_cfg.connection_string == "spanner+vtb://proj/inst/db"
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+def test_spanner_alembic_impl_batches_ddl_in_exec_and_offline_sql() -> None:
+    """Verify SpannerAlembicImpl._exec batches online DDL until emit_commit/DML and emits offline SQL."""
+    batched_calls: list[list[str]] = []
+    executed_dml: list[Any] = []
+
+    class _RecordingSpannerClient(_ClosableFakeSpannerClient):
+        def update_ddl(self, statements: Sequence[str] | str) -> str:
+            stmt_list = [statements] if isinstance(statements, str) else list(statements)
+            batched_calls.append(stmt_list)
+            return super().update_ddl(stmt_list)
+
+    sp_driver = SyncSpannerDriver(
+        SpannerConfig(
+            project_id="core-proj",
+            instance_id="prod-inst",
+            database_id="music-db",
+            endpoint="http://localhost:9010",
+        ),
+        client=_RecordingSpannerClient(),
+    )
+
+    class _FakeSAConnection:
+        def __init__(self, driver_obj: Any) -> None:
+            self.connection = SimpleNamespace(dbapi_connection=SimpleNamespace(driver=driver_obj))
+
+        def execution_options(self, **_kw: Any) -> _FakeSAConnection:
+            return self
+
+        def execute(self, construct: Any, params: Any = None) -> None:
+            executed_dml.append((str(construct), params))
+
+    sp_dialect: Any = SyncSpannerDialect()
+    fake_conn: Any = _FakeSAConnection(sp_driver)
+    online_impl = SpannerAlembicImpl(sp_dialect, fake_conn, False, False, None, {})
+
+    meta = MetaData()
+    singers = Table("Singers", meta, Column("SingerId", Integer, primary_key=True))
+    albums = Table("Albums", meta, Column("AlbumId", Integer, primary_key=True), Column("Title", String(64)))
+    version_tbl = online_impl.version_table_impl(
+        version_table="alembic_version",
+        version_table_schema=None,
+        version_table_pk=True,
+    )
+
+    online_impl._exec(CreateTable(singers))
+    online_impl._exec(CreateTable(albums))
+    assert len(online_impl._ddl_buffer) == 2
+    assert batched_calls == []
+
+    online_impl.emit_commit()
+    assert not online_impl._ddl_buffer
+    assert len(batched_calls) == 1
+    assert len(batched_calls[0]) == 2
+    assert "CREATE TABLE" in batched_calls[0][0]
+    assert "Singers" in batched_calls[0][0]
+    assert "Albums" in batched_calls[0][1]
+
+    online_impl._exec(CreateTable(singers))
+    assert len(online_impl._ddl_buffer) == 1
+    online_impl._exec(insert(version_tbl).values(version_num="rev001"))
+    assert not online_impl._ddl_buffer
+    assert len(batched_calls) == 2
+    assert len(executed_dml) == 1
+    assert "alembic_version" in executed_dml[0][0]
+
+    sql_buf = io.StringIO()
+    offline_impl = SpannerAlembicImpl(sp_dialect, None, True, False, sql_buf, {})
+    offline_impl._exec(CreateTable(singers))
+    offline_impl.emit_commit()
+    offline_sql = sql_buf.getvalue()
+    assert not offline_impl._ddl_buffer
+    assert "CREATE TABLE" in offline_sql
+    assert "Singers" in offline_sql
+    assert ";" in offline_sql
+    assert "COMMIT;" in offline_sql
 
 
 @pytest.mark.anyio
@@ -1497,13 +1600,14 @@ async def test_native_provider_preserves_driver_exception_identity(
         assert exc.value is failure
 
 
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
 @pytest.mark.anyio
 async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module() -> None:
     """Verify BigQuery/Spanner configs wire BrokerPool/AsyncBrokerPool and dialects expose PEP 249 interfaces."""
     assert not hasattr(sqlalchemy_dialects_mod, "SyncDBAPIConnection")
     assert not hasattr(sqlalchemy_dialects_mod, "AsyncDBAPIConnection")
-    assert SyncBigQueryDialect.dbapi().paramstyle == "named"
-    assert AsyncSpannerDialect.dbapi().paramstyle == "named"
+    assert SyncBigQueryDialect.import_dbapi().paramstyle == "named"
+    assert AsyncSpannerDialect.import_dbapi().paramstyle == "named"
 
     sync_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
     async_broker = AsyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
@@ -1512,9 +1616,13 @@ async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module(
     try:
         bq_cfg = create_sync_alchemy_config("bigquery://analytics-proj/ds", broker=sync_broker)
         sp_cfg = create_async_alchemy_config("spanner://core-proj/prod-inst/orders", broker=async_broker)
+        assert isinstance(bq_cfg.engine_config.poolclass, type)
         assert issubclass(bq_cfg.engine_config.poolclass, BrokerPool)
+        assert isinstance(sp_cfg.engine_config.poolclass, type)
         assert issubclass(sp_cfg.engine_config.poolclass, AsyncBrokerPool)
+        assert isinstance(bq_cfg.engine_config.connect_args, dict)
         assert bq_cfg.engine_config.connect_args["broker"] is sync_broker
+        assert isinstance(sp_cfg.engine_config.connect_args, dict)
         assert sp_cfg.engine_config.connect_args["broker"] is async_broker
         bq_engine = bq_cfg.get_engine()
         sp_engine = sp_cfg.get_engine()
@@ -1535,3 +1643,398 @@ async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module(
             await sp_engine.dispose()
         sync_broker.close()
         await async_broker.close()
+
+
+class _ProtocolFakeGCPDriver:
+    """Protocol-fake synchronous SQL driver for BigQuery, Spanner, and Spangres SQLAlchemy tests."""
+
+    def __init__(self, *, version_string: str = "PostgreSQL 14.1 on spangres") -> None:
+        self.queries: list[tuple[str, Any]] = []
+        self.version_string = version_string
+        self.rows: list[tuple[Any, ...]] = [(1, "alpha")]
+
+    def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+        self.queries.append((sql, parameters))
+        lowered = sql.lower()
+        if "pg_catalog.version" in lowered:
+            return [(self.version_string,)], (("version", None, None, None, None, None, None),)
+        if "current_schema" in lowered:
+            return [("public",)], (("current_schema", None, None, None, None, None, None),)
+        if "show transaction isolation level" in lowered:
+            return [("serializable",)], (("transaction_isolation", None, None, None, None, None, None),)
+        if "select 1" in lowered:
+            return [(1,)], (("col_0", None, None, None, None, None, None),)
+        return list(self.rows), (
+            ("id", None, None, None, None, None, None),
+            ("name", None, None, None, None, None, None),
+        )
+
+    def execute(self, sql: str, parameters: Any = ()) -> int:
+        self.queries.append((sql, parameters))
+        return 1
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _AsyncProtocolFakeGCPDriver:
+    """Protocol-fake asynchronous SQL driver wrapping _ProtocolFakeGCPDriver."""
+
+    def __init__(self, *, version_string: str = "PostgreSQL 14.1 on spangres") -> None:
+        self.sync_delegate = _ProtocolFakeGCPDriver(version_string=version_string)
+
+    @property
+    def queries(self) -> list[tuple[str, Any]]:
+        return self.sync_delegate.queries
+
+    async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+        return self.sync_delegate.execute_with_description(sql, parameters)
+
+    async def execute(self, sql: str, parameters: Any = ()) -> int:
+        return self.sync_delegate.execute(sql, parameters)
+
+    async def commit(self) -> None:
+        self.sync_delegate.commit()
+
+    async def rollback(self) -> None:
+        self.sync_delegate.rollback()
+
+    async def close(self) -> None:
+        self.sync_delegate.close()
+
+
+class _GCPProtocolError(Exception):
+    """Test error carrying optional SQLSTATE, vendor code, or gRPC StatusCode-like code."""
+
+    def __init__(self, message: str, *, sqlstate: str | None = None, code: Any = None) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+        self.code = code
+
+
+class _FakeGrpcStatusCode:
+    """Stub mimicking grpc.StatusCode with a .name attribute."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _BrokenStrGCPError(Exception):
+    """Exception whose __str__ fails to verify is_disconnect never raises."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("broken string conversion")
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_bigquery_sqlalchemy21_compilation_and_execution(asynchronous: bool) -> None:
+    """Verify BigQuery SQLAlchemy 2.1 compilation, identifier quoting, JSON serializers, and execution."""
+    events = Table(
+        "user-events",
+        MetaData(),
+        Column("id", Integer, primary_key=True),
+        Column("name", String(64)),
+    )
+
+    if asynchronous:
+        async_driver = _AsyncProtocolFakeGCPDriver()
+        async_engine = create_async_engine(
+            "bigquery+vtb_async://analytics-proj/warehouse",
+            json_serializer=json.dumps,
+            json_deserializer=json.loads,
+            async_creator=lambda: AsyncDBAPIConnection(
+                "bigquery+vtb_async://analytics-proj/warehouse",
+                driver=async_driver,
+            ),
+        )
+        try:
+            assert isinstance(async_engine.dialect, AsyncBigQueryDialect)
+            assert async_engine.dialect._json_serializer is json.dumps
+            assert async_engine.dialect._json_deserializer is json.loads
+            assert async_engine.dialect.identifier_preparer.quote_identifier("user-events") == "`user-events`"
+            compiled = str(select(events).where(events.c.id == 1).compile(dialect=async_engine.dialect))
+            assert "`user-events`" in compiled
+            async with async_engine.connect() as aconn:
+                rows = (await aconn.execute(select(events).where(events.c.id == 1))).fetchall()
+                assert rows == [(1, "alpha")]
+                assert async_engine.dialect.server_version_info is None
+                ping_ok = await aconn.run_sync(
+                    lambda sc: (
+                        sc.connection.dbapi_connection is not None
+                        and async_engine.dialect.do_ping(sc.connection.dbapi_connection)
+                    )
+                )
+                assert ping_ok is True
+                await aconn.execute(insert(events).values(id=2, name="beta"))
+            assert any("INSERT INTO `user-events`" in sql for sql, _ in async_driver.queries)
+        finally:
+            await async_engine.dispose()
+        return
+
+    sync_driver = _ProtocolFakeGCPDriver()
+    sync_engine = create_engine(
+        "bigquery+vtb://analytics-proj/warehouse",
+        json_serializer=json.dumps,
+        json_deserializer=json.loads,
+        creator=lambda: SyncDBAPIConnection(
+            "bigquery+vtb://analytics-proj/warehouse",
+            driver=sync_driver,
+        ),
+    )
+    try:
+        assert isinstance(sync_engine.dialect, SyncBigQueryDialect)
+        assert sync_engine.dialect._json_serializer is json.dumps
+        assert sync_engine.dialect._json_deserializer is json.loads
+        assert sync_engine.dialect.identifier_preparer.quote_identifier("user-events") == "`user-events`"
+        compiled = str(select(events).where(events.c.id == 1).compile(dialect=sync_engine.dialect))
+        assert "`user-events`" in compiled
+        with sync_engine.connect() as conn:
+            rows = conn.execute(select(events).where(events.c.id == 1)).fetchall()
+            assert rows == [(1, "alpha")]
+            assert sync_engine.dialect.server_version_info is None
+            dbapi_conn = conn.connection.dbapi_connection
+            assert dbapi_conn is not None
+            assert sync_engine.dialect.do_ping(dbapi_conn) is True
+            conn.execute(insert(events).values(id=2, name="beta"))
+        assert any("INSERT INTO `user-events`" in sql for sql, _ in sync_driver.queries)
+    finally:
+        sync_engine.dispose()
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.parametrize(
+    ("scheme", "dialect_cls", "expected_broker_base"),
+    [
+        ("bigquery+vtb", SyncBigQueryDialect, BrokerPool),
+        ("bigquery+vtb_async", AsyncBigQueryDialect, AsyncBrokerPool),
+        ("spanner+vtb", SyncSpannerDialect, BrokerPool),
+        ("spanner+vtb_async", AsyncSpannerDialect, AsyncBrokerPool),
+        ("spangres+vtb", SyncSpangresDialect, BrokerPool),
+        ("spangres+vtb_async", AsyncSpangresDialect, AsyncBrokerPool),
+    ],
+)
+def test_bigquery_broker_query_selects_broker_pool_or_null_pool(
+    monkeypatch: pytest.MonkeyPatch,
+    scheme: str,
+    dialect_cls: type[Any],
+    expected_broker_base: type[BrokerPool],
+) -> None:
+    """Verify GCP dialects default to NullPool and select BrokerPool/AsyncBrokerPool on ?broker=true."""
+    base_url = f"{scheme}://analytics-proj/warehouse"
+    assert dialect_cls.get_pool_class(make_url(base_url)) is NullPool
+    assert dialect_cls.get_pool_class(make_url(f"{base_url}?shm_broker=true")) is NullPool
+
+    fake_broker = SyncSHMBrokerTransport(BrokerConfig(pool_size=2, max_overflow=0))
+    try:
+        monkeypatch.setattr(DatabaseRegistry, "default_broker", classmethod(lambda cls: fake_broker))
+        for query_param in ("broker=true", "broker_pool=true"):
+            bound_cls = dialect_cls.get_pool_class(make_url(f"{base_url}?{query_param}"))
+            assert issubclass(bound_cls, expected_broker_base)
+            assert bound_cls._bound_broker is fake_broker
+
+        monkeypatch.setattr(DatabaseRegistry, "default_broker", classmethod(lambda cls: None))
+        with pytest.raises(ImproperConfigurationError, match="default broker"):
+            dialect_cls.get_pool_class(make_url(f"{base_url}?broker=true"))
+    finally:
+        fake_broker.close()
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("scheme_prefix", "asynchronous"),
+    [
+        ("spanner", False),
+        ("spanner", True),
+        ("spangres", False),
+        ("spangres", True),
+    ],
+)
+async def test_spanner_and_spangres_sqlalchemy21_execution_and_pool(
+    scheme_prefix: str,
+    asynchronous: bool,
+) -> None:
+    """Verify Spanner and Spangres SQLAlchemy 2.1 engines execute queries, ping, and use NullPool by default."""
+    items = Table(
+        "singers",
+        MetaData(),
+        Column("id", Integer, primary_key=True),
+        Column("name", String(64)),
+    )
+    scheme = f"{scheme_prefix}+vtb_async" if asynchronous else f"{scheme_prefix}+vtb"
+    dsn = f"{scheme}://core-proj/prod-inst/music-db"
+
+    if asynchronous:
+        async_driver = _AsyncProtocolFakeGCPDriver()
+        async_engine = create_async_engine(
+            dsn,
+            async_creator=lambda: AsyncDBAPIConnection(dsn, driver=async_driver),
+        )
+        try:
+            assert isinstance(async_engine.pool, NullPool)
+            async with async_engine.connect() as aconn:
+                rows = (await aconn.execute(select(items).where(items.c.id == 1))).fetchall()
+                assert rows == [(1, "alpha")]
+                ping_ok = await aconn.run_sync(
+                    lambda sc: (
+                        sc.connection.dbapi_connection is not None
+                        and async_engine.dialect.do_ping(sc.connection.dbapi_connection)
+                    )
+                )
+                assert ping_ok is True
+                await aconn.execute(insert(items).values(id=2, name="beta"))
+            assert any("INSERT INTO singers" in sql for sql, _ in async_driver.queries)
+        finally:
+            await async_engine.dispose()
+        return
+
+    sync_driver = _ProtocolFakeGCPDriver()
+    sync_engine = create_engine(
+        dsn,
+        creator=lambda: SyncDBAPIConnection(dsn, driver=sync_driver),
+    )
+    try:
+        assert isinstance(sync_engine.pool, NullPool)
+        with sync_engine.connect() as conn:
+            rows = conn.execute(select(items).where(items.c.id == 1)).fetchall()
+            assert rows == [(1, "alpha")]
+            dbapi_conn = conn.connection.dbapi_connection
+            assert dbapi_conn is not None
+            assert sync_engine.dialect.do_ping(dbapi_conn) is True
+            assert sync_engine.dialect.get_isolation_level(dbapi_conn) in {"AUTOCOMMIT", "SERIALIZABLE"}
+            conn.execute(insert(items).values(id=2, name="beta"))
+        assert any("INSERT INTO singers" in sql for sql, _ in sync_driver.queries)
+    finally:
+        sync_engine.dispose()
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.anyio
+async def test_spangres_rejects_twophase_and_spanner_is_disconnect() -> None:
+    """Verify Spangres rejects two-phase commit loudly without emitting PREPARE TRANSACTION."""
+    assert SyncSpangresDialect.supports_twophase is False
+    assert AsyncSpangresDialect.supports_twophase is False
+
+    sync_driver = _ProtocolFakeGCPDriver()
+    sync_engine = create_engine(
+        "spangres+vtb://core-proj/prod-inst/music-db",
+        creator=lambda: SyncDBAPIConnection(
+            "spangres+vtb://core-proj/prod-inst/music-db",
+            driver=sync_driver,
+        ),
+    )
+    try:
+        with sync_engine.connect() as conn, pytest.raises(sa_exc.NotSupportedError, match="two-phase"):
+            conn.begin_twophase()
+        with sync_engine.connect() as conn:
+            with pytest.raises(sa_exc.NotSupportedError, match="two-phase"):
+                conn.recover_twophase()
+            for method_call in (
+                lambda: sync_engine.dialect.do_begin_twophase(conn, "xid-1"),
+                lambda: sync_engine.dialect.do_prepare_twophase(conn, "xid-1"),
+                lambda: sync_engine.dialect.do_commit_twophase(conn, "xid-1"),
+                lambda: sync_engine.dialect.do_rollback_twophase(conn, "xid-1"),
+                lambda: sync_engine.dialect.do_recover_twophase(conn),
+            ):
+                with pytest.raises(sa_exc.NotSupportedError, match="two-phase"):
+                    method_call()
+        assert not any("PREPARE TRANSACTION" in sql.upper() for sql, _ in sync_driver.queries)
+    finally:
+        sync_engine.dispose()
+
+    async_driver = _AsyncProtocolFakeGCPDriver()
+    async_engine = create_async_engine(
+        "spangres+vtb_async://core-proj/prod-inst/music-db",
+        async_creator=lambda: AsyncDBAPIConnection(
+            "spangres+vtb_async://core-proj/prod-inst/music-db",
+            driver=async_driver,
+        ),
+    )
+    try:
+        async with async_engine.connect() as aconn:
+            with pytest.raises(sa_exc.NotSupportedError, match="two-phase"):
+                await aconn.run_sync(lambda sc: sc.begin_twophase())
+            with pytest.raises(sa_exc.NotSupportedError, match="two-phase"):
+                await aconn.run_sync(lambda sc: sc.recover_twophase())
+        assert not any("PREPARE TRANSACTION" in sql.upper() for sql, _ in async_driver.queries)
+    finally:
+        await async_engine.dispose()
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.parametrize(
+    "dialect_cls",
+    [
+        SyncBigQueryDialect,
+        AsyncBigQueryDialect,
+        SyncSpannerDialect,
+        AsyncSpannerDialect,
+        SyncSpangresDialect,
+        AsyncSpangresDialect,
+    ],
+)
+@pytest.mark.parametrize(
+    ("exc_factory", "closed", "expected"),
+    [
+        (lambda: _GCPProtocolError("socket lost", sqlstate="08006"), False, True),
+        (lambda: _GCPProtocolError("comm link", sqlstate="08S01"), False, True),
+        (lambda: _GCPProtocolError("admin shutdown", sqlstate="57P01"), False, True),
+        (lambda: _GCPProtocolError("endpoint unavailable", code=14), False, True),
+        (lambda: _GCPProtocolError("rpc failed", code=_FakeGrpcStatusCode("UNAVAILABLE")), False, True),
+        (lambda: _GCPProtocolError("503 UNAVAILABLE: channel closed"), False, True),
+        (lambda: _GCPProtocolError("connection reset by peer"), False, True),
+        (lambda: _GCPProtocolError("generic query error"), True, True),
+        (lambda: _GCPProtocolError("aborted", sqlstate="40001"), False, False),
+        (lambda: _GCPProtocolError("duplicate key", sqlstate="23505"), False, False),
+        (lambda: type("SerializationFailure", (Exception,), {})("concurrent update"), False, False),
+        (_BrokenStrGCPError, False, False),
+    ],
+)
+def test_gcp_dialects_is_disconnect_classification(
+    dialect_cls: type[Any],
+    exc_factory: Any,
+    closed: bool,
+    expected: bool,
+) -> None:
+    """Verify BigQuery, Spanner, and Spangres dialects classify 08*, gRPC UNAVAILABLE, and non-disconnects."""
+
+    class _ConnStub:
+        def __init__(self, is_closed: bool) -> None:
+            self.closed = is_closed
+
+    dialect = dialect_cls()
+    assert dialect.is_disconnect(exc_factory(), _ConnStub(closed)) is expected
+
+
+@pytest.mark.skipif(not _HAS_SQLALCHEMY_GCP, reason="sqlalchemy GCP dialects require Python < 3.14")
+@pytest.mark.parametrize(
+    ("dialect_module_name", "missing_dep"),
+    [
+        ("vertebra.extensions.sqlalchemy.dialects.bigquery", "sqlalchemy_bigquery"),
+        ("vertebra.extensions.sqlalchemy.dialects.spanner", "google.cloud.sqlalchemy_spanner"),
+    ],
+)
+def test_bigquery_and_spanner_missing_dependency_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    dialect_module_name: str,
+    missing_dep: str,
+) -> None:
+    """Verify importing BigQuery or Spanner dialects without required base packages raises MissingDependencyError."""
+    dialect_mod = importlib.import_module(dialect_module_name)
+    monkeypatch.setitem(sys.modules, missing_dep, None)
+    reset_dependency_cache(missing_dep)
+    try:
+        with pytest.raises(MissingDependencyError, match=r"sqlalchemy-gcp"):
+            importlib.reload(dialect_mod)
+    finally:
+        monkeypatch.undo()
+        reset_dependency_cache(missing_dep)
+        importlib.reload(dialect_mod)

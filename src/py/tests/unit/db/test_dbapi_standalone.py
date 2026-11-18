@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import datetime
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -13,14 +15,27 @@ import pytest
 import vertebra.db.dbapi as dbapi_pkg
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.dbapi import (
+    BINARY,
+    DATETIME,
+    NUMBER,
+    ROWID,
+    STRING,
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
+    Binary,
+    Date,
+    DateFromTicks,
+    Error,
     InterfaceError,
     NotSupportedError,
     OperationalError,
     ProgrammingError,
     SyncDBAPIConnection,
     SyncDBAPIModule,
+    Time,
+    TimeFromTicks,
+    Timestamp,
+    TimestampFromTicks,
     apilevel,
     connect,
     is_row_returning_sql,
@@ -34,6 +49,7 @@ from vertebra.db.driver import (
     ProgrammingError as DriverProgrammingError,
 )
 from vertebra.db.registry import DatabaseRegistry
+from vertebra.typing import VertebraError
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
 
@@ -257,7 +273,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
     finally:
         await async_conn.close()
     with pytest.raises(InterfaceError):
-        await async_conn.cursor()
+        async_conn.cursor()
     with pytest.raises(InterfaceError):
         await async_conn.commit()
     with pytest.raises(InterfaceError):
@@ -722,3 +738,414 @@ def test_sync_dbapi_sqlite_uses_native_driver_and_has_no_sqlite_conn() -> None:
         assert cur.fetchone() == (100,)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("INSERT INTO t (name) OUTPUT INSERTED.id VALUES (?)", True),
+        ("UPDATE t SET name = ? OUTPUT DELETED.name, INSERTED.name WHERE id = ?", True),
+        ("DELETE FROM t OUTPUT DELETED.id WHERE id = ?", True),
+        (
+            "MERGE INTO tgt USING src ON tgt.id = src.id "
+            "WHEN MATCHED THEN UPDATE SET tgt.val = src.val OUTPUT $action, INSERTED.id",
+            True,
+        ),
+        (
+            "WITH src AS (SELECT 1 AS id) MERGE INTO tgt USING src ON tgt.id = src.id "
+            "WHEN NOT MATCHED THEN INSERT (id) VALUES (src.id) OUTPUT $action",
+            True,
+        ),
+        ("INSERT INTO t (msg) VALUES ('OUTPUT INSERTED.id')", False),
+        ('INSERT INTO t ("OUTPUT INSERTED.id") VALUES (?)', False),
+        ("INSERT INTO t ([OUTPUT INSERTED.id]) VALUES (?)", False),
+        ("INSERT INTO t (name) VALUES (?) -- OUTPUT INSERTED.id", False),
+        ("INSERT INTO t (name) VALUES (?) /* OUTPUT DELETED.id */", False),
+        ("INSERT INTO t (name) VALUES (?) /* outer /* inner */ OUTPUT $action */", False),
+        ("UPDATE t SET output = ? WHERE id = ?", False),
+        ("UPDATE t SET output = deleted.name WHERE id = ?", False),
+    ],
+)
+def test_is_row_returning_sql_tsql_output(sql: str, expected: bool) -> None:
+    """Verify T-SQL OUTPUT clauses are detected only when unquoted and uncommented inside DML."""
+    assert is_row_returning_sql(sql) is expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("url", "overrides", "expected_attrs"),
+    [
+        (
+            "sqlite+vtb:///:memory:",
+            {"wal_mode": False, "busy_timeout_ms": 1500},
+            {"wal_mode": False, "busy_timeout_ms": 1500},
+        ),
+        (
+            "postgres+vtb://localhost/app",
+            {"application_name": "vtb-app", "statement_timeout_ms": 2500},
+            {"application_name": "vtb-app", "statement_timeout_ms": 2500},
+        ),
+        (
+            "mysql+vtb://localhost/app",
+            {"charset": "latin1", "connect_timeout": 5.0},
+            {"charset": "latin1", "connect_timeout": 5.0},
+        ),
+        (
+            "mssql+vtb://localhost/app",
+            {"application_name": "vtb-mssql", "connect_timeout_ms": 3000},
+            {"application_name": "vtb-mssql", "connect_timeout_ms": 3000},
+        ),
+        (
+            "bigquery://my-project/my_dataset",
+            {"maximum_bytes_billed": 1024},
+            {"maximum_bytes_billed": 1024},
+        ),
+        (
+            "spanner://my-project/my-instance/my-db",
+            {"database_role": "reader"},
+            {"database_role": "reader"},
+        ),
+    ],
+)
+async def test_dbapi_connect_args_forwarding_and_validation(
+    url: str,
+    overrides: dict[str, Any],
+    expected_attrs: dict[str, Any],
+) -> None:
+    """Verify per-engine connect_args forward to config and invalid keys or build errors raise PEP 249 Error."""
+
+    class _StubDriver:
+        dialect = "stub"
+
+        def close(self) -> None:
+            return None
+
+    class _StubAsyncDriver:
+        dialect = "stub"
+
+        async def close(self) -> None:
+            return None
+
+    use_stub = not url.startswith(("sqlite", "bigquery", "spanner"))
+    sync_kwargs: dict[str, Any] = {"share_pool": False, **overrides}
+    async_kwargs: dict[str, Any] = {"share_pool": False, **overrides}
+    if use_stub:
+        sync_kwargs["driver"] = _StubDriver()
+        async_kwargs["driver"] = _StubAsyncDriver()
+
+    sync_conn = connect(url, **sync_kwargs)
+    try:
+        for attr, expected in expected_attrs.items():
+            assert getattr(sync_conn.config, attr) == expected
+    finally:
+        sync_conn.close()
+
+    async_url = url.replace("+vtb://", "+vtb_async://", 1) if "+vtb://" in url else url
+    async_conn = AsyncDBAPIConnection(async_url, **async_kwargs)
+    try:
+        for attr, expected in expected_attrs.items():
+            assert getattr(async_conn.config, attr) == expected
+    finally:
+        await async_conn.close()
+
+    engine_name = url.partition("://")[0].partition("+")[0]
+    with pytest.raises(InterfaceError) as sync_bad_exc:
+        connect(url, share_pool=False, bad_key=1)
+    assert engine_name in str(sync_bad_exc.value).lower()
+    assert "bad_key" in str(sync_bad_exc.value)
+
+    with pytest.raises(InterfaceError) as async_bad_exc:
+        AsyncDBAPIConnection(async_url, share_pool=False, bad_key=1)
+    assert engine_name in str(async_bad_exc.value).lower()
+    assert "bad_key" in str(async_bad_exc.value)
+
+    autocommit_conn = connect("sqlite+vtb:///:memory:", share_pool=False, autocommit=True)
+    try:
+        assert autocommit_conn.autocommit is True
+    finally:
+        autocommit_conn.close()
+
+    class _FailingConfig(SQLiteConfig, frozen=True):
+        def build_sync_driver(self, registry: Any) -> Any:
+            _ = registry
+            raise VertebraError("sync driver build failed")
+
+        def build_async_driver(self, registry: Any) -> Any:
+            _ = registry
+            raise TypeError("async driver bad arg type")
+
+    with pytest.raises(Error, match="sync driver build failed"):
+        SyncDBAPIConnection(_FailingConfig(), share_pool=False)
+
+    with pytest.raises(Error, match="async driver bad arg type"):
+        AsyncDBAPIConnection(_FailingConfig(), share_pool=False)
+
+
+@pytest.mark.anyio
+async def test_dbapi_executemany_returning_and_negative_fetchmany() -> None:
+    """Verify executemany accumulates RETURNING rows across batches and fetchmany(-1) preserves cursor state."""
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        cur = sync_conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        cur.executemany(
+            "INSERT INTO items (name) VALUES (?) RETURNING id, name",
+            [("alpha",), ("beta",), ("gamma",)],
+        )
+        assert cur.rowcount == 3
+        assert cur.description is not None
+        assert [col[0] for col in cur.description] == ["id", "name"]
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+        assert cur.fetchone() == (1, "alpha")
+        assert cur.fetchall() == [(2, "beta"), (3, "gamma")]
+    finally:
+        sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    try:
+        acur = async_conn.cursor()
+        await acur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        await acur.executemany(
+            "INSERT INTO items (name) VALUES (?) RETURNING id, name",
+            [("one",), ("two",), ("three",)],
+        )
+        assert acur.rowcount == 3
+        assert acur.description is not None
+        assert [col[0] for col in acur.description] == ["id", "name"]
+        with pytest.raises(ProgrammingError):
+            await acur.fetchmany(-1)
+        assert await acur.fetchone() == (1, "one")
+        assert await acur.fetchall() == [(2, "two"), (3, "three")]
+    finally:
+        await async_conn.close()
+
+
+class _TypeCodeColumnDescriptor:
+    def __init__(self, name: str, type_code: Any = None, type_oid: int | None = None) -> None:
+        self.name = name
+        self.type_code = type_code
+        self.type_oid = type_oid
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("columns_meta", "expected_desc"),
+    [
+        (
+            [("id", 23), ("label", 25)],
+            (
+                ("id", 23, None, None, None, None, None),
+                ("label", 25, None, None, None, None, None),
+            ),
+        ),
+        (
+            [("id", 23, 10, 4, 10, 0, False)],
+            (("id", 23, 10, 4, 10, 0, False),),
+        ),
+        (
+            [
+                _TypeCodeColumnDescriptor("id", type_code=NUMBER),
+                _TypeCodeColumnDescriptor("payload", type_oid=17),
+            ],
+            (
+                ("id", NUMBER, None, None, None, None, None),
+                ("payload", 17, None, None, None, None, None),
+            ),
+        ),
+        (
+            ["plain_col"],
+            (("plain_col", None, None, None, None, None, None),),
+        ),
+    ],
+)
+async def test_dbapi_description_preserves_driver_type_codes(
+    columns_meta: list[Any],
+    expected_desc: tuple[tuple[Any, ...], ...],
+) -> None:
+    """Verify coerce_dbapi_rows_and_desc preserves type_code for tuples and descriptors and None for strings."""
+
+    class _SyncDescDriver:
+        dialect = "postgres"
+
+        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], list[Any]]:
+            _ = (sql, parameters)
+            return ([tuple(range(len(columns_meta)))], columns_meta)
+
+        def close(self) -> None:
+            return None
+
+    class _AsyncDescDriver:
+        dialect = "postgres"
+
+        async def execute_with_description(
+            self,
+            sql: str,
+            parameters: Any = (),
+        ) -> tuple[list[tuple[Any, ...]], list[Any]]:
+            _ = (sql, parameters)
+            return ([tuple(range(len(columns_meta)))], columns_meta)
+
+        async def close(self) -> None:
+            return None
+
+    sync_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=_SyncDescDriver(), share_pool=False)
+    try:
+        cur = sync_conn.cursor()
+        cur.execute("SELECT 1")
+        assert cur.description == expected_desc
+    finally:
+        sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection(
+        "postgres+vtb_async://localhost/testdb",
+        driver=_AsyncDescDriver(),
+        share_pool=False,
+    )
+    try:
+        acur = async_conn.cursor()
+        await acur.execute("SELECT 1")
+        assert acur.description == expected_desc
+    finally:
+        await async_conn.close()
+
+
+@pytest.mark.anyio
+async def test_dbapi_pep249_constructors_version_scope_var_and_nextset() -> None:
+    """Verify PEP 249 constructors, type objects, SQLite-only version attributes, var(), and nextset()."""
+    str_type: Any = str
+    bytes_type: Any = bytes
+    int_type: Any = int
+    dt_type: Any = datetime.datetime
+    bytearray_type: Any = bytearray
+    float_type: Any = float
+    date_type: Any = datetime.date
+
+    for target in (dbapi_pkg, SyncDBAPIModule(dialect="sqlite"), AsyncDBAPIModule(dialect="sqlite")):
+        assert target.Date(2026, 11, 17) == datetime.date(2026, 11, 17)
+        assert target.Time(12, 30, 45) == datetime.time(12, 30, 45)
+        assert target.Timestamp(2026, 11, 17, 12, 30, 45) == datetime.datetime(2026, 11, 17, 12, 30, 45)
+        assert isinstance(target.DateFromTicks(0), datetime.date)
+        assert isinstance(target.TimeFromTicks(0), datetime.time)
+        assert isinstance(target.TimestampFromTicks(0), datetime.datetime)
+        assert target.Binary(b"abc") == b"abc"
+        assert str_type == target.STRING
+        assert bytes_type == target.BINARY
+        assert int_type == target.NUMBER
+        assert dt_type == target.DATETIME
+        assert target.ROWID == "ROWID"
+
+    assert Date(2026, 1, 2) == datetime.date(2026, 1, 2)
+    assert Time(3, 4, 5) == datetime.time(3, 4, 5)
+    assert Timestamp(2026, 1, 2, 3, 4, 5) == datetime.datetime(2026, 1, 2, 3, 4, 5)
+    assert isinstance(DateFromTicks(100), datetime.date)
+    assert isinstance(TimeFromTicks(100), datetime.time)
+    assert isinstance(TimestampFromTicks(100), datetime.datetime)
+    assert Binary(bytearray(b"xy")) == b"xy"
+    assert STRING == "TEXT"
+    assert bytearray_type == BINARY
+    assert float_type == NUMBER
+    assert date_type == DATETIME
+    assert ROWID == 26
+
+    sync_sqlite_mod = SyncDBAPIModule(paramstyle="qmark", dialect="sqlite")
+    async_sqlite_mod = AsyncDBAPIModule(paramstyle="qmark", dialect="sqlite")
+    assert sync_sqlite_mod.sqlite_version == sqlite3.sqlite_version
+    assert sync_sqlite_mod.sqlite_version_info == sqlite3.sqlite_version_info
+    assert async_sqlite_mod.sqlite_version == sqlite3.sqlite_version
+    assert async_sqlite_mod.sqlite_version_info == sqlite3.sqlite_version_info
+
+    sync_pg_mod = SyncDBAPIModule(paramstyle="pyformat", dialect="postgresql")
+    async_pg_mod = AsyncDBAPIModule(paramstyle="pyformat", dialect="postgresql")
+    assert not hasattr(sync_pg_mod, "sqlite_version")
+    assert not hasattr(sync_pg_mod, "sqlite_version_info")
+    assert not hasattr(async_pg_mod, "sqlite_version")
+    assert not hasattr(async_pg_mod, "sqlite_version_info")
+
+    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        cur = sync_conn.cursor()
+        out_var = cur.var(int, size=8, arraysize=2, outconverter=lambda v: v * 10)
+        assert out_var.type_code is int
+        assert out_var.size == 8
+        assert out_var.arraysize == 2
+        assert out_var.getvalue(0) is None
+        out_var.setvalue(0, 4)
+        assert out_var.getvalue(0) == 40
+        assert cur.nextset() is None
+    finally:
+        sync_conn.close()
+
+    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    try:
+        acur = async_conn.cursor()
+        aout_var = acur.var(str, size=16, arraysize=1)
+        assert aout_var.type_code is str
+        assert aout_var.size == 16
+        aout_var.setvalue(0, "ok")
+        assert aout_var.getvalue(0) == "ok"
+        assert await acur.nextset() is None
+    finally:
+        await async_conn.close()
+
+    class _SyncNextSetDriver:
+        dialect = "mssql"
+
+        def __init__(self) -> None:
+            self._sets = [([(1,)], ("a",)), ([(2,)], ("b",))]
+
+        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+            _ = (sql, parameters)
+            return self._sets.pop(0)
+
+        def nextset(self) -> tuple[list[tuple[Any, ...]], Any] | None:
+            if self._sets:
+                return self._sets.pop(0)
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _AsyncNextSetDriver:
+        dialect = "mssql"
+
+        def __init__(self) -> None:
+            self._sets = [([(10,)], ("x",)), ([(20,)], ("y",))]
+
+        async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
+            _ = (sql, parameters)
+            return self._sets.pop(0)
+
+        async def nextset(self) -> tuple[list[tuple[Any, ...]], Any] | None:
+            if self._sets:
+                return self._sets.pop(0)
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    mssql_sync_conn = SyncDBAPIConnection("mssql+vtb://localhost/db", driver=_SyncNextSetDriver(), share_pool=False)
+    try:
+        mcur = mssql_sync_conn.cursor()
+        mcur.execute("SELECT 1; SELECT 2")
+        assert mcur.fetchall() == [(1,)]
+        assert mcur.nextset() is True
+        assert mcur.fetchall() == [(2,)]
+        assert mcur.nextset() is None
+    finally:
+        mssql_sync_conn.close()
+
+    mssql_async_conn = AsyncDBAPIConnection(
+        "mssql+vtb_async://localhost/db",
+        driver=_AsyncNextSetDriver(),
+        share_pool=False,
+    )
+    try:
+        amcur = mssql_async_conn.cursor()
+        await amcur.execute("SELECT 10; SELECT 20")
+        assert await amcur.fetchall() == [(10,)]
+        assert await amcur.nextset() is True
+        assert await amcur.fetchall() == [(20,)]
+        assert await amcur.nextset() is None
+    finally:
+        await mssql_async_conn.close()

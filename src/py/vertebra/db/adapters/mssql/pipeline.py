@@ -59,14 +59,21 @@ class SyncMSSQLPipeline:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Commit flushed operations on clean exit or roll back on error or unflushed queue."""
+        """Flush queued operations and commit on clean exit, or discard and roll back on error."""
         _ = (exc, tb)
-        has_unexecuted = bool(self._queue)
-        self._queue.clear()
-        if exc_type is not None or self._failed or has_unexecuted:
+        if exc_type is not None or self._failed:
+            self._queue.clear()
             if self._tx_active:
                 self._rollback_active()
             return
+        if self._queue:
+            try:
+                self.results()
+            except BaseException:
+                self._queue.clear()
+                if self._tx_active:
+                    self._rollback_active()
+                raise
         if self._tx_active:
             self._commit_active()
 
@@ -172,15 +179,23 @@ class AsyncMSSQLPipeline:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Commit flushed operations on clean exit or roll back on error or unflushed queue."""
+        """Flush queued operations and commit on clean exit, or discard and roll back on error."""
         _ = (exc, tb)
-        has_unexecuted = bool(self._queue)
-        self._queue.clear()
-        if exc_type is not None or self._failed or has_unexecuted:
+        if exc_type is not None or self._failed:
+            self._queue.clear()
             if self._tx_active:
                 with CancelScope(shield=True):
                     await self._rollback_active()
             return
+        if self._queue:
+            try:
+                await self.results()
+            except BaseException:
+                self._queue.clear()
+                if self._tx_active:
+                    with CancelScope(shield=True):
+                        await self._rollback_active()
+                raise
         if self._tx_active:
             await self._commit_active()
 

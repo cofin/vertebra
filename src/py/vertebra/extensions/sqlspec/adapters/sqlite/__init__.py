@@ -1,10 +1,21 @@
 """Vertebra SQLite SQLSpec adapter package with PEP 562 lazy attribute loading."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
+    from vertebra.extensions.sqlspec.adapters.sqlite._typing import (
+        SQLiteAsyncConnectionContext,
+        SQLiteAsyncSessionContext,
+        SQLiteConnectionParams,
+        SQLiteDriverFeatures,
+        SQLitePoolParams,
+        SQLiteSyncConnectionContext,
+        SQLiteSyncSessionContext,
+    )
     from vertebra.extensions.sqlspec.adapters.sqlite.adk import (
         SQLiteADKConfig,
         SQLiteAsyncADKArtifactStore,
@@ -36,18 +47,25 @@ __all__ = (
     "SQLiteAsyncADKMemoryStore",
     "SQLiteAsyncADKStore",
     "SQLiteAsyncConfig",
+    "SQLiteAsyncConnectionContext",
     "SQLiteAsyncDataDictionary",
     "SQLiteAsyncDriver",
+    "SQLiteAsyncSessionContext",
+    "SQLiteConnectionParams",
+    "SQLiteDriverFeatures",
     "SQLiteEventQueueStore",
     "SQLiteEventsConfig",
     "SQLiteLitestarConfig",
     "SQLiteLitestarStore",
+    "SQLitePoolParams",
     "SQLiteSyncADKArtifactStore",
     "SQLiteSyncADKMemoryStore",
     "SQLiteSyncADKStore",
     "SQLiteSyncConfig",
+    "SQLiteSyncConnectionContext",
     "SQLiteSyncDataDictionary",
     "SQLiteSyncDriver",
+    "SQLiteSyncSessionContext",
     "build_connection_config",
     "datetime_to_julian",
     "default_statement_config",
@@ -61,24 +79,43 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "SQLiteAsyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.sqlite.adk", "SQLiteAsyncADKMemoryStore"),
     "SQLiteAsyncADKStore": ("vertebra.extensions.sqlspec.adapters.sqlite.adk", "SQLiteAsyncADKStore"),
     "SQLiteAsyncConfig": ("vertebra.extensions.sqlspec.adapters.sqlite.config", "SQLiteAsyncConfig"),
+    "SQLiteAsyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.sqlite._typing",
+        "SQLiteAsyncConnectionContext",
+    ),
     "SQLiteAsyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.sqlite.data_dictionary",
         "SQLiteAsyncDataDictionary",
     ),
     "SQLiteAsyncDriver": ("vertebra.extensions.sqlspec.adapters.sqlite.driver", "SQLiteAsyncDriver"),
+    "SQLiteAsyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.sqlite._typing",
+        "SQLiteAsyncSessionContext",
+    ),
+    "SQLiteConnectionParams": ("vertebra.extensions.sqlspec.adapters.sqlite._typing", "SQLiteConnectionParams"),
+    "SQLiteDriverFeatures": ("vertebra.extensions.sqlspec.adapters.sqlite._typing", "SQLiteDriverFeatures"),
     "SQLiteEventQueueStore": ("vertebra.extensions.sqlspec.adapters.sqlite.events", "SQLiteEventQueueStore"),
     "SQLiteEventsConfig": ("vertebra.extensions.sqlspec.adapters.sqlite.events", "SQLiteEventsConfig"),
     "SQLiteLitestarConfig": ("vertebra.extensions.sqlspec.adapters.sqlite.litestar", "SQLiteLitestarConfig"),
     "SQLiteLitestarStore": ("vertebra.extensions.sqlspec.adapters.sqlite.litestar", "SQLiteLitestarStore"),
+    "SQLitePoolParams": ("vertebra.extensions.sqlspec.adapters.sqlite._typing", "SQLitePoolParams"),
     "SQLiteSyncADKArtifactStore": ("vertebra.extensions.sqlspec.adapters.sqlite.adk", "SQLiteSyncADKArtifactStore"),
     "SQLiteSyncADKMemoryStore": ("vertebra.extensions.sqlspec.adapters.sqlite.adk", "SQLiteSyncADKMemoryStore"),
     "SQLiteSyncADKStore": ("vertebra.extensions.sqlspec.adapters.sqlite.adk", "SQLiteSyncADKStore"),
     "SQLiteSyncConfig": ("vertebra.extensions.sqlspec.adapters.sqlite.config", "SQLiteSyncConfig"),
+    "SQLiteSyncConnectionContext": (
+        "vertebra.extensions.sqlspec.adapters.sqlite._typing",
+        "SQLiteSyncConnectionContext",
+    ),
     "SQLiteSyncDataDictionary": (
         "vertebra.extensions.sqlspec.adapters.sqlite.data_dictionary",
         "SQLiteSyncDataDictionary",
     ),
     "SQLiteSyncDriver": ("vertebra.extensions.sqlspec.adapters.sqlite.driver", "SQLiteSyncDriver"),
+    "SQLiteSyncSessionContext": (
+        "vertebra.extensions.sqlspec.adapters.sqlite._typing",
+        "SQLiteSyncSessionContext",
+    ),
     "build_connection_config": ("vertebra.extensions.sqlspec.adapters.sqlite.core", "build_connection_config"),
     "datetime_to_julian": ("vertebra.extensions.sqlspec.adapters.sqlite.core", "datetime_to_julian"),
     "default_statement_config": ("vertebra.extensions.sqlspec.adapters.sqlite.core", "default_statement_config"),

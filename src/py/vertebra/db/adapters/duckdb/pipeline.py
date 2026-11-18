@@ -22,17 +22,19 @@ _PIPELINE_SAVEPOINT_COUNTER = itertools.count(1)
 class SyncDuckDBPipeline:
     """Synchronous delayed-commit query pipeline batching operations on `SyncDuckDBDriver`."""
 
-    __slots__ = ("_driver", "_opened_transaction", "_ops", "_savepoint", "_transaction")
+    __slots__ = ("_driver", "_failed", "_opened_transaction", "_ops", "_savepoint", "_transaction")
 
     def __init__(self, driver: SyncDuckDBDriver, *, transaction: bool = True) -> None:
         self._driver = driver
         self._transaction = bool(transaction)
         self._opened_transaction = False
         self._savepoint: str | None = None
+        self._failed = False
         self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None, type[Any] | None]] = []
 
     def __enter__(self) -> Self:
         """Enter the synchronous pipeline context, opening a transaction or nested savepoint."""
+        self._failed = False
         if self._transaction:
             if self._driver.in_transaction:
                 sp_name = f"_vtb_pipe_{next(_PIPELINE_SAVEPOINT_COUNTER)}"
@@ -45,7 +47,7 @@ class SyncDuckDBPipeline:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """Flush remaining operations and commit on clean exit, or roll back on exception."""
-        if exc_type is not None:
+        if exc_type is not None or self._failed:
             self._ops.clear()
             if self._savepoint is not None:
                 sp_name = self._savepoint
@@ -60,6 +62,7 @@ class SyncDuckDBPipeline:
             if self._ops:
                 self.results()
         except BaseException:
+            self._ops.clear()
             if self._savepoint is not None:
                 sp_name = self._savepoint
                 self._savepoint = None
@@ -96,28 +99,34 @@ class SyncDuckDBPipeline:
         queued = list(self._ops)
         self._ops.clear()
         out: list[Any] = []
-        for kind, sql, params, schema_type in queued:
-            if kind == "select":
-                out.append(self._driver.select(sql, params, schema_type=schema_type))
-            else:
-                out.append(self._driver.execute(sql, params))
+        try:
+            for kind, sql, params, schema_type in queued:
+                if kind == "select":
+                    out.append(self._driver.select(sql, params, schema_type=schema_type))
+                else:
+                    out.append(self._driver.execute(sql, params))
+        except BaseException:
+            self._failed = True
+            raise
         return out
 
 
 class AsyncDuckDBPipeline:
     """Asynchronous delayed-commit query pipeline batching operations on `AsyncDuckDBDriver`."""
 
-    __slots__ = ("_driver", "_opened_transaction", "_ops", "_savepoint", "_transaction")
+    __slots__ = ("_driver", "_failed", "_opened_transaction", "_ops", "_savepoint", "_transaction")
 
     def __init__(self, driver: AsyncDuckDBDriver, *, transaction: bool = True) -> None:
         self._driver = driver
         self._transaction = bool(transaction)
         self._opened_transaction = False
         self._savepoint: str | None = None
+        self._failed = False
         self._ops: list[tuple[str, str, Sequence[Any] | Mapping[str, Any] | None, type[Any] | None]] = []
 
     async def __aenter__(self) -> Self:
         """Enter the asynchronous pipeline context, opening a transaction or nested savepoint."""
+        self._failed = False
         if self._transaction:
             if self._driver.in_transaction:
                 sp_name = f"_vtb_pipe_{next(_PIPELINE_SAVEPOINT_COUNTER)}"
@@ -130,7 +139,7 @@ class AsyncDuckDBPipeline:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """Flush remaining operations and commit on clean exit, or roll back under a shielded scope on error."""
-        if exc_type is not None:
+        if exc_type is not None or self._failed:
             self._ops.clear()
             with CancelScope(shield=True):
                 if self._savepoint is not None:
@@ -146,6 +155,7 @@ class AsyncDuckDBPipeline:
             if self._ops:
                 await self.results()
         except BaseException:
+            self._ops.clear()
             with CancelScope(shield=True):
                 if self._savepoint is not None:
                     sp_name = self._savepoint
@@ -183,9 +193,13 @@ class AsyncDuckDBPipeline:
         queued = list(self._ops)
         self._ops.clear()
         out: list[Any] = []
-        for kind, sql, params, schema_type in queued:
-            if kind == "select":
-                out.append(await self._driver.select(sql, params, schema_type=schema_type))
-            else:
-                out.append(await self._driver.execute(sql, params))
+        try:
+            for kind, sql, params, schema_type in queued:
+                if kind == "select":
+                    out.append(await self._driver.select(sql, params, schema_type=schema_type))
+                else:
+                    out.append(await self._driver.execute(sql, params))
+        except BaseException:
+            self._failed = True
+            raise
         return out

@@ -1,9 +1,73 @@
 """Type stubs for the vertebra._bigquery native extension module."""
 
 from collections.abc import Awaitable, Sequence
-from typing import Any, final
+from typing import Any, NotRequired, TypedDict, final, type_check_only
 
 from vertebra._vertebra import ArrowCursor
+
+@type_check_only
+class BigQueryFieldSchema(TypedDict):
+    """BigQuery result schema field descriptor."""
+
+    name: str
+    """Field name."""
+    type: str
+    """BigQuery legacy or standard SQL type name."""
+    mode: str
+    """Column mode (``NULLABLE``, ``REQUIRED``, or ``REPEATED``)."""
+    fields: NotRequired[list[BigQueryFieldSchema]]
+    """Nested STRUCT or RECORD child field schemas."""
+
+@type_check_only
+class BigQueryQueryResult(TypedDict):
+    """BigQuery synchronous or asynchronous query execution payload."""
+
+    columns: list[str]
+    """Ordered output column names."""
+    schema: list[BigQueryFieldSchema]
+    """Field schema metadata for output columns."""
+    rows: list[list[Any]]
+    """Decoded tabular result rows."""
+    total_rows: int
+    """Total rows matched by the query job."""
+    total_bytes_processed: int
+    """Total bytes processed across queried tables and partitions."""
+    total_bytes_billed: int
+    """Total bytes billed for query execution."""
+    slot_ms: int
+    """Cumulative slot milliseconds consumed by the query job."""
+    cache_hit: bool
+    """Whether results were served from BigQuery query cache."""
+    job_id: str | None
+    """Assigned BigQuery job identifier, if created."""
+    session_id: str | None
+    """Active BigQuery session identifier, if any."""
+    num_dml_affected_rows: int | None
+    """Number of rows inserted, updated, or deleted by a DML statement."""
+
+@type_check_only
+class BigQueryDryRunResult(TypedDict):
+    """BigQuery query dry-run cost and schema estimation payload."""
+
+    total_bytes_processed: int
+    """Estimated bytes that execution would scan."""
+    total_bytes_billed: int
+    """Estimated billable bytes for the query."""
+    cache_hit: bool
+    """Whether the dry-run metadata matched a cached result."""
+    referenced_tables: list[str]
+    """Fully-qualified table references inspected by the dry run."""
+    schema: list[BigQueryFieldSchema]
+    """Inferred output schema for the validated query."""
+
+@type_check_only
+class BigQueryAppendResult(TypedDict):
+    """BigQuery Storage Write API append confirmation payload."""
+
+    appended_rows: int
+    """Number of rows appended to the write stream."""
+    write_stream: str
+    """Target BigQuery Storage Write API stream resource name."""
 
 __version__: str
 FREE_THREADED: bool
@@ -90,14 +154,14 @@ class SyncBigQueryClient:
         job_timeout_ms: int | None = None,
         priority: str | None = None,
         labels: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    ) -> BigQueryQueryResult:
         """Execute a GoogleSQL query via `jobs.query` and paginate through `jobs.getQueryResults`."""
         ...
     def dry_run(
         self,
         sql: str,
         params_json: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> BigQueryDryRunResult:
         """Validate `sql` via `jobs.insert(dryRun=True)` and return byte and schema estimates."""
         ...
     def read_table_arrow(
@@ -117,7 +181,7 @@ class SyncBigQueryClient:
         parent_table: str,
         arrow_ipc_bytes: bytes,
         mode: str = "_default",
-    ) -> dict[str, Any]:
+    ) -> BigQueryAppendResult:
         """Append an Arrow IPC stream to `parent_table` via the Storage Write API."""
         ...
     def close(self) -> None:
@@ -197,14 +261,14 @@ class AsyncBigQueryClient:
         job_timeout_ms: int | None = None,
         priority: str | None = None,
         labels: dict[str, str] | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[BigQueryQueryResult]:
         """Execute a GoogleSQL query asynchronously on the shared Tokio runtime."""
         ...
     def dry_run(
         self,
         sql: str,
         params_json: str | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[BigQueryDryRunResult]:
         """Validate `sql` asynchronously via `jobs.insert(dryRun=True)`."""
         ...
     def read_table_arrow(
@@ -224,7 +288,7 @@ class AsyncBigQueryClient:
         parent_table: str,
         arrow_ipc_bytes: bytes,
         mode: str = "_default",
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[BigQueryAppendResult]:
         """Append an Arrow IPC stream asynchronously via the Storage Write API."""
         ...
     def close(self) -> None:

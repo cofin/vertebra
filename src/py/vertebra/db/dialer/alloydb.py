@@ -144,7 +144,9 @@ class _BaseAlloyDBDialer(_BaseGCPDialer):
         mode = int(auth_type)
         native_mod = import_optional("vertebra._vertebra")
         if native_mod is not None and mode in (AlloyDBAuthType.BUILT_IN, AlloyDBAuthType.IAM):
-            native_fn = getattr(native_mod, "encode_alloydb_metadata_exchange", None)
+            native_fn: Callable[[str, str, bool], bytes] | None = getattr(
+                native_mod, "encode_alloydb_metadata_exchange", None
+            )
             if callable(native_fn):
                 return bytes(native_fn(user_agent, oauth2_token, mode == AlloyDBAuthType.IAM))
 

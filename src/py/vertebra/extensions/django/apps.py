@@ -2,24 +2,53 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from vertebra.utils.module_loader import import_optional
+import msgspec
+
+from vertebra.extensions.django.config import VertebraConfig
+from vertebra.extensions.django.plugin import VertebraPlugin
+from vertebra.utils.module_loader import ensure_module, import_optional
+
+_apps_module = import_optional("django.apps")
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
+    from django.apps import AppConfig as _AppConfigBase
+else:
+    _AppConfigBase = _apps_module.AppConfig if _apps_module is not None else object
 
 __all__ = ("VertebraAppConfig",)
 
 
-class VertebraAppConfig:
+def __getattr__(name: str) -> Any:
+    """Lazily resolve optional Django AppConfig classes on demand."""
+    if name == "AppConfig":
+        return ensure_module("django.apps", package="django", extra="django").AppConfig
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+class VertebraAppConfig(_AppConfigBase):
     """Django ``AppConfig`` that registers Vertebra's routing, fastpath, and template bridges."""
 
     name: str = "vertebra.extensions.django"
     label: str = "vertebra_django"
-    verbose_name: str = "Vertebra Django Extension"
-    default_auto_field: str = "django.db.models.BigAutoField"
+    verbose_name = "Vertebra Django Extension"
+    default_auto_field = "django.db.models.BigAutoField"
 
-    def __init__(self, app_name: str = "vertebra.extensions.django", app_module: Any = None) -> None:
-        self.name = app_name
-        self.module = app_module if app_module is not None else import_optional(app_name)
+    def __init__(
+        self,
+        app_name: str | None = None,
+        app_module: ModuleType | None = None,
+    ) -> None:
+        if _apps_module is None:
+            ensure_module("django.apps", package="django", extra="django")
+        resolved_name = app_name or type(self).name
+        resolved_module = app_module if app_module is not None else ensure_module(resolved_name)
+        self.plugin: VertebraPlugin | None = None
+        super().__init__(resolved_name, resolved_module)
 
     def ready(self) -> None:
         """Initialize ``VertebraPlugin`` from ``django.conf.settings`` when Django starts."""
@@ -31,8 +60,10 @@ class VertebraAppConfig:
             return
         raw_cfg = getattr(settings, "VERTEBRA", None)
         if raw_cfg is not None:
-            from vertebra.extensions.django.config import VertebraConfig
-            from vertebra.extensions.django.plugin import VertebraPlugin
-
             cfg = raw_cfg if isinstance(raw_cfg, VertebraConfig) else VertebraConfig(**dict(raw_cfg))
-            VertebraPlugin(settings=settings, config=cfg)
+        else:
+            cfg = VertebraConfig()
+        root_urlconf = getattr(settings, "ROOT_URLCONF", None)
+        if cfg.root_urlconf is None and isinstance(root_urlconf, str) and root_urlconf:
+            cfg = msgspec.structs.replace(cfg, root_urlconf=root_urlconf)
+        self.plugin = VertebraPlugin(settings=settings, config=cfg)

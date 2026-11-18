@@ -3,28 +3,50 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig
+from sqlspec.core.cache import get_cache_config
 from sqlspec.core.parameters import TypedParameter
 from sqlspec.exceptions import (
     CheckViolationError,
+    ConnectionTimeoutError,
+    DatabaseConnectionError,
+    DataError,
     DeadlockError,
+    DialectNotSupportedError,
     ForeignKeyViolationError,
+    IntegrityError,
     NotNullViolationError,
+    OperationalError,
+    OperationCancelledError,
+    PermissionDeniedError,
+    QueryTimeoutError,
     SerializationConflictError,
     SQLParsingError,
+    SQLSpecError,
     UniqueViolationError,
 )
 
-from vertebra.extensions.sqlspec._driver import (
-    _normalize_bound_params,
-    map_native_database_exception,
-    native_statement_config,
-    unwrap_typed_parameters,
+from vertebra._vertebra import (
+    ConnectionFailure,
+    DatabaseError,
+    GoogleCloudAuthError,
+    GoogleCloudError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    PoolExhaustedError,
+    ProgrammingError,
+    QueryCancelledError,
+    SerializationFailure,
 )
+from vertebra._vertebra import DataError as NativeDataError
+from vertebra._vertebra import IntegrityError as NativeIntegrityError
+from vertebra._vertebra import NotFoundError as NativeNotFoundError
+from vertebra._vertebra import OperationalError as NativeOperationalError
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json
 
@@ -35,7 +57,9 @@ __all__ = (
     "escape_pg_literal",
     "is_pg_table_missing",
     "is_pg_unique_violation",
+    "map_native_database_exception",
     "map_postgres_exception",
+    "native_statement_config",
     "normalize_pg_many_parameters",
     "normalize_pg_parameters",
     "pg_ensure_utc",
@@ -47,6 +71,7 @@ __all__ = (
     "pg_table_ref",
     "pg_vector_literal",
     "postgres_storage_params_sql",
+    "unwrap_typed_parameters",
     "validate_pg_table_name",
 )
 
@@ -99,6 +124,143 @@ def pg_index_name(prefix: str, table_name: str, suffix: str) -> str:
 def escape_pg_literal(value: str) -> str:
     """Escape single quotes inside a PostgreSQL string literal."""
     return value.replace("'", "''")
+
+
+def unwrap_typed_parameters(bound: Any) -> Any:
+    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
+    if isinstance(bound, dict):
+        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
+    if isinstance(bound, tuple):
+        return tuple(unwrap_typed_parameters(value) for value in bound)
+    if isinstance(bound, list):
+        return [unwrap_typed_parameters(value) for value in bound]
+    if isinstance(bound, TypedParameter):
+        return unwrap_typed_parameters(bound.value)
+    return bound
+
+
+def _normalize_bound_params(params: Any) -> Any:
+    """Normalize empty bound containers to `None` while keeping populated payloads intact."""
+    if params is None:
+        return None
+    if isinstance(params, (dict, list, tuple)) and len(params) == 0:
+        return None
+    return params
+
+
+def native_statement_config(
+    dialect: str,
+    parameter_style: ParameterStyle,
+    **overrides: Any,
+) -> StatementConfig:
+    """Construct an isolated `StatementConfig` configured for the adapter's native bind syntax."""
+    default_style = overrides.pop("default_style", ParameterStyle.QMARK)
+    supported_styles = overrides.pop("supported_styles", None)
+    supported_execution_styles = overrides.pop("supported_execution_styles", None)
+    preserve_parameter_format = bool(overrides.pop("preserve_parameter_format", True))
+    enable_caching = overrides.pop("enable_caching", None)
+
+    if supported_styles is not None:
+        input_styles: Collection[ParameterStyle] = set(supported_styles)
+    elif parameter_style == ParameterStyle.NAMED_COLON:
+        input_styles = {ParameterStyle.QMARK, ParameterStyle.NAMED_COLON}
+    else:
+        input_styles = {default_style, parameter_style}
+
+    exec_styles: Collection[ParameterStyle] = (
+        set(supported_execution_styles) if supported_execution_styles is not None else {parameter_style}
+    )
+    caching = get_cache_config().compiled_cache_enabled if enable_caching is None else enable_caching
+    parameter_config = overrides.pop(
+        "parameter_config",
+        ParameterStyleConfig(
+            default_parameter_style=default_style,
+            supported_parameter_styles=set(input_styles),
+            default_execution_parameter_style=parameter_style,
+            supported_execution_parameter_styles=set(exec_styles),
+            preserve_parameter_format=preserve_parameter_format,
+        ),
+    )
+    return StatementConfig(
+        dialect=dialect,
+        enable_caching=caching,
+        parameter_config=parameter_config,
+        **overrides,
+    )
+
+
+def map_native_database_exception(exc: BaseException) -> Exception | None:
+    """Map Vertebra native `DatabaseError` hierarchy exceptions to `sqlspec.exceptions.*`."""
+    if isinstance(exc, SQLSpecError):
+        return None
+    if not isinstance(exc, (DatabaseError, GoogleCloudError)):
+        return None
+
+    message = str(exc)
+    lower = message.lower()
+    sqlstate = str(getattr(exc, "sqlstate", "") or "").upper()
+
+    if (
+        isinstance(exc, GoogleCloudAuthError)
+        or sqlstate in {"42501", "28000", "28P01"}
+        or any(token in lower for token in ("permission denied", "unauthenticated", "forbidden", "access denied"))
+    ):
+        return PermissionDeniedError(message)
+
+    if isinstance(exc, QueryCancelledError) or any(
+        token in lower for token in ("cancelled", "canceled", "query was interrupted", "57014")
+    ):
+        return OperationCancelledError(message)
+
+    if (
+        isinstance(exc, SerializationFailure)
+        or sqlstate in {"40001", "40P01"}
+        or any(token in lower for token in ("deadlock", "serialization", "aborted"))
+    ):
+        if "deadlock" in lower or sqlstate == "40P01":
+            return DeadlockError(message)
+        return SerializationConflictError(message)
+
+    if isinstance(exc, NativeIntegrityError) or sqlstate.startswith("23"):
+        if "unique" in lower or "duplicate" in lower or sqlstate == "23505":
+            return UniqueViolationError(message)
+        if "foreign key" in lower or sqlstate == "23503":
+            return ForeignKeyViolationError(message)
+        if "check constraint" in lower or sqlstate == "23514":
+            return CheckViolationError(message)
+        if "not null" in lower or "not-null" in lower or sqlstate == "23502":
+            return NotNullViolationError(message)
+        return IntegrityError(message)
+
+    if isinstance(exc, (ConnectionFailure, PoolExhaustedError)) or sqlstate.startswith("08"):
+        if "timeout" in lower or "timed out" in lower:
+            return ConnectionTimeoutError(message)
+        return DatabaseConnectionError(message)
+
+    if isinstance(exc, (NativeDataError, NativeNotFoundError)) or sqlstate.startswith("22"):
+        return DataError(message)
+
+    if isinstance(exc, NotSupportedError):
+        return DialectNotSupportedError(message)
+
+    if isinstance(exc, NativeOperationalError) or "timeout" in lower or "deadline" in lower:
+        if any(token in lower for token in ("timeout", "timed out", "deadline", "57014")):
+            return QueryTimeoutError(message)
+        if "deadlock" in lower:
+            return DeadlockError(message)
+        if any(token in lower for token in ("connection", "refused", "unreachable", "reset by peer")):
+            return DatabaseConnectionError(message)
+        return OperationalError(message)
+
+    if isinstance(exc, ProgrammingError) or any(
+        token in lower for token in ("syntax", "parse error", "no such table", "does not exist", "undefined")
+    ):
+        return SQLParsingError(message)
+
+    if isinstance(exc, (InterfaceError, InternalError, DatabaseError, GoogleCloudError)):
+        return OperationalError(message)
+
+    return OperationalError(message)
 
 
 def build_postgres_statement_config(statement_config: StatementConfig | None = None) -> StatementConfig:

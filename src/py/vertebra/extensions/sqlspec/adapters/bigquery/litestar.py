@@ -1,10 +1,14 @@
 """BigQuery Litestar session store backed by GoogleSQL ``MERGE`` and ``PARTITION BY DATE(expires_at)``."""
 
+from __future__ import annotations
+
 import base64
 from datetime import UTC, datetime, timedelta
-from typing import Any, TypedDict
+from typing import Any, ClassVar, NotRequired
 
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.config import LitestarConfig
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget
 from sqlspec.utils.sync_tools import async_
 
 from vertebra.extensions.sqlspec.adapters.bigquery.core import (
@@ -13,6 +17,7 @@ from vertebra.extensions.sqlspec.adapters.bigquery.core import (
     parse_utc_timestamp,
     positive_int_or_none,
     qualify_store_table,
+    quote_bigquery_table,
 )
 
 __all__ = (
@@ -21,16 +26,14 @@ __all__ = (
 )
 
 
-class BigQueryLitestarConfig(TypedDict, total=False):
+class BigQueryLitestarConfig(LitestarConfig):
     """Typed extension configuration for BigQuery Litestar session stores."""
 
-    session_table: str
-    """Qualified BigQuery table name storing Litestar HTTP sessions."""
-    with_partitioning: bool
+    with_partitioning: NotRequired[bool]
     """Enable BigQuery time-based partitioning on the session table."""
-    partition_expiration_days: int
+    partition_expiration_days: NotRequired[int]
     """Partition retention window in days when partitioning is enabled."""
-    require_partition_filter: bool
+    require_partition_filter: NotRequired[bool]
     """Require partition filter predicates in generated session table DDL."""
 
 
@@ -56,6 +59,7 @@ class BigQueryLitestarStore(BaseSQLSpecStore[Any]):
     __slots__ = ()
 
     adapter_name = "vertebra_bigquery"
+    _dialect: ClassVar[str] = "bigquery"
     extension_config_options = BaseSQLSpecStore.extension_config_options | frozenset(
         {
             "partition_expiration_days",
@@ -63,6 +67,10 @@ class BigQueryLitestarStore(BaseSQLSpecStore[Any]):
             "with_partitioning",
         }
     )
+
+    @staticmethod
+    def _ensure_table_name(table_name: str) -> None:
+        quote_bigquery_table(table_name)
 
     def _is_async_config(self) -> bool:
         return bool(getattr(self._config, "is_async", False))
@@ -77,6 +85,26 @@ class BigQueryLitestarStore(BaseSQLSpecStore[Any]):
             if isinstance(litestar_cfg, dict):
                 return dict(litestar_cfg)
         return {}
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return dataset-qualified ``SchemaTarget`` definitions for the BigQuery session table."""
+        return [SchemaTarget.from_ddl(self._qualified_table(), self._table_ddl(), dialect=self._dialect)]
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return ``[]`` because BigQuery clusters sessions inline instead of using secondary B-tree indexes."""
+        return []
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """No-op companion reconciliation because BigQuery declares clustering in table DDL."""
+        _ = driver
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """No-op async companion reconciliation because BigQuery declares clustering in table DDL."""
+        _ = driver
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return BigQuery ``DROP TABLE IF EXISTS`` downgrade statements for the session table."""
+        return [DropStatement(statement) for statement in self._drop_table_sql()]
 
     def _table_ddl(self) -> str:
         """Build the BigQuery ``CREATE TABLE IF NOT EXISTS`` DDL with optional date partitioning."""

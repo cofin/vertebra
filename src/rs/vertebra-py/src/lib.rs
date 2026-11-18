@@ -15,6 +15,7 @@ pub mod gcp_auth;
 pub mod gcp_identity;
 pub mod headers;
 pub mod msgspec_bridge;
+pub mod queue_ring;
 pub mod request;
 pub mod response;
 pub mod rsgi;
@@ -23,6 +24,7 @@ pub mod telemetry;
 pub mod text;
 pub mod transport;
 pub mod vector;
+pub mod webtransport;
 pub mod wsgi;
 
 pub use agent::{SchemaDigestCache, classify_jsonrpc_frame};
@@ -34,7 +36,7 @@ pub use async_bridge::{RustDbTaskAwaitable, TaskPanicError};
 pub use broker::{
     BrokerAttachClient, BrokerAttachServer, BrokerEngineRegistry, BrokerStats, LeaseBroker,
     LeaseGrant, PartitionStats, ReclaimedLease, ShmCache, ShmCacheStats, StatementCache,
-    StatementCacheStats, StatementPlan,
+    StatementCacheStats, StatementPlan, pubsub_publish,
 };
 pub use db::{AlloyDBDialer, ArrowCursor, CloudSQLDialer};
 pub use gcp_auth::{
@@ -47,12 +49,14 @@ pub use msgspec_bridge::{
     call_vectorcall, hydrate_one_vectorcall, hydrate_rows_vectorcall,
     instantiate_struct_vectorcall, orm_to_struct_vectorcall, pack_grpc_lpm_frame,
 };
+pub use queue_ring::ShmQueueRing;
 pub use request::{Request, RequestBatch, RequestBatchIterator};
 pub use response::Response;
 pub use rsgi::{RsgiHttpProtocol, RsgiScope, RsgiTransport, drive_rsgi_batch};
 pub use telemetry::{
     JWTGuard, LogSink, RateLimiter, format_traceparent, parse_traceparent, sanitize_sql,
 };
+pub use webtransport::{WebTransportSession, WebTransportStream, register_webtransport_handler};
 pub use wsgi::{
     WsgiEnviron, WsgiEnvironIterator, WsgiFileWrapper, WsgiInput, WsgiStartResponse,
     drive_wsgi_batch, run_wsgi_callable,
@@ -115,7 +119,9 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<broker::StatementCache>()?;
     m.add_class::<broker::ShmCacheStats>()?;
     m.add_class::<broker::ShmCache>()?;
+    m.add_class::<queue_ring::ShmQueueRing>()?;
     m.add_function(wrap_pyfunction!(broker::stable_hash64, m)?)?;
+    m.add_function(wrap_pyfunction!(broker::pubsub_publish, m)?)?;
     m.add_class::<agent::SchemaDigestCache>()?;
 
     // Agentic JSON-RPC fastpath
@@ -176,6 +182,7 @@ pub fn pymodule_init(m: &Bound<'_, PyModule>) -> PyResult<()> {
     db::register_db_bindings(m)?;
     vector::register_vector_bindings(m)?;
     text::register(m)?;
+    webtransport::register(m)?;
 
     Ok(())
 }

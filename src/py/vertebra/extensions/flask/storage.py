@@ -3,18 +3,41 @@
 from __future__ import annotations
 
 import mimetypes
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vertebra._vertebra import Response
-from vertebra.storage import AsyncObjectStore, GCSConfig, LocalConfig, MemoryConfig, S3Config, SyncObjectStore
+from vertebra.framework.storage import (
+    AsyncObjectStore,
+    AsyncStorageRegistry,
+    AzureConfig,
+    GCSConfig,
+    HTTPConfig,
+    LocalConfig,
+    MemoryConfig,
+    OCIConfig,
+    R2Config,
+    S3Config,
+    StorageConfig,
+    SyncObjectStore,
+    SyncStorageRegistry,
+)
+from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 __all__ = (
     "AsyncObjectStore",
     "AsyncStorageRegistry",
+    "AzureConfig",
     "GCSConfig",
+    "HTTPConfig",
     "LocalConfig",
     "MemoryConfig",
+    "OCIConfig",
+    "R2Config",
     "S3Config",
+    "StorageConfig",
     "SyncObjectStore",
     "SyncStorageRegistry",
     "attach_storage",
@@ -22,42 +45,8 @@ __all__ = (
 )
 
 
-class SyncStorageRegistry:
-    """Named ``SyncObjectStore`` registry attached to a Flask application."""
-
-    __slots__ = ("_stores",)
-
-    def __init__(self, stores: dict[str, SyncObjectStore] | None = None) -> None:
-        self._stores: dict[str, SyncObjectStore] = dict(stores or {})
-
-    def register(self, name: str, store: SyncObjectStore) -> None:
-        """Register a ``SyncObjectStore`` under ``name``."""
-        self._stores[name] = store
-
-    def get(self, name: str = "default") -> SyncObjectStore:
-        """Return the ``SyncObjectStore`` registered under ``name``."""
-        return self._stores[name]
-
-
-class AsyncStorageRegistry:
-    """Named ``AsyncObjectStore`` registry attached to a Flask application."""
-
-    __slots__ = ("_stores",)
-
-    def __init__(self, stores: dict[str, AsyncObjectStore] | None = None) -> None:
-        self._stores: dict[str, AsyncObjectStore] = dict(stores or {})
-
-    def register(self, name: str, store: AsyncObjectStore) -> None:
-        """Register an ``AsyncObjectStore`` under ``name``."""
-        self._stores[name] = store
-
-    def get(self, name: str = "default") -> AsyncObjectStore:
-        """Return the ``AsyncObjectStore`` registered under ``name``."""
-        return self._stores[name]
-
-
 def attach_storage(
-    app: Any,
+    app: Flask | Any,
     stores: SyncStorageRegistry
     | AsyncStorageRegistry
     | dict[str, SyncObjectStore]
@@ -68,6 +57,7 @@ def attach_storage(
     attribute: str = "storage",
 ) -> SyncStorageRegistry | AsyncStorageRegistry:
     """Attach a ``SyncStorageRegistry`` or ``AsyncStorageRegistry`` to a Flask application and ``app.extensions``."""
+    ensure_module("flask", extra="flask")
     registry: SyncStorageRegistry | AsyncStorageRegistry
     if isinstance(stores, (SyncStorageRegistry, AsyncStorageRegistry)):
         registry = stores

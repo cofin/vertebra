@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:02:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -57,6 +60,7 @@ sources:
 <!-- truth: start -->
 - `vertebra-core` provides batched JSONL logging (`AsyncLogCore`), W3C `traceparent` parsing and formatting (`W3cTraceContext`), and SQL literal sanitization (`sanitize_sql_statement`), exposed to Python through `vertebra._vertebra`.
 - `vertebra.telemetry` exposes `LogSink`, `LogHandler`, `TraceContext`, `SpanExporter`, `SqlTracePropagator` (`sqlcommenter`), `DbPoolRecorder`, `GenAiUsage`, and `GenAiRecorder`, consumed across `agent`, `db`, `embeddings`, `extensions`, `framework.queues`, and `server.lanes`.
+- `SpanExporter`, `GenAiRecorder`, and `DbPoolRecorder` guard their ring/sample buffers with per-instance `threading.Lock` instances for free-threaded safety, and `telemetry/genai.py` places its tuple `__all__` directly after top-level imports.
 <!-- truth: end -->
 
 Telemetry spans `vertebra-core` and `vertebra-py` Rust FFI primitives, the Python [`vertebra.telemetry`](../../../../../src/py/vertebra/telemetry/__init__.py)[^src-telemetry-init-py] package, and the TypeScript `@vertebra/client/telemetry` subpath. In production Python code, `vertebra.telemetry` is consumed across `vertebra.agent` (`AgentTelemetryRecorder`, `AgentRuntime`, `AgentChatController`, `MCPStreamableHttpClient`, and `McpToolBridge`), `vertebra.db` (`_common.py` and the BigQuery and Spanner adapters via `TraceContext` and `SqlTracePropagator`), `vertebra.embeddings` (`GenAiUsage`), `vertebra.extensions` (`broker/plugin.py` `DbPoolRecorder` and `apex/openapi.py` `inject_w3c_trace_context`), `vertebra.framework.queues` (`TraceContext` propagation), and `vertebra.server.lanes` (`SpanData`, `SpanExporter`, `TraceContext`), with unit coverage in [`test_telemetry_and_platform.py`](../../../../../src/py/tests/unit/telemetry/test_telemetry_and_platform.py)[^src-tests-unit-telemetry-test-telemetry-and-platform-py].
@@ -88,9 +92,9 @@ Telemetry spans `vertebra-core` and `vertebra-py` Rust FFI primitives, the Pytho
 |---|---|
 | [`TraceContext`](../../../../../src/py/vertebra/telemetry/otel.py)[^src-telemetry-otel-py] | `msgspec.Struct(frozen=True, gc=False, kw_only=True, cache_hash=True)`: `trace_id`, `span_id` (lowercase hex), `trace_flags=1`, `version=0`. `parse(header)` validates field lengths and hex and rejects version `ff` and zero ids. Also `generate(sampled=)`, `new_child()`, `format()`, `is_sampled`. |
 | `TraceContext.current` / `set_current` (static) | Read and bind the module-level `ContextVar` `_ACTIVE_TRACE_CTX`. `set_current` returns the reset `Token`. |
-| `SpanData` / `SpanExporter` | Frozen `msgspec.Struct(gc=False, kw_only=True)` span record. `SpanExporter` is a `deque(maxlen=capacity)` (default 4096) with `record_span` and `drain_spans`. When full, the oldest span is evicted silently. |
-| `DbPoolMetricSample` / `DbPoolRecorder` | Records lease acquisition duration, active leases, and wait queue metrics for `vertebra.extensions.broker`. |
-| `GenAiMetricSample` / `GenAiRecorder` / [`GenAiUsage`](../../../../../src/py/vertebra/telemetry/genai.py)[^src-telemetry-genai-py] | OpenTelemetry `gen_ai.client.token.usage` and `gen_ai.client.operation.duration` sample/histogram types (`GenAiDurationHistogram`, `ModelPricing`, `inject_w3c_trace_context`). |
+| `SpanData` / `SpanExporter` | Frozen `msgspec.Struct(gc=False, kw_only=True)` span record. `SpanExporter` wraps a `deque(maxlen=capacity)` (default 4096) guarded by `self._lock = threading.Lock()` across `record_span`, `get_spans`, and `drain_spans`; when full, the oldest span is evicted silently. |
+| `DbPoolMetricSample` / `DbPoolRecorder` | Records lease acquisition duration, active leases, and wait queue metrics for `vertebra.extensions.broker`; `samples`, `record_sample`, and `drain_samples` synchronize `self._samples` under `self._lock = threading.Lock()`. |
+| `GenAiMetricSample` / `GenAiRecorder` / [`GenAiUsage`](../../../../../src/py/vertebra/telemetry/genai.py)[^src-telemetry-genai-py] | OpenTelemetry `gen_ai.client.token.usage` and `gen_ai.client.operation.duration` sample/histogram types (`GenAiDurationHistogram`, `ModelPricing`, `inject_w3c_trace_context`). `GenAiRecorder` guards its bounded `deque(maxlen=max_samples)` with `self._lock = threading.Lock()` across `samples`, `record_generation`, `duration_histogram`, `total_cost`, `total_tokens`, and `drain`, and `telemetry/genai.py` places its tuple `__all__` at module top immediately after imports. |
 
 ## 4. SQL Trace Propagation (`db_propagation.py`)
 

@@ -149,7 +149,10 @@ class EmbeddingBroker:
             )
         )
         if state.flush_task is None or state.flush_task.done():
+            state.wakeup_event = asyncio.Event()
             state.flush_task = loop.create_task(self._flush_loop(loop, state))
+        if len(state.pending) >= self._config.max_batch_requests and state.wakeup_event is not None:
+            state.wakeup_event.set()
         return await fut
 
     async def submit_batch(self, texts: Sequence[str]) -> VectorBatchView:
@@ -174,8 +177,10 @@ class EmbeddingBroker:
             chunk_rows = await asyncio.to_thread(self._execute_length_sorted_rows, chunk_texts)
             for rel_idx, row in enumerate(chunk_rows):
                 all_rows[offset + rel_idx] = row
-            await asyncio.sleep(0.002)
+            await asyncio.sleep(0)
             if state.pending:
+                if state.wakeup_event is not None:
+                    state.wakeup_event.set()
                 await self._drain_pending_once(state)
 
         return VectorBatchView.from_f32_rows(all_rows, normalize=True)
@@ -260,9 +265,23 @@ class EmbeddingBroker:
             for closed_loop in closed_loops:
                 closed_state = self._loop_states.pop(closed_loop, None)
                 if closed_state is not None:
+                    closed_state.closed = True
+                    if closed_state.wakeup_event is not None:
+                        closed_state.wakeup_event.set()
                     self._terminate_process_nowait(closed_state.subprocess)
             state = self._loop_states.pop(loop, None)
         if state is not None:
+            state.closed = True
+            if state.wakeup_event is not None:
+                state.wakeup_event.set()
+            flush_task = state.flush_task
+            if flush_task is not None and not flush_task.done():
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await flush_task
+            while state.pending:
+                item = state.pending.popleft()
+                if not item.future.done():
+                    item.future.cancel()
             async with state.subprocess_lock:
                 proc = state.subprocess
                 if proc is not None:
@@ -335,10 +354,16 @@ class EmbeddingBroker:
             for closed_loop in closed_loops:
                 closed_state = self._loop_states.pop(closed_loop, None)
                 if closed_state is not None:
+                    closed_state.closed = True
+                    if closed_state.wakeup_event is not None:
+                        closed_state.wakeup_event.set()
                     self._terminate_process_nowait(closed_state.subprocess)
             state = self._loop_states.get(target_loop)
             if state is None:
-                state = _BrokerLoopState(pending=deque(), subprocess_lock=asyncio.Lock())
+                state = _BrokerLoopState(
+                    pending=deque(),
+                    subprocess_lock=asyncio.Lock(),
+                )
                 self._loop_states[target_loop] = state
                 weakref.finalize(target_loop, self._terminate_state_ref, weakref.ref(state))
             return state
@@ -361,9 +386,25 @@ class EmbeddingBroker:
     async def _flush_loop(self, loop: asyncio.AbstractEventLoop, state: _BrokerLoopState) -> None:
         """Wait for the coalesce window and drain pending singular requests on the owning loop."""
         try:
-            if self._config.coalesce_window_ms > 0.0:
-                await asyncio.sleep(self._config.coalesce_window_ms / 1000.0)
-            while state.pending:
+            wakeup = state.wakeup_event
+            if wakeup is None:
+                wakeup = asyncio.Event()
+                state.wakeup_event = wakeup
+            if self._config.coalesce_window_ms > 0.0 and not state.closed:
+                wakeup.clear()
+                if not state.closed and len(state.pending) < self._config.max_batch_requests:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            wakeup.wait(),
+                            timeout=self._config.coalesce_window_ms / 1000.0,
+                        )
+            if state.closed:
+                while state.pending:
+                    item = state.pending.popleft()
+                    if not item.future.done():
+                        item.future.cancel()
+                return
+            while state.pending and not state.closed:
                 await self._drain_pending_once(state)
         except asyncio.CancelledError:
             while state.pending:
@@ -372,10 +413,11 @@ class EmbeddingBroker:
                     item.future.cancel()
             raise
         finally:
-            if state.pending and not loop.is_closed():
+            if state.pending and not state.closed and not loop.is_closed():
                 state.flush_task = loop.create_task(self._flush_loop(loop, state))
             elif state.flush_task is asyncio.current_task():
                 state.flush_task = None
+                state.wakeup_event = None
 
     async def _drain_pending_once(self, state: _BrokerLoopState) -> None:
         """Drain one token-budgeted batch of singular requests and resolve their futures."""
@@ -503,6 +545,8 @@ class _BrokerLoopState(msgspec.Struct, weakref=True):
 
     pending: deque[_QueuedBrokerRequest]
     subprocess_lock: asyncio.Lock
+    wakeup_event: asyncio.Event | None = None
+    closed: bool = False
     flush_task: asyncio.Task[None] | None = None
     subprocess: asyncio.subprocess.Process | None = None
 

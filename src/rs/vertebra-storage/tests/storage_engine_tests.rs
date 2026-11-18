@@ -5337,3 +5337,443 @@ async fn test_verified_reads_get_get_file_and_verifying_stream() {
         drop(early_drop_stream);
     }
 }
+
+#[tokio::test]
+async fn test_atomic_rename_support_and_atomic_only_guard() {
+    use _storage::store::{ObjectStoreEngine, StorageError};
+    use std::sync::atomic::Ordering;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let mem_cfg = BackendConfig::Memory;
+    let local_cfg = BackendConfig::Local {
+        root: tmp.path().to_string_lossy().into_owned(),
+    };
+    let oci_cfg = BackendConfig::Oci {
+        bucket: "b".to_string(),
+        namespace: "ns".to_string(),
+        region: "us-ashburn-1".to_string(),
+        endpoint: Some("http://127.0.0.1:9".to_string()),
+        credentials: None,
+    };
+    let s3_cfg = BackendConfig::S3 {
+        bucket: "b".to_string(),
+        region: Some("us-east-1".to_string()),
+        access_key_id: Some("ak".to_string()),
+        secret_access_key: Some("sk".to_string()),
+        session_token: None,
+        virtual_hosted_style: false,
+        endpoint: Some("http://127.0.0.1:9".to_string()),
+        proxy_url: None,
+        allow_http: true,
+    };
+    let r2_cfg = BackendConfig::R2 {
+        bucket: "b".to_string(),
+        account_id: "acct".to_string(),
+        access_key_id: Some("ak".to_string()),
+        secret_access_key: Some("sk".to_string()),
+        jurisdiction: None,
+        endpoint: Some("http://127.0.0.1:9".to_string()),
+        allow_http: true,
+    };
+    let gcs_cfg = BackendConfig::Gcs {
+        bucket: "b".to_string(),
+        service_account_path: None,
+        service_account_key: None,
+        application_credentials_path: None,
+        access_token: Some("tok".to_string()),
+        credential_cache: None,
+        quota_project_id: None,
+        endpoint: Some("http://127.0.0.1:9".to_string()),
+        allow_http: true,
+        skip_signature: true,
+        allow_ambient_adc: false,
+    };
+    let azure_cfg = BackendConfig::Azure {
+        container: "c".to_string(),
+        account: Some("acct".to_string()),
+        access_key: Some("Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".to_string()),
+        endpoint: Some("http://127.0.0.1:9/acct".to_string()),
+        allow_http: true,
+    };
+    let http_cfg = BackendConfig::Http {
+        url: "http://127.0.0.1:9".to_string(),
+        allow_http: true,
+        headers: HashMap::new(),
+    };
+
+    assert!(mem_cfg.supports_atomic_rename());
+    assert!(local_cfg.supports_atomic_rename());
+    assert!(oci_cfg.supports_atomic_rename());
+    assert!(!s3_cfg.supports_atomic_rename());
+    assert!(!r2_cfg.supports_atomic_rename());
+    assert!(!gcs_cfg.supports_atomic_rename());
+    assert!(!azure_cfg.supports_atomic_rename());
+    assert!(!http_cfg.supports_atomic_rename());
+
+    let mem_engine = ObjectStoreEngine::new(mem_cfg).expect("mem engine");
+    let local_engine = ObjectStoreEngine::new(local_cfg).expect("local engine");
+    let oci_engine = ObjectStoreEngine::new(oci_cfg).expect("oci engine");
+    assert!(mem_engine.supports_atomic_rename());
+    assert!(local_engine.supports_atomic_rename());
+    assert!(oci_engine.supports_atomic_rename());
+
+    for cfg in [s3_cfg, r2_cfg, gcs_cfg, azure_cfg, http_cfg] {
+        let eng = ObjectStoreEngine::new(cfg).expect("non-atomic engine");
+        assert!(!eng.supports_atomic_rename());
+        let err = eng
+            .rename_with_options("a.txt", "b.txt", false, true)
+            .await
+            .expect_err("atomic_only=true must fail loudly on non-atomic backend");
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    for scheme in ["s3", "gs", "az", "r2", "http"] {
+        let inner = std::sync::Arc::new(CountingStore::new(std::time::Duration::ZERO));
+        let engine = ObjectStoreEngine::with_store(inner.clone(), scheme);
+        assert!(!engine.supports_atomic_rename());
+        engine
+            .put("src.txt", Bytes::from_static(b"payload"))
+            .await
+            .expect("seed src");
+        let err = engine
+            .rename_with_options("src.txt", "dst.txt", false, true)
+            .await
+            .expect_err("atomic_only must reject non-atomic store");
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+        assert_eq!(inner.put_calls.load(Ordering::SeqCst), 1);
+        assert!(engine.exists("src.txt").await.expect("src remains"));
+        assert!(!engine.exists("dst.txt").await.expect("dst untouched"));
+    }
+
+    mem_engine
+        .put("one.txt", Bytes::from_static(b"v1"))
+        .await
+        .expect("put one");
+    mem_engine
+        .rename_with_options("one.txt", "two.txt", true, true)
+        .await
+        .expect("atomic_only succeeds on memory");
+    assert_eq!(
+        &mem_engine.get("two.txt").await.expect("get two")[..],
+        b"v1"
+    );
+}
+
+#[tokio::test]
+async fn test_get_file_sync_durability_and_cleanup_on_stream_error() {
+    #[derive(Debug)]
+    struct FailingGetStore {
+        inner: object_store::memory::InMemory,
+    }
+
+    impl std::fmt::Display for FailingGetStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("FailingGetStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for FailingGetStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let stream: futures::stream::BoxStream<'static, object_store::Result<Bytes>> =
+                Box::pin(futures::stream::iter(vec![
+                    Ok(Bytes::from_static(b"partial-chunk")),
+                    Err(object_store::Error::Generic {
+                        store: "FailingGetStore",
+                        source: "simulated mid-stream failure".into(),
+                    }),
+                ]));
+            let meta = object_store::ObjectMeta {
+                location: location.clone(),
+                last_modified: chrono::Utc::now(),
+                size: 25,
+                e_tag: None,
+                version: None,
+            };
+            Ok(object_store::GetResult {
+                payload: object_store::GetResultPayload::Stream(stream),
+                meta,
+                range: 0..25,
+                attributes: Default::default(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let local_root = tmp.path().join("store");
+    let local_url = format!("file://{}", local_root.display());
+    let local_engine = ObjectStoreEngine::from_url(&local_url, None).expect("local engine");
+    local_engine
+        .put("durable/item.bin", Bytes::from_static(b"fsynced-payload"))
+        .await
+        .expect("put durable");
+
+    let dest_dir = tmp.path().join("downloads/nested");
+    let dest_file = dest_dir.join("item.bin");
+    local_engine
+        .get_file("durable/item.bin", dest_file.to_str().expect("utf8"))
+        .await
+        .expect("get_file succeeds with sync_all");
+    assert_eq!(
+        std::fs::read(&dest_file).expect("read synced target"),
+        b"fsynced-payload"
+    );
+    assert!(leftover_part_files(&dest_dir).is_empty());
+
+    let failing_engine = ObjectStoreEngine::with_store(
+        std::sync::Arc::new(FailingGetStore {
+            inner: object_store::memory::InMemory::new(),
+        }),
+        "memory",
+    );
+    let fail_dir = tmp.path().join("fail-downloads");
+    let fail_target = fail_dir.join("broken.bin");
+    let err = failing_engine
+        .get_file("broken.bin", fail_target.to_str().expect("utf8"))
+        .await
+        .expect_err("mid-stream error must propagate");
+    assert!(matches!(err, _storage::store::StorageError::ObjectStore(_)));
+    assert!(!fail_target.exists());
+    assert!(leftover_part_files(&fail_dir).is_empty());
+}
+
+#[test]
+fn test_verify_gcs_azure_and_oci_presigned_urls() {
+    use _storage::oci::{OciParConfig, build_oci_par_url, verify_oci_par_url};
+    use _storage::signing::{
+        GcsVerifyConfig, SigningError, sign_gcs_v4_hmac_url, sign_gcs_v4_url, verify_azure_sas_url,
+        verify_gcs_v4_url,
+    };
+
+    let now = 1_700_000_000_i64;
+    let rsa_sign_cfg = GcsSignConfig {
+        bucket: "ml-artifacts".to_string(),
+        service_account_email: "signer@project.iam.gserviceaccount.com".to_string(),
+        private_key_pem: Some(TEST_OCI_RSA_PEM.to_string()),
+        access_token: None,
+        endpoint: None,
+    };
+    let gcs_rsa_url = sign_gcs_v4_url(&rsa_sign_cfg, "GET", "models/weights.bin", 600, now)
+        .expect("sign gcs rsa");
+    let gcs_rsa_verify_cfg = GcsVerifyConfig {
+        bucket: "ml-artifacts".to_string(),
+        service_account_email: "signer@project.iam.gserviceaccount.com".to_string(),
+        verify_key_pem: Some(TEST_OCI_RSA_PEM.to_string()),
+        access_key_id: None,
+        secret_access_key: None,
+        endpoint: None,
+    };
+    assert!(
+        verify_gcs_v4_url(&gcs_rsa_verify_cfg, "GET", &gcs_rsa_url, now + 60).expect("valid rsa")
+    );
+    assert!(
+        !verify_gcs_v4_url(&gcs_rsa_verify_cfg, "PUT", &gcs_rsa_url, now + 60)
+            .expect("wrong method")
+    );
+    assert!(
+        !verify_gcs_v4_url(&gcs_rsa_verify_cfg, "GET", &gcs_rsa_url, now + 700).expect("expired")
+    );
+    assert!(
+        !verify_gcs_v4_url(
+            &gcs_rsa_verify_cfg,
+            "GET",
+            &gcs_rsa_url.replace(
+                "X-Goog-SignedHeaders=host",
+                "X-Goog-SignedHeaders=host%3Bx-evil"
+            ),
+            now + 60
+        )
+        .expect("tampered signed headers")
+    );
+    assert!(
+        !verify_gcs_v4_url(
+            &gcs_rsa_verify_cfg,
+            "GET",
+            &gcs_rsa_url.replace("storage.googleapis.com", "evil.example.com"),
+            now + 60
+        )
+        .expect("altered host")
+    );
+    assert!(
+        !verify_gcs_v4_url(&gcs_rsa_verify_cfg, "GET", "not a url", now + 60).expect("malformed")
+    );
+
+    let gcs_hmac_url = sign_gcs_v4_hmac_url(
+        "ml-artifacts",
+        "GOOG1EHMACKEY",
+        "super-secret-gcs-hmac-key",
+        "PUT",
+        "datasets/part 0.parquet",
+        600,
+        now,
+        None,
+    )
+    .expect("sign gcs hmac");
+    let gcs_hmac_verify_cfg = GcsVerifyConfig {
+        bucket: "ml-artifacts".to_string(),
+        service_account_email: String::new(),
+        verify_key_pem: None,
+        access_key_id: Some("GOOG1EHMACKEY".to_string()),
+        secret_access_key: Some("super-secret-gcs-hmac-key".to_string()),
+        endpoint: None,
+    };
+    assert!(
+        verify_gcs_v4_url(&gcs_hmac_verify_cfg, "PUT", &gcs_hmac_url, now + 10)
+            .expect("valid hmac")
+    );
+    assert!(
+        !verify_gcs_v4_url(&gcs_hmac_verify_cfg, "GET", &gcs_hmac_url, now + 10)
+            .expect("wrong method hmac")
+    );
+    assert!(
+        !verify_gcs_v4_url(&gcs_hmac_verify_cfg, "PUT", &gcs_hmac_url, now + 700)
+            .expect("expired hmac")
+    );
+
+    let missing_gcs_secret = GcsVerifyConfig {
+        bucket: "ml-artifacts".to_string(),
+        service_account_email: "signer@project.iam.gserviceaccount.com".to_string(),
+        verify_key_pem: None,
+        access_key_id: None,
+        secret_access_key: None,
+        endpoint: None,
+    };
+    assert!(matches!(
+        verify_gcs_v4_url(&missing_gcs_secret, "GET", &gcs_rsa_url, now),
+        Err(SigningError::InvalidKey(_))
+    ));
+
+    let sas_cfg = AzureSasConfig {
+        account: "acct1".to_string(),
+        container: "lake".to_string(),
+        access_key_b64:
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+                .to_string(),
+        endpoint: None,
+    };
+    let sas_get =
+        sign_azure_sas_url(&sas_cfg, "GET", "dir/file.parquet", 600, now).expect("sas get");
+    assert!(verify_azure_sas_url(&sas_cfg, "GET", &sas_get, now + 30).expect("valid sas get"));
+    assert!(!verify_azure_sas_url(&sas_cfg, "PUT", &sas_get, now + 30).expect("wrong sas perm"));
+    assert!(!verify_azure_sas_url(&sas_cfg, "GET", &sas_get, now - 10).expect("before st"));
+    assert!(!verify_azure_sas_url(&sas_cfg, "GET", &sas_get, now + 700).expect("after se"));
+    assert!(
+        !verify_azure_sas_url(&sas_cfg, "GET", &sas_get.replace("sp=r", "sp=rw"), now + 30)
+            .expect("tampered sp")
+    );
+    let sas_put =
+        sign_azure_sas_url(&sas_cfg, "PUT", "dir/file.parquet", 600, now).expect("sas put");
+    assert!(verify_azure_sas_url(&sas_cfg, "PUT", &sas_put, now + 30).expect("valid sas put"));
+    let sas_del =
+        sign_azure_sas_url(&sas_cfg, "DELETE", "dir/file.parquet", 600, now).expect("sas del");
+    assert!(verify_azure_sas_url(&sas_cfg, "DELETE", &sas_del, now + 30).expect("valid sas del"));
+
+    let oci_cfg = OciParConfig {
+        region: "us-ashburn-1".to_string(),
+        namespace: "mytenancy".to_string(),
+        bucket: "oci-warehouse".to_string(),
+        par_token: "par-tok-xyz".to_string(),
+        endpoint: None,
+    };
+    let oci_url = build_oci_par_url(&oci_cfg, "reports/q4.parquet", 600).expect("oci par url");
+    assert!(
+        verify_oci_par_url(
+            &oci_url,
+            &oci_cfg,
+            "reports/q4.parquet",
+            Some(now + 600),
+            now + 10
+        )
+        .expect("valid oci")
+    );
+    assert!(
+        !verify_oci_par_url(
+            &oci_url,
+            &oci_cfg,
+            "reports/other.parquet",
+            Some(now + 600),
+            now + 10
+        )
+        .expect("wrong key")
+    );
+    assert!(
+        !verify_oci_par_url(
+            &oci_url,
+            &oci_cfg,
+            "reports/q4.parquet",
+            Some(now + 600),
+            now + 700
+        )
+        .expect("expired oci")
+    );
+    assert!(
+        !verify_oci_par_url(
+            &oci_url.replace("par-tok-xyz", "par-tok-bad"),
+            &oci_cfg,
+            "reports/q4.parquet",
+            None,
+            now
+        )
+        .expect("tampered token")
+    );
+    assert!(
+        !verify_oci_par_url("not-a-url", &oci_cfg, "reports/q4.parquet", None, now)
+            .expect("malformed oci")
+    );
+}

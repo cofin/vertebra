@@ -23,9 +23,8 @@ def detect_interface(app: Any, configured: InterfaceMode = "auto") -> Literal["a
         return configured
     if is_rsgi_app(app):
         return "rsgi"
-    is_async_fn = inspect.iscoroutinefunction(app) or (
-        callable(app) and inspect.iscoroutinefunction(type(app).__call__)
-    )
+    app_cls: Any = type(app)
+    is_async_fn = inspect.iscoroutinefunction(app) or (callable(app) and inspect.iscoroutinefunction(app_cls.__call__))
     try:
         sig = inspect.signature(app)
         positional_params = [

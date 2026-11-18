@@ -28,7 +28,10 @@ __all__ = [
     "py_sign_hmac_url",
     "py_sign_oci_cavage_headers",
     "py_sign_s3_v4_url",
+    "py_verify_azure_sas_url",
+    "py_verify_gcs_v4_url",
     "py_verify_hmac_url",
+    "py_verify_oci_par_url",
     "py_verify_s3_v4_url",
     "sign_oci_par_url",
 ]
@@ -111,6 +114,8 @@ class SyncObjectStore:
     ) -> SyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
+    @property
+    def supports_atomic_rename(self) -> bool: ...
     def to_async(self) -> AsyncObjectStore: ...
     def put(
         self,
@@ -176,7 +181,14 @@ class SyncObjectStore:
     def exists(self, path: str) -> bool: ...
     def delete(self, path: str) -> None: ...
     def copy(self, src: str, dst: str, *, if_not_exists: bool = False) -> None: ...
-    def rename(self, src: str, dst: str, *, if_not_exists: bool = False) -> None: ...
+    def rename(
+        self,
+        src: str,
+        dst: str,
+        *,
+        if_not_exists: bool = False,
+        atomic_only: bool = False,
+    ) -> None: ...
     def list_page(
         self,
         prefix: str | None = None,
@@ -199,6 +211,8 @@ class AsyncObjectStore:
     ) -> AsyncObjectStore: ...
     @property
     def scheme(self) -> str: ...
+    @property
+    def supports_atomic_rename(self) -> bool: ...
     def to_sync(self) -> SyncObjectStore: ...
     def put(
         self,
@@ -264,7 +278,14 @@ class AsyncObjectStore:
     def exists(self, path: str) -> RustTaskAwaitable: ...
     def delete(self, path: str) -> RustTaskAwaitable: ...
     def copy(self, src: str, dst: str, *, if_not_exists: bool = False) -> RustTaskAwaitable: ...
-    def rename(self, src: str, dst: str, *, if_not_exists: bool = False) -> RustTaskAwaitable: ...
+    def rename(
+        self,
+        src: str,
+        dst: str,
+        *,
+        if_not_exists: bool = False,
+        atomic_only: bool = False,
+    ) -> RustTaskAwaitable: ...
     def list(self, prefix: str | None = None) -> RustTaskAwaitable: ...
     def list_page(
         self,
@@ -360,6 +381,37 @@ def py_sign_azure_sas_url(
     timestamp: int | None = None,
     endpoint: str | None = None,
 ) -> str: ...
+def py_verify_gcs_v4_url(
+    bucket: str,
+    service_account_email: str,
+    method: str,
+    signed_url: str,
+    timestamp: int | None = None,
+    verify_key_pem: str | None = None,
+    access_key_id: str | None = None,
+    secret_access_key: str | None = None,
+    endpoint: str | None = None,
+) -> bool: ...
+def py_verify_azure_sas_url(
+    account: str,
+    container: str,
+    access_key: str,
+    method: str,
+    signed_url: str,
+    timestamp: int | None = None,
+    endpoint: str | None = None,
+) -> bool: ...
+def py_verify_oci_par_url(
+    bucket: str,
+    namespace: str,
+    region: str,
+    par_token: str,
+    signed_url: str,
+    object_path: str | None = None,
+    expires_at: int | None = None,
+    timestamp: int | None = None,
+    endpoint: str | None = None,
+) -> bool: ...
 def py_chunk_r2_uniform_parts(
     data: Buffer | bytes,
     part_size: int = 8388608,

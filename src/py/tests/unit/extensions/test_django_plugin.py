@@ -9,28 +9,36 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from importlib import import_module
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
 import django
+import jwt
 import msgspec
 import pyarrow as pa
 import pydantic
 import pytest
+from django.apps import AppConfig, apps
 from django.conf import settings
 from django.core.cache.backends.base import DEFAULT_TIMEOUT
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import Storage
 from django.core.files.uploadedfile import UploadedFile
+from django.core.mail import EmailMessage as DjangoEmailMessage
+from django.core.mail.backends.base import BaseEmailBackend
 from django.core.management import call_command
+from django.core.management.base import BaseCommand
+from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.migrations.writer import MigrationWriter
 from django.db.models import FileField
 from django.db.models.fields.files import FieldFile
 from django.tasks import TaskResultStatus, task, task_backends
+from django.utils import deprecation as django_deprecation
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
@@ -47,6 +55,7 @@ from vertebra.extensions.django import (
     DjangoStorage,
     EmailBackend,
     FastPath,
+    JWKSVerifier,
     MCPConfig,
     MsgspecView,
     OpenAPIConfig,
@@ -60,6 +69,7 @@ from vertebra.extensions.django import (
     VertebraAppConfig,
     VertebraConfig,
     VertebraPlugin,
+    ViteBridge,
     ViteConfig,
     attach_vite,
     convert_django_pattern,
@@ -75,9 +85,21 @@ from vertebra.extensions.django.db.backends.sqlite3 import (
     DatabaseWrapper as SQLiteDatabaseWrapper,
 )
 from vertebra.extensions.django.fastpath import CompiledRoute as DjangoCompiledRoute
+from vertebra.extensions.django.mail import EmailConfig
+from vertebra.extensions.django.management.commands.vertebra_worker import Command as VertebraWorkerCommand
 from vertebra.extensions.django.templatetags.vertebra_vite import vite_asset, vite_hmr_client
+from vertebra.extensions.django.vite import clear_vite_bridges
 from vertebra.extensions.sqlspec.adapters import PostgresSyncConfig, SQLiteSyncConfig
 from vertebra.framework.di import Container
+from vertebra.framework.security import JWKSVerifier as NeutralJWKSVerifier
+from vertebra.framework.storage import (
+    AsyncStorageRegistry as NeutralAsyncStorageRegistry,
+)
+from vertebra.framework.storage import (
+    SyncStorageRegistry as NeutralSyncStorageRegistry,
+)
+from vertebra.framework.vite import ViteBridge as NeutralViteBridge
+from vertebra.framework.vite import ViteConfig as NeutralViteConfig
 from vertebra.server._fastpath_core import CompiledRouteBase
 from vertebra.storage import (
     AsyncObjectStore,
@@ -243,87 +265,91 @@ def test_django_route_compiler_fastpath_openapi_and_mcp(tmp_path: Any) -> None:
     static_dir.mkdir()
     settings = _MockDjangoSettings(str(static_dir))
 
-    plugin = VertebraPlugin(
-        urlpatterns=urlpatterns,
-        settings=settings,
-        config=VertebraConfig(
-            openapi=OpenAPIConfig(
-                title="Django Orders API",
-                version="2.0.0",
-                swagger=SwaggerDocsConfig(path="/swagger"),
-                asyncapi=AsyncAPIDocsConfig(path="/asyncapi"),
-                enabled_docs=("scalar", "swagger", "asyncapi"),
+    clear_vite_bridges()
+    try:
+        plugin = VertebraPlugin(
+            urlpatterns=urlpatterns,
+            settings=settings,
+            config=VertebraConfig(
+                openapi=OpenAPIConfig(
+                    title="Django Orders API",
+                    version="2.0.0",
+                    swagger=SwaggerDocsConfig(path="/swagger"),
+                    asyncapi=AsyncAPIDocsConfig(path="/asyncapi"),
+                    enabled_docs=("scalar", "swagger", "asyncapi"),
+                ),
+                mcp=MCPConfig(server_name="django-orders-mcp"),
+                vite=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"),
             ),
-            mcp=MCPConfig(server_name="django-orders-mcp"),
-            vite=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"),
-        ),
-    )
+        )
 
-    app_cfg = VertebraAppConfig()
-    app_cfg.ready()
+        app_cfg = VertebraAppConfig()
+        app_cfg.ready()
 
-    post_req = Request.from_parts(
-        method="POST",
-        path="/api/orders/77/",
-        headers=[(b"content-type", b"application/json")],
-        body=b'{"sku":"WIDGET","qty":4}',
-    )
-    post_resp = plugin.handle_request(post_req)
-    assert post_resp.status == 201
-    assert decode_json(bytes(post_resp.body)) == {"id": 77, "sku": "WIDGET", "qty": 4}
+        post_req = Request.from_parts(
+            method="POST",
+            path="/api/orders/77/",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"sku":"WIDGET","qty":4}',
+        )
+        post_resp = plugin.handle_request(post_req)
+        assert post_resp.status == 201
+        assert decode_json(bytes(post_resp.body)) == {"id": 77, "sku": "WIDGET", "qty": 4}
 
-    cbv_req = Request.from_parts(method="GET", path="/api/items/99/")
-    cbv_resp = plugin.handle_request(cbv_req)
-    assert cbv_resp.status == 200
-    assert decode_json(bytes(cbv_resp.body)) == {"id": 99, "sku": "CBV-SKU", "qty": 5}
+        cbv_req = Request.from_parts(method="GET", path="/api/items/99/")
+        cbv_resp = plugin.handle_request(cbv_req)
+        assert cbv_resp.status == 200
+        assert decode_json(bytes(cbv_resp.body)) == {"id": 99, "sku": "CBV-SKU", "qty": 5}
 
-    def _fallback_wsgi(environ: Any, start_response: Callable[..., Any]) -> list[bytes]:
-        start_response("404 Not Found", [("content-type", "text/plain")])
-        return [b"not-found"]
+        def _fallback_wsgi(environ: Any, start_response: Callable[..., Any]) -> list[bytes]:
+            start_response("404 Not Found", [("content-type", "text/plain")])
+            return [b"not-found"]
 
-    wrapped_wsgi = plugin.wrap_wsgi_application(_fallback_wsgi)
-    wsgi_env = WsgiEnviron.from_parts(
-        method="POST",
-        path="/api/pydantic/",
-        headers=[(b"content-type", b"application/json")],
-        body=b'{"sku":"bolt","qty":8}',
-    )
-    wsgi_resp = run_wsgi_callable(wrapped_wsgi, wsgi_env)
-    assert wsgi_resp.status == 200
-    assert decode_json(bytes(wsgi_resp.body)) == {"sku": "BOLT", "qty": 10}
+        wrapped_wsgi = plugin.wrap_wsgi_application(_fallback_wsgi)
+        wsgi_env = WsgiEnviron.from_parts(
+            method="POST",
+            path="/api/pydantic/",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"sku":"bolt","qty":8}',
+        )
+        wsgi_resp = run_wsgi_callable(wrapped_wsgi, wsgi_env)
+        assert wsgi_resp.status == 200
+        assert decode_json(bytes(wsgi_resp.body)) == {"sku": "BOLT", "qty": 10}
 
-    openapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/openapi.json"))
-    assert openapi_resp.status == 200
-    schema_doc = decode_json(bytes(openapi_resp.body))
-    assert "/api/orders/{order_id}/" in schema_doc["paths"]
+        openapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/openapi.json"))
+        assert openapi_resp.status == 200
+        schema_doc = decode_json(bytes(openapi_resp.body))
+        assert "/api/orders/{order_id}/" in schema_doc["paths"]
 
-    scalar_resp = plugin.handle_request(Request.from_parts(method="GET", path="/docs"))
-    assert scalar_resp.status == 200
-    assert b"@scalar/api-reference" in bytes(scalar_resp.body)
+        scalar_resp = plugin.handle_request(Request.from_parts(method="GET", path="/docs"))
+        assert scalar_resp.status == 200
+        assert b"@scalar/api-reference" in bytes(scalar_resp.body)
 
-    swagger_resp = plugin.handle_request(Request.from_parts(method="GET", path="/swagger"))
-    assert swagger_resp.status == 200
-    assert b"SwaggerUIBundle" in bytes(swagger_resp.body)
+        swagger_resp = plugin.handle_request(Request.from_parts(method="GET", path="/swagger"))
+        assert swagger_resp.status == 200
+        assert b"SwaggerUIBundle" in bytes(swagger_resp.body)
 
-    asyncapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/asyncapi"))
-    assert asyncapi_resp.status == 200
+        asyncapi_resp = plugin.handle_request(Request.from_parts(method="GET", path="/asyncapi"))
+        assert asyncapi_resp.status == 200
 
-    mcp_req = Request.from_parts(
-        method="POST",
-        path="/mcp",
-        headers=[(b"content-type", b"application/json")],
-        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
-    )
-    mcp_resp = plugin.handle_request(mcp_req)
-    assert mcp_resp.status == 200
-    mcp_data = decode_json(bytes(mcp_resp.body))
-    assert any(t["name"] == "create_django_order" for t in mcp_data["result"]["tools"])
+        mcp_req = Request.from_parts(
+            method="POST",
+            path="/mcp",
+            headers=[(b"content-type", b"application/json")],
+            body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+        mcp_resp = plugin.handle_request(mcp_req)
+        assert mcp_resp.status == 200
+        mcp_data = decode_json(bytes(mcp_resp.body))
+        assert any(t["name"] == "create_django_order" for t in mcp_data["result"]["tools"])
 
-    assert plugin.offload_bundle is not None
-    assert plugin.offload_bundle.compression is not None
-    assert plugin.offload_bundle.cors is not None
-    assert len(plugin.offload_bundle.static_mounts) == 1
-    assert "django.middleware.gzip.GZipMiddleware" not in settings.MIDDLEWARE
+        assert plugin.offload_bundle is not None
+        assert plugin.offload_bundle.compression is not None
+        assert plugin.offload_bundle.cors is not None
+        assert len(plugin.offload_bundle.static_mounts) == 1
+        assert "django.middleware.gzip.GZipMiddleware" not in settings.MIDDLEWARE
+    finally:
+        clear_vite_bridges()
 
 
 def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
@@ -371,6 +397,7 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
         alias="default",
     )
     assert pg_wrapper.engine == "postgresql"
+    assert isinstance(pg_wrapper, BaseDatabaseWrapper)
     assert pg_wrapper.pooler_config.pgbouncer is True
     assert pg_wrapper.pooler_config.pooler_mode == "transaction"
     assert pg_wrapper.build_alloydb_dialer() is not None
@@ -401,10 +428,14 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
         }
     )
     assert mysql_wrapper.engine == "mysql"
+    assert isinstance(mysql_wrapper, BaseDatabaseWrapper)
+    assert mysql_wrapper.display_name == "MySQL (Vertebra)"
+    assert mysql_wrapper.Database.paramstyle == "format"
     assert mysql_wrapper.build_cloud_sql_dialer() is not None
 
     sqlite_wrapper = SQLiteDatabaseWrapper({"NAME": ":memory:"})
     assert sqlite_wrapper.engine == "sqlite3"
+    assert isinstance(sqlite_wrapper, BaseDatabaseWrapper)
 
     oracle_wrapper = OracleDatabaseWrapper(
         {
@@ -413,7 +444,102 @@ def test_django_arrow_queryset_orm_bridge_and_db_backends() -> None:
         }
     )
     assert oracle_wrapper.engine == "oracle"
+    assert isinstance(oracle_wrapper, BaseDatabaseWrapper)
+    assert oracle_wrapper.display_name == "Oracle (Vertebra)"
+    assert oracle_wrapper.Database.paramstyle == "named"
     assert oracle_wrapper.wallet_zip == b"PK\x03\x04"
+
+
+def test_django_db_backends_never_inject_driver_shims() -> None:
+    """Importing all Django DB backends leaves MySQLdb and oracledb absent from sys.modules."""
+    assert "MySQLdb" not in sys.modules
+    assert "oracledb" not in sys.modules
+    script = (
+        "import importlib, sys\n"
+        "sys.modules['psycopg'] = None\n"
+        "sys.modules['psycopg2'] = None\n"
+        "before = set(sys.modules)\n"
+        "for name in (\n"
+        "    'vertebra.extensions.django.db.backends',\n"
+        "    'vertebra.extensions.django.db.backends.postgresql',\n"
+        "    'vertebra.extensions.django.db.backends.mysql',\n"
+        "    'vertebra.extensions.django.db.backends.oracle',\n"
+        "    'vertebra.extensions.django.db.backends.sqlite3',\n"
+        "    'vertebra.extensions.django.db.backends.spanner.base',\n"
+        "):\n"
+        "    importlib.import_module(name)\n"
+        "added = set(sys.modules) - before\n"
+        "assert 'MySQLdb' not in sys.modules, added\n"
+        "assert 'oracledb' not in sys.modules, added\n"
+        "assert not any(m.startswith(('MySQLdb.', 'oracledb.', 'psycopg.', 'psycopg2.')) for m in added), added\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("version_output", "expected"),
+    [
+        ("8.4.3", (8, 4, 3)),
+        ("11.4.2-MariaDB", (11, 4, 2)),
+    ],
+)
+def test_mysql_get_database_version_parses_server_strings(
+    version_output: str,
+    expected: tuple[int, int, int],
+) -> None:
+    """MySQL DatabaseWrapper.get_database_version parses MySQL and MariaDB SELECT VERSION() strings."""
+
+    class _VersionCursor:
+        def __init__(self) -> None:
+            self.executed_sql = ""
+
+        def execute(self, sql: str, params: Any = ()) -> None:
+            _ = params
+            self.executed_sql = sql
+
+        def fetchone(self) -> tuple[str]:
+            return (version_output,)
+
+        def close(self) -> None:
+            return None
+
+    class _VersionConnection:
+        def cursor(self) -> _VersionCursor:
+            return _VersionCursor()
+
+    wrapper = MySQLDatabaseWrapper({"NAME": "mydb"})
+    wrapper.connection = _VersionConnection()
+    assert wrapper.get_database_version() == expected
+
+
+@pytest.mark.parametrize("bad_row", [("unknown-server",), ("",), (None,), ()])
+def test_mysql_get_database_version_rejects_malformed_output(bad_row: tuple[Any, ...]) -> None:
+    """MySQL DatabaseWrapper.get_database_version raises ValueError when SELECT VERSION() has no version tuple."""
+
+    class _BadCursor:
+        def execute(self, sql: str, params: Any = ()) -> None:
+            _ = (sql, params)
+
+        def fetchone(self) -> tuple[Any, ...]:
+            return bad_row
+
+        def close(self) -> None:
+            return None
+
+    class _BadConnection:
+        def cursor(self) -> _BadCursor:
+            return _BadCursor()
+
+    wrapper = MySQLDatabaseWrapper({"NAME": "mydb"})
+    wrapper.connection = _BadConnection()
+    with pytest.raises(ValueError, match="Unable to determine MySQL version"):
+        wrapper.get_database_version()
 
 
 @pytest.mark.parametrize("backend", ["bigquery", "duckdb", "mssql"])
@@ -561,24 +687,28 @@ async def test_django_cache_storage_mail_channels_queues_security_and_templates(
     assert sec.jwt_guard is not None
     assert sec.jwt_guard.verify_header(None) is None
 
-    attach_vite(config=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
-    assert "@vite/client" in str(vite_hmr_client())
-    assert "http://localhost:5173/src/main.ts" in str(vite_asset("src/main.ts"))
+    clear_vite_bridges()
+    try:
+        attach_vite(config=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
+        assert "@vite/client" in str(vite_hmr_client())
+        assert "http://localhost:5173/src/main.ts" in str(vite_asset("src/main.ts"))
 
-    class _MockJinjaTemplate:
-        def render(self, **kwargs: Any) -> str:
-            return f"<h1>{kwargs.get('title', '')}</h1>{kwargs['vite_asset']('src/app.ts')}"
+        class _MockJinjaTemplate:
+            def render(self, **kwargs: Any) -> str:
+                return f"<h1>{kwargs.get('title', '')}</h1>{kwargs['vite_asset']('src/app.ts')}"
 
-    class _MockJinjaEnv:
-        def get_template(self, name: str) -> _MockJinjaTemplate:
-            assert name == "index.html"
-            return _MockJinjaTemplate()
+        class _MockJinjaEnv:
+            def get_template(self, name: str) -> _MockJinjaTemplate:
+                assert name == "index.html"
+                return _MockJinjaTemplate()
 
-    tpl_bridge = TemplateBridge(jinja_env=_MockJinjaEnv(), default_context={"title": "Dashboard"})
-    rendered_resp = tpl_bridge.render_to_response("index.html")
-    assert rendered_resp.status == 200
-    assert b"<h1>Dashboard</h1>" in bytes(rendered_resp.body)
-    assert b"http://localhost:5173/src/app.ts" in bytes(rendered_resp.body)
+        tpl_bridge = TemplateBridge(jinja_env=_MockJinjaEnv(), default_context={"title": "Dashboard"})
+        rendered_resp = tpl_bridge.render_to_response("index.html")
+        assert rendered_resp.status == 200
+        assert b"<h1>Dashboard</h1>" in bytes(rendered_resp.body)
+        assert b"http://localhost:5173/src/app.ts" in bytes(rendered_resp.body)
+    finally:
+        clear_vite_bridges()
 
 
 @pytest.mark.anyio
@@ -718,7 +848,8 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
     assert dj_pg.native_driver is sa_pg.driver
     assert dj_pg.broker is DatabaseRegistry.default_broker()
     assert sa_pg.broker is DatabaseRegistry.default_broker()
-    assert dj_pg.native_driver._dialer is not None
+    assert dj_pg.native_driver is not None
+    assert getattr(dj_pg.native_driver, "_dialer", None) is not None
 
     db_file = tmp_path / "shared_cross_fw.db"
     dj_sqlite = SQLiteDatabaseWrapper({"NAME": str(db_file)})
@@ -742,6 +873,62 @@ def test_cross_framework_shared_native_pool_and_lease_broker(tmp_path: Any) -> N
     assert isolated_dj.broker is not DatabaseRegistry.default_broker()
     assert isolated_sqlspec.create_driver().native_driver is not dj_sqlite.native_driver
     assert isolated_sa.driver is not dj_sqlite.native_driver
+
+
+@pytest.mark.parametrize(
+    ("method", "headers", "body", "expected_status", "expected_key", "expected_value"),
+    [
+        (
+            "POST",
+            [(b"content-type", b"application/json")],
+            b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
+            200,
+            "protocolVersion",
+            "2026-07-28",
+        ),
+        ("GET", [], b"", 405, None, None),
+        (
+            "POST",
+            [
+                (b"content-type", b"application/json"),
+                (b"host", b"api.example.com"),
+                (b"origin", b"https://evil.example.com"),
+            ],
+            b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+            403,
+            None,
+            None,
+        ),
+        (
+            "POST",
+            [(b"content-type", b"application/json")],
+            b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+            202,
+            "empty_body",
+            b"",
+        ),
+    ],
+    ids=["discover", "get-405", "forbidden-origin", "notification-202"],
+)
+def test_django_mcp_protocol_request_cases(
+    method: str,
+    headers: list[tuple[bytes, bytes]],
+    body: bytes,
+    expected_status: int,
+    expected_key: str | None,
+    expected_value: Any,
+) -> None:
+    """Django MCP endpoint handles discovery, method checks, origin validation, and notifications."""
+    plugin = VertebraPlugin(
+        urlpatterns=[],
+        config=VertebraConfig(mcp=MCPConfig(server_name="django-mcp")),
+    )
+    resp = plugin.handle_request(Request.from_parts(method=method, path="/mcp", headers=headers, body=body))
+    assert resp.status == expected_status
+    if expected_key == "protocolVersion":
+        assert decode_json(bytes(resp.body))["result"]["protocolVersion"] == expected_value
+    elif expected_key == "empty_body":
+        assert bytes(resp.body) == expected_value
 
 
 def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
@@ -771,50 +958,11 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
     )
     assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
 
-    discover_resp = plugin.handle_request(
-        Request.from_parts(
-            method="POST",
-            path="/mcp",
-            headers=[(b"content-type", b"application/json")],
-            body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
-        )
-    )
-    assert discover_resp.status == 200
-    assert decode_json(bytes(discover_resp.body))["result"]["protocolVersion"] == "2026-07-28"
-
-    get_resp = plugin.handle_request(Request.from_parts(method="GET", path="/mcp"))
-    assert get_resp.status == 405
-
-    origin_resp = plugin.handle_request(
-        Request.from_parts(
-            method="POST",
-            path="/mcp",
-            headers=[
-                (b"content-type", b"application/json"),
-                (b"host", b"api.example.com"),
-                (b"origin", b"https://evil.example.com"),
-            ],
-            body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
-        )
-    )
-    assert origin_resp.status == 403
-
-    notify_resp = plugin.handle_request(
-        Request.from_parts(
-            method="POST",
-            path="/mcp",
-            headers=[(b"content-type", b"application/json")],
-            body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
-        )
-    )
-    assert notify_resp.status == 202
-    assert bytes(notify_resp.body) == b""
-
     wrapped_wsgi = plugin.wrap_wsgi_application(lambda _e, sr: (sr("404 Not Found", []), [b""])[1])
     wsgi_get = run_wsgi_callable(wrapped_wsgi, WsgiEnviron.from_parts(method="GET", path="/mcp"))
     assert wsgi_get.status == 405
 
-    for seq in (1, 2):
+    def _call_tool(seq: int) -> None:
         wsgi_call = run_wsgi_callable(
             wrapped_wsgi,
             WsgiEnviron.from_parts(
@@ -825,6 +973,9 @@ def test_django_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
             ),
         )
         assert wsgi_call.status == 200
+
+    _call_tool(1)
+    _call_tool(2)
 
     assert len(observed_loops) == 2
     assert observed_loops[0] == observed_loops[1]
@@ -1228,27 +1379,27 @@ async def test_django_cache_relative_ttl_and_zero_timeout_semantics() -> None:
     """CacheBackend passes relative TTL durations rather than epoch timestamps and honors <=0/None timeouts."""
     cache = CacheBackend("memory://", {"TIMEOUT": 60, "KEY_PREFIX": "ttltest"})
     recorded_ttls: list[float | None] = []
-    orig_sync_backend = cache._sync_backend
+    orig_sync_store = cache._sync_store
 
-    class _ProxySyncBackend:
+    class _ProxySyncStore:
         def __init__(self, inner: Any) -> None:
             self._inner = inner
 
-        def set(self, key: str, value: Any, expiration_time: float | None = None) -> None:
-            recorded_ttls.append(expiration_time)
-            self._inner.set(key, value, expiration_time=expiration_time)
+        def set(self, key: str, value: bytes, *, ttl: float | None = None) -> None:
+            recorded_ttls.append(ttl)
+            self._inner.set(key, value, ttl=ttl)
 
         def __getattr__(self, name: str) -> Any:
             return getattr(self._inner, name)
 
-    cast(Any, cache)._sync_backend = _ProxySyncBackend(orig_sync_backend)
+    cast(Any, cache)._sync_store = _ProxySyncStore(orig_sync_store)
     try:
         cache.set("default_ttl", "v1", timeout=DEFAULT_TIMEOUT)
         cache.set("explicit_ttl", "v2", timeout=30)
         cache.set("delta_ttl", "v3", timeout=dt.timedelta(seconds=45))
         cache.set("forever_ttl", "v4", timeout=None)
 
-        assert recorded_ttls == [60.0, 30.0, 45.0, -1.0]
+        assert recorded_ttls == [60.0, 30.0, 45.0, None]
         assert cache.get("forever_ttl") == "v4"
 
         cache.set("default_ttl", "expired", timeout=0)
@@ -1326,3 +1477,220 @@ def test_django_database_wrapper_cursor_select_to_arrow_and_schema(tmp_path: Pat
         ]
     finally:
         sqlite_wrapper.close()
+
+
+def test_django_app_config_create_setup_and_root_urlconf_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify AppConfig.create, django.setup registry entry, zero-arg init, and ROOT_URLCONF plugin dispatch."""
+    live_cfg = cast("VertebraAppConfig", apps.get_app_config("vertebra_django"))
+    assert isinstance(live_cfg, AppConfig)
+    assert live_cfg.label == "vertebra_django"
+    assert isinstance(live_cfg.plugin, VertebraPlugin)
+
+    direct_cfg = VertebraAppConfig()
+    assert isinstance(direct_cfg, AppConfig)
+    assert direct_cfg.name == "vertebra.extensions.django"
+    assert direct_cfg.label == "vertebra_django"
+
+    def ping_view(request: Request) -> dict[str, str]:
+        _ = request
+        return {"status": "ok"}
+
+    vertebra_view(ping_view, methods=("GET",))
+
+    urlconf_mod = ModuleType("test_vertebra_root_urlconf")
+    cast("Any", urlconf_mod).urlpatterns = [_MockURLPattern("health/", ping_view, name="health")]
+    monkeypatch.setitem(sys.modules, "test_vertebra_root_urlconf", urlconf_mod)
+    monkeypatch.setattr(settings, "ROOT_URLCONF", "test_vertebra_root_urlconf", raising=False)
+    monkeypatch.setattr(settings, "VERTEBRA", {"compile_routes": True, "enable_fastpath": True}, raising=False)
+
+    created_cfg = cast("VertebraAppConfig", AppConfig.create("vertebra.extensions.django.apps.VertebraAppConfig"))
+    assert isinstance(created_cfg, AppConfig)
+    assert created_cfg.label == "vertebra_django"
+    created_cfg.ready()
+    assert created_cfg.plugin is not None
+    resp = created_cfg.plugin.handle_request(Request.from_parts(method="GET", path="/health/"))
+    assert resp.status == 200
+    assert decode_json(bytes(resp.body)) == {"status": "ok"}
+
+
+def test_django_email_backend_base_class_open_close_and_zero_deprecation_warnings() -> None:
+    """Verify EmailBackend subclasses BaseEmailBackend with suppress_send=False default and zero 2028 warnings."""
+    default_backend = EmailBackend()
+    assert isinstance(default_backend, BaseEmailBackend)
+    assert default_backend.suppress_send is False
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        backend = EmailBackend(
+            host="localhost",
+            port=25,
+            username="test-user",
+            password="test-token-placeholder",
+            use_tls=False,
+            fail_silently=False,
+            suppress_send=True,
+            alias="default",
+        )
+        assert backend.open() is False
+        django_msg = DjangoEmailMessage(
+            subject="Order Ready",
+            body="Dispatched",
+            from_email="noreply@example.com",
+            to=["customer@example.com"],
+        )
+        assert backend.send_messages([django_msg]) == 1
+        assert len(backend.outbox) == 1
+        assert backend.outbox[0].subject == "Order Ready"
+        assert backend.outbox[0].to == ("customer@example.com",)
+        backend.close()
+
+    warning_cls = cast("type[Warning]", getattr(django_deprecation, "RemovedInDjango2028Warning", DeprecationWarning))
+    deprecations = [w for w in caught if issubclass(w.category, warning_cls)]
+    assert deprecations == []
+
+    live_backend = EmailBackend(
+        suppress_send=False,
+        config=EmailConfig(backend="resend", api_key="test-token-placeholder"),
+    )
+    assert live_backend.open() is True
+    assert live_backend.open() is False
+    live_backend.close()
+    assert live_backend.open() is True
+    live_backend.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("timeout", "expected_present"),
+    [
+        (0.5, True),
+        (30, True),
+        (dt.timedelta(seconds=45), True),
+        (None, True),
+        (0, False),
+        (-1, False),
+    ],
+    ids=["float", "int", "timedelta", "none", "zero", "negative"],
+)
+async def test_django_cache_backend_ttl_variants_and_shared_memory_consistency(
+    timeout: float | int | dt.timedelta | None,
+    expected_present: bool,
+) -> None:
+    """Verify CacheBackend accepts float, int, timedelta, and None TTLs and shares memory:// state."""
+    cache = CacheBackend("memory://", {"TIMEOUT": 0.5, "KEY_PREFIX": "ttl_variant"})
+    try:
+        assert cache.default_timeout == 0.5
+        cache.set("sync_key", {"ok": True}, timeout=timeout)
+        assert (await cache.aget("sync_key") is not None) is expected_present
+        await cache.aset("async_key", {"ok": "async"}, timeout=timeout)
+        assert (cache.get("async_key") is not None) is expected_present
+    finally:
+        cache.close()
+        await cache.aclose()
+
+
+@pytest.mark.anyio
+async def test_django_adapters_delegate_to_neutral_framework_modules_and_security_middleware() -> None:
+    """Verify Django adapters re-export neutral modules and enforce SecurityBridge middleware."""
+    assert JWKSVerifier is NeutralJWKSVerifier
+    assert SyncStorageRegistry is NeutralSyncStorageRegistry
+    assert AsyncStorageRegistry is NeutralAsyncStorageRegistry
+    assert ViteBridge is NeutralViteBridge
+    assert ViteConfig is NeutralViteConfig
+
+    secret = "test-token-placeholder-32-bytes-minimum"
+    token = jwt.encode(
+        {"sub": "django-user", "exp": int(time.time()) + 300},
+        secret,
+        algorithm="HS256",
+    )
+    sec = SecurityBridge(jwt_secret=secret, rate_limit_capacity=2, rate_limit_refill=0.0)
+    middleware = sec.create_middleware(lambda req: SimpleNamespace(status_code=200, principal=req.vertebra_principal))
+
+    authed_req = SimpleNamespace(META={"REMOTE_ADDR": "10.0.0.1", "HTTP_AUTHORIZATION": f"Bearer {token}"})
+    ok_resp = middleware(authed_req)
+    assert ok_resp.status_code == 200
+    assert ok_resp.principal.sub == "django-user"
+
+    unauth_req = SimpleNamespace(META={"REMOTE_ADDR": "10.0.0.1"})
+    unauth_resp = middleware(unauth_req)
+    assert unauth_resp.status_code == 401
+
+    limited_resp = middleware(authed_req)
+    assert limited_resp.status_code == 429
+
+    layer = ChannelLayer()
+    await layer.send("orders.events", {"type": "created", "id": 1})
+    assert await layer.receive("orders.events") == {"type": "created", "id": 1}
+    await layer.aclose()
+
+    clear_vite_bridges()
+    try:
+        bridge = attach_vite(config=ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
+        assert "@vite/client" in bridge.hmr_client_tag()
+        assert "http://localhost:5173/src/main.ts" in bridge.asset_tags("src/main.ts")
+    finally:
+        clear_vite_bridges()
+
+
+def test_django_extension_subprocess_isolation_without_cross_imports() -> None:
+    """All non-DB Django modules import cleanly when django, litestar, flask, and alchemy are blocked."""
+    script = """
+import importlib
+import sys
+
+for blocked in (
+    "django",
+    "litestar",
+    "flask",
+    "alchemy",
+    "vertebra.extensions.litestar",
+    "vertebra.extensions.flask",
+    "vertebra.extensions.alchemy",
+):
+    sys.modules[blocked] = None
+
+modules = (
+    "vertebra.extensions.django",
+    "vertebra.extensions.django.apps",
+    "vertebra.extensions.django.cache",
+    "vertebra.extensions.django.channels",
+    "vertebra.extensions.django.config",
+    "vertebra.extensions.django.fastpath",
+    "vertebra.extensions.django.mail",
+    "vertebra.extensions.django.mcp",
+    "vertebra.extensions.django.offload",
+    "vertebra.extensions.django.openapi",
+    "vertebra.extensions.django.orm",
+    "vertebra.extensions.django.plugin",
+    "vertebra.extensions.django.router",
+    "vertebra.extensions.django.security",
+    "vertebra.extensions.django.storage",
+    "vertebra.extensions.django.tasks",
+    "vertebra.extensions.django.templates",
+    "vertebra.extensions.django.templatetags.vertebra_vite",
+    "vertebra.extensions.django.vite",
+    "vertebra.extensions.django.management.commands.vertebra_worker",
+)
+for mod_name in modules:
+    importlib.import_module(mod_name)
+
+from vertebra.extensions.django.management.commands.vertebra_worker import Command
+from vertebra.typing import MissingDependencyError
+
+try:
+    Command()
+except MissingDependencyError as exc:
+    assert "django" in str(exc)
+else:
+    raise AssertionError("Expected MissingDependencyError when invoking Command without django")
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_django_worker_command_inherits_base_command() -> None:
+    """Vertebra worker Command inherits from Django BaseCommand when Django is installed."""
+    assert issubclass(VertebraWorkerCommand, BaseCommand)
+    cmd = VertebraWorkerCommand()
+    assert isinstance(cmd, BaseCommand)

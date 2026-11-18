@@ -36,7 +36,7 @@ export class SseClient {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manuallyClosed = false;
-  private handlers = new Map<string, Set<SseEventHandler<any>>>();
+  private handlers = new Map<string, Set<SseEventHandler<unknown>>>();
   private boundDomListeners = new Map<string, (ev: Event) => void>();
   private seenIdempotencyKeys = new BoundedKeySet(MAX_IDEMPOTENCY_KEYS);
 
@@ -70,12 +70,15 @@ export class SseClient {
         this.attachEventListener(this.es, event);
       }
     }
-    set.add(handler as SseEventHandler<any>);
+    const wrapped: SseEventHandler<unknown> = (data, meta) => {
+      handler(data as T, meta);
+    };
+    set.add(wrapped);
 
     return () => {
       const current = this.handlers.get(event);
       if (!current) return;
-      current.delete(handler as SseEventHandler<any>);
+      current.delete(wrapped);
       if (current.size === 0) {
         this.handlers.delete(event);
         const domListener = this.boundDomListeners.get(event);
@@ -140,20 +143,19 @@ export class SseClient {
       if (msgEvent.lastEventId) {
         this.lastEventId = msgEvent.lastEventId;
       }
-      let parsed: any = msgEvent.data;
+      let parsed: unknown = msgEvent.data;
       if (typeof msgEvent.data === "string") {
         try {
-          parsed = JSON.parse(msgEvent.data);
+          parsed = JSON.parse(msgEvent.data) as unknown;
         } catch {
           parsed = msgEvent.data;
         }
       }
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        typeof parsed.idempotencyKey === "string" &&
-        !this.seenIdempotencyKeys.add(parsed.idempotencyKey)
-      ) {
+      const idempotencyKey =
+        parsed !== null && typeof parsed === "object" && "idempotencyKey" in parsed
+          ? (parsed as Record<string, unknown>).idempotencyKey
+          : undefined;
+      if (typeof idempotencyKey === "string" && !this.seenIdempotencyKeys.add(idempotencyKey)) {
         return;
       }
       const meta: SseMessageMeta = {

@@ -1,6 +1,9 @@
 """Fixtures launching embedded and SHM vertebra-server binaries over loopback sockets."""
 
+import contextlib
+import errno
 import os
+import selectors
 import signal
 import socket
 import subprocess
@@ -14,7 +17,7 @@ import msgspec
 import pytest
 
 import vertebra.cli as _vtb_cli
-from vertebra.supervisor._supervisor import find_server_binary
+from vertebra.supervisor._supervisor import EmbeddedPythonRuntime, find_server_binary
 
 __all__ = (
     "LiveServerHandle",
@@ -26,6 +29,7 @@ _ = _vtb_cli
 _STREAMING_FIXTURE_MODULE = textwrap.dedent(
     """\
     import asyncio
+    import threading
     from collections.abc import AsyncIterator
     from typing import Any
 
@@ -33,15 +37,42 @@ _STREAMING_FIXTURE_MODULE = textwrap.dedent(
     from vertebra.framework._app import App
     from vertebra.server._asgi._sse import SseEvent, SseResponse
 
-    _GATES: dict[str, asyncio.Event] = {}
+
+    class _CrossThreadGate:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._is_set = False
+            self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+
+        async def wait(self) -> None:
+            loop = asyncio.get_running_loop()
+            ev = asyncio.Event()
+            with self._lock:
+                if self._is_set:
+                    return
+                self._waiters.append((loop, ev))
+            await ev.wait()
+
+        def set(self) -> None:
+            with self._lock:
+                self._is_set = True
+                waiters = list(self._waiters)
+                self._waiters.clear()
+            for loop, ev in waiters:
+                loop.call_soon_threadsafe(ev.set)
 
 
-    def _gate_for(stream_id: str) -> asyncio.Event:
-        gate = _GATES.get(stream_id)
-        if gate is None:
-            gate = asyncio.Event()
-            _GATES[stream_id] = gate
-        return gate
+    _GATES_LOCK = threading.Lock()
+    _GATES: dict[str, _CrossThreadGate] = {}
+
+
+    def _gate_for(stream_id: str) -> _CrossThreadGate:
+        with _GATES_LOCK:
+            gate = _GATES.get(stream_id)
+            if gate is None:
+                gate = _CrossThreadGate()
+                _GATES[stream_id] = gate
+            return gate
 
 
     async def _asgi_sse_app(scope: Any, receive: Any, send: Any) -> None:
@@ -137,9 +168,10 @@ def live_vertebra_server(
     port = _reserve_ephemeral_port()
     env = dict(os.environ)
     env["VERTEBRA_SERVER_BINARY"] = str(binary_path)
-    env["PYTHONHOME"] = sys.base_prefix
+    EmbeddedPythonRuntime.detect().apply(env)
     env["VERTEBRA_SHM_PROFILE"] = "compact"
-    py_paths = [str(app_dir), str(repo_root / "src" / "py"), *(p for p in sys.path if p)]
+    vtb_pkg_root = str(Path(_vtb_cli.__file__).resolve().parents[2])
+    py_paths = [str(app_dir), vtb_pkg_root, *(p for p in sys.path if p), str(repo_root / "src" / "py")]
     env["PYTHONPATH"] = os.pathsep.join(py_paths)
 
     cmd = [
@@ -165,17 +197,20 @@ def live_vertebra_server(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
     try:
         _wait_until_healthy("127.0.0.1", port, proc)
         yield LiveServerHandle(host="127.0.0.1", port=port, topology=topology)
     finally:
         if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGTERM)
             try:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=2.0)
 
 
@@ -187,26 +222,100 @@ def _reserve_ephemeral_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _probe_health_nonblocking(
+    selector: selectors.BaseSelector,
+    host: str,
+    port: int,
+    request_bytes: bytes,
+    deadline: float,
+) -> bool:
+    """Attempt one non-blocking HTTP /health handshake bounded by ``deadline``."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    try:
+        err = sock.connect_ex((host, port))
+        if err not in (0, errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK):
+            return False
+        selector.register(sock, selectors.EVENT_WRITE)
+        while time.monotonic() < deadline:
+            remaining = min(0.05, max(0.0, deadline - time.monotonic()))
+            events = selector.select(timeout=remaining)
+            for key, _ in events:
+                if key.fileobj is sock:
+                    so_err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if so_err != 0:
+                        return False
+                    sock.sendall(request_bytes)
+                    selector.modify(sock, selectors.EVENT_READ)
+                    break
+            else:
+                continue
+            break
+        else:
+            return False
+
+        response = bytearray()
+        while time.monotonic() < deadline:
+            remaining = min(0.05, max(0.0, deadline - time.monotonic()))
+            events = selector.select(timeout=remaining)
+            for key, _ in events:
+                if key.fileobj is sock:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        return response.startswith(b"HTTP/1.1 200") and b"ok" in response
+                    response.extend(chunk)
+                    if response.startswith(b"HTTP/1.1 200") and b"ok" in response:
+                        return True
+        return False
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(KeyError, ValueError):
+            selector.unregister(sock)
+        sock.close()
+
+
 def _wait_until_healthy(host: str, port: int, proc: subprocess.Popen[str]) -> None:
-    """Poll GET /health until HTTP 200 is returned or fail with subprocess output."""
+    """Wait for HTTP 200 /health readiness via selector events or fail with subprocess output."""
     deadline = time.monotonic() + 15.0
     request_bytes = f"GET /health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n".encode("ascii")
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            stdout, stderr = proc.communicate(timeout=2.0)
-            msg = f"vertebra-server exited prematurely (code={proc.returncode}):\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-            raise RuntimeError(msg)
-        try:
-            with socket.create_connection((host, port), timeout=0.5) as conn:
-                conn.sendall(request_bytes)
-                raw = conn.recv(4096)
-                if raw.startswith(b"HTTP/1.1 200") and b"ok" in raw:
-                    return
-        except OSError:
-            pass
-        time.sleep(0.05)
+    captured: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    with selectors.DefaultSelector() as selector:
+        for stream_name, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            if pipe is not None:
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, data=stream_name)
+
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                stdout_tail, stderr_tail = proc.communicate(timeout=2.0)
+                stdout = b"".join(captured["stdout"]).decode("utf-8", errors="replace") + stdout_tail
+                stderr = b"".join(captured["stderr"]).decode("utf-8", errors="replace") + stderr_tail
+                msg = (
+                    f"vertebra-server exited prematurely (code={proc.returncode}):\n"
+                    f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+                )
+                raise RuntimeError(msg)
+
+            if _probe_health_nonblocking(selector, host, port, request_bytes, min(deadline, time.monotonic() + 0.5)):
+                return
+
+            remaining = min(0.05, max(0.0, deadline - time.monotonic()))
+            for key, _ in selector.select(timeout=remaining):
+                if isinstance(key.data, str):
+                    fd = key.fd
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        captured[key.data].append(chunk)
 
     proc.kill()
-    stdout, stderr = proc.communicate(timeout=2.0)
+    stdout_tail, stderr_tail = proc.communicate(timeout=2.0)
+    stdout = b"".join(captured["stdout"]).decode("utf-8", errors="replace") + stdout_tail
+    stderr = b"".join(captured["stderr"]).decode("utf-8", errors="replace") + stderr_tail
     msg = f"Timed out waiting for vertebra-server on {host}:{port}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
     raise TimeoutError(msg)

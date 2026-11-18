@@ -38,13 +38,9 @@ class WsgiAdapter:
     ) -> None:
         self._mount_prefix = mount_prefix.rstrip("/")
         wrapped = attach_framework_fastpath(app, mount_prefix=self._mount_prefix, protocol="wsgi")
-        if (
-            not callable(wrapped)
-            and callable(getattr(wrapped, "wsgi_app", None))
-            or callable(getattr(wrapped, "wsgi_app", None))
-            and getattr(wrapped.wsgi_app, "__vertebra_fastpath_attached__", False)
-        ):
-            wrapped = wrapped.wsgi_app
+        wsgi_app = getattr(wrapped, "wsgi_app", None)
+        if callable(wsgi_app) and (not callable(wrapped) or getattr(wsgi_app, "__vertebra_fastpath_attached__", False)):
+            wrapped = wsgi_app
         self._app: Callable[..., Iterable[bytes]] = cast("Callable[..., Iterable[bytes]]", wrapped)
 
     @property

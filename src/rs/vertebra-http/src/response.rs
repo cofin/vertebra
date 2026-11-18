@@ -3,6 +3,7 @@
 //! `handle` is the `service_fn` target for both plain and TLS connections.
 
 use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,7 +11,11 @@ use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, header};
 use http_body_util::{Either, Full};
 use hyper::Request;
 use hyper::body::{Body, Incoming};
+use hyper::upgrade::OnUpgrade;
+use hyper_util::rt::TokioIo;
 use tokio::sync::oneshot;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::{debug, warn};
 
 use vertebra_core::transport::{encode_headers_compact, iter_raw_headers};
@@ -27,11 +32,17 @@ use crate::grpc::{
 use crate::health::HealthState;
 use crate::hmr;
 use crate::mcp_bridge::extract_mcp_observability_headers;
+use crate::multipart::parse_multipart_body;
 use crate::payload::{
     PayloadError, collect_bounded_body, decode_buffered_body, is_active_content_encoding,
 };
 use crate::routing::RouterError;
 use crate::server::ServerState;
+use crate::ws_mount::{
+    WebSocketHandshakeDecision, WsConfig, WsIncoming, WsOutgoing, build_handshake_response,
+    client_offers_permessage_deflate, is_websocket_upgrade_parts, negotiate_subprotocol,
+    run_ws_connection, validate_origin,
+};
 
 /// Path for the backpressure-aware health endpoint. Always returns 200 so
 /// that load balancers can probe it even when the controller is
@@ -45,9 +56,18 @@ enum RequestBodySource {
     Buffered(Bytes),
 }
 
-/// Top-level request handler; called for every accepted HTTP connection.
+/// Top-level request handler; delegates with an unspecified peer address.
 pub async fn handle(
     req: Request<Incoming>,
+    state: Arc<ServerState>,
+) -> Result<HttpResponse, Infallible> {
+    handle_with_peer(req, SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), state).await
+}
+
+/// Top-level request handler with connected peer address; called for every accepted HTTP connection.
+pub async fn handle_with_peer(
+    mut req: Request<Incoming>,
+    peer: SocketAddr,
     state: Arc<ServerState>,
 ) -> Result<HttpResponse, Infallible> {
     if state.config.dev_mode && hmr::is_hmr_path(req.uri().path()) {
@@ -55,8 +75,19 @@ pub async fn handle(
         let (parts, body) = hmr_resp.into_parts();
         return Ok(Response::from_parts(parts, Either::Left(body)));
     }
+    let on_upgrade = req
+        .headers()
+        .contains_key(header::UPGRADE)
+        .then(|| hyper::upgrade::on(&mut req));
     let (parts, body) = req.into_parts();
-    dispatch_request(parts, RequestBodySource::Incoming(body), state).await
+    dispatch_request(
+        parts,
+        RequestBodySource::Incoming(body),
+        on_upgrade,
+        peer.ip(),
+        state,
+    )
+    .await
 }
 
 /// Shared ingress request handler for protocols supplying pre-buffered request bodies (HTTP/3 QUIC).
@@ -65,15 +96,24 @@ pub async fn handle_buffered(
     state: Arc<ServerState>,
 ) -> Result<HttpResponse, Infallible> {
     let (parts, body) = req.into_parts();
-    dispatch_request(parts, RequestBodySource::Buffered(body), state).await
+    dispatch_request(
+        parts,
+        RequestBodySource::Buffered(body),
+        None,
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        state,
+    )
+    .await
 }
 
 async fn dispatch_request(
     parts: http::request::Parts,
     body: RequestBodySource,
+    on_upgrade: Option<OnUpgrade>,
+    peer_ip: IpAddr,
     state: Arc<ServerState>,
 ) -> Result<HttpResponse, Infallible> {
-    let mut resp = dispatch_request_inner(parts, body, &state).await;
+    let mut resp = dispatch_request_inner(parts, body, on_upgrade, peer_ip, &state).await;
     if let Some(port) = state.http3_port {
         crate::http3::inject_alt_svc_header(
             resp.headers_mut(),
@@ -87,6 +127,8 @@ async fn dispatch_request(
 async fn dispatch_request_inner(
     mut parts: http::request::Parts,
     body: RequestBodySource,
+    on_upgrade: Option<OnUpgrade>,
+    peer_ip: IpAddr,
     state: &Arc<ServerState>,
 ) -> HttpResponse {
     // Health endpoint sits above routing and backpressure so probes always
@@ -104,10 +146,18 @@ async fn dispatch_request_inner(
     }
 
     // Token-guarded `/debug/pprof/*` diagnostic endpoint.
-    if state.config.profile.enabled
-        && let Some(pprof_resp) = state.profile_endpoint.try_handle(req_path, &parts.headers)
-    {
-        return pprof_resp.map(Either::Left);
+    if state.config.profile.enabled {
+        let pprof_uri = parts
+            .uri
+            .path_and_query()
+            .map_or(req_path, http::uri::PathAndQuery::as_str);
+        if let Some(pprof_resp) = state
+            .profile_endpoint
+            .try_handle_async(pprof_uri, &parts.headers)
+            .await
+        {
+            return pprof_resp.map(Either::Left);
+        }
     }
 
     // Zero-GIL `/.well-known/*` discovery cache.
@@ -143,6 +193,25 @@ async fn dispatch_request_inner(
         let sse_resp = state.sse_hub.subscribe_response(topic, last_event_id);
         let (resp_parts, body) = sse_resp.into_parts();
         return Response::from_parts(resp_parts, Either::Right(body));
+    }
+
+    // Native Rust RFC 6455 WebSocket pub/sub mount (`/__vertebra/ws/{topic}` and `ServerState::ws_mounts`).
+    if parts.headers.contains_key(header::UPGRADE) {
+        if let Some(ws_mount) = match_ws_mount(req_path, state) {
+            if is_websocket_upgrade_parts(&parts.method, parts.version, &parts.headers) {
+                return handle_ws_upgrade(&parts, on_upgrade, ws_mount, state).await;
+            }
+            return error_response(StatusCode::BAD_REQUEST, "Invalid WebSocket upgrade request");
+        }
+    } else if req_path
+        .strip_prefix("/__vertebra/ws/")
+        .is_some_and(|topic| !topic.is_empty())
+    {
+        return Response::builder()
+            .status(StatusCode::UPGRADE_REQUIRED)
+            .header(header::UPGRADE, HeaderValue::from_static("websocket"))
+            .body(full_body(Bytes::from_static(b"Upgrade Required")))
+            .unwrap();
     }
 
     // Zero-GIL CORS OPTIONS preflight offload.
@@ -366,7 +435,24 @@ async fn dispatch_request_inner(
         }
     };
 
-    if !body_bytes.is_empty() {
+    if !is_grpc
+        && let Some(ct) = parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .filter(|ct| is_multipart_content_type(ct))
+    {
+        if let Err(err) =
+            parse_multipart_body(body_bytes.clone(), ct, &state.config.multipart_limits).await
+        {
+            warn!(error = %err, "multipart request rejected");
+            let msg = match err.status_code() {
+                StatusCode::PAYLOAD_TOO_LARGE => "Payload Too Large",
+                _ => "Bad Request",
+            };
+            return error_response(err.status_code(), msg);
+        }
+    } else if !body_bytes.is_empty() {
         if is_grpc {
             if body_bytes.len() >= GRPC_HEADER_LEN {
                 let flag = body_bytes[0];
@@ -395,15 +481,6 @@ async fn dispatch_request_inner(
                     )
                     .map(Either::Left);
                 }
-            }
-        } else if parts
-            .headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.starts_with("multipart/form-data"))
-        {
-            if body_bytes.len() > state.config.multipart_limits.max_total_size {
-                return error_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large");
             }
         } else if parts.method == Method::POST
             && parts.uri.path().starts_with("/mcp")
@@ -528,8 +605,9 @@ async fn dispatch_request_inner(
     ) = (&state.access_logger, access_log_start, log_meta)
     {
         let resp_bytes = hyper_resp.body().size_hint().lower() as usize;
+        let remote_addr = peer_ip.to_string();
         logger.record(&AccessLogEntry {
-            remote_addr: "-",
+            remote_addr: &remote_addr,
             method: &log_method,
             path: &log_path,
             protocol: log_proto,
@@ -677,6 +755,261 @@ fn build_response_with_offloads(
     }
 
     response
+}
+
+fn is_multipart_content_type(ct: &str) -> bool {
+    let trimmed = ct.trim_start();
+    trimmed
+        .get(..19)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("multipart/form-data"))
+        && trimmed[19..]
+            .chars()
+            .next()
+            .is_none_or(|ch| ch == ';' || ch.is_ascii_whitespace())
+}
+
+struct ResolvedWsMount<'a> {
+    topic: &'a str,
+    allowed_origins: &'a [String],
+    supported_subprotocols: &'a [String],
+    config: &'a WsConfig,
+}
+
+fn match_ws_mount<'a>(req_path: &'a str, state: &'a ServerState) -> Option<ResolvedWsMount<'a>> {
+    if let Some(topic) = req_path.strip_prefix("/__vertebra/ws/")
+        && !topic.is_empty()
+    {
+        return Some(ResolvedWsMount {
+            topic,
+            allowed_origins: &state.ws_allowed_origins,
+            supported_subprotocols: &state.ws_supported_subprotocols,
+            config: &state.ws_config,
+        });
+    }
+    for mount in &state.ws_mounts {
+        if let Some(topic) = mount.match_topic(req_path) {
+            return Some(ResolvedWsMount {
+                topic,
+                allowed_origins: &mount.allowed_origins,
+                supported_subprotocols: &mount.supported_subprotocols,
+                config: &mount.config,
+            });
+        }
+    }
+    None
+}
+
+fn payload_to_ws_outgoing(payload: Bytes) -> WsOutgoing {
+    match std::str::from_utf8(&payload) {
+        Ok(text) => WsOutgoing::Text(text.to_owned()),
+        Err(_) => WsOutgoing::Binary(payload.to_vec()),
+    }
+}
+
+async fn handle_ws_upgrade(
+    parts: &http::request::Parts,
+    on_upgrade: Option<OnUpgrade>,
+    ws_mount: ResolvedWsMount<'_>,
+    state: &Arc<ServerState>,
+) -> HttpResponse {
+    let req_path = parts.uri.path();
+    let _handshake_permit = if let Some(controller) = state.dispatcher.backpressure() {
+        match controller.try_acquire_for_path(req_path).await {
+            Ok(permit) => Some(permit),
+            Err(reason) => return rejection_response(reason),
+        }
+    } else {
+        None
+    };
+    let stream_guard = if let Some(controller) = state.dispatcher.backpressure() {
+        match controller.acquire_stream() {
+            Ok(guard) => Some(guard),
+            Err(reason) => return rejection_response(reason),
+        }
+    } else {
+        None
+    };
+
+    let allowed_refs: Vec<&str> = ws_mount
+        .allowed_origins
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if !validate_origin(&parts.headers, &allowed_refs) {
+        return build_handshake_response(
+            "",
+            false,
+            WebSocketHandshakeDecision::Reject {
+                status: StatusCode::FORBIDDEN.as_u16(),
+                headers: vec![(
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string(),
+                )],
+                body: Bytes::from_static(b"Origin not allowed"),
+            },
+        )
+        .map(Either::Left);
+    }
+
+    let subprotocol_refs: Vec<&str> = ws_mount
+        .supported_subprotocols
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let subprotocol = negotiate_subprotocol(&parts.headers, &subprotocol_refs);
+    let sec_key = match parts
+        .headers
+        .get(header::SEC_WEBSOCKET_KEY)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(key) if !key.is_empty() => key,
+        _ => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key"),
+    };
+    let negotiate_deflate = ws_mount.config.enable_permessage_deflate
+        && client_offers_permessage_deflate(&parts.headers);
+    let Some(on_upgrade) = on_upgrade else {
+        return error_response(
+            StatusCode::UPGRADE_REQUIRED,
+            "WebSocket upgrade requires HTTP/1.1 connection",
+        );
+    };
+
+    let last_event_id = parts
+        .headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<u64>().ok());
+    let topic_owned = ws_mount.topic.to_owned();
+    let req_path_owned = req_path.to_owned();
+    let ws_config = ws_mount.config.clone();
+    let broker = Arc::clone(&state.pubsub_broker);
+    let (replayed, mut envelope_rx) = broker.subscribe_with_replay(&topic_owned, last_event_id);
+    let mut pattern_rx = topic_owned
+        .contains('*')
+        .then(|| broker.subscribe_pattern(&topic_owned));
+
+    let resp = build_handshake_response(
+        sec_key,
+        negotiate_deflate,
+        WebSocketHandshakeDecision::Accept {
+            subprotocol: subprotocol.clone(),
+            headers: Vec::new(),
+        },
+    )
+    .map(Either::Left);
+
+    let registry = Arc::clone(&state.ws_registry);
+    tokio::spawn(async move {
+        let _stream_guard = stream_guard;
+        let upgraded = match on_upgrade.await {
+            Ok(upgraded) => upgraded,
+            Err(err) => {
+                debug!(path = %req_path_owned, error = %err, "websocket upgrade failed");
+                return;
+            }
+        };
+        let ws_stream = WebSocketStream::from_raw_socket(
+            TokioIo::new(upgraded),
+            Role::Server,
+            Some(ws_config.to_tungstenite_config()),
+        )
+        .await;
+
+        let (incoming_tx, mut incoming_rx) = tokio::sync::mpsc::channel::<WsIncoming>(64);
+        let (outgoing_tx, outgoing_rx) = tokio::sync::mpsc::channel::<WsOutgoing>(64);
+
+        let forward_topic = topic_owned.clone();
+        let forward_broker = Arc::clone(&broker);
+        let forward_task = tokio::spawn(async move {
+            for env in replayed {
+                if outgoing_tx
+                    .send(payload_to_ws_outgoing(env.payload))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            loop {
+                tokio::select! {
+                    recv = envelope_rx.recv() => {
+                        match recv {
+                            Ok(env) => {
+                                if outgoing_tx
+                                    .send(payload_to_ws_outgoing(env.payload))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                debug!(skipped, topic = %forward_topic, "websocket pubsub subscriber lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    pat_recv = async {
+                        match pattern_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match pat_recv {
+                            Ok(payload) => {
+                                if outgoing_tx
+                                    .send(payload_to_ws_outgoing(payload))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                debug!(skipped, pattern = %forward_topic, "websocket pattern subscriber lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    inc = incoming_rx.recv() => {
+                        match inc {
+                            Some(WsIncoming::Text(text)) => {
+                                forward_broker.pubsub_publish(
+                                    &forward_topic,
+                                    Bytes::from(text.into_bytes()),
+                                    None,
+                                );
+                            }
+                            Some(WsIncoming::Binary(data)) => {
+                                forward_broker.pubsub_publish(
+                                    &forward_topic,
+                                    Bytes::from(data),
+                                    None,
+                                );
+                            }
+                            Some(WsIncoming::Close(_, _)) | None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        run_ws_connection(
+            ws_stream,
+            req_path_owned,
+            subprotocol,
+            ws_config,
+            registry,
+            incoming_tx,
+            outgoing_rx,
+        )
+        .await;
+
+        forward_task.abort();
+        let _ = forward_task.await;
+    });
+
+    resp
 }
 
 fn error_response(status: StatusCode, msg: &'static str) -> HttpResponse {

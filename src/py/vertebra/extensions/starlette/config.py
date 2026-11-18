@@ -15,6 +15,7 @@ class VertebraConfig(msgspec.Struct, frozen=True, gc=False):
     offload_compression: bool = True
     offload_cors: bool = True
     offload_static_files: bool = True
+    offload_openapi: bool = True
     enable_fastpath_bypass: bool = True
     enable_direct_endpoint_fastpath: bool = True
     enable_health_endpoint: bool = False

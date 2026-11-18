@@ -228,10 +228,76 @@ pub fn encode_alloydb_metadata_response(response_code: u32, error_message: &str)
     framed.freeze()
 }
 
-/// Decode a 4-byte big-endian length-prefixed AlloyDB `MetadataExchangeResponse` wire frame.
-///
-/// Returns `(response_code, error_message)`.
-pub fn decode_alloydb_metadata_response(buf: &[u8]) -> Result<(u32, String), String> {
+/// Response status code decoded from an AlloyDB `MetadataExchangeResponse` frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MetadataExchangeResponseCode {
+    /// `0` (`RESPONSE_CODE_UNSPECIFIED`).
+    Unspecified,
+    /// `1` (`OK`).
+    Ok,
+    /// `2` (`ERROR`).
+    Error,
+    /// Non-standard numeric response code returned by the proxy.
+    Unknown(u32),
+}
+
+impl MetadataExchangeResponseCode {
+    /// Convert a raw protobuf varint code (`1` = `OK`, `2` = `ERROR`) into [`MetadataExchangeResponseCode`].
+    pub const fn from_raw(code: u32) -> Self {
+        match code {
+            0 => Self::Unspecified,
+            1 => Self::Ok,
+            2 => Self::Error,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// Return the numeric wire code.
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Ok => 1,
+            Self::Error => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+
+    /// Return the canonical uppercase AlloyDB protocol status label (`OK`, `ERROR`, `UNSPECIFIED`, `UNKNOWN`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "UNSPECIFIED",
+            Self::Ok => "OK",
+            Self::Error => "ERROR",
+            Self::Unknown(_) => "UNKNOWN",
+        }
+    }
+}
+
+/// Structured AlloyDB `MetadataExchangeResponse` payload retaining status code and full diagnostic text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataExchangeResponse {
+    pub response_code: MetadataExchangeResponseCode,
+    pub raw_code: u32,
+    pub error_message: String,
+}
+
+impl MetadataExchangeResponse {
+    /// Decode a 4-byte big-endian length-prefixed AlloyDB `MetadataExchangeResponse` wire frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, String> {
+        decode_alloydb_metadata_response_details(buf)
+    }
+
+    /// Return `true` when `response_code == MetadataExchangeResponseCode::Ok` and `error_message` is empty.
+    pub fn is_ok(&self) -> bool {
+        self.response_code == MetadataExchangeResponseCode::Ok && self.error_message.is_empty()
+    }
+}
+
+/// Decode a 4-byte big-endian length-prefixed AlloyDB `MetadataExchangeResponse` wire frame
+/// into a structured [`MetadataExchangeResponse`].
+pub fn decode_alloydb_metadata_response_details(
+    buf: &[u8],
+) -> Result<MetadataExchangeResponse, String> {
     if buf.len() < 4 {
         return Err("frame too short for 4-byte length prefix".to_string());
     }
@@ -242,11 +308,22 @@ pub fn decode_alloydb_metadata_response(buf: &[u8]) -> Result<(u32, String), Str
             buf.len() - 4
         ));
     }
-    decode_alloydb_metadata_response_body(&buf[4..4 + body_len])
+    decode_alloydb_metadata_response_body_struct(&buf[4..4 + body_len])
 }
 
-fn decode_alloydb_metadata_response_body(body: &[u8]) -> Result<(u32, String), String> {
-    let mut response_code = 1u32;
+/// Decode a 4-byte big-endian length-prefixed AlloyDB `MetadataExchangeResponse` wire frame.
+///
+/// Returns `(response_code, error_message)`.
+pub fn decode_alloydb_metadata_response(buf: &[u8]) -> Result<(u32, String), String> {
+    let resp = decode_alloydb_metadata_response_details(buf)?;
+    Ok((resp.raw_code, resp.error_message))
+}
+
+fn decode_alloydb_metadata_response_body_struct(
+    body: &[u8],
+) -> Result<MetadataExchangeResponse, String> {
+    let mut saw_code = false;
+    let mut raw_code = 0u32;
     let mut error_message = String::new();
     let mut idx = 0usize;
 
@@ -256,7 +333,8 @@ fn decode_alloydb_metadata_response_body(body: &[u8]) -> Result<(u32, String), S
             WIRE_TYPE_VARINT => {
                 let val = read_varint(body, &mut idx)?;
                 if field_num == 1 {
-                    response_code = val as u32;
+                    raw_code = u32::try_from(val).unwrap_or(u32::MAX);
+                    saw_code = true;
                 }
             }
             WIRE_TYPE_LENGTH_DELIMITED => {
@@ -264,7 +342,13 @@ fn decode_alloydb_metadata_response_body(body: &[u8]) -> Result<(u32, String), S
                     "truncated string field in MetadataExchangeResponse".to_string()
                 })?;
                 if field_num == 2 {
-                    error_message = String::from_utf8_lossy(slice).into_owned();
+                    let text = String::from_utf8_lossy(slice);
+                    if error_message.is_empty() {
+                        error_message = text.into_owned();
+                    } else {
+                        error_message.push_str("; ");
+                        error_message.push_str(&text);
+                    }
                 }
             }
             other => {
@@ -275,7 +359,15 @@ fn decode_alloydb_metadata_response_body(body: &[u8]) -> Result<(u32, String), S
         }
     }
 
-    Ok((response_code, error_message))
+    if !saw_code && !error_message.is_empty() {
+        raw_code = MetadataExchangeResponseCode::Error.as_u32();
+    }
+
+    Ok(MetadataExchangeResponse {
+        response_code: MetadataExchangeResponseCode::from_raw(raw_code),
+        raw_code,
+        error_message,
+    })
 }
 
 /// Generate an ephemeral X.509 client certificate and private key PEM pair using `rcgen`.
@@ -330,13 +422,24 @@ where
         .await
         .map_err(|e| format!("failed to read AlloyDB MetadataExchangeResponse body: {e}"))?;
 
-    let (code, err_msg) = decode_alloydb_metadata_response_body(&body)?;
-    if code != 1 {
+    let resp = decode_alloydb_metadata_response_body_struct(&body)?;
+    if !resp.is_ok() {
+        let label = if resp.response_code == MetadataExchangeResponseCode::Ok {
+            MetadataExchangeResponseCode::Error.as_str()
+        } else {
+            resp.response_code.as_str()
+        };
+        let detail = if resp.error_message.is_empty() {
+            "no diagnostic message provided"
+        } else {
+            resp.error_message.as_str()
+        };
         return Err(format!(
-            "AlloyDB MetadataExchange rejected (code={code}): {err_msg}"
+            "AlloyDB MetadataExchange rejected ({label}, code={}): {detail}",
+            resp.raw_code
         ));
     }
-    Ok((code, err_msg))
+    Ok((resp.raw_code, resp.error_message))
 }
 
 /// Zero-sidecar Google Cloud SQL (`:3307`) mTLS dialer.
@@ -464,6 +567,33 @@ mod tests {
         let (code_err, msg_err) = decode_alloydb_metadata_response(&resp_err).unwrap();
         assert_eq!(code_err, 2);
         assert_eq!(msg_err, "IAM token expired");
+
+        let details_ok = MetadataExchangeResponse::decode(&resp_ok).unwrap();
+        assert_eq!(details_ok.response_code, MetadataExchangeResponseCode::Ok);
+        assert_eq!(details_ok.response_code.as_str(), "OK");
+        assert!(details_ok.is_ok());
+
+        let details_err = MetadataExchangeResponse::decode(&resp_err).unwrap();
+        assert_eq!(
+            details_err.response_code,
+            MetadataExchangeResponseCode::Error
+        );
+        assert_eq!(details_err.response_code.as_str(), "ERROR");
+        assert_eq!(details_err.error_message, "IAM token expired");
+        assert!(!details_err.is_ok());
+
+        let mut omitted_code_proto = BytesMut::new();
+        put_bytes_field(&mut omitted_code_proto, 2, b"missing IAM credential");
+        let mut omitted_frame = BytesMut::with_capacity(4 + omitted_code_proto.len());
+        omitted_frame.put_u32(omitted_code_proto.len() as u32);
+        omitted_frame.extend_from_slice(&omitted_code_proto);
+        let omitted_details = MetadataExchangeResponse::decode(&omitted_frame).unwrap();
+        assert_eq!(
+            omitted_details.response_code,
+            MetadataExchangeResponseCode::Error
+        );
+        assert_eq!(omitted_details.raw_code, 2);
+        assert_eq!(omitted_details.error_message, "missing IAM credential");
     }
 
     #[test]

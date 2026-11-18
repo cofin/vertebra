@@ -9,6 +9,7 @@ import dataclasses
 import inspect
 import logging
 import os
+import threading
 from collections.abc import AsyncIterable, Callable, Coroutine, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time
@@ -81,13 +82,17 @@ __all__ = (
     "compile_handler_spec",
     "compile_handler_table",
     "dispatch_batch",
+    "get_worker_executor",
     "partition_batch",
+    "shutdown_worker_executor",
 )
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS: float = 30.0
 _UNSET_BATCH_TIMEOUT = object()
+_EXECUTOR_LOCK = threading.Lock()
+_WORKER_EXECUTOR: ThreadPoolExecutor | None = None
 _REQUEST_PARAMS = frozenset({"request", "req"})
 _JSON_CONTENT_TYPE_COMPACT = b"\x0ccontent-type\x10\x00application/json"
 _RAW_BUFFER_TYPES = (bytes, bytearray, memoryview)
@@ -854,6 +859,28 @@ def _schedule_coros(scheduler: Any, coros: list[Coroutine[Any, Any, Any]]) -> No
         _schedule_coros(scheduler.loop, coros)
 
 
+def get_worker_executor(min_workers: int = 32) -> ThreadPoolExecutor:
+    """Return the lazily initialized worker-scoped ThreadPoolExecutor."""
+    global _WORKER_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _WORKER_EXECUTOR is None:
+            _WORKER_EXECUTOR = ThreadPoolExecutor(
+                max_workers=max(1, min_workers),
+                thread_name_prefix="vertebra-worker",
+            )
+        return _WORKER_EXECUTOR
+
+
+def shutdown_worker_executor(wait: bool = True) -> None:
+    """Atomically clear and shut down the cached worker-scoped ThreadPoolExecutor."""
+    global _WORKER_EXECUTOR
+    with _EXECUTOR_LOCK:
+        pool = _WORKER_EXECUTOR
+        _WORKER_EXECUTOR = None
+    if pool is not None:
+        pool.shutdown(wait=wait)
+
+
 def _dispatch_wsgi_concurrent(
     adapter: Any,
     entries: list[tuple[int, Any]],
@@ -871,7 +898,7 @@ def _dispatch_wsgi_concurrent(
             results[idx] = build_error_response(RuntimeError("WSGI error"), request, vr_cls=vr_cls)
         return
 
-    pool = executor or ThreadPoolExecutor(max_workers=max(32, len(entries)), thread_name_prefix="vertebra-wsgi")
+    pool = executor or get_worker_executor(max(32, len(entries)))
     indexed_futures = [(idx, req, pool.submit(adapter, req)) for idx, req in entries]
     for idx, req, fut in indexed_futures:
         try:
@@ -1061,7 +1088,7 @@ def dispatch_batch(
                     active_submit(err_resp)
 
     if partitioned.sync_thread:
-        active_exec = executor or ThreadPoolExecutor(max_workers=32, thread_name_prefix="vertebra-sync")
+        active_exec = executor or get_worker_executor()
         for _idx, request, spec in partitioned.sync_thread:
 
             def _dispatch_sync_item(

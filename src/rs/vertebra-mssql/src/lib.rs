@@ -123,6 +123,7 @@ fn build_mssql_config(
     cloudsql_ip_type: &str,
     cloudsql_auth_type: &str,
     cloudsql_proxy_addr: Option<String>,
+    aad_token: Option<String>,
 ) -> Result<MssqlClientConfig, MssqlError> {
     let mut cfg = if dsn.trim().is_empty() {
         MssqlClientConfig::default()
@@ -152,6 +153,9 @@ fn build_mssql_config(
     }
     if let Some(pw) = password {
         cfg.password = pw;
+    }
+    if let Some(tok) = aad_token {
+        cfg.aad_token = Some(tok);
     }
     if let Some(app) = application_name.filter(|s| !s.trim().is_empty()) {
         cfg.application_name = app;
@@ -287,7 +291,8 @@ impl PySyncMSSQLClient {
         cloudsql_instance=None,
         cloudsql_ip_type="PUBLIC",
         cloudsql_auth_type="PASSWORD",
-        cloudsql_proxy_addr=None
+        cloudsql_proxy_addr=None,
+        aad_token=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -315,6 +320,7 @@ impl PySyncMSSQLClient {
         cloudsql_ip_type: &str,
         cloudsql_auth_type: &str,
         cloudsql_proxy_addr: Option<String>,
+        aad_token: Option<String>,
     ) -> PyResult<Self> {
         let cfg = build_mssql_config(
             dsn,
@@ -340,6 +346,7 @@ impl PySyncMSSQLClient {
             cloudsql_ip_type,
             cloudsql_auth_type,
             cloudsql_proxy_addr,
+            aad_token,
         )
         .map_err(|e| mssql_error_to_py(py, e))?;
         let client = MssqlClient::new(cfg).map_err(|e| mssql_error_to_py(py, e))?;
@@ -435,16 +442,26 @@ impl PySyncMSSQLClient {
 
     fn __repr__(&self) -> String {
         let cfg = self.inner.config();
+        let aad_token = cfg.effective_aad_token().as_ref().map(|_| "[REDACTED]");
         format!(
-            "SyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, cloudsql_instance={:?}, closed={})",
+            "SyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", aad_token={:?}, encryption={:?}, cloudsql_instance={:?}, closed={})",
             cfg.host,
             cfg.port,
             cfg.database,
             cfg.user,
+            aad_token,
             cfg.encryption.as_str(),
             self.cloudsql_instance(),
             self.inner.is_closed()
         )
+    }
+
+    #[pyo3(signature = (aad_token=None))]
+    fn set_aad_token(&self, py: Python<'_>, aad_token: Option<String>) -> PyResult<()> {
+        self.inner
+            .config()
+            .set_aad_token(aad_token)
+            .map_err(|e| mssql_error_to_py(py, e))
     }
 
     fn connect(&self, py: Python<'_>) -> PyResult<()> {
@@ -769,7 +786,8 @@ impl PyAsyncMSSQLClient {
         cloudsql_instance=None,
         cloudsql_ip_type="PUBLIC",
         cloudsql_auth_type="PASSWORD",
-        cloudsql_proxy_addr=None
+        cloudsql_proxy_addr=None,
+        aad_token=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -797,6 +815,7 @@ impl PyAsyncMSSQLClient {
         cloudsql_ip_type: &str,
         cloudsql_auth_type: &str,
         cloudsql_proxy_addr: Option<String>,
+        aad_token: Option<String>,
     ) -> PyResult<Self> {
         let cfg = build_mssql_config(
             dsn,
@@ -822,6 +841,7 @@ impl PyAsyncMSSQLClient {
             cloudsql_ip_type,
             cloudsql_auth_type,
             cloudsql_proxy_addr,
+            aad_token,
         )
         .map_err(|e| mssql_error_to_py(py, e))?;
         let client = MssqlClient::new(cfg).map_err(|e| mssql_error_to_py(py, e))?;
@@ -917,16 +937,26 @@ impl PyAsyncMSSQLClient {
 
     fn __repr__(&self) -> String {
         let cfg = self.inner.config();
+        let aad_token = cfg.effective_aad_token().as_ref().map(|_| "[REDACTED]");
         format!(
-            "AsyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", encryption={:?}, cloudsql_instance={:?}, closed={})",
+            "AsyncMSSQLClient(dsn={cfg}, host={:?}, port={}, database={:?}, user={:?}, password=\"[REDACTED]\", aad_token={:?}, encryption={:?}, cloudsql_instance={:?}, closed={})",
             cfg.host,
             cfg.port,
             cfg.database,
             cfg.user,
+            aad_token,
             cfg.encryption.as_str(),
             self.cloudsql_instance(),
             self.inner.is_closed()
         )
+    }
+
+    #[pyo3(signature = (aad_token=None))]
+    fn set_aad_token(&self, py: Python<'_>, aad_token: Option<String>) -> PyResult<()> {
+        self.inner
+            .config()
+            .set_aad_token(aad_token)
+            .map_err(|e| mssql_error_to_py(py, e))
     }
 
     fn connect(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {

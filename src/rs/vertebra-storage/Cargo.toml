@@ -35,7 +35,7 @@ sha2 = { workspace = true }
 thiserror.workspace = true
 tokio.workspace = true
 url = { workspace = true }
-vertebra-core = { path = "../vertebra-core" }
+vertebra-core = { path = "../vertebra-core", features = ["pyo3"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

@@ -1,10 +1,12 @@
 """MySQL and MariaDB Litestar session store backed by Vertebra native drivers."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime, timedelta
-from typing import Any, NotRequired
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired
 
 from sqlspec.config import LitestarConfig
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
 from sqlspec.utils.sync_tools import async_
 
 from vertebra.extensions.sqlspec.adapters.mysql.core import (
@@ -12,6 +14,9 @@ from vertebra.extensions.sqlspec.adapters.mysql.core import (
     mysql_index_options,
     mysql_table_options,
 )
+
+if TYPE_CHECKING:
+    from sqlspec.migrations.schema import DropStatement, SchemaTarget
 
 __all__ = ("MySQLLitestarConfig", "MySQLLitestarStore")
 
@@ -32,6 +37,7 @@ class MySQLLitestarStore(BaseSQLSpecStore[Any]):
     __slots__ = ("_index_options", "_table_options")
 
     adapter_name = "vertebra_mysql"
+    _dialect: ClassVar[str] = "mysql"
     extension_config_options = BaseSQLSpecStore.extension_config_options | frozenset({"index_options", "table_options"})
 
     def __init__(self, config: Any) -> None:
@@ -63,6 +69,26 @@ class MySQLLitestarStore(BaseSQLSpecStore[Any]):
     def _drop_table_sql(self) -> list[str]:
         """Return DDL statements dropping the Litestar session table."""
         return [f"DROP TABLE IF EXISTS {self._table_name}"]
+
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered `SchemaTarget` definitions for the MySQL session table."""
+        return super().get_schema_targets()
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return MySQL companion expiration index metadata extracted from store DDL."""
+        return super().get_companion_indexes()
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing MySQL companion indexes using `data_dictionary.get_indexes()` probing."""
+        super().reconcile_companion_objects_sync(driver)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing MySQL companion indexes asynchronously using metadata probing."""
+        await super().reconcile_companion_objects_async(driver)
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return MySQL downgrade drop statements for the Litestar session table."""
+        return super().downgrade_drops()
 
     def _create_table_sync(self) -> None:
         ddl = self._table_ddl()

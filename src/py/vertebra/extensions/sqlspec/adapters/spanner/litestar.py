@@ -1,9 +1,13 @@
 """Cloud Spanner hash-sharded Litestar session store supporting GoogleSQL and Spangres TTL."""
 
-from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypedDict
+from __future__ import annotations
 
-from sqlspec.extensions.litestar.store import BaseSQLSpecStore
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
+
+from sqlspec.config import LitestarConfig
+from sqlspec.extensions.litestar.store import BaseSQLSpecStore, CompanionIndex
+from sqlspec.migrations.schema import DropStatement, SchemaTarget, metadata_has_index
 from sqlspec.utils.sync_tools import async_
 
 from vertebra.extensions.sqlspec.adapters.spanner.core import (
@@ -20,25 +24,8 @@ __all__ = (
 )
 
 
-class SpannerLitestarConfig(TypedDict, total=False):
+class SpannerLitestarConfig(LitestarConfig):
     """Typed extension configuration keys supported by ``SpannerLitestarStore``."""
-
-    commit_mode: str
-    """Transaction commit mode used for Litestar session writes."""
-    connection_key: str
-    """Dependency injection key for database connections."""
-    create_schema: bool
-    """Create the Litestar session table when it does not already exist."""
-    manage_schema: bool
-    """Create or migrate the session table automatically on startup."""
-    migrations_path: str
-    """Filesystem path to custom session table migrations."""
-    pool_key: str
-    """Dependency injection key for database connection pools."""
-    session_key: str
-    """Dependency injection key for database session drivers."""
-    session_table: str
-    """Cloud Spanner table name storing Litestar HTTP sessions."""
 
 
 def _coerce_session_bytes(value: Any) -> bytes:
@@ -60,7 +47,7 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         super().__init__(config)
         self._shard_count = 16
 
-    def _dialect(self) -> Literal["googlesql", "spangres"]:
+    def _spanner_dialect(self) -> Literal["googlesql", "spangres"]:
         return normalize_spanner_dialect(
             getattr(self._config, "spanner_dialect", None) or getattr(self._config, "dialect", "googlesql")
         )
@@ -71,13 +58,54 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
     def _validated_table(self) -> str:
         return validate_spanner_identifier(self.table_name, "session_table")
 
+    def _split_table_name(self) -> tuple[str | None, str]:
+        table = self._validated_table()
+        schema_name, dot, bare_table = table.partition(".")
+        if dot:
+            return schema_name, bare_table
+        return None, table
+
+    def _companion_index(self) -> CompanionIndex:
+        schema_name, bare_table = self._split_table_name()
+        table = self._validated_table()
+        idx_name = validate_spanner_identifier(f"idx_{table.replace('.', '_')}_expires_at", "session_index")
+        if self._spanner_dialect() == "spangres":
+            ddl = f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}(expires_at) WHERE expires_at IS NOT NULL"
+        else:
+            ddl = f"CREATE NULL_FILTERED INDEX IF NOT EXISTS {idx_name} ON {table}(expires_at)"
+        return CompanionIndex(name=idx_name, table=bare_table, schema=schema_name, ddl=ddl)
+
     def compute_shard_id(self, key: str) -> int:
         """Compute the deterministic hash shard prefix for session ``key``."""
         return farm_fingerprint_shard(key, self._shard_count)
 
+    def get_schema_targets(self) -> list[SchemaTarget]:
+        """Return ordered ``SchemaTarget`` definitions for the Cloud Spanner session store."""
+        schema_name, bare_table = self._split_table_name()
+        parse_dialect = "postgres" if self._spanner_dialect() == "spangres" else "spanner"
+        return [SchemaTarget.from_ddl(bare_table, self._table_ddl(), schema=schema_name, dialect=parse_dialect)]
+
+    def get_companion_indexes(self) -> list[CompanionIndex]:
+        """Return the Spanner session expiration companion index definition."""
+        return [self._companion_index()]
+
+    def reconcile_companion_objects_sync(self, driver: Any) -> None:
+        """Create missing companion indexes on a synchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                driver.execute_script(index.ddl)
+
+    async def reconcile_companion_objects_async(self, driver: Any) -> None:
+        """Create missing companion indexes on an asynchronous driver without committing."""
+        for index in self.get_companion_indexes():
+            rows = await driver.data_dictionary.get_indexes(driver, table=index.table, schema=index.schema)
+            if not metadata_has_index(rows, index.table, index.name, schema_name=index.schema):
+                await driver.execute_script(index.ddl)
+
     def _table_ddl(self) -> str:
         table = self._validated_table()
-        if self._dialect() == "spangres":
+        if self._spanner_dialect() == "spangres":
             return (
                 f"CREATE TABLE IF NOT EXISTS {table} ("
                 "shard_id BIGINT NOT NULL, "
@@ -98,11 +126,21 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         )
 
     def _drop_table_sql(self) -> list[str]:
-        return [f"DROP TABLE IF EXISTS {self._validated_table()}"]
+        table = self._validated_table()
+        idx = self._companion_index()
+        qualified_index = f"{idx.schema}.{idx.name}" if idx.schema else idx.name
+        return [
+            f"DROP INDEX IF EXISTS {qualified_index}",
+            f"DROP TABLE IF EXISTS {table}",
+        ]
+
+    def downgrade_drops(self) -> list[DropStatement]:
+        """Return index-before-table downgrade drop statements for the Spanner session store."""
+        return [DropStatement(statement) for statement in self._drop_table_sql()]
 
     def _merge_sql(self) -> str:
         table = self._validated_table()
-        if self._dialect() == "spangres":
+        if self._spanner_dialect() == "spangres":
             return (
                 f"INSERT INTO {table} (shard_id, session_id, data, expires_at) "
                 "VALUES (@shard_id, @session_id, @data, @expires_at) "
@@ -120,16 +158,18 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         )
 
     async def create_table(self) -> None:
-        """Create the Litestar session table in Cloud Spanner."""
-        ddl = self._table_ddl()
+        """Create the Litestar session table and companion index in Cloud Spanner."""
+        statements = self.create_statements()
         if self._is_async_config():
             async with self._config.provide_session(transaction=False) as driver:
-                await driver.execute(ddl)
+                for stmt in statements:
+                    await driver.execute(stmt)
             return
 
         def _sync_create() -> None:
             with self._config.provide_session(transaction=False) as driver:
-                driver.execute(ddl)
+                for stmt in statements:
+                    driver.execute(stmt)
 
         await async_(_sync_create)()
 
@@ -352,9 +392,9 @@ class SpannerLitestarStore(BaseSQLSpecStore[Any]):
         return await async_(_sync_delete_expired)()
 
     def create_statements(self) -> list[str]:
-        """Return idempotent ``CREATE TABLE IF NOT EXISTS`` DDL statements."""
-        return [self._table_ddl()]
+        """Return idempotent ``CREATE TABLE IF NOT EXISTS`` and companion index DDL statements."""
+        return [self._table_ddl(), self._companion_index().ddl]
 
     def drop_statements(self) -> list[str]:
-        """Return idempotent ``DROP TABLE IF EXISTS`` DDL statements."""
+        """Return idempotent ``DROP INDEX IF EXISTS`` and ``DROP TABLE IF EXISTS`` DDL statements."""
         return self._drop_table_sql()

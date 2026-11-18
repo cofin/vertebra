@@ -72,7 +72,7 @@ def generate_ephemeral_keypair(bits: int = 2048) -> tuple[str, str]:
 
     if native_mod is None:
         ensure_module("vertebra._vertebra", package="vertebra-core")
-    ensure_module("cryptography.hazmat.primitives.asymmetric.rsa", package="cryptography")
+    ensure_module("cryptography.hazmat.primitives.asymmetric.rsa", package="cryptography", extra="cryptography")
     msg = "Ephemeral RSA keypair generation requires vertebra._vertebra or cryptography"
     raise RuntimeError(msg)
 

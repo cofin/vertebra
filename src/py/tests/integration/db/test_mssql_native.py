@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -30,6 +32,12 @@ def _shm_arrow_segments() -> set[str]:
     if not shm_dir.is_dir():
         return set()
     return {entry.name for entry in shm_dir.iterdir() if "vtb" in entry.name.lower() or "arrow" in entry.name.lower()}
+
+
+def _close_arrow_batches(batches: Sequence[Any]) -> None:
+    """Close materialized Arrow batch cursors so shared-memory segments are released."""
+    for batch in batches:
+        batch.close()
 
 
 @pytest.fixture
@@ -173,6 +181,7 @@ async def test_mssql_bulk_load_arrow_shm_pipeline_and_savepoints(
                     )
                 )
                 assert len(batches) == 3
+                _close_arrow_batches(batches)
 
                 with pytest.raises(_MSSQLPipelineAbortError), driver.pipeline() as pipe:
                     pipe.execute(f"INSERT INTO {table} (id, label) VALUES (@P1, @P2)", (99991, "pipe-rollback"))
@@ -218,6 +227,7 @@ async def test_mssql_bulk_load_arrow_shm_pipeline_and_savepoints(
                     )
                 ]
                 assert len(batches) == 3
+                _close_arrow_batches(batches)
 
                 with pytest.raises(_MSSQLPipelineAbortError):
                     async with driver.pipeline() as pipe:

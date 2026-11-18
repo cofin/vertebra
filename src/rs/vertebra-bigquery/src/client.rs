@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -143,9 +144,10 @@ pub struct BigQueryClient {
     quota_project_header: Option<reqwest::header::HeaderValue>,
     http_client: reqwest::Client,
     token_cache: Option<Arc<GcpTokenCache>>,
-    injected_read: Option<Read>,
-    read_client: tokio::sync::OnceCell<Read>,
-    write_client: tokio::sync::OnceCell<Write>,
+    injected_read: Option<Arc<Read>>,
+    read_client: tokio::sync::RwLock<Option<Arc<Read>>>,
+    write_client: tokio::sync::RwLock<Option<Arc<Write>>>,
+    closed: AtomicBool,
 }
 
 impl BigQueryClient {
@@ -258,8 +260,9 @@ impl BigQueryClient {
             http_client,
             token_cache,
             injected_read: None,
-            read_client: tokio::sync::OnceCell::new(),
-            write_client: tokio::sync::OnceCell::new(),
+            read_client: tokio::sync::RwLock::new(None),
+            write_client: tokio::sync::RwLock::new(None),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -269,43 +272,89 @@ impl BigQueryClient {
         read: Read,
     ) -> Result<Self, BigQueryError> {
         let mut client = Self::new(config)?;
-        client.injected_read = Some(read);
+        client.injected_read = Some(Arc::new(read));
         Ok(client)
     }
 
-    async fn storage_read(&self) -> Result<&Read, BigQueryError> {
-        if let Some(ref read) = self.injected_read {
-            return Ok(read);
+    /// Close this client idempotently, releasing cached Storage API handles and rejecting further calls.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.read_client.try_write() {
+            *guard = None;
         }
-        self.read_client
-            .get_or_try_init(|| async {
-                install_rustls_ring_provider();
-                Read::builder()
-                    .with_endpoint(self.storage_endpoint.clone())
-                    .with_credentials(official_credentials(self.token_cache.clone()))
-                    .build()
-                    .await
-                    .map_err(|e| {
-                        BigQueryError::Http(format!("failed to build BigQuery Read client: {e}"))
-                    })
-            })
-            .await
+        if let Ok(mut guard) = self.write_client.try_write() {
+            *guard = None;
+        }
     }
 
-    async fn storage_write(&self) -> Result<&Write, BigQueryError> {
-        self.write_client
-            .get_or_try_init(|| async {
-                install_rustls_ring_provider();
-                Write::builder()
-                    .with_endpoint(self.storage_endpoint.clone())
-                    .with_credentials(official_credentials(self.token_cache.clone()))
-                    .build()
-                    .await
-                    .map_err(|e| {
-                        BigQueryError::Http(format!("failed to build BigQuery Write client: {e}"))
-                    })
-            })
-            .await
+    /// Return `true` if [`BigQueryClient::close`] has been called.
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ensure_open(&self) -> Result<(), BigQueryError> {
+        if self.is_closed() {
+            return Err(BigQueryError::InvalidArgument(
+                "BigQuery client is closed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn storage_read(&self) -> Result<Arc<Read>, BigQueryError> {
+        self.ensure_open()?;
+        if let Some(ref read) = self.injected_read {
+            return Ok(Arc::clone(read));
+        }
+        if let Some(read) = self.read_client.read().await.as_ref() {
+            return Ok(Arc::clone(read));
+        }
+        let mut guard = self.read_client.write().await;
+        self.ensure_open()?;
+        if let Some(read) = guard.as_ref() {
+            return Ok(Arc::clone(read));
+        }
+        install_rustls_ring_provider();
+        let read = Arc::new(
+            Read::builder()
+                .with_endpoint(self.storage_endpoint.clone())
+                .with_credentials(official_credentials(self.token_cache.clone()))
+                .build()
+                .await
+                .map_err(|e| {
+                    BigQueryError::Http(format!("failed to build BigQuery Read client: {e}"))
+                })?,
+        );
+        self.ensure_open()?;
+        *guard = Some(Arc::clone(&read));
+        Ok(read)
+    }
+
+    async fn storage_write(&self) -> Result<Arc<Write>, BigQueryError> {
+        self.ensure_open()?;
+        if let Some(write) = self.write_client.read().await.as_ref() {
+            return Ok(Arc::clone(write));
+        }
+        let mut guard = self.write_client.write().await;
+        self.ensure_open()?;
+        if let Some(write) = guard.as_ref() {
+            return Ok(Arc::clone(write));
+        }
+        install_rustls_ring_provider();
+        let write = Arc::new(
+            Write::builder()
+                .with_endpoint(self.storage_endpoint.clone())
+                .with_credentials(official_credentials(self.token_cache.clone()))
+                .build()
+                .await
+                .map_err(|e| {
+                    BigQueryError::Http(format!("failed to build BigQuery Write client: {e}"))
+                })?,
+        );
+        self.ensure_open()?;
+        *guard = Some(Arc::clone(&write));
+        Ok(write)
     }
 
     /// Return a reference to the client configuration.
@@ -339,6 +388,7 @@ impl BigQueryClient {
         params: &[BigQueryQueryParameter],
         session_id: Option<&str>,
     ) -> Result<BigQueryQueryResult, BigQueryError> {
+        self.ensure_open()?;
         let opts = BigQueryQueryOptions {
             session_id: session_id.map(str::to_string),
             ..Default::default()
@@ -353,6 +403,7 @@ impl BigQueryClient {
         params: &[BigQueryQueryParameter],
         options: &BigQueryQueryOptions,
     ) -> Result<BigQueryQueryResult, BigQueryError> {
+        self.ensure_open()?;
         if options.dry_run
             || options.destination_table.is_some()
             || options.priority.as_deref() == Some("BATCH")
@@ -369,6 +420,7 @@ impl BigQueryClient {
         sql: &str,
         params: &[BigQueryQueryParameter],
     ) -> Result<BigQueryDryRunResult, BigQueryError> {
+        self.ensure_open()?;
         let opts = BigQueryQueryOptions {
             dry_run: true,
             ..Default::default()
@@ -467,6 +519,7 @@ impl BigQueryClient {
         max_streams: i32,
         compression: BigQueryArrowCompression,
     ) -> Result<(String, usize, usize, Arc<ShmRegion>), BigQueryError> {
+        self.ensure_open()?;
         let read = self.storage_read().await?;
         let eff_project = if project_id.trim().is_empty() {
             &self.config.project_id
@@ -574,6 +627,7 @@ impl BigQueryClient {
         arrow_ipc_bytes: &[u8],
         mode: &str,
     ) -> Result<BigQueryAppendResult, BigQueryError> {
+        self.ensure_open()?;
         let _ = BigQueryWriteMode::from_str_mode(mode)?;
         let table = self.normalize_table_resource(parent_table)?;
         if arrow_ipc_bytes.is_empty() {
@@ -593,6 +647,7 @@ impl BigQueryClient {
         arrow_ipc_bytes: Bytes,
         mode: &str,
     ) -> Result<BigQueryAppendResult, BigQueryError> {
+        self.ensure_open()?;
         let write_mode = BigQueryWriteMode::from_str_mode(mode)?;
         let table = self.normalize_table_resource(parent_table)?;
         let plan = ArrowAppendPlan::build_bytes(arrow_ipc_bytes, write_mode)?;
@@ -1297,5 +1352,50 @@ fn map_commit_error(err: CommitError) -> BigQueryError {
             }
         }
         other => BigQueryError::AppendVerification(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_close_is_idempotent_and_rejects_operations() {
+        let mut config = BigQueryClientConfig::new("test-proj");
+        config.rest_endpoint = "http://127.0.0.1:9".to_string();
+        config.storage_endpoint = "http://127.0.0.1:9".to_string();
+        let client = BigQueryClient::new(config).expect("client");
+        assert!(!client.is_closed());
+
+        client.close();
+        assert!(client.is_closed());
+        client.close();
+        assert!(client.is_closed());
+
+        let query_err = client.query("SELECT 1", &[], None).await.unwrap_err();
+        assert!(
+            matches!(query_err, BigQueryError::InvalidArgument(ref msg) if msg == "BigQuery client is closed")
+        );
+
+        let dry_err = client.dry_run("SELECT 1", &[]).await.unwrap_err();
+        assert!(
+            matches!(dry_err, BigQueryError::InvalidArgument(ref msg) if msg == "BigQuery client is closed")
+        );
+
+        let read_err = client
+            .read_table_to_shm_arrow("test-proj", "ds", "tbl", &[], None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(read_err, BigQueryError::InvalidArgument(ref msg) if msg == "BigQuery client is closed")
+        );
+
+        let append_err = client
+            .append_arrow_stream("projects/test-proj/datasets/ds/tables/tbl", b"", "_default")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(append_err, BigQueryError::InvalidArgument(ref msg) if msg == "BigQuery client is closed")
+        );
     }
 }

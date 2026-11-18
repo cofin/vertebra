@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -260,7 +261,10 @@ def test_makefile_isolates_pypi_duckdb_and_oracle_test_has_no_fallback() -> None
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dep_groups = pyproject["dependency-groups"]
     assert "duckdb>=1.0; python_version < '3.14'" in dep_groups["bench"]
-    assert all("duckdb" not in str(entry) for entry in dep_groups["test"])
+    assert all(
+        str(entry).split(">")[0].split("<")[0].split("=")[0].split(";")[0].strip().lower() != "duckdb"
+        for entry in dep_groups["test"]
+    )
 
     oracle_dry_run = subprocess.run(
         ["make", "-n", "oracle-test"],
@@ -269,13 +273,81 @@ def test_makefile_isolates_pypi_duckdb_and_oracle_test_has_no_fallback() -> None
         text=True,
         check=True,
     )
-    assert "src/py/tests/unit/db/test_oracle_adapter.py" in oracle_dry_run.stdout
-    assert "src/py/tests/integration/db/test_oracle_native.py" in oracle_dry_run.stdout
+    adapter_pos = oracle_dry_run.stdout.find("src/py/tests/unit/db/test_oracle_adapter.py")
+    notify_pos = oracle_dry_run.stdout.find("src/py/tests/unit/db/test_oracle_context_notify_and_queues.py")
+    native_pos = oracle_dry_run.stdout.find("src/py/tests/integration/db/test_oracle_native.py")
+    assert adapter_pos != -1
+    assert notify_pos != -1
+    assert native_pos != -1
+    assert adapter_pos < native_pos
+    assert notify_pos < native_pos
     assert "test_freethreaded_gil.py" not in oracle_dry_run.stdout
+
+    for target in ("redis-test", "valkey-test"):
+        dry_run = subprocess.run(
+            ["make", "-n", target],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "src/py/tests/unit/framework/test_queue_backends_and_channels.py" in dry_run.stdout
+        assert "test_distributed_queues.py" not in dry_run.stdout
+
+
+def _extract_makefile_recipe(target: str) -> str:
+    makefile_lines = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+    collecting = False
+    recipe_lines: list[str] = []
+    prefix = f"{target}:"
+    for line in makefile_lines:
+        if line.startswith(prefix):
+            collecting = True
+            recipe_lines.append(line)
+            continue
+        if collecting:
+            if line.startswith("\t"):
+                recipe_lines.append(line)
+            elif line.strip() == "":
+                break
+            else:
+                break
+    return "\n".join(recipe_lines)
+
+
+@pytest.mark.parametrize("target", ["lint", "lint-all"])
+def test_makefile_lint_targets_enforce_no_sync_type_gates_and_fail_loud_stubtest(target: str) -> None:
+    """Verify Makefile lint and lint-all pass --no-sync, run tsc/pyright/check_extras, and fail loud on missing stubs."""
+    recipe = _extract_makefile_recipe(target)
+    assert recipe
+    uv_run_lines = [line.strip() for line in recipe.splitlines() if "uv run" in line]
+    assert uv_run_lines
+    assert all("uv run --no-sync" in line for line in uv_run_lines)
+    assert "bunx tsc --noEmit" in recipe
+    assert "uv run --no-sync pyright src/py/vertebra" in recipe
+    assert "uv run --no-sync python tools/scripts/check_extras.py" in recipe
+    assert "Missing native extensions:" in recipe
+    expected_exts = (
+        "vertebra._vertebra",
+        "vertebra._bundler",
+        "vertebra._storage",
+        "vertebra._mysql",
+        "vertebra._bigquery",
+        "vertebra._mssql",
+        "vertebra._spanner",
+        "vertebra._duckdb",
+        "vertebra._oracle",
+        "vertebra._postgres",
+        "vertebra._sqlite",
+        "vertebra._redis",
+        "vertebra._valkey",
+    )
+    for ext in expected_exts:
+        assert ext in recipe
 
 
 def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
-    """Verify ``.github/workflows/ci.yml`` defines ``test-db-conformance`` (10 rows) and non-blocking ``conformance-oracle``."""
+    """Verify ``.github/workflows/ci.yml`` defines ``test-db-conformance`` and blocking ``conformance-oracle``."""
     ci_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     jobs = ci_data["jobs"]
 
@@ -310,8 +382,111 @@ def test_ci_workflow_defines_db_conformance_matrix_and_oracle_job() -> None:
     oracle_job = jobs["conformance-oracle"]
     assert oracle_job["needs"] == ["changes", "lint"]
     assert oracle_job["timeout-minutes"] == 45
-    assert oracle_job["continue-on-error"] is True
+    assert "continue-on-error" not in oracle_job
     assert any(step.get("run") == "make db-conformance ENGINE=oracle VERSION=23ai" for step in oracle_job["steps"])
+
+
+def test_ci_workflow_lint_macos_and_thirteen_wheel_checks() -> None:
+    """Verify CI lint installs all extras, macOS Rust runs on PRs without macos-ulock, and all 13 wheel checks run."""
+    ci_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    jobs = ci_data["jobs"]
+
+    changes_job = jobs["changes"]
+    assert "rust_macos" in changes_job["outputs"]
+    assert "packaging" in changes_job["outputs"]
+    filter_step = next(step for step in changes_job["steps"] if step.get("id") == "filter")
+    filters_cfg = yaml.safe_load(filter_step["with"]["filters"])
+    assert "src/rs/**" in filters_cfg["rust_macos"]
+    assert "src/rs/vertebra-*/**" in filters_cfg["packaging"]
+
+    lint_runs = "\n".join(str(step.get("run", "")) for step in jobs["lint"]["steps"])
+    assert "uv sync --frozen --all-extras --group test --group lint --group build" in lint_runs
+    assert "make ts-install && make ts-build" in lint_runs
+    assert "make dev" in lint_runs
+    assert "make lint-all" in lint_runs
+    assert lint_runs.index("make dev") < lint_runs.index("make lint-all")
+
+    macos_job = jobs["test-rust-macos"]
+    assert "needs.changes.outputs.rust_macos == 'true'" in macos_job["if"]
+    macos_runs = "\n".join(str(step.get("run", "")) for step in macos_job["steps"])
+    assert "cargo test --workspace --features tls,http3,compression,gcp" in macos_runs
+    assert "macos-ulock" not in macos_runs
+
+    ci_text = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for fixed_target in (
+        "make core-wheel-check",
+        "make sqlite-wheel-check",
+        "make postgres-wheel-check",
+        "make redis-wheel-check",
+        "make valkey-wheel-check",
+    ):
+        assert fixed_target in ci_text
+
+    opt_wheels = jobs["optional-wheel-checks"]
+    assert opt_wheels["needs"] == ["changes", "lint"]
+    assert "needs.changes.outputs.packaging == 'true'" in opt_wheels["if"]
+    assert opt_wheels["strategy"]["matrix"]["package"] == [
+        "duckdb",
+        "mysql",
+        "mssql",
+        "oracle",
+        "storage",
+        "bigquery",
+        "spanner",
+        "bundler",
+    ]
+    assert any("make ${{ matrix.package }}-wheel-check" in str(step.get("run", "")) for step in opt_wheels["steps"])
+
+
+def _extract_release_manifest_script() -> str:
+    release_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
+    validate_job = release_data["jobs"]["validate_release_manifest"]
+    run_cmd = next(
+        str(step["run"]) for step in validate_job["steps"] if "Reject upstream git pins" in step.get("name", "")
+    )
+    _, _, body = run_cmd.partition("<<'PY'\n")
+    script, _, _ = body.partition("\nPY")
+    return textwrap.dedent(script)
+
+
+@pytest.mark.parametrize(
+    ("source_entry", "expected_rc"),
+    [
+        ('{ git = "https://example.com/repo.git", rev = "abc123" }', 1),
+        ('{ git = "https://example.com/repo.git", branch = "main" }', 1),
+        ('{ git = "https://example.com/repo.git", tag = "v1.0.0" }', 1),
+        ('{ rev = "abc123" }', 1),
+        ('{ path = "src/rs/vertebra-sqlite", editable = true }', 0),
+    ],
+)
+def test_release_workflow_guards_sdist_pypi_and_git_pins(
+    tmp_path: Path,
+    source_entry: str,
+    expected_rc: int,
+) -> None:
+    """Verify release.yaml includes valkey sdist, release-only PyPI upload, and rejects git source pins."""
+    release_data = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
+    jobs = release_data["jobs"]
+
+    assert "validate_release_manifest" in jobs["build_wheels"]["needs"]
+    assert "validate_release_manifest" in jobs["build_sdist"]["needs"]
+    sdist_runs = "\n".join(str(step.get("run", "")) for step in jobs["build_sdist"]["steps"])
+    assert "valkey" in sdist_runs
+    assert jobs["upload_pypi"]["if"] == "github.event_name == 'release'"
+
+    (tmp_path / "pyproject.toml").write_text(
+        f"[project]\nname = 'synthetic'\nversion = '0.1.0'\n\n[tool.uv.sources]\ndep = {source_entry}\n",
+        encoding="utf-8",
+    )
+    script = _extract_release_manifest_script()
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == expected_rc
 
 
 def test_server_runner_exits_with_utf8_and_non_utf8_binary_stderr() -> None:

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from vertebra.agent.runtime import ConfirmationGate as RuntimeConfirmationGate
 from vertebra.extensions.apex import (
     ApexAccessPolicy,
     ApexFederatedQuery,
@@ -26,6 +27,7 @@ from vertebra.extensions.apex import (
     DualityViewSpec,
     OracleSessionManager,
 )
+from vertebra.extensions.apex.gateway import ConfirmationGate as GatewayConfirmationGate
 from vertebra.framework.live import LiveState
 from vertebra.typing import UnsupportedBackendError
 
@@ -384,6 +386,43 @@ async def test_apex_gateway_policy_page_tools_and_confirmation_gate() -> None:
 
     with pytest.raises(UnsupportedBackendError, match="requires an explicit ords_transport"):
         await gateway.execute_ords_rest(policy, "ORDS_ORDERS", {"id": 1}, bearer_token="tok")
+
+
+def test_apex_confirmation_gate_unification_wildcard_and_owner_isolation() -> None:
+    """Verify APEX uses runtime ConfirmationGate with single-use target/wildcard and owner isolation."""
+    assert ConfirmationGate is RuntimeConfirmationGate
+    assert GatewayConfirmationGate is RuntimeConfirmationGate
+
+    gate = ConfirmationGate()
+    assert gate.approve("tok-wild", target="*") is True
+    assert gate.is_approved("tok-wild", target="ANY_PKG.PROC", payload={"x": 1}) is True
+    assert gate.consume("tok-wild", target="ANY_PKG.PROC", payload={"x": 1}) is True
+    assert gate.consume("tok-wild", target="ANY_PKG.PROC", payload={"x": 1}) is False
+
+    assert (
+        gate.approve("tok-scoped", target="APEX_ORDER_PKG.APPROVE", payload={"id": 42}, owner_id="acme:alice") is True
+    )
+    assert (
+        gate.is_approved("tok-scoped", target="APEX_ORDER_PKG.APPROVE", payload={"id": 42}, owner_id="acme:bob")
+        is False
+    )
+    assert gate.consume("tok-scoped", target="APEX_ORDER_PKG.APPROVE", payload={"id": 42}, owner_id="acme:bob") is False
+    assert (
+        gate.consume("tok-scoped", target="APEX_ORDER_PKG.APPROVE", payload={"id": 99}, owner_id="acme:alice") is False
+    )
+    assert (
+        gate.consume("tok-scoped", target="apex_order_pkg.approve", payload={"id": 42}, owner_id="acme:alice") is True
+    )
+    assert (
+        gate.consume("tok-scoped", target="APEX_ORDER_PKG.APPROVE", payload={"id": 42}, owner_id="acme:alice") is False
+    )
+
+    ticket = gate.request_confirmation("drop_table", "call-9", {"table": "orders"}, owner_id="acme:alice")
+    assert gate.approve(ticket.token, owner_id="acme:bob") is False
+    assert gate.approve(ticket.token, owner_id="acme:alice") is True
+    assert gate.consume(ticket.token, target="drop_table", payload={"table": "orders"}, owner_id="acme:bob") is False
+    assert gate.consume(ticket.token, target="drop_table", payload={"table": "orders"}, owner_id="acme:alice") is True
+    assert gate.consume(ticket.token, target="drop_table", payload={"table": "orders"}, owner_id="acme:alice") is False
 
 
 def test_ords_openapi_and_duality_view_generator() -> None:

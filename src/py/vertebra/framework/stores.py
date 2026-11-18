@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Self
@@ -32,7 +33,7 @@ __all__ = (
 class BaseNativeKVStore(_StoreBase):
     """Lock-free monotonic TTL store foundation with driver backing and RESP3 invalidation."""
 
-    __slots__ = ("_client_tracking", "_driver", "_key_prefix", "_l1_cache")
+    __slots__ = ("_client_tracking", "_driver", "_key_prefix", "_l1_cache", "_max_l1_entries")
 
     def __init__(
         self,
@@ -40,10 +41,15 @@ class BaseNativeKVStore(_StoreBase):
         driver: Any = None,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> None:
+        if max_l1_entries < 0:
+            msg = f"max_l1_entries must be >= 0, got {max_l1_entries}"
+            raise ValueError(msg)
         self._key_prefix = validate_identifier(key_prefix, "key_prefix", allow_hyphens=True)
         self._client_tracking = client_tracking
-        self._l1_cache: dict[str, tuple[bytes, float | None]] = {}
+        self._max_l1_entries = max_l1_entries
+        self._l1_cache: OrderedDict[str, tuple[bytes, float | None]] = OrderedDict()
         self._driver = driver
         if self._client_tracking and driver is not None and hasattr(driver, "add_invalidation_listener"):
             driver.add_invalidation_listener(self._on_driver_invalidate)
@@ -53,6 +59,11 @@ class BaseNativeKVStore(_StoreBase):
         """Return the underlying Valkey or Redis driver when configured."""
         return self._driver
 
+    @property
+    def max_l1_entries(self) -> int:
+        """Return the maximum number of entries retained in the L1 cache."""
+        return self._max_l1_entries
+
     @classmethod
     def from_valkey(
         cls,
@@ -60,6 +71,7 @@ class BaseNativeKVStore(_StoreBase):
         *,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> Self:
         """Create a store backed by Valkey with client-side caching."""
         cfg = ValkeyConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
@@ -67,6 +79,7 @@ class BaseNativeKVStore(_StoreBase):
             driver=AsyncValkeyDriver(cfg),
             key_prefix=key_prefix,
             client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
         )
 
     @classmethod
@@ -76,6 +89,7 @@ class BaseNativeKVStore(_StoreBase):
         *,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> Self:
         """Create a store backed by Redis."""
         cfg = RedisConfig(url=config_or_url) if isinstance(config_or_url, str) else config_or_url
@@ -83,6 +97,7 @@ class BaseNativeKVStore(_StoreBase):
             driver=AsyncRedisDriver(cfg),
             key_prefix=key_prefix,
             client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
         )
 
     @property
@@ -91,7 +106,7 @@ class BaseNativeKVStore(_StoreBase):
         return self._key_prefix
 
     @property
-    def _entries(self) -> dict[str, tuple[bytes, float | None]]:
+    def _entries(self) -> OrderedDict[str, tuple[bytes, float | None]]:
         """Return the underlying L1 cache entries mapping."""
         return self._l1_cache
 
@@ -120,6 +135,8 @@ class BaseNativeKVStore(_StoreBase):
             if expires_at is not None and now >= expires_at:
                 self._l1_cache.pop(full_key, None)
                 entry = None
+            else:
+                self._l1_cache.move_to_end(full_key)
         if entry is None:
             if self._driver is None:
                 return None
@@ -130,7 +147,7 @@ class BaseNativeKVStore(_StoreBase):
             if renew_for is not None:
                 ttl_ms = self._ttl_milliseconds(renew_for)
                 new_expires = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
-                self._l1_cache[full_key] = (val_bytes, new_expires)
+                self._l1_put(full_key, val_bytes, new_expires)
                 await self._driver.set(full_key, val_bytes, px=ttl_ms)
                 return val_bytes
             new_expires = None
@@ -140,13 +157,13 @@ class BaseNativeKVStore(_StoreBase):
                     return None
                 if pttl_ms >= 0:
                     new_expires = time.monotonic() + pttl_ms / 1000.0
-            self._l1_cache[full_key] = (val_bytes, new_expires)
+            self._l1_put(full_key, val_bytes, new_expires)
             return val_bytes
         value, _expires_at = entry
         if renew_for is not None:
             ttl_ms = self._ttl_milliseconds(renew_for)
             new_expires = None if ttl_ms is None else now + ttl_ms / 1000.0
-            self._l1_cache[full_key] = (value, new_expires)
+            self._l1_put(full_key, value, new_expires)
             if self._driver is not None:
                 await self._driver.set(full_key, value, px=ttl_ms)
         return value
@@ -162,7 +179,7 @@ class BaseNativeKVStore(_StoreBase):
         full_key = self._make_key(key)
         ttl_ms = self._ttl_milliseconds(expires_in)
         expires_at = None if ttl_ms is None else time.monotonic() + ttl_ms / 1000.0
-        self._l1_cache[full_key] = (raw, expires_at)
+        self._l1_put(full_key, raw, expires_at)
         if self._driver is not None:
             await self._driver.set(full_key, raw, px=ttl_ms)
 
@@ -250,6 +267,15 @@ class BaseNativeKVStore(_StoreBase):
             raise ValueError("expires_in must be a positive duration")
         return math.ceil(seconds * 1000)
 
+    def _l1_put(self, full_key: str, value: bytes, expires_at: float | None) -> None:
+        """Insert or update an L1 cache entry and evict oldest entries past max_l1_entries."""
+        if self._max_l1_entries == 0:
+            return
+        self._l1_cache[full_key] = (value, expires_at)
+        self._l1_cache.move_to_end(full_key)
+        while len(self._l1_cache) > self._max_l1_entries:
+            self._l1_cache.popitem(last=False)
+
     def _on_driver_invalidate(self, keys: Any) -> None:
         """Evict local cache entries matching invalidated keys."""
         for key in keys:
@@ -269,6 +295,7 @@ class ValkeyStore(BaseNativeKVStore):
         *,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> None:
         if driver is not None:
             resolved_driver = driver
@@ -277,12 +304,29 @@ class ValkeyStore(BaseNativeKVStore):
             resolved_driver = AsyncValkeyDriver(cfg)
         else:
             resolved_driver = AsyncValkeyDriver(ValkeyConfig())
-        super().__init__(driver=resolved_driver, key_prefix=key_prefix, client_tracking=client_tracking)
+        super().__init__(
+            driver=resolved_driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
     @classmethod
-    def from_url(cls, url: str, *, key_prefix: str = "vertebra", client_tracking: bool = True) -> Self:
+    def from_url(
+        cls,
+        url: str,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+        max_l1_entries: int = 4096,
+    ) -> Self:
         """Create a ValkeyStore from a valkey:// connection URL."""
-        return cls(config_or_url=url, key_prefix=key_prefix, client_tracking=client_tracking)
+        return cls(
+            config_or_url=url,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
 
 class RedisStore(BaseNativeKVStore):
@@ -297,6 +341,7 @@ class RedisStore(BaseNativeKVStore):
         *,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> None:
         if driver is not None:
             resolved_driver = driver
@@ -305,12 +350,29 @@ class RedisStore(BaseNativeKVStore):
             resolved_driver = AsyncRedisDriver(cfg)
         else:
             resolved_driver = AsyncRedisDriver(RedisConfig())
-        super().__init__(driver=resolved_driver, key_prefix=key_prefix, client_tracking=client_tracking)
+        super().__init__(
+            driver=resolved_driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
     @classmethod
-    def from_url(cls, url: str, *, key_prefix: str = "vertebra", client_tracking: bool = True) -> Self:
+    def from_url(
+        cls,
+        url: str,
+        *,
+        key_prefix: str = "vertebra",
+        client_tracking: bool = True,
+        max_l1_entries: int = 4096,
+    ) -> Self:
         """Create a RedisStore from a redis:// connection URL."""
-        return cls(config_or_url=url, key_prefix=key_prefix, client_tracking=client_tracking)
+        return cls(
+            config_or_url=url,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
 
 class MemoryStore(BaseNativeKVStore):
@@ -324,8 +386,14 @@ class MemoryStore(BaseNativeKVStore):
         driver: Any = None,
         key_prefix: str = "vertebra",
         client_tracking: bool = False,
+        max_l1_entries: int = 4096,
     ) -> None:
-        super().__init__(driver=driver, key_prefix=key_prefix, client_tracking=client_tracking)
+        super().__init__(
+            driver=driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
 
 class KeyValueStore(BaseNativeKVStore):
@@ -339,8 +407,14 @@ class KeyValueStore(BaseNativeKVStore):
         driver: AsyncValkeyDriver | AsyncRedisDriver | None = None,
         key_prefix: str = "vertebra",
         client_tracking: bool = True,
+        max_l1_entries: int = 4096,
     ) -> None:
-        super().__init__(driver=driver, key_prefix=key_prefix, client_tracking=client_tracking)
+        super().__init__(
+            driver=driver,
+            key_prefix=key_prefix,
+            client_tracking=client_tracking,
+            max_l1_entries=max_l1_entries,
+        )
 
 
 class NamespacedStore:

@@ -193,9 +193,16 @@ impl VectorSlab {
         if dimensions == 0 {
             return Err("vector dimensions must be > 0".to_string());
         }
-        let packed_row_bytes = dtype.packed_row_bytes(dimensions);
+        let packed_row_bytes = match dtype {
+            VectorDtype::Binary => dimensions.div_ceil(8),
+            _ => dimensions
+                .checked_mul(dtype.elem_bytes())
+                .ok_or_else(|| "vector row byte size overflow".to_string())?,
+        };
         let row_stride_bytes = if padded_rows {
-            packed_row_bytes.next_multiple_of(64)
+            packed_row_bytes
+                .checked_next_multiple_of(64)
+                .ok_or_else(|| "vector row stride overflow".to_string())?
         } else {
             packed_row_bytes
         };
@@ -203,18 +210,30 @@ impl VectorSlab {
         let data_bytes = count
             .checked_mul(row_stride_bytes)
             .ok_or_else(|| "vector slab byte size overflow".to_string())?;
+        let data_end = data_offset
+            .checked_add(data_bytes)
+            .ok_or_else(|| "vector slab data size overflow".to_string())?;
         let scales_offset = if dtype == VectorDtype::Int8 && count > 0 {
-            (data_offset + data_bytes).next_multiple_of(64)
+            data_end
+                .checked_next_multiple_of(64)
+                .ok_or_else(|| "vector slab scales offset overflow".to_string())?
         } else {
             0
         };
         let total_bytes = if scales_offset > 0 {
+            let scales_bytes = count
+                .checked_mul(4)
+                .ok_or_else(|| "vector slab scales overflow".to_string())?;
             scales_offset
-                .checked_add(count * 4)
+                .checked_add(scales_bytes)
                 .ok_or_else(|| "vector slab scales overflow".to_string())?
-                .next_multiple_of(64)
+                .checked_next_multiple_of(64)
+                .ok_or_else(|| "vector slab total size overflow".to_string())?
         } else {
-            (data_offset + data_bytes).max(64).next_multiple_of(64)
+            data_end
+                .max(64)
+                .checked_next_multiple_of(64)
+                .ok_or_else(|| "vector slab total size overflow".to_string())?
         };
         Ok((
             packed_row_bytes,
@@ -289,7 +308,6 @@ impl VectorSlab {
             }
         };
         // SAFETY: `region` was newly created with at least `total_bytes` mapped writable bytes.
-        // SAFETY: `region` was newly created with at least `total_bytes` writable bytes.
         unsafe {
             std::ptr::write_bytes(region.as_ptr(), 0, total_bytes);
         }
@@ -333,28 +351,55 @@ impl VectorSlab {
         let data_offset = hdr.data_offset as usize;
         let scales_offset = hdr.scales_offset as usize;
         let total_bytes = hdr.total_bytes as usize;
-        if total_bytes > region.len() {
-            drop(region);
-            let full_region = ShmRegion::open_named(name, total_bytes)
-                .map_err(|e| format!("failed to reopen full SHM vector slab '{name}': {e}"))?;
-            return Ok(Self {
-                backing: SlabBacking::Shm {
-                    region: full_region,
-                    name: Some(name.to_string()),
-                },
-                count,
-                dimensions,
-                dtype,
-                row_stride_bytes,
-                packed_row_bytes,
-                data_offset,
-                scales_offset,
-                total_bytes,
-            });
+        if dimensions == 0
+            || total_bytes < VECTOR_SLAB_HEADER_BYTES
+            || data_offset < VECTOR_SLAB_HEADER_BYTES
+            || row_stride_bytes < packed_row_bytes
+        {
+            return Err("invalid VectorSlab header dimensions or offsets".to_string());
         }
+        let data_bytes = count
+            .checked_mul(row_stride_bytes)
+            .ok_or_else(|| "VectorSlab header data size overflow".to_string())?;
+        let data_end = data_offset
+            .checked_add(data_bytes)
+            .ok_or_else(|| "VectorSlab header data end overflow".to_string())?;
+        if data_end > total_bytes {
+            return Err("VectorSlab header data exceeds total_bytes".to_string());
+        }
+        if dtype == VectorDtype::Float32
+            && (!data_offset.is_multiple_of(4) || !row_stride_bytes.is_multiple_of(4))
+        {
+            return Err("VectorSlab Float32 data offset or stride is unaligned".to_string());
+        }
+        if scales_offset > 0 {
+            let scales_bytes = count
+                .checked_mul(4)
+                .ok_or_else(|| "VectorSlab header scales size overflow".to_string())?;
+            let scales_end = scales_offset
+                .checked_add(scales_bytes)
+                .ok_or_else(|| "VectorSlab header scales end overflow".to_string())?;
+            if scales_offset < VECTOR_SLAB_HEADER_BYTES
+                || !scales_offset.is_multiple_of(4)
+                || scales_end > total_bytes
+            {
+                return Err("VectorSlab header scales region is invalid".to_string());
+            }
+        }
+        let final_region = if total_bytes > region.len() {
+            drop(region);
+            let reopened = ShmRegion::open_named(name, total_bytes)
+                .map_err(|e| format!("failed to reopen full SHM vector slab '{name}': {e}"))?;
+            if reopened.len() < total_bytes {
+                return Err("reopened SHM vector slab shorter than total_bytes".to_string());
+            }
+            reopened
+        } else {
+            region
+        };
         Ok(Self {
             backing: SlabBacking::Shm {
-                region,
+                region: final_region,
                 name: Some(name.to_string()),
             },
             count,
@@ -866,35 +911,55 @@ pub fn top_k_search(
         ));
     }
 
+    enum Float32Query<'a> {
+        Borrowed(&'a [f32]),
+        Owned(Vec<f32>),
+        None,
+    }
+    impl Float32Query<'_> {
+        #[inline]
+        fn as_slice(&self) -> &[f32] {
+            match self {
+                Self::Borrowed(s) => s,
+                Self::Owned(v) => v,
+                Self::None => &[],
+            }
+        }
+    }
+    let f32_query = if slab.dtype() == VectorDtype::Float32 {
+        let ptr = query_bytes.as_ptr() as *const f32;
+        if ptr.is_aligned() {
+            // SAFETY: `query_bytes.len() == slab.packed_row_bytes() == slab.dimensions() * 4`
+            // and `ptr.is_aligned()` verified 4-byte alignment for `f32`.
+            Float32Query::Borrowed(unsafe { std::slice::from_raw_parts(ptr, slab.dimensions()) })
+        } else {
+            Float32Query::Owned(
+                query_bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+            )
+        }
+    } else {
+        Float32Query::None
+    };
+
     let mut heap: BinaryHeap<MinScoreEntry> = BinaryHeap::with_capacity(k.min(slab.count()) + 1);
     for idx in 0..slab.count() {
         let score = match (slab.dtype(), metric) {
             (VectorDtype::Float32, SimilarityMetric::Cosine) => {
-                // SAFETY: `query_bytes.len() == slab.packed_row_bytes() == slab.dimensions() * 4`
-                // and `i8` has alignment 1; for `f32` we read via `from_raw_parts` on aligned slab rows
-                // or decode `query_bytes` safely.
-                let q = unsafe {
-                    std::slice::from_raw_parts(
-                        query_bytes.as_ptr() as *const f32,
-                        slab.dimensions(),
-                    )
-                };
                 let row = slab.row_f32(idx)?;
-                cosine_similarity_f32(q, row)
+                cosine_similarity_f32(f32_query.as_slice(), row)
             }
             (VectorDtype::Float32, SimilarityMetric::Dot) => {
-                // SAFETY: `query_bytes.len() == slab.dimensions() * 4`.
-                let q = unsafe {
-                    std::slice::from_raw_parts(
-                        query_bytes.as_ptr() as *const f32,
-                        slab.dimensions(),
-                    )
-                };
                 let row = slab.row_f32(idx)?;
-                dot_product_f32(q, row)
+                dot_product_f32(f32_query.as_slice(), row)
             }
             (VectorDtype::Int8, SimilarityMetric::Dot | SimilarityMetric::Cosine) => {
-                // SAFETY: `query_bytes.len() == slab.dimensions()` and `i8` has alignment 1.
+                // SAFETY: `query_bytes.len() == slab.dimensions()` and `i8` has alignment 1
+                // with identical size and representation to `u8`.
                 let q = unsafe {
                     std::slice::from_raw_parts(query_bytes.as_ptr() as *const i8, slab.dimensions())
                 };
@@ -1106,13 +1171,29 @@ pub struct VectorCache {
 }
 
 impl VectorCache {
-    pub fn new_in_memory(capacity: usize, dimensions: usize) -> Result<Self, String> {
+    fn compute_layout(capacity: usize, dimensions: usize) -> Result<(usize, usize), String> {
         if capacity == 0 || dimensions == 0 {
             return Err("VectorCache capacity and dimensions must be > 0".to_string());
         }
-        let vec_bytes = dimensions * 4;
-        let slot_stride_bytes = (64 + vec_bytes).next_multiple_of(64);
-        let total_bytes = 64 + capacity * slot_stride_bytes;
+        let vec_bytes = dimensions
+            .checked_mul(4)
+            .ok_or_else(|| "VectorCache dimensions byte size overflow".to_string())?;
+        let slot_stride_bytes = 64usize
+            .checked_add(vec_bytes)
+            .ok_or_else(|| "VectorCache slot stride overflow".to_string())?
+            .checked_next_multiple_of(64)
+            .ok_or_else(|| "VectorCache slot stride overflow".to_string())?;
+        let slots_bytes = capacity
+            .checked_mul(slot_stride_bytes)
+            .ok_or_else(|| "VectorCache total size overflow".to_string())?;
+        let total_bytes = 64usize
+            .checked_add(slots_bytes)
+            .ok_or_else(|| "VectorCache total size overflow".to_string())?;
+        Ok((slot_stride_bytes, total_bytes))
+    }
+
+    pub fn new_in_memory(capacity: usize, dimensions: usize) -> Result<Self, String> {
+        let (slot_stride_bytes, total_bytes) = Self::compute_layout(capacity, dimensions)?;
         let buf = AlignedBuffer::new_zeroed(total_bytes)?;
         Ok(Self {
             backing: SlabBacking::Memory(buf),
@@ -1130,12 +1211,7 @@ impl VectorCache {
         capacity: usize,
         dimensions: usize,
     ) -> Result<Self, String> {
-        if capacity == 0 || dimensions == 0 {
-            return Err("VectorCache capacity and dimensions must be > 0".to_string());
-        }
-        let vec_bytes = dimensions * 4;
-        let slot_stride_bytes = (64 + vec_bytes).next_multiple_of(64);
-        let total_bytes = 64 + capacity * slot_stride_bytes;
+        let (slot_stride_bytes, total_bytes) = Self::compute_layout(capacity, dimensions)?;
         let (region, resolved_name) = match name {
             #[cfg(unix)]
             Some(explicit) => {
@@ -1160,7 +1236,6 @@ impl VectorCache {
             }
         };
         // SAFETY: `region` was newly created with at least `total_bytes` mapped writable bytes.
-        // SAFETY: `region` was newly created with at least `total_bytes` writable bytes.
         unsafe {
             std::ptr::write_bytes(region.as_ptr(), 0, total_bytes);
         }
@@ -2017,5 +2092,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_top_k_search_unaligned_query_and_checked_layout_bounds() {
+        #[repr(align(4))]
+        struct AlignedBytes([u8; 9]);
+
+        let slab =
+            VectorSlab::from_f32_slice(&[1.0, 0.0, 0.0, 1.0], 2, 2, true).expect("from_f32_slice");
+        let mut raw = AlignedBytes([0u8; 9]);
+        raw.0[1..5].copy_from_slice(&0.0f32.to_ne_bytes());
+        raw.0[5..9].copy_from_slice(&1.0f32.to_ne_bytes());
+        let matches = top_k_search(&raw.0[1..9], &slab, SimilarityMetric::Dot, 1)
+            .expect("unaligned query search");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].index, 1);
+
+        assert!(VectorSlab::compute_layout(usize::MAX, 4, VectorDtype::Float32, false).is_err());
+        assert!(VectorSlab::compute_layout(1, usize::MAX, VectorDtype::Float32, false).is_err());
+        assert!(VectorCache::new_in_memory(usize::MAX, 4).is_err());
+        assert!(VectorCache::new_in_memory(1, usize::MAX).is_err());
     }
 }

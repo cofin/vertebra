@@ -6,9 +6,9 @@ import builtins
 import datetime as dt
 import inspect
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Buffer, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Buffer, Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from vertebra.storage import (
     AsyncGcpTokenCache,
@@ -68,7 +68,7 @@ class ObjectStoreBackend(AAStorageBackend):
         prefix: str = "",
         signing: SigningConfig | None = None,
         token_cache: SyncGcpTokenCache | AsyncGcpTokenCache | None = None,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> None:
         """Initialize the storage backend for Advanced Alchemy FileObject and StoredObject columns.
 
@@ -149,12 +149,12 @@ class ObjectStoreBackend(AAStorageBackend):
         """Return True when presigned URL generation is configured on the underlying store."""
         return self._sync_store.supports_signing
 
-    def get_content(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
+    def get_content(self, path: PathLike, *, options: Mapping[str, object] | None = None) -> bytes:
         """Read full object bytes synchronously."""
         _ = options
         return self._sync_store.get(self._qualify(path))
 
-    async def get_content_async(self, path: PathLike, *, options: dict[str, Any] | None = None) -> bytes:
+    async def get_content_async(self, path: PathLike, *, options: Mapping[str, object] | None = None) -> bytes:
         """Read full object bytes asynchronously."""
         _ = options
         return await self._async_store.get(self._qualify(path))
@@ -204,19 +204,36 @@ class ObjectStoreBackend(AAStorageBackend):
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
         qualified = self._qualify(file_object.path)
+        content_type, attributes = self._resolve_upload_headers(file_object)
         if isinstance(data, Path):
-            put_res = self._sync_store.put_file(
-                qualified,
-                data,
-                checksum=checksum,
-                expected_sha256=expected_sha256,
-                expected_crc32c=expected_crc32c,
-                expected_md5=expected_md5,
-            )
+            if use_multipart is False and data.stat().st_size <= chunk_size:
+                put_res = self._sync_store.put(
+                    qualified,
+                    data.read_bytes(),
+                    content_type=content_type,
+                    attributes=attributes,
+                    checksum=checksum,
+                    expected_sha256=expected_sha256,
+                    expected_crc32c=expected_crc32c,
+                    expected_md5=expected_md5,
+                )
+            else:
+                put_res = self._sync_store.put_stream(
+                    qualified,
+                    self._iter_path_chunks(data, chunk_size),
+                    content_type=content_type,
+                    attributes=attributes,
+                    checksum=checksum,
+                    expected_sha256=expected_sha256,
+                    expected_crc32c=expected_crc32c,
+                    expected_md5=expected_md5,
+                )
         elif isinstance(data, Buffer) and not use_multipart:
             put_res = self._sync_store.put(
                 qualified,
                 data,
+                content_type=content_type,
+                attributes=attributes,
                 checksum=checksum,
                 expected_sha256=expected_sha256,
                 expected_crc32c=expected_crc32c,
@@ -226,6 +243,8 @@ class ObjectStoreBackend(AAStorageBackend):
             put_res = self._sync_store.put_stream(
                 qualified,
                 self._iter_sync_data(data, chunk_size),
+                content_type=content_type,
+                attributes=attributes,
                 checksum=checksum,
                 expected_sha256=expected_sha256,
                 expected_crc32c=expected_crc32c,
@@ -253,19 +272,36 @@ class ObjectStoreBackend(AAStorageBackend):
             msg = "chunk_size must be >= 1"
             raise ValueError(msg)
         qualified = self._qualify(file_object.path)
+        content_type, attributes = self._resolve_upload_headers(file_object)
         if isinstance(data, Path):
-            put_res = await self._async_store.put_file(
-                qualified,
-                data,
-                checksum=checksum,
-                expected_sha256=expected_sha256,
-                expected_crc32c=expected_crc32c,
-                expected_md5=expected_md5,
-            )
+            if use_multipart is False and data.stat().st_size <= chunk_size:
+                put_res = await self._async_store.put(
+                    qualified,
+                    data.read_bytes(),
+                    content_type=content_type,
+                    attributes=attributes,
+                    checksum=checksum,
+                    expected_sha256=expected_sha256,
+                    expected_crc32c=expected_crc32c,
+                    expected_md5=expected_md5,
+                )
+            else:
+                put_res = await self._async_store.put_stream(
+                    qualified,
+                    self._iter_path_chunks_async(data, chunk_size),
+                    content_type=content_type,
+                    attributes=attributes,
+                    checksum=checksum,
+                    expected_sha256=expected_sha256,
+                    expected_crc32c=expected_crc32c,
+                    expected_md5=expected_md5,
+                )
         elif isinstance(data, Buffer) and not use_multipart:
             put_res = await self._async_store.put(
                 qualified,
                 data,
+                content_type=content_type,
+                attributes=attributes,
                 checksum=checksum,
                 expected_sha256=expected_sha256,
                 expected_crc32c=expected_crc32c,
@@ -275,6 +311,8 @@ class ObjectStoreBackend(AAStorageBackend):
             put_res = await self._async_store.put_stream(
                 qualified,
                 self._iter_async_data(data, chunk_size),
+                content_type=content_type,
+                attributes=attributes,
                 checksum=checksum,
                 expected_sha256=expected_sha256,
                 expected_crc32c=expected_crc32c,
@@ -286,18 +324,18 @@ class ObjectStoreBackend(AAStorageBackend):
     def save_arrow(
         self,
         path: PathLike,
-        data: Any,
+        data: object,
         *,
         format: str | None = None,
         file_format: str | None = None,
         batch_size: int = 65536,
-        schema: Any = None,
-        options: Mapping[str, Any] | None = None,
+        schema: object = None,
+        options: Mapping[str, object] | None = None,
         checksum: bool = False,
         expected_sha256: str | None = None,
         expected_crc32c: str | None = None,
         expected_md5: str | None = None,
-        **codec_options: Any,
+        **codec_options: object,
     ) -> PutResult:
         """Stream an Arrow Table, RecordBatch, or batch iterable directly to storage synchronously."""
         qualified, resolved_format, merged_options = self._prepare_arrow_write(
@@ -324,18 +362,18 @@ class ObjectStoreBackend(AAStorageBackend):
     async def save_arrow_async(
         self,
         path: PathLike,
-        data: Any,
+        data: object,
         *,
         format: str | None = None,
         file_format: str | None = None,
         batch_size: int = 65536,
-        schema: Any = None,
-        options: Mapping[str, Any] | None = None,
+        schema: object = None,
+        options: Mapping[str, object] | None = None,
         checksum: bool = False,
         expected_sha256: str | None = None,
         expected_crc32c: str | None = None,
         expected_md5: str | None = None,
-        **codec_options: Any,
+        **codec_options: object,
     ) -> PutResult:
         """Stream an Arrow Table, RecordBatch, or batch iterable directly to storage asynchronously."""
         qualified, resolved_format, merged_options = self._prepare_arrow_write(
@@ -431,9 +469,9 @@ class ObjectStoreBackend(AAStorageBackend):
         *,
         file_format: str | None,
         format: str | None,
-        options: Mapping[str, Any] | None,
-        codec_options: dict[str, Any],
-    ) -> tuple[str, str, dict[str, Any]]:
+        options: Mapping[str, object] | None,
+        codec_options: dict[str, object],
+    ) -> tuple[str, str, dict[str, object]]:
         """Qualify an Arrow object key, resolve its target format, and merge codec options."""
         qualified = self._qualify(path)
         raw_format = file_format if file_format is not None else format
@@ -494,6 +532,27 @@ class ObjectStoreBackend(AAStorageBackend):
         return lowered
 
     @staticmethod
+    def _resolve_upload_headers(file_object: FileObject) -> tuple[str | None, dict[str, str] | None]:
+        """Extract normalized content type and string attributes from a FileObject."""
+        content_type = file_object.content_type
+        raw_metadata = file_object.metadata
+        attributes = {str(k): str(v) for k, v in raw_metadata.items()} if raw_metadata else None
+        return content_type, attributes
+
+    @staticmethod
+    def _iter_path_chunks(path: Path, chunk_size: int) -> Iterator[bytes]:
+        """Yield bounded byte slices from a local file path."""
+        with path.open("rb") as handle:
+            while chunk := handle.read(chunk_size):
+                yield chunk
+
+    @classmethod
+    async def _iter_path_chunks_async(cls, path: Path, chunk_size: int) -> AsyncIterator[bytes]:
+        """Asynchronously yield bounded byte slices from a local file path."""
+        for chunk in cls._iter_path_chunks(path, chunk_size):
+            yield chunk
+
+    @staticmethod
     def _apply_put_metadata(file_object: FileObject, size: int, etag: str | None) -> None:
         """Populate size, etag, and UTC last_modified timestamp on a saved FileObject."""
         file_object.size = size
@@ -510,7 +569,7 @@ class ObjectStoreBackend(AAStorageBackend):
                 yield view[start : start + chunk_size]
         elif (reader := cls._get_reader(data)) is not None:
             while chunk := reader(chunk_size):
-                yield chunk
+                yield cast("Buffer", chunk)
         else:
             yield from cast("Iterable[Buffer]", data)
 
@@ -530,10 +589,10 @@ class ObjectStoreBackend(AAStorageBackend):
                 pass
             while True:
                 result = reader(chunk_size) if bounded else reader()
-                chunk = await result if inspect.isawaitable(result) else result
-                if not chunk:
+                raw_chunk = await result if inspect.isawaitable(result) else result
+                if not raw_chunk:
                     break
-                yield chunk
+                yield cast("Buffer", raw_chunk)
                 if not bounded:
                     break
         elif isinstance(data, AsyncIterable):
@@ -544,13 +603,13 @@ class ObjectStoreBackend(AAStorageBackend):
                 yield chunk
 
     @staticmethod
-    def _get_reader(data: Any) -> Any:
+    def _get_reader(data: object) -> Callable[..., object] | None:
         """Resolve direct and upload-wrapper file readers."""
         if callable(reader := getattr(data, "read", None)):
-            return reader
+            return cast("Callable[..., object]", reader)
         for attr in ("file", "stream"):
             if callable(reader := getattr(getattr(data, attr, None), "read", None)):
-                return reader
+                return cast("Callable[..., object]", reader)
         return None
 
 

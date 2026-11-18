@@ -14,9 +14,13 @@ fn bench_spsc_ping_pong(c: &mut Criterion) {
         vertebra_core::buffer::CACHELINE_BYTES,
     )
     .unwrap();
+    // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
     let ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is non-null, `CACHELINE_BYTES`-aligned, and valid for `layout.total_size` bytes
+    // until `dealloc` at the end of this benchmark function.
     let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
     let payload = [7u8; 8];
     let mut out = [0u8; 8];
@@ -26,6 +30,9 @@ fn bench_spsc_ping_pong(c: &mut Criterion) {
             let _ = ring.recv(&mut out).unwrap();
         })
     });
+    drop(ring);
+    drop(region);
+    // SAFETY: `ptr` was allocated with `alloc` and all ring/region handles are dropped.
     unsafe {
         std::alloc::dealloc(ptr, alloc);
     }
@@ -38,9 +45,13 @@ fn bench_spsc_throughput(c: &mut Criterion) {
         vertebra_core::buffer::CACHELINE_BYTES,
     )
     .unwrap();
+    // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
     let ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is non-null, `CACHELINE_BYTES`-aligned, and valid for `layout.total_size` bytes
+    // until `dealloc` at the end of this benchmark function.
     let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
     let payload = [3u8; 32];
     let mut out = [0u8; 32];
@@ -52,6 +63,9 @@ fn bench_spsc_throughput(c: &mut Criterion) {
             }
         })
     });
+    drop(ring);
+    drop(region);
+    // SAFETY: `ptr` was allocated with `alloc` and all ring/region handles are dropped.
     unsafe {
         std::alloc::dealloc(ptr, alloc);
     }
@@ -65,9 +79,13 @@ fn bench_spsc_recv_hybrid_immediate(c: &mut Criterion) {
         vertebra_core::buffer::CACHELINE_BYTES,
     )
     .unwrap();
+    // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
     let ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is non-null, `CACHELINE_BYTES`-aligned, and valid for `layout.total_size` bytes
+    // until `dealloc` at the end of this benchmark function.
     let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring = unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() };
     let payload = [42u8; 64];
     let mut out = [0u8; 256];
@@ -89,6 +107,9 @@ fn bench_spsc_recv_hybrid_immediate(c: &mut Criterion) {
         })
     });
 
+    drop(ring);
+    drop(region);
+    // SAFETY: `ptr` was allocated with `alloc` and all ring/region handles are dropped.
     unsafe {
         std::alloc::dealloc(ptr, alloc);
     }
@@ -111,9 +132,13 @@ fn bench_spsc_recv_hybrid_wakeup(c: &mut Criterion) {
                     vertebra_core::buffer::CACHELINE_BYTES,
                 )
                 .unwrap();
+                // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
                 let ptr = unsafe { std::alloc::alloc(alloc) };
                 assert!(!ptr.is_null());
+                // SAFETY: `ptr` is non-null, `CACHELINE_BYTES`-aligned, and valid for `layout.total_size`
+                // bytes until `dealloc` after all threads and handles finish.
                 let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+                // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
                 let ring = Arc::new(unsafe {
                     SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap()
                 });
@@ -140,6 +165,9 @@ fn bench_spsc_recv_hybrid_wakeup(c: &mut Criterion) {
                     sender.join().expect("sender panicked");
                 });
 
+                drop(ring);
+                drop(region);
+                // SAFETY: `ptr` was allocated with `alloc` and all ring/region handles are dropped.
                 unsafe {
                     std::alloc::dealloc(ptr, alloc);
                 }
@@ -161,9 +189,13 @@ fn bench_spsc_recv_hybrid_pure_wakeup(c: &mut Criterion) {
         vertebra_core::buffer::CACHELINE_BYTES,
     )
     .unwrap();
+    // SAFETY: `alloc` has non-zero `layout.total_size` and `CACHELINE_BYTES` alignment.
     let ptr = unsafe { std::alloc::alloc(alloc) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is non-null, `CACHELINE_BYTES`-aligned, and valid for `layout.total_size` bytes
+    // until `dealloc` after the sender thread joins and handles drop.
     let region = Arc::new(unsafe { ShmRegion::from_raw(ptr, layout.total_size) });
+    // SAFETY: exclusive initialization of freshly allocated `region` matching `layout`.
     let ring =
         Arc::new(unsafe { SpscRing::initialize(Arc::clone(&region), layout, 0, 0).unwrap() });
 
@@ -210,6 +242,9 @@ fn bench_spsc_recv_hybrid_pure_wakeup(c: &mut Criterion) {
     stop.store(true, Ordering::Release);
     sender_handle.join().unwrap();
 
+    drop(ring);
+    drop(region);
+    // SAFETY: `ptr` was allocated with `alloc`, the sender thread joined, and all handles are dropped.
     unsafe {
         std::alloc::dealloc(ptr, alloc);
     }

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
+import msgspec
 import pytest
 
 from vertebra.typing import MissingDependencyError
@@ -40,6 +42,8 @@ from vertebra.utils.module_loader import (
     reset_dependency_cache,
     resolve_optional_attr,
 )
+from vertebra.utils.serializers import JSONSerializer, MsgPackSerializer
+from vertebra.utils.serializers._schema import is_uuid_instance
 from vertebra.utils.uuids import (
     nanoid,
     uuid3,
@@ -404,3 +408,112 @@ def test_vertebra_utils_package_submodule_imports(submodule_name: str) -> None:
     """Verify vertebra.utils submodules import cleanly while keeping vertebra.utils thin."""
     submod = ensure_module(f"vertebra.utils.{submodule_name}")
     assert isinstance(submod, types.ModuleType)
+
+
+@pytest.mark.parametrize("serializer_cls", [JSONSerializer, MsgPackSerializer])
+def test_serializer_default_singleton_is_thread_safe(
+    serializer_cls: type[JSONSerializer] | type[MsgPackSerializer],
+) -> None:
+    """Verify concurrent default() calls after cache reset return one identical singleton instance."""
+    serializer_cls._default = None
+    workers = 8
+    barrier = threading.Barrier(workers)
+    instances: list[object] = []
+
+    def _grab() -> None:
+        barrier.wait(timeout=5.0)
+        instances.append(serializer_cls.default())
+
+    threads = [threading.Thread(target=_grab) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert len(instances) == workers
+    assert len({id(inst) for inst in instances}) == 1
+
+
+@pytest.mark.parametrize("codec", ["json", "msgpack"])
+def test_serializer_typed_decoder_cache_is_bounded_and_handles_unhashable_types(codec: str) -> None:
+    """Verify typed decoder caches stay bounded at <= 1024 entries and fall back on unhashable types."""
+    if codec == "json":
+        serializer: JSONSerializer | MsgPackSerializer = JSONSerializer()
+        raw_payload: Any = b'{"value": 7}'
+    else:
+        serializer = MsgPackSerializer()
+        raw_payload = serializer.encode_bytes({"value": 7})
+
+    for idx in range(1100):
+        dyn_struct = msgspec.defstruct(f"DynPayload{idx}", [("value", int)])
+        decoded = serializer.decode(raw_payload, type=dyn_struct)
+        assert decoded.value == 7
+
+    assert len(serializer._typed_decoders) <= 1024
+
+    unhashable_annotated_type = Annotated[int, {"meta": 1}]
+    if codec == "json":
+        assert serializer.decode(b"42", type=unhashable_annotated_type) == 42
+    else:
+        assert serializer.decode(serializer.encode_bytes(42), type=unhashable_annotated_type) == 42
+
+
+def test_shared_is_uuid_instance_recognizes_stdlib_and_non_uuid_values() -> None:
+    """Verify shared is_uuid_instance helper handles stdlib UUID and non-UUID values cleanly."""
+    assert is_uuid_instance(uuid.uuid4()) is True
+    assert is_uuid_instance("not-a-uuid") is False
+
+
+@pytest.mark.parametrize("should_fail", [False, True])
+def test_import_optional_waits_for_concurrent_initializing_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    should_fail: bool,
+) -> None:
+    """Verify concurrent threads do not observe half-initialized sys.modules entries during import."""
+    mod_name = f"_vtb_concurrent_init_{uuid.uuid4().hex}"
+    entered = threading.Event()
+    release = threading.Event()
+    state_mod_name = f"{mod_name}_sync"
+    state_mod: Any = types.ModuleType(state_mod_name)
+    state_mod.entered = entered
+    state_mod.release = release
+    monkeypatch.setitem(sys.modules, state_mod_name, state_mod)
+
+    tail = "raise ImportError('broken native binary')\n" if should_fail else "READY_ATTR = 'initialized'\n"
+    (tmp_path / f"{mod_name}.py").write_text(
+        f"import {state_mod_name} as _s\n_s.entered.set()\n_s.release.wait(timeout=5.0)\n{tail}",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    reset_dependency_cache(mod_name)
+
+    results: list[Any] = []
+    results_lock = threading.Lock()
+
+    def _loader() -> None:
+        loaded = import_optional(mod_name)
+        if not should_fail:
+            assert loaded is not None
+            assert getattr(loaded, "READY_ATTR", None) == "initialized"
+        with results_lock:
+            results.append(loaded)
+
+    t1 = threading.Thread(target=_loader)
+    t2 = threading.Thread(target=_loader)
+    t1.start()
+    assert entered.wait(timeout=5.0)
+    t2.start()
+    release.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert len(results) == 2
+    if should_fail:
+        assert results == [None, None]
+        assert mod_name not in sys.modules
+    else:
+        assert results[0] is results[1]
+        assert getattr(results[0], "READY_ATTR", None) == "initialized"
+    sys.modules.pop(mod_name, None)
+    reset_dependency_cache(mod_name)

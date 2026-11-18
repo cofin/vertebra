@@ -3,24 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import fnmatch
+import hashlib
+import hmac
 import queue
+import subprocess
+import sys
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import pydantic
 import pytest
+from advanced_alchemy.config import EngineConfig, RoutingConfig
+from advanced_alchemy.extensions.flask import (
+    SQLAlchemyAsyncConfig as FlaskSQLAlchemyAsyncConfig,
+)
+from advanced_alchemy.extensions.flask import (
+    SQLAlchemySyncConfig as FlaskSQLAlchemySyncConfig,
+)
+from flask import Flask
+from flask_caching import Cache as FlaskCache
+from flask_caching.backends.base import BaseCache
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 
 from vertebra._vertebra import AsgiProtocol, AsgiScope, Request, WsgiEnviron, run_wsgi_callable
 from vertebra.agent.mcp.models import MCPConfig as CanonicalMCPConfig
 from vertebra.agent.mcp.routes import WsgiMcpApp
+from vertebra.cache import SyncCacheStore
 from vertebra.db.driver import NotificationEvent, SyncNotificationSource
+from vertebra.extensions.alchemy import (
+    create_async_alchemy_config,
+    create_flask_alchemy,
+    create_sync_alchemy_config,
+)
 from vertebra.extensions.flask import (
+    AssetManifest,
     AsyncAPIDocsConfig,
     AsyncObjectStore,
     AsyncStorageRegistry,
+    AuthenticatedPrincipal,
     CacheBackend,
     ChannelsBackend,
     FastPath,
@@ -40,13 +65,20 @@ from vertebra.extensions.flask import (
     SyncStorageRegistry,
     VertebraConfig,
     VertebraPlugin,
+    ViteAssetBridge,
     ViteConfig,
     attach_channels,
     attach_storage,
+    attach_vite,
+    clear_vite_bridges,
     convert_werkzeug_rule,
+    get_vertebra_client_path,
+    get_vertebra_client_vite_aliases,
     mcp_tool,
     send_storage_file,
     vertebra_route,
+    vite_asset,
+    vite_hmr_client,
 )
 from vertebra.extensions.flask.fastpath import CompiledRoute as FlaskCompiledRoute
 from vertebra.framework.queues import (
@@ -61,10 +93,11 @@ from vertebra.framework.queues import (
 from vertebra.framework.queues import TaskEnvelope as CoreTaskEnvelope
 from vertebra.server._channels import ChannelEnvelope
 from vertebra.server._fastpath_core import CompiledRouteBase, get_attached_fastpath
-from vertebra.utils.serializers import decode_json, encode_msgpack_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
+    from pathlib import Path
 
 
 class CreateOrderPayload(msgspec.Struct, frozen=True, gc=False):
@@ -399,6 +432,73 @@ async def test_flask_fastpath_async_views_wrap_asgi_and_wsgi_send_raw_response()
     }
 
 
+@pytest.mark.parametrize(
+    ("method", "headers", "body", "expected_status", "check_kind", "expected_value"),
+    [
+        (
+            "POST",
+            [(b"content-type", b"application/json")],
+            b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
+            200,
+            "protocolVersion",
+            "2026-07-28",
+        ),
+        (
+            "POST",
+            [
+                (b"content-type", b"application/json"),
+                (b"mcp-protocol-version", b"2026-07-28"),
+            ],
+            b'{"jsonrpc":"2.0","id":2,"method":"initialize"}',
+            None,
+            "error_code",
+            -32601,
+        ),
+        ("GET", [], b"", 405, None, None),
+        (
+            "POST",
+            [
+                (b"content-type", b"application/json"),
+                (b"host", b"api.example.com"),
+                (b"origin", b"https://evil.example.com"),
+            ],
+            b'{"jsonrpc":"2.0","id":3,"method":"tools/list"}',
+            403,
+            None,
+            None,
+        ),
+        (
+            "POST",
+            [(b"content-type", b"application/json")],
+            b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
+            202,
+            "empty_body",
+            b"",
+        ),
+    ],
+    ids=["discover", "initialize-error", "get-405", "forbidden-origin", "notification-202"],
+)
+def test_flask_mcp_protocol_request_cases(
+    method: str,
+    headers: list[tuple[bytes, bytes]],
+    body: bytes,
+    expected_status: int | None,
+    check_kind: str | None,
+    expected_value: Any,
+) -> None:
+    """Flask MCP endpoint handles discovery, method validation, origin checks, and notifications."""
+    plugin = VertebraPlugin(_MockFlaskApp(), config=VertebraConfig(mcp=MCPConfig(server_name="flask-mcp")))
+    resp = plugin.handle_request(Request.from_parts(method=method, path="/mcp", headers=headers, body=body))
+    if expected_status is not None:
+        assert resp.status == expected_status
+    if check_kind == "protocolVersion":
+        assert decode_json(bytes(resp.body))["result"]["protocolVersion"] == expected_value
+    elif check_kind == "error_code":
+        assert decode_json(bytes(resp.body))["error"]["code"] == expected_value
+    elif check_kind == "empty_body":
+        assert bytes(resp.body) == expected_value
+
+
 def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
     """Flask MCP uses canonical MCPConfig, WsgiMcpApp over MCPCore, and reuses the persistent Portal loop."""
     assert MCPConfig is CanonicalMCPConfig
@@ -418,58 +518,7 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
     plugin = VertebraPlugin(app, config=VertebraConfig(mcp=MCPConfig(server_name="flask-mcp")))
     assert isinstance(getattr(plugin, "_mcp_app", None), WsgiMcpApp)
 
-    discover_req = Request.from_parts(
-        method="POST",
-        path="/mcp",
-        headers=[(b"content-type", b"application/json")],
-        body=b'{"jsonrpc":"2.0","id":1,"method":"server/discover"}',
-    )
-    discover_resp = plugin.handle_request(discover_req)
-    assert discover_resp.status == 200
-    discover_payload = decode_json(bytes(discover_resp.body))
-    assert discover_payload["result"]["protocolVersion"] == "2026-07-28"
-
-    init_req = Request.from_parts(
-        method="POST",
-        path="/mcp",
-        headers=[
-            (b"content-type", b"application/json"),
-            (b"mcp-protocol-version", b"2026-07-28"),
-        ],
-        body=b'{"jsonrpc":"2.0","id":2,"method":"initialize"}',
-    )
-    init_resp = plugin.handle_request(init_req)
-    assert decode_json(bytes(init_resp.body))["error"]["code"] == -32601
-
-    get_resp = plugin.handle_request(Request.from_parts(method="GET", path="/mcp"))
-    assert get_resp.status == 405
-
-    origin_resp = plugin.handle_request(
-        Request.from_parts(
-            method="POST",
-            path="/mcp",
-            headers=[
-                (b"content-type", b"application/json"),
-                (b"host", b"api.example.com"),
-                (b"origin", b"https://evil.example.com"),
-            ],
-            body=b'{"jsonrpc":"2.0","id":3,"method":"tools/list"}',
-        )
-    )
-    assert origin_resp.status == 403
-
-    notify_resp = plugin.handle_request(
-        Request.from_parts(
-            method="POST",
-            path="/mcp",
-            headers=[(b"content-type", b"application/json")],
-            body=b'{"jsonrpc":"2.0","method":"notifications/cancelled"}',
-        )
-    )
-    assert notify_resp.status == 202
-    assert bytes(notify_resp.body) == b""
-
-    for seq in (1, 2):
+    def _call_tool(seq: int) -> None:
         call_resp = plugin.handle_request(
             Request.from_parts(
                 method="POST",
@@ -479,6 +528,9 @@ def test_flask_mcp_shares_wsgi_mcp_app_and_reuses_persistent_portal() -> None:
             )
         )
         assert call_resp.status == 200
+
+    _call_tool(1)
+    _call_tool(2)
 
     assert len(observed_loops) == 2
     assert observed_loops[0] == observed_loops[1]
@@ -743,3 +795,250 @@ async def test_flask_queue_backend_delegates_to_durable_backend_without_lanes_at
     assert flask_queue.run_next() == 17
     assert durable.acked == [env1.id, env2.id, env3.id]
     assert durable.promoted >= 3
+
+
+def test_flask_alchemy_factory_and_app_binding() -> None:
+    """Verify Flask Alchemy config factories, routing/engine forwarding, and app extension binding."""
+    with pytest.raises(ValueError, match="at least one configuration"):
+        create_flask_alchemy()
+
+    async_cfg = create_async_alchemy_config("sqlite+vtb_async:///:memory:", framework="flask")
+    sync_cfg = create_sync_alchemy_config("sqlite+vtb:///:memory:", framework="flask")
+    assert isinstance(async_cfg, FlaskSQLAlchemyAsyncConfig)
+    assert isinstance(sync_cfg, FlaskSQLAlchemySyncConfig)
+
+    app = Flask(__name__)
+    ext = create_flask_alchemy(sync_cfg, app=app)
+    assert ext.config == [sync_cfg]
+    assert "advanced_alchemy" in app.extensions
+
+    routing_cfg = RoutingConfig(primary_connection_string="sqlite+vtb:///:memory:")
+    routed_cfg = create_sync_alchemy_config(framework="flask", routing_config=routing_cfg)
+    assert isinstance(routed_cfg, FlaskSQLAlchemySyncConfig)
+    assert routed_cfg.routing_config is routing_cfg
+
+    sync_engine = create_engine("sqlite+vtb:///:memory:")
+    explicit_ec = EngineConfig(pool_pre_ping=False, pool_recycle=cast("Any", None), poolclass=NullPool)
+    try:
+        prebuilt_cfg = create_sync_alchemy_config(
+            framework="flask",
+            engine_instance=sync_engine,
+            engine_config=explicit_ec,
+        )
+        assert prebuilt_cfg.engine_instance is sync_engine
+        assert prebuilt_cfg.engine_config is explicit_ec
+    finally:
+        sync_engine.dispose()
+
+
+def _build_hs256_jwt(claims: dict[str, Any], secret: bytes) -> str:
+    """Create a deterministic HS256 JWT token for unit assertions."""
+    header_b64 = (
+        base64.urlsafe_b64encode(encode_json_bytes({"alg": "HS256", "typ": "JWT"})).rstrip(b"=").decode("ascii")
+    )
+    payload_b64 = base64.urlsafe_b64encode(encode_json_bytes(claims)).rstrip(b"=").decode("ascii")
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+    sig_b64 = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+
+def test_flask_caching_backend_live_cache_sentinel_none_and_prefix_clear() -> None:
+    """FlaskCachingBackend integrates with flask_caching.Cache, preserves None hits, and clears by prefix."""
+    app = Flask(__name__)
+    ext_cache = FlaskCache(
+        app,
+        config={
+            "CACHE_TYPE": "vertebra.extensions.flask.cache.FlaskCachingBackend",
+            "CACHE_DEFAULT_TIMEOUT": 60,
+            "CACHE_KEY_PREFIX": "fc:app1:",
+        },
+    )
+    backend = ext_cache.cache
+    assert isinstance(backend, BaseCache)
+
+    hits = 0
+
+    @app.route("/items")
+    @ext_cache.cached(timeout=30)
+    def list_items() -> dict[str, Any]:
+        nonlocal hits
+        hits += 1
+        return {"hits": hits}
+
+    client = app.test_client()
+    first_resp = client.get("/items")
+    second_resp = client.get("/items")
+    assert first_resp.status_code == 200
+    assert second_resp.status_code == 200
+    assert decode_json(first_resp.data) == {"hits": 1}
+    assert decode_json(second_resp.data) == {"hits": 1}
+    assert hits == 1
+
+    assert backend.set("nullable", None) is True
+    assert backend.has("nullable") is True
+    assert backend.get("nullable") is None
+    assert backend.has("missing") is False
+    assert backend.get("missing") is None
+    assert backend.get_many("nullable", "missing") == [None, None]
+    assert backend.get_dict("nullable", "missing") == {"nullable": None, "missing": None}
+    assert backend.add("nullable", "overwrite-blocked") is False
+    assert backend.get("nullable") is None
+    assert backend.add("fresh", "created") is True
+    assert backend.get("fresh") == "created"
+
+    assert backend.inc("counter", 2) == 2
+    assert backend.inc("counter", 3) == 5
+    assert backend.dec("counter", 1) == 4
+    assert backend.set_many({"m1": "v1", "m2": "v2"}) == ["m1", "m2"]
+    assert backend.delete_many("m1", "m2") == ["m1", "m2"]
+    assert backend.has("m1") is False
+
+    clock_now = [100.0]
+
+    def _clock() -> float:
+        return clock_now[0]
+
+    shared_store = SyncCacheStore("memory://", key_prefix="shared:", _clock=_clock)
+
+    class _NoFlushStore:
+        def __init__(self, inner: SyncCacheStore) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "flushdb":
+                raise AssertionError("flushdb() must never be called by FlaskCachingBackend.clear()")
+            return getattr(self._inner, name)
+
+    guarded_store = cast("SyncCacheStore", _NoFlushStore(shared_store))
+    ns_one = FlaskCachingBackend(default_timeout=10, key_prefix="ns1:", store=guarded_store)
+    ns_two = FlaskCachingBackend(default_timeout=10, key_prefix="ns2:", store=guarded_store)
+
+    assert ns_one.set("forever", "kept", timeout=0) is True
+    assert ns_one.set("ephemeral", "gone", timeout=5) is True
+    assert ns_two.set("untouched", "safe", timeout=0) is True
+
+    clock_now[0] = 106.0
+    assert ns_one.has("forever") is True
+    assert ns_one.get("forever") == "kept"
+    assert ns_one.has("ephemeral") is False
+
+    assert ns_one.clear() is True
+    assert ns_one.has("forever") is False
+    assert ns_two.has("untouched") is True
+    assert ns_two.get("untouched") == "safe"
+
+
+@pytest.mark.parametrize(
+    "blocked_modules",
+    [
+        ("litestar", "litestar_queues", "vertebra.extensions.litestar"),
+        ("flask", "werkzeug"),
+        ("flask_caching", "flask_caching.backends", "flask_caching.backends.base"),
+    ],
+)
+def test_flask_subprocess_import_isolation_and_missing_dependencies(blocked_modules: tuple[str, ...]) -> None:
+    """Subprocess import isolation verifies zero litestar cross-imports and MissingDependencyError when optional deps are absent."""
+    script = (
+        "import importlib, sys\n"
+        "from types import SimpleNamespace\n"
+        "from vertebra.typing import MissingDependencyError\n"
+        f"blocked = {list(blocked_modules)!r}\n"
+        "for mod in blocked:\n"
+        "    sys.modules[mod] = None\n"
+        "pkg = importlib.import_module('vertebra.extensions.flask')\n"
+        "for sub in (\n"
+        "    'cache', 'channels', 'config', 'fastpath', 'mail', 'mcp',\n"
+        "    'offload', 'openapi', 'plugin', 'queues', 'router', 'security', 'storage', 'vite'\n"
+        "):\n"
+        "    importlib.import_module(f'vertebra.extensions.flask.{sub}')\n"
+        "cross = [m for m in sys.modules if m.startswith('vertebra.extensions.litestar') and sys.modules[m] is not None]\n"
+        "assert not cross, f'Unexpected litestar imports: {cross}'\n"
+        "assert hasattr(pkg, 'VertebraPlugin')\n"
+        "if 'flask_caching' in blocked:\n"
+        "    cache_mod = sys.modules['vertebra.extensions.flask.cache']\n"
+        "    try:\n"
+        "        cache_mod.FlaskCachingBackend()\n"
+        "    except MissingDependencyError as exc:\n"
+        "        assert 'flask-caching' in str(exc), str(exc)\n"
+        "    else:\n"
+        "        raise AssertionError('Expected MissingDependencyError when flask_caching is blocked')\n"
+        "if 'flask' in blocked:\n"
+        "    fake_app = SimpleNamespace(extensions={}, view_functions={})\n"
+        "    for hook in (\n"
+        "        lambda: pkg.VertebraPlugin(fake_app),\n"
+        "        lambda: pkg.attach_mcp_routes(fake_app),\n"
+        "        lambda: pkg.attach_openapi_docs(fake_app),\n"
+        "        lambda: pkg.attach_channels(fake_app),\n"
+        "        lambda: pkg.attach_vite(fake_app),\n"
+        "        lambda: pkg.MailBackend().init_app(fake_app),\n"
+        "        lambda: pkg.QueueBackend().init_app(fake_app),\n"
+        "    ):\n"
+        "        try:\n"
+        "            hook()\n"
+        "        except MissingDependencyError as exc:\n"
+        "            assert 'flask' in str(exc), str(exc)\n"
+        "        else:\n"
+        "            raise AssertionError('Expected MissingDependencyError when flask is blocked')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+
+def test_flask_feature_adapters_neutral_roundtrips(tmp_path: Path) -> None:
+    """Verify Flask Vite, security, storage, and channels adapters delegate cleanly to neutral modules."""
+    clear_vite_bridges()
+    app = Flask(__name__)
+
+    manifest_file = tmp_path / "manifest.json"
+    manifest_file.write_text(
+        '{"src/main.ts":{"file":"assets/main-abc123.js","isEntry":true,"css":["assets/main-def456.css"]}}',
+        encoding="utf-8",
+    )
+    manifest = AssetManifest.from_file(manifest_file)
+    standalone_bridge = ViteAssetBridge(ViteConfig(asset_url="/static/"), manifest=manifest)
+    tags = standalone_bridge.asset_tags("src/main.ts")
+    assert "/static/assets/main-abc123.js" in tags
+    assert "/static/assets/main-def456.css" in tags
+    assert standalone_bridge.hmr_client_tag() == ""
+
+    attached_vite = attach_vite(app, ViteConfig(dev_mode=True, dev_server_url="http://localhost:5173"))
+    assert attached_vite is cast("Any", app).vite
+    assert "@vite/client" in vite_hmr_client()
+    assert "http://localhost:5173/src/main.ts" in vite_asset("src/main.ts")
+    assert get_vertebra_client_path().name == "vertebra-client"
+    assert "@vertebra/client" in get_vertebra_client_vite_aliases()
+
+    secret = b"test-token-placeholder-secret-32"
+    token = _build_hs256_jwt({"sub": "user-flask-1", "scope": "read write", "exp": 4_102_444_800}, secret)
+    guard = JWTAuthGuard(secret)
+    principal = guard.verify_header(f"Bearer {token}")
+    assert isinstance(principal, AuthenticatedPrincipal)
+    assert principal.sub == "user-flask-1"
+    assert principal.scopes == ("read", "write")
+    with pytest.raises(ValueError):
+        guard.verify_header("Bearer test-token-placeholder")
+
+    limiter = RateLimitGuard(capacity=1, refill_rate=0.0)
+    assert limiter.allow("client-flask-1") is True
+    assert limiter.allow("client-flask-1") is False
+
+    sync_reg = SyncStorageRegistry(default_store=MemoryConfig())
+    sync_reg.get().put("docs/readme.txt", b"flask-storage-body")
+    attach_storage(app, sync_reg)
+    resp = send_storage_file(sync_reg.get(), "docs/readme.txt", as_attachment=True, download_name="readme.txt")
+    assert resp.status == 200
+    assert bytes(resp.body) == b"flask-storage-body"
+
+    channels = attach_channels(app)
+    channels.subscribe(["flask-neutral"])
+    channels.publish("flask-neutral", {"event": "ready"})
+    item = next(channels.listen(["flask-neutral"]))
+    assert item.channel == "flask-neutral"
+    assert b"ready" in item.data
+    channels.close()

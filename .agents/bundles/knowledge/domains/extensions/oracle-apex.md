@@ -14,6 +14,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T05:50:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -33,6 +36,9 @@ sources:
   - id: src-extensions-apex-gateway-py
     resource: src/py/vertebra/extensions/apex/gateway.py
     title: "Python implementation module (src/py/vertebra/extensions/apex/gateway.py)"
+  - id: src-agent-runtime-py
+    resource: src/py/vertebra/agent/runtime.py::ConfirmationGate
+    title: "Shared ConfirmationGate implementation imported by APEX gateway"
   - id: src-extensions-apex-openapi-py
     resource: src/py/vertebra/extensions/apex/openapi.py
     title: "Python implementation module (src/py/vertebra/extensions/apex/openapi.py)"
@@ -85,7 +91,7 @@ sources:
 | :--- | :--- |
 | [`ApexPageToolSpec`](../../../../../src/py/vertebra/extensions/apex/gateway.py)[^src-extensions-apex-gateway-py] | Describes an Oracle APEX page process or region action (`app_id`, `page_id`, `process_name`, `package_procedure`, `page_items`) and converts it into an `ApexToolSpec` and `ApexSkillSpec`. |
 | [`ApexAccessPolicy`](../../../../../src/py/vertebra/extensions/apex/gateway.py) & [`ApexPolicyEvaluator`](../../../../../src/py/vertebra/extensions/apex/gateway.py) | Evaluates `authorization_schemes`, `allowed_targets` (deny-by-default), and `max_mutation_amount`, returning `ApexPolicyDecision(allowed, requires_confirmation, reason)`. |
-| [`ConfirmationGate`](../../../../../src/py/vertebra/extensions/apex/gateway.py) | Single-use SHA-256 payload-bound confirmation token gate (`approve`, `is_approved`, `consume`). |
+| [`ConfirmationGate`](../../../../../src/py/vertebra/agent/runtime.py)[^src-agent-runtime-py] | Single-use payload-bound confirmation token gate imported directly from `vertebra.agent.runtime` (`approve`, `is_approved`, `consume`). |
 | [`ApexGateway`](../../../../../src/py/vertebra/extensions/apex/gateway.py) | Registers APEX page tools (`register_page_tool`) and skills (`register_skill`), publishes `ApexAgentCard`, and executes PL/SQL page processes (`execute_plsql_process`) inside `OracleSessionManager.acquire_scoped` or ORDS REST endpoints (`execute_ords_rest`) with policy and `ConfirmationGate` enforcement. |
 
 ## 5. TypeScript Browser Bridge (`@vertebra/client/apex`)
@@ -100,6 +106,7 @@ sources:
 [^src-extensions-apex-session-py]: `src/py/vertebra/extensions/apex/session.py` — Python implementation module (src/py/vertebra/extensions/apex/session.py).
 [^src-extensions-apex-bridge-py]: `src/py/vertebra/extensions/apex/bridge.py` — Python implementation module (src/py/vertebra/extensions/apex/bridge.py).
 [^src-extensions-apex-gateway-py]: `src/py/vertebra/extensions/apex/gateway.py` — Python implementation module (src/py/vertebra/extensions/apex/gateway.py).
+[^src-agent-runtime-py]: `src/py/vertebra/agent/runtime.py::ConfirmationGate` — Shared `ConfirmationGate` implementation imported by APEX gateway.
 [^src-extensions-apex-openapi-py]: `src/py/vertebra/extensions/apex/openapi.py` — Python implementation module (src/py/vertebra/extensions/apex/openapi.py).
 [^src-src-apex-index-ts]: `src/ts/vertebra-client/src/apex/index.ts` — TypeScript client module (src/ts/vertebra-client/src/apex/index.ts).
 [^src-tests-unit-extensions-test-oracle-apex-py]: `src/py/tests/unit/extensions/test_oracle_apex.py` — Python implementation module (src/py/tests/unit/extensions/test_oracle_apex.py).

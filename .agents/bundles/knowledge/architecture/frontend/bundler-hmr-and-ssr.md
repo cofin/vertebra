@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T08:02:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -59,17 +62,27 @@ sources:
   - id: src-framework-ssr-init-py
     resource: src/py/vertebra/framework/ssr/__init__.py
     title: "Python implementation module (src/py/vertebra/framework/ssr/__init__.py)"
+  - id: src-framework-vite-py
+    resource: src/py/vertebra/framework/vite.py
+    title: "Framework-neutral Vite asset manifest, HMR tags, and @vertebra/client alias helpers"
+  - id: src-litestar-vite-plugin-py
+    resource: src/py/vertebra/extensions/litestar/vite/plugin.py
+    title: "Litestar VertebraVitePlugin integration exposing client_aliases"
+  - id: src-ts-vite-index-ts
+    resource: src/ts/vertebra-client/src/vite/index.ts
+    title: "Vite plugin fetching /__vertebra/manifest.json and polling /__vertebra/types/version"
 ---
 
 # Oxc Bundler, HMR Watcher & QuickJS SSR Pool
 
 <!-- truth: start -->
 - `vertebra._bundler` (`#[pymodule(gil_used = false)]`) detaches the GIL (`py.detach`) across `Bundler.build`, `SSRPool.render`, and `IsolatedDeclarationsGenerator`.
-- `Bundler.build` performs single-entry Oxc TypeScript/JSX transforms without import bundling; `BuildOrchestrator` coordinates codegen, `load_client_subpaths()` import maps, and native `_bundler` builds loaded via `ensure_module("vertebra._bundler")`.
+- `Bundler.build` performs single-entry Oxc TypeScript/JSX transforms without import bundling; `BuildOrchestrator` coordinates codegen, `ImportMapGenerator.sync_wheel_client`, and native `_bundler` builds loaded via `ensure_module("vertebra._bundler")`, falling back to Vite on `ImportError`.
+- `vitePlugin` (`@vertebra/client/vite`) materializes runtime `routes` (`{ method, path }`) and `websocketRoutes` (`{ method: "WS", path }`) from `/__vertebra/manifest.json`, while `get_vertebra_client_vite_aliases()` and `VertebraVitePlugin.client_aliases` (`include_client_alias=True`) resolve every `@vertebra/client*` subpath.
 - `SSRPool` pools QuickJS contexts with generation-tagged reloads and bounded render caching, returning `PoolExhausted` immediately when all slots are busy.
 <!-- truth: end -->
 
-[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs] builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi] declares the stub types for `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SSRPool`, `SSRResult`, `IsolatedDeclarationsGenerator`, `minify_css`, and `GIL_USED` as `vertebra._bundler`. When the native `_bundler` extension is not compiled, `AssetBundler` raises `UnsupportedBackendError` rather than emitting stub bundle files.
+[`vertebra-bundler`](../../../../../src/rs/vertebra-bundler/src/lib.rs)[^src-vertebra-bundler-src-lib-rs] builds the `_bundler` PyO3 module (`crate-type = ["cdylib", "rlib"]`, `#[pymodule(gil_used = false)]`, module constant `GIL_USED = False`). [`vertebra/_bundler.pyi`](../../../../../src/py/vertebra/_bundler.pyi)[^src-bundler-pyi] declares the stub types for `Bundler`, `BundleConfig`, `DevConfig`, `BuildResult`, `OutputFile`, `SourceWatcher`, `SSRPool`, `SSRResult`, `IsolatedDeclarationsGenerator`, `minify_css`, and `GIL_USED` as `vertebra._bundler`. When `vertebra._bundler` is unavailable, `BuildOrchestrator._run_bundler` catches `ImportError` (`MissingDependencyError` from `ensure_module`) and delegates to Vite.
 
 ## Single-entry transform (`bundler.rs`, `config.rs`)
 
@@ -116,8 +129,13 @@ The Python class (`PySourceWatcher`, exported as `SourceWatcher`) takes `(watch_
 | `codegen_only(output_dir=None)` | `vtb js generate-types` | Codegen only. |
 
 1. **Codegen**: `import_app(app)`, `RouteCollector().collect(app)`, then write `types.d.ts`, `schemas.zod.ts`, `manifest.json`, `routes.ts`, and `litestar-vite.json` / `asyncapi.json` when an app plugin or state value exposes `export_vite_metadata` / `export_asyncapi_schema`. Skipped with a warning when `app` is unset. See [Codegen & Inertia](codegen-and-inertia.md).
-2. **Import map & wheel SDK sync**: [`load_client_subpaths()`](../../../../../src/py/vertebra/build/_import_map.py)[^src-build-import-map-py] derives `@vertebra/client` and all subpath entries (`./vite`, `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./store`, `./hmr`, `./wasm`, `./arrow`, `./live`, `./apex`, `./telemetry`, `./router`, `./webmcp`, `./agent`) dynamically from bundled `client_dist/package.json` or repo `src/ts/vertebra-client/package.json`, `ImportMapGenerator.sync_wheel_client(project_dir)` copies wheel-bundled `client_dist/` assets into `.vertebra/vendor/@vertebra/client/`, and `ImportMapGenerator.write` writes `.vertebra/import_map.json` mapping `@vertebra/client*` subpaths alongside `npm:<name>@<version>` dependencies.
-3. **Bundler**: `BuildOrchestrator._run_native` and `_dev_native` resolve the extension via `ensure_module("vertebra._bundler")` (`MissingDependencyError` triggers the Vite fallback). Production uses `BundleConfig(entry, outdir, minify=True, sourcemap=True)`; dev uses `DevConfig(entry, watch_dirs=[<project>/src, <app_dir>], hmr_port=<port>, extensions=["ts","tsx","js","jsx","py"])` and `start_dev`. When `bundler != "native"` or `_bundler` is unavailable, it falls back to Vite: [`DevServerProcess`](../../../../../src/py/vertebra/build/_fallback.py)[^src-build-fallback-py] and `ViteDevProxy` (`vite --port` or `npx vite --port`, sets `VERTEBRA_VITE_PROXY`) in dev, `run_vite_build` (`vite build`) in production.
+2. **Import map & wheel SDK sync**: [`load_client_subpaths()`](../../../../../src/py/vertebra/build/_import_map.py)[^src-build-import-map-py] derives `@vertebra/client` and all subpath entries (`./vite`, `./react`, `./vue`, `./svelte`, `./angular`, `./htmx`, `./store`, `./hmr`, `./wasm`, `./arrow`, `./live`, `./apex`, `./telemetry`, `./router`, `./webmcp`, `./agent`) dynamically from repo `src/ts/vertebra-client/package.json` or wheel-bundled `server/_js/bundle/package.json`. `ImportMapGenerator.write(js_config, vertebra_dir, include_client=True)` writes `.vertebra/import_map.json` mapping `@vertebra/client` to `/__vertebra/client/index.js` and `@vertebra/client/` to `/__vertebra/client/` alongside `npm:<name>@<version>` dependencies, and `ImportMapGenerator.sync_wheel_client(vertebra_dir)` copies `server/_js/bundle/` (or source fallback) into `.vertebra/client/`.
+3. **Bundler**: `BuildOrchestrator._run_native` resolves the extension via `ensure_module("vertebra._bundler", package="vertebra-core[bundler]", extra="bundler")` (`ImportError` triggers `_run_vite_fallback`). Production passes `BundleConfig(entry, outdir, minify=True, sourcemap=True)`; dev uses `DevConfig(entry, watch_dirs=[<project>/src], hmr_port=<port>)` and `start_dev`. When `bundler != "native"` or `_bundler` is unavailable, it falls back to Vite: [`DevServerProcess`](../../../../../src/py/vertebra/build/_fallback.py)[^src-build-fallback-py] (`vite --port` or `npx vite --port`, sets `VERTEBRA_VITE_PROXY`) in dev, `run_vite_build` (`vite build`) in production.
+
+## Vite Virtual Module & Full `@vertebra/client/*` Aliases
+
+- **Virtual route manifest (`vite/index.ts`)**: [`vitePlugin`](../../../../../src/ts/vertebra-client/src/vite/index.ts)[^src-ts-vite-index-ts] resolves `virtual:vertebra-types` (configurable via `virtualModuleName`), fetches `${serverUrl}/__vertebra/manifest.json` during `load`, normalizes `manifest.routes` entries to `{ method, path }` (defaulting `method` to `"GET"` and mapping `entry.route` to `path`) and `manifest.websocketRoutes` entries to `{ method: "WS", path }`, and emits frozen runtime JS exports (`export const routes = Object.freeze(...); export const websocketRoutes = Object.freeze(...);`, or `EMPTY_MANIFEST_MODULE` on fetch failure). In `configureServer` with `hmr=true`, it polls `/__vertebra/types/version` every second (and immediately in `handleHotUpdate` on `.py` changes) to invalidate the virtual module and send custom HMR event `"vertebra:types-update"`.
+- **Vite `@vertebra/client/*` aliases (`framework/vite.py`, `extensions/litestar/vite/plugin.py`)**: [`get_vertebra_client_vite_aliases()`](../../../../../src/py/vertebra/framework/vite.py)[^src-framework-vite-py] maps `@vertebra/client` and every `@vertebra/client/<subpath>` entry from `load_client_subpaths()` to its compiled `dist/` file (or `src/` entry in source checkouts without `dist/`). [`create_vite_plugin(..., include_client_alias=True)`](../../../../../src/py/vertebra/extensions/litestar/vite/plugin.py)[^src-litestar-vite-plugin-py] instantiates the slotted `VertebraVitePlugin(VitePlugin)` subclass (`__slots__ = ("client_aliases",)`), attaching those full alias mappings to `plugin.client_aliases` when `include_client_alias` is `True` (or `{}` when `False`).
 
 Provenance sources: [^src-vertebra-bundler-src-bundler-rs], [^src-vertebra-bundler-src-config-rs], [^src-vertebra-bundler-src-hmr-rs], [^src-vertebra-bundler-src-ssr-rs], [^src-vertebra-bundler-src-errors-rs].
 
@@ -135,3 +153,6 @@ Provenance sources: [^src-vertebra-bundler-src-bundler-rs], [^src-vertebra-bundl
 [^src-build-fallback-py]: `src/py/vertebra/build/_fallback.py` — Python implementation module (src/py/vertebra/build/_fallback.py).
 [^src-build-import-map-py]: `src/py/vertebra/build/_import_map.py` — Python implementation module (src/py/vertebra/build/_import_map.py).
 [^src-framework-ssr-init-py]: `src/py/vertebra/framework/ssr/__init__.py` — Python implementation module (src/py/vertebra/framework/ssr/__init__.py).
+[^src-framework-vite-py]: `src/py/vertebra/framework/vite.py` — Framework-neutral Vite asset manifest, HMR tags, and `@vertebra/client` alias helpers.
+[^src-litestar-vite-plugin-py]: `src/py/vertebra/extensions/litestar/vite/plugin.py` — Litestar `VertebraVitePlugin` integration exposing `client_aliases`.
+[^src-ts-vite-index-ts]: `src/ts/vertebra-client/src/vite/index.ts` — Vite plugin fetching `/__vertebra/manifest.json` and polling `/__vertebra/types/version`.

@@ -298,14 +298,14 @@ async def test_rsgi_websocket_protocol_and_interface_detection() -> None:
     assert detect_interface(dummy_wsgi, "auto") == "wsgi"
 
 
-def test_cli_run_and_dev_interface_flag() -> None:
+@pytest.mark.parametrize("subcmd", ["run", "dev"], ids=["run", "dev"])
+def test_cli_run_and_dev_interface_flag(subcmd: str) -> None:
     """Verify `vertebra run --interface` and `vertebra dev --interface` accept rsgi/asgi/wsgi/auto."""
     runner = CliRunner()
-    for subcmd in ("run", "dev"):
-        result = runner.invoke(cli, [subcmd, "--help"])
-        assert result.exit_code == 0
-        assert "--interface" in result.output
-        assert "rsgi" in result.output
+    result = runner.invoke(cli, [subcmd, "--help"])
+    assert result.exit_code == 0
+    assert "--interface" in result.output
+    assert "rsgi" in result.output
 
 
 def test_native_worker_mount_dispatch_for_rsgi() -> None:
@@ -410,7 +410,7 @@ async def test_rsgi_http_protocol_direct_submit_and_drive_rsgi_batch() -> None:
             if scope.path == "/fail":
                 raise ValueError("rsgi failure")
             if scope.path == "/slow":
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0)
                 stream = protocol.response_stream(200, [("content-type", "text/plain")])
                 await stream.send_str("s1")
                 await stream.send_bytes(b"s2")

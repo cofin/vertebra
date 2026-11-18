@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from anyio import CancelScope
+
 from vertebra.db.adapters.oracle.core import OracleCore
 from vertebra.db.arrow import _hydrate_rows_with_schema
 from vertebra.db.driver import InterfaceError
@@ -53,6 +55,7 @@ class SyncOraclePipeline:
         """Pin a session and open a transaction or nested `SAVEPOINT _vtb_pipe_<n>`."""
         if self._driver._pipeline_active:
             raise InterfaceError("An Oracle pipeline is already active on this driver")
+        self._failed = False
         self._driver._pipeline_active = True
         self._entered = True
         try:
@@ -77,23 +80,35 @@ class SyncOraclePipeline:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Commit on clean exit after `results()`, or roll back the transaction/savepoint on error."""
+        """Flush queued operations and commit on clean exit, or discard and roll back on error."""
         _ = (exc_val, exc_tb)
-        self._driver._pipeline_active = False
-        self._entered = False
-        unexecuted = bool(self._pending_ops)
-        self._pending_ops.clear()
-        should_rollback = exc_type is not None or self._failed or unexecuted
-        if should_rollback:
-            if self._savepoint_name is not None:
-                self._driver.rollback_to_savepoint(self._savepoint_name)
-            elif self._owns_transaction:
-                self._driver.rollback()
-            if exc_type is None and unexecuted:
-                raise InterfaceError("Oracle pipeline exited with unexecuted operations")
-            return
-        if self._owns_transaction:
-            self._driver.commit()
+        try:
+            if exc_type is None and not self._failed:
+                if self._pending_ops:
+                    try:
+                        self.results()
+                    except BaseException:
+                        self._pending_ops.clear()
+                        self._rollback_scope()
+                        raise
+                if self._owns_transaction:
+                    self._owns_transaction = False
+                    self._driver.commit()
+            else:
+                self._pending_ops.clear()
+                self._rollback_scope()
+        finally:
+            self._driver._pipeline_active = False
+            self._entered = False
+
+    def _rollback_scope(self) -> None:
+        if self._savepoint_name is not None:
+            sp_name = self._savepoint_name
+            self._savepoint_name = None
+            self._driver.rollback_to_savepoint(sp_name)
+        elif self._owns_transaction:
+            self._owns_transaction = False
+            self._driver.rollback()
 
     def execute(
         self,
@@ -130,8 +145,12 @@ class SyncOraclePipeline:
             OracleCore.track_session_context_sql(self._driver._session_context, sql, params)
             batch_payload.append((sql, coerced, returns_rows))
 
-        with self._driver._checkout_client() as active_client:
-            raw_outcomes = tuple(active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
+        try:
+            with self._driver._checkout_client() as active_client:
+                raw_outcomes = tuple(active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
+        except BaseException:
+            self._failed = True
+            raise
         self._outcomes = raw_outcomes
         self._driver._last_pipeline_outcomes = raw_outcomes
 
@@ -184,6 +203,7 @@ class AsyncOraclePipeline:
         """Pin a session and open an async transaction or nested `SAVEPOINT _vtb_pipe_<n>`."""
         if self._driver._pipeline_active:
             raise InterfaceError("An Oracle pipeline is already active on this driver")
+        self._failed = False
         self._driver._pipeline_active = True
         self._entered = True
         try:
@@ -208,23 +228,37 @@ class AsyncOraclePipeline:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Commit on clean exit after `results()`, or roll back the transaction/savepoint on error."""
+        """Flush queued operations and commit on clean exit, or discard and roll back on error."""
         _ = (exc_val, exc_tb)
-        self._driver._pipeline_active = False
-        self._entered = False
-        unexecuted = bool(self._pending_ops)
-        self._pending_ops.clear()
-        should_rollback = exc_type is not None or self._failed or unexecuted
-        if should_rollback:
-            if self._savepoint_name is not None:
-                await self._driver.rollback_to_savepoint(self._savepoint_name)
-            elif self._owns_transaction:
-                await self._driver.rollback()
-            if exc_type is None and unexecuted:
-                raise InterfaceError("Oracle pipeline exited with unexecuted operations")
-            return
-        if self._owns_transaction:
-            await self._driver.commit()
+        try:
+            if exc_type is None and not self._failed:
+                if self._pending_ops:
+                    try:
+                        await self.results()
+                    except BaseException:
+                        self._pending_ops.clear()
+                        with CancelScope(shield=True):
+                            await self._rollback_scope()
+                        raise
+                if self._owns_transaction:
+                    self._owns_transaction = False
+                    await self._driver.commit()
+            else:
+                self._pending_ops.clear()
+                with CancelScope(shield=True):
+                    await self._rollback_scope()
+        finally:
+            self._driver._pipeline_active = False
+            self._entered = False
+
+    async def _rollback_scope(self) -> None:
+        if self._savepoint_name is not None:
+            sp_name = self._savepoint_name
+            self._savepoint_name = None
+            await self._driver.rollback_to_savepoint(sp_name)
+        elif self._owns_transaction:
+            self._owns_transaction = False
+            await self._driver.rollback()
 
     def execute(
         self,
@@ -261,8 +295,12 @@ class AsyncOraclePipeline:
             OracleCore.track_session_context_sql(self._driver._session_context, sql, params)
             batch_payload.append((sql, coerced, returns_rows))
 
-        async with self._driver._checkout_client() as active_client:
-            raw_outcomes = tuple(await active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
+        try:
+            async with self._driver._checkout_client() as active_client:
+                raw_outcomes = tuple(await active_client.execute_pipeline_batch(batch_payload, continue_on_error=False))
+        except BaseException:
+            self._failed = True
+            raise
         self._outcomes = raw_outcomes
         self._driver._last_pipeline_outcomes = raw_outcomes
 

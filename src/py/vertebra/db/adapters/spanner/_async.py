@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, ClassVar, Literal, Protocol, Self
@@ -64,7 +65,7 @@ class AsyncSpannerReadWriteTxProtocol(Protocol):
         sql: str,
         params_json: str | None = None,
         request_tag: str | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Execute a SQL query inside this transaction asynchronously."""
         ...
 
@@ -85,7 +86,7 @@ class AsyncSpannerReadWriteTxProtocol(Protocol):
         """Execute a batch of DML statements inside this transaction asynchronously."""
         ...
 
-    def commit(self, mutations_json: str | None = None) -> Awaitable[dict[str, Any]]:
+    def commit(self, mutations_json: str | None = None) -> Awaitable[Mapping[str, Any]]:
         """Commit this transaction and optional buffered mutations asynchronously."""
         ...
 
@@ -103,7 +104,7 @@ class AsyncSpannerClientProtocol(Protocol):
         params_json: str | None = None,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Execute a streaming SQL read asynchronously."""
         ...
 
@@ -141,7 +142,7 @@ class AsyncSpannerClientProtocol(Protocol):
         transaction_tag: str | None = None,
         exclude_txn_from_change_streams: bool = False,
         max_commit_delay_ms: int | None = None,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Commit a JSON-encoded list of Spanner mutations asynchronously."""
         ...
 
@@ -149,7 +150,7 @@ class AsyncSpannerClientProtocol(Protocol):
         self,
         mutation_groups_json: str,
         exclude_txn_from_change_streams: bool = False,
-    ) -> Awaitable[list[dict[str, Any]]]:
+    ) -> Awaitable[Sequence[Mapping[str, Any]]]:
         """Commit independent mutation groups asynchronously via ``BatchWrite``."""
         ...
 
@@ -165,7 +166,7 @@ class AsyncSpannerClientProtocol(Protocol):
         data_boost_enabled: bool = False,
         staleness_mode: str = "strong",
         staleness_ms: int = 0,
-    ) -> Awaitable[dict[str, Any]]:
+    ) -> Awaitable[Mapping[str, Any]]:
         """Execute a parallel ``PartitionQuery`` read asynchronously."""
         ...
 
@@ -279,12 +280,20 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         return self
 
     async def close(self) -> None:
-        """Release the underlying Rust client reference and roll back any active transaction."""
-        if self._active_transaction is not None:
-            with contextlib.suppress(Exception):
-                await self.rollback()
-        self._client = None
-        self._closed = True
+        """Roll back any active transaction, close the Rust client, and release references."""
+        client = self._client
+        try:
+            if self._active_transaction is not None:
+                with contextlib.suppress(Exception):
+                    await self.rollback()
+            if client is not None:
+                res = client.close()
+                if inspect.isawaitable(res):
+                    await res
+        finally:
+            self._active_transaction = None
+            self._client = None
+            self._closed = True
 
     async def _open_rw_transaction(
         self,
@@ -749,7 +758,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         client = self._ensure_client()
         groups_json = encode_json([g.to_dict() for g in groups])
         res = await client.batch_write(groups_json, exclude_txn_from_change_streams)
-        return list(res)
+        return [dict(item) for item in res]
 
     async def update_ddl(self, statements: Sequence[str] | str) -> str:
         """Execute one or more DDL statements asynchronously via `UpdateDatabaseDdl`."""
@@ -897,7 +906,9 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
 
     def _ensure_client(self) -> AsyncSpannerClientProtocol:
         if self._client is None:
-            self._client = SpannerCore.create_async_rust_client(self.config)
+            created: AsyncSpannerClientProtocol = SpannerCore.create_async_rust_client(self.config)
+            self._client = created
+            return created
         return self._client
 
     def _prepare_sql_and_params(

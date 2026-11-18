@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import msgspec
 import pytest
 
@@ -1232,3 +1233,43 @@ async def test_agent_runtime_single_use_confirmation_rejects_replay(mode: str) -
         assert replay_frames[-1].payload is not None
         assert replay_frames[-1].payload["token"] != ticket.token
         assert executed == ["staging"]
+
+
+@pytest.mark.parametrize(
+    "bad_table",
+    ["bad; DROP TABLE x", "sessions--", "123invalid", ""],
+    ids=["semicolon-drop", "sql-comment", "leading-digit", "empty"],
+)
+def test_sqlspec_session_store_rejects_invalid_table_name(bad_table: str) -> None:
+    """Verify SQLSpecSessionStore validates table_name at initialization."""
+    with pytest.raises(ValueError):
+        SQLSpecSessionStore(table_name=bad_table)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_session_store_lock_manager_serializes_and_evicts() -> None:
+    """Verify _LockManager serializes concurrent tasks on the same session and evicts idle locks."""
+    store = SQLSpecSessionStore(table_name="valid_sessions")
+    active = 0
+    max_active = 0
+    completed = 0
+
+    async def worker(idx: int) -> None:
+        nonlocal active, max_active, completed
+        async with store.lock("owner-1", "sess-1"):
+            active += 1
+            max_active = max(max_active, active)
+            await anyio.sleep(0.005)
+            active -= 1
+            completed += 1
+        async with store.lock("owner-2", f"sess-{idx}"):
+            await anyio.sleep(0)
+
+    async with anyio.create_task_group() as tg:
+        for i in range(6):
+            tg.start_soon(worker, i)
+
+    assert completed == 6
+    assert max_active == 1
+    assert store._locks._locks == {}
+    assert store._locks._refcounts == {}

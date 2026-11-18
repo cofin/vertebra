@@ -610,3 +610,325 @@ async fn dropped_bridge_receiver_releases_a_blocked_producer() {
     worker.join().unwrap();
     assert_eq!(registry.active_streams(), 0);
 }
+
+#[tokio::test]
+async fn stalled_slow_stream_does_not_block_concurrent_fast_stream_or_unary() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::shm_reader::spawn_response_readers;
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_size = 4096;
+    config.response_tiers.xlarge.slot_count = 256;
+    let pair = Arc::new(RingPair::create(config).unwrap());
+    let shm = ShmDispatcher::new(vec![pair.clone()], 128);
+    let dispatcher = Arc::new(Dispatcher::from_shm(shm.clone()));
+    let shutdown = CancellationToken::new();
+    let reader = spawn_response_readers(vec![pair.clone()], dispatcher, shutdown.clone());
+
+    let (slow_id, slow_resp) = register_shm_stream(&shm);
+    let (fast_id, fast_resp) = register_shm_stream(&shm);
+    let (unary_id, unary_resp) = register_shm_stream(&shm);
+
+    // Slow stream saturates both its response channel (64) and bounded staging queue (64)
+    pair.send_stream_frame(slow_id, 200, FLAG_STREAMING | FLAG_HEADERS_SENT, b"", b"s0")
+        .unwrap();
+    for _ in 0..150 {
+        pair.send_stream_frame(slow_id, 200, FLAG_STREAMING, b"", b"s")
+            .unwrap();
+    }
+
+    // Sibling fast stream and unary response arrive after the stalled slow stream on the same worker
+    pair.send_stream_frame(
+        fast_id,
+        200,
+        FLAG_STREAMING | FLAG_HEADERS_SENT,
+        b"",
+        b"fast-1:",
+    )
+    .unwrap();
+    pair.send_stream_frame(fast_id, 200, FLAG_STREAMING, b"", b"fast-2")
+        .unwrap();
+    pair.send_stream_frame(fast_id, 200, FLAG_STREAMING | FLAG_FINAL, b"", b"")
+        .unwrap();
+    pair.response_rings
+        .send_response(unary_id, 200, b"", b"unary-ok")
+        .unwrap();
+    pair.response_notifier.notify().unwrap();
+
+    // Never poll slow_pending while verifying fast stream and unary completion
+    let _slow_pending = tokio::time::timeout(std::time::Duration::from_secs(2), slow_resp)
+        .await
+        .expect("slow stream initial response")
+        .unwrap();
+
+    let unary = tokio::time::timeout(std::time::Duration::from_secs(2), unary_resp)
+        .await
+        .expect("unary response must not be stalled by slow stream")
+        .unwrap();
+    assert_eq!(unary.status, 200);
+    assert_eq!(unary.body.as_ref(), b"unary-ok");
+
+    let fast_pending = tokio::time::timeout(std::time::Duration::from_secs(2), fast_resp)
+        .await
+        .expect("fast stream must not be stalled by slow stream")
+        .unwrap();
+    let fast_bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        build_response(fast_pending).into_body().collect(),
+    )
+    .await
+    .expect("fast stream body must complete promptly")
+    .unwrap()
+    .to_bytes();
+    assert_eq!(fast_bytes.as_ref(), b"fast-1:fast-2");
+
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shm.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn backpressured_slow_stream_drains_after_sibling_fast_stream_completes() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::shm_reader::spawn_response_readers;
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+
+    let mut config = RingPairConfig::compact();
+    config.response_tiers.xlarge.slot_size = 4096;
+    config.response_tiers.xlarge.slot_count = 128;
+    let pair = Arc::new(RingPair::create(config).unwrap());
+    let shm = ShmDispatcher::new(vec![pair.clone()], 128);
+    let dispatcher = Arc::new(Dispatcher::from_shm(shm.clone()));
+    let shutdown = CancellationToken::new();
+    let reader = spawn_response_readers(vec![pair.clone()], dispatcher, shutdown.clone());
+
+    let (slow_id, slow_resp) = register_shm_stream(&shm);
+    let (fast_id, fast_resp) = register_shm_stream(&shm);
+
+    // 65 frames: fills channel (64) + blocks forwarder task on frame 65 without saturating staging
+    pair.send_stream_frame(slow_id, 200, FLAG_STREAMING | FLAG_HEADERS_SENT, b"", b"a")
+        .unwrap();
+    for _ in 0..63 {
+        pair.send_stream_frame(slow_id, 200, FLAG_STREAMING, b"", b"b")
+            .unwrap();
+    }
+    pair.send_stream_frame(slow_id, 200, FLAG_STREAMING | FLAG_FINAL, b"", b"z")
+        .unwrap();
+
+    pair.send_stream_frame(
+        fast_id,
+        200,
+        FLAG_STREAMING | FLAG_HEADERS_SENT | FLAG_FINAL,
+        b"",
+        b"fast-ok",
+    )
+    .unwrap();
+    pair.response_notifier.notify().unwrap();
+
+    let slow_pending = tokio::time::timeout(std::time::Duration::from_secs(2), slow_resp)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let fast_pending = tokio::time::timeout(std::time::Duration::from_secs(2), fast_resp)
+        .await
+        .expect("fast stream must complete while slow stream is backpressured")
+        .unwrap();
+    assert_eq!(fast_pending.body.as_ref(), b"fast-ok");
+
+    let slow_bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        build_response(slow_pending).into_body().collect(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .to_bytes();
+    assert_eq!(slow_bytes.len(), 65);
+    assert_eq!(slow_bytes[0], b'a');
+    assert_eq!(slow_bytes[64], b'z');
+
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shm.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn dispatcher_new_with_queue_depth_enforces_configured_backpressure() {
+    use vertebra_core::bridge::StreamDelivery;
+    use vertebra_http::dispatcher::{BridgeCorrelation, DispatchBackend, Dispatcher};
+
+    let zero_clamped = BridgeCorrelation::with_capacity_and_queue_depth(128, 0);
+    assert_eq!(zero_clamped.stream_registry().capacity(), 1);
+
+    let dispatcher = Dispatcher::new_with_queue_depth(2);
+    let DispatchBackend::Bridge(correlation) = dispatcher.backend() else {
+        panic!("expected bridge backend");
+    };
+    assert_eq!(correlation.stream_registry().capacity(), 2);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = correlation.register_pending(tx).unwrap();
+    assert_eq!(
+        correlation
+            .stream_registry()
+            .deliver(stream_frame(id, FLAG_HEADERS_SENT, b"a"), |id, resp| {
+                correlation.complete(id, resp)
+            })
+            .await,
+        StreamDelivery::Accepted
+    );
+    assert_eq!(
+        correlation
+            .stream_registry()
+            .deliver(stream_frame(id, 0, b"b"), |_, _| false)
+            .await,
+        StreamDelivery::Accepted
+    );
+
+    let mut receiver = rx.await.unwrap().stream_rx.unwrap().into_inner();
+    let third = correlation
+        .stream_registry()
+        .deliver(stream_frame(id, FLAG_FINAL, b"c"), |_, _| false);
+    tokio::pin!(third);
+    tokio::select! {
+        biased;
+        _ = &mut third => panic!("configured queue depth 2 must backpressure on 3rd frame"),
+        _ = std::future::ready(()) => {}
+    }
+
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"a")
+    );
+    assert_eq!(third.await, StreamDelivery::Accepted);
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"b")
+    );
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"c")
+    );
+    assert!(receiver.recv().await.is_none());
+    assert_eq!(correlation.stream_registry().active_streams(), 0);
+}
+
+#[tokio::test]
+async fn shm_dispatcher_new_with_queue_depth_enforces_configured_backpressure() {
+    use std::sync::Arc;
+    use vertebra_core::bridge::StreamDelivery;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+    use vertebra_http::dispatcher::{Dispatcher, ShmDispatcher};
+
+    let pair = Arc::new(RingPair::create(RingPairConfig::compact()).unwrap());
+    let shm = ShmDispatcher::new_with_queue_depth(vec![pair.clone()], 128, 2);
+    let (id, response) = register_shm_stream(&shm);
+    assert_eq!(
+        shm.deliver_stream_frame(stream_frame(id, FLAG_HEADERS_SENT, b"a"))
+            .await,
+        StreamDelivery::Accepted
+    );
+    assert_eq!(
+        shm.deliver_stream_frame(stream_frame(id, 0, b"b")).await,
+        StreamDelivery::Accepted
+    );
+
+    let mut receiver = response.await.unwrap().stream_rx.unwrap().into_inner();
+    let third = shm.deliver_stream_frame(stream_frame(id, FLAG_FINAL, b"c"));
+    tokio::pin!(third);
+    tokio::select! {
+        biased;
+        _ = &mut third => panic!("SHM queue depth 2 must backpressure on 3rd frame"),
+        _ = std::future::ready(()) => {}
+    }
+
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"a")
+    );
+    assert_eq!(third.await, StreamDelivery::Accepted);
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"b")
+    );
+    assert_eq!(
+        receiver.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"c")
+    );
+    assert!(receiver.recv().await.is_none());
+    assert_eq!(shm.active_streams(), 0);
+
+    let dispatcher = Dispatcher::new_shm_with_queue_depth(vec![pair], 128, 2);
+    let shm_from_disp = dispatcher.shm_dispatcher().unwrap();
+    let (id2, response2) = register_shm_stream(shm_from_disp);
+    assert_eq!(
+        dispatcher
+            .deliver_stream_frame(stream_frame(id2, FLAG_HEADERS_SENT, b"x"))
+            .await,
+        StreamDelivery::Accepted
+    );
+    assert_eq!(
+        dispatcher
+            .deliver_stream_frame(stream_frame(id2, 0, b"y"))
+            .await,
+        StreamDelivery::Accepted
+    );
+    let mut rx2 = response2.await.unwrap().stream_rx.unwrap().into_inner();
+    let third2 = dispatcher.deliver_stream_frame(stream_frame(id2, FLAG_FINAL, b"z"));
+    tokio::pin!(third2);
+    tokio::select! {
+        biased;
+        _ = &mut third2 => panic!("Dispatcher SHM queue depth 2 must backpressure on 3rd frame"),
+        _ = std::future::ready(()) => {}
+    }
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"x")
+    );
+    assert_eq!(third2.await, StreamDelivery::Accepted);
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"y")
+    );
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap().into_data().unwrap(),
+        Bytes::from_static(b"z")
+    );
+    assert!(rx2.recv().await.is_none());
+    assert_eq!(shm_from_disp.active_streams(), 0);
+}
+
+#[tokio::test]
+async fn bridge_correlation_with_queue_depth_sweeps_abandoned_streams() {
+    use vertebra_core::bridge::StreamDelivery;
+    use vertebra_http::dispatcher::BridgeCorrelation;
+
+    let correlation = BridgeCorrelation::with_capacity_and_queue_depth(128, 2);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = correlation.register_pending(tx).unwrap();
+    assert_eq!(
+        correlation
+            .stream_registry()
+            .deliver(stream_frame(id, FLAG_HEADERS_SENT, b"a"), |id, resp| {
+                correlation.complete(id, resp)
+            })
+            .await,
+        StreamDelivery::Accepted
+    );
+    assert_eq!(correlation.stream_registry().active_streams(), 1);
+    drop(rx.await.unwrap());
+    assert_eq!(correlation.sweep_expired(std::time::Duration::ZERO), 0);
+    assert_eq!(correlation.stream_registry().active_streams(), 0);
+}

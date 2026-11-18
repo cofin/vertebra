@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
-import zlib
 from collections.abc import Sequence
-from typing import Any, ClassVar, Final, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Self
 
+from vertebra._vertebra import InterfaceError
 from vertebra.db.arrow import (
     _hydrate_rows_with_schema,
     write_arrow_shm,
@@ -15,6 +16,11 @@ from vertebra.db.arrow import (
 from vertebra.telemetry.otel import TraceContext
 from vertebra.typing import FrozenBaseStruct
 from vertebra.utils.module_loader import ensure_module
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from vertebra._vertebra import StatementCache, StatementPlan
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -60,14 +66,10 @@ class BaseDatabaseConfig(FrozenBaseStruct, frozen=True, gc=False):
     @property
     def effective_direct_dsn(self) -> str:
         """Return the effective direct connection DSN or URL for migrations and pooler bypass."""
-        if hasattr(self, "direct_dsn") and self.direct_dsn:
-            return str(self.direct_dsn)
-        if hasattr(self, "dsn") and self.dsn:
-            return str(self.dsn)
-        if hasattr(self, "database") and self.database:
-            return str(self.database)
-        if hasattr(self, "path") and self.path:
-            return str(self.path)
+        for attr in ("direct_dsn", "dsn", "database", "path"):
+            value = getattr(self, attr, None)
+            if value:
+                return str(value)
         return ""
 
     @classmethod
@@ -142,24 +144,45 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         """Hydrate tabular rows into dictionaries or typed `schema_type` instances."""
         return _hydrate_rows_with_schema(rows, columns, schema_type)
 
-    def _acquire_broker_lease(self) -> Any:
+    def _acquire_broker_lease(self, timeout_ms: int = 5000, bind_key_hash: int = 0) -> Any:
         """Acquire a connection lease from the shared-memory `LeaseBroker` when configured."""
         if self._broker is None:
             return None
-        acquire_fn = getattr(self._broker, "acquire_lease", None)
+        acquire_fn = getattr(self._broker, "acquire", None)
         if callable(acquire_fn):
+            if inspect.iscoroutinefunction(acquire_fn):
+                msg = "Async broker transport cannot acquire leases synchronously; use SyncSHMBrokerTransport"
+                raise InterfaceError(msg)
+            kwargs = _supported_acquire_kwargs(acquire_fn, timeout_ms=timeout_ms, bind_key_hash=bind_key_hash)
             with contextlib.suppress(RuntimeError):
-                return acquire_fn(int(self.dialect_tag), 0)
+                return acquire_fn(os.getpid(), **kwargs)
+            return None
+        lease_table = getattr(self._broker, "lease_table", None)
+        if lease_table is not None:
+            with contextlib.suppress(RuntimeError):
+                return lease_table.acquire(os.getpid())
         return None
 
     def _release_broker_lease(self, lease: Any) -> None:
         """Release a previously acquired connection lease back to the `LeaseBroker`."""
         if self._broker is None or lease is None:
             return
-        release_fn = getattr(self._broker, "release_lease", None)
-        if callable(release_fn):
+        lease_release = getattr(lease, "release", None)
+        if callable(lease_release) and not inspect.iscoroutinefunction(lease_release):
             with contextlib.suppress(RuntimeError):
-                release_fn(lease)
+                lease_release()
+            return
+        if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
+            return
+        release_fn = getattr(self._broker, "release", None)
+        if callable(release_fn) and not inspect.iscoroutinefunction(release_fn):
+            with contextlib.suppress(RuntimeError):
+                release_fn(lease.slot_index, lease.generation)
+            return
+        lease_table = getattr(self._broker, "lease_table", None)
+        if lease_table is not None:
+            with contextlib.suppress(RuntimeError):
+                lease_table.release(lease.slot_index, lease.generation)
 
     def _acquire_pid_lease(self) -> Any:
         """Acquire a PID-bound lease from the shared-memory `LeaseBroker` when configured."""
@@ -167,34 +190,53 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
             return None
         acquire_fn = getattr(self._broker, "acquire", None)
         if callable(acquire_fn):
+            if inspect.iscoroutinefunction(acquire_fn):
+                msg = "Async broker transport cannot acquire leases synchronously; use SyncSHMBrokerTransport"
+                raise InterfaceError(msg)
+            kwargs = _supported_acquire_kwargs(acquire_fn, timeout_ms=5000, bind_key_hash=0)
+            kwargs.pop("bind_key_hash", None)
             with contextlib.suppress(Exception):
-                return acquire_fn(os.getpid(), timeout_ms=5000)
+                return acquire_fn(os.getpid(), **kwargs)
         return None
 
     def _release_pid_lease(self, lease: Any) -> None:
         """Release a previously acquired PID-bound lease back to the `LeaseBroker`."""
         if lease is None or self._broker is None:
             return
+        lease_release = getattr(lease, "release", None)
+        if callable(lease_release) and not inspect.iscoroutinefunction(lease_release):
+            with contextlib.suppress(Exception):
+                lease_release()
+            return
         release_fn = getattr(self._broker, "release", None)
-        if callable(release_fn):
+        if callable(release_fn) and not inspect.iscoroutinefunction(release_fn):
             with contextlib.suppress(Exception):
                 release_fn(lease.slot_index, lease.generation)
 
-    def _lookup_or_cache_statement(self, sql: str) -> tuple[bool, int]:
-        """Lookup or register a SQL statement hash in the shared-memory `LeaseBroker`."""
-        stmt_hash = zlib.crc32(sql.encode("utf-8")) & 0xFFFFFFFF
+    def _lookup_or_cache_statement(
+        self,
+        sql: str,
+        *,
+        param_count: int = 0,
+        compiled_sql: bytes | None = None,
+        param_plan: bytes = b"",
+    ) -> StatementPlan | None:
+        """Lookup or register a UTF-8 SQL statement plan in the broker `StatementCache`."""
         if self._broker is None:
-            return False, stmt_hash
-        lookup_fn = getattr(self._broker, "lookup_statement", None)
-        insert_fn = getattr(self._broker, "insert_statement", None)
-        if callable(lookup_fn):
-            with contextlib.suppress(RuntimeError):
-                if lookup_fn(int(self.dialect_tag), stmt_hash) is not None:
-                    return True, stmt_hash
-        if callable(insert_fn):
-            with contextlib.suppress(RuntimeError):
-                insert_fn(int(self.dialect_tag), stmt_hash, stmt_hash)
-        return False, stmt_hash
+            return None
+        sc_attr: StatementCache | Callable[[], StatementCache | None] | None = getattr(
+            self._broker, "statement_cache", None
+        )
+        sc: StatementCache | None = sc_attr() if callable(sc_attr) else sc_attr
+        if sc is None:
+            return None
+        raw_bytes = sql.encode("utf-8")
+        tag = int(self.dialect_tag)
+        cached: StatementPlan | None = sc.lookup(tag, raw_bytes)
+        if cached is not None:
+            return cached
+        sc.insert(tag, raw_bytes, param_count, compiled_sql or raw_bytes, param_plan)
+        return None
 
     @staticmethod
     def _annotate_sql(sql: str, *, propagate_trace: bool = True) -> str:
@@ -212,3 +254,23 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         if not description:
             return ()
         return tuple(col[0] if isinstance(col, tuple) else str(col) for col in description)
+
+
+def _supported_acquire_kwargs(
+    acquire_fn: Any,
+    *,
+    timeout_ms: int,
+    bind_key_hash: int,
+) -> dict[str, Any]:
+    """Return keyword arguments supported by ``acquire_fn``."""
+    try:
+        params = inspect.signature(acquire_fn).parameters
+    except (TypeError, ValueError):
+        return {"timeout_ms": timeout_ms}
+    has_var_kw = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+    kwargs: dict[str, Any] = {}
+    if has_var_kw or "timeout_ms" in params:
+        kwargs["timeout_ms"] = timeout_ms
+    if has_var_kw or "bind_key_hash" in params:
+        kwargs["bind_key_hash"] = bind_key_hash
+    return kwargs

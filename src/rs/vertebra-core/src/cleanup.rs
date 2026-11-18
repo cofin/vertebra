@@ -198,15 +198,23 @@ mod signal_hook {
         super::cleanup_all();
 
         let prev = match sig {
+            // SAFETY: `PREV_SIGINT` is populated by `libc::sigaction` before `install()` registers
+            // this handler and is never mutated afterward while `INSTALLED` remains true.
             libc::SIGINT => unsafe { (*core::ptr::addr_of!(PREV_SIGINT)).assume_init() },
+            // SAFETY: `PREV_SIGTERM` is populated by `libc::sigaction` before `install()` registers
+            // this handler and is never mutated afterward while `INSTALLED` remains true.
             libc::SIGTERM => unsafe { (*core::ptr::addr_of!(PREV_SIGTERM)).assume_init() },
             _ => {
+                // SAFETY: `libc::_exit` is async-signal-safe and avoids running non-signal-safe
+                // Rust destructors or stdio flushes inside a signal context.
                 unsafe { libc::_exit(128 + sig) };
             }
         };
 
         let handler_addr = prev.sa_sigaction;
         if (prev.sa_flags & libc::SA_SIGINFO) != 0 && handler_addr != 0 {
+            // SAFETY: `SA_SIGINFO` is set and `handler_addr` is non-null, so `sa_sigaction`
+            // holds a valid C `extern "C" fn(c_int, *mut siginfo_t, *mut c_void)` handler.
             let sigaction_fn: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
                 unsafe { core::mem::transmute(handler_addr) };
             sigaction_fn(sig, info, ucontext);
@@ -214,6 +222,8 @@ mod signal_hook {
         }
 
         if handler_addr != libc::SIG_DFL && handler_addr != libc::SIG_IGN {
+            // SAFETY: `SA_SIGINFO` is unset and `handler_addr` is neither `SIG_DFL` nor `SIG_IGN`,
+            // so `sa_sigaction` holds a valid C `extern "C" fn(c_int)` handler.
             let handler_fn: extern "C" fn(libc::c_int) =
                 unsafe { core::mem::transmute(handler_addr) };
             handler_fn(sig);
@@ -221,6 +231,8 @@ mod signal_hook {
         }
 
         if handler_addr == libc::SIG_DFL {
+            // SAFETY: `libc::sigaction` is POD valid when zeroed; `sigemptyset`, `sigaction`, and
+            // `raise` are async-signal-safe POSIX functions used to re-raise with `SIG_DFL`.
             unsafe {
                 let mut dfl: libc::sigaction = core::mem::zeroed();
                 dfl.sa_sigaction = libc::SIG_DFL;
@@ -239,7 +251,9 @@ mod signal_hook {
             return Ok(());
         }
 
-        // SAFETY: `sigaction` structs are initialized via `zeroed` + `sigemptyset` before registration.
+        // SAFETY: `INSTALLED` serializes one-time installation; `action` is zero-initialized and
+        // its mask is cleared with `sigemptyset` before `libc::sigaction` writes `PREV_SIGINT` and
+        // `PREV_SIGTERM` (`MaybeUninit<libc::sigaction>`) and activates `handle_termination_signal`.
         unsafe {
             let mut action: libc::sigaction = core::mem::zeroed();
             action.sa_sigaction = handle_termination_signal as *const () as usize;
@@ -281,18 +295,20 @@ pub fn install_signal_cleanup() -> std::io::Result<()> {
     }
 }
 
-/// Reap shared-memory segments under `/dev/shm` matching `prefixes` whose owner PID is dead.
+/// Reap shared-memory segments matching `prefixes` whose owner PID is dead.
 ///
+/// Scans `/dev/shm` when present (Linux) and otherwise probes `prefixes` directly as POSIX
+/// segment names (for example macOS XNU, where `shm_open` is kernel-backed without `/dev/shm`).
 /// Segments without a valid [`crate::shm::ShmOwnerHeader`] or owned by a live PID are preserved.
 pub fn reap_dead_owner_segments(prefixes: &[&str]) -> u32 {
     #[cfg(unix)]
     {
         let shm_dir = std::path::Path::new("/dev/shm");
         if !shm_dir.exists() {
-            return 0;
+            return reap_named_candidates(prefixes);
         }
         let Ok(entries) = std::fs::read_dir(shm_dir) else {
-            return 0;
+            return reap_named_candidates(prefixes);
         };
 
         let mut reaped = 0u32;
@@ -321,6 +337,27 @@ pub fn reap_dead_owner_segments(prefixes: &[&str]) -> u32 {
     }
 }
 
+#[cfg(unix)]
+fn reap_named_candidates(prefixes: &[&str]) -> u32 {
+    let mut seen: Vec<String> = Vec::new();
+    let mut reaped = 0u32;
+    for prefix in prefixes {
+        let bare = prefix.strip_prefix('/').unwrap_or(prefix);
+        if bare.is_empty() {
+            continue;
+        }
+        let posix_name = format!("/{bare}");
+        if seen.iter().any(|existing| existing == &posix_name) {
+            continue;
+        }
+        seen.push(posix_name.clone());
+        if crate::shm::try_unlink_if_dead_owner(&posix_name) {
+            reaped += 1;
+        }
+    }
+    reaped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,12 +366,54 @@ mod tests {
     fn registration_handles_overflow_without_panicking() {
         let mut names = Vec::new();
         for idx in 0..(MAX_OWNED_SEGMENTS + 8) {
-            let name = format!("/vtb-reg-cap-{idx}-{}", std::process::id());
+            let name = crate::shm::unique_test_shm_name(&format!("/vtb-reg-cap-{idx}"));
             register_owned(&name);
             names.push(name);
         }
         for name in &names {
             unregister_owned(name);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_named_candidates_unlinks_dead_owner_and_preserves_live_owner() {
+        if std::env::var("VTB_REAP_DIRLESS_CHILD").as_deref() == Ok("1") {
+            let child_name = std::env::var("VTB_REAP_DIRLESS_NAME").expect("child shm name");
+            let seg = crate::shm::ShmRegion::create_named(&child_name, 4096).expect("create child");
+            std::mem::forget(seg);
+            return;
+        }
+
+        let dead_name = crate::shm::unique_test_shm_name("/vtb-reap-dirless-dead");
+        let live_name = crate::shm::unique_test_shm_name("/vtb-reap-dirless-live");
+        let live_seg = match crate::shm::ShmRegion::create_named(&live_name, 4096) {
+            Ok(seg) => seg,
+            Err(crate::shm::ShmError::Sys(err))
+                if err.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                return;
+            }
+            Err(err) => panic!("{err:?}"),
+        };
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let status = std::process::Command::new(&exe)
+            .env("VTB_REAP_DIRLESS_CHILD", "1")
+            .env("VTB_REAP_DIRLESS_NAME", &dead_name)
+            .arg("--exact")
+            .arg(
+                "cleanup::tests::reap_named_candidates_unlinks_dead_owner_and_preserves_live_owner",
+            )
+            .status()
+            .expect("spawn dead owner child");
+        assert!(status.success());
+
+        let bare_dead = dead_name.trim_start_matches('/');
+        let reaped = reap_named_candidates(&[&dead_name, bare_dead, &live_name, ""]);
+        assert_eq!(reaped, 1);
+        assert!(crate::shm::ShmRegion::open_named(&dead_name, 4096).is_err());
+        assert!(crate::shm::ShmRegion::open_named(&live_name, 4096).is_ok());
+        drop(live_seg);
     }
 }

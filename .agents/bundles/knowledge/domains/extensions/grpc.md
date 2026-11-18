@@ -13,6 +13,9 @@ generated:
   by: flow/0.26.0
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-17T05:50:00Z"
+    commit: 5a833832
   - by: agent:flow-setup
     at: "2026-11-07T03:55:00Z"
     commit: 067fa901
@@ -29,16 +32,20 @@ sources:
   - id: src-build-codegen-protobuf-py
     resource: src/py/vertebra/build/codegen/protobuf.py
     title: "Python implementation module (src/py/vertebra/build/codegen/protobuf.py)"
+  - id: src-framework-security-jwks-py
+    resource: src/py/vertebra/framework/security.py::JWKSVerifier
+    title: "Shared JWKSVerifier for inbound gRPC bearer authentication"
 ---
 
 # gRPC Services & Wire Framing
 
 <!-- truth: start -->
 - `vertebra-http/src/grpc.rs` frames HTTP/2 5-byte Length-Prefixed Messages (`GrpcFrame`, `GrpcStreamBody`, `GrpcStatus`) across Protobuf and `+msgpack` wire formats.
-- `GrpcServiceRegistry`, `@grpc_method`, `ProtobufSchemaGenerator`, `ProtobufGenerator`, and `ProtobufParser` expose typed unary and streaming gRPC handlers paired with bidirectional `.proto` route codegen.
+- `GrpcServiceRegistry` negotiates `application/grpc+proto` vs `application/grpc+msgpack` codecs (`grpc-status` `12` when unsupported, matching response `content-type`), bounds streaming and unary frames to `max_message_bytes` (`4 MiB` default, `grpc-status` `8` when exceeded), and enforces optional inbound JWT auth via `JWKSVerifier`.
+- `@grpc_method`, `ProtobufSchemaGenerator`, `ProtobufGenerator`, and `ProtobufParser` expose typed unary and streaming gRPC handlers paired with bidirectional `.proto` route codegen.
 <!-- truth: end -->
 
-Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`src/rs/vertebra-http/src/grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs] with `msgspec.Struct`-typed Python handlers and `.proto` v3 schema generation in [`vertebra.extensions.grpc`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)[^src-extensions-grpc-init-py] and [`vertebra.build.codegen.protobuf`](../../../../../src/py/vertebra/build/codegen/protobuf.py)[^src-build-codegen-protobuf-py].
+Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`src/rs/vertebra-http/src/grpc.rs`](../../../../../src/rs/vertebra-http/src/grpc.rs)[^src-vertebra-http-src-grpc-rs] with typed Python handlers, JWKS bearer authentication, and `.proto` v3 schema generation in [`vertebra.extensions.grpc`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)[^src-extensions-grpc-init-py] and [`vertebra.build.codegen.protobuf`](../../../../../src/py/vertebra/build/codegen/protobuf.py)[^src-build-codegen-protobuf-py].
 
 ## 1. Rust HTTP/2 gRPC Wire Framing (`vertebra-http/src/grpc.rs`)
 
@@ -49,12 +56,13 @@ Vertebra pairs native HTTP/2 5-byte Length-Prefixed Message (LPM) framing in [`s
 | [`GrpcStatus`](../../../../../src/rs/vertebra-http/src/grpc.rs) / [`GrpcError`](../../../../../src/rs/vertebra-http/src/grpc.rs) | Canonical status codes `0..=16`, `parse_grpc_timeout` (`H`, `M`, `S`, `m`, `u`, `n`), and RFC 3986 `percent_encode_grpc_message` / `percent_decode_grpc_message`. |
 | [`GrpcStreamBody`](../../../../../src/rs/vertebra-http/src/grpc.rs) | Hyper `Body` streaming LPM data frames followed by HTTP/2 `Frame::trailers` when `FLAG_TRAILERS` (`1 << 5`) is set (`build_grpc_response_with_trailers`, `build_grpc_trailers_only_response`). |
 
-## 2. Python `@grpc_method`, Registry & Protobuf v3 Codegen (`extensions/grpc/__init__.py`, `build/codegen/protobuf.py`)
+## 2. Python `@grpc_method`, Registry, Auth & Protobuf v3 Codegen (`extensions/grpc/__init__.py`, `build/codegen/protobuf.py`)
 
-- **[`@grpc_method(service=..., package="vertebra", name=...)`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Introspects type annotations on async handlers to build a frozen [`GrpcMethodSpec`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) supporting all four [`GrpcMethodKind`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) cardinalities (`UNARY`, `SERVER_STREAMING`, `CLIENT_STREAMING`, `BIDI_STREAMING`) over `msgspec.Struct` and `AsyncIterator[Struct]` types.
-- **[`GrpcServiceRegistry`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Registers `@grpc_method` callables by `/<package>.<service>/<Method>` path and dispatches ASGI HTTP/2 requests (`handle_asgi`) using `decode_lpm_frames`, `encode_lpm_frame`, `decode_msgpack`, and `encode_msgpack_bytes`, emitting `grpc-status` and percent-encoded `grpc-message` (`percent_encode_grpc_message`) trailers.
+- **[`@grpc_method(service=..., package="vertebra", name=...)`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Introspects type annotations on async handlers to build a frozen [`GrpcMethodSpec`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) supporting all four [`GrpcMethodKind`](../../../../../src/py/vertebra/extensions/grpc/__init__.py) cardinalities (`UNARY`, `SERVER_STREAMING`, `CLIENT_STREAMING`, `BIDI_STREAMING`) over `msgspec.Struct`, registered Protobuf types (`register_proto_codec`), and `AsyncIterator` streams.
+- **[`GrpcServiceRegistry`](../../../../../src/py/vertebra/extensions/grpc/__init__.py)**: Registers `@grpc_method` callables by `/<package>.<service>/<Method>` path and dispatches ASGI HTTP/2 requests (`handle_asgi`). `_resolve_codec` matches `application/grpc+proto` (registered `_proto_codecs` or `FromString`/`SerializeToString`, returning `GrpcStatus.UNIMPLEMENTED` `12` when unsupported) and `application/grpc+msgpack` (`msgspec.Struct`), always emitting the matching response `content-type` header. Frame priming and `_iter_lpm_frames` enforce `max_message_bytes` (`4 MiB` default), rejecting oversized unary or streaming frames with `GrpcStatus.RESOURCE_EXHAUSTED` (`8`). When `jwks_verifier` ([`JWKSVerifier`](../../../../../src/py/vertebra/framework/security.py)[^src-framework-security-jwks-py]) or `auth_required=True` is set, inbound Bearer tokens are verified and bound into `AgentContext`, rejecting missing or invalid tokens with `GrpcStatus.UNAUTHENTICATED` (`16`).
 - **[`ProtobufSchemaGenerator`](../../../../../src/py/vertebra/extensions/grpc/__init__.py), [`ProtobufGenerator`](../../../../../src/py/vertebra/build/codegen/protobuf.py), & [`ProtobufParser`](../../../../../src/py/vertebra/build/codegen/protobuf.py)**: Renders `.proto` v3 schemas from registered `GrpcServiceRegistry` definitions (`generate_from_registry`) and supports bidirectional `.proto` v3 route and client codegen.
 
 [^src-vertebra-http-src-grpc-rs]: `src/rs/vertebra-http/src/grpc.rs` — Rust implementation module (src/rs/vertebra-http/src/grpc.rs).
 [^src-extensions-grpc-init-py]: `src/py/vertebra/extensions/grpc/__init__.py` — Python implementation module (src/py/vertebra/extensions/grpc/__init__.py).
 [^src-build-codegen-protobuf-py]: `src/py/vertebra/build/codegen/protobuf.py` — Python implementation module (src/py/vertebra/build/codegen/protobuf.py).
+[^src-framework-security-jwks-py]: `src/py/vertebra/framework/security.py::JWKSVerifier` — Shared `JWKSVerifier` for inbound gRPC bearer authentication.

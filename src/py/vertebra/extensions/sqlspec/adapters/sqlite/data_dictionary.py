@@ -1,5 +1,7 @@
 """SQLite synchronous and asynchronous SQLSpec data dictionaries."""
 
+from __future__ import annotations
+
 from typing import Any, ClassVar, cast
 
 from sqlspec.data_dictionary import (
@@ -18,7 +20,6 @@ from sqlspec.exceptions import SQLFileNotFoundError
 
 from vertebra.extensions.sqlspec.adapters.sqlite.core import (
     format_sqlite_schema_prefix,
-    list_sqlite_available_features,
     normalize_sqlite_schema_name,
     resolve_sqlite_json_type,
     sqlite_check_constraints,
@@ -61,6 +62,8 @@ def _domain_query_text(dialect: str, domain: str, query_name: str) -> str:
 
 class SQLiteSyncDataDictionary(SyncDataDictionaryBase):
     """SQLite-specific synchronous data dictionary backed by Vertebra `SQLiteSyncDriver`."""
+
+    __slots__ = ()
 
     dialect: ClassVar[str] = "sqlite"
 
@@ -105,10 +108,6 @@ class SQLiteSyncDataDictionary(SyncDataDictionaryBase):
         if type_category == "json":
             return resolve_sqlite_json_type(version_info)
         return config.get_optimal_type(type_category)
-
-    def list_available_features(self) -> list[str]:
-        """List supported SQLite dialect feature flags."""
-        return list_sqlite_available_features()
 
     def get_tables(self, driver: Any, schema: str | None = None) -> list[TableMetadata]:
         """List SQLite tables in topological dependency order."""
@@ -273,6 +272,8 @@ class SQLiteSyncDataDictionary(SyncDataDictionaryBase):
 class SQLiteAsyncDataDictionary(AsyncDataDictionaryBase):
     """SQLite-specific asynchronous data dictionary backed by Vertebra `SQLiteAsyncDriver`."""
 
+    __slots__ = ()
+
     dialect: ClassVar[str] = "sqlite"
 
     def resolve_schema(self, schema: str | None) -> str | None:
@@ -280,10 +281,6 @@ class SQLiteAsyncDataDictionary(AsyncDataDictionaryBase):
         if schema is not None:
             return normalize_sqlite_schema_name(schema)
         return get_dialect_config(type(self).dialect).default_schema
-
-    def list_available_features(self) -> list[str]:
-        """List supported SQLite dialect feature flags."""
-        return list_sqlite_available_features()
 
     async def get_version(self, driver: Any) -> VersionInfo | None:
         """Asynchronously detect and cache SQLite engine version."""

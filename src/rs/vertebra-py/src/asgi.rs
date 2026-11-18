@@ -11,6 +11,7 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::pyclass::{PyTraverseError, PyVisit};
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
@@ -132,6 +133,8 @@ static TLS_EXTENSIONS: pyo3::sync::PyOnceLock<Py<PyDict>> = pyo3::sync::PyOnceLo
 #[inline]
 pub(crate) fn mark_immortal_if_supported(obj: &Bound<'_, PyAny>) {
     #[cfg(Py_3_15)]
+    // SAFETY: Caller holds the GIL (`Bound` witness); `obj.as_ptr()` is a valid non-null `PyObject*`
+    // safe to mark immortal on CPython 3.15+ via `PyUnstable_SetImmortal`.
     unsafe {
         let _ = pyo3::ffi::PyUnstable_SetImmortal(obj.as_ptr());
     }
@@ -406,10 +409,13 @@ impl AsgiScope {
             _ => PyBytes::new(py, self.batch.body(self.index)).into_any(),
         };
         let attr_name = pyo3::intern!(py, "_body");
+        // SAFETY: GIL is attached (`py`); `request.as_ptr()`, `attr_name.as_ptr()`, and
+        // `body_obj.as_ptr()` are valid borrowed `PyObject*` pointers for `PyObject_GenericSetAttr`.
         let rc = unsafe {
             ffi::PyObject_GenericSetAttr(request.as_ptr(), attr_name.as_ptr(), body_obj.as_ptr())
         };
         if rc < 0 {
+            // SAFETY: GIL is attached (`py`) and `rc < 0` guarantees CPython set an exception to clear.
             unsafe { ffi::PyErr_Clear() };
             request.setattr(attr_name, body_obj)?;
         }
@@ -2243,11 +2249,7 @@ pub(crate) fn log_app_exception(py: Python<'_>, protocol_label: &str, err: &PyEr
 }
 
 /// Rust coroutine continuation resuming a coroutine that yielded on its initial `PyIter_Send`.
-#[cfg_attr(
-    not(Py_GIL_DISABLED),
-    pyclass(name = "_SteppedCoroutine", freelist = 128, immutable_type)
-)]
-#[cfg_attr(Py_GIL_DISABLED, pyclass(name = "_SteppedCoroutine", immutable_type))]
+#[pyclass(name = "_SteppedCoroutine", immutable_type)]
 pub struct SteppedCoroutine {
     coro: Option<Py<PyAny>>,
     first_yielded: Option<Py<PyAny>>,
@@ -2266,15 +2268,21 @@ impl SteppedCoroutine {
                 return Err(PyStopIteration::new_err(py.None()));
             };
             let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+            // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `arg_ptr` stay borrowed for
+            // `PyIter_Send`, which writes a fresh owned `PyObject*` to `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
             let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), arg_ptr, &mut yielded) };
             match send_res {
                 ffi::PySendResult::PYGEN_NEXT => {
+                    // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned
+                    // `PyObject*` returned by `PyIter_Send` with the GIL attached.
                     return Ok(unsafe { Bound::from_owned_ptr(py, yielded) }.unbind());
                 }
                 ffi::PySendResult::PYGEN_RETURN => {
                     let ret_val = if yielded.is_null() {
                         py.None()
                     } else {
+                        // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a freshly owned
+                        // `PyObject*` return value from `PyIter_Send` with the GIL attached.
                         unsafe { Bound::from_owned_ptr(py, yielded) }.unbind()
                     };
                     self.coro = None;
@@ -2283,6 +2291,7 @@ impl SteppedCoroutine {
                     {
                         self.coro = Some(followup_coro);
                         self.finalizer = Some(ProtocolFinalizer::StreamDone);
+                        // SAFETY: GIL is attached (`py`); `Py_None()` returns a borrowed pointer to immortal `None`.
                         arg_ptr = unsafe { ffi::Py_None() };
                         continue;
                     }
@@ -2315,6 +2324,8 @@ impl SteppedCoroutine {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // SAFETY: GIL is attached (`py`); `Py_None()` returns a borrowed pointer to immortal `None`
+        // kept valid for the synchronous `step_ptr` call.
         self.step_ptr(py, unsafe { ffi::Py_None() })
     }
 
@@ -2363,6 +2374,8 @@ impl SteppedCoroutine {
                         if let Some(followup_coro) = fin.on_return(py, &val_bound)? {
                             self.coro = Some(followup_coro);
                             self.finalizer = Some(ProtocolFinalizer::StreamDone);
+                            // SAFETY: GIL is attached (`py`); `Py_None()` returns a borrowed pointer to
+                            // immortal `None` kept valid for the `step_ptr` call.
                             return self.step_ptr(py, unsafe { ffi::Py_None() });
                         }
                     }
@@ -2394,6 +2407,25 @@ impl SteppedCoroutine {
             let _ = coro.bind(py).call_method0(pyo3::intern!(py, "close"));
         }
         Ok(())
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.coro)?;
+        visit.call(&self.first_yielded)?;
+        visit.call(&self.self_task)?;
+        match self.finalizer {
+            Some(ProtocolFinalizer::Asgi(ref proto)) => visit.call(proto)?,
+            Some(ProtocolFinalizer::Rsgi(ref proto)) => visit.call(proto)?,
+            Some(ProtocolFinalizer::Native { .. } | ProtocolFinalizer::StreamDone) | None => {}
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.coro = None;
+        self.first_yielded = None;
+        self.finalizer = None;
+        self.self_task = None;
     }
 }
 
@@ -2638,10 +2670,14 @@ fn drive_asgi_targets_inline(
         };
 
         let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+        // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
+        // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
         let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
         match send_res {
             ffi::PySendResult::PYGEN_RETURN => {
                 if !yielded.is_null() {
+                    // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a fresh owned
+                    // `PyObject*`; adopting and dropping it prevents a refcount leak.
                     unsafe {
                         let _ = Bound::from_owned_ptr(py, yielded);
                     }
@@ -2660,6 +2696,8 @@ fn drive_asgi_targets_inline(
                 completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_NEXT => {
+                // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`
+                // produced by `PyIter_Send` while the GIL is attached.
                 let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
                 if let Some(resp) = proto_bound.get().take_completed_for_batch(py, false)? {
                     ready_responses.push(resp);
@@ -2815,12 +2853,16 @@ fn drive_native_items_inline(
         };
 
         let mut yielded: *mut ffi::PyObject = std::ptr::null_mut();
+        // SAFETY: GIL is attached (`py`); `coro.as_ptr()` and `Py_None()` stay borrowed for
+        // `PyIter_Send`, which writes a fresh owned `PyObject*` into `yielded` on `PYGEN_NEXT`/`PYGEN_RETURN`.
         let send_res = unsafe { ffi::PyIter_Send(coro.as_ptr(), ffi::Py_None(), &mut yielded) };
         match send_res {
             ffi::PySendResult::PYGEN_RETURN => {
                 let ret_bound = if yielded.is_null() {
                     py.None().into_bound(py)
                 } else {
+                    // SAFETY: `PYGEN_RETURN` with non-null `yielded` transfers a freshly owned
+                    // `PyObject*` return value from `PyIter_Send` with the GIL attached.
                     unsafe { Bound::from_owned_ptr(py, yielded) }
                 };
                 match try_submit_native_special(py, request_id, default_status, &ret_bound) {
@@ -2829,6 +2871,8 @@ fn drive_native_items_inline(
                     }
                     Ok(NativeSpecialOutcome::StreamCoro(stream_coro)) => {
                         let mut stream_yielded: *mut ffi::PyObject = std::ptr::null_mut();
+                        // SAFETY: GIL is attached (`py`); `stream_coro.as_ptr()` and `Py_None()` stay
+                        // borrowed for `PyIter_Send`, writing a fresh owned `PyObject*` to `stream_yielded`.
                         let stream_send = unsafe {
                             ffi::PyIter_Send(
                                 stream_coro.as_ptr(),
@@ -2839,6 +2883,8 @@ fn drive_native_items_inline(
                         match stream_send {
                             ffi::PySendResult::PYGEN_RETURN => {
                                 if !stream_yielded.is_null() {
+                                    // SAFETY: `PYGEN_RETURN` with non-null `stream_yielded` transfers a
+                                    // freshly owned `PyObject*`; adopting and dropping prevents a refcount leak.
                                     unsafe {
                                         drop(Bound::from_owned_ptr(py, stream_yielded));
                                     }
@@ -2851,6 +2897,8 @@ fn drive_native_items_inline(
                                 completed_inline += 1;
                             }
                             ffi::PySendResult::PYGEN_NEXT => {
+                                // SAFETY: `PYGEN_NEXT` guarantees `stream_yielded` is a non-null freshly
+                                // owned `PyObject*` from `PyIter_Send` while the GIL is attached.
                                 let first_yielded =
                                     unsafe { Bound::from_owned_ptr(py, stream_yielded) }.unbind();
                                 let lp = match active_loop {
@@ -2903,6 +2951,8 @@ fn drive_native_items_inline(
                 completed_inline += 1;
             }
             ffi::PySendResult::PYGEN_NEXT => {
+                // SAFETY: `PYGEN_NEXT` guarantees `yielded` is a non-null freshly owned `PyObject*`
+                // produced by `PyIter_Send` while the GIL is attached.
                 let first_yielded = unsafe { Bound::from_owned_ptr(py, yielded) }.unbind();
                 let lp = match active_loop {
                     Some(l) => l.clone(),

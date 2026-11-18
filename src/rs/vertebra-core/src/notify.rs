@@ -95,6 +95,8 @@ impl Notifier {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
+            // SAFETY: `fd` was just returned by `libc::eventfd`, so it is valid, open,
+            // non-blocking, and uniquely owned by this `Notifier`.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         })
     }
@@ -102,13 +104,15 @@ impl Notifier {
     #[cfg(all(unix, not(target_os = "linux")))]
     fn new_pipe() -> io::Result<Self> {
         let mut fds = [0i32; 2];
-        // SAFETY: pipe() is a standard POSIX syscall.
+        // SAFETY: `fds` points to a valid writable `[i32; 2]` buffer for `libc::pipe`.
         if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
 
         // Set both ends to non-blocking, but NOT close-on-exec (for inheritance).
         for &fd in &fds {
+            // SAFETY: `fds` holds two newly opened pipe FDs; both are closed before returning
+            // an error if configuring `O_NONBLOCK` fails.
             unsafe {
                 let flags = libc::fcntl(fd, libc::F_GETFL);
                 if flags < 0 {
@@ -126,7 +130,9 @@ impl Notifier {
         }
 
         Ok(Self {
+            // SAFETY: `fds[0]` is the valid, open, non-blocking read end uniquely owned here.
             read_fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+            // SAFETY: `fds[1]` is the valid, open, non-blocking write end uniquely owned here.
             write_fd: unsafe { OwnedFd::from_raw_fd(fds[1]) },
         })
     }
@@ -145,6 +151,8 @@ impl Notifier {
     #[cfg(target_os = "linux")]
     pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
         Self {
+            // SAFETY: Caller upholds `from_raw_fd` contract that `fd` is valid, open,
+            // and exclusively transferred to this `Notifier`.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         }
     }
@@ -161,7 +169,11 @@ impl Notifier {
     #[cfg(all(unix, not(target_os = "linux")))]
     pub unsafe fn from_raw_fds(read_fd: RawFd, write_fd: RawFd) -> Self {
         Self {
+            // SAFETY: Caller upholds `from_raw_fds` contract that `read_fd` is valid, open,
+            // and exclusively transferred to this `Notifier`.
             read_fd: unsafe { OwnedFd::from_raw_fd(read_fd) },
+            // SAFETY: Caller upholds `from_raw_fds` contract that `write_fd` is valid, open,
+            // and exclusively transferred to this `Notifier`.
             write_fd: unsafe { OwnedFd::from_raw_fd(write_fd) },
         }
     }
@@ -206,6 +218,7 @@ impl Notifier {
         #[cfg(target_os = "linux")]
         {
             let val: u64 = 1;
+            // SAFETY: `self.fd` is an open non-blocking `OwnedFd` and `&val` points to 8 readable bytes.
             let ret = unsafe {
                 libc::write(
                     self.fd.as_raw_fd(),
@@ -226,6 +239,7 @@ impl Notifier {
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             let val: u8 = 1;
+            // SAFETY: `self.write_fd` is an open non-blocking `OwnedFd` and `&val` points to 1 readable byte.
             let ret = unsafe {
                 libc::write(
                     self.write_fd.as_raw_fd(),
@@ -259,6 +273,7 @@ impl Notifier {
         #[cfg(target_os = "linux")]
         {
             let mut val: u64 = 0;
+            // SAFETY: `self.fd` is an open non-blocking `OwnedFd` and `&mut val` is writable 8-byte storage.
             let _ = unsafe {
                 libc::read(
                     self.fd.as_raw_fd(),
@@ -274,6 +289,8 @@ impl Notifier {
             // Drain the pipe completely.
             let mut buf = [0u8; 64];
             loop {
+                // SAFETY: `self.read_fd` is an open non-blocking `OwnedFd` and `buf` is valid writable
+                // storage for `buf.len()` bytes.
                 let ret = unsafe {
                     libc::read(
                         self.read_fd.as_raw_fd(),
@@ -311,6 +328,7 @@ impl Notifier {
                 events: libc::POLLIN,
                 revents: 0,
             };
+            // SAFETY: `&mut pfd` points to a valid single-element `libc::pollfd` for the live `OwnedFd`.
             let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
             ret > 0 && (pfd.revents & libc::POLLIN) != 0
         }
@@ -337,6 +355,7 @@ impl Notifier {
                 events: libc::POLLIN,
                 revents: 0,
             };
+            // SAFETY: `&mut pfd` points to a valid single-element `libc::pollfd` for the live `OwnedFd`.
             let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
             if ret < 0 {
                 return Err(io::Error::last_os_error());
@@ -645,6 +664,7 @@ mod tests {
     fn notifier_no_cloexec() {
         let notifier = Notifier::new().expect("failed to create notifier");
         for fd in [notifier.as_raw_fd(), notifier.write_fd()] {
+            // SAFETY: `fd` is borrowed from the live `notifier` for this call.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             assert!(flags >= 0, "fcntl F_GETFD failed");
             assert!(
@@ -664,6 +684,7 @@ mod tests {
         notifier.notify().expect("notify failed");
 
         // Duplicate the FD to simulate inheritance.
+        // SAFETY: `fd` is a valid open descriptor borrowed from `notifier`.
         let dup_fd = unsafe { libc::dup(fd) };
         assert!(dup_fd >= 0, "dup failed");
 
@@ -672,6 +693,7 @@ mod tests {
         drop(notifier);
 
         // Reconstruct from duplicated FD.
+        // SAFETY: `dup_fd` is a valid, uniquely owned eventfd duplicated from `notifier`.
         let child_notifier = unsafe { Notifier::from_raw_fd(dup_fd) };
 
         // Notify and check.
@@ -690,13 +712,16 @@ mod tests {
 
         notifier.notify().expect("notify failed");
 
+        // SAFETY: `read_fd` is a valid open descriptor borrowed from `notifier`.
         let dup_read = unsafe { libc::dup(read_fd) };
+        // SAFETY: `write_fd` is a valid open descriptor borrowed from `notifier`.
         let dup_write = unsafe { libc::dup(write_fd) };
         assert!(dup_read >= 0 && dup_write >= 0, "dup failed");
 
         notifier.clear().expect("clear failed");
         drop(notifier);
 
+        // SAFETY: `dup_read` and `dup_write` are valid, uniquely owned pipe FDs from `notifier`.
         let child_notifier = unsafe { Notifier::from_raw_fds(dup_read, dup_write) };
         child_notifier.notify().expect("notify failed");
         assert!(child_notifier.has_pending());
@@ -809,13 +834,16 @@ mod tests {
         assert_eq!(queue.pop_timeout(timeout), None);
         assert!(start.elapsed() >= Duration::from_millis(10));
 
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let ready_clone = Arc::clone(&ready);
         let q = Arc::clone(&queue);
         let handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
+            ready_clone.wait();
             q.push(42);
         });
 
-        assert_eq!(queue.pop_timeout(Duration::from_millis(100)), Some(42));
+        ready.wait();
+        assert_eq!(queue.pop_timeout(Duration::from_secs(1)), Some(42));
         handle.join().expect("thread join");
     }
 

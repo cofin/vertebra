@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyIOError, PyTypeError};
+use pyo3::exceptions::{PyIOError, PyOverflowError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyList, PyString, PyTuple};
 
@@ -45,6 +45,9 @@ pub(crate) fn extract_buffer_bytes(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Py
             let slice = if len == 0 {
                 &[][..]
             } else {
+                // SAFETY: The GIL is held (`py`); `py_buf` is a valid C-contiguous `PyBuffer<u8>`
+                // with `len > 0` whose exporter refcount pins backing memory while `py_buf` is
+                // alive, so `buf_ptr()` is non-null and valid for `len` bytes during the copy.
                 unsafe { std::slice::from_raw_parts(py_buf.buf_ptr() as *const u8, len) }
             };
             return Ok(Bytes::copy_from_slice(slice));
@@ -165,7 +168,13 @@ impl Response {
         length: Option<u64>,
     ) -> PyResult<Self> {
         let path_owned = path.to_string();
-        let end = offset.and_then(|o| length.map(|l| o + l));
+        let end = match (offset, length) {
+            (Some(o), Some(l)) => Some(
+                o.checked_add(l)
+                    .ok_or_else(|| PyOverflowError::new_err("offset + length overflows u64"))?,
+            ),
+            _ => None,
+        };
         let body_bytes = py
             .detach(|| crate::file_io::read_file_range_sync(&path_owned, offset, end))
             .map_err(|e| PyIOError::new_err(format!("failed to read file {path}: {e}")))?;

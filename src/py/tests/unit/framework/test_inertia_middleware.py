@@ -1,5 +1,6 @@
 """Tests for the Inertia.js v3 protocol middleware."""
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -22,19 +23,27 @@ from vertebra.utils.serializers import decode_json
 
 
 class _TestRequest:
-    def __init__(self, method: str = "GET", path: str = "/dashboard", headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        method: str = "GET",
+        path: str = "/dashboard",
+        headers: dict[str, str] | None = None,
+        query_string: str = "",
+    ) -> None:
         self.method = method
         self.path = path
         self.headers = headers or {}
+        self.query_string = query_string
 
 
 def _make_request(
     method: str = "GET",
     path: str = "/dashboard",
     headers: dict[str, str] | None = None,
+    query_string: str = "",
 ) -> _TestRequest:
-    """Build a Request with the given headers."""
-    return _TestRequest(method=method, path=path, headers=headers)
+    """Build a Request with the given headers and query string."""
+    return _TestRequest(method=method, path=path, headers=headers, query_string=query_string)
 
 
 class _MockSSRClient:
@@ -462,26 +471,10 @@ def test_version_conflict_only_on_get() -> None:
     assert result.status == 200
 
 
-@pytest.mark.parametrize(
-    ("method", "status", "expected"),
-    [
-        ("PUT", 302, True),
-        ("PATCH", 302, True),
-        ("DELETE", 302, True),
-        ("GET", 302, False),
-        ("PUT", 301, True),
-    ],
-    ids=[
-        "302-to-303-for-put",
-        "302-to-303-for-patch",
-        "302-to-303-for-delete",
-        "302-kept-for-get",
-        "301-to-303-for-put",
-    ],
-)
-def test_redirect_fixup(method: str, status: int, expected: bool) -> None:
-    mw = SyncInertiaMiddleware()
-    assert mw.should_redirect_303(method, status) is expected
+def test_should_redirect_303_removed() -> None:
+    """Verify legacy should_redirect_303 helper is removed from middleware classes."""
+    assert not hasattr(SyncInertiaMiddleware, "should_redirect_303")
+    assert not hasattr(AsyncInertiaMiddleware, "should_redirect_303")
 
 
 def test_json_response_inertia_request_returns_json() -> None:
@@ -642,3 +635,124 @@ async def test_async_inertia_middleware_process() -> None:
     fallback_res = await fail_mw.process(_make_request(), InertiaResponse(component="Pages/Home"))
     assert fallback_res.status == 200
     assert "<title>Async SSR Page</title>" not in fallback_res.body.decode("utf-8")
+
+
+@pytest.mark.anyio
+async def test_async_inertia_v3_protocol_props_headers_and_resets() -> None:
+    """AsyncInertiaMiddleware resolves async callables/iterables, onceProps, reset headers, query strings, and shared_data."""
+
+    async def load_user() -> dict[str, str]:
+        return {"name": "Ada"}
+
+    async def stream_events() -> AsyncIterator[str]:
+        for item in ("boot", "ready"):
+            yield item
+
+    async def load_stats() -> dict[str, int]:
+        return {"visits": 42}
+
+    async def direct_coro() -> str:
+        return "awaited"
+
+    cfg = InertiaConfig(
+        version="v1",
+        shared_data={"app_name": "Vertebra", "viewer": lambda: "shared-user"},
+    )
+    mw = AsyncInertiaMiddleware(cfg)
+
+    initial_req = _make_request(
+        path="/dashboard",
+        query_string="tab=overview&page=2",
+        headers={"x-inertia": "true", "x-inertia-version": "v1"},
+    )
+    resp = InertiaResponse(
+        component="Pages/Dashboard",
+        props={
+            "user": load_user,
+            "events": stream_events,
+            "coro": direct_coro(),
+            "sync_val": lambda: 7,
+            "stats": DeferredProp(load_stats, group="analytics", once=True),
+            "token": OnceProp(lambda: "secret-once", expires_in=600),
+            "feed": MergeProp(lambda: [1, 2]),
+            "alerts": MergeProp(lambda: ["a"], prepend=True),
+            "prefs": DeepMergeProp(lambda: {"theme": "dark"}),
+        },
+    )
+    initial_http = await mw.process(initial_req, resp)
+    assert initial_http.status == 200
+    initial_page = decode_json(initial_http.body)
+    assert initial_page["url"] == "/dashboard?tab=overview&page=2"
+    assert initial_page["props"]["user"] == {"name": "Ada"}
+    assert initial_page["props"]["events"] == ["boot", "ready"]
+    assert initial_page["props"]["coro"] == "awaited"
+    assert initial_page["props"]["sync_val"] == 7
+    assert initial_page["props"]["app_name"] == "Vertebra"
+    assert initial_page["props"]["viewer"] == "shared-user"
+    assert "stats" not in initial_page["props"]
+    assert initial_page["deferredProps"] == {"analytics": ["stats"]}
+    assert initial_page["onceProps"] == {
+        "stats": {"prop": "stats"},
+        "token": {"prop": "token", "expiresAt": 600},
+    }
+    assert initial_page["mergeProps"] == ["feed"]
+    assert initial_page["prependProps"] == ["alerts"]
+    assert initial_page["deepMergeProps"] == ["prefs"]
+    assert "resetProps" not in initial_page
+
+    partial_req = _make_request(
+        path="/dashboard",
+        query_string="tab=analytics",
+        headers={
+            "X-INERTIA": "true",
+            "x-inertia-version": "v1",
+            "X-INERTIA-PARTIAL-COMPONENT": "Pages/Dashboard",
+            "x-inertia-partial-data": "stats,feed,alerts,prefs",
+            "X-INERTIA-EXCEPT-ONCE-PROPS": "token",
+            "x-inertia-reset": "feed,alerts,prefs,stats",
+        },
+    )
+    partial_resp = InertiaResponse(
+        component="Pages/Dashboard",
+        props={
+            "user": load_user,
+            "stats": DeferredProp(load_stats, group="analytics", once=True),
+            "token": OnceProp(lambda: "secret-once", expires_in=600),
+            "feed": MergeProp(lambda: [3]),
+            "alerts": MergeProp(lambda: ["b"], prepend=True),
+            "prefs": DeepMergeProp(lambda: {"theme": "light"}),
+        },
+    )
+    partial_http = await mw.process(partial_req, partial_resp)
+    partial_page = decode_json(partial_http.body)
+    assert partial_page["url"] == "/dashboard?tab=analytics"
+    assert partial_page["props"]["stats"] == {"visits": 42}
+    assert partial_page["props"]["app_name"] == "Vertebra"
+    assert partial_page["props"]["viewer"] == "shared-user"
+    assert "user" not in partial_page["props"]
+    assert "token" not in partial_page["props"]
+    assert "mergeProps" not in partial_page
+    assert "prependProps" not in partial_page
+    assert "deepMergeProps" not in partial_page
+    assert "onceProps" not in partial_page
+    assert "resetProps" not in partial_page
+
+    except_deferred_req = _make_request(
+        headers={
+            "x-inertia": "true",
+            "X-INERTIA-PARTIAL-COMPONENT": "Pages/Dashboard",
+            "X-INERTIA-PARTIAL-DATA": "stats",
+            "X-INERTIA-EXCEPT-ONCE-PROPS": "stats",
+        },
+    )
+    except_http = await mw.process(
+        except_deferred_req,
+        InertiaResponse(
+            component="Pages/Dashboard",
+            props={"stats": DeferredProp(load_stats, group="analytics", once=True)},
+        ),
+    )
+    except_page = decode_json(except_http.body)
+    assert "stats" not in except_page["props"]
+    assert "deferredProps" not in except_page
+    assert "onceProps" not in except_page
