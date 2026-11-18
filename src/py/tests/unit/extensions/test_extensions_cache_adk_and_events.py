@@ -1507,18 +1507,18 @@ class _RecordingSyncMigrationDriver(SyncDriverAdapterBase):
         _ = connection
         raise NotImplementedError
 
-    def execute_script(self, sql_text: str, *parameters: Any, **kwargs: Any) -> Any:
+    def execute_script(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = (parameters, kwargs)
-        self.scripts.append(sql_text)
+        self.scripts.append(str(sql_text))
 
-    def execute(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> Any:
+    def execute(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = kwargs
         param_arg = parameters[0] if parameters else None
         self.executed.append((str(sql_text), param_arg))
         if self._execute_error is not None:
             raise self._execute_error
 
-    def select(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> list[Any]:
+    def select(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = kwargs
         param_arg = parameters[0] if parameters else None
         sql_str = str(sql_text)
@@ -1577,18 +1577,18 @@ class _RecordingAsyncMigrationDriver(AsyncDriverAdapterBase):
         _ = connection
         raise NotImplementedError
 
-    async def execute_script(self, sql_text: str, *parameters: Any, **kwargs: Any) -> Any:
+    async def execute_script(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = (parameters, kwargs)
-        self.scripts.append(sql_text)
+        self.scripts.append(str(sql_text))
 
-    async def execute(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> Any:
+    async def execute(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = kwargs
         param_arg = parameters[0] if parameters else None
         self.executed.append((str(sql_text), param_arg))
         if self._execute_error is not None:
             raise self._execute_error
 
-    async def select(self, sql_text: Any, *parameters: Any, **kwargs: Any) -> list[Any]:
+    async def select(self, sql_text: Any, /, *parameters: Any, **kwargs: Any) -> Any:
         _ = kwargs
         param_arg = parameters[0] if parameters else None
         sql_str = str(sql_text)
