@@ -461,7 +461,7 @@ def _hydrate_rows_with_schema(
     columns: Sequence[str],
     schema_type: type[Any] | None = None,
     *,
-    normalize_nested: bool = False,
+    normalize_nested: bool = True,
 ) -> list[Any]:
     """Hydrate tabular rows into dictionaries or typed `schema_type` instances via C-API vectorcall or `to_schema`."""
     if not rows:
@@ -470,7 +470,7 @@ def _hydrate_rows_with_schema(
         if isinstance(rows[0], Mapping):
             return [dict(r) for r in rows]
         return [{col: (r[i] if i < len(r) else None) for i, col in enumerate(columns)} for r in rows]
-    if not normalize_nested and can_vectorcall_hydrate_schema(schema_type):
+    if can_vectorcall_hydrate_schema(schema_type):
         try:
             plan = ZeroCopyCodecRegistry.compile(schema_type)
             if isinstance(rows[0], Mapping):

@@ -1,7 +1,7 @@
 ---
 type: Knowledge
 title: SQLSpec Adapter, Proxy & Store Limitations
-description: Operational boundaries for SQLSpec 0.72.1+ nested schema mapping, data dictionary bases, native Oracle sessionless hooks, session reset semantics, storage alias registration, ADK extras, and TxEventQ acknowledgment.
+description: Operational boundaries for SQLSpec 0.72.2+ nested schema mapping, data dictionary bases, native Oracle sessionless hooks, session reset semantics, storage alias registration, ADK extras, and TxEventQ acknowledgment.
 status: stable
 tags:
   - domains
@@ -22,7 +22,7 @@ verified:
 sources:
   - id: src-pyproject
     resource: pyproject.toml
-    title: SQLSpec >=0.72.1 PyPI dependency floor without upstream git pins
+    title: SQLSpec >=0.72.2 PyPI dependency floor without upstream git pins
   - id: src-sqlspec-mysql-dict
     resource: src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py
     title: MySQL data dictionary subclassing upstream sqlspec.data_dictionary.dialects.mysql.dictionary
@@ -64,8 +64,8 @@ sources:
 # SQLSpec Adapter, Proxy & Store Limitations
 
 <!-- truth: start -->
-- `pyproject.toml` declares `"sqlspec>=0.72.1"` from PyPI with zero `[tool.uv.sources]` upstream git pins; nested `msgspec.Struct` Python field names inside SQL projections require `to_schema(..., normalize_nested=True)` (`normalize_nested=False` by default in both `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema`) [^src-pyproject].
-- In `sqlspec>=0.72.1`, `sqlspec.data_dictionary.dialects.<dialect>.dictionary` exists only for MySQL; `MySQLSyncDataDictionary` and `MySQLAsyncDataDictionary` subclass it, while the PostgreSQL, Oracle, SQLite, MSSQL, DuckDB, BigQuery, and Spanner dictionaries subclass `SyncDataDictionaryBase` and `AsyncDataDictionaryBase` directly [^src-sqlspec-mysql-dict] [^src-sqlspec-pg-dict].
+- `pyproject.toml` declares `"sqlspec>=0.72.2"` from PyPI with zero `[tool.uv.sources]` upstream git pins; driver-level `to_schema` and tabular row hydrators default to `normalize_nested=True` for SQL projections, while standalone `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False` [^src-pyproject].
+- In `sqlspec>=0.72.2`, `sqlspec.data_dictionary.dialects.<dialect>.dictionary` exists only for MySQL; `MySQLSyncDataDictionary` and `MySQLAsyncDataDictionary` subclass it, while the PostgreSQL, Oracle, SQLite, MSSQL, DuckDB, BigQuery, and Spanner dictionaries subclass `SyncDataDictionaryBase` and `AsyncDataDictionaryBase` directly [^src-sqlspec-mysql-dict] [^src-sqlspec-pg-dict].
 - Native pure-Rust `vertebra._oracle` does not expose FFI `begin_sessionless_transaction`, `resume_sessionless_transaction`, or `suspend_sessionless_transaction` hooks (nor `suspend_on_success` execution), so `OracleSyncDriver`, `OracleAsyncDriver`, and the Oracle sessionless context managers raise `DialectNotSupportedError` against `vertebra._oracle` until native FFI support lands [^src-sqlspec-oracle-driver].
 - `reset_session_on_release=True` is a no-op on stateless BigQuery REST connections lacking an active `session_id` (falling back to `CALL BQ.ABORT_SESSION(@session_id)` only when a session exists), clears only local transaction flags on Spanner when no native `reset_session` hook exists, drops only temporary objects plus non-baseline attached databases while re-applying baseline pragmas on DuckDB, and executes `EXEC sp_reset_connection` as a T-SQL batch rather than a TDS `RESETCONNECTION` packet flag when an MSSQL connection lacks a native reset hook [^src-sqlspec-bigquery-typing] [^src-sqlspec-spanner-typing] [^src-sqlspec-duckdb-typing] [^src-sqlspec-mssql-typing].
 - Upstream `StorageRegistry.register_alias` accepts only `"local"`, `"obstore"`, and `"fsspec"` backend names and rejects custom `ObjectStoreBackend` instances or pre-configured `SyncObjectStore` / `AsyncObjectStore` signing state (`SigningConfig`, credentials, custom endpoints); `register_storage_alias` forwards only the URI string without touching `_alias_configs`, so callers needing custom native stores or signing must construct `ObjectStoreBackend(store=...)` directly [^src-sqlspec-storage].
@@ -75,7 +75,7 @@ sources:
 
 ## Operational Boundaries
 
-- **Opt-In Nested `msgspec.Struct` Field Aliasing (`sqlspec>=0.72.1`)**: [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject] declares `"sqlspec>=0.72.1"` from PyPI without upstream git pins. Both `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False` (requiring encoded field names inside nested `msgspec.Struct` values and leaving `dict[str, Any]` keys untouched); pass `normalize_nested=True` on raw rows when trusted SQL projections return Python field names inside nested structs.
+- **Driver vs. Standalone Nested `msgspec.Struct` Normalization (`sqlspec>=0.72.2`)**: [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject] declares `"sqlspec>=0.72.2"` from PyPI without upstream git pins. Driver-level `CommonDriverAttributesMixin.to_schema`, `RoutingSession.to_schema`, and Vertebra's tabular row hydrators (`_hydrate_rows_with_schema`, `BigQueryCore.hydrate_query_rows`, `SpannerCore.hydrate_query_rows`) default to `normalize_nested=True` (with `normalize_nested=False` opt-out), whereas standalone `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False`.
 - **Data Dictionary Upstream Base Coverage**: Upstream `sqlspec.data_dictionary.dialects` ships a shared `dictionary` base class only for MySQL ([`mysql/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py)[^src-sqlspec-mysql-dict]). PostgreSQL ([`postgres/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py)[^src-sqlspec-pg-dict]), Oracle, SQLite, MSSQL, DuckDB, BigQuery, and Spanner implement their dialect queries directly on `SyncDataDictionaryBase` and `AsyncDataDictionaryBase` without cross-importing `sqlspec.adapters.*`.
 - **Oracle 26ai Sessionless Transaction FFI Gap**: [`OracleSyncDriver`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/oracle/driver.py)[^src-sqlspec-oracle-driver] and `OracleAsyncDriver` implement `begin_sessionless_transaction`, `resume_sessionless_transaction`, `suspend_sessionless_transaction`, `sessionless_transaction(...)`, and `execute(..., suspend_on_success=True)`. Because pure-Rust `vertebra._oracle` does not expose native sessionless FFI hooks yet, calls against `vertebra._oracle` connections fail loudly with `DialectNotSupportedError`, while external or test connections that expose those hooks run them directly.
 - **`reset_session_on_release` Engine & Transport Caveats**:
@@ -87,7 +87,7 @@ sources:
 - **Mandatory `google-adk` Extra**: ADK session, memory, and artifact stores across all eight engines (`adk.py`) carry no fallback implementations and load `sqlspec.extensions.adk` via `ensure_module(..., package="google-adk", extra="adk")` ([`postgres/adk.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py)[^src-sqlspec-postgres-adk]), raising `MissingDependencyError` when `google-adk` (`vertebra-core[adk]`) is absent.
 - **Oracle TxEventQ Acknowledgment & Cloud Tenant Guards**: [`OracleSyncEventsBackend`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/oracle/events.py)[^src-sqlspec-oracle-events] and `OracleAsyncEventsBackend` commit `DBMS_AQ.DEQUEUE` messages upon dequeue and re-publish on `nack()`. [`BigQuery`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py)[^src-sqlspec-bigquery-driver] and [`Spanner`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py)[^src-sqlspec-spanner-driver] configs and drivers reject `tenant_predicate` and `tenant_id` with `NotSupportedError` before base initialization or native calls.
 
-[^src-pyproject]: `pyproject.toml` — SQLSpec `>=0.72.1` PyPI dependency floor without upstream git pins.
+[^src-pyproject]: `pyproject.toml` — SQLSpec `>=0.72.2` PyPI dependency floor without upstream git pins.
 [^src-sqlspec-mysql-dict]: `src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py` — MySQL data dictionary subclassing `sqlspec.data_dictionary.dialects.mysql.dictionary`.
 [^src-sqlspec-pg-dict]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py` — Direct `SyncDataDictionaryBase` / `AsyncDataDictionaryBase` subclassing without an upstream dialect dictionary.
 [^src-sqlspec-oracle-driver]: `src/py/vertebra/extensions/sqlspec/adapters/oracle/driver.py` — Oracle SQLSpec driver sessionless transaction FFI checks.

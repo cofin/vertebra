@@ -142,7 +142,7 @@ class BigQueryCore:
         rows: Sequence[Sequence[Any]],
         *,
         schema_type: type[Any] | None = None,
-        normalize_nested: bool = False,
+        normalize_nested: bool = True,
     ) -> list[Any]:
         """Hydrate query rows into dictionaries or `schema_type` instances via C-API vectorcall or `to_schema`."""
         if not rows:
@@ -150,7 +150,7 @@ class BigQueryCore:
         col_tuple = tuple(columns)
         if schema_type is None or schema_type is dict:
             return [dict(zip(col_tuple, row, strict=False)) for row in rows]
-        if not normalize_nested and can_vectorcall_hydrate_schema(schema_type):
+        if can_vectorcall_hydrate_schema(schema_type):
             try:
                 return hydrate_rows_vectorcall(schema_type, list(rows), col_tuple)
             except Exception:

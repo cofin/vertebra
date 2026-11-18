@@ -5445,9 +5445,9 @@ class _DuckDBInventoryRow(msgspec.Struct, frozen=True):
     item: _DuckDBNestedItem
 
 
-def test_sqlspec_0721_nested_msgspec_schema_and_builder_pushdown() -> None:
-    """Verify SQLSpec 0.72.1 normalize_nested schema mapping, ASOF join preservation, and subquery scope hashing."""
-    cfg = DuckDBSyncConfig(database=":memory:duck_0721_schema")
+def test_sqlspec_0722_nested_msgspec_schema_and_builder_pushdown() -> None:
+    """Verify SQLSpec 0.72.2 driver.to_schema default normalize_nested=True, ASOF join preservation, and scope hashing."""
+    cfg = DuckDBSyncConfig(database=":memory:duck_0722_schema")
     try:
         with cfg.provide_session() as session:
             row = session.select_one(
@@ -5455,12 +5455,13 @@ def test_sqlspec_0721_nested_msgspec_schema_and_builder_pushdown() -> None:
                 "Pencil",
                 2,
             )
+            expected = _DuckDBInventoryRow(item=_DuckDBNestedItem(item_name="Pencil", item_count=2))
+            assert session.to_schema(row, schema_type=_DuckDBInventoryRow) == expected
+            with pytest.raises(msgspec.ValidationError, match="itemName"):
+                session.to_schema(row, schema_type=_DuckDBInventoryRow, normalize_nested=False)
             with pytest.raises(msgspec.ValidationError, match="itemName"):
                 sqlspec_to_schema(row, schema_type=_DuckDBInventoryRow)
-            hydrated = sqlspec_to_schema(row, schema_type=_DuckDBInventoryRow, normalize_nested=True)
-            assert hydrated == _DuckDBInventoryRow(
-                item=_DuckDBNestedItem(item_name="Pencil", item_count=2),
-            )
+            assert sqlspec_to_schema(row, schema_type=_DuckDBInventoryRow, normalize_nested=True) == expected
     finally:
         cfg.close()
 

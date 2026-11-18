@@ -662,7 +662,7 @@ def test_to_schema_msgspec_opt_in_normalize_nested_and_map_key_preservation() ->
 
 @pytest.mark.parametrize("hydrator", ["arrow", "bigquery", "spanner"])
 def test_row_hydrators_convert_nested_msgspec_structs(hydrator: str) -> None:
-    """Verify Arrow, BigQuery, and Spanner row hydrators convert nested Struct fields instead of leaving raw dicts."""
+    """Verify driver row hydrators normalize nested Struct fields by default and support normalize_nested=False."""
     assert can_vectorcall_hydrate_schema(_SampleStruct) is True
     assert can_vectorcall_hydrate_schema(_SampleCamelStruct) is False
     assert can_vectorcall_hydrate_schema(_OptionalCollectionEnvelope) is False
@@ -672,30 +672,41 @@ def test_row_hydrators_convert_nested_msgspec_structs(hydrator: str) -> None:
     cols = ("child",)
 
     if hydrator == "arrow":
-        res_default = _hydrate_rows_with_schema(encoded_rows, cols, _OptionalCollectionEnvelope)
-        res_nested = _hydrate_rows_with_schema(
-            python_rows,
-            cols,
-            _OptionalCollectionEnvelope,
-            normalize_nested=True,
-        )
+        res_encoded = _hydrate_rows_with_schema(encoded_rows, cols, _OptionalCollectionEnvelope, normalize_nested=False)
+        res_default = _hydrate_rows_with_schema(python_rows, cols, _OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError, match="itemName"):
+            _hydrate_rows_with_schema(python_rows, cols, _OptionalCollectionEnvelope, normalize_nested=False)
     elif hydrator == "bigquery":
-        res_default = BigQueryCore.hydrate_query_rows(cols, encoded_rows, schema_type=_OptionalCollectionEnvelope)
-        res_nested = BigQueryCore.hydrate_query_rows(
+        res_encoded = BigQueryCore.hydrate_query_rows(
             cols,
-            python_rows,
+            encoded_rows,
             schema_type=_OptionalCollectionEnvelope,
-            normalize_nested=True,
+            normalize_nested=False,
         )
+        res_default = BigQueryCore.hydrate_query_rows(cols, python_rows, schema_type=_OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError):
+            BigQueryCore.hydrate_query_rows(
+                cols,
+                python_rows,
+                schema_type=_OptionalCollectionEnvelope,
+                normalize_nested=False,
+            )
     else:
-        res_default = SpannerCore.hydrate_query_rows(cols, encoded_rows, schema_type=_OptionalCollectionEnvelope)
-        res_nested = SpannerCore.hydrate_query_rows(
+        res_encoded = SpannerCore.hydrate_query_rows(
             cols,
-            python_rows,
+            encoded_rows,
             schema_type=_OptionalCollectionEnvelope,
-            normalize_nested=True,
+            normalize_nested=False,
         )
+        res_default = SpannerCore.hydrate_query_rows(cols, python_rows, schema_type=_OptionalCollectionEnvelope)
+        with pytest.raises(msgspec.ValidationError):
+            SpannerCore.hydrate_query_rows(
+                cols,
+                python_rows,
+                schema_type=_OptionalCollectionEnvelope,
+                normalize_nested=False,
+            )
 
     assert isinstance(res_default[0].child, _CamelNestedChild)
     assert res_default[0].child == _CamelNestedChild(item_name="notebook", item_count=4)
-    assert res_nested[0].child == _CamelNestedChild(item_name="notebook", item_count=4)
+    assert res_encoded[0].child == _CamelNestedChild(item_name="notebook", item_count=4)
