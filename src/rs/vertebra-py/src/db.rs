@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_int, c_void};
+use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,11 +18,11 @@ use arrow_array::{
     DurationNanosecondArray, DurationSecondArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float16Array, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, LargeBinaryArray,
-    LargeListArray, LargeStringArray, ListArray, MapArray, NullArray, RecordBatch, StringArray,
-    StringViewArray, StructArray, Time32MillisecondArray, Time32SecondArray,
-    Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    LargeListArray, LargeStringArray, ListArray, MapArray, NullArray, RecordBatch,
+    RecordBatchIterator, RecordBatchReader, StringArray, StringViewArray, StructArray,
+    Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_ipc::reader::StreamReader;
 use pyo3::buffer::PyBuffer;
@@ -439,6 +441,16 @@ impl AzureEntraDialer {
     }
 
     #[getter]
+    pub fn cloud(&self) -> &'static str {
+        self.inner.cloud.as_str()
+    }
+
+    #[getter]
+    pub fn authority_host(&self) -> &'static str {
+        self.inner.authority_host()
+    }
+
+    #[getter]
     pub fn server_name(&self) -> Option<String> {
         self.inner.server_name.clone()
     }
@@ -462,6 +474,7 @@ fn validate_arrow_ipc_stream_framing(payload: &[u8]) -> Result<(), String> {
     }
     let mut pos = 0usize;
     let mut saw_schema = false;
+    let mut schema = None;
     while pos < payload.len() {
         if payload.len() - pos < 4 {
             return Err("corrupt Arrow IPC stream: truncated message length".to_string());
@@ -497,6 +510,8 @@ fn validate_arrow_ipc_stream_framing(payload: &[u8]) -> Result<(), String> {
                 ));
             }
             saw_schema = true;
+            schema = message.header_as_schema();
+            validate_arrow_ipc_schema_fields(schema.as_ref().and_then(|schema| schema.fields()))?;
         }
         let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
             format!(
@@ -507,12 +522,408 @@ fn validate_arrow_ipc_stream_framing(payload: &[u8]) -> Result<(), String> {
         if payload.len() - pos < body_len {
             return Err("corrupt Arrow IPC stream: truncated message body".to_string());
         }
+        validate_arrow_ipc_message_ranges(&message, body_len, schema.as_ref())?;
         pos += body_len;
     }
     if !saw_schema {
         return Err("invalid Arrow IPC stream: missing schema message".to_string());
     }
     Ok(())
+}
+
+type IpcArrowError = arrow_schema::ArrowError;
+type IpcBatchResult = Result<arrow_array::RecordBatch, IpcArrowError>;
+
+#[inline]
+fn ipc_range_within_body(offset: i64, length: i64, body_len: usize) -> bool {
+    match (usize::try_from(offset), usize::try_from(length)) {
+        (Ok(offset), Ok(length)) => offset
+            .checked_add(length)
+            .is_some_and(|end| end <= body_len),
+        _ => false,
+    }
+}
+
+/// Rejects record-batch metadata whose buffers fall outside the message body or whose field
+/// nodes carry negative or inconsistent counts, which `arrow-ipc` slices without checking.
+fn validate_arrow_ipc_batch_ranges(
+    batch: &arrow_ipc::RecordBatch<'_>,
+    body_len: usize,
+) -> Result<(), String> {
+    if batch.length() < 0 {
+        return Err(format!(
+            "corrupt Arrow IPC stream: negative record batch length {}",
+            batch.length()
+        ));
+    }
+    if let Some(buffers) = batch.buffers() {
+        for (index, buffer) in buffers.iter().enumerate() {
+            if !ipc_range_within_body(buffer.offset(), buffer.length(), body_len) {
+                return Err(format!(
+                    "corrupt Arrow IPC stream: buffer {index} (offset {}, length {}) exceeds message body length {body_len}",
+                    buffer.offset(),
+                    buffer.length()
+                ));
+            }
+        }
+    }
+    if let Some(nodes) = batch.nodes() {
+        for (index, node) in nodes.iter().enumerate() {
+            if node.length() < 0 || node.null_count() < 0 || node.null_count() > node.length() {
+                return Err(format!(
+                    "corrupt Arrow IPC stream: field node {index} has invalid length {} or null count {}",
+                    node.length(),
+                    node.null_count()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_ipc_dictionary_field<'a, I>(fields: Option<I>, id: i64) -> Option<arrow_ipc::Field<'a>>
+where
+    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
+{
+    for field in fields.into_iter().flatten() {
+        if field.dictionary().is_some_and(|dict| dict.id() == id) {
+            return Some(field);
+        }
+        if let Some(found) = find_ipc_dictionary_field(field.children(), id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Rejects fixed-size binary and fixed-size list fields with a negative width, which
+/// `arrow-data` unwraps into `usize` while laying out buffers.
+fn validate_arrow_ipc_schema_fields<'a, I>(fields: Option<I>) -> Result<(), String>
+where
+    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
+{
+    for field in fields.into_iter().flatten() {
+        let width = field
+            .type_as_fixed_size_binary()
+            .map(|binary| binary.byteWidth())
+            .or_else(|| field.type_as_fixed_size_list().map(|list| list.listSize()));
+        if let Some(width) = width.filter(|width| *width < 0) {
+            return Err(format!(
+                "invalid Arrow IPC stream: field {:?} declares negative fixed size {width}",
+                field.name().unwrap_or_default()
+            ));
+        }
+        validate_arrow_ipc_schema_fields(field.children())?;
+    }
+    Ok(())
+}
+
+#[inline]
+fn ipc_int_byte_width(int: Option<arrow_ipc::Int<'_>>, default: i64) -> i64 {
+    match int.map(|int| int.bitWidth()) {
+        Some(8) => 1,
+        Some(16) => 2,
+        Some(32) => 4,
+        Some(64) => 8,
+        Some(_) => 1,
+        None => default,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IpcFieldRole {
+    Plain,
+    DictionaryValues,
+    RunEnds,
+}
+
+/// Walks one record batch in schema order, mirroring the node and buffer consumption of
+/// `arrow_ipc::reader::RecordBatchDecoder`, and rejects the buffer shapes that `arrow-ipc` and
+/// `arrow-data` assert on instead of reporting: typed offset, view, dictionary-key, and run-end
+/// buffers whose byte length is not a whole number of elements, and union type-id or offset
+/// buffers shorter than the field node length.
+struct IpcBatchLayoutWalker<N, B, V> {
+    nodes: N,
+    buffers: B,
+    variadic_counts: V,
+    legacy_union_validity: bool,
+    compressed: bool,
+}
+
+impl<'a, N, B, V> IpcBatchLayoutWalker<N, B, V>
+where
+    N: Iterator<Item = &'a arrow_ipc::FieldNode>,
+    B: Iterator<Item = &'a arrow_ipc::Buffer>,
+    V: Iterator<Item = i64>,
+{
+    fn skip_buffers(&mut self, count: usize) -> bool {
+        for _ in 0..count {
+            if self.buffers.next().is_none() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn walk_children(&mut self, field: &arrow_ipc::Field<'_>) -> Result<bool, String> {
+        for child in field.children().into_iter().flatten() {
+            if !self.walk(&child, IpcFieldRole::Plain)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Compressed buffers are skipped: this build of `arrow-ipc` has no codecs and rejects
+    /// every non-empty compressed buffer before interpreting it.
+    fn check_typed_buffer(&mut self, width: i64, label: &str) -> Result<bool, String> {
+        let Some(buffer) = self.buffers.next() else {
+            return Ok(false);
+        };
+        if !self.compressed && buffer.length() % width != 0 {
+            return Err(format!(
+                "corrupt Arrow IPC stream: {label} buffer length {} is not a multiple of {width} bytes",
+                buffer.length()
+            ));
+        }
+        Ok(true)
+    }
+
+    fn check_union_buffer(&mut self, rows: i64, width: i64, label: &str) -> Result<bool, String> {
+        let Some(buffer) = self.buffers.next() else {
+            return Ok(false);
+        };
+        if rows == 0 {
+            return Ok(true);
+        }
+        if self.compressed {
+            return Err(
+                "invalid Arrow IPC stream: compressed union columns are not supported".to_string(),
+            );
+        }
+        let required = rows.checked_mul(width);
+        if required.is_none_or(|required| buffer.length() < required)
+            || buffer.offset() % width != 0
+        {
+            return Err(format!(
+                "corrupt Arrow IPC stream: union {label} buffer (offset {}, length {}) cannot hold {rows} rows",
+                buffer.offset(),
+                buffer.length()
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Returns `Ok(false)` when the metadata runs out of nodes or buffers; `arrow-ipc` reports
+    /// that mismatch itself as an error.
+    fn walk(&mut self, field: &arrow_ipc::Field<'_>, role: IpcFieldRole) -> Result<bool, String> {
+        use arrow_ipc::Type;
+
+        let Some(node) = self.nodes.next() else {
+            return Ok(false);
+        };
+        if role != IpcFieldRole::DictionaryValues
+            && let Some(dictionary) = field.dictionary()
+        {
+            let width = ipc_int_byte_width(dictionary.indexType(), 4);
+            return Ok(self.skip_buffers(1) && self.check_typed_buffer(width, "dictionary key")?);
+        }
+        match field.type_type() {
+            Type::Null => Ok(true),
+            Type::Utf8 | Type::Binary => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(4, "offset")?
+                && self.skip_buffers(1)),
+            Type::LargeUtf8 | Type::LargeBinary => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(8, "offset")?
+                && self.skip_buffers(1)),
+            Type::Utf8View | Type::BinaryView => {
+                let Some(count) = self
+                    .variadic_counts
+                    .next()
+                    .and_then(|count| usize::try_from(count).ok())
+                else {
+                    return Ok(false);
+                };
+                Ok(self.skip_buffers(1)
+                    && self.check_typed_buffer(16, "view")?
+                    && self.skip_buffers(count))
+            }
+            Type::List | Type::Map => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(4, "offset")?
+                && self.walk_children(field)?),
+            Type::LargeList => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(8, "offset")?
+                && self.walk_children(field)?),
+            Type::ListView => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(4, "offset")?
+                && self.check_typed_buffer(4, "size")?
+                && self.walk_children(field)?),
+            Type::LargeListView => Ok(self.skip_buffers(1)
+                && self.check_typed_buffer(8, "offset")?
+                && self.check_typed_buffer(8, "size")?
+                && self.walk_children(field)?),
+            Type::FixedSizeList | Type::Struct_ => {
+                Ok(self.skip_buffers(1) && self.walk_children(field)?)
+            }
+            Type::RunEndEncoded => {
+                let mut role = IpcFieldRole::RunEnds;
+                for child in field.children().into_iter().flatten() {
+                    if !self.walk(&child, role)? {
+                        return Ok(false);
+                    }
+                    role = IpcFieldRole::Plain;
+                }
+                Ok(true)
+            }
+            Type::Union => {
+                if self.legacy_union_validity && !self.skip_buffers(1) {
+                    return Ok(false);
+                }
+                if !self.check_union_buffer(node.length(), 1, "type id")? {
+                    return Ok(false);
+                }
+                let dense = field
+                    .type_as_union()
+                    .is_some_and(|union| union.mode() == arrow_ipc::UnionMode::Dense);
+                if dense && !self.check_union_buffer(node.length(), 4, "offset")? {
+                    return Ok(false);
+                }
+                self.walk_children(field)
+            }
+            Type::Int if role == IpcFieldRole::RunEnds => {
+                let width = ipc_int_byte_width(field.type_as_int(), 1);
+                Ok(self.skip_buffers(1) && self.check_typed_buffer(width, "run end")?)
+            }
+            _ => Ok(self.skip_buffers(2)),
+        }
+    }
+}
+
+fn validate_arrow_ipc_batch_layout<'a, I>(
+    batch: &arrow_ipc::RecordBatch<'_>,
+    fields: I,
+    role: IpcFieldRole,
+    version: arrow_ipc::MetadataVersion,
+) -> Result<(), String>
+where
+    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
+{
+    let mut walker = IpcBatchLayoutWalker {
+        nodes: batch.nodes().into_iter().flatten(),
+        buffers: batch.buffers().into_iter().flatten(),
+        variadic_counts: batch.variadicBufferCounts().into_iter().flatten(),
+        legacy_union_validity: version < arrow_ipc::MetadataVersion::V5,
+        compressed: batch.compression().is_some(),
+    };
+    for field in fields {
+        if !walker.walk(&field, role)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Validates the buffer and field-node ranges of one record-batch or dictionary-batch message
+/// against its declared body length and the stream schema before `arrow-ipc` decodes it.
+fn validate_arrow_ipc_message_ranges(
+    message: &arrow_ipc::Message<'_>,
+    body_len: usize,
+    schema: Option<&arrow_ipc::Schema<'_>>,
+) -> Result<(), String> {
+    if let Some(batch) = message.header_as_record_batch() {
+        validate_arrow_ipc_batch_ranges(&batch, body_len)?;
+        if let Some(fields) = schema.and_then(|schema| schema.fields()) {
+            validate_arrow_ipc_batch_layout(
+                &batch,
+                fields,
+                IpcFieldRole::Plain,
+                message.version(),
+            )?;
+        }
+    } else if let Some(dictionary) = message.header_as_dictionary_batch()
+        && let Some(batch) = dictionary.data()
+    {
+        validate_arrow_ipc_batch_ranges(&batch, body_len)?;
+        if let Some(field) =
+            schema.and_then(|schema| find_ipc_dictionary_field(schema.fields(), dictionary.id()))
+        {
+            validate_arrow_ipc_batch_layout(
+                &batch,
+                [field],
+                IpcFieldRole::DictionaryValues,
+                message.version(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn ipc_panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
+/// Opens a `StreamReader`, converting a decoder panic on the schema message into an error.
+fn try_open_arrow_ipc_reader<R: Read>(reader: R) -> Result<StreamReader<R>, String> {
+    match catch_unwind(AssertUnwindSafe(|| StreamReader::try_new(reader, None))) {
+        Ok(result) => result.map_err(|e| format!("invalid Arrow IPC stream: {e}")),
+        Err(payload) => Err(format!(
+            "invalid Arrow IPC stream: decoder panicked: {}",
+            ipc_panic_message(payload.as_ref())
+        )),
+    }
+}
+
+/// Batch iterator that turns a panic inside `StreamReader::next` into one `ArrowError` and then
+/// ends the stream, so unwinding never crosses `py.detach` or the `extern "C"` stream callbacks.
+struct PanicGuardedIpcBatches<R: Read> {
+    inner: StreamReader<R>,
+    poisoned: bool,
+}
+
+impl<R: Read> Iterator for PanicGuardedIpcBatches<R> {
+    type Item = IpcBatchResult;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.poisoned {
+            return None;
+        }
+        match catch_unwind(AssertUnwindSafe(|| self.inner.next())) {
+            Ok(item) => item,
+            Err(payload) => {
+                self.poisoned = true;
+                Some(Err(IpcArrowError::IpcError(format!(
+                    "decoder panicked: {}",
+                    ipc_panic_message(payload.as_ref())
+                ))))
+            }
+        }
+    }
+}
+
+type GuardedIpcReader<R> = RecordBatchIterator<PanicGuardedIpcBatches<R>>;
+
+/// Validates stream framing plus every batch's buffer and node ranges, then opens a
+/// panic-guarded lazy batch reader.
+fn open_validated_arrow_ipc_reader<T>(
+    carrier: T,
+) -> Result<GuardedIpcReader<std::io::Cursor<T>>, String>
+where
+    T: AsRef<[u8]>,
+{
+    validate_arrow_ipc_stream_framing(carrier.as_ref())?;
+    let inner = try_open_arrow_ipc_reader(std::io::Cursor::new(carrier))?;
+    let schema = inner.schema();
+    Ok(RecordBatchIterator::new(
+        PanicGuardedIpcBatches {
+            inner,
+            poisoned: false,
+        },
+        schema,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -563,23 +974,18 @@ impl AsRef<[u8]> for OwnedArrowIpcSlice {
 
 fn open_lazy_arrow_ipc_stream(
     carrier: OwnedArrowIpcSlice,
-) -> Result<StreamReader<std::io::Cursor<OwnedArrowIpcSlice>>, String> {
-    validate_arrow_ipc_stream_framing(carrier.as_ref())?;
-    StreamReader::try_new(std::io::Cursor::new(carrier), None)
-        .map_err(|e| format!("invalid Arrow IPC stream: {e}"))
+) -> Result<GuardedIpcReader<std::io::Cursor<OwnedArrowIpcSlice>>, String> {
+    open_validated_arrow_ipc_reader(carrier)
 }
 
 fn open_arrow_ipc_schema_reader(
     carrier: OwnedArrowIpcSlice,
 ) -> Result<StreamReader<std::io::Cursor<OwnedArrowIpcSlice>>, String> {
-    StreamReader::try_new(std::io::Cursor::new(carrier), None)
-        .map_err(|e| format!("invalid Arrow IPC stream: {e}"))
+    try_open_arrow_ipc_reader(std::io::Cursor::new(carrier))
 }
 
 fn validate_and_summarize_ipc_bytes(payload: &[u8]) -> Result<(usize, Arc<[String]>), String> {
-    validate_arrow_ipc_stream_framing(payload)?;
-    let reader = StreamReader::try_new(std::io::Cursor::new(payload), None)
-        .map_err(|e| format!("invalid Arrow IPC stream: {e}"))?;
+    let reader = open_validated_arrow_ipc_reader(payload)?;
     let columns: Arc<[String]> = reader
         .schema()
         .fields()
@@ -1491,6 +1897,11 @@ impl ArrowCursor {
             // SAFETY: `pointer_checked` verified the `arrow_schema` capsule name and a
             // non-null `FFI_ArrowSchema*` kept alive by `cap` for this call.
             let ffi_schema = unsafe { &*ptr.as_ptr().cast::<FFI_ArrowSchema>() };
+            if ffi_schema.release().is_none() {
+                return Err(PyValueError::new_err(
+                    "requested_schema arrow_schema PyCapsule has already been released",
+                ));
+            }
             Some(ffi_schema)
         } else {
             None
@@ -2225,6 +2636,211 @@ mod tests {
             assert_eq!(still_readable, payload);
             assert!(!py_cursor.borrow().release(py));
         });
+    }
+
+    fn fuzz_ipc_stream() -> Vec<u8> {
+        use std::sync::Arc;
+
+        use arrow_array::builder::{
+            FixedSizeBinaryBuilder, FixedSizeListBuilder, Int32Builder, LargeListBuilder,
+            LargeStringBuilder, ListBuilder, ListViewBuilder, MapBuilder, StringBuilder,
+            StringDictionaryBuilder, StringRunBuilder, StringViewBuilder, UnionBuilder,
+        };
+        use arrow_array::types::{Float64Type, Int16Type, Int32Type};
+        use arrow_array::{
+            ArrayRef, BooleanArray, Decimal128Array, Int32Array, Int64Array, RecordBatch,
+            StringArray, StructArray, TimestampMicrosecondArray,
+        };
+        use arrow_ipc::writer::StreamWriter;
+
+        let build = |base: i32| -> RecordBatch {
+            let mut dense = UnionBuilder::new_dense();
+            dense.append::<Int32Type>("i", base).unwrap();
+            dense.append::<Float64Type>("f", 1.5).unwrap();
+            dense.append_null::<Int32Type>("i").unwrap();
+            let mut sparse = UnionBuilder::new_sparse();
+            sparse.append::<Int32Type>("i", base).unwrap();
+            sparse.append::<Float64Type>("f", 2.5).unwrap();
+            sparse.append::<Int32Type>("i", base + 1).unwrap();
+            let mut large_label = LargeStringBuilder::new();
+            large_label.append_value("large");
+            large_label.append_null();
+            large_label.append_value("x");
+            let mut view = StringViewBuilder::new();
+            view.append_value("a string longer than twelve bytes");
+            view.append_null();
+            view.append_value("short");
+            let mut attrs = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+            attrs.keys().append_value("k");
+            attrs.values().append_value(base);
+            attrs.append(true).unwrap();
+            attrs.append(false).unwrap();
+            attrs.append(true).unwrap();
+            let mut pair = FixedSizeListBuilder::new(Int32Builder::new(), 2);
+            pair.values().append_slice(&[base, base + 1]);
+            pair.append(true);
+            pair.values().append_slice(&[0, 0]);
+            pair.append(false);
+            pair.values().append_slice(&[base + 2, base + 3]);
+            pair.append(true);
+            let mut runs = StringRunBuilder::<Int16Type>::new();
+            runs.append_value("run");
+            runs.append_value("run");
+            runs.append_null();
+            let mut large_tags = LargeListBuilder::new(Int32Builder::new());
+            large_tags.append_value([Some(base)]);
+            large_tags.append_null();
+            large_tags.append_value([Some(base + 1), None]);
+            let mut tag_view = ListViewBuilder::new(Int32Builder::new());
+            tag_view.append_value([Some(base)]);
+            tag_view.append_null();
+            tag_view.append_value([Some(base + 1), None]);
+            let mut digest = FixedSizeBinaryBuilder::new(4);
+            digest.append_value(b"abcd").unwrap();
+            digest.append_null();
+            digest.append_value(b"wxyz").unwrap();
+            let mut tags = ListBuilder::new(Int32Builder::new());
+            tags.append_value([Some(base), None]);
+            tags.append_null();
+            tags.append_value([Some(base + 2)]);
+            let mut role = StringDictionaryBuilder::<Int32Type>::new();
+            role.append_value("primary");
+            role.append_null();
+            role.append_value("replica");
+            let point = StructArray::from(
+                RecordBatch::try_from_iter(vec![(
+                    "x",
+                    Arc::new(Int32Array::from(vec![Some(base), None, Some(3)])) as ArrayRef,
+                )])
+                .unwrap(),
+            );
+            RecordBatch::try_from_iter(vec![
+                (
+                    "id",
+                    Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])) as ArrayRef,
+                ),
+                (
+                    "label",
+                    Arc::new(StringArray::from(vec![Some("a"), None, Some("ccc")])) as ArrayRef,
+                ),
+                (
+                    "flag",
+                    Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])) as ArrayRef,
+                ),
+                ("tags", Arc::new(tags.finish()) as ArrayRef),
+                ("point", Arc::new(point) as ArrayRef),
+                ("role", Arc::new(role.finish()) as ArrayRef),
+                ("large_label", Arc::new(large_label.finish()) as ArrayRef),
+                ("view", Arc::new(view.finish()) as ArrayRef),
+                ("attrs", Arc::new(attrs.finish()) as ArrayRef),
+                ("pair", Arc::new(pair.finish()) as ArrayRef),
+                ("runs", Arc::new(runs.finish()) as ArrayRef),
+                ("large_tags", Arc::new(large_tags.finish()) as ArrayRef),
+                ("tag_view", Arc::new(tag_view.finish()) as ArrayRef),
+                ("digest", Arc::new(digest.finish()) as ArrayRef),
+                (
+                    "amount",
+                    Arc::new(Decimal128Array::from(vec![Some(1), None, Some(3)])) as ArrayRef,
+                ),
+                (
+                    "seen_at",
+                    Arc::new(TimestampMicrosecondArray::from(vec![
+                        Some(1),
+                        None,
+                        Some(3),
+                    ])) as ArrayRef,
+                ),
+                ("dense", Arc::new(dense.build().unwrap()) as ArrayRef),
+                ("sparse", Arc::new(sparse.build().unwrap()) as ArrayRef),
+            ])
+            .unwrap()
+        };
+        let first = build(10);
+        let second = build(20);
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &first.schema()).unwrap();
+        writer.write(&first).unwrap();
+        writer.write(&second).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        buf
+    }
+
+    #[test]
+    fn arrow_ipc_range_validation_rejects_every_panicking_single_byte_mutation() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use arrow_ipc::reader::StreamReader;
+
+        let valid = fuzz_ipc_stream();
+        super::validate_arrow_ipc_stream_framing(&valid).unwrap();
+        let valid_rows: usize = StreamReader::try_new(std::io::Cursor::new(&valid[..]), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert_eq!(valid_rows, 6);
+
+        const FLIPS: usize = 1;
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut panics = Vec::new();
+        let mut rejected = 0usize;
+        for offset in 0..valid.len() {
+            for _ in 0..FLIPS {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let flip = (state % 255) as u8 + 1;
+                let mut mutated = valid.clone();
+                mutated[offset] ^= flip;
+                if super::validate_arrow_ipc_stream_framing(&mutated).is_err() {
+                    rejected += 1;
+                    continue;
+                }
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    if let Ok(reader) =
+                        StreamReader::try_new(std::io::Cursor::new(&mutated[..]), None)
+                    {
+                        for batch in reader {
+                            if batch.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }));
+                if let Err(payload) = outcome {
+                    panics.push((
+                        offset,
+                        flip,
+                        super::ipc_panic_message(payload.as_ref()).to_string(),
+                    ));
+                }
+            }
+        }
+        assert!(rejected > 0);
+        assert!(panics.is_empty(), "unguarded decoder panics: {panics:?}");
+    }
+
+    #[test]
+    fn arrow_ipc_guarded_reader_reports_out_of_range_buffers_as_errors() {
+        let valid = fuzz_ipc_stream();
+        let mut saw_range_error = false;
+        for offset in 0..valid.len() {
+            let mut mutated = valid.clone();
+            mutated[offset] ^= 0x80;
+            match super::open_validated_arrow_ipc_reader(&mutated[..]) {
+                Ok(reader) => {
+                    for batch in reader {
+                        if batch.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(message) => {
+                    saw_range_error |= message.contains("exceeds message body length");
+                }
+            }
+        }
+        assert!(saw_range_error);
     }
 
     #[test]

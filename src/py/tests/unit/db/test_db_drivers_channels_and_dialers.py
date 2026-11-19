@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import importlib
 import sys
 import threading
 import time
 import tomllib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -65,6 +66,7 @@ from vertebra.db.driver import (
     AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
 )
+from vertebra.db.driver._cloud_auth import is_loopback_host
 from vertebra.db.driver.capabilities import (
     NotificationEvent,
 )
@@ -1785,3 +1787,394 @@ def test_azure_entra_ambient_validation_errors(
     provider = AzureEntraTokenProvider(**provider_kwargs)
     with pytest.raises(ImproperConfigurationError):
         provider.resolve_sync()
+
+
+@contextlib.contextmanager
+def _loopback_http_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
+    """Serve `handler` on an ephemeral 127.0.0.1 port and yield the bound port."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        srv_thread.join(timeout=2.0)
+
+
+def _build_credential_chain_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chain: str,
+    port: int,
+) -> AwsRdsIamTokenProvider | AzureEntraTokenProvider:
+    """Configure one ambient credential chain against a loopback endpoint and return its provider."""
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-creds"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    base = f"http://127.0.0.1:{port}"
+    if chain.startswith("aws_"):
+        if chain == "aws_ecs":
+            monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", f"{base}/v2/credentials/task")
+            monkeypatch.setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN", "test-token-placeholder-ecs-bearer")
+        elif chain == "aws_sts":
+            jwt_path = tmp_path / "web-identity.jwt"
+            jwt_path.write_text("test-token-placeholder-jwt\n", encoding="utf-8")
+            monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(jwt_path))
+            monkeypatch.setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/vertebra-db-role")
+            monkeypatch.setenv("AWS_ENDPOINT_URL_STS", f"{base}/")
+        else:
+            monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", base)
+        return AwsRdsIamTokenProvider(
+            endpoint_host="rds.redirect.internal",
+            region="us-east-1",
+            username="iam_user",
+            clock=lambda: 1_794_873_600.0,
+        )
+    if chain == "entra_token_endpoint":
+        return AzureEntraTokenProvider(
+            client_id="sp-client-id",
+            client_secret="test-token-placeholder-sp-secret",
+            token_endpoint=f"{base}/oauth2/v2.0/token",
+            scope=AZURE_POSTGRES_SCOPE,
+            clock=lambda: 1000.0,
+        )
+    if chain == "entra_app_service":
+        monkeypatch.setenv("IDENTITY_ENDPOINT", f"{base}/msi/token")
+        monkeypatch.setenv("IDENTITY_HEADER", "test-token-placeholder-msi-secret")
+        return AzureEntraTokenProvider(scope=AZURE_POSTGRES_SCOPE, clock=lambda: 1000.0)
+    return AzureEntraTokenProvider(
+        imds_endpoint=f"{base}/metadata/identity/oauth2/token",
+        scope=AZURE_POSTGRES_SCOPE,
+        clock=lambda: 1000.0,
+    )
+
+
+_CREDENTIAL_RESPONSE_FIELDS: dict[str, Any] = {
+    "AccessKeyId": "ASIAREDIRECTSINK",
+    "SecretAccessKey": "test-token-placeholder-sink-sk",
+    "Token": "test-token-placeholder-sink-sess",
+    "access_token": "test-token-placeholder-sink-entra",
+    "expires_in": 600,
+}
+
+
+@pytest.mark.parametrize(
+    "chain",
+    ["aws_ecs", "aws_sts", "aws_imds", "entra_token_endpoint", "entra_app_service", "entra_vm_imds"],
+)
+def test_cloud_credential_requests_refuse_redirects_without_forwarding_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chain: str,
+) -> None:
+    """Verify every credential and token HTTP request refuses a 302 and never contacts the redirect target."""
+    _clear_ambient_cloud_env(monkeypatch)
+    sink_requests: list[dict[str, str | None]] = []
+    sink_payload = encode_json_bytes(_CREDENTIAL_RESPONSE_FIELDS)
+
+    class _SinkHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _record(self) -> None:
+            sink_requests.append(
+                {
+                    "authorization": self.headers.get("Authorization"),
+                    "identity_header": self.headers.get("X-IDENTITY-HEADER"),
+                    "imds_token": self.headers.get("X-aws-ec2-metadata-token"),
+                }
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(sink_payload)))
+            self.end_headers()
+            self.wfile.write(sink_payload)
+
+        do_GET = _record
+        do_POST = _record
+        do_PUT = _record
+
+    with _loopback_http_server(_SinkHandler) as sink_port:
+
+        class _RedirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+            def _redirect(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    self.rfile.read(length)
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{sink_port}/stolen")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = _redirect
+            do_POST = _redirect
+            do_PUT = _redirect
+
+        with _loopback_http_server(_RedirectHandler) as redirect_port:
+            provider = _build_credential_chain_provider(monkeypatch, tmp_path, chain, redirect_port)
+            with pytest.raises(ImproperConfigurationError, match="redirect") as exc_info:
+                provider.resolve_sync()
+
+    assert sink_requests == []
+    assert "test-token-placeholder" not in str(exc_info.value)
+    assert str(sink_port) not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("chain", ["aws_ecs", "aws_sts", "entra_token_endpoint", "entra_vm_imds"])
+def test_cloud_credential_requests_reject_oversized_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chain: str,
+) -> None:
+    """Verify credential and token responses larger than the 1 MiB cap fail instead of being buffered."""
+    _clear_ambient_cloud_env(monkeypatch)
+    payload = encode_json_bytes(_CREDENTIAL_RESPONSE_FIELDS)
+    oversized = payload + b" " * (1024 * 1024 + 1 - len(payload))
+
+    class _OversizedHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _respond(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(oversized)))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                self.wfile.write(oversized)
+
+        do_GET = _respond
+        do_POST = _respond
+
+    with _loopback_http_server(_OversizedHandler) as port:
+        provider = _build_credential_chain_provider(monkeypatch, tmp_path, chain, port)
+        with pytest.raises(ImproperConfigurationError, match="exceeds"):
+            provider.resolve_sync()
+
+
+def test_token_provider_shared_across_event_loops_completes_with_single_flight_per_loop() -> None:
+    """Verify one provider refreshed concurrently from two event loops completes without cross-loop lock misuse."""
+    both_loops_fetching = threading.Barrier(2)
+    state_lock = threading.Lock()
+    fetch_counts: dict[int, int] = {}
+    in_flight: dict[int, int] = {}
+    max_in_flight: dict[int, int] = {}
+
+    async def _fetch(scope: str) -> dict[str, Any]:
+        ident = threading.get_ident()
+        with state_lock:
+            fetch_counts[ident] = fetch_counts.get(ident, 0) + 1
+            in_flight[ident] = in_flight.get(ident, 0) + 1
+            max_in_flight[ident] = max(max_in_flight.get(ident, 0), in_flight[ident])
+            is_first_fetch = fetch_counts[ident] == 1
+        try:
+            if is_first_fetch:
+                await asyncio.to_thread(both_loops_fetching.wait, 2.0)
+            else:
+                await asyncio.sleep(0)
+            return {"access_token": f"test-token-placeholder-{scope}", "expires_in": 600}
+        finally:
+            with state_lock:
+                in_flight[ident] -= 1
+
+    provider = AzureEntraTokenProvider(scope=AZURE_POSTGRES_SCOPE, fetcher=_fetch, clock=lambda: 1000.0)
+    results: dict[str, list[str]] = {}
+    errors: dict[str, BaseException] = {}
+
+    async def _refresh_three_times() -> list[str]:
+        return await asyncio.wait_for(
+            asyncio.gather(*(provider.resolve_async(force_refresh=True) for _ in range(3))),
+            timeout=5.0,
+        )
+
+    def _run_loop(name: str) -> None:
+        try:
+            results[name] = asyncio.run(_refresh_three_times())
+        except BaseException as exc:
+            errors[name] = exc
+
+    threads = [threading.Thread(target=_run_loop, args=(name,), daemon=True) for name in ("loop-a", "loop-b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+
+    assert errors == {}
+    assert [thread.is_alive() for thread in threads] == [False, False]
+    expected = [f"test-token-placeholder-{AZURE_POSTGRES_SCOPE}"] * 3
+    assert results == {"loop-a": expected, "loop-b": expected}
+    assert sorted(max_in_flight.values()) == [1, 1]
+    assert provider.resolve_sync() == expected[0]
+
+
+@pytest.mark.anyio
+async def test_token_provider_sync_refresh_does_not_stall_event_loop() -> None:
+    """Verify an in-flight `resolve_sync` network fetch on a worker thread never blocks `resolve_async` on the loop."""
+    sync_fetch_started = threading.Event()
+    release_sync_fetch = threading.Event()
+    sync_refresh_done = threading.Event()
+    loop_ident = threading.get_ident()
+    sync_results: list[str] = []
+
+    def _fetch(scope: str) -> dict[str, Any]:
+        if threading.get_ident() == loop_ident:
+            return {"access_token": "test-token-placeholder-loop", "expires_in": 600}
+        sync_fetch_started.set()
+        release_sync_fetch.wait(2.0)
+        return {"access_token": "test-token-placeholder-worker", "expires_in": 600}
+
+    provider = AzureEntraTokenProvider(scope=AZURE_POSTGRES_SCOPE, fetcher=_fetch, clock=lambda: 1000.0)
+
+    def _sync_refresh() -> None:
+        sync_results.append(provider.resolve_sync(force_refresh=True))
+        sync_refresh_done.set()
+
+    worker = threading.Thread(target=_sync_refresh, daemon=True)
+    worker.start()
+    try:
+        assert await asyncio.to_thread(sync_fetch_started.wait, 2.0)
+        loop_token = await provider.resolve_async()
+        stalled_until_sync_finished = sync_refresh_done.is_set()
+    finally:
+        release_sync_fetch.set()
+        await asyncio.to_thread(worker.join, 5.0)
+
+    assert loop_token == "test-token-placeholder-loop"
+    assert stalled_until_sync_finished is False
+    assert sync_results == ["test-token-placeholder-worker"]
+    assert await provider.resolve_async() in {"test-token-placeholder-loop", "test-token-placeholder-worker"}
+
+
+@pytest.mark.parametrize(
+    ("token_endpoint", "accepted"),
+    [
+        ("http://login.evil.example/tenant/oauth2/v2.0/token", False),
+        ("http://10.0.0.25/tenant/oauth2/v2.0/token", False),
+        ("http://localhost%evil.example.com/tenant/oauth2/v2.0/token", False),
+        ("http://127.0.0.1:8080/tenant/oauth2/v2.0/token", True),
+        ("http://[::1]:8080/tenant/oauth2/v2.0/token", True),
+        ("http://localhost:8080/tenant/oauth2/v2.0/token", True),
+        ("https://login.example.com/tenant/oauth2/v2.0/token", True),
+    ],
+)
+def test_azure_entra_token_endpoint_requires_https_or_loopback(token_endpoint: str, accepted: bool) -> None:
+    """Verify `token_endpoint` follows the same HTTPS-or-loopback rule as `authority_host`."""
+    kwargs: dict[str, Any] = {
+        "client_id": "sp-client-id",
+        "client_secret": "test-token-placeholder-sp-secret",
+        "token_endpoint": token_endpoint,
+        "scope": AZURE_POSTGRES_SCOPE,
+    }
+    if accepted:
+        assert AzureEntraTokenProvider(**kwargs).token_endpoint == token_endpoint
+        return
+    with pytest.raises(ImproperConfigurationError, match="token_endpoint must use HTTPS") as exc_info:
+        AzureEntraTokenProvider(**kwargs)
+    assert "test-token-placeholder" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "profile_body",
+    [
+        "role_arn = arn:aws:iam::123456789012:role/assumed\nsource_profile = base\n",
+        "role_arn = arn:aws:iam::123456789012:role/assumed\ncredential_source = Ec2InstanceMetadata\n",
+    ],
+    ids=["source_profile", "credential_source"],
+)
+def test_aws_assume_role_profile_falls_through_to_next_credential_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile_body: str,
+) -> None:
+    """Verify an unsupported `role_arn` assume-role profile shape is skipped instead of raising a Web Identity error."""
+    _clear_ambient_cloud_env(monkeypatch)
+    config_file = tmp_path / "config"
+    config_file.write_text(f"[default]\nregion = us-east-1\n{profile_body}", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-creds"))
+    payload = encode_json_bytes(
+        {
+            "AccessKeyId": "ASIAECSFALLTHROUGH",
+            "SecretAccessKey": "test-token-placeholder-ecs-sk",
+            "Token": "test-token-placeholder-ecs-sess",
+        }
+    )
+
+    class _EcsHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    with _loopback_http_server(_EcsHandler) as port:
+        monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", f"http://127.0.0.1:{port}/v2/credentials/task")
+        provider = AwsRdsIamTokenProvider(
+            endpoint_host="rds.profile.internal",
+            username="iam_user",
+            clock=lambda: 1_794_873_600.0,
+        )
+        token = provider.resolve_sync()
+
+    qs = parse_qs(urlsplit(f"https://{token}").query)
+    assert qs["X-Amz-Credential"][0].startswith("ASIAECSFALLTHROUGH/")
+
+
+@pytest.mark.parametrize(
+    "profile_body",
+    [
+        "web_identity_token_file = /var/run/secrets/token.jwt\n",
+        "web_identity_token_file = /var/run/secrets/token.jwt\nsource_profile = base\n",
+        "role_arn = arn:aws:iam::123456789012:role/assumed\n",
+    ],
+    ids=["token_file_only", "token_file_with_source_profile", "role_arn_only"],
+)
+def test_aws_incomplete_web_identity_profile_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile_body: str,
+) -> None:
+    """Verify a profile declaring half of a Web Identity pair fails closed with the Web Identity error."""
+    _clear_ambient_cloud_env(monkeypatch)
+    config_file = tmp_path / "config"
+    config_file.write_text(f"[default]\nregion = us-east-1\n{profile_body}", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config_file))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-creds"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    provider = AwsRdsIamTokenProvider(endpoint_host="rds.profile.internal", username="iam_user")
+    with pytest.raises(ImproperConfigurationError, match="Web Identity requires both"):
+        provider.resolve_sync()
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("localhost", True),
+        ("LOCALHOST.", True),
+        ("127.0.0.1", True),
+        ("[::1]", True),
+        ("::1%lo", True),
+        ("[::1%lo0]", True),
+        ("::ffff:127.0.0.1", True),
+        ("localhost%evil.example.com", False),
+        ("127.0.0.1%evil.example.com", False),
+        ("localhost.%25evil.example.com", False),
+        ("fe80::1%eth0", False),
+        ("10.0.0.42", False),
+        ("pg.postgres.database.azure.com", False),
+    ],
+)
+def test_is_loopback_host_strips_zone_only_for_ipv6_literals(host: str, expected: bool) -> None:
+    """Verify a `%zone` suffix is honoured only on IPv6 literals and never turns a hostname into loopback."""
+    assert is_loopback_host(host) is expected

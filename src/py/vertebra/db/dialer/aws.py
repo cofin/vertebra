@@ -105,15 +105,21 @@ class _BaseAwsRdsDialer:
                 except ValueError as exc:
                     raise ImproperConfigurationError(str(exc)) from exc
         else:
+            target_engine = (
+                provisional_engine
+                if provisional_engine is not None
+                else self._normalize_rds_engine(
+                    None,
+                    default_from_port=port if port is not None else self._embedded_port(endpoint_host),
+                )
+            )
             effective_port = port
-            if effective_port is None and provisional_engine == "mysql" and not self._has_embedded_port(endpoint_host):
+            if effective_port is None and target_engine == "mysql" and not self._has_embedded_port(endpoint_host):
                 effective_port = 3306
             effective_user = (
                 username
                 if username is not None
-                else (
-                    str(provider_user) if provider_user else ("admin" if provisional_engine == "mysql" else "postgres")
-                )
+                else (str(provider_user) if provider_user else ("admin" if target_engine == "mysql" else "postgres"))
             )
             effective_region = region if region is not None else (str(provider_region) if provider_region else None)
             lower_host = endpoint_host.lower()
@@ -295,6 +301,14 @@ class _BaseAwsRdsDialer:
             return "]:" in endpoint_host
         return endpoint_host.count(":") == 1
 
+    @classmethod
+    def _embedded_port(cls, endpoint_host: str) -> int | None:
+        """Return the numeric `:port` suffix embedded in an endpoint string, or `None` when absent."""
+        if not cls._has_embedded_port(endpoint_host):
+            return None
+        raw_port = endpoint_host.rpartition(":")[2]
+        return int(raw_port) if raw_port.isascii() and raw_port.isdigit() else None
+
 
 class SyncAwsRdsDialer(_BaseAwsRdsDialer):
     """Synchronous AWS RDS, Aurora, and RDS Proxy `verify-full` TLS and SigV4 IAM dialer."""
@@ -411,7 +425,7 @@ class _BaseAwsAuroraDsqlDialer:
         *,
         port: int | None = None,
         region: str | None = None,
-        admin: bool = False,
+        admin: bool | None = None,
         username: str | None = None,
         database: str = "postgres",
         token_provider: AwsAuroraDsqlIamTokenProvider | DatabaseTokenProvider | None = None,
@@ -434,10 +448,10 @@ class _BaseAwsAuroraDsqlDialer:
             raise ImproperConfigurationError(msg)
 
         provider_region = getattr(token_provider, "region", None) if token_provider is not None else None
-        effective_admin = admin or (isinstance(token_provider, AwsAuroraDsqlIamTokenProvider) and token_provider.admin)
+        effective_admin = self._resolve_admin(admin, endpoint_host, token_provider)
 
         if isinstance(endpoint_host, AwsAuroraDsqlDialer):
-            if port is None and region is None and admin == endpoint_host.admin:
+            if port is None and region is None:
                 native = endpoint_host
             else:
                 try:
@@ -593,6 +607,30 @@ class _BaseAwsAuroraDsqlDialer:
             kwargs["ca_pem"] = self._ca_pem
         kwargs.update(overrides)
         return kwargs
+
+    @staticmethod
+    def _resolve_admin(
+        admin: bool | None,
+        endpoint_host: str | AwsAuroraDsqlDialer,
+        token_provider: DatabaseTokenProvider | None,
+    ) -> bool:
+        """Return the `admin` flag agreed by the argument, a wrapped native dialer, and a DSQL token provider.
+
+        An omitted `admin` follows the wrapped dialer, then the token provider, then `False`. Sources that
+        disagree raise instead of letting one silently win, because the flag selects the signed action.
+        """
+        declared: dict[str, bool] = {}
+        if admin is not None:
+            declared["admin argument"] = admin
+        if isinstance(endpoint_host, AwsAuroraDsqlDialer):
+            declared["wrapped AwsAuroraDsqlDialer"] = endpoint_host.admin
+        if isinstance(token_provider, AwsAuroraDsqlIamTokenProvider):
+            declared["token_provider"] = token_provider.admin
+        if len(set(declared.values())) > 1:
+            detail = ", ".join(f"{source} admin={value}" for source, value in declared.items())
+            msg = f"Conflicting Aurora DSQL admin settings: {detail}"
+            raise ImproperConfigurationError(msg)
+        return next(iter(declared.values()), False)
 
 
 class SyncAwsAuroraDsqlDialer(_BaseAwsAuroraDsqlDialer):

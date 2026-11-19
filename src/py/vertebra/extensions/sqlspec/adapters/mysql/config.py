@@ -201,6 +201,24 @@ def _build_mysql_replica_overrides(adapter: Any, spec_input: str | bool | Mappin
     return meta
 
 
+def _inherited_endpoint_fields(driver_config: MySQLConfig) -> dict[str, Any]:
+    """Return the endpoint fields a derived pool inherits from its parent `MySQLConfig`.
+
+    Only an SSL mode the caller set explicitly is inherited. An unset mode is left out so the derived
+    `MySQLConfig` resolves its own default for the new target and token provider.
+    """
+    parsed = driver_config._parse_dsn_fields()
+    inherited = {
+        field_key: parsed[field_key]
+        for field_key in ("host", "port", "user", "password", "database", "charset", "unix_socket")
+        if parsed.get(field_key) is not None
+    }
+    explicit_ssl_mode = driver_config.explicit_ssl_mode
+    if explicit_ssl_mode is not None:
+        inherited["ssl_mode"] = explicit_ssl_mode
+    return inherited
+
+
 def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
     """Clone `MySQLSyncConfig` or `MySQLAsyncConfig` with non-mutating connection and feature overrides."""
     merged_features = dict(overrides.get("driver_features", adapter.driver_features))
@@ -259,14 +277,10 @@ def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
     elif any(k in _ENDPOINT_KEYS for k in explicit_conn):
         for alias in _URL_KEYS:
             merged_conn.pop(alias, None)
-        base_fields = adapter.driver_config._parse_dsn_fields()
-        for field_key in ("host", "port", "user", "password", "database", "charset", "ssl_mode", "unix_socket"):
-            if (
-                field_key not in merged_conn
-                and field_key not in explicit_conn
-                and base_fields.get(field_key) is not None
-            ):
-                merged_conn[field_key] = base_fields[field_key]
+        base_fields = _inherited_endpoint_fields(adapter.driver_config)
+        for field_key, field_value in base_fields.items():
+            if field_key not in merged_conn and field_key not in explicit_conn:
+                merged_conn[field_key] = field_value
         if "ssl_ca" not in explicit_conn and adapter.driver_config.ssl_ca is not None:
             merged_conn["ssl_ca"] = adapter.driver_config.ssl_ca
         if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
@@ -276,19 +290,9 @@ def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
             if adapter.driver_config.dsn != "mysql://localhost:3306/vertebra":
                 merged_conn["dsn"] = adapter.driver_config.dsn
             else:
-                base_fields = adapter.driver_config._parse_dsn_fields()
-                for field_key in (
-                    "host",
-                    "port",
-                    "user",
-                    "password",
-                    "database",
-                    "charset",
-                    "ssl_mode",
-                    "unix_socket",
-                ):
-                    if field_key not in merged_conn and base_fields.get(field_key) is not None:
-                        merged_conn[field_key] = base_fields[field_key]
+                for field_key, field_value in _inherited_endpoint_fields(adapter.driver_config).items():
+                    if field_key not in merged_conn:
+                        merged_conn[field_key] = field_value
         if "ssl_ca" not in explicit_conn and adapter.driver_config.ssl_ca is not None:
             merged_conn["ssl_ca"] = adapter.driver_config.ssl_ca
         if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:

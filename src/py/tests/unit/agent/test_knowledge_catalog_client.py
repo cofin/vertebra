@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import threading
 from collections.abc import Callable, Iterator
@@ -27,6 +28,7 @@ from vertebra.agent.knowledge_catalog import (
     MAX_BATCH_SYNC_ENTRIES,
     AsyncKnowledgeCatalogClient,
     CatalogEntryRecord,
+    CatalogSyncError,
     CatalogSyncSummary,
     KnowledgeCatalogConfig,
     SyncKnowledgeCatalogClient,
@@ -834,7 +836,7 @@ async def test_sync_bundle_progressive_digest_chunking_and_delete_stale(use_asyn
         },
         stale_id: {
             "name": f"projects/p/locations/us-central1/entryGroups/okf-context/entries/{stale_id}",
-            "entrySource": {"labels": {"okf-sha256": "f" * 64}},
+            "entrySource": {"system": "okf", "labels": {"okf-sha256": "f" * 64, "okf-format": "v0-2"}},
         },
     }
     mutations: list[tuple[str, str, dict[str, Any] | None]] = []
@@ -1016,3 +1018,230 @@ async def test_search_entries_routes_to_global_endpoint_with_context_set_scope(u
         "semanticSearch": True,
         "pageToken": "tok-next",
     }
+
+
+_ENTRY_NAME_PREFIX = "projects/p/locations/us-central1/entryGroups/okf-context/entries"
+_OKF_LABELS = {"okf-sha256": "f" * 64, "okf-format": "v0-2"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("entry_source", "expect_deleted"),
+    [
+        ({"system": "okf", "labels": _OKF_LABELS}, True),
+        (None, False),
+        ({"system": "bigquery", "labels": _OKF_LABELS}, False),
+        ({"system": "okf"}, False),
+        ({"system": "okf", "labels": {"okf-sha256": "f" * 64}}, False),
+        ({"system": "okf", "labels": {"okf-format": "v0-2"}}, False),
+        ({"labels": _OKF_LABELS}, False),
+    ],
+    ids=["okf-managed", "no-source", "other-system", "no-labels", "no-format", "no-digest", "no-system"],
+)
+async def test_sync_bundle_delete_stale_only_deletes_entries_it_wrote(
+    use_async: bool,
+    entry_source: dict[str, Any] | None,
+    expect_deleted: bool,
+) -> None:
+    """Verify delete_stale removes only OKF-managed entries and never counts foreign entries as skipped."""
+    remote_id = "third-party-table-0001"
+    remote: dict[str, Any] = {"name": f"{_ENTRY_NAME_PREFIX}/{remote_id}"}
+    if entry_source is not None:
+        remote["entrySource"] = entry_source
+    deleted: list[str] = []
+
+    def handler(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (headers, body, timeout_ms)
+        path = urlparse(url).path
+        if method == "GET":
+            return (200, {}, encode_json_bytes({"entries": [remote]}))
+        if method == "DELETE":
+            deleted.append(path.rsplit("/", 1)[-1])
+            return (200, {}, b"{}")
+        return (200, {}, encode_json_bytes({"name": f"{_ENTRY_NAME_PREFIX}/created"}))
+
+    async def async_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        return handler(method, url, headers, body, timeout_ms)
+
+    cfg = KnowledgeCatalogConfig(project_id="p")
+    bundle = OkfBundle(documents=(_make_okf_doc("knowledge/kept.md", "Kept"),))
+    if use_async:
+        client_a = AsyncKnowledgeCatalogClient(cfg, token_cache=_AsyncFakeTokenCache(), transport=async_transport)
+        summary = await client_a.sync_bundle(bundle, delete_stale=True)
+    else:
+        client_s = SyncKnowledgeCatalogClient(cfg, token_cache=_SyncFakeTokenCache(), transport=handler)
+        summary = client_s.sync_bundle(bundle, delete_stale=True)
+
+    assert CatalogEntryRecord.from_dataplex_dict(remote).is_okf_managed is expect_deleted
+    assert deleted == ([remote_id] if expect_deleted else [])
+    assert summary.deleted_entry_ids == ((remote_id,) if expect_deleted else ())
+    assert summary.skipped_entry_ids == ()
+    assert summary.created == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_search_entries_page_returns_next_page_token_until_last_page(use_async: bool) -> None:
+    """Verify search_entries_page exposes nextPageToken so results after the first page are reachable."""
+    seen_tokens: list[str | None] = []
+    pages: dict[str | None, dict[str, Any]] = {
+        None: {"results": [{"dataplexEntry": {"name": f"{_ENTRY_NAME_PREFIX}/doc-1"}}], "nextPageToken": "tok-2"},
+        "tok-2": {"results": [{"dataplexEntry": {"name": f"{_ENTRY_NAME_PREFIX}/doc-2"}}], "nextPageToken": ""},
+    }
+
+    def handler(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (method, url, headers, timeout_ms)
+        token = (decode_json(body) if body else {}).get("pageToken")
+        seen_tokens.append(token)
+        return (200, {}, encode_json_bytes(pages[token]))
+
+    async def async_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        return handler(method, url, headers, body, timeout_ms)
+
+    cfg = KnowledgeCatalogConfig(project_id="p")
+    if use_async:
+        client_a = AsyncKnowledgeCatalogClient(cfg, token_cache=_AsyncFakeTokenCache(), transport=async_transport)
+        first, first_token = await client_a.search_entries_page("pooling")
+        second, second_token = await client_a.search_entries_page("pooling", page_token=first_token)
+        single = await client_a.search_entries("pooling")
+    else:
+        client_s = SyncKnowledgeCatalogClient(cfg, token_cache=_SyncFakeTokenCache(), transport=handler)
+        first, first_token = client_s.search_entries_page("pooling")
+        second, second_token = client_s.search_entries_page("pooling", page_token=first_token)
+        single = client_s.search_entries("pooling")
+
+    assert [record.entry_id for record in first] == ["doc-1"]
+    assert first_token == "tok-2"
+    assert [record.entry_id for record in second] == ["doc-2"]
+    assert second_token is None
+    assert [record.entry_id for record in single] == ["doc-1"]
+    assert seen_tokens == [None, "tok-2", None]
+
+
+def test_sync_bundle_sync_failure_raises_catalog_sync_error_with_completed_summary() -> None:
+    """Verify the sync client chains the original error and reports the entries written before it."""
+    attempted: list[str] = []
+
+    def handler(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (headers, body, timeout_ms)
+        parsed = urlparse(url)
+        if method == "GET":
+            return (200, {}, encode_json_bytes({"entries": []}))
+        entry_id = parse_qs(parsed.query)["entryId"][0]
+        attempted.append(entry_id)
+        if "fail" in entry_id:
+            return (500, {}, encode_json_bytes({"error": {"status": "INTERNAL", "message": "backend exploded"}}))
+        return (200, {}, encode_json_bytes({"name": f"{_ENTRY_NAME_PREFIX}/{entry_id}"}))
+
+    bundle = OkfBundle(
+        documents=(
+            _make_okf_doc("knowledge/ok.md", "Ok"),
+            _make_okf_doc("knowledge/fail.md", "Fail"),
+            _make_okf_doc("knowledge/never.md", "Never"),
+        )
+    )
+    client = SyncKnowledgeCatalogClient(
+        KnowledgeCatalogConfig(project_id="p"), token_cache=_SyncFakeTokenCache(), transport=handler
+    )
+
+    with pytest.raises(CatalogSyncError) as excinfo:
+        client.sync_bundle(bundle)
+
+    err = excinfo.value
+    assert isinstance(err.__cause__, GoogleCloudError)
+    assert err.errors == (err.__cause__,)
+    assert "backend exploded" in str(err)
+    assert len(attempted) == 2
+    assert err.summary.created_entry_ids == (attempted[0],)
+    assert err.summary.created == 1
+    assert err.summary.total_documents == 3
+    assert err.summary.batch_sizes == (3,)
+
+
+@pytest.mark.anyio
+async def test_sync_bundle_async_failure_cancels_in_flight_siblings_and_keeps_summary() -> None:
+    """Verify the async client cancels and awaits in-flight batch mutations and reports completed entries."""
+    never_released = asyncio.Event()
+    hang_started = asyncio.Event()
+    outcomes: dict[str, str] = {}
+
+    async def transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_ms: int,
+    ) -> tuple[int, dict[str, str], bytes]:
+        _ = (headers, body, timeout_ms)
+        parsed = urlparse(url)
+        if method == "GET":
+            return (200, {}, encode_json_bytes({"entries": []}))
+        entry_id = parse_qs(parsed.query)["entryId"][0]
+        if "hang" in entry_id:
+            hang_started.set()
+            try:
+                await never_released.wait()
+            except asyncio.CancelledError:
+                outcomes[entry_id] = "cancelled"
+                raise
+            outcomes[entry_id] = "completed"
+        if "fail" in entry_id:
+            await hang_started.wait()
+            outcomes[entry_id] = "failed"
+            return (500, {}, encode_json_bytes({"error": {"status": "INTERNAL", "message": "backend exploded"}}))
+        outcomes[entry_id] = "completed"
+        return (200, {}, encode_json_bytes({"name": f"{_ENTRY_NAME_PREFIX}/{entry_id}"}))
+
+    bundle = OkfBundle(
+        documents=(
+            _make_okf_doc("knowledge/ok.md", "Ok"),
+            _make_okf_doc("knowledge/hang.md", "Hang"),
+            _make_okf_doc("knowledge/fail.md", "Fail"),
+        )
+    )
+    client = AsyncKnowledgeCatalogClient(
+        KnowledgeCatalogConfig(project_id="p"), token_cache=_AsyncFakeTokenCache(), transport=transport
+    )
+
+    with pytest.raises(CatalogSyncError) as excinfo:
+        await asyncio.wait_for(client.sync_bundle(bundle), timeout=5.0)
+
+    err = excinfo.value
+    by_outcome = {outcome: entry_id for entry_id, outcome in outcomes.items()}
+    assert sorted(outcomes.values()) == ["cancelled", "completed", "failed"]
+    assert isinstance(err.__cause__, GoogleCloudError)
+    assert err.errors == (err.__cause__,)
+    assert err.summary.created_entry_ids == (by_outcome["completed"],)
+    assert err.summary.updated_entry_ids == ()
+    assert err.summary.batch_sizes == (3,)

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from vertebra.agent.knowledge_catalog import (
         AsyncKnowledgeCatalogClient,
         CatalogEntryRecord,
+        CatalogSyncError,
         CatalogSyncSummary,
         KnowledgeCatalogConfig,
         SyncKnowledgeCatalogClient,
@@ -54,6 +55,7 @@ __all__ = (
     "CallerIdentity",
     "CancellationToken",
     "CatalogEntryRecord",
+    "CatalogSyncError",
     "CatalogSyncSummary",
     "ChatRequest",
     "ConfirmationCapacityError",
@@ -306,6 +308,7 @@ _KNOWLEDGE_CATALOG_EXPORTS = frozenset(
     {
         "AsyncKnowledgeCatalogClient",
         "CatalogEntryRecord",
+        "CatalogSyncError",
         "CatalogSyncSummary",
         "KnowledgeCatalogConfig",
         "SyncKnowledgeCatalogClient",

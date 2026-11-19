@@ -5,7 +5,8 @@ import contextlib
 import os
 import sys
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextvars import Context
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +23,7 @@ from vertebra.cli._launch import ServerLaunchEnv
 from vertebra.extensions.litestar import VertebraPlugin
 from vertebra.extensions.litestar import plugin as litestar_plugin_mod
 from vertebra.framework.queues import MemoryQueueBackend, QueueService, task
+from vertebra.server import _loops as loops_mod
 from vertebra.server._gil_audit import GilAuditReport, is_free_threaded
 from vertebra.server._loops import (
     LOOP_BACKEND_CHOICES,
@@ -38,6 +40,7 @@ from vertebra.server._loops import (
 from vertebra.server._protocol import detect_interface, is_rsgi_app
 from vertebra.server.lanes import LaneConfig, WorkerRunner
 from vertebra.server.platform import CgroupQuota
+from vertebra.telemetry.otel import EventLoopMetricSample, EventLoopRecorder
 from vertebra.utils.module_loader import import_optional
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -954,3 +957,196 @@ def test_capture_loop_task_snapshots_and_format_call_graphs(
         assert "_nested_waiter" in target_snap.call_graph
     else:
         assert "_nested_waiter" in target_snap.call_graph
+
+
+class _TimerTrackingLoop(asyncio.SelectorEventLoop):
+    """Selector event loop recording every `call_later` timer and whether it fired."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timers: list[tuple[asyncio.TimerHandle, list[bool]]] = []
+
+    def call_later[*Ts](
+        self,
+        delay: float,
+        callback: Callable[[*Ts], object],
+        *args: *Ts,
+        context: Context | None = None,
+    ) -> asyncio.TimerHandle:
+        fired: list[bool] = []
+
+        def _run() -> None:
+            fired.append(True)
+            callback(*args)
+
+        handle = super().call_later(delay, _run, context=context)
+        self.timers.append((handle, fired))
+        return handle
+
+    def pending_timers(self) -> list[asyncio.TimerHandle]:
+        """Return timers that neither fired nor were cancelled."""
+        return [handle for handle, fired in self.timers if not fired and not handle.cancelled()]
+
+
+class _SignalingRecorder(EventLoopRecorder):
+    """Recorder that signals once every expected shard reported and remembers recording threads."""
+
+    __slots__ = ("all_seen", "expected_shards", "threads_by_shard", "zuvloop_calls")
+
+    def __init__(self, expected_shards: int) -> None:
+        super().__init__()
+        self.expected_shards = expected_shards
+        self.all_seen = threading.Event()
+        self.threads_by_shard: dict[int, int] = {}
+        self.zuvloop_calls: list[tuple[Any, int, int]] = []
+
+    def record(self, sample: EventLoopMetricSample) -> None:
+        super().record(sample)
+        self.threads_by_shard[sample.shard_id] = threading.get_ident()
+        if len(self.threads_by_shard) >= self.expected_shards:
+            self.all_seen.set()
+
+    def configure_zuvloop(
+        self,
+        loop: Any,
+        *,
+        metrics_interval_ms: int = 1000,
+        slow_callback_ms: float = 100.0,
+    ) -> bool:
+        _ = slow_callback_ms
+        self.zuvloop_calls.append((loop, metrics_interval_ms, threading.get_ident()))
+        return True
+
+
+async def _current_thread_ident() -> int:
+    return threading.get_ident()
+
+
+@pytest.mark.parametrize(
+    ("size", "attach_mode"),
+    [(3, "constructor"), (2, "attach"), (1, "constructor")],
+    ids=["three-shards-constructor", "two-shards-attach", "one-shard-constructor"],
+)
+def test_event_loop_pool_recorder_samples_every_threaded_shard_and_stops_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+    attach_mode: str,
+) -> None:
+    """An attached recorder receives lag samples from every shard on that shard's thread and leaves no timers."""
+    monkeypatch.setattr(loops_mod, "create_event_loop", lambda **_kwargs: _TimerTrackingLoop())
+    recorder = _SignalingRecorder(expected_shards=size)
+    if attach_mode == "constructor":
+        pool = EventLoopPool(size=size, loop_backend="asyncio", recorder=recorder, recorder_interval_seconds=0.005)
+    else:
+        pool = EventLoopPool(size=size, loop_backend="asyncio")
+        pool.attach_recorder(recorder, interval_seconds=0.005)
+    try:
+        assert pool.recorder is recorder
+        assert recorder.all_seen.wait(timeout=5.0)
+        shard_threads = {
+            idx: pool.schedule(_current_thread_ident(), worker_index=idx).result(timeout=5.0) for idx in range(size)
+        }
+    finally:
+        pool.stop()
+
+    latest = recorder.latest_by_shard()
+    assert set(latest) == set(range(size))
+    assert {sample.backend for sample in latest.values()} == {"asyncio"}
+    assert all(sample.lag_ms >= 0.0 and sample.active_tasks >= 0 for sample in latest.values())
+    assert recorder.threads_by_shard == shard_threads
+    assert recorder.zuvloop_calls == []
+    tracked = [loop for loop in pool.loops if isinstance(loop, _TimerTrackingLoop)]
+    assert len(tracked) == size
+    assert [loop.pending_timers() for loop in tracked] == [[] for _ in tracked]
+    assert all(loop.is_closed() for loop in tracked)
+
+
+def test_inline_event_loop_pool_recorder_samples_while_loop_runs_and_stops_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inline shard starts sampling when its loop runs, records on the caller thread, and leaves no timers."""
+    monkeypatch.setattr(loops_mod, "create_event_loop", lambda **_kwargs: _TimerTrackingLoop())
+    recorder = _SignalingRecorder(expected_shards=1)
+    pool = EventLoopPool(
+        size=1,
+        inline_single_loop=True,
+        loop_backend="asyncio",
+        recorder=recorder,
+        recorder_interval_seconds=0.005,
+    )
+    loop = pool.primary_loop
+    assert isinstance(loop, _TimerTrackingLoop)
+    try:
+        assert loop.timers == []
+
+        async def _wait_for_sample() -> bool:
+            return await asyncio.get_running_loop().run_in_executor(None, recorder.all_seen.wait, 5.0)
+
+        assert loop.run_until_complete(_wait_for_sample()) is True
+    finally:
+        pool.stop()
+
+    assert recorder.threads_by_shard == {0: threading.get_ident()}
+    assert recorder.latest_by_shard()[0].backend == "asyncio"
+    assert loop.pending_timers() == []
+    assert loop.is_closed()
+
+
+@pytest.mark.parametrize("inline", [False, True], ids=["threaded", "inline"])
+def test_event_loop_pool_without_recorder_schedules_no_timers(monkeypatch: pytest.MonkeyPatch, inline: bool) -> None:
+    """A pool with no attached recorder never arms a sampling timer."""
+    monkeypatch.setattr(loops_mod, "create_event_loop", lambda **_kwargs: _TimerTrackingLoop())
+    pool = EventLoopPool(size=1 if inline else 2, inline_single_loop=inline, loop_backend="asyncio")
+    try:
+        assert pool.recorder is None
+        if inline:
+            pool.spawn(_current_thread_ident())
+        else:
+            for idx in range(pool.size):
+                pool.schedule(_current_thread_ident(), worker_index=idx).result(timeout=5.0)
+        timers = [loop.timers for loop in pool.loops if isinstance(loop, _TimerTrackingLoop)]
+        assert timers == [[] for _ in range(pool.size)]
+    finally:
+        pool.stop()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_error"),
+    [
+        ("zero-interval", ValueError),
+        ("negative-interval", ValueError),
+        ("twice", RuntimeError),
+        ("stopped", RuntimeError),
+    ],
+)
+def test_event_loop_pool_attach_recorder_rejects_invalid_use(scenario: str, expected_error: type[Exception]) -> None:
+    """attach_recorder rejects non-positive intervals, a second recorder, and a stopped pool."""
+    pool = EventLoopPool(size=1, inline_single_loop=True, loop_backend="asyncio")
+    try:
+        if scenario == "twice":
+            pool.attach_recorder(EventLoopRecorder(), interval_seconds=1.0)
+        if scenario == "stopped":
+            pool.stop()
+        interval = {"zero-interval": 0.0, "negative-interval": -1.0}.get(scenario, 1.0)
+        with pytest.raises(expected_error):
+            pool.attach_recorder(EventLoopRecorder(), interval_seconds=interval)
+    finally:
+        pool.stop()
+
+
+def test_event_loop_pool_recorder_configures_zuvloop_on_each_shard_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For the zuvloop backend each shard calls recorder.configure_zuvloop on its own loop thread."""
+    fake_zuvloop = SimpleNamespace(new_event_loop=_TimerTrackingLoop)
+    monkeypatch.setattr(loops_mod, "import_optional", lambda name: fake_zuvloop if name == "zuvloop" else None)
+    recorder = _SignalingRecorder(expected_shards=2)
+    pool = EventLoopPool(size=2, loop_backend="zuvloop", recorder=recorder, recorder_interval_seconds=0.005)
+    try:
+        assert recorder.all_seen.wait(timeout=5.0)
+        shard_threads = [pool.schedule(_current_thread_ident(), worker_index=idx).result(timeout=5.0) for idx in (0, 1)]
+    finally:
+        pool.stop()
+
+    assert {sample.backend for sample in recorder.latest_by_shard().values()} == {"zuvloop"}
+    calls_by_loop = {id(loop): (interval_ms, thread) for loop, interval_ms, thread in recorder.zuvloop_calls}
+    assert len(recorder.zuvloop_calls) == 2
+    assert [calls_by_loop[id(loop)] for loop in pool.loops] == [(5, shard_threads[0]), (5, shard_threads[1])]

@@ -14,15 +14,18 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import IO, Any, Final, Protocol, runtime_checkable
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import anyio
 import msgspec
+from anyio.lowlevel import RunVar
 
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json
@@ -36,6 +39,7 @@ _MAX_RDS_IAM_TTL_SECONDS: Final[int] = 900
 _MAX_DSQL_IAM_TTL_SECONDS: Final[int] = 604_800
 _DEFAULT_AWS_HTTP_TIMEOUT_SECONDS: Final[float] = 5.0
 _DEFAULT_AWS_IMDS_TIMEOUT_SECONDS: Final[float] = 1.0
+_MAX_CREDENTIAL_RESPONSE_BYTES: Final[int] = 1024 * 1024
 _DEFAULT_AWS_ECS_ENDPOINT: Final[str] = "http://169.254.170.2"
 _DEFAULT_AWS_IMDS_IPV4_ENDPOINT: Final[str] = "http://169.254.169.254"
 _DEFAULT_AWS_IMDS_IPV6_ENDPOINT: Final[str] = "http://[fd00:ec2::254]"
@@ -465,7 +469,10 @@ class AzureEntraTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tr
                 msgspec.structs.force_setattr(self, "scope", normalized_scope)
 
         if self.token_endpoint is not None:
-            normalized_token_ep = _validate_http_url(self.token_endpoint, field_name="token_endpoint")
+            normalized_token_ep = _require_https_unless_loopback(
+                _validate_http_url(self.token_endpoint, field_name="token_endpoint"),
+                field_name="token_endpoint",
+            )
             if normalized_token_ep != self.token_endpoint:
                 msgspec.structs.force_setattr(self, "token_endpoint", normalized_token_ep)
 
@@ -801,26 +808,84 @@ class AzureEntraTokenProvider(msgspec.Struct, frozen=True, kw_only=True, dict=Tr
 
 
 class _TokenCacheSlot:
-    """Thread-safe and task-safe mutable cache container held by frozen token providers."""
+    """Cached token snapshot plus refresh serialization shared by one frozen token provider.
 
-    __slots__ = ("async_lock", "snapshot", "sync_lock")
+    `state_lock` guards only the cached-snapshot read and write and is never held across I/O or an
+    await, so taking it on an event-loop thread cannot stall the loop. `sync_refresh_lock` keeps one
+    `resolve_sync` refresh in flight and is held across network I/O, so only blocking callers take it.
+    Async refreshes are serialized per running event loop through `async_refresh_lock()`, because an
+    async lock cannot be shared between event loops.
+    """
+
+    __slots__ = ("__weakref__", "snapshot", "state_lock", "sync_refresh_lock")
 
     def __init__(self) -> None:
-        self.sync_lock = threading.Lock()
-        self.async_lock: anyio.Lock | None = None
+        self.state_lock = threading.Lock()
+        self.sync_refresh_lock = threading.Lock()
         self.snapshot: TokenSnapshot | None = None
 
-    def get_async_lock(self) -> anyio.Lock:
-        """Lazily initialize and return the async lock under the thread lock."""
-        with self.sync_lock:
-            if self.async_lock is None:
-                self.async_lock = anyio.Lock()
-            return self.async_lock
+    def fresh_token(self, now: float, refresh_margin_seconds: float) -> str | None:
+        """Return the cached token when it stays valid beyond the refresh margin."""
+        with self.state_lock:
+            snap = self.snapshot
+        if snap is not None and now + refresh_margin_seconds < snap.expires_at:
+            return snap.token
+        return None
+
+    def store(self, snapshot: TokenSnapshot) -> None:
+        """Replace the cached token snapshot."""
+        with self.state_lock:
+            self.snapshot = snapshot
 
     def clear(self) -> None:
-        """Discard any cached token snapshot under the thread lock."""
-        with self.sync_lock:
+        """Discard any cached token snapshot."""
+        with self.state_lock:
             self.snapshot = None
+
+    def async_refresh_lock(self) -> anyio.Lock:
+        """Return the refresh lock owned by the running event loop, creating it on first use."""
+        try:
+            loop_locks = _LOOP_REFRESH_LOCKS.get()
+        except LookupError:
+            loop_locks = weakref.WeakKeyDictionary()
+            _LOOP_REFRESH_LOCKS.set(loop_locks)
+        lock = loop_locks.get(self)
+        if lock is None:
+            lock = anyio.Lock()
+            loop_locks[self] = lock
+        return lock
+
+
+_LOOP_REFRESH_LOCKS: Final[RunVar[weakref.WeakKeyDictionary[_TokenCacheSlot, anyio.Lock]]] = RunVar(
+    "vertebra_db_token_refresh_locks"
+)
+
+
+class _CredentialResponseRejectedError(ImproperConfigurationError):
+    """Raised when a credential endpoint answers with a redirect or an oversized body."""
+
+
+class _RefuseRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that fails closed so credential headers and bodies never reach a second host."""
+
+    def __init__(self, endpoint_label: str) -> None:
+        self._endpoint_label = endpoint_label
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        """Refuse every redirect without contacting or naming the redirect target."""
+        fp.close()
+        error_msg = (
+            f"{self._endpoint_label} answered with an HTTP {code} redirect; credential requests never follow redirects"
+        )
+        raise _CredentialResponseRejectedError(error_msg)
 
 
 class _ResolvedAwsCredentials(msgspec.Struct, frozen=True, gc=False, kw_only=True):
@@ -853,11 +918,13 @@ def _normalize_host(raw: str, *, field_name: str) -> str:
 
 
 def is_loopback_host(host: str) -> bool:
-    """Return True when `host` resolves syntactically to `localhost` or an IPv4/IPv6 loopback IP."""
+    """Return True when `host` is syntactically `localhost` or an IPv4/IPv6 loopback literal.
+
+    A `%zone` suffix is accepted only on an IPv6 literal, so a hostname containing `%` is never loopback.
+    """
     cleaned = host.strip().lower()
     if cleaned.startswith("[") and cleaned.endswith("]"):
         cleaned = cleaned[1:-1]
-    cleaned = cleaned.partition("%")[0]
     if cleaned in {"localhost", "localhost."}:
         return True
     try:
@@ -876,7 +943,6 @@ def _should_bypass_proxy(host: str) -> bool:
     cleaned = host.strip().lower()
     if cleaned.startswith("[") and cleaned.endswith("]"):
         cleaned = cleaned[1:-1]
-    cleaned = cleaned.partition("%")[0]
     try:
         ip = ipaddress.ip_address(cleaned)
     except ValueError:
@@ -896,16 +962,18 @@ def _validate_http_url(raw: str, *, field_name: str) -> str:
     return normalized
 
 
-def _validate_aws_sts_url(raw: str, *, field_name: str) -> str:
-    """Validate an AWS STS endpoint URL, requiring HTTPS for non-loopback hosts."""
-    normalized = _validate_http_url(raw, field_name=field_name)
+def _require_https_unless_loopback(normalized: str, *, field_name: str) -> str:
+    """Reject a plain-HTTP URL whose host is not a local loopback endpoint."""
     parsed = urlsplit(normalized)
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower()
-    if scheme == "http" and not is_loopback_host(host):
+    if parsed.scheme.lower() == "http" and not is_loopback_host((parsed.hostname or "").lower()):
         msg = f"{field_name} must use HTTPS unless targeting a local loopback endpoint"
         raise ImproperConfigurationError(msg)
     return normalized
+
+
+def _validate_aws_sts_url(raw: str, *, field_name: str) -> str:
+    """Validate an AWS STS endpoint URL, requiring HTTPS for non-loopback hosts."""
+    return _require_https_unless_loopback(_validate_http_url(raw, field_name=field_name), field_name=field_name)
 
 
 def _validate_ecs_credentials_url(raw_url: str) -> tuple[str, bool]:
@@ -953,13 +1021,7 @@ def _validate_aws_imds_base_url(raw_url: str, *, field_name: str) -> str:
 def _validate_azure_authority_host(raw: str, *, field_name: str) -> str:
     """Validate an Azure authority base URL, requiring HTTPS for non-loopback hosts."""
     normalized = _validate_http_url(raw, field_name=field_name).rstrip("/")
-    parsed = urlsplit(normalized)
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower()
-    if scheme == "http" and not is_loopback_host(host):
-        msg = f"{field_name} must use HTTPS unless targeting a local loopback endpoint"
-        raise ImproperConfigurationError(msg)
-    return normalized
+    return _require_https_unless_loopback(normalized, field_name=field_name)
 
 
 def _validate_tenant_id(tenant_id: str) -> str:
@@ -1105,6 +1167,26 @@ def _parse_iso8601_timestamp(raw: Any, *, field_name: str) -> float:
     raise ImproperConfigurationError(msg)
 
 
+def _read_credential_response(
+    req: urllib.request.Request,
+    *,
+    timeout: float,
+    bypass_proxy: bool,
+    endpoint_label: str,
+) -> bytes:
+    """Send one credential HTTP request that refuses redirects and reads at most the response size cap."""
+    handlers: list[urllib.request.BaseHandler] = [_RefuseRedirectHandler(endpoint_label)]
+    if bypass_proxy:
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
+    with opener.open(req, timeout=timeout) as resp:
+        raw_bytes = bytes(resp.read(_MAX_CREDENTIAL_RESPONSE_BYTES + 1))
+    if len(raw_bytes) > _MAX_CREDENTIAL_RESPONSE_BYTES:
+        msg = f"{endpoint_label} response exceeds the {_MAX_CREDENTIAL_RESPONSE_BYTES}-byte limit"
+        raise _CredentialResponseRejectedError(msg)
+    return raw_bytes
+
+
 def _open_aws_http_bytes(
     req: urllib.request.Request,
     *,
@@ -1113,12 +1195,13 @@ def _open_aws_http_bytes(
     endpoint_label: str,
 ) -> bytes:
     """Execute an AWS credential HTTP request with optional proxy bypass and secret-redacted errors."""
-    opener = (
-        urllib.request.build_opener(urllib.request.ProxyHandler({})) if bypass_proxy else urllib.request.build_opener()
-    )
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            return bytes(resp.read())
+        return _read_credential_response(
+            req,
+            timeout=timeout,
+            bypass_proxy=bypass_proxy,
+            endpoint_label=endpoint_label,
+        )
     except urllib.error.HTTPError as exc:
         msg = f"{endpoint_label} returned HTTP {exc.code}"
         raise ImproperConfigurationError(msg) from exc
@@ -1325,6 +1408,8 @@ def _fetch_ec2_imdsv2_credentials(*, imds_endpoint: str | None) -> _ResolvedAwsC
             bypass_proxy=True,
             endpoint_label="AWS EC2 IMDSv2 token endpoint",
         )
+    except _CredentialResponseRejectedError:
+        raise
     except ImproperConfigurationError as exc:
         msg = "AWS IAM database token signing requires AWS credentials or a custom signer"
         raise ImproperConfigurationError(msg) from exc
@@ -1383,7 +1468,11 @@ def _resolve_aws_credentials(
     ecs_endpoint: str | None = None,
     imds_endpoint: str | None = None,
 ) -> _ResolvedAwsCredentials:
-    """Resolve AWS IAM signing credentials through explicit, env, `~/.aws`, STS, ECS, and IMDSv2 chains."""
+    """Resolve AWS IAM signing credentials through explicit, env, `~/.aws`, STS, ECS, and IMDSv2 chains.
+
+    A profile that pairs `role_arn` with `source_profile` or `credential_source` is an assume-role chain,
+    which this resolver does not implement, so it is skipped in favour of the next credential source.
+    """
     if access_key_id is not None or secret_access_key is not None:
         resolved_ak = (access_key_id or "").strip()
         resolved_sk = (secret_access_key or "").strip()
@@ -1433,7 +1522,12 @@ def _resolve_aws_credentials(
 
     prof_web_tok = profile_vals.get("web_identity_token_file", "")
     prof_role_arn = profile_vals.get("role_arn", "")
-    if prof_web_tok or prof_role_arn:
+    is_assume_role_profile = (
+        bool(prof_role_arn)
+        and not prof_web_tok
+        and ("source_profile" in profile_vals or "credential_source" in profile_vals)
+    )
+    if (prof_web_tok or prof_role_arn) and not is_assume_role_profile:
         if not prof_web_tok or not prof_role_arn:
             msg = f"AWS profile {profile_name!r} Web Identity requires both web_identity_token_file and role_arn"
             raise ImproperConfigurationError(msg)
@@ -1561,15 +1655,20 @@ def _resolve_snapshot_sync(
     *,
     force_refresh: bool,
 ) -> str:
-    """Resolve or synchronously mint and cache a `TokenSnapshot` under thread synchronization."""
+    """Resolve or synchronously mint and cache a `TokenSnapshot` with one sync refresh in flight."""
     now_fn = clock or time.time
-    with slot.sync_lock:
+    if not force_refresh:
+        cached = slot.fresh_token(float(now_fn()), refresh_margin_seconds)
+        if cached is not None:
+            return cached
+    with slot.sync_refresh_lock:
         now = float(now_fn())
-        snap = slot.snapshot
-        if not force_refresh and snap is not None and now + refresh_margin_seconds < snap.expires_at:
-            return snap.token
         if force_refresh:
-            slot.snapshot = None
+            slot.clear()
+        else:
+            cached = slot.fresh_token(now, refresh_margin_seconds)
+            if cached is not None:
+                return cached
         raw = fetch_fn(now)
         if inspect.isawaitable(raw):
             close_coro = getattr(raw, "close", None)
@@ -1580,7 +1679,7 @@ def _resolve_snapshot_sync(
         if not isinstance(raw, TokenSnapshot):
             msg = f"Expected TokenSnapshot from token fetcher, got {type(raw).__name__}"
             raise ImproperConfigurationError(msg)
-        slot.snapshot = raw
+        slot.store(raw)
         return raw.token
 
 
@@ -1592,32 +1691,27 @@ async def _resolve_snapshot_async(
     *,
     force_refresh: bool,
 ) -> str:
-    """Resolve or asynchronously mint and cache a `TokenSnapshot` under async task and thread locks."""
+    """Resolve or asynchronously mint and cache a `TokenSnapshot` with one refresh in flight per event loop."""
     now_fn = clock or time.time
-    with slot.sync_lock:
+    if not force_refresh:
+        cached = slot.fresh_token(float(now_fn()), refresh_margin_seconds)
+        if cached is not None:
+            return cached
+    async with slot.async_refresh_lock():
         now = float(now_fn())
-        snap = slot.snapshot
-        if not force_refresh and snap is not None and now + refresh_margin_seconds < snap.expires_at:
-            return snap.token
-
-    async_lock = slot.get_async_lock()
-    async with async_lock:
-        with slot.sync_lock:
-            now = float(now_fn())
-            snap = slot.snapshot
-            if not force_refresh and snap is not None and now + refresh_margin_seconds < snap.expires_at:
-                return snap.token
-            if force_refresh:
-                slot.snapshot = None
-
+        if force_refresh:
+            slot.clear()
+        else:
+            cached = slot.fresh_token(now, refresh_margin_seconds)
+            if cached is not None:
+                return cached
         raw = fetch_fn(now)
         if inspect.isawaitable(raw):
             raw = await raw
         if not isinstance(raw, TokenSnapshot):
             msg = f"Expected TokenSnapshot from token fetcher, got {type(raw).__name__}"
             raise ImproperConfigurationError(msg)
-        with slot.sync_lock:
-            slot.snapshot = raw
+        slot.store(raw)
         return raw.token
 
 
@@ -1740,12 +1834,13 @@ def _execute_entra_token_request(
     bypass_proxy: bool = False,
 ) -> TokenSnapshot:
     """Execute an Entra OAuth2, Managed Identity, or IMDS HTTP request and decode the token snapshot."""
-    opener = (
-        urllib.request.build_opener(urllib.request.ProxyHandler({})) if bypass_proxy else urllib.request.build_opener()
-    )
     try:
-        with opener.open(req, timeout=_DEFAULT_ENTRA_HTTP_TIMEOUT_SECONDS) as resp:
-            raw_bytes = bytes(resp.read())
+        raw_bytes = _read_credential_response(
+            req,
+            timeout=_DEFAULT_ENTRA_HTTP_TIMEOUT_SECONDS,
+            bypass_proxy=bypass_proxy,
+            endpoint_label="Azure Entra token endpoint",
+        )
     except urllib.error.HTTPError as exc:
         msg = f"Azure Entra token endpoint returned HTTP {exc.code}"
         raise ImproperConfigurationError(msg) from exc

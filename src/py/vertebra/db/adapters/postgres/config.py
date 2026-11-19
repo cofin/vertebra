@@ -9,6 +9,7 @@ from typing import Any, ClassVar, Literal, Self
 import msgspec
 
 from vertebra.db.adapters.postgres.options import (
+    enforce_cloud_token_sslmode,
     merge_postgres_options,
     normalize_pem_bytes,
     parse_postgres_dsn,
@@ -21,7 +22,6 @@ from vertebra.db.driver._cloud_auth import (
     AwsAuroraDsqlIamTokenProvider,
     AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
-    is_loopback_host,
 )
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
@@ -136,21 +136,17 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                 if not candidate_dsn:
                     continue
                 parsed_candidate = parse_postgres_dsn(candidate_dsn)
-                sslmode = parsed_candidate.params.get("sslmode")
-                if sslmode is None or sslmode.strip().lower() != "disable":
-                    continue
                 if "host" in parsed_candidate.params and parsed_candidate.params["host"] != "":
                     candidate_hosts = [part for part in parsed_candidate.params["host"].split(",") if part]
                 elif parsed_candidate.hosts:
                     candidate_hosts = list(parsed_candidate.hosts)
                 else:
                     candidate_hosts = ["localhost"]
-                if any(not h.startswith("/") and not is_loopback_host(h) for h in candidate_hosts):
-                    msg = (
-                        f"{type(self.token_provider).__name__} requires TLS on remote hosts "
-                        "and cannot be used with sslmode='disable'"
-                    )
-                    raise ImproperConfigurationError(msg)
+                enforce_cloud_token_sslmode(
+                    self.token_provider,
+                    candidate_hosts,
+                    parsed_candidate.params.get("sslmode"),
+                )
 
     @staticmethod
     def _redact_dsn(dsn: str) -> str:

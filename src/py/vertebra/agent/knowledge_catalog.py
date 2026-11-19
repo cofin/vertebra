@@ -29,7 +29,7 @@ from vertebra._vertebra import (
     gcp_http2_request_sync,
 )
 from vertebra.agent.okf import OkfBundle, OkfDocument
-from vertebra.typing import ImproperConfigurationError
+from vertebra.typing import ImproperConfigurationError, VertebraError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 __all__ = (
@@ -41,6 +41,7 @@ __all__ = (
     "AsyncHttpTransport",
     "AsyncKnowledgeCatalogClient",
     "CatalogEntryRecord",
+    "CatalogSyncError",
     "CatalogSyncSummary",
     "GcpTokenCachePort",
     "KnowledgeCatalogConfig",
@@ -55,6 +56,9 @@ DEFAULT_ENTRY_TYPE: Final[str] = "projects/dataplex-types/locations/global/entry
 DEFAULT_OVERVIEW_ASPECT_KEY: Final[str] = "dataplex-types.global.overview"
 DEFAULT_OVERVIEW_ASPECT_TYPE: Final[str] = "projects/dataplex-types/locations/global/aspectTypes/overview"
 DEFAULT_DATAPLEX_SCOPES: Final[tuple[str, ...]] = ("https://www.googleapis.com/auth/cloud-platform",)
+OKF_ENTRY_SOURCE_SYSTEM: Final[str] = "okf"
+OKF_FORMAT_LABEL: Final[str] = "okf-format"
+OKF_SHA256_LABEL: Final[str] = "okf-sha256"
 
 _RFC1035_ENTRY_GROUP_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 _SYSTEM_ENTRY_GROUP_ID_RE: Final[re.Pattern[str]] = re.compile(r"^@[a-z0-9_-]+$")
@@ -148,6 +152,7 @@ class CatalogEntryRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     parent_entry: str = ""
     display_name: str = ""
     description: str = ""
+    source_system: str = ""
     sha256: str = ""
     labels: dict[str, str] = msgspec.field(default_factory=dict)
     aspects: dict[str, Any] = msgspec.field(default_factory=dict)
@@ -155,6 +160,20 @@ class CatalogEntryRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     create_time: str | None = None
     update_time: str | None = None
     raw: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    @property
+    def is_okf_managed(self) -> bool:
+        """Return whether `sync_bundle` wrote this entry.
+
+        An entry is OKF-managed when `entrySource.system` is `okf` and its `entrySource.labels`
+        carry both `okf-format` and `okf-sha256`. Only OKF-managed entries are eligible for
+        `sync_bundle(delete_stale=True)` deletion.
+        """
+        return (
+            self.source_system == OKF_ENTRY_SOURCE_SYSTEM
+            and OKF_FORMAT_LABEL in self.labels
+            and OKF_SHA256_LABEL in self.labels
+        )
 
     @classmethod
     def from_dataplex_dict(cls, payload: Mapping[str, Any]) -> CatalogEntryRecord:
@@ -168,7 +187,7 @@ class CatalogEntryRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         raw_aspects = payload.get("aspects")
         aspects = dict(raw_aspects) if isinstance(raw_aspects, Mapping) else {}
 
-        sha256 = labels.get("okf-sha256", "")
+        sha256 = labels.get(OKF_SHA256_LABEL, "")
         if not sha256:
             for aspect_val in aspects.values():
                 if not isinstance(aspect_val, Mapping):
@@ -191,6 +210,7 @@ class CatalogEntryRecord(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             parent_entry=str(payload.get("parentEntry", "") or ""),
             display_name=str(entry_source.get("displayName", "") or ""),
             description=str(entry_source.get("description", "") or ""),
+            source_system=str(entry_source.get("system", "") or ""),
             sha256=sha256,
             labels=labels,
             aspects=aspects,
@@ -217,6 +237,28 @@ class CatalogSyncSummary(msgspec.Struct, frozen=True, gc=False, kw_only=True):
     updated_entry_ids: tuple[str, ...] = ()
     skipped_entry_ids: tuple[str, ...] = ()
     deleted_entry_ids: tuple[str, ...] = ()
+
+
+class CatalogSyncError(VertebraError):
+    """Raised when a `sync_bundle` mutation fails after zero or more mutations completed.
+
+    The first failure is chained as `__cause__`. `summary` describes the mutations that completed
+    before the run stopped, so callers can tell which entry IDs were already written or deleted.
+
+    Attributes:
+        summary: `CatalogSyncSummary` covering only the mutations that completed.
+        errors: Every mutation failure observed in the failing batch, in batch order.
+    """
+
+    def __init__(self, summary: CatalogSyncSummary, errors: Sequence[BaseException]) -> None:
+        self.summary = summary
+        self.errors: tuple[BaseException, ...] = tuple(errors)
+        completed = summary.created + summary.updated + summary.deleted
+        detail = f": {self.errors[0]}" if self.errors else ""
+        super().__init__(
+            f"Knowledge Catalog sync of entry group {summary.entry_group_id!r} failed after "
+            f"{completed} completed mutation(s){detail}"
+        )
 
 
 def _validate_create_entry_group_id(entry_group_id: str) -> str:
@@ -376,6 +418,12 @@ def _parse_search_results(data: Mapping[str, Any]) -> list[CatalogEntryRecord]:
         if isinstance(entry_payload, Mapping):
             records.append(CatalogEntryRecord.from_dataplex_dict(entry_payload))
     return records
+
+
+def _parse_next_page_token(data: Mapping[str, Any]) -> str | None:
+    """Return the non-empty `nextPageToken` of a paged Dataplex response, or `None` on the last page."""
+    token = data.get("nextPageToken")
+    return token if isinstance(token, str) and token else None
 
 
 def _matches_labels(group: Mapping[str, Any], labels: Mapping[str, str] | None) -> bool:
@@ -627,12 +675,12 @@ class _BaseKnowledgeCatalogClient:
             "display_name": title,
             "description": description,
             "labels": {
-                "okf-sha256": doc.sha256,
-                "okf-format": "v0-2",
+                OKF_SHA256_LABEL: doc.sha256,
+                OKF_FORMAT_LABEL: "v0-2",
             },
             "entry_source": {
                 "resource": doc.rel_path,
-                "system": "okf",
+                "system": OKF_ENTRY_SOURCE_SYSTEM,
             },
             "aspects": aspects,
         }
@@ -647,7 +695,12 @@ class _BaseKnowledgeCatalogClient:
         list[tuple[str, str, OkfDocument | None]],
         list[str],
     ]:
-        """Diff an `OkfBundle` against remote catalog entries by SHA-256 digest."""
+        """Diff an `OkfBundle` against remote catalog entries by SHA-256 digest.
+
+        With `delete_stale`, only remote entries whose `CatalogEntryRecord.is_okf_managed` is true and
+        whose ID is absent from the bundle are planned for deletion. Entries written by other tools
+        are neither deleted nor reported as skipped.
+        """
         remote_by_id = {entry.entry_id: entry for entry in existing_entries if entry.entry_id}
         mutations: list[tuple[str, str, OkfDocument | None]] = []
         skipped_ids: list[str] = []
@@ -666,10 +719,38 @@ class _BaseKnowledgeCatalogClient:
 
         if delete_stale:
             for remote_id in sorted(remote_by_id):
-                if remote_id not in desired_ids:
+                if remote_id not in desired_ids and remote_by_id[remote_id].is_okf_managed:
                     mutations.append(("delete", remote_id, None))
 
         return (mutations, skipped_ids)
+
+    @staticmethod
+    def _build_sync_summary(
+        bundle: OkfBundle,
+        *,
+        entry_group_id: str,
+        batches: Sequence[Sequence[tuple[str, str, OkfDocument | None]]],
+        created_ids: Sequence[str],
+        updated_ids: Sequence[str],
+        skipped_ids: Sequence[str],
+        deleted_ids: Sequence[str],
+    ) -> CatalogSyncSummary:
+        """Build a `CatalogSyncSummary` from the planned batches and the mutations that completed."""
+        return CatalogSyncSummary(
+            entry_group_id=entry_group_id,
+            bundle_digest=bundle.digest(),
+            total_documents=len(bundle.documents),
+            created=len(created_ids),
+            updated=len(updated_ids),
+            skipped=len(skipped_ids),
+            deleted=len(deleted_ids),
+            batch_count=len(batches),
+            batch_sizes=tuple(len(batch) for batch in batches),
+            created_entry_ids=tuple(created_ids),
+            updated_entry_ids=tuple(updated_ids),
+            skipped_entry_ids=tuple(skipped_ids),
+            deleted_entry_ids=tuple(deleted_ids),
+        )
 
     @staticmethod
     def _okf_rel_path_to_entry_id(rel_path: str) -> str:
@@ -993,9 +1074,7 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
             for item in (raw_entries if isinstance(raw_entries, list) else ())
             if isinstance(item, Mapping)
         ]
-        next_token_raw = data.get("nextPageToken")
-        next_token = next_token_raw if isinstance(next_token_raw, str) and next_token_raw else None
-        return (records, next_token)
+        return (records, _parse_next_page_token(data))
 
     def list_entries(
         self,
@@ -1121,7 +1200,16 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         entry_type: str | None = None,
         aspect_type: str | None = None,
     ) -> CatalogSyncSummary:
-        """Progressively sync an `OkfBundle` by SHA-256 digest in `<= 250`-entry batches."""
+        """Progressively sync an `OkfBundle` by SHA-256 digest in `<= 250`-entry batches.
+
+        With `delete_stale=True`, only stale entries that `sync_bundle` itself wrote
+        (`CatalogEntryRecord.is_okf_managed`) are deleted; entries created by other tools in the
+        same entry group are left untouched.
+
+        Raises:
+            CatalogSyncError: When a mutation fails. The original error is chained as `__cause__`
+                and `CatalogSyncError.summary` lists the entry IDs that completed before the failure.
+        """
         resolved_eg = entry_group_id if entry_group_id is not None else self._config.entry_group_id
         _validate_lookup_entry_group_id(resolved_eg)
         existing = self.list_entries(entry_group_id=resolved_eg, location=location)
@@ -1135,45 +1223,67 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         updated_ids: list[str] = []
         deleted_ids: list[str] = []
 
-        for batch in batches:
-            for op, entry_id, doc in batch:
-                if op == "delete" or doc is None:
-                    self.delete_entry(entry_id, entry_group_id=resolved_eg, location=location)
-                    deleted_ids.append(entry_id)
-                elif op == "create":
+        try:
+            for batch in batches:
+                for op, entry_id, doc in batch:
+                    if op == "delete" or doc is None:
+                        self.delete_entry(entry_id, entry_group_id=resolved_eg, location=location)
+                        deleted_ids.append(entry_id)
+                        continue
                     fields = self._build_okf_entry_fields(doc, entry_type=entry_type, aspect_type=aspect_type)
-                    self.create_entry(
-                        entry_id,
-                        entry_group_id=resolved_eg,
-                        location=location,
-                        **fields,
-                    )
-                    created_ids.append(entry_id)
-                else:
-                    fields = self._build_okf_entry_fields(doc, entry_type=entry_type, aspect_type=aspect_type)
-                    self.update_entry(
-                        entry_id,
-                        entry_group_id=resolved_eg,
-                        location=location,
-                        **fields,
-                    )
-                    updated_ids.append(entry_id)
+                    if op == "create":
+                        self.create_entry(entry_id, entry_group_id=resolved_eg, location=location, **fields)
+                        created_ids.append(entry_id)
+                    else:
+                        self.update_entry(entry_id, entry_group_id=resolved_eg, location=location, **fields)
+                        updated_ids.append(entry_id)
+        except Exception as exc:
+            partial = self._build_sync_summary(
+                bundle,
+                entry_group_id=resolved_eg,
+                batches=batches,
+                created_ids=created_ids,
+                updated_ids=updated_ids,
+                skipped_ids=skipped_ids,
+                deleted_ids=deleted_ids,
+            )
+            raise CatalogSyncError(partial, (exc,)) from exc
 
-        return CatalogSyncSummary(
+        return self._build_sync_summary(
+            bundle,
             entry_group_id=resolved_eg,
-            bundle_digest=bundle.digest(),
-            total_documents=len(bundle.documents),
-            created=len(created_ids),
-            updated=len(updated_ids),
-            skipped=len(skipped_ids),
-            deleted=len(deleted_ids),
-            batch_count=len(batches),
-            batch_sizes=tuple(len(batch) for batch in batches),
-            created_entry_ids=tuple(created_ids),
-            updated_entry_ids=tuple(updated_ids),
-            skipped_entry_ids=tuple(skipped_ids),
-            deleted_entry_ids=tuple(deleted_ids),
+            batches=batches,
+            created_ids=created_ids,
+            updated_ids=updated_ids,
+            skipped_ids=skipped_ids,
+            deleted_ids=deleted_ids,
         )
+
+    def search_entries_page(
+        self,
+        query: str,
+        *,
+        entry_group_id: str | None = None,
+        location: str | None = None,
+        page_size: int = 20,
+        page_token: str | None = None,
+        semantic_search: bool = True,
+    ) -> tuple[list[CatalogEntryRecord], str | None]:
+        """Fetch one `locations/global:searchEntries` page and its `nextPageToken`.
+
+        Pass the returned token back as `page_token` to fetch the following page; the token is
+        `None` on the last page. `search_entries` returns only the records of a single page.
+        """
+        url, payload = self._build_search_payload(
+            query,
+            entry_group_id=entry_group_id,
+            location=location,
+            page_size=page_size,
+            page_token=page_token,
+            semantic_search=semantic_search,
+        )
+        data = self._request_json("POST", url, body=payload)
+        return (_parse_search_results(data), _parse_next_page_token(data))
 
     def search_entries(
         self,
@@ -1185,8 +1295,12 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_token: str | None = None,
         semantic_search: bool = True,
     ) -> list[CatalogEntryRecord]:
-        """Search Dataplex Universal Catalog via `locations/global:searchEntries`."""
-        url, payload = self._build_search_payload(
+        """Search Dataplex Universal Catalog and return the records of one result page.
+
+        The response's `nextPageToken` is not returned; use `search_entries_page` to walk
+        results beyond the page selected by `page_token`.
+        """
+        records, _ = self.search_entries_page(
             query,
             entry_group_id=entry_group_id,
             location=location,
@@ -1194,8 +1308,7 @@ class SyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
             page_token=page_token,
             semantic_search=semantic_search,
         )
-        data = self._request_json("POST", url, body=payload)
-        return _parse_search_results(data)
+        return records
 
 
 class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
@@ -1470,9 +1583,7 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
             for item in (raw_entries if isinstance(raw_entries, list) else ())
             if isinstance(item, Mapping)
         ]
-        next_token_raw = data.get("nextPageToken")
-        next_token = next_token_raw if isinstance(next_token_raw, str) and next_token_raw else None
-        return (records, next_token)
+        return (records, _parse_next_page_token(data))
 
     async def list_entries(
         self,
@@ -1629,7 +1740,19 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         entry_type: str | None = None,
         aspect_type: str | None = None,
     ) -> CatalogSyncSummary:
-        """Progressively sync an `OkfBundle` by SHA-256 digest in `<= 250`-entry batches."""
+        """Progressively sync an `OkfBundle` by SHA-256 digest in `<= 250`-entry batches.
+
+        With `delete_stale=True`, only stale entries that `sync_bundle` itself wrote
+        (`CatalogEntryRecord.is_okf_managed`) are deleted; entries created by other tools in the
+        same entry group are left untouched.
+
+        Mutations of one batch run concurrently. On the first failure the remaining in-flight
+        mutations of that batch are cancelled and awaited before the error is raised.
+
+        Raises:
+            CatalogSyncError: When a mutation fails. The original error is chained as `__cause__`
+                and `CatalogSyncError.summary` lists the entry IDs that completed before the failure.
+        """
         resolved_eg = entry_group_id if entry_group_id is not None else self._config.entry_group_id
         _validate_lookup_entry_group_id(resolved_eg)
         existing = await self.list_entries(entry_group_id=resolved_eg, location=location)
@@ -1644,43 +1767,73 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         deleted_ids: list[str] = []
 
         for batch in batches:
-            outcomes = await asyncio.gather(
-                *(
-                    self._execute_mutation(
-                        op,
-                        entry_id,
-                        doc,
-                        entry_group_id=resolved_eg,
-                        location=location,
-                        entry_type=entry_type,
-                        aspect_type=aspect_type,
+            tasks: list[asyncio.Task[tuple[str, str]]] = []
+            try:
+                async with asyncio.TaskGroup() as group:
+                    tasks.extend(
+                        group.create_task(
+                            self._execute_mutation(
+                                op,
+                                entry_id,
+                                doc,
+                                entry_group_id=resolved_eg,
+                                location=location,
+                                entry_type=entry_type,
+                                aspect_type=aspect_type,
+                            )
+                        )
+                        for op, entry_id, doc in batch
                     )
-                    for op, entry_id, doc in batch
+            except ExceptionGroup as failures:
+                self._collect_mutation_outcomes(tasks, created_ids, updated_ids, deleted_ids)
+                partial = self._build_sync_summary(
+                    bundle,
+                    entry_group_id=resolved_eg,
+                    batches=batches,
+                    created_ids=created_ids,
+                    updated_ids=updated_ids,
+                    skipped_ids=skipped_ids,
+                    deleted_ids=deleted_ids,
                 )
-            )
-            for op, entry_id in outcomes:
-                if op == "create":
-                    created_ids.append(entry_id)
-                elif op == "update":
-                    updated_ids.append(entry_id)
-                else:
-                    deleted_ids.append(entry_id)
+                errors = self._flatten_exception_group(failures)
+                raise CatalogSyncError(partial, errors) from errors[0]
+            self._collect_mutation_outcomes(tasks, created_ids, updated_ids, deleted_ids)
 
-        return CatalogSyncSummary(
+        return self._build_sync_summary(
+            bundle,
             entry_group_id=resolved_eg,
-            bundle_digest=bundle.digest(),
-            total_documents=len(bundle.documents),
-            created=len(created_ids),
-            updated=len(updated_ids),
-            skipped=len(skipped_ids),
-            deleted=len(deleted_ids),
-            batch_count=len(batches),
-            batch_sizes=tuple(len(batch) for batch in batches),
-            created_entry_ids=tuple(created_ids),
-            updated_entry_ids=tuple(updated_ids),
-            skipped_entry_ids=tuple(skipped_ids),
-            deleted_entry_ids=tuple(deleted_ids),
+            batches=batches,
+            created_ids=created_ids,
+            updated_ids=updated_ids,
+            skipped_ids=skipped_ids,
+            deleted_ids=deleted_ids,
         )
+
+    async def search_entries_page(
+        self,
+        query: str,
+        *,
+        entry_group_id: str | None = None,
+        location: str | None = None,
+        page_size: int = 20,
+        page_token: str | None = None,
+        semantic_search: bool = True,
+    ) -> tuple[list[CatalogEntryRecord], str | None]:
+        """Fetch one `locations/global:searchEntries` page and its `nextPageToken`.
+
+        Pass the returned token back as `page_token` to fetch the following page; the token is
+        `None` on the last page. `search_entries` returns only the records of a single page.
+        """
+        url, payload = self._build_search_payload(
+            query,
+            entry_group_id=entry_group_id,
+            location=location,
+            page_size=page_size,
+            page_token=page_token,
+            semantic_search=semantic_search,
+        )
+        data = await self._request_json("POST", url, body=payload)
+        return (_parse_search_results(data), _parse_next_page_token(data))
 
     async def search_entries(
         self,
@@ -1692,8 +1845,12 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
         page_token: str | None = None,
         semantic_search: bool = True,
     ) -> list[CatalogEntryRecord]:
-        """Search Dataplex Universal Catalog via `locations/global:searchEntries`."""
-        url, payload = self._build_search_payload(
+        """Search Dataplex Universal Catalog and return the records of one result page.
+
+        The response's `nextPageToken` is not returned; use `search_entries_page` to walk
+        results beyond the page selected by `page_token`.
+        """
+        records, _ = await self.search_entries_page(
             query,
             entry_group_id=entry_group_id,
             location=location,
@@ -1701,5 +1858,34 @@ class AsyncKnowledgeCatalogClient(_BaseKnowledgeCatalogClient):
             page_token=page_token,
             semantic_search=semantic_search,
         )
-        data = await self._request_json("POST", url, body=payload)
-        return _parse_search_results(data)
+        return records
+
+    @staticmethod
+    def _collect_mutation_outcomes(
+        tasks: Sequence[asyncio.Task[tuple[str, str]]],
+        created_ids: list[str],
+        updated_ids: list[str],
+        deleted_ids: list[str],
+    ) -> None:
+        """Append the entry IDs of successfully finished mutation tasks to their per-operation lists."""
+        for task in tasks:
+            if not task.done() or task.cancelled() or task.exception() is not None:
+                continue
+            op, entry_id = task.result()
+            if op == "create":
+                created_ids.append(entry_id)
+            elif op == "update":
+                updated_ids.append(entry_id)
+            else:
+                deleted_ids.append(entry_id)
+
+    @classmethod
+    def _flatten_exception_group(cls, group: ExceptionGroup[Exception]) -> list[Exception]:
+        """Flatten nested exception groups into their leaf exceptions in order."""
+        leaves: list[Exception] = []
+        for exc in group.exceptions:
+            if isinstance(exc, ExceptionGroup):
+                leaves.extend(cls._flatten_exception_group(exc))
+            else:
+                leaves.append(exc)
+        return leaves

@@ -2535,3 +2535,103 @@ def test_arrow_storage_pipeline_microbenchmark_skips_when_optional_extra_missing
 
     monkeypatch.setattr("tools.benchmarks.micro.import_optional", fake_import_optional)
     assert benchmark_arrow_storage_pipeline(iterations=1, rounds=1, warmup_rounds=0) is None
+
+
+_ARROW_FORMAT_SURFACES: tuple[str, ...] = (
+    "write_sync",
+    "write_async",
+    "cursor_sync",
+    "cursor_async",
+    "read_sync",
+    "read_async",
+)
+
+
+async def _run_arrow_format_surface(
+    backend: SQLSpecObjectStoreBackend,
+    surface: str,
+    key: str,
+    table: pa.Table,
+    **kwargs: Any,
+) -> pa.Table | None:
+    """Invoke one Arrow read or write surface of the SQLSpec backend with extra keyword arguments."""
+    if surface == "write_sync":
+        backend.write_arrow_sync(key, table, **kwargs)
+        return None
+    if surface == "write_async":
+        await backend.write_arrow_async(key, table, **kwargs)
+        return None
+    if surface in {"cursor_sync", "cursor_async"}:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        payload = sink.getvalue().to_pybytes()
+        if surface == "cursor_sync":
+            backend.write_arrow_cursor_sync(key, payload, **kwargs)
+        else:
+            await backend.write_arrow_cursor_async(key, payload, **kwargs)
+        return None
+    if surface == "read_sync":
+        return backend.read_arrow_sync(key, **kwargs)
+    return await backend.read_arrow_async(key, **kwargs)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", _ARROW_FORMAT_SURFACES)
+@pytest.mark.parametrize(
+    ("file_format", "format_hint"),
+    [("parquet", "parquet"), ("arrow-ipc", "ipc"), ("arrow", "feather"), ("CSV", "csv")],
+    ids=["parquet", "ipc-alias", "arrow-feather-alias", "csv-case"],
+)
+async def test_sqlspec_arrow_accepts_matching_file_format_and_format_hint(
+    surface: str, file_format: str, format_hint: str
+) -> None:
+    """Passing `file_format` and `format_hint` naming the same format reads and writes normally."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace=f"sqlspec-arrow-both-{surface}-{format_hint}"))
+    table = pa.table({"id": [1, 2], "label": ["a", "b"]})
+    if surface.startswith("read"):
+        backend.write_arrow_sync("data.bin", table, file_format=file_format)
+
+    result = await _run_arrow_format_surface(
+        backend, surface, "data.bin", table, file_format=file_format, format_hint=format_hint
+    )
+
+    stored = result if result is not None else backend.read_arrow_sync("data.bin", file_format=file_format)
+    assert stored.equals(table)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", _ARROW_FORMAT_SURFACES)
+@pytest.mark.parametrize(
+    ("file_format", "format_hint"),
+    [("parquet", "csv"), ("csv", "arrow-ipc"), ("ipc", "parquet")],
+)
+async def test_sqlspec_arrow_rejects_conflicting_file_format_and_format_hint(
+    surface: str, file_format: str, format_hint: str
+) -> None:
+    """Conflicting `file_format` and `format_hint` raise `ValueError` naming both and write nothing."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace=f"sqlspec-arrow-conflict-{surface}-{file_format}"))
+    table = pa.table({"id": [1, 2]})
+    if surface.startswith("read"):
+        backend.write_arrow_sync("data.bin", table, file_format=file_format)
+
+    with pytest.raises(ValueError, match=rf"file_format='{file_format}'.*format_hint='{format_hint}'"):
+        await _run_arrow_format_surface(
+            backend, surface, "data.bin", table, file_format=file_format, format_hint=format_hint
+        )
+
+    assert backend.exists_sync("data.bin") is surface.startswith("read")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", ["write_sync", "write_async", "cursor_sync", "cursor_async"])
+async def test_sqlspec_arrow_overwrite_none_uses_default_overwrite(surface: str) -> None:
+    """`overwrite=None` means the default, so an existing object is replaced."""
+    backend = SQLSpecObjectStoreBackend(MemoryConfig(namespace=f"sqlspec-arrow-overwrite-none-{surface}"))
+    original = pa.table({"id": [1]})
+    replacement = pa.table({"id": [2, 3]})
+    backend.write_arrow_sync("data.parquet", original)
+
+    await _run_arrow_format_surface(backend, surface, "data.parquet", replacement, overwrite=None)
+
+    assert backend.read_arrow_sync("data.parquet").equals(replacement)

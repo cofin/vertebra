@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import math
 import os
 import signal
 from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
@@ -67,8 +68,9 @@ from vertebra.server.platform import (
     SHMAllocationPolicy,
     ZPagesRegistry,
 )
+from vertebra.telemetry.otel import EventLoopRecorder
 from vertebra.typing import VertebraError
-from vertebra.utils.module_loader import import_app
+from vertebra.utils.module_loader import import_app, import_optional
 from vertebra.utils.serializers import encode_json_bytes
 
 if TYPE_CHECKING:
@@ -85,6 +87,8 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 _INLINE_DRAIN_BUDGET = 16
+_LOOP_POOL_ZPAGES_NAME = "worker"
+_DEFAULT_LOOP_TELEMETRY_INTERVAL_SECONDS = 1.0
 
 
 class WorkerStartupError(VertebraError, RuntimeError):
@@ -356,6 +360,7 @@ class Worker:
         "_gil_report",
         "_handlers",
         "_lame_duck",
+        "_loop_recorder",
         "_max_batches",
         "_mounts",
         "_queue_service",
@@ -381,6 +386,7 @@ class Worker:
         max_batches: int | None = None,
         queue_service: QueueService | None = None,
         app_obj: Any = None,
+        loop_recorder: EventLoopRecorder | None = None,
     ) -> None:
         self._app_obj: Any = app_obj
         if hasattr(handlers, "_handlers") and not isinstance(handlers, Mapping):
@@ -410,6 +416,7 @@ class Worker:
         self._stop_event = stop_event
         self._max_batches = max_batches
         self._queue_service = queue_service
+        self._loop_recorder = loop_recorder
         self._cgroup_quota: CgroupQuota | None = None
         self._gil_report: GilAuditReport | None = None
 
@@ -427,6 +434,15 @@ class Worker:
     def zpages(self) -> ZPagesRegistry:
         """Return the worker's zPages diagnostics registry."""
         return self._zpages
+
+    @property
+    def loop_recorder(self) -> EventLoopRecorder | None:
+        """Return the event loop telemetry recorder, or `None` when loop telemetry is disabled.
+
+        The recorder is the one passed as `loop_recorder`, or one created by `run` when
+        `VERTEBRA_LOOP_TELEMETRY` is `1` or `true`.
+        """
+        return self._loop_recorder
 
     @property
     def cgroup_quota(self) -> CgroupQuota | None:
@@ -448,7 +464,13 @@ class Worker:
             self._stop_event.set()
 
     def run(self) -> None:
-        """Validate the environment, initialize transport and loops, and run the batch loop."""
+        """Validate the environment, initialize transport and loops, and run the batch loop.
+
+        The worker's `EventLoopPool` is registered with `zpages` as `worker`, so `/taskz` lists its
+        tasks per shard. When `VERTEBRA_LOOP_TELEMETRY` is `1` or `true`, or a `loop_recorder` was
+        passed, every continuously running shard samples scheduling lag and active task counts
+        into the recorder every `VERTEBRA_LOOP_TELEMETRY_INTERVAL` seconds (default `1.0`).
+        """
         self._shm_policy.validate_environment()
         self._cgroup_quota = CgroupQuota.detect()
         self._gil_report = GilAuditReport.audit(before_extensions=self._before_extensions)
@@ -488,10 +510,16 @@ class Worker:
         notify_fd = get_request_notify_fd()
 
         use_inline_event_loop = notify_fd >= 0 and shard_count == 1 and needs_event_loop
+        inline_single_loop = shard_count == 1 and (use_inline_event_loop or not needs_event_loop)
         loop_pool = EventLoopPool(
             size=shard_count,
-            inline_single_loop=(shard_count == 1 and (use_inline_event_loop or not needs_event_loop)),
+            inline_single_loop=inline_single_loop,
             gil_report=self._gil_report,
+        )
+        self._zpages.register_loop_pool(_LOOP_POOL_ZPAGES_NAME, loop_pool)
+        self._attach_loop_telemetry(
+            loop_pool,
+            loop_runs_continuously=use_inline_event_loop or not inline_single_loop,
         )
         executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(
@@ -626,6 +654,49 @@ class Worker:
                 executor.shutdown(wait=True)
             shutdown_worker_executor(wait=True)
             loop_pool.stop()
+
+    def _attach_loop_telemetry(self, loop_pool: EventLoopPool, *, loop_runs_continuously: bool) -> None:
+        """Attach the loop recorder to `loop_pool` when loop telemetry is enabled.
+
+        A recorder passed to the constructor is always used. Otherwise one is created when
+        `VERTEBRA_LOOP_TELEMETRY` is enabled, with `emit_otel` following whether
+        `opentelemetry.metrics` is importable. A sync-only worker drives its inline loop only on
+        demand, so scheduling lag is undefined there and no sampler is attached.
+        """
+        recorder = self._loop_recorder
+        if recorder is None:
+            if not self._loop_telemetry_enabled():
+                return
+            recorder = EventLoopRecorder(emit_otel=import_optional("opentelemetry.metrics") is not None)
+            self._loop_recorder = recorder
+        if not loop_runs_continuously:
+            logger.debug("Loop telemetry sampling skipped: the worker event loop does not run continuously")
+            return
+        loop_pool.attach_recorder(recorder, interval_seconds=self._loop_telemetry_interval())
+
+    @staticmethod
+    def _loop_telemetry_enabled() -> bool:
+        """Return whether `VERTEBRA_LOOP_TELEMETRY` is `1` or `true` (case-insensitive)."""
+        return os.environ.get("VERTEBRA_LOOP_TELEMETRY", "").strip().lower() in {"1", "true"}
+
+    @staticmethod
+    def _loop_telemetry_interval() -> float:
+        """Return `VERTEBRA_LOOP_TELEMETRY_INTERVAL` in seconds, or `1.0` when unset or not a positive finite number."""
+        raw = os.environ.get("VERTEBRA_LOOP_TELEMETRY_INTERVAL", "").strip()
+        if not raw:
+            return _DEFAULT_LOOP_TELEMETRY_INTERVAL_SECONDS
+        try:
+            interval = float(raw)
+        except ValueError:
+            interval = math.nan
+        if not math.isfinite(interval) or interval <= 0:
+            logger.warning(
+                "Ignoring invalid VERTEBRA_LOOP_TELEMETRY_INTERVAL=%r; using %.1fs",
+                raw,
+                _DEFAULT_LOOP_TELEMETRY_INTERVAL_SECONDS,
+            )
+            return _DEFAULT_LOOP_TELEMETRY_INTERVAL_SECONDS
+        return interval
 
     def _resolve_colocated_queue_service(
         self,
@@ -898,8 +969,14 @@ def run_worker(
     max_batches: int | None = None,
     queue_service: QueueService | None = None,
     app_obj: Any = None,
+    loop_recorder: EventLoopRecorder | None = None,
 ) -> None:
-    """Entry point that constructs and runs a ``Worker``."""
+    """Entry point that constructs and runs a ``Worker``.
+
+    Loop telemetry follows `Worker.run`: `VERTEBRA_LOOP_TELEMETRY=1` (or `true`) or an explicit
+    `loop_recorder` attaches an `EventLoopRecorder` to the worker's loop pool, and the pool is
+    registered with `zpages` for `/taskz`.
+    """
     worker = Worker(
         handlers,
         mounts=mounts,
@@ -914,6 +991,7 @@ def run_worker(
         max_batches=max_batches,
         queue_service=queue_service,
         app_obj=app_obj,
+        loop_recorder=loop_recorder,
     )
     worker.run()
 

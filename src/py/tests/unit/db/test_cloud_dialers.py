@@ -1941,12 +1941,78 @@ async def test_aws_and_azure_dialers_pre_expiry_token_rotation(
 
 
 @pytest.mark.parametrize(
+    ("endpoint_host", "explicit_authority", "env_authority", "expected_authority"),
+    [
+        ("contoso-pg.postgres.database.azure.com", None, None, None),
+        ("gov-pg.postgres.database.usgovcloudapi.net", None, None, "https://login.microsoftonline.us"),
+        ("cn-sql.database.chinacloudapi.cn", None, None, "https://login.chinacloudapi.cn"),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            None,
+            "https://login.example.test",
+            "https://login.example.test",
+        ),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            "https://login.override.test",
+            "https://login.example.test",
+            "https://login.override.test",
+        ),
+    ],
+)
+def test_azure_entra_dialer_selects_authority_host_for_endpoint_cloud(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_host: str,
+    explicit_authority: str | None,
+    env_authority: str | None,
+    expected_authority: str | None,
+) -> None:
+    """Verify Azure dialers pick the Entra authority for sovereign clouds unless one is set explicitly."""
+    if env_authority is None:
+        monkeypatch.delenv("AZURE_AUTHORITY_HOST", raising=False)
+    else:
+        monkeypatch.setenv("AZURE_AUTHORITY_HOST", env_authority)
+
+    dialer = SyncAzureEntraDialer(
+        endpoint_host,
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="cid",
+        client_secret="test-client-secret-placeholder",
+        authority_host=explicit_authority,
+    )
+    provider = dialer.token_provider
+    assert isinstance(provider, AzureEntraTokenProvider)
+    assert provider.authority_host == expected_authority
+
+
+@pytest.mark.parametrize(
     ("endpoint_host", "engine", "expected_engine", "expected_port", "expected_scope"),
     [
         ("contoso-pg.postgres.database.azure.com", None, "postgres", 5432, AZURE_POSTGRES_SCOPE),
         ("contoso-mysql.mysql.database.azure.com", None, "mysql", 3306, AZURE_MYSQL_SCOPE),
         ("contoso-sql.database.windows.net", None, "mssql", 1433, AZURE_MSSQL_SCOPE),
         ("privatelink-sql.internal.corp", "sqlserver", "mssql", 1433, AZURE_MSSQL_SCOPE),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            None,
+            "postgres",
+            5432,
+            "https://ossrdbms-aad.database.usgovcloudapi.net/.default",
+        ),
+        (
+            "gov-sql.database.usgovcloudapi.net",
+            None,
+            "mssql",
+            1433,
+            "https://database.usgovcloudapi.net/.default",
+        ),
+        (
+            "cn-mysql.mysql.database.chinacloudapi.cn",
+            None,
+            "mysql",
+            3306,
+            "https://ossrdbms-aad.database.chinacloudapi.cn/.default",
+        ),
     ],
 )
 def test_azure_entra_dialer_scope_selection_and_connection_kwargs(
@@ -2110,3 +2176,124 @@ def test_vertebra_db_lazy_cloud_dialer_resolution_in_fresh_interpreter() -> None
     )
     proc = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
+
+
+_DSQL_TEST_ENDPOINT = "abc123def456.dsql.us-east-1.on.aws"
+_AWS_TEST_KEYS: dict[str, Any] = {
+    "access_key_id": "test-access-key-placeholder",
+    "secret_access_key": "test-secret-key-placeholder",
+}
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize("native_admin", [True, False])
+@pytest.mark.parametrize("rebuild_port", [None, 5433], ids=["reuse-native", "rebuild-native"])
+def test_aws_aurora_dsql_dialer_wrapping_inherits_native_admin(
+    dialer_cls: Any,
+    native_admin: bool,
+    rebuild_port: int | None,
+) -> None:
+    """Verify wrapping a native `AwsAuroraDsqlDialer` keeps its `admin` flag on the dialer and its token provider."""
+    native = AwsAuroraDsqlDialer(_DSQL_TEST_ENDPOINT, admin=native_admin)
+    dialer = dialer_cls(native, port=rebuild_port, **_AWS_TEST_KEYS)
+
+    assert dialer.admin is native_admin
+    assert dialer.token_provider.admin is native_admin
+    assert dialer.action == ("DbConnectAdmin" if native_admin else "DbConnect")
+    assert dialer.username == ("admin" if native_admin else "postgres")
+    assert dialer_cls(native, admin=native_admin, port=rebuild_port, **_AWS_TEST_KEYS).admin is native_admin
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize(
+    ("native_admin", "provider_admin", "explicit_admin"),
+    [
+        (True, None, False),
+        (False, None, True),
+        (True, False, None),
+        (None, True, False),
+        (None, False, True),
+    ],
+)
+def test_aws_aurora_dsql_dialer_rejects_conflicting_admin_sources(
+    dialer_cls: Any,
+    native_admin: bool | None,
+    provider_admin: bool | None,
+    explicit_admin: bool | None,
+) -> None:
+    """Verify an `admin` argument, wrapped dialer, and DSQL token provider that disagree fail instead of one winning."""
+    endpoint: Any = (
+        _DSQL_TEST_ENDPOINT if native_admin is None else AwsAuroraDsqlDialer(_DSQL_TEST_ENDPOINT, admin=native_admin)
+    )
+    kwargs: dict[str, Any] = dict(_AWS_TEST_KEYS)
+    if provider_admin is not None:
+        kwargs = {
+            "token_provider": AwsAuroraDsqlIamTokenProvider(
+                hostname=_DSQL_TEST_ENDPOINT,
+                region="us-east-1",
+                admin=provider_admin,
+                **_AWS_TEST_KEYS,
+            )
+        }
+    if explicit_admin is not None:
+        kwargs["admin"] = explicit_admin
+    with pytest.raises(ImproperConfigurationError, match="admin"):
+        dialer_cls(endpoint, **kwargs)
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize("provider_admin", [True, False])
+def test_aws_aurora_dsql_dialer_admin_defaults_to_token_provider(dialer_cls: Any, provider_admin: bool) -> None:
+    """Verify an omitted `admin` argument follows a supplied `AwsAuroraDsqlIamTokenProvider`."""
+    provider = AwsAuroraDsqlIamTokenProvider(
+        hostname=_DSQL_TEST_ENDPOINT,
+        region="us-east-1",
+        admin=provider_admin,
+        **_AWS_TEST_KEYS,
+    )
+    dialer = dialer_cls(_DSQL_TEST_ENDPOINT, token_provider=provider)
+    assert dialer.admin is provider_admin
+    assert dialer.token_provider is provider
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsRdsDialer, AsyncAwsRdsDialer])
+@pytest.mark.parametrize(
+    ("endpoint_host", "port", "engine", "expected_engine", "expected_port", "expected_user", "expected_db"),
+    [
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:3306", None, None, "mysql", 3306, "admin", "mysql"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", 3306, None, "mysql", 3306, "admin", "mysql"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", None, "mysql", "mysql", 3306, "admin", "mysql"),
+        (
+            "orders.c9akciq32.us-east-1.rds.amazonaws.com:3306",
+            None,
+            "postgres",
+            "postgres",
+            3306,
+            "postgres",
+            "postgres",
+        ),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:5432", None, None, "postgres", 5432, "postgres", "postgres"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", None, None, "postgres", 5432, "postgres", "postgres"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:3307", None, "mariadb", "mysql", 3307, "admin", "mysql"),
+    ],
+)
+def test_aws_rds_dialer_resolves_engine_before_default_username(
+    dialer_cls: Any,
+    endpoint_host: str,
+    port: int | None,
+    engine: str | None,
+    expected_engine: str,
+    expected_port: int,
+    expected_user: str,
+    expected_db: str,
+) -> None:
+    """Verify the default IAM username follows the engine resolved from `engine`, `port`, or an embedded port."""
+    dialer = dialer_cls(endpoint_host, port=port, engine=engine, clock=lambda: 1_794_873_600.0, **_AWS_TEST_KEYS)
+
+    assert dialer.engine == expected_engine
+    assert dialer.port == expected_port
+    assert dialer.username == expected_user
+    assert dialer.database == expected_db
+    assert dialer.token_provider.username == expected_user
+    signed = dialer.token_provider.resolve_sync()
+    assert parse_qs(urlsplit(f"https://{signed}").query)["DBUser"] == [expected_user]

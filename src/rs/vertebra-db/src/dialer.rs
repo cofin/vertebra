@@ -1113,9 +1113,63 @@ impl AzureDatabaseEngine {
 
     /// Canonical Microsoft Entra ID OAuth2 scope for the Azure database engine.
     pub const fn scope(self) -> &'static str {
+        self.scope_for(AzureCloud::Public)
+    }
+
+    /// Microsoft Entra ID OAuth2 scope for the Azure database engine in `cloud`.
+    pub const fn scope_for(self, cloud: AzureCloud) -> &'static str {
+        match (self, cloud) {
+            (Self::Postgres | Self::Mysql, AzureCloud::Public) => AZURE_OSSRDBMS_SCOPE,
+            (Self::Mssql, AzureCloud::Public) => AZURE_SQL_DATABASE_SCOPE,
+            (Self::Postgres | Self::Mysql, AzureCloud::UsGovernment) => {
+                "https://ossrdbms-aad.database.usgovcloudapi.net/.default"
+            }
+            (Self::Mssql, AzureCloud::UsGovernment) => {
+                "https://database.usgovcloudapi.net/.default"
+            }
+            (Self::Postgres | Self::Mysql, AzureCloud::China) => {
+                "https://ossrdbms-aad.database.chinacloudapi.cn/.default"
+            }
+            (Self::Mssql, AzureCloud::China) => "https://database.chinacloudapi.cn/.default",
+        }
+    }
+}
+
+/// Azure cloud environment that owns a database endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AzureCloud {
+    Public,
+    UsGovernment,
+    China,
+}
+
+impl AzureCloud {
+    /// Infer the Azure cloud from a normalized lowercase database hostname.
+    pub fn from_host(host: &str) -> Self {
+        if host.ends_with(".usgovcloudapi.net") {
+            Self::UsGovernment
+        } else if host.ends_with(".chinacloudapi.cn") {
+            Self::China
+        } else {
+            Self::Public
+        }
+    }
+
+    /// Canonical lowercase cloud identifier (`"public"`, `"usgovernment"`, `"china"`).
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Postgres | Self::Mysql => AZURE_OSSRDBMS_SCOPE,
-            Self::Mssql => AZURE_SQL_DATABASE_SCOPE,
+            Self::Public => "public",
+            Self::UsGovernment => "usgovernment",
+            Self::China => "china",
+        }
+    }
+
+    /// Microsoft Entra ID authority base URL for this cloud.
+    pub const fn authority_host(self) -> &'static str {
+        match self {
+            Self::Public => "https://login.microsoftonline.com",
+            Self::UsGovernment => "https://login.microsoftonline.us",
+            Self::China => "https://login.chinacloudapi.cn",
         }
     }
 }
@@ -1127,6 +1181,7 @@ pub struct AzureEntraDialer {
     pub server_port: u16,
     pub engine: AzureDatabaseEngine,
     pub server_name: Option<String>,
+    pub cloud: AzureCloud,
 }
 
 impl AzureEntraDialer {
@@ -1185,11 +1240,13 @@ impl AzureEntraDialer {
             resolved_engine.default_port()
         };
 
+        let cloud = AzureCloud::from_host(&host);
         Ok(Self {
             endpoint_host: host,
             server_port,
             engine: resolved_engine,
             server_name,
+            cloud,
         })
     }
 
@@ -1263,9 +1320,14 @@ impl AzureEntraDialer {
         Ok(None)
     }
 
-    /// Return the canonical Entra OAuth2 scope for this Azure database endpoint.
+    /// Return the Entra OAuth2 scope for this Azure database endpoint and its cloud.
     pub const fn scope(&self) -> &'static str {
-        self.engine.scope()
+        self.engine.scope_for(self.cloud)
+    }
+
+    /// Return the Entra authority base URL for this endpoint's Azure cloud.
+    pub const fn authority_host(&self) -> &'static str {
+        self.cloud.authority_host()
     }
 }
 
@@ -1629,6 +1691,50 @@ mod tests {
         let explicit_mssql = AzureEntraDialer::new("127.0.0.1", None, Some("mssql")).unwrap();
         assert_eq!(explicit_mssql.server_port, 1433);
         assert_eq!(explicit_mssql.scope(), AZURE_SQL_DATABASE_SCOPE);
+        assert_eq!(explicit_mssql.cloud, AzureCloud::Public);
+        assert_eq!(
+            explicit_mssql.authority_host(),
+            "https://login.microsoftonline.com"
+        );
+
+        let sovereign_cases = [
+            (
+                "gov-pg.postgres.database.usgovcloudapi.net",
+                AzureCloud::UsGovernment,
+                "https://ossrdbms-aad.database.usgovcloudapi.net/.default",
+                "https://login.microsoftonline.us",
+            ),
+            (
+                "gov-mysql.mysql.database.usgovcloudapi.net",
+                AzureCloud::UsGovernment,
+                "https://ossrdbms-aad.database.usgovcloudapi.net/.default",
+                "https://login.microsoftonline.us",
+            ),
+            (
+                "gov-sql.database.usgovcloudapi.net",
+                AzureCloud::UsGovernment,
+                "https://database.usgovcloudapi.net/.default",
+                "https://login.microsoftonline.us",
+            ),
+            (
+                "cn-pg.postgres.database.chinacloudapi.cn",
+                AzureCloud::China,
+                "https://ossrdbms-aad.database.chinacloudapi.cn/.default",
+                "https://login.chinacloudapi.cn",
+            ),
+            (
+                "cn-sql.database.chinacloudapi.cn",
+                AzureCloud::China,
+                "https://database.chinacloudapi.cn/.default",
+                "https://login.chinacloudapi.cn",
+            ),
+        ];
+        for (host, cloud, scope, authority) in sovereign_cases {
+            let dialer = AzureEntraDialer::new(host, None, None).unwrap();
+            assert_eq!(dialer.cloud, cloud, "{host}");
+            assert_eq!(dialer.scope(), scope, "{host}");
+            assert_eq!(dialer.authority_host(), authority, "{host}");
+        }
 
         for bad in [
             "https://my-pg.postgres.database.azure.com",

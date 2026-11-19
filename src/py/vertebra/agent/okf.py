@@ -46,10 +46,22 @@ _STREAM_CHUNK_BYTES: Final[int] = 16_384
 
 _DRIVE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z]:")
 _INT_SCALAR_RE: Final[re.Pattern[str]] = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
-_FLOAT_SCALAR_RE: Final[re.Pattern[str]] = re.compile(r"^-?(?:0|[1-9][0-9]*)\.[0-9]+(?:[eE][+-]?[0-9]+)?$")
+_FLOAT_SCALAR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$"
+)
 _NUMERIC_OR_HEX_STR_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?:[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9][0-9a-fA-F]*|0[xX][0-9a-fA-F]+)$"
 )
+_YAML_FOREIGN_TYPED_STR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:"
+    r"[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?"
+    r"|[+-]?\.[0-9_]+(?:[eE][+-]?[0-9]+)?"
+    r"|[+-]?0[oObBxX][0-9a-fA-F_]+"
+    r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt \t].*)?"
+    r"|=|<<"
+    r")$"
+)
+_BLOCK_SCALAR_HEADER_RE: Final[re.Pattern[str]] = re.compile(r"^([|>])(?:([+-])([0-9])?|([0-9])([+-])?)?$")
 _YAML_RESERVED_WORDS: Final[frozenset[str]] = frozenset(
     {
         "true",
@@ -158,10 +170,10 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
         if isinstance(content, str):
             raw_bytes = content.encode("utf-8")
             if len(raw_bytes) > MAX_OKF_ENTRY_BYTES:
-                raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
+                raise _entry_too_large_error(rel_path, len(raw_bytes), MAX_OKF_ENTRY_BYTES)
             return content
         if len(content) > MAX_OKF_ENTRY_BYTES:
-            raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
+            raise _entry_too_large_error(rel_path, len(content), MAX_OKF_ENTRY_BYTES)
         try:
             return content.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -422,7 +434,11 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         exclude_log: bool = True,
         max_truth_lines: int = DEFAULT_MAX_TRUTH_LINES,
     ) -> OkfBundle:
-        """Load and validate an OKF v0.2 bundle from a filesystem directory."""
+        """Load and validate an OKF v0.2 bundle from a filesystem directory.
+
+        Every loaded Markdown entry, including a reserved `log.md` loaded with `exclude_log=False`,
+        must fit `MAX_OKF_ENTRY_BYTES`; the error names the entry, its size, and the limit.
+        """
         root_path = Path(root)
         if root_path.is_symlink():
             raise OkfValidationError(f"OKF bundle root must not be a symlink: {root_path}")
@@ -470,7 +486,12 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         exclude_log: bool = False,
         max_truth_lines: int = DEFAULT_MAX_TRUTH_LINES,
     ) -> OkfBundle:
-        """Load and validate an OKF v0.2 bundle from a ZIP archive path, buffer, or stream."""
+        """Load and validate an OKF v0.2 bundle from a ZIP archive path, buffer, or stream.
+
+        Symlink, path-safety, and duplicate-path checks apply to every archive member. Members that
+        are not Markdown, or that `exclude_specs` / `exclude_log` filter out, are skipped before the
+        `MAX_OKF_ENTRY_BYTES` check and are never decompressed.
+        """
         loaded: list[OkfDocument] = []
         seen_paths: set[str] = set()
 
@@ -492,10 +513,15 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                         raise OkfValidationError(f"Duplicate ZIP entry path: {rel_path!r}")
                     seen_paths.add(rel_path)
 
+                    if exclude_specs and cls._is_specs_path(rel_path):
+                        continue
+                    if exclude_log and cls._is_log_path(rel_path):
+                        continue
+                    if not rel_path.endswith(".md"):
+                        continue
+
                     if info.file_size > MAX_OKF_ENTRY_BYTES:
-                        raise OkfValidationError(
-                            f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes"
-                        )
+                        raise _entry_too_large_error(rel_path, info.file_size, MAX_OKF_ENTRY_BYTES)
 
                     with archive.open(info, "r") as member_stream:
                         raw_bytes = cls._read_stream_bounded(
@@ -503,13 +529,6 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                             rel_path=rel_path,
                             max_bytes=MAX_OKF_ENTRY_BYTES,
                         )
-
-                    if exclude_specs and cls._is_specs_path(rel_path):
-                        continue
-                    if exclude_log and cls._is_log_path(rel_path):
-                        continue
-                    if not rel_path.endswith(".md"):
-                        continue
 
                     loaded.append(
                         OkfDocument.parse(
@@ -590,6 +609,9 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
 
             rel_path = _normalize_rel_path(rel_posix)
             with cls._open_file_nofollow(entry) as handle:
+                on_disk_bytes = os.fstat(handle.fileno()).st_size
+                if on_disk_bytes > MAX_OKF_ENTRY_BYTES:
+                    raise _entry_too_large_error(rel_path, on_disk_bytes, MAX_OKF_ENTRY_BYTES)
                 raw_bytes = cls._read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
             out.append(OkfDocument.parse(rel_path, raw_bytes, max_truth_lines=max_truth_lines))
 
@@ -643,7 +665,9 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                 break
             total += len(chunk)
             if total > max_bytes:
-                raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {max_bytes} bytes")
+                raise OkfValidationError(
+                    f"OKF entry '{rel_path}' streamed more than the maximum entry size of {max_bytes} bytes"
+                )
             chunks.append(chunk)
         return b"".join(chunks)
 
@@ -655,6 +679,13 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         except OSError as exc:
             raise OkfValidationError(f"Unable to safely open OKF entry '{path}': {exc}") from exc
         return os.fdopen(fd, "rb")
+
+
+def _entry_too_large_error(rel_path: str, actual_bytes: int, max_bytes: int) -> OkfValidationError:
+    """Build the size-ceiling error naming the entry, its size, and the per-entry limit."""
+    return OkfValidationError(
+        f"OKF entry '{rel_path}' is {actual_bytes} bytes, exceeding the maximum entry size of {max_bytes} bytes"
+    )
 
 
 def _normalize_rel_path(raw_path: str) -> str:
@@ -697,16 +728,152 @@ def _tokenize_yaml_lines(
     *,
     rel_path: str,
 ) -> list[tuple[int, str, int]]:
+    """Tokenize frontmatter lines into `(indent, text, line_no)`, inlining block scalars as quoted strings."""
     tokens: list[tuple[int, str, int]] = []
-    for offset, raw_line in enumerate(yaml_lines, start=2):
+    idx = 0
+    while idx < len(yaml_lines):
+        raw_line = yaml_lines[idx]
+        line_no = idx + 2
+        idx += 1
         if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]:
-            raise OkfValidationError(f"Tabs are forbidden in YAML indentation on line {offset} in '{rel_path}'")
+            raise OkfValidationError(f"Tabs are forbidden in YAML indentation on line {line_no} in '{rel_path}'")
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         indent = len(raw_line) - len(raw_line.lstrip(" "))
-        tokens.append((indent, stripped, offset))
+        header = _match_block_scalar_header(stripped, line_no=line_no, rel_path=rel_path)
+        if header is not None:
+            prefix, parent_offset, style, chomp, explicit_indent = header
+            block_text, idx = _read_block_scalar(
+                yaml_lines,
+                idx,
+                parent_indent=indent + parent_offset,
+                style=style,
+                chomp=chomp,
+                explicit_indent=explicit_indent,
+                rel_path=rel_path,
+            )
+            stripped = f"{prefix}{encode_json(block_text)}"
+        tokens.append((indent, stripped, line_no))
     return tokens
+
+
+def _match_block_scalar_header(
+    text: str,
+    *,
+    line_no: int,
+    rel_path: str,
+) -> tuple[str, int, str, str, int] | None:
+    """Detect a `|` or `>` block scalar header at the end of a `key:` or `- ` line.
+
+    Returns:
+        `(prefix, parent_offset, style, chomp, explicit_indent)` where `prefix` is the line text up
+        to the value, `parent_offset` is the column of the owning key or dash relative to the line
+        indentation, `chomp` is `""`, `"-"`, or `"+"`, and `explicit_indent` is `0` when the content
+        indentation is auto-detected. `None` when the line does not open a block scalar.
+    """
+    rest = text
+    offset = 0
+    parent_offset: int | None = None
+    while rest != "-" and _is_sequence_line(rest):
+        after_dash = rest[2:].lstrip(" ")
+        parent_offset = offset
+        offset += len(rest) - len(after_dash)
+        rest = after_dash
+
+    colon_pos = _find_mapping_colon(rest)
+    if colon_pos is not None:
+        value_text = rest[colon_pos + 1 :]
+        prefix = f"{text[: offset + colon_pos + 1]} "
+        parent_offset = offset
+    elif parent_offset is not None:
+        value_text = rest
+        prefix = text[:offset]
+    else:
+        return None
+
+    matched = _BLOCK_SCALAR_HEADER_RE.match(_strip_inline_yaml_comment(value_text.strip()))
+    if matched is None:
+        return None
+    chomp = matched.group(2) or matched.group(5) or ""
+    indent_digit = matched.group(3) or matched.group(4)
+    if indent_digit == "0":
+        raise OkfValidationError(f"Block scalar indentation indicator must be 1-9 on line {line_no} in '{rel_path}'")
+    return prefix, parent_offset, matched.group(1), chomp, int(indent_digit) if indent_digit else 0
+
+
+def _read_block_scalar(
+    yaml_lines: list[str],
+    idx: int,
+    *,
+    parent_indent: int,
+    style: str,
+    chomp: str,
+    explicit_indent: int,
+    rel_path: str,
+) -> tuple[str, int]:
+    """Read literal (`|`) or folded (`>`) block scalar content starting at `yaml_lines[idx]`.
+
+    Content lines are those indented deeper than `parent_indent`; whitespace-only lines inside the
+    block count as empty lines. Chomping follows YAML: clip keeps one trailing newline, `-` strips
+    all, and `+` keeps every trailing empty line.
+    """
+    content_indent = parent_indent + explicit_indent if explicit_indent else 0
+    collected: list[str] = []
+    while idx < len(yaml_lines):
+        raw_line = yaml_lines[idx]
+        if not raw_line.strip():
+            collected.append("")
+            idx += 1
+            continue
+        lead = len(raw_line) - len(raw_line.lstrip(" "))
+        if lead <= parent_indent:
+            break
+        if not content_indent:
+            content_indent = lead
+        if lead < content_indent:
+            raise OkfValidationError(f"Under-indented block scalar line {idx + 2} in '{rel_path}'")
+        collected.append(raw_line[content_indent:])
+        idx += 1
+
+    trailing_empty = 0
+    while trailing_empty < len(collected) and not collected[len(collected) - 1 - trailing_empty]:
+        trailing_empty += 1
+    body = collected[: len(collected) - trailing_empty]
+    if not body:
+        return ("\n" * trailing_empty if chomp == "+" else ""), idx
+    text = "\n".join(body) if style == "|" else _fold_block_lines(body)
+    if chomp == "-":
+        return text, idx
+    if chomp == "+":
+        return text + "\n" * (trailing_empty + 1), idx
+    return f"{text}\n", idx
+
+
+def _fold_block_lines(lines: list[str]) -> str:
+    """Fold `>` block scalar lines: adjacent text lines join with a space and empty lines become newlines.
+
+    Line breaks next to a more-indented line (one starting with a space or tab) are preserved.
+    """
+    parts: list[str] = []
+    previous: str | None = None
+    empty_run = 0
+    for line in lines:
+        if not line:
+            empty_run += 1
+            continue
+        if previous is None:
+            parts.append("\n" * empty_run)
+        elif previous[0] in " \t" or line[0] in " \t":
+            parts.append("\n" * (empty_run + 1))
+        elif empty_run == 0:
+            parts.append(" ")
+        else:
+            parts.append("\n" * empty_run)
+        parts.append(line)
+        previous = line
+        empty_run = 0
+    return "".join(parts)
 
 
 def _is_sequence_line(stripped: str) -> bool:
@@ -783,6 +950,12 @@ def _parse_yaml_sequence(
             break
 
         after_dash = "" if text == "-" else text[2:].lstrip(" ")
+        if _is_sequence_line(after_dash):
+            nested_indent = seq_indent + len(text) - len(after_dash)
+            tokens[idx] = (nested_indent, after_dash, line_no)
+            inline_nested, idx = _parse_yaml_sequence(tokens, idx, nested_indent, rel_path=rel_path)
+            items.append(inline_nested)
+            continue
         item_indent = seq_indent + 2
         idx += 1
 
@@ -824,7 +997,8 @@ def _parse_yaml_sequence(
     return items, idx
 
 
-def _has_mapping_colon(text: str) -> bool:
+def _find_mapping_colon(text: str) -> int | None:
+    """Return the index of the first unquoted `:` followed by whitespace or end of text, or `None`."""
     quote_char: str | None = None
     escaped = False
     for i, ch in enumerate(text):
@@ -840,30 +1014,16 @@ def _has_mapping_colon(text: str) -> bool:
             quote_char = ch
             continue
         if ch == ":" and (i + 1 == len(text) or text[i + 1] in (" ", "\t")):
-            return True
-    return False
+            return i
+    return None
+
+
+def _has_mapping_colon(text: str) -> bool:
+    return _find_mapping_colon(text) is not None
 
 
 def _split_yaml_key_value(text: str, *, line_no: int, rel_path: str) -> tuple[str, str]:
-    quote_char: str | None = None
-    escaped = False
-    split_pos: int | None = None
-    for i, ch in enumerate(text):
-        if quote_char is not None:
-            if quote_char == '"' and not escaped and ch == "\\":
-                escaped = True
-                continue
-            if not escaped and ch == quote_char:
-                quote_char = None
-            escaped = False
-            continue
-        if ch in ('"', "'"):
-            quote_char = ch
-            continue
-        if ch == ":" and (i + 1 == len(text) or text[i + 1] in (" ", "\t")):
-            split_pos = i
-            break
-
+    split_pos = _find_mapping_colon(text)
     if split_pos is None:
         raise OkfValidationError(f"Expected 'key: value' on frontmatter line {line_no} in '{rel_path}'")
 
@@ -1117,7 +1277,7 @@ def _emit_yaml_scalar(value: Any) -> str:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise OkfValidationError(f"Non-finite float is forbidden in OKF frontmatter: {value!r}")
-        return str(value)
+        return _emit_yaml_float(value)
     if isinstance(value, str):
         if _needs_yaml_quoting(value):
             return str(encode_json(value))
@@ -1125,13 +1285,26 @@ def _emit_yaml_scalar(value: Any) -> str:
     raise OkfValidationError(f"Unsupported frontmatter value type: {type(value).__name__}")
 
 
+def _emit_yaml_float(value: float) -> str:
+    """Render a finite float as its shortest repr, forcing a fractional part before any exponent.
+
+    `1e+20` becomes `1.0e+20` so YAML 1.1 readers, which require a dot in floats, agree with this parser.
+    """
+    text = repr(value)
+    mantissa, exp_marker, exponent = text.partition("e")
+    if exp_marker and "." not in mantissa:
+        return f"{mantissa}.0e{exponent}"
+    return text
+
+
 def _needs_yaml_quoting(value: str) -> bool:
+    """Return whether a string must be double-quoted to stay a string for this parser and standard YAML readers."""
     if not value or value != value.strip():
         return True
     if value[0] in _YAML_LEADING_CHARS:
         return True
     if value.lower() in _YAML_RESERVED_WORDS:
         return True
-    if _NUMERIC_OR_HEX_STR_RE.match(value):
+    if _NUMERIC_OR_HEX_STR_RE.match(value) or _YAML_FOREIGN_TYPED_STR_RE.match(value):
         return True
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _YAML_SPECIAL_CHARS for ch in value)

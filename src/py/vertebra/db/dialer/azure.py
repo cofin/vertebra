@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import ssl
 from collections.abc import Callable
@@ -17,19 +18,11 @@ from vertebra.db.dialer._base import (
     validate_dialer_port,
 )
 from vertebra.db.driver._cloud_auth import (
-    AZURE_MSSQL_SCOPE,
-    AZURE_MYSQL_SCOPE,
-    AZURE_POSTGRES_SCOPE,
     AzureEntraTokenProvider,
     DatabaseTokenProvider,
 )
 from vertebra.typing import ImproperConfigurationError
 
-_ENGINE_DEFAULT_SCOPES: Final[dict[str, str]] = {
-    "postgres": AZURE_POSTGRES_SCOPE,
-    "mysql": AZURE_MYSQL_SCOPE,
-    "mssql": AZURE_MSSQL_SCOPE,
-}
 _ENGINE_DEFAULT_DATABASES: Final[dict[str, str]] = {
     "postgres": "postgres",
     "mysql": "mysql",
@@ -107,8 +100,11 @@ class _BaseAzureEntraDialer:
             except ValueError as exc:
                 raise ImproperConfigurationError(str(exc)) from exc
 
-        default_scope = _ENGINE_DEFAULT_SCOPES[native.engine]
+        default_scope = native.scope
         explicit_scope = validate_dialer_non_empty(scope, field_name="scope") if scope is not None else None
+        resolved_authority_host = authority_host
+        if resolved_authority_host is None and native.cloud != "public":
+            resolved_authority_host = os.environ.get("AZURE_AUTHORITY_HOST", "").strip() or native.authority_host
 
         if token_provider is not None:
             if isinstance(token_provider, AzureEntraTokenProvider):
@@ -125,7 +121,7 @@ class _BaseAzureEntraDialer:
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "federated_token_file": federated_token_file,
-                "authority_host": authority_host,
+                "authority_host": resolved_authority_host,
                 "scope": resolved_scope,
                 "token_endpoint": token_endpoint,
                 "api_version": api_version,

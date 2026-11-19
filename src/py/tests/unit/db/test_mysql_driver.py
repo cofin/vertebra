@@ -8,14 +8,19 @@ import decimal
 import hashlib
 import importlib
 import socket
+import ssl
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import msgspec
 import pyarrow as pa
 import pytest
 from sqlalchemy import Column, MetaData, Table, create_engine, select, text
@@ -816,9 +821,10 @@ def _extract_handshake_auth_data(payload: bytes) -> bytes:
     return payload[pos : pos + auth_len]
 
 
-def _mysql_handshake_v10(conn_id: int, nonce: bytes) -> bytes:
+def _mysql_handshake_v10(conn_id: int, nonce: bytes, extra_caps: int = 0) -> bytes:
     caps = (
-        0x0000_0001
+        extra_caps
+        | 0x0000_0001
         | 0x0000_0002
         | 0x0000_0004
         | 0x0000_0008
@@ -854,8 +860,200 @@ def _mysql_err_packet(errno: int, sqlstate: str, message: str) -> bytes:
     return b"\xff" + struct.pack("<H", errno) + b"#" + sqlstate.encode("ascii") + message.encode("utf-8")
 
 
+_MYSQL_CLIENT_SSL_CAPABILITY = 0x0000_0800
+
+
+def _generate_mysql_tls_credentials(subject_alt_name: str) -> tuple[str, str]:
+    """Generate a self-signed leaf certificate and private key carrying one SubjectAltName entry."""
+    with tempfile.TemporaryDirectory(prefix="vtb-mysql-tls-") as tmpdir:
+        key_path = Path(tmpdir) / "key.pem"
+        cert_path = Path(tmpdir) / "cert.pem"
+        cmd = [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=vtb-mysql-loopback",
+            "-addext",
+            f"subjectAltName={subject_alt_name}",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
+
+
+class _MySQLTlsLoopbackServer:
+    """Loopback MySQL wire fake that upgrades to TLS after SSLRequest and rejects the login with error 1045.
+
+    The fake records `ssl_request`, `tls_established`, `tls_rejected`, and `login:<user>` events so tests can
+    tell a completed TLS handshake (the client reached authentication) from a certificate rejection.
+    """
+
+    def __init__(self, cert_pem: str, key_pem: str) -> None:
+        self.events: list[str] = []
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        with tempfile.TemporaryDirectory(prefix="vtb-mysql-srv-") as tmpdir:
+            cert_path = Path(tmpdir) / "cert.pem"
+            key_path = Path(tmpdir) / "key.pem"
+            cert_path.write_text(cert_pem, encoding="utf-8")
+            key_path.write_text(key_pem, encoding="utf-8")
+            self._ctx.load_cert_chain(str(cert_path), str(key_path))
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port: int = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, name="vtb-mysql-tls-fake", daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        conn_id = 0
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            conn_id += 1
+            with conn:
+                conn.settimeout(5.0)
+                try:
+                    self._handle(conn, conn_id)
+                except (OSError, EOFError):
+                    self.events.append("io_closed")
+
+    def _handle(self, conn: socket.socket, conn_id: int) -> None:
+        nonce = hashlib.sha1(f"vtb-tls-{conn_id}".encode()).digest()
+        conn.sendall(_mysql_packet(0, _mysql_handshake_v10(conn_id, nonce, _MYSQL_CLIENT_SSL_CAPABILITY)))
+        _, ssl_request = _read_mysql_packet(conn)
+        client_caps = struct.unpack_from("<I", ssl_request, 0)[0]
+        if len(ssl_request) != 32 or not client_caps & _MYSQL_CLIENT_SSL_CAPABILITY:
+            self.events.append("plaintext_login")
+            return
+        self.events.append("ssl_request")
+        try:
+            tls_conn = self._ctx.wrap_socket(conn, server_side=True)
+        except ssl.SSLError:
+            self.events.append("tls_rejected")
+            return
+        with tls_conn:
+            self.events.append("tls_established")
+            try:
+                seq, login = _read_mysql_packet(tls_conn)
+            except (ssl.SSLError, EOFError):
+                self.events.append("tls_rejected")
+                return
+            user = login[32 : login.index(b"\x00", 32)].decode("utf-8")
+            self.events.append(f"login:{user}")
+            tls_conn.sendall(_mysql_packet(seq + 1, _mysql_err_packet(1045, "28000", "Access denied for user")))
+
+    def close(self) -> None:
+        self._stop.set()
+        self._listener.close()
+        self._thread.join(timeout=5.0)
+
+
+@pytest.fixture(scope="module")
+def mysql_tls_credentials() -> dict[str, tuple[str, str]]:
+    """Generate loopback TLS credentials once: a 127.0.0.1 leaf, an unrelated leaf, and a wrong-name leaf."""
+    return {
+        "loopback": _generate_mysql_tls_credentials("IP:127.0.0.1"),
+        "foreign": _generate_mysql_tls_credentials("IP:127.0.0.1"),
+        "wrong_name": _generate_mysql_tls_credentials("DNS:other.mysql.example"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("ssl_mode", "ca_form", "server_identity", "trusted_identity", "handshake_completes"),
+    [
+        ("verify-full", "inline", "loopback", "loopback", True),
+        ("verify-full", "inline_padded", "loopback", "loopback", True),
+        ("verify-full", "path", "loopback", "loopback", True),
+        ("verify-ca", "inline", "loopback", "loopback", True),
+        ("require", "inline", "loopback", "loopback", True),
+        ("require", "inline", "loopback", "rds_bundle", True),
+        ("verify-full", "inline", "loopback", "foreign", False),
+        ("verify-full", "path", "loopback", "foreign", False),
+        ("verify-ca", "inline", "loopback", "foreign", False),
+        ("verify-full", "inline", "wrong_name", "wrong_name", False),
+        ("verify-full", "inline", "loopback", "rds_bundle", False),
+    ],
+)
+def test_mysql_tls_handshake_with_inline_and_path_ssl_ca(
+    mysql_tls_credentials: dict[str, tuple[str, str]],
+    tmp_path: Path,
+    ssl_mode: str,
+    ca_form: str,
+    server_identity: str,
+    trusted_identity: str,
+    handshake_completes: bool,
+) -> None:
+    """Verify inline PEM and file-path `ssl_ca` values complete or reject a real loopback TLS handshake."""
+    server_cert, server_key = mysql_tls_credentials[server_identity]
+    trusted_cert = (
+        aws_rds_root_ca_pem() if trusted_identity == "rds_bundle" else mysql_tls_credentials[trusted_identity][0]
+    )
+    if ca_form == "path":
+        ca_file = tmp_path / "ca.pem"
+        ca_file.write_text(trusted_cert, encoding="utf-8")
+        ssl_ca = str(ca_file)
+    elif ca_form == "inline_padded":
+        ssl_ca = f"\n  {trusted_cert}"
+    else:
+        ssl_ca = trusted_cert
+
+    srv = _MySQLTlsLoopbackServer(server_cert, server_key)
+    try:
+        cfg = MySQLConfig(
+            host="127.0.0.1",
+            port=srv.port,
+            user="tls_user",
+            password="test-token-placeholder",
+            database="vtb",
+            ssl_mode=ssl_mode,
+            ssl_ca=ssl_ca,
+            connect_timeout=5.0,
+        )
+        kwargs = build_mysql_client_kwargs(cfg)
+        assert kwargs["ssl_mode"] == ssl_mode
+        assert kwargs["ssl_ca"] == ssl_ca
+        driver = SyncMySQLDriver(cfg)
+        try:
+            with pytest.raises(DatabaseError) as exc_info:
+                driver.connect()
+                driver.ping()
+        finally:
+            driver.close()
+    finally:
+        srv.close()
+
+    detail = str(exc_info.value)
+    assert "File name too long" not in detail
+    assert "ssl_request" in srv.events
+    if handshake_completes:
+        assert "tls_established" in srv.events
+        assert "login:tls_user" in srv.events
+        assert "Access denied" in detail
+    else:
+        assert not any(event.startswith("login:") for event in srv.events)
+        assert "Access denied" not in detail
+
+
 def test_mysql_config_token_provider_redaction_and_ssl_defaults() -> None:
-    """Verify MySQLConfig redacts RDS credentials, defaults TLS to require, and preserves explicit ssl_mode."""
+    """Verify MySQLConfig redacts RDS credentials, defaults TLS to verify-full, and preserves explicit ssl_mode."""
     provider = AwsRdsIamTokenProvider(
         endpoint_host="db.example.us-east-1.rds.amazonaws.com",
         port=3306,
@@ -870,9 +1068,10 @@ def test_mysql_config_token_provider_redaction_and_ssl_defaults() -> None:
         dsn="mysql://iam_user:inline-secret@db.example.us-east-1.rds.amazonaws.com:3306/appdb",
         token_provider=provider,
     )
-    assert cfg.canonical_ssl_mode == "require"
+    assert cfg.ssl_mode is None
+    assert cfg.canonical_ssl_mode == "verify-full"
     params = cfg.parse_dsn_params()
-    assert params["ssl_mode"] == "require"
+    assert params["ssl_mode"] == "verify-full"
     expected_token = provider.resolve_sync()
     assert params["password"] == expected_token
     assert "X-Amz-Signature=" in expected_token
@@ -946,7 +1145,8 @@ async def test_mysql_config_azure_entra_default_scope_injection(
     )
     assert isinstance(cfg.token_provider, AzureEntraTokenProvider)
     assert cfg.token_provider.scope == expected_scope
-    assert cfg.canonical_ssl_mode == "require"
+    assert cfg.canonical_ssl_mode == "verify-full"
+    assert cfg.ssl_ca is None
     assert cfg.resolve_iam_password_sync() == f"test-token-placeholder-{expected_scope}"
     assert await cfg.resolve_iam_password_async(force_refresh=True) == f"test-token-placeholder-{expected_scope}"
     assert cfg.parse_dsn_params()["password"] == f"test-token-placeholder-{expected_scope}"
@@ -999,7 +1199,8 @@ def test_mysql_cloud_auth_rds_ca_attachment_and_remote_tls_enforcement(
             MySQLConfig.from_url(disabled_dsn, token_provider=provider)
 
         remote_cfg = MySQLConfig(dsn=default_dsn, token_provider=provider)
-        assert remote_cfg.canonical_ssl_mode == "require"
+        assert remote_cfg.canonical_ssl_mode == "verify-full"
+        assert build_mysql_connect_kwargs(remote_cfg)["ssl_mode"] == "verify-full"
         if provider_kind == "aws_rds":
             assert remote_cfg.ssl_ca == aws_rds_root_ca_pem()
             assert build_mysql_connect_kwargs(remote_cfg)["ssl_ca"] == aws_rds_root_ca_pem()
@@ -1012,6 +1213,214 @@ def test_mysql_cloud_auth_rds_ca_attachment_and_remote_tls_enforcement(
         local_cfg = MySQLConfig(dsn=disabled_dsn, token_provider=provider)
         assert local_cfg.parse_dsn_params()["ssl_mode"] == "disable"
         assert local_cfg.ssl_ca is None
+
+
+class _StaticMySQLTokenProvider:
+    """Non-cloud `DatabaseTokenProvider` fixture returning a static placeholder token."""
+
+    def resolve_sync(self, *, force_refresh: bool = False) -> str:
+        _ = force_refresh
+        return "test-token-placeholder"
+
+    async def resolve_async(self, *, force_refresh: bool = False) -> str:
+        _ = force_refresh
+        return "test-token-placeholder"
+
+    def invalidate(self) -> None:
+        return None
+
+
+def _mysql_token_provider(provider_kind: str) -> Any:
+    """Build a deterministic AWS RDS, Azure Entra, or static token provider for SSL-mode tests."""
+    if provider_kind == "aws_rds":
+        return AwsRdsIamTokenProvider(
+            endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+            port=3306,
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-akid",
+            secret_access_key="test-token-placeholder-secret",
+            clock=lambda: 1_794_873_600.0,
+        )
+    if provider_kind == "azure_entra":
+        return AzureEntraTokenProvider(
+            fetcher=lambda scope: {"access_token": f"test-token-placeholder-{scope}", "expires_in": 600},
+            clock=lambda: 1000.0,
+        )
+    if provider_kind == "static":
+        return _StaticMySQLTokenProvider()
+    return None
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra", "static", "none"])
+@pytest.mark.parametrize(
+    ("config_kwargs", "target_kind"),
+    [
+        ({"dsn": "mysql://iam_user@db.example.us-east-1.rds.amazonaws.com:3306/appdb"}, "remote"),
+        ({"dsn": "mysql://iam_user@10.0.0.15:3306/appdb"}, "remote"),
+        ({"host": "db.example.us-east-1.rds.amazonaws.com", "user": "iam_user"}, "remote"),
+        ({"dsn": "mysql://iam_user@127.0.0.1:3306/appdb"}, "local"),
+        ({"dsn": "mysql://iam_user@localhost:3306/appdb"}, "local"),
+        ({"dsn": "mysql://iam_user@[::1]:3306/appdb"}, "local"),
+        ({"host": "127.0.0.1", "user": "iam_user"}, "local"),
+        ({"host": "db.example.internal", "unix_socket": "/var/run/mysqld/mysqld.sock"}, "local"),
+        ({"dsn": "mysql://iam_user@db.example.internal/appdb?unix_socket=/var/run/mysqld/mysqld.sock"}, "local"),
+        ({"host": "db.example.internal", "cloud_sql_instance": "proj:us-central1:inst"}, "local"),
+    ],
+)
+def test_mysql_default_ssl_mode_by_provider_and_target(
+    provider_kind: str,
+    config_kwargs: dict[str, Any],
+    target_kind: str,
+) -> None:
+    """Verify the unset `ssl_mode` resolves to verify-full only for cloud IAM providers on remote targets."""
+    provider = _mysql_token_provider(provider_kind)
+    is_cloud = provider_kind in {"aws_rds", "azure_entra"}
+    if provider is None:
+        expected_mode = "prefer"
+    elif is_cloud and target_kind == "remote":
+        expected_mode = "verify-full"
+    else:
+        expected_mode = "require"
+
+    cfg = MySQLConfig(token_provider=provider, **config_kwargs)
+
+    assert cfg.ssl_mode is None
+    assert cfg.explicit_ssl_mode is None
+    assert cfg.canonical_ssl_mode == expected_mode
+    assert cfg.parse_dsn_params()["ssl_mode"] == expected_mode
+    assert build_mysql_connect_kwargs(cfg)["ssl_mode"] == expected_mode
+    assert build_mysql_client_kwargs(cfg)["ssl_mode"] == expected_mode
+    assert build_mysql_client_kwargs(cfg, "test-token-placeholder")["ssl_mode"] == expected_mode
+    assert f"ssl_mode={expected_mode!r}" in repr(cfg)
+    assert expected_mode in cfg.pool_key()
+    expected_ca = aws_rds_root_ca_pem() if provider_kind == "aws_rds" and target_kind == "remote" else None
+    assert cfg.ssl_ca == expected_ca
+    assert build_mysql_client_kwargs(cfg)["ssl_ca"] == expected_ca
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])
+@pytest.mark.parametrize(
+    ("dsn", "expected_mode"),
+    [
+        ("cloudsql://proj:us-central1:inst/appdb", "require"),
+        ("cloudsql://proj:us-central1:inst/appdb?ssl_mode=disable", "disable"),
+    ],
+)
+def test_mysql_cloud_iam_cloudsql_dsn_keeps_local_ssl_mode_rules(
+    provider_kind: str,
+    dsn: str,
+    expected_mode: str,
+) -> None:
+    """Verify `cloudsql://` DSNs are never treated as remote cloud IAM targets."""
+    cfg = MySQLConfig(dsn=dsn, token_provider=_mysql_token_provider(provider_kind))
+    assert cfg.canonical_ssl_mode == expected_mode
+    assert cfg.ssl_ca is None
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])
+@pytest.mark.parametrize("source", ["field", "dsn", "from_url", "field_and_dsn"])
+@pytest.mark.parametrize(
+    ("mode_literal", "expected_mode"),
+    [
+        ("disable", None),
+        ("disabled", None),
+        ("off", None),
+        ("prefer", None),
+        ("preferred", None),
+        ("PREFERRED", None),
+        ("require", "require"),
+        ("required", "require"),
+        ("verify-ca", "verify-ca"),
+        ("verify_ca", "verify-ca"),
+        ("verify-full", "verify-full"),
+        ("verify_identity", "verify-full"),
+    ],
+)
+def test_mysql_cloud_iam_explicit_ssl_mode_on_remote_target(
+    provider_kind: str,
+    source: str,
+    mode_literal: str,
+    expected_mode: str | None,
+) -> None:
+    """Verify remote cloud IAM configs reject plaintext-capable explicit modes and keep deliberate TLS modes."""
+    provider = _mysql_token_provider(provider_kind)
+    base_dsn = "mysql://iam_user@db.example.us-east-1.rds.amazonaws.com:3306/appdb"
+    query_dsn = f"{base_dsn}?ssl_mode={mode_literal}"
+
+    def _build() -> MySQLConfig:
+        if source == "field":
+            return MySQLConfig(dsn=base_dsn, ssl_mode=mode_literal, token_provider=provider)
+        if source == "dsn":
+            return MySQLConfig(dsn=query_dsn, token_provider=provider)
+        if source == "from_url":
+            return MySQLConfig.from_url(query_dsn, token_provider=provider)
+        return MySQLConfig(dsn=query_dsn, ssl_mode="verify-full", token_provider=provider)
+
+    if expected_mode is None:
+        with pytest.raises(ImproperConfigurationError, match="requires TLS on remote hosts"):
+            _build()
+        return
+
+    cfg = _build()
+    assert cfg.explicit_ssl_mode == expected_mode
+    assert cfg.canonical_ssl_mode == expected_mode
+    assert cfg.parse_dsn_params()["ssl_mode"] == expected_mode
+    assert build_mysql_connect_kwargs(cfg)["ssl_mode"] == expected_mode
+    assert build_mysql_client_kwargs(cfg)["ssl_mode"] == expected_mode
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])
+@pytest.mark.parametrize(
+    ("config_kwargs", "expected_mode"),
+    [
+        ({"dsn": "mysql://iam_user@127.0.0.1:3306/appdb?ssl_mode=disable"}, "disable"),
+        ({"dsn": "mysql://iam_user@127.0.0.1:3306/appdb?ssl_mode=preferred"}, "prefer"),
+        ({"host": "localhost", "ssl_mode": "disable"}, "disable"),
+        ({"host": "localhost", "ssl_mode": "prefer"}, "prefer"),
+        ({"host": "db.example.internal", "unix_socket": "/tmp/mysql.sock", "ssl_mode": "disable"}, "disable"),
+        (
+            {"host": "db.example.internal", "cloud_sql_instance": "proj:us-central1:inst", "ssl_mode": "prefer"},
+            "prefer",
+        ),
+    ],
+)
+def test_mysql_cloud_iam_explicit_ssl_mode_on_local_target(
+    provider_kind: str,
+    config_kwargs: dict[str, Any],
+    expected_mode: str,
+) -> None:
+    """Verify loopback, unix-socket, and Cloud SQL targets keep explicit plaintext-capable modes."""
+    cfg = MySQLConfig(token_provider=_mysql_token_provider(provider_kind), **config_kwargs)
+    assert cfg.canonical_ssl_mode == expected_mode
+    assert build_mysql_client_kwargs(cfg)["ssl_mode"] == expected_mode
+    assert cfg.ssl_ca is None
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])
+def test_mysql_cloud_iam_default_ssl_mode_is_recomputed_for_new_target(provider_kind: str) -> None:
+    """Verify a loopback default never follows a config rebuilt for a remote host, and the reverse."""
+    provider = _mysql_token_provider(provider_kind)
+    local_cfg = MySQLConfig(dsn="mysql://iam_user@127.0.0.1:3306/appdb", token_provider=provider)
+    assert local_cfg.canonical_ssl_mode == "require"
+
+    remote_cfg = msgspec.structs.replace(local_cfg, dsn="mysql://iam_user@db.example.internal:3306/appdb")
+    assert remote_cfg.canonical_ssl_mode == "verify-full"
+    assert build_mysql_client_kwargs(remote_cfg)["ssl_mode"] == "verify-full"
+
+    sync_driver = SyncMySQLDriver(local_cfg, dsn="mysql://iam_user@db.example.internal:3306/appdb")
+    async_driver = AsyncMySQLDriver(local_cfg, dsn="mysql://iam_user@db.example.internal:3306/appdb")
+    assert sync_driver.config.canonical_ssl_mode == "verify-full"
+    assert async_driver.config.canonical_ssl_mode == "verify-full"
+
+    back_local = msgspec.structs.replace(remote_cfg, dsn="mysql://iam_user@localhost:3306/appdb")
+    assert back_local.canonical_ssl_mode == "require"
+
+    with pytest.raises(ImproperConfigurationError, match="requires TLS on remote hosts"):
+        msgspec.structs.replace(
+            MySQLConfig(host="127.0.0.1", ssl_mode="prefer", token_provider=provider),
+            host="db.example.internal",
+        )
 
 
 @pytest.mark.anyio

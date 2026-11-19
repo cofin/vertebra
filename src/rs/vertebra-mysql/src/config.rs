@@ -292,7 +292,7 @@ impl MySQLConnectConfig {
 
         let final_ssl_mode = resolved_ssl_mode.unwrap_or(MySQLSslMode::Prefer);
         if let Some(ref ca_val) = resolved_ssl_ca {
-            if ca_val.trim_start().starts_with("-----BEGIN") {
+            if is_inline_pem(ca_val) {
                 validate_inline_pem_cert(ca_val, "ssl_ca")?;
             } else if matches!(
                 final_ssl_mode,
@@ -305,12 +305,12 @@ impl MySQLConnectConfig {
             }
         }
         if let Some(ref cert_val) = resolved_ssl_cert
-            && cert_val.trim_start().starts_with("-----BEGIN")
+            && is_inline_pem(cert_val)
         {
             validate_inline_pem_cert(cert_val, "ssl_cert")?;
         }
         if let Some(ref key_val) = resolved_ssl_key
-            && key_val.trim_start().starts_with("-----BEGIN")
+            && is_inline_pem(key_val)
         {
             validate_inline_pem_key(key_val, "ssl_key")?;
         }
@@ -534,15 +534,29 @@ impl MySQLConnectConfig {
             .with_danger_skip_domain_validation(skip_domain_validation);
 
         if let Some(ref ca) = self.ssl_ca {
-            let path = PathBuf::from(ca);
+            let root_cert = if is_inline_pem(ca) {
+                inline_pem_bytes(ca).into()
+            } else {
+                PathBuf::from(ca).into()
+            };
             ssl = ssl
-                .with_root_certs(vec![path.into()])
+                .with_root_certs(vec![root_cert])
                 .with_disable_built_in_roots(true);
         }
 
         if let (Some(cert), Some(key)) = (&self.ssl_cert, &self.ssl_key) {
-            let identity =
-                ClientIdentity::new(PathBuf::from(cert).into(), PathBuf::from(key).into());
+            let identity = ClientIdentity::new(
+                if is_inline_pem(cert) {
+                    inline_pem_bytes(cert).into()
+                } else {
+                    PathBuf::from(cert).into()
+                },
+                if is_inline_pem(key) {
+                    inline_pem_bytes(key).into()
+                } else {
+                    PathBuf::from(key).into()
+                },
+            );
             ssl = ssl.with_client_identity(Some(identity));
         }
 
@@ -565,8 +579,18 @@ impl MySQLConnectConfig {
     }
 }
 
+/// Returns true when a TLS option carries PEM text instead of a filesystem path.
+fn is_inline_pem(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN")
+}
+
+/// Returns the in-memory bytes of an inline PEM TLS option without leading whitespace.
+fn inline_pem_bytes(value: &str) -> Vec<u8> {
+    value.trim_start().as_bytes().to_vec()
+}
+
 fn validate_inline_pem_cert(pem: &str, field: &str) -> Result<(), MySQLError> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let mut reader = std::io::BufReader::new(pem.trim_start().as_bytes());
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     match certs {
         Ok(list) if !list.is_empty() => Ok(()),
@@ -580,7 +604,7 @@ fn validate_inline_pem_cert(pem: &str, field: &str) -> Result<(), MySQLError> {
 }
 
 fn validate_inline_pem_key(pem: &str, field: &str) -> Result<(), MySQLError> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let mut reader = std::io::BufReader::new(pem.trim_start().as_bytes());
     match rustls_pemfile::private_key(&mut reader) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(MySQLError::config(format!(
@@ -737,5 +761,107 @@ mod tests {
         assert_eq!(cfg.ssl_mode, MySQLSslMode::VerifyCa);
         assert!(cfg.enable_iam_auth);
         assert_eq!(cfg.cloud_sql_ip_type, IpType::Private);
+    }
+
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ3Jvc3NDaGVja0NBMAoGCCqGSM49BAMCMA0xCzAJBgNV\n-----END CERTIFICATE-----\n";
+
+    fn tls_config(ssl_mode: &str, ssl_ca: Option<String>) -> MySQLConnectConfig {
+        MySQLConnectConfig::from_dsn_and_kwargs(
+            "mysql://app@db.example.internal:3306/app",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ssl_mode),
+            ssl_ca,
+            None,
+            None,
+            5000,
+            5000,
+            5000,
+            1,
+            4,
+            64,
+            "utf8mb4",
+            true,
+            None,
+            None,
+            "PUBLIC",
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn read_root_cert(cfg: &MySQLConnectConfig) -> std::io::Result<Vec<u8>> {
+        let ssl = cfg.build_ssl_opts().unwrap().unwrap();
+        assert!(ssl.disable_built_in_roots());
+        assert_eq!(ssl.root_certs().len(), 1);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                ssl.root_certs()[0]
+                    .read()
+                    .await
+                    .map(|data| data.into_owned())
+            })
+    }
+
+    #[test]
+    fn test_inline_pem_ssl_ca_is_loaded_from_memory() {
+        let large_pem = TEST_CA_PEM.repeat(600);
+        assert!(large_pem.len() > 4096);
+        for mode in ["require", "verify-ca", "verify-full"] {
+            for pem in [
+                TEST_CA_PEM.to_string(),
+                format!("\n  {TEST_CA_PEM}"),
+                large_pem.clone(),
+            ] {
+                let cfg = tls_config(mode, Some(pem.clone()));
+                let loaded = read_root_cert(&cfg).unwrap();
+                assert_eq!(loaded, pem.trim_start().as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_ssl_ca_is_read_from_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "vtb-mysql-ssl-ca-{}-{:?}.pem",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, TEST_CA_PEM).unwrap();
+        let cfg = tls_config("verify-full", Some(path.to_string_lossy().into_owned()));
+        let loaded = read_root_cert(&cfg);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.unwrap(), TEST_CA_PEM.as_bytes());
+    }
+
+    #[test]
+    fn test_ssl_modes_map_to_verification_flags() {
+        for (mode, accept_invalid, skip_domain) in [
+            ("require", true, true),
+            ("verify-ca", false, true),
+            ("verify-full", false, false),
+        ] {
+            let ssl = tls_config(mode, Some(TEST_CA_PEM.to_string()))
+                .build_ssl_opts()
+                .unwrap()
+                .unwrap();
+            assert_eq!(ssl.accept_invalid_certs(), accept_invalid, "{mode}");
+            assert_eq!(ssl.skip_domain_validation(), skip_domain, "{mode}");
+        }
+        assert!(
+            tls_config("disable", None)
+                .build_ssl_opts()
+                .unwrap()
+                .is_none()
+        );
     }
 }

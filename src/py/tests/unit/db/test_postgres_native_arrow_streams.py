@@ -9,8 +9,11 @@ import ctypes
 import datetime
 import decimal
 import inspect
+import json
+import random
 import select
 import struct
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -1889,3 +1892,235 @@ def test_arrow_cursor_dictionary_array_to_pylist_roundtrip(index_type_name: str)
         ]
     finally:
         native_cursor.release()
+
+
+_ARROW_FUZZ_SEED = 20261119
+_ARROW_FUZZ_MUTATION_COUNT = 300
+_ARROW_FUZZ_ALLOWED_ERRORS = (ValueError, DataError, BufferError, NotImplementedError)
+_ARROW_RELEASED_SCHEMA_MESSAGE = "requested_schema arrow_schema PyCapsule has already been released"
+_ARROW_SCHEMA_RELEASE_OFFSET = (
+    3 * ctypes.sizeof(ctypes.c_void_p) + 2 * ctypes.sizeof(ctypes.c_int64) + 2 * ctypes.sizeof(ctypes.c_void_p)
+)
+_ARROW_FUZZ_SUBPROCESS_SCRIPT = """
+import json
+import sys
+
+import pyarrow as pa
+
+import vertebra._vertebra as native_vertebra
+from vertebra.db.arrow import ArrowCursor
+
+consumer, source = sys.argv[1], sys.argv[2]
+spec = json.load(sys.stdin)
+valid = bytes.fromhex(spec["payload"])
+failures = []
+for offset, value in spec["mutations"]:
+    payload = bytearray(valid)
+    payload[offset] = value
+    cursor = None
+    try:
+        if source == "bytes":
+            cursor = native_vertebra.ArrowCursor.from_ipc_bytes(bytes(payload))
+        else:
+            cursor = native_vertebra.ArrowCursor.write_ipc_to_shm(
+                ArrowCursor._next_shm_segment_name(), bytes(payload), 0
+            )
+        if consumer == "pyarrow_stream":
+            pa.RecordBatchReader.from_stream(cursor).read_all()
+        else:
+            cursor.to_polars()
+    except Exception as exc:
+        if consumer == "pyarrow_stream" and not isinstance(exc, (ValueError, NotImplementedError)):
+            failures.append([offset, value, type(exc).__name__, str(exc)[:200]])
+    except BaseException as exc:
+        failures.append([offset, value, type(exc).__name__, str(exc)[:200]])
+    finally:
+        if cursor is not None:
+            cursor.release()
+json.dump(failures, sys.stdout)
+"""
+
+
+def _build_arrow_fuzz_ipc() -> bytes:
+    """Serialize a two-batch Arrow IPC stream covering primitive, string, list, struct, and dictionary columns."""
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, None, 4], type=pa.int64()),
+            "label": pa.array(["a", None, "ccc", "dddd"], type=pa.string()),
+            "flag": pa.array([True, False, None, True], type=pa.bool_()),
+            "score": pa.array([1.5, 2.5, 3.5, None], type=pa.float64()),
+            "tags": pa.array([[1, 2], None, [], [3]], type=pa.list_(pa.int32())),
+            "point": pa.array(
+                [{"x": 1, "y": "a"}, None, {"x": 3, "y": None}, {"x": 4, "y": "d"}],
+                type=pa.struct([("x", pa.int32()), ("y", pa.string())]),
+            ),
+            "role": pa.array(["primary", "replica", None, "primary"]).dictionary_encode(),
+        }
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table, max_chunksize=2)
+    return bytes(sink.getvalue().to_pybytes())
+
+
+def _arrow_ipc_metadata_offsets(payload: bytes) -> list[int]:
+    """Return every byte offset that belongs to an encapsulated message prefix or flatbuffer metadata block."""
+    offsets: list[int] = []
+    pos = 0
+    while pos + 8 <= len(payload):
+        meta_len = struct.unpack_from("<i", payload, pos + 4)[0]
+        if payload[pos : pos + 4] != b"\xff\xff\xff\xff" or meta_len <= 0:
+            break
+        meta_end = pos + 8 + meta_len
+        offsets.extend(range(pos, meta_end))
+        body_len = _message_body_length(payload[pos + 8 : meta_end])
+        pos = meta_end + body_len
+    return offsets
+
+
+def _message_body_length(metadata: bytes) -> int:
+    """Decode the `bodyLength` field (vtable slot 3) of an Arrow IPC `Message` flatbuffer."""
+    table_pos = struct.unpack_from("<I", metadata, 0)[0]
+    vtable_pos = table_pos - struct.unpack_from("<i", metadata, table_pos)[0]
+    vtable_len = struct.unpack_from("<H", metadata, vtable_pos)[0]
+    slot = 4 + 2 * 3
+    if slot + 2 > vtable_len:
+        return 0
+    field_offset = struct.unpack_from("<H", metadata, vtable_pos + slot)[0]
+    if field_offset == 0:
+        return 0
+    return int(struct.unpack_from("<q", metadata, table_pos + field_offset)[0])
+
+
+def _arrow_fuzz_mutations(payload: bytes) -> list[tuple[int, int]]:
+    """Return the fixed seeded single-byte mutations: two thirds target IPC metadata, one third any byte."""
+    rng = random.Random(_ARROW_FUZZ_SEED)
+    metadata_offsets = _arrow_ipc_metadata_offsets(payload)
+    mutations: list[tuple[int, int]] = []
+    while len(mutations) < _ARROW_FUZZ_MUTATION_COUNT:
+        targeted = len(mutations) % 3 != 2
+        offset = rng.choice(metadata_offsets) if targeted else rng.randrange(len(payload))
+        mutations.append((offset, payload[offset] ^ rng.randrange(1, 256)))
+    return mutations
+
+
+_ARROW_FUZZ_VALID_IPC = _build_arrow_fuzz_ipc()
+_ARROW_FUZZ_MUTATIONS = _arrow_fuzz_mutations(_ARROW_FUZZ_VALID_IPC)
+
+
+def _mutated_arrow_fuzz_cursor(source: str, offset: int, value: int) -> native_vertebra.ArrowCursor:
+    """Build a native cursor over the fuzz stream with one byte replaced."""
+    payload = bytearray(_ARROW_FUZZ_VALID_IPC)
+    payload[offset] = value
+    if source == "bytes":
+        return native_vertebra.ArrowCursor.from_ipc_bytes(bytes(payload))
+    return native_vertebra.ArrowCursor.write_ipc_to_shm(ArrowCursor._next_shm_segment_name(), bytes(payload), 0)
+
+
+def _release_schema_capsule_via_pyarrow(capsule: object) -> None:
+    """Consume an `arrow_schema` capsule by importing it into pyarrow."""
+    pa.Schema._import_from_c_capsule(capsule)
+
+
+def _release_schema_capsule_via_callback(capsule: object) -> None:
+    """Consume an `arrow_schema` capsule by invoking its C `release` callback."""
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    get_pointer.restype = ctypes.c_void_p
+    schema_ptr = get_pointer(capsule, b"arrow_schema")
+    release_ptr = ctypes.c_void_p.from_address(schema_ptr + _ARROW_SCHEMA_RELEASE_OFFSET).value
+    assert release_ptr is not None
+    ctypes.CFUNCTYPE(None, ctypes.c_void_p)(release_ptr)(schema_ptr)
+    assert ctypes.c_void_p.from_address(schema_ptr + _ARROW_SCHEMA_RELEASE_OFFSET).value is None
+
+
+def test_arrow_fuzz_seed_stream_is_valid_and_mutations_are_fixed() -> None:
+    """Verify the unmutated fuzz stream decodes and the seeded mutation set is stable and metadata-heavy."""
+    cursor = native_vertebra.ArrowCursor.from_ipc_bytes(_ARROW_FUZZ_VALID_IPC)
+    try:
+        assert cursor.row_count == 4
+        assert cursor.columns == ["id", "label", "flag", "score", "tags", "point", "role"]
+        assert [row["id"] for row in cursor.to_pylist()] == [1, 2, None, 4]
+    finally:
+        cursor.release()
+    metadata_offsets = set(_arrow_ipc_metadata_offsets(_ARROW_FUZZ_VALID_IPC))
+    assert len(_ARROW_FUZZ_MUTATIONS) == _ARROW_FUZZ_MUTATION_COUNT
+    assert _arrow_fuzz_mutations(_ARROW_FUZZ_VALID_IPC) == _ARROW_FUZZ_MUTATIONS
+    assert sum(offset in metadata_offsets for offset, _ in _ARROW_FUZZ_MUTATIONS) >= 200
+    assert all(_ARROW_FUZZ_VALID_IPC[offset] != value for offset, value in _ARROW_FUZZ_MUTATIONS)
+
+
+@pytest.mark.parametrize("source", ["bytes", "shm"])
+@pytest.mark.parametrize(
+    "entry_point",
+    ["columns", "__arrow_c_schema__", "__arrow_c_stream__", "to_pylist"],
+)
+@pytest.mark.parametrize(("offset", "value"), _ARROW_FUZZ_MUTATIONS)
+def test_arrow_cursor_mutated_ipc_never_panics_in_process(
+    source: str,
+    entry_point: str,
+    offset: int,
+    value: int,
+) -> None:
+    """Verify single-byte IPC mutations make each in-process decode entry point succeed or raise a mapped error."""
+    cursor: native_vertebra.ArrowCursor | None = None
+    try:
+        cursor = _mutated_arrow_fuzz_cursor(source, offset, value)
+        attr = getattr(cursor, entry_point)
+        if callable(attr):
+            attr()
+    except _ARROW_FUZZ_ALLOWED_ERRORS:
+        pass
+    except BaseException as exc:
+        pytest.fail(f"{entry_point} on {source} cursor raised {type(exc).__name__}: {exc}")
+    finally:
+        if cursor is not None:
+            cursor.release()
+
+
+@pytest.mark.parametrize("source", ["bytes", "shm"])
+@pytest.mark.parametrize("consumer", ["pyarrow_stream", "polars"])
+def test_arrow_cursor_mutated_ipc_c_stream_consumers_never_abort(source: str, consumer: str) -> None:
+    """Verify C-stream consumers survive every seeded IPC mutation in a subprocess with exit code zero."""
+    if consumer == "polars" and import_optional("polars") is None:
+        pytest.skip("polars is not installed")
+    spec = {"payload": _ARROW_FUZZ_VALID_IPC.hex(), "mutations": _ARROW_FUZZ_MUTATIONS}
+    proc = subprocess.run(
+        [sys.executable, "-c", _ARROW_FUZZ_SUBPROCESS_SCRIPT, consumer, source],
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout) == []
+
+
+@pytest.mark.parametrize(
+    "consume",
+    [_release_schema_capsule_via_pyarrow, _release_schema_capsule_via_callback],
+    ids=["pyarrow_import", "release_callback"],
+)
+@pytest.mark.parametrize("source", ["bytes", "shm"])
+def test_arrow_c_stream_rejects_released_requested_schema_capsule(
+    source: str,
+    consume: Any,
+) -> None:
+    """Verify a consumed `arrow_schema` capsule is rejected by its null `release` without decoding the struct."""
+    ipc_bytes = _serialize_multi_batch_ipc([[(1, "alpha")]])
+    if source == "bytes":
+        cursor = native_vertebra.ArrowCursor.from_ipc_bytes(ipc_bytes)
+    else:
+        cursor = native_vertebra.ArrowCursor.write_ipc_to_shm(ArrowCursor._next_shm_segment_name(), ipc_bytes, 1)
+    try:
+        live_capsule = cursor.__arrow_c_schema__()
+        assert _capsule_name(cursor.__arrow_c_stream__(live_capsule)) == b"arrow_array_stream"
+        consumed_capsule = cursor.__arrow_c_schema__()
+        consume(consumed_capsule)
+        with pytest.raises(ValueError) as excinfo:
+            cursor.__arrow_c_stream__(consumed_capsule)
+        assert str(excinfo.value) == _ARROW_RELEASED_SCHEMA_MESSAGE
+        assert cursor.to_pylist() == [{"id": 1, "label": "alpha"}]
+    finally:
+        cursor.release()

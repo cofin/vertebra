@@ -27,7 +27,7 @@ from vertebra.server.platform import (
     SHMAllocationPolicy,
     ZPagesRegistry,
 )
-from vertebra.server.worker import Worker
+from vertebra.server.worker import Worker, run_worker
 from vertebra.telemetry import (
     EventLoopMetricSample,
     EventLoopRecorder,
@@ -945,3 +945,187 @@ def test_telemetry_package_lazy_exports_resolve_without_eager_optional_imports(
     finally:
         reset_dependency_cache("opentelemetry")
         reset_dependency_cache("opentelemetry.metrics")
+
+
+class _WorkerSignalingRecorder(EventLoopRecorder):
+    """Recorder signaling the first recorded sample; tracks every instance the worker constructs."""
+
+    __slots__ = ("first_sample",)
+
+    created: list[_WorkerSignalingRecorder] = []
+
+    def __init__(self, max_samples: int = 1024, *, emit_otel: bool = False) -> None:
+        super().__init__(max_samples, emit_otel=emit_otel)
+        self.first_sample = threading.Event()
+        type(self).created.append(self)
+
+    def record(self, sample: EventLoopMetricSample) -> None:
+        super().record(sample)
+        self.first_sample.set()
+
+
+async def _async_worker_route() -> bytes:
+    return b"ok"
+
+
+@pytest.fixture
+def worker_loop_harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Run `Worker.run` on a threaded one-shard pool with a controllable batch source and recorder class."""
+    state: dict[str, Any] = {"stop_event": threading.Event(), "zpages": ZPagesRegistry("loop-telemetry-test")}
+    attach_calls: list[float] = []
+    original_attach = EventLoopPool.attach_recorder
+
+    def _spy_attach(self: EventLoopPool, recorder: EventLoopRecorder, *, interval_seconds: float = 1.0) -> None:
+        attach_calls.append(interval_seconds)
+        original_attach(self, recorder, interval_seconds=min(interval_seconds, 0.005))
+
+    def _fake_get_batch(_timeout: int) -> list[Any]:
+        created = _WorkerSignalingRecorder.created
+        recorder = state.get("explicit_recorder") or (created[0] if created else None)
+        state["sampled"] = recorder.first_sample.wait(timeout=5.0) if attach_calls and recorder is not None else False
+        state["taskz_loops"] = sorted(state["zpages"].get_tasks_payload()["loops"])
+        state["stop_event"].set()
+        return []
+
+    monkeypatch.setattr(_WorkerSignalingRecorder, "created", [])
+    monkeypatch.setattr("vertebra.server.worker.EventLoopRecorder", _WorkerSignalingRecorder)
+    monkeypatch.setattr(EventLoopPool, "attach_recorder", _spy_attach)
+    monkeypatch.setattr("vertebra.server.worker.get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr("vertebra.server.worker.get_batch", _fake_get_batch)
+    monkeypatch.setenv("VERTEBRA_LOOP_SHARDS", "1")
+    monkeypatch.delenv("VERTEBRA_LOOP_TELEMETRY", raising=False)
+    monkeypatch.delenv("VERTEBRA_LOOP_TELEMETRY_INTERVAL", raising=False)
+    state["attach_calls"] = attach_calls
+    return state
+
+
+@pytest.mark.parametrize(
+    ("env_value", "enabled"),
+    [("1", True), ("true", True), (" TRUE ", True), (None, False), ("", False), ("0", False), ("false", False)],
+    ids=["one", "true", "padded-upper-true", "unset", "empty", "zero", "false"],
+)
+def test_worker_run_attaches_loop_recorder_only_when_loop_telemetry_env_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_loop_harness: dict[str, Any],
+    env_value: str | None,
+    enabled: bool,
+) -> None:
+    """VERTEBRA_LOOP_TELEMETRY=1/true attaches a sampling recorder; the worker pool is always listed in /taskz."""
+    if env_value is not None:
+        monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", env_value)
+    worker = Worker(
+        {1: _async_worker_route},
+        zpages=worker_loop_harness["zpages"],
+        stop_event=worker_loop_harness["stop_event"],
+        batch_timeout_ms=10,
+    )
+
+    worker.run()
+
+    assert worker_loop_harness["taskz_loops"] == ["worker.shard.0"]
+    assert worker_loop_harness["sampled"] is enabled
+    assert worker_loop_harness["attach_calls"] == ([1.0] if enabled else [])
+    assert len(_WorkerSignalingRecorder.created) == (1 if enabled else 0)
+    if enabled:
+        recorder = worker.loop_recorder
+        assert recorder is _WorkerSignalingRecorder.created[0]
+        assert set(recorder.latest_by_shard()) == {0}
+    else:
+        assert worker.loop_recorder is None
+    assert worker_loop_harness["zpages"].get_tasks_payload()["loops"] == {}
+
+
+@pytest.mark.parametrize(
+    ("raw_interval", "expected"),
+    [("0.25", 0.25), ("2", 2.0), (None, 1.0), ("abc", 1.0), ("0", 1.0), ("-3", 1.0), ("nan", 1.0), ("inf", 1.0)],
+)
+def test_worker_loop_telemetry_interval_env_falls_back_to_one_second(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_loop_harness: dict[str, Any],
+    raw_interval: str | None,
+    expected: float,
+) -> None:
+    """VERTEBRA_LOOP_TELEMETRY_INTERVAL sets the sampling interval; invalid values use the 1.0 second default."""
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", "1")
+    if raw_interval is not None:
+        monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY_INTERVAL", raw_interval)
+
+    Worker(
+        {1: _async_worker_route},
+        zpages=worker_loop_harness["zpages"],
+        stop_event=worker_loop_harness["stop_event"],
+        batch_timeout_ms=10,
+    ).run()
+
+    assert worker_loop_harness["attach_calls"] == [expected]
+    assert worker_loop_harness["sampled"] is True
+
+
+@pytest.mark.parametrize("otel_available", [False, True], ids=["otel-missing", "otel-importable"])
+def test_worker_loop_recorder_emit_otel_follows_opentelemetry_metrics_availability(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_loop_harness: dict[str, Any],
+    otel_available: bool,
+) -> None:
+    """The env-created recorder emits OTel metrics only when opentelemetry.metrics is importable."""
+    probed: list[str] = []
+
+    def _fake_import_optional(name: str) -> Any:
+        probed.append(name)
+        return SimpleNamespace() if otel_available else None
+
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", "1")
+    monkeypatch.setattr("vertebra.server.worker.import_optional", _fake_import_optional)
+    worker = Worker(
+        {1: _async_worker_route},
+        zpages=worker_loop_harness["zpages"],
+        stop_event=worker_loop_harness["stop_event"],
+        batch_timeout_ms=10,
+    )
+
+    worker.run()
+
+    assert probed == ["opentelemetry.metrics"]
+    assert worker.loop_recorder is not None
+    assert worker.loop_recorder.emit_otel is otel_available
+
+
+def test_run_worker_attaches_explicit_loop_recorder_without_env(worker_loop_harness: dict[str, Any]) -> None:
+    """run_worker(loop_recorder=...) samples into the caller's recorder even when the env switch is unset."""
+    recorder = _WorkerSignalingRecorder()
+    worker_loop_harness["explicit_recorder"] = recorder
+
+    run_worker(
+        {1: _async_worker_route},
+        zpages=worker_loop_harness["zpages"],
+        stop_event=worker_loop_harness["stop_event"],
+        batch_timeout_ms=10,
+        loop_recorder=recorder,
+    )
+
+    assert worker_loop_harness["attach_calls"] == [1.0]
+    assert worker_loop_harness["sampled"] is True
+    assert worker_loop_harness["taskz_loops"] == ["worker.shard.0"]
+    assert _WorkerSignalingRecorder.created == [recorder]
+    assert set(recorder.latest_by_shard()) == {0}
+
+
+def test_worker_skips_loop_sampling_when_inline_loop_never_runs_continuously(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_loop_harness: dict[str, Any],
+) -> None:
+    """A sync-only worker drives its inline loop on demand, so no lag sampler is attached to it."""
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", "1")
+    worker = Worker(
+        {},
+        zpages=worker_loop_harness["zpages"],
+        stop_event=worker_loop_harness["stop_event"],
+        batch_timeout_ms=10,
+    )
+
+    worker.run()
+
+    assert worker_loop_harness["attach_calls"] == []
+    assert worker.loop_recorder is not None
+    assert worker.loop_recorder.samples() == []
+    assert worker_loop_harness["taskz_loops"] == ["worker.shard.0"]

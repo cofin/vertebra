@@ -65,6 +65,7 @@ def execute_worker_cli(
 
                 queue_service = WorkerRunner.resolve_queue_service(app)
                 runner = WorkerRunner(lanes, queue_service=queue_service, lame_duck=lame_duck)
+                zpages.register_event_loop("worker", asyncio.get_running_loop())
                 state = getattr(app, "state", None)
                 if isinstance(state, MutableMapping):
                     state["vertebra_worker_runner"] = runner

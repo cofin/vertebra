@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import importlib
 import io
+import math
+import random
 import stat
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -444,6 +447,7 @@ def test_repository_okf_bundle_documents_round_trip(tmp_path: Path) -> None:
     [
         ("AsyncKnowledgeCatalogClient", "vertebra.agent.knowledge_catalog"),
         ("CatalogEntryRecord", "vertebra.agent.knowledge_catalog"),
+        ("CatalogSyncError", "vertebra.agent.knowledge_catalog"),
         ("CatalogSyncSummary", "vertebra.agent.knowledge_catalog"),
         ("KnowledgeCatalogConfig", "vertebra.agent.knowledge_catalog"),
         ("OkfBundle", "vertebra.agent.okf"),
@@ -509,3 +513,308 @@ def test_vertebra_agent_lazy_imports_avoid_eager_okf_and_catalog_loads() -> None
         timeout=30,
     )
     assert completed.returncode == 0
+
+
+def _round_trip_frontmatter(frontmatter: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Emit `frontmatter` through `OkfDocument.to_markdown` and parse the emitted text back."""
+    emitted = OkfDocument(rel_path="notes/scalars.md", frontmatter=frontmatter, body="\n# Scalars\n").to_markdown()
+    return emitted, OkfDocument.parse("notes/scalars.md", emitted).frontmatter
+
+
+def _parse_frontmatter(yaml_text: str) -> dict[str, Any]:
+    """Parse a frontmatter YAML snippet through the public `OkfDocument.parse` seam."""
+    return OkfDocument.parse("notes/blocks.md", f"---\n{yaml_text}---\n\n# Blocks\n").frontmatter
+
+
+def _same_scalar(left: object, right: object) -> bool:
+    """Compare scalars by type and value, distinguishing `-0.0` from `0.0`."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, float) and isinstance(right, float):
+        return left == right and math.copysign(1.0, left) == math.copysign(1.0, right)
+    return left == right
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1e20, 1e-07, 1.5e300, 5e-324, -0.0, 0.1, 1.0, 1e16, 123456789.125, -2.5e-10, 1.7976931348623157e308],
+)
+def test_finite_floats_round_trip_as_the_same_float(value: float) -> None:
+    """Every finite float emitted into frontmatter parses back as the identical float."""
+    emitted, parsed = _round_trip_frontmatter({"value": value})
+
+    assert _same_scalar(parsed["value"], value), emitted
+    yaml = pytest.importorskip("yaml")
+    assert _same_scalar(yaml.safe_load(emitted.split("---\n")[1])["value"], value), emitted
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("1e+20", 1e20), ("1e-07", 1e-07), ("1E5", 1e5), ("-3e2", -300.0), ("1.0e+20", 1e20), ("2e0", 2.0)],
+)
+def test_parser_accepts_exponent_only_floats(raw: str, expected: float) -> None:
+    """Unquoted exponent-only scalars such as `1e+20` parse as floats."""
+    assert _same_scalar(_parse_frontmatter(f"value: {raw}\n")["value"], expected)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1_000",
+        "2024-01-01",
+        "2024-1-1",
+        "2024-01-01 10:00:00",
+        "1.",
+        "1.e3",
+        "0o17",
+        "0b101",
+        "1:30",
+        "190:20:30",
+        "+1_000.5",
+        "1e5",
+        "=",
+        "<<",
+    ],
+)
+def test_strings_other_yaml_readers_would_retype_are_quoted(text: str) -> None:
+    """Strings that standard YAML reads as numbers, dates, or merge keys are emitted double-quoted."""
+    emitted, parsed = _round_trip_frontmatter({"value": text})
+
+    assert f'value: "{text}"' in emitted
+    assert _same_scalar(parsed["value"], text)
+    yaml = pytest.importorskip("yaml")
+    assert _same_scalar(yaml.safe_load(emitted.split("---\n")[1])["value"], text)
+
+
+_TRICKY_STRINGS: tuple[str, ...] = (
+    "1_000",
+    "2024-01-01",
+    "1.",
+    "0o17",
+    "1:30",
+    "1e+20",
+    "true",
+    "No",
+    "~",
+    ".inf",
+    "0x1F",
+    "- item",
+    "key: value",
+    "a # b",
+    " padded ",
+    "",
+    "plain words",
+    "line\nbreak",
+    'quote"d',
+    "it's",
+    "caf\u00e9",
+    "[x]",
+    "{y}",
+    "|",
+    ">",
+    "1.2.3",
+    "v0-2",
+)
+
+
+def _random_scalar(rng: random.Random) -> object:
+    """Draw one frontmatter scalar across floats, integers, booleans, null, and tricky strings."""
+    kind = rng.randrange(7)
+    if kind == 0:
+        return rng.uniform(-1.0, 1.0) * 10.0 ** rng.randint(-320, 300)
+    if kind == 1:
+        return float(rng.randint(-10, 10)) * 10.0 ** rng.randint(-30, 30)
+    if kind == 2:
+        return rng.randint(-(10**18), 10**18)
+    if kind == 3:
+        return rng.choice([True, False, None])
+    if kind == 4:
+        return rng.choice(_TRICKY_STRINGS)
+    if kind == 5:
+        return repr(rng.uniform(-1.0, 1.0) * 10.0 ** rng.randint(-30, 30))
+    alphabet = "abz019_-.:+eE xo#'\"\\,~"
+    return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+
+
+@pytest.mark.parametrize("seed", [11, 23, 37, 41, 59, 67, 73, 89])
+def test_mixed_scalar_frontmatter_round_trip_is_type_exact_for_seeded_samples(seed: int) -> None:
+    """Seeded mixed scalars survive emit -> parse with identical types and values, and emission is a fixed point."""
+    rng = random.Random(seed)
+    frontmatter: dict[str, Any] = {f"k{idx}": _random_scalar(rng) for idx in range(60)}
+    frontmatter["nested"] = {"items": [_random_scalar(rng) for _ in range(20)]}
+
+    emitted, parsed = _round_trip_frontmatter(frontmatter)
+
+    assert list(parsed) == list(frontmatter)
+    mismatches = [
+        (key, frontmatter[key], parsed[key])
+        for key in frontmatter
+        if key != "nested" and not _same_scalar(parsed[key], frontmatter[key])
+    ]
+    assert mismatches == []
+    nested_pairs = zip(parsed["nested"]["items"], frontmatter["nested"]["items"], strict=True)
+    assert [pair for pair in nested_pairs if not _same_scalar(*pair)] == []
+    assert _round_trip_frontmatter(parsed)[0] == emitted
+
+    yaml = pytest.importorskip("yaml")
+    foreign = yaml.safe_load(emitted.split("---\n")[1])
+    foreign_mismatches = [
+        (key, frontmatter[key], foreign[key])
+        for key in frontmatter
+        if key != "nested" and not _same_scalar(foreign[key], frontmatter[key])
+    ]
+    assert foreign_mismatches == []
+
+
+_BLOCK_SCALAR_CASES: tuple[tuple[str, str, object], ...] = (
+    ("folded-clip", "description: >\n  folded text\n  continues here\ntitle: T\n", "folded text continues here\n"),
+    ("folded-strip", "description: >-\n  folded text\n  continues here\n", "folded text continues here"),
+    ("folded-keep", "description: >+\n  folded text\n\n\ntitle: T\n", "folded text\n\n\n"),
+    ("folded-paragraphs", "description: >\n  one\n  two\n\n  three\n", "one two\nthree\n"),
+    ("folded-more-indented", "description: >\n  one\n    code\n  two\n", "one\n  code\ntwo\n"),
+    ("literal-clip", "description: |\n  line one\n  line two\n\ntitle: T\n", "line one\nline two\n"),
+    ("literal-strip", "description: |-\n  line one\n  line two\n", "line one\nline two"),
+    ("literal-keep", "description: |+\n  line one\n\ntitle: T\n", "line one\n\n"),
+    (
+        "literal-syntax-chars",
+        "description: |\n  # not a comment\n  key: value\n  - dash\n",
+        "# not a comment\nkey: value\n- dash\n",
+    ),
+    ("literal-inner-blank", "description: |\n  a\n\n  b\n", "a\n\nb\n"),
+    ("literal-indent-indicator", "description: |2\n    indented\n  flush\n", "  indented\nflush\n"),
+    ("literal-indicator-chomp", "description: |2-\n    indented\n", "  indented"),
+    ("header-comment", "description: > # folded\n  text\n", "text\n"),
+    ("empty-block", "description: |\ntitle: T\n", ""),
+)
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "expected"),
+    [(case[1], case[2]) for case in _BLOCK_SCALAR_CASES],
+    ids=[case[0] for case in _BLOCK_SCALAR_CASES],
+)
+def test_block_scalars_parse_with_chomping_and_folding(yaml_text: str, expected: str) -> None:
+    """Literal and folded block scalars honor clip, strip, and keep chomping like a standard YAML reader."""
+    parsed = _parse_frontmatter(yaml_text)
+
+    assert parsed["description"] == expected
+    if "title" in yaml_text:
+        assert parsed["title"] == "T"
+    yaml = pytest.importorskip("yaml")
+    assert yaml.safe_load(yaml_text)["description"] == expected
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "expected"),
+    [
+        ("matrix:\n  - - a\n    - b\n  - - c\n", {"matrix": [["a", "b"], ["c"]]}),
+        ("matrix:\n- - 1\n  - 2\n- - 3\n", {"matrix": [[1, 2], [3]]}),
+        ("deep:\n  - - - x\n", {"deep": [[["x"]]]}),
+        ("rows:\n  - - k: v\n      j: w\n    - z\n", {"rows": [[{"k": "v", "j": "w"}, "z"]]}),
+        (
+            "notes:\n  - |\n    first\n    second\n  - >-\n    folded\n    item\n",
+            {"notes": ["first\nsecond\n", "folded item"]},
+        ),
+        (
+            "items:\n  - name: a\n    text: >\n      folded\n      value\n    kind: b\n",
+            {"items": [{"name": "a", "text": "folded value\n", "kind": "b"}]},
+        ),
+        ("outer:\n  inner: |\n    deep\n  other: 1\n", {"outer": {"inner": "deep\n", "other": 1}}),
+    ],
+    ids=[
+        "nested-seq",
+        "nested-seq-flush",
+        "triple-nested",
+        "nested-seq-mapping",
+        "seq-blocks",
+        "seq-map-block",
+        "map-block",
+    ],
+)
+def test_nested_inline_sequences_and_block_scalars_reach_a_fixed_point(
+    yaml_text: str,
+    expected: dict[str, Any],
+) -> None:
+    """Nested `- - x` sequences and block scalars parse like standard YAML, and parse -> emit -> parse is stable."""
+    parsed = _parse_frontmatter(yaml_text)
+    assert parsed == expected
+    yaml = pytest.importorskip("yaml")
+    assert yaml.safe_load(yaml_text) == expected
+
+    first = OkfDocument.parse("notes/blocks.md", f"---\n{yaml_text}---\n\n# Blocks\n")
+    second = OkfDocument.parse("notes/blocks.md", first.to_markdown())
+    assert second.frontmatter == first.frontmatter
+    assert second.to_markdown() == first.to_markdown()
+    assert second.sha256 == first.sha256
+    assert all("\n" not in line or line == "" for line in first.to_markdown().split("\n"))
+
+
+@pytest.mark.parametrize(
+    "bad_yaml",
+    ["description: |\n    deep\n  shallow\n", "description: |0\n  text\n", "description: |\n\ttabbed\n"],
+    ids=["dedent-inside-block", "zero-indent-indicator", "tab-indented-block"],
+)
+def test_malformed_block_scalars_raise_validation_error(bad_yaml: str) -> None:
+    """Block scalars with inconsistent indentation or invalid indicators are rejected."""
+    with pytest.raises(OkfValidationError):
+        _parse_frontmatter(bad_yaml)
+
+
+def _zip_with_members(members: list[tuple[str, bytes]]) -> bytes:
+    """Build an in-memory ZIP archive from `(name, payload)` members."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in members:
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+_INDEX_MD: bytes = b'---\nokf_version: "0.2"\n---\n\n# Index\n'
+
+
+@pytest.mark.parametrize("asset_name", ["assets/diagram.png", "notes.txt", "knowledge/data.md.bak"])
+def test_from_zip_skips_oversized_non_markdown_members(asset_name: str) -> None:
+    """A non-Markdown member above the per-entry ceiling is skipped instead of rejecting the archive."""
+    archive = _zip_with_members([("index.md", _INDEX_MD), (asset_name, b"\x00" * (MAX_OKF_ENTRY_BYTES + 1))])
+
+    bundle = OkfBundle.from_zip(archive)
+
+    assert [doc.rel_path for doc in bundle] == ["index.md"]
+
+
+@pytest.mark.parametrize("unsafe_name", ["../escape.bin", "assets/../../escape.bin", "C:/escape.bin"])
+def test_from_zip_still_rejects_unsafe_non_markdown_member_paths(unsafe_name: str) -> None:
+    """Path-safety checks apply to skipped non-Markdown members too."""
+    archive = _zip_with_members([("index.md", _INDEX_MD), (unsafe_name, b"x")])
+
+    with pytest.raises(OkfValidationError):
+        OkfBundle.from_zip(archive)
+
+
+def test_from_zip_still_rejects_non_markdown_symlink_members() -> None:
+    """Symlink checks apply to skipped non-Markdown members too."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w") as archive:
+        archive.writestr("index.md", _INDEX_MD)
+        link = zipfile.ZipInfo("assets/link.bin")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "/etc/passwd")
+
+    with pytest.raises(OkfValidationError, match="symlink"):
+        OkfBundle.from_zip(buffer.getvalue())
+
+
+@pytest.mark.parametrize("source_kind", ["directory", "zip"])
+def test_oversized_reserved_log_error_names_file_and_both_sizes(tmp_path: Path, source_kind: str) -> None:
+    """An oversized `log.md` keeps the per-entry ceiling and the error names the file, its size, and the limit."""
+    oversized = b"# Bundle Activity Log\n" + b"x" * MAX_OKF_ENTRY_BYTES
+    expected = rf"'log\.md'.*\b{len(oversized)} bytes.*\b{MAX_OKF_ENTRY_BYTES} bytes"
+
+    with pytest.raises(OkfValidationError, match=expected):
+        if source_kind == "directory":
+            (tmp_path / "index.md").write_bytes(_INDEX_MD)
+            (tmp_path / "log.md").write_bytes(oversized)
+            OkfBundle.from_directory(tmp_path, exclude_log=False)
+        else:
+            OkfBundle.from_zip(_zip_with_members([("index.md", _INDEX_MD), ("log.md", oversized)]))

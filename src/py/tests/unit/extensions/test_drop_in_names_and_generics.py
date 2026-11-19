@@ -80,6 +80,7 @@ from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, S
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.mysql.config import build_mysql_client_kwargs
 from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
     AsyncOraclePool,
@@ -181,6 +182,7 @@ from vertebra.extensions.sqlspec.adapters.bigquery.core import BigQueryConnectio
 from vertebra.extensions.sqlspec.adapters.mysql.core import build_connection_config as build_mysql_connection_config
 from vertebra.extensions.sqlspec.adapters.spanner.core import SpannerConnectionShim
 from vertebra.storage import SyncObjectStore
+from vertebra.typing import ImproperConfigurationError
 
 
 class _DummySyncDriver:
@@ -1480,11 +1482,16 @@ def test_sqlspec_mysql_configs_forward_and_preserve_cloud_auth_across_derive_poo
     assert derived_key[2] == 3307
     assert derived.driver_config.token_provider is expected_provider
     assert derived.driver_config.ssl_ca == custom_ca
+    assert primary.driver_config.canonical_ssl_mode == "verify-full"
+    assert derived.driver_config.canonical_ssl_mode == "verify-full"
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_mode"] == "verify-full"
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_ca"] == custom_ca
 
     replaced = primary.derive_pool(url=replica_dsn, token_provider=override_provider, ssl_ca=override_ca)
     assert replaced.driver_config.dsn == replica_dsn
     assert replaced.driver_config.token_provider is override_provider
     assert replaced.driver_config.ssl_ca == override_ca
+    assert replaced.driver_config.canonical_ssl_mode == "require"
     assert primary.driver_config.token_provider is expected_provider
     assert primary.driver_config.ssl_ca == custom_ca
 
@@ -1492,6 +1499,7 @@ def test_sqlspec_mysql_configs_forward_and_preserve_cloud_auth_across_derive_poo
     assert cleared.driver_config.dsn == replica_dsn
     assert cleared.driver_config.token_provider is None
     assert cleared.driver_config.ssl_ca is None
+    assert cleared.driver_config.canonical_ssl_mode == "prefer"
     assert primary.driver_config.token_provider is expected_provider
     assert primary.driver_config.ssl_ca == custom_ca
 
@@ -1516,6 +1524,7 @@ def test_sqlspec_mysql_build_connection_config_and_rds_default_ca_derive_pool(
     assert built.dsn == "mysql://iam_user@replica.rds.internal:3306/app"
     assert built.token_provider is rds_provider
     assert built.ssl_ca == aws_rds_root_ca_pem()
+    assert built.canonical_ssl_mode == "verify-full"
 
     primary = config_cls(
         "mysql://iam_user@primary.rds.internal:3306/app",
@@ -1523,12 +1532,15 @@ def test_sqlspec_mysql_build_connection_config_and_rds_default_ca_derive_pool(
         share_pool=False,
     )
     assert primary.driver_config.ssl_ca == aws_rds_root_ca_pem()
+    assert build_mysql_client_kwargs(primary.driver_config)["ssl_mode"] == "verify-full"
+    assert build_mysql_client_kwargs(primary.driver_config)["ssl_ca"] == aws_rds_root_ca_pem()
 
     derived_query_ca = primary.derive_pool(
         url="mysql://iam_user@replica.rds.internal:3306/app?ssl_ca=/etc/ssl/replica-ca.pem"
     )
     assert derived_query_ca.driver_config.token_provider is rds_provider
     assert derived_query_ca.driver_config.ssl_ca == "/etc/ssl/replica-ca.pem"
+    assert derived_query_ca.driver_config.canonical_ssl_mode == "verify-full"
 
     seen_scopes: list[str] = []
 
@@ -1542,6 +1554,87 @@ def test_sqlspec_mysql_build_connection_config_and_rds_default_ca_derive_pool(
         share_pool=False,
     )
     entra_replica = entra_primary.derive_pool(host="replica.mysql.database.azure.com")
+    assert entra_primary.driver_config.canonical_ssl_mode == "verify-full"
+    assert entra_replica.driver_config.canonical_ssl_mode == "verify-full"
+    assert entra_replica.driver_config.ssl_ca is None
     assert entra_primary.driver_config.parse_dsn_params()["password"] == "test-token-placeholder-entra"
     assert entra_replica.driver_config.parse_dsn_params()["password"] == "test-token-placeholder-entra"
     assert seen_scopes == [AZURE_MYSQL_SCOPE]
+
+
+def _mysql_cloud_token_provider(provider_kind: str) -> DatabaseTokenProvider:
+    """Build an AWS RDS or Azure Entra token provider that never reaches the network."""
+    if provider_kind == "rds_iam":
+        return AwsRdsIamTokenProvider(
+            endpoint_host="primary.internal",
+            port=3306,
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-id",
+            secret_access_key="test-token-placeholder-secret",
+        )
+    return AzureEntraTokenProvider(fetcher=lambda scope: f"test-token-placeholder-{scope}")
+
+
+@pytest.mark.parametrize("config_cls", [MySQLSyncConfig, MySQLAsyncConfig], ids=["sync", "async"])
+@pytest.mark.parametrize("provider_kind", ["rds_iam", "azure_entra"])
+@pytest.mark.parametrize(
+    ("primary_dsn", "primary_ssl_mode", "derive_mode", "primary_mode", "derived_mode"),
+    [
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "url", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "endpoint", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "replicas_url", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "replicas_endpoint", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app?ssl_mode=disable", None, "url", "disable", "verify-full"),
+        ("mysql://iam_user@primary.internal:3306/app", None, "endpoint", "verify-full", "verify-full"),
+        ("mysql://iam_user@primary.internal:3306/app", "verify-ca", "endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@primary.internal:3306/app", "verify-ca", "replicas_endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@primary.internal:3306/app", "required", "endpoint", "require", "require"),
+        ("mysql://iam_user@primary.internal:3306/app?ssl_mode=verify-ca", None, "endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@127.0.0.1:3306/app?ssl_mode=disable", None, "endpoint", "disable", None),
+        ("mysql://iam_user@127.0.0.1:3306/app", "prefer", "replicas_endpoint", "prefer", None),
+    ],
+)
+def test_sqlspec_mysql_cloud_iam_ssl_mode_across_derive_pool_and_replicas(
+    config_cls: type[MySQLSyncConfig | MySQLAsyncConfig],
+    provider_kind: str,
+    primary_dsn: str,
+    primary_ssl_mode: str | None,
+    derive_mode: str,
+    primary_mode: str,
+    derived_mode: str | None,
+) -> None:
+    """Verify derived MySQL pools verify remote cloud IAM servers by default and inherit only explicit modes."""
+    provider = _mysql_cloud_token_provider(provider_kind)
+    replica_dsn = "mysql://iam_user@replica.internal:3307/app"
+    replicas_arg: list[Any] | None = None
+    if derive_mode == "replicas_url":
+        replicas_arg = [replica_dsn]
+    elif derive_mode == "replicas_endpoint":
+        replicas_arg = [{"host": "replica.internal", "port": 3307}]
+    extra: dict[str, Any] = {} if primary_ssl_mode is None else {"ssl_mode": primary_ssl_mode}
+
+    def _derive() -> MySQLSyncConfig | MySQLAsyncConfig:
+        primary = config_cls(primary_dsn, token_provider=provider, share_pool=False, replicas=replicas_arg, **extra)
+        assert primary.driver_config.canonical_ssl_mode == primary_mode
+        assert build_mysql_client_kwargs(primary.driver_config)["ssl_mode"] == primary_mode
+        if derive_mode == "url":
+            return primary.derive_pool(url=replica_dsn)
+        if derive_mode == "endpoint":
+            return primary.derive_pool(host="replica.internal", port=3307)
+        replica: MySQLSyncConfig | MySQLAsyncConfig = primary.replica_groups["default"].specs[0].config
+        return replica
+
+    if derived_mode is None:
+        with pytest.raises(ImproperConfigurationError, match="requires TLS on remote hosts"):
+            _derive()
+        return
+
+    derived = _derive()
+    assert derived.driver_config.pool_key()[1] == "replica.internal"
+    assert derived.driver_config.canonical_ssl_mode == derived_mode
+    assert derived.driver_config.parse_dsn_params()["ssl_mode"] == derived_mode
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_mode"] == derived_mode
+    expected_ca = aws_rds_root_ca_pem() if provider_kind == "rds_iam" else None
+    assert derived.driver_config.ssl_ca == expected_ca
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_ca"] == expected_ca

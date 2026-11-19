@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Coroutine, Iterable
 from contextlib import suppress
 from enum import StrEnum
@@ -16,6 +17,7 @@ import msgspec
 
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server.platform import CgroupQuota
+from vertebra.telemetry.otel import EventLoopMetricSample, EventLoopRecorder
 from vertebra.utils.module_loader import import_optional
 
 __all__ = (
@@ -232,7 +234,12 @@ def format_task_call_graphs(loop: asyncio.AbstractEventLoop | None = None) -> st
 
 
 class EventLoopPool:
-    """Sharded pool of persistent event loops with optional inline single-thread mode."""
+    """Sharded pool of persistent event loops with optional inline single-thread mode.
+
+    An `EventLoopRecorder` attached through the `recorder` keyword or `attach_recorder` receives one
+    `EventLoopMetricSample` per shard per interval, recorded on that shard's own loop thread. A pool
+    without a recorder schedules no sampling timers.
+    """
 
     __slots__ = (
         "_close_on_exit",
@@ -244,6 +251,10 @@ class EventLoopPool:
         "_loop_backend",
         "_loops",
         "_quarantined_modules",
+        "_recorder",
+        "_recorder_backend",
+        "_recorder_interval",
+        "_sampler_handles",
         "_size",
         "_stopped",
         "_task_counters",
@@ -258,7 +269,12 @@ class EventLoopPool:
         inline_single_loop: bool = False,
         loop_backend: LoopBackend | str | None = None,
         gil_report: GilAuditReport | None = None,
+        recorder: EventLoopRecorder | None = None,
+        recorder_interval_seconds: float = 1.0,
     ) -> None:
+        if recorder is not None and not recorder_interval_seconds > 0:
+            msg = "EventLoopPool recorder_interval_seconds must be > 0"
+            raise ValueError(msg)
         resolved_size = size if size is not None else resolve_loop_shards(audit_report=gil_report)
         if resolved_size < 1:
             msg = "EventLoopPool size must be >= 1"
@@ -280,6 +296,10 @@ class EventLoopPool:
         self._inline_drained = False
         self._inline_drain_task: asyncio.Task[None] | None = None
         self._inline_run_depth = 0
+        self._recorder: EventLoopRecorder | None = None
+        self._recorder_backend = ""
+        self._recorder_interval = 0.0
+        self._sampler_handles: list[asyncio.TimerHandle | None] = [None] * resolved_size
 
         if self._inline_single:
             inline_loop = create_event_loop(
@@ -291,6 +311,8 @@ class EventLoopPool:
             self._task_counters.append(itertools.count(1))
             self._install_shard_task_naming(0, inline_loop)
             self._install_inline_exit_hook(inline_loop)
+            if recorder is not None:
+                self.attach_recorder(recorder, interval_seconds=recorder_interval_seconds)
             return
 
         for shard_idx in range(resolved_size):
@@ -316,6 +338,9 @@ class EventLoopPool:
                 msg = f"Event loop shard {shard_idx} did not start within {_SHARD_START_TIMEOUT_SECONDS}s"
                 raise RuntimeError(msg)
 
+        if recorder is not None:
+            self.attach_recorder(recorder, interval_seconds=recorder_interval_seconds)
+
     @property
     def size(self) -> int:
         """Return the number of event loop shards in the pool."""
@@ -330,6 +355,11 @@ class EventLoopPool:
     def primary_loop(self) -> asyncio.AbstractEventLoop:
         """Return the primary event loop shard without mutating round-robin state."""
         return self._loops[0]
+
+    @property
+    def recorder(self) -> EventLoopRecorder | None:
+        """Return the attached `EventLoopRecorder`, or `None` when no loop telemetry is sampled."""
+        return self._recorder
 
     def get_loop(self, worker_index: int) -> asyncio.AbstractEventLoop:
         """Return the event loop shard assigned to worker_index."""
@@ -489,6 +519,46 @@ class EventLoopPool:
 
         return futures
 
+    def attach_recorder(self, recorder: EventLoopRecorder, *, interval_seconds: float = 1.0) -> None:
+        """Start sampling scheduling lag and active task counts on every shard into `recorder`.
+
+        Each shard arms a self-rescheduling `loop.call_later` timer on its own loop. When the timer
+        fires, the lag is the actual `time.monotonic()` fire time minus the expected one, and the
+        shard records an `EventLoopMetricSample` on its loop thread. For `zuvloop` loops the shard also calls
+        `recorder.configure_zuvloop` with the same interval. An inline loop starts sampling the first
+        time it runs, and lag is only meaningful while that loop runs continuously. Sampling stops
+        and every pending timer is cancelled when the pool stops.
+
+        Args:
+            recorder: Recorder receiving one sample per shard per interval.
+            interval_seconds: Sampling interval in seconds; must be greater than zero.
+
+        Raises:
+            ValueError: When `interval_seconds` is not greater than zero.
+            RuntimeError: When the pool is stopped or already has a recorder attached.
+        """
+        if not interval_seconds > 0:
+            msg = "EventLoopPool recorder interval_seconds must be > 0"
+            raise ValueError(msg)
+        if self._stopped:
+            msg = "Cannot attach a recorder to a stopped EventLoopPool"
+            raise RuntimeError(msg)
+        if self._recorder is not None:
+            msg = "EventLoopPool already has a recorder attached"
+            raise RuntimeError(msg)
+
+        self._recorder_backend = resolve_loop_backend(
+            self._loop_backend,
+            quarantined_modules=self._quarantined_modules,
+        ).value
+        self._recorder_interval = float(interval_seconds)
+        self._recorder = recorder
+        for shard_idx, loop in enumerate(self._loops):
+            if self._inline_single and not loop.is_running():
+                loop.call_soon(self._start_shard_sampler, shard_idx)
+            else:
+                loop.call_soon_threadsafe(self._start_shard_sampler, shard_idx)
+
     def stop(self) -> None:
         """Drain and stop every loop shard, closing each loop only after its thread exits.
 
@@ -499,6 +569,7 @@ class EventLoopPool:
         if self._stopped:
             return
         self._stopped = True
+        self._cancel_shard_samplers()
 
         if self._inline_single:
             loop = self._loops[0]
@@ -564,6 +635,68 @@ class EventLoopPool:
                 continue
             if not loop.is_closed():
                 loop.close()
+
+    def _start_shard_sampler(self, shard_idx: int) -> None:
+        """Configure native zuvloop telemetry and arm the first lag timer on the shard's own loop."""
+        recorder = self._recorder
+        if recorder is None or self._stopped or self._sampler_handles[shard_idx] is not None:
+            return
+        loop = self._loops[shard_idx]
+        if self._recorder_backend == LoopBackend.ZUVLOOP.value:
+            recorder.configure_zuvloop(loop, metrics_interval_ms=max(1, round(self._recorder_interval * 1000.0)))
+        self._arm_shard_sampler(shard_idx, loop)
+
+    def _arm_shard_sampler(self, shard_idx: int, loop: asyncio.AbstractEventLoop) -> None:
+        """Schedule the next lag sample for a shard and remember its timer handle."""
+        interval = self._recorder_interval
+        self._sampler_handles[shard_idx] = loop.call_later(
+            interval,
+            self._sample_shard,
+            shard_idx,
+            time.monotonic() + interval,
+        )
+
+    def _sample_shard(self, shard_idx: int, expected_at: float) -> None:
+        """Record one lag and active-task sample on the shard's loop thread, then re-arm the timer."""
+        self._sampler_handles[shard_idx] = None
+        recorder = self._recorder
+        if recorder is None or self._stopped:
+            return
+        loop = self._loops[shard_idx]
+        lag_ms = max(0.0, (time.monotonic() - expected_at) * 1000.0)
+        try:
+            recorder.record(
+                EventLoopMetricSample(
+                    shard_id=shard_idx,
+                    backend=self._recorder_backend,
+                    lag_ms=lag_ms,
+                    active_tasks=len(asyncio.all_tasks(loop)),
+                )
+            )
+        except Exception:
+            logger.exception("Event loop shard %d telemetry sample failed", shard_idx)
+        self._arm_shard_sampler(shard_idx, loop)
+
+    def _cancel_shard_sampler(self, shard_idx: int) -> None:
+        """Cancel a shard's pending lag timer; runs on the shard's loop thread or on an idle inline loop."""
+        handle = self._sampler_handles[shard_idx]
+        self._sampler_handles[shard_idx] = None
+        if handle is not None:
+            handle.cancel()
+
+    def _cancel_shard_samplers(self) -> None:
+        """Cancel every shard's pending lag timer, hopping onto running shard loops owned by other threads."""
+        if self._recorder is None:
+            return
+        running = self._running_loop_or_none()
+        for shard_idx, loop in enumerate(self._loops):
+            if loop.is_closed():
+                continue
+            if loop.is_running() and loop is not running:
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._cancel_shard_sampler, shard_idx)
+            else:
+                self._cancel_shard_sampler(shard_idx)
 
     def _install_shard_task_naming(self, shard_idx: int, loop: asyncio.AbstractEventLoop) -> None:
         counter = self._task_counters[shard_idx]

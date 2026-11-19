@@ -6,7 +6,7 @@ import getpass
 import os
 import posixpath
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -31,6 +31,7 @@ __all__ = (
     "PostgresClientOptions",
     "PostgresTarget",
     "build_native_client_options",
+    "enforce_cloud_token_sslmode",
     "is_postgres_auth_rejection",
     "merge_postgres_options",
     "normalize_pem_bytes",
@@ -47,6 +48,7 @@ _CLOUD_TLS_TOKEN_PROVIDERS = (
 )
 
 _VALID_SSLMODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
+_PLAINTEXT_CAPABLE_SSLMODES = frozenset({"disable", "allow", "prefer"})
 _VALID_CHANNEL_BINDINGS = frozenset({"prefer", "require", "disable"})
 _VALID_POOLER_MODES = frozenset({"direct", "transaction", "session", "statement", "auto"})
 _VALID_CLOUD_IP_TYPES = frozenset({"PUBLIC", "PRIVATE", "PSC"})
@@ -426,6 +428,26 @@ def parse_postgres_dsn(dsn: str) -> ParsedPostgresDsn:
     )
 
 
+def enforce_cloud_token_sslmode(token_provider: object, hosts: Iterable[str], explicit_sslmode: str | None) -> None:
+    """Reject an explicit sslmode that can send a cloud IAM or Entra token to a remote host in plaintext.
+
+    `disable`, `allow`, and `prefer` all continue without TLS when the server declines it, so they are
+    refused whenever `token_provider` is a cloud token provider and any TCP host in `hosts` is not loopback.
+    Unix socket paths and loopback hosts are exempt.
+    """
+    if explicit_sslmode is None or not isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS):
+        return
+    normalized_sslmode = explicit_sslmode.strip().lower()
+    if normalized_sslmode not in _PLAINTEXT_CAPABLE_SSLMODES:
+        return
+    if any(not host.startswith("/") and not is_loopback_host(host) for host in hosts):
+        msg = (
+            f"{type(token_provider).__name__} requires TLS on remote hosts "
+            f"and cannot be used with sslmode='{normalized_sslmode}'"
+        )
+        raise ImproperConfigurationError(msg)
+
+
 def build_native_client_options(
     config: PostgreSQLConfig,
     *,
@@ -519,18 +541,18 @@ def build_native_client_options(
     if isinstance(token_provider, AzureEntraTokenProvider):
         token_provider = token_provider.with_default_scope(AZURE_POSTGRES_SCOPE)
 
+    enforce_cloud_token_sslmode(
+        token_provider,
+        (target.host for target in targets if not target.is_unix),
+        explicit_sslmode,
+    )
+    upgrades_remote_default = explicit_sslmode is None and isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS)
     has_remote_target = False
     resolved_targets: list[PostgresTarget] = []
     for target in targets:
-        is_remote_target = not target.is_unix and not is_loopback_host(target.host)
-        if is_remote_target:
+        if not target.is_unix and not is_loopback_host(target.host):
             has_remote_target = True
-            if isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS) and target.sslmode == "disable":
-                raise ImproperConfigurationError(
-                    f"{type(token_provider).__name__} requires TLS on remote hosts "
-                    "and cannot be used with sslmode='disable'"
-                )
-            if isinstance(token_provider, AwsRdsIamTokenProvider) and explicit_sslmode is None:
+            if upgrades_remote_default:
                 target = msgspec.structs.replace(target, sslmode="verify-full")
         resolved_targets.append(target)
     targets = tuple(resolved_targets)
