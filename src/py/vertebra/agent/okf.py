@@ -114,14 +114,14 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
     ) -> OkfDocument:
         """Parse, normalize, validate, and digest a single OKF v0.2 Markdown document."""
         normalized_path = _normalize_rel_path(rel_path)
-        text = _decode_utf8_text(content, rel_path=normalized_path)
-        normalized_text = _normalize_line_endings(text)
+        text = cls._decode_utf8_text(content, rel_path=normalized_path)
+        normalized_text = cls._normalize_line_endings(text)
 
-        frontmatter, body, has_frontmatter = _split_frontmatter(normalized_text, rel_path=normalized_path)
-        truth_lines, footnotes, inline_refs = _scan_markdown_body(body, rel_path=normalized_path)
-        sources = _parse_sources(frontmatter, rel_path=normalized_path)
+        frontmatter, body, has_frontmatter = cls._split_frontmatter(normalized_text, rel_path=normalized_path)
+        truth_lines, footnotes, inline_refs = cls._scan_markdown_body(body, rel_path=normalized_path)
+        sources = cls._parse_sources(frontmatter, rel_path=normalized_path)
 
-        _validate_okf_document(
+        cls._validate_okf_document(
             rel_path=normalized_path,
             frontmatter=frontmatter,
             has_frontmatter=has_frontmatter,
@@ -132,7 +132,7 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
             max_truth_lines=max_truth_lines,
         )
 
-        canonical_text = _render_markdown(frontmatter, body)
+        canonical_text = cls._render_markdown(frontmatter, body)
         digest = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
 
         return cls(
@@ -147,11 +147,214 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
 
     def to_markdown(self) -> str:
         """Render the document as canonical UTF-8 Markdown with normalized line endings."""
-        return _render_markdown(self.frontmatter, self.body)
+        return self._render_markdown(self.frontmatter, self.body)
 
     def to_bytes(self) -> bytes:
         """Encode the canonical Markdown representation as UTF-8 bytes."""
         return self.to_markdown().encode("utf-8")
+
+    @staticmethod
+    def _decode_utf8_text(content: str | bytes, *, rel_path: str) -> str:
+        if isinstance(content, str):
+            raw_bytes = content.encode("utf-8")
+            if len(raw_bytes) > MAX_OKF_ENTRY_BYTES:
+                raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
+            return content
+        if len(content) > MAX_OKF_ENTRY_BYTES:
+            raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise OkfValidationError(f"OKF entry '{rel_path}' is not valid UTF-8: {exc}") from exc
+
+    @staticmethod
+    def _normalize_line_endings(text: str) -> str:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        if normalized.startswith("\ufeff"):
+            return normalized[1:]
+        return normalized
+
+    @staticmethod
+    def _split_frontmatter(text: str, *, rel_path: str) -> tuple[dict[str, Any], str, bool]:
+        lines = text.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return {}, text, False
+
+        close_idx: int | None = None
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                close_idx = idx
+                break
+        if close_idx is None:
+            raise OkfValidationError(f"Unterminated YAML frontmatter in '{rel_path}'")
+
+        yaml_lines = lines[1:close_idx]
+        frontmatter = _parse_yaml_frontmatter(yaml_lines, rel_path=rel_path)
+        body = "\n".join(lines[close_idx + 1 :])
+        return frontmatter, body, True
+
+    @staticmethod
+    def _render_markdown(frontmatter: Mapping[str, Any], body: str) -> str:
+        if not frontmatter:
+            return body
+        yaml_text = _dump_yaml_frontmatter(frontmatter)
+        return f"---\n{yaml_text}\n---\n{body}"
+
+    @staticmethod
+    def _scan_markdown_body(
+        body: str,
+        *,
+        rel_path: str,
+    ) -> tuple[tuple[str, ...], dict[str, str], set[str]]:
+        truth_lines: list[str] = []
+        footnotes: dict[str, str] = {}
+        inline_refs: set[str] = set()
+
+        in_fence = False
+        fence_char = ""
+        fence_len = 0
+        in_truth = False
+
+        for line_no, line in enumerate(body.split("\n"), start=1):
+            stripped = line.strip()
+            if not in_fence:
+                opened = _fence_opening(stripped)
+                if opened is not None:
+                    in_fence = True
+                    fence_char, fence_len = opened
+                    if in_truth:
+                        truth_lines.append(line)
+                    continue
+            else:
+                if _is_fence_closing(stripped, fence_char, fence_len):
+                    in_fence = False
+                    fence_char = ""
+                    fence_len = 0
+                if in_truth:
+                    truth_lines.append(line)
+                continue
+
+            if stripped == "---":
+                raise OkfValidationError(
+                    f"Standalone '---' horizontal rule is forbidden in bundle markdown body ({rel_path}:{line_no})"
+                )
+
+            if stripped == "<!-- truth: start -->":
+                if in_truth:
+                    raise OkfValidationError(f"Nested truth block start marker in '{rel_path}:{line_no}'")
+                in_truth = True
+                continue
+            if stripped == "<!-- truth: end -->":
+                if not in_truth:
+                    raise OkfValidationError(f"Unexpected truth block end marker in '{rel_path}:{line_no}'")
+                in_truth = False
+                continue
+            if in_truth:
+                truth_lines.append(line)
+
+            fn_match = _FOOTNOTE_DEF_RE.match(line)
+            if fn_match is not None:
+                fn_id = fn_match.group(1).strip()
+                fn_text = fn_match.group(2).strip()
+                if not fn_id:
+                    raise OkfValidationError(f"Empty footnote identifier in '{rel_path}:{line_no}'")
+                if fn_id in footnotes:
+                    raise OkfValidationError(f"Duplicate footnote definition '[^{fn_id}]:' in '{rel_path}:{line_no}'")
+                footnotes[fn_id] = fn_text
+                continue
+
+            scrubbed_line = _INLINE_CODE_RE.sub("", line)
+            for ref_match in _FOOTNOTE_REF_RE.finditer(scrubbed_line):
+                inline_refs.add(ref_match.group(1).strip())
+
+        if in_truth:
+            raise OkfValidationError(f"Unterminated '<!-- truth: start -->' block in '{rel_path}'")
+
+        return tuple(truth_lines), footnotes, inline_refs
+
+    @staticmethod
+    def _parse_sources(frontmatter: Mapping[str, Any], *, rel_path: str) -> tuple[OkfSource, ...]:
+        if "sources" not in frontmatter or frontmatter["sources"] is None:
+            return ()
+        raw_sources = frontmatter["sources"]
+        if not isinstance(raw_sources, list):
+            raise OkfValidationError(f"Frontmatter 'sources' must be a list in '{rel_path}'")
+
+        parsed: list[OkfSource] = []
+        seen_ids: set[str] = set()
+        for item in raw_sources:
+            if not isinstance(item, Mapping):
+                raise OkfValidationError(f"Each entry in 'sources' must be a mapping in '{rel_path}'")
+            src_id = item.get("id")
+            resource = item.get("resource")
+            title = item.get("title", "")
+            if not isinstance(src_id, str) or not src_id.strip():
+                raise OkfValidationError(f"Source entry missing non-empty string 'id' in '{rel_path}'")
+            if not isinstance(resource, str) or not resource.strip():
+                raise OkfValidationError(f"Source '{src_id}' missing non-empty string 'resource' in '{rel_path}'")
+            if title is None:
+                title = ""
+            if not isinstance(title, str):
+                raise OkfValidationError(f"Source '{src_id}' 'title' must be a string in '{rel_path}'")
+            if src_id in seen_ids:
+                raise OkfValidationError(f"Duplicate source id {src_id!r} in '{rel_path}'")
+            seen_ids.add(src_id)
+            parsed.append(OkfSource(id=src_id, resource=resource, title=title))
+        return tuple(parsed)
+
+    @staticmethod
+    def _validate_okf_document(
+        *,
+        rel_path: str,
+        frontmatter: Mapping[str, Any],
+        has_frontmatter: bool,
+        truth_lines: tuple[str, ...],
+        sources: tuple[OkfSource, ...],
+        footnotes: Mapping[str, str],
+        inline_refs: set[str],
+        max_truth_lines: int,
+    ) -> None:
+        if len(truth_lines) > max_truth_lines:
+            raise OkfValidationError(
+                f"Truth block line count ({len(truth_lines)}) exceeds max_truth_lines ({max_truth_lines}) in '{rel_path}'"
+            )
+
+        filename = rel_path.rsplit("/", 1)[-1]
+        if rel_path == "index.md":
+            if frontmatter.get("okf_version") != "0.2":
+                raise OkfValidationError("Root 'index.md' must declare frontmatter okf_version == '0.2'")
+            return
+
+        if filename in OKF_RESERVED_FILENAMES:
+            if has_frontmatter:
+                raise OkfValidationError(f"Reserved OKF file '{rel_path}' must not carry YAML frontmatter")
+            return
+
+        is_content_doc = rel_path.startswith(("product/", "knowledge/"))
+        if is_content_doc:
+            if not has_frontmatter:
+                raise OkfValidationError(f"Content document '{rel_path}' must include YAML frontmatter")
+            status = frontmatter.get("status")
+            if not isinstance(status, str) or status not in VALID_OKF_STATUSES:
+                raise OkfValidationError(
+                    f"Invalid OKF status {status!r} in '{rel_path}'; expected one of {sorted(VALID_OKF_STATUSES)}"
+                )
+
+        source_ids = {source.id for source in sources}
+        footnote_ids = set(footnotes.keys())
+
+        if is_content_doc or source_ids or footnote_ids:
+            missing_footnotes = sorted(source_ids - footnote_ids)
+            if missing_footnotes:
+                raise OkfValidationError(f"Sources missing footnote definitions in '{rel_path}': {missing_footnotes}")
+            undeclared_footnotes = sorted(footnote_ids - source_ids)
+            if undeclared_footnotes:
+                raise OkfValidationError(
+                    f"Footnote definitions missing from frontmatter sources in '{rel_path}': {undeclared_footnotes}"
+                )
+            dangling_refs = sorted(inline_refs - footnote_ids)
+            if dangling_refs:
+                raise OkfValidationError(f"Dangling footnote references in '{rel_path}': {dangling_refs}")
 
 
 class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
@@ -206,7 +409,7 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
 
         resolved_root = root_path.resolve()
         loaded: list[OkfDocument] = []
-        _collect_directory_documents(
+        cls._collect_directory_documents(
             current_dir=root_path,
             root_path=root_path,
             resolved_root=resolved_root,
@@ -230,7 +433,7 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         for doc in sorted(self.documents, key=lambda item: item.rel_path):
             rel_path = _normalize_rel_path(doc.rel_path)
             target = root_path.joinpath(*rel_path.split("/"))
-            _ensure_safe_export_target(target, root_path=root_path, resolved_root=resolved_root)
+            self._ensure_safe_export_target(target, root_path=root_path, resolved_root=resolved_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(doc.to_bytes())
             written.append(target)
@@ -250,7 +453,7 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         seen_paths: set[str] = set()
 
         try:
-            with _open_zip_reader(source) as archive:
+            with cls._open_zip_reader(source) as archive:
                 for info in archive.infolist():
                     if stat.S_ISLNK(info.external_attr >> 16):
                         raise OkfValidationError(f"ZIP entry must not be a symlink: {info.filename!r}")
@@ -321,6 +524,78 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         dest_path.write_bytes(self.to_zip_bytes())
         return dest_path
 
+    @classmethod
+    def _collect_directory_documents(
+        cls,
+        *,
+        current_dir: Path,
+        root_path: Path,
+        resolved_root: Path,
+        exclude_specs: bool,
+        exclude_log: bool,
+        max_truth_lines: int,
+        out: list[OkfDocument],
+    ) -> None:
+        entries = sorted(current_dir.iterdir(), key=lambda item: item.name)
+        for entry in entries:
+            if entry.is_symlink():
+                raise OkfValidationError(f"Symlink is not allowed in OKF bundle: {entry}")
+            rel_posix = entry.relative_to(root_path).as_posix()
+            if entry.is_dir():
+                if exclude_specs and _is_specs_path(rel_posix):
+                    continue
+                cls._collect_directory_documents(
+                    current_dir=entry,
+                    root_path=root_path,
+                    resolved_root=resolved_root,
+                    exclude_specs=exclude_specs,
+                    exclude_log=exclude_log,
+                    max_truth_lines=max_truth_lines,
+                    out=out,
+                )
+                continue
+
+            if not entry.is_file():
+                continue
+            if not entry.resolve().is_relative_to(resolved_root):
+                raise OkfValidationError(f"Entry escapes OKF bundle root: {entry}")
+            if exclude_specs and _is_specs_path(rel_posix):
+                continue
+            if exclude_log and _is_log_path(rel_posix):
+                continue
+            if not rel_posix.endswith(".md"):
+                continue
+
+            rel_path = _normalize_rel_path(rel_posix)
+            with _open_file_nofollow(entry) as handle:
+                raw_bytes = _read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
+            out.append(OkfDocument.parse(rel_path, raw_bytes, max_truth_lines=max_truth_lines))
+
+    @staticmethod
+    def _ensure_safe_export_target(target: Path, *, root_path: Path, resolved_root: Path) -> None:
+        current = target
+        while current != root_path and current != current.parent:
+            if current.is_symlink():
+                raise OkfValidationError(f"Refusing to export through symlink path: {current}")
+            current = current.parent
+        if not target.resolve().is_relative_to(resolved_root):
+            raise OkfValidationError(f"Export path escapes destination root: {target}")
+
+    @staticmethod
+    def _open_zip_reader(
+        source: str | Path | bytes | bytearray | memoryview | IO[bytes],
+    ) -> zipfile.ZipFile:
+        if isinstance(source, (str, Path)):
+            zip_path = Path(source)
+            if zip_path.is_symlink():
+                raise OkfValidationError(f"OKF ZIP archive must not be a symlink: {zip_path}")
+            if not zip_path.is_file():
+                raise OkfValidationError(f"OKF ZIP archive does not exist: {zip_path}")
+            return zipfile.ZipFile(_open_file_nofollow(zip_path), mode="r")
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            return zipfile.ZipFile(io.BytesIO(source), mode="r")
+        return zipfile.ZipFile(source, mode="r")
+
 
 def _normalize_rel_path(raw_path: str) -> str:
     if not raw_path or "\x00" in raw_path:
@@ -345,27 +620,6 @@ def _is_specs_path(rel_path: str) -> bool:
 
 def _is_log_path(rel_path: str) -> bool:
     return rel_path == "log.md" or rel_path.endswith("/log.md")
-
-
-def _decode_utf8_text(content: str | bytes, *, rel_path: str) -> str:
-    if isinstance(content, str):
-        raw_bytes = content.encode("utf-8")
-        if len(raw_bytes) > MAX_OKF_ENTRY_BYTES:
-            raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
-        return content
-    if len(content) > MAX_OKF_ENTRY_BYTES:
-        raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {MAX_OKF_ENTRY_BYTES} bytes")
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise OkfValidationError(f"OKF entry '{rel_path}' is not valid UTF-8: {exc}") from exc
-
-
-def _normalize_line_endings(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    if normalized.startswith("\ufeff"):
-        return normalized[1:]
-    return normalized
 
 
 def _read_stream_bounded(
@@ -395,96 +649,6 @@ def _open_file_nofollow(path: Path) -> IO[bytes]:
     except OSError as exc:
         raise OkfValidationError(f"Unable to safely open OKF entry '{path}': {exc}") from exc
     return os.fdopen(fd, "rb")
-
-
-def _collect_directory_documents(
-    *,
-    current_dir: Path,
-    root_path: Path,
-    resolved_root: Path,
-    exclude_specs: bool,
-    exclude_log: bool,
-    max_truth_lines: int,
-    out: list[OkfDocument],
-) -> None:
-    entries = sorted(current_dir.iterdir(), key=lambda item: item.name)
-    for entry in entries:
-        if entry.is_symlink():
-            raise OkfValidationError(f"Symlink is not allowed in OKF bundle: {entry}")
-        rel_posix = entry.relative_to(root_path).as_posix()
-        if entry.is_dir():
-            if exclude_specs and _is_specs_path(rel_posix):
-                continue
-            _collect_directory_documents(
-                current_dir=entry,
-                root_path=root_path,
-                resolved_root=resolved_root,
-                exclude_specs=exclude_specs,
-                exclude_log=exclude_log,
-                max_truth_lines=max_truth_lines,
-                out=out,
-            )
-            continue
-
-        if not entry.is_file():
-            continue
-        if not entry.resolve().is_relative_to(resolved_root):
-            raise OkfValidationError(f"Entry escapes OKF bundle root: {entry}")
-        if exclude_specs and _is_specs_path(rel_posix):
-            continue
-        if exclude_log and _is_log_path(rel_posix):
-            continue
-        if not rel_posix.endswith(".md"):
-            continue
-
-        rel_path = _normalize_rel_path(rel_posix)
-        with _open_file_nofollow(entry) as handle:
-            raw_bytes = _read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
-        out.append(OkfDocument.parse(rel_path, raw_bytes, max_truth_lines=max_truth_lines))
-
-
-def _ensure_safe_export_target(target: Path, *, root_path: Path, resolved_root: Path) -> None:
-    current = target
-    while current != root_path and current != current.parent:
-        if current.is_symlink():
-            raise OkfValidationError(f"Refusing to export through symlink path: {current}")
-        current = current.parent
-    if not target.resolve().is_relative_to(resolved_root):
-        raise OkfValidationError(f"Export path escapes destination root: {target}")
-
-
-def _open_zip_reader(
-    source: str | Path | bytes | bytearray | memoryview | IO[bytes],
-) -> zipfile.ZipFile:
-    if isinstance(source, (str, Path)):
-        zip_path = Path(source)
-        if zip_path.is_symlink():
-            raise OkfValidationError(f"OKF ZIP archive must not be a symlink: {zip_path}")
-        if not zip_path.is_file():
-            raise OkfValidationError(f"OKF ZIP archive does not exist: {zip_path}")
-        return zipfile.ZipFile(_open_file_nofollow(zip_path), mode="r")
-    if isinstance(source, (bytes, bytearray, memoryview)):
-        return zipfile.ZipFile(io.BytesIO(source), mode="r")
-    return zipfile.ZipFile(source, mode="r")
-
-
-def _split_frontmatter(text: str, *, rel_path: str) -> tuple[dict[str, Any], str, bool]:
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}, text, False
-
-    close_idx: int | None = None
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
-            close_idx = idx
-            break
-    if close_idx is None:
-        raise OkfValidationError(f"Unterminated YAML frontmatter in '{rel_path}'")
-
-    yaml_lines = lines[1:close_idx]
-    frontmatter = _parse_yaml_frontmatter(yaml_lines, rel_path=rel_path)
-    body = "\n".join(lines[close_idx + 1 :])
-    return frontmatter, body, True
 
 
 def _parse_yaml_frontmatter(yaml_lines: list[str], *, rel_path: str) -> dict[str, Any]:
@@ -950,13 +1114,6 @@ def _needs_yaml_quoting(value: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _YAML_SPECIAL_CHARS for ch in value)
 
 
-def _render_markdown(frontmatter: Mapping[str, Any], body: str) -> str:
-    if not frontmatter:
-        return body
-    yaml_text = _dump_yaml_frontmatter(frontmatter)
-    return f"---\n{yaml_text}\n---\n{body}"
-
-
 def _fence_opening(stripped: str) -> tuple[str, int] | None:
     for fence_char in ("`", "~"):
         if stripped.startswith(fence_char * 3):
@@ -976,159 +1133,3 @@ def _is_fence_closing(stripped: str, fence_char: str, fence_len: int) -> bool:
     if not stripped or len(stripped) < fence_len:
         return False
     return all(ch == fence_char for ch in stripped)
-
-
-def _scan_markdown_body(
-    body: str,
-    *,
-    rel_path: str,
-) -> tuple[tuple[str, ...], dict[str, str], set[str]]:
-    truth_lines: list[str] = []
-    footnotes: dict[str, str] = {}
-    inline_refs: set[str] = set()
-
-    in_fence = False
-    fence_char = ""
-    fence_len = 0
-    in_truth = False
-
-    for line_no, line in enumerate(body.split("\n"), start=1):
-        stripped = line.strip()
-        if not in_fence:
-            opened = _fence_opening(stripped)
-            if opened is not None:
-                in_fence = True
-                fence_char, fence_len = opened
-                if in_truth:
-                    truth_lines.append(line)
-                continue
-        else:
-            if _is_fence_closing(stripped, fence_char, fence_len):
-                in_fence = False
-                fence_char = ""
-                fence_len = 0
-            if in_truth:
-                truth_lines.append(line)
-            continue
-
-        if stripped == "---":
-            raise OkfValidationError(
-                f"Standalone '---' horizontal rule is forbidden in bundle markdown body ({rel_path}:{line_no})"
-            )
-
-        if stripped == "<!-- truth: start -->":
-            if in_truth:
-                raise OkfValidationError(f"Nested truth block start marker in '{rel_path}:{line_no}'")
-            in_truth = True
-            continue
-        if stripped == "<!-- truth: end -->":
-            if not in_truth:
-                raise OkfValidationError(f"Unexpected truth block end marker in '{rel_path}:{line_no}'")
-            in_truth = False
-            continue
-        if in_truth:
-            truth_lines.append(line)
-
-        fn_match = _FOOTNOTE_DEF_RE.match(line)
-        if fn_match is not None:
-            fn_id = fn_match.group(1).strip()
-            fn_text = fn_match.group(2).strip()
-            if not fn_id:
-                raise OkfValidationError(f"Empty footnote identifier in '{rel_path}:{line_no}'")
-            if fn_id in footnotes:
-                raise OkfValidationError(f"Duplicate footnote definition '[^{fn_id}]:' in '{rel_path}:{line_no}'")
-            footnotes[fn_id] = fn_text
-            continue
-
-        scrubbed_line = _INLINE_CODE_RE.sub("", line)
-        for ref_match in _FOOTNOTE_REF_RE.finditer(scrubbed_line):
-            inline_refs.add(ref_match.group(1).strip())
-
-    if in_truth:
-        raise OkfValidationError(f"Unterminated '<!-- truth: start -->' block in '{rel_path}'")
-
-    return tuple(truth_lines), footnotes, inline_refs
-
-
-def _parse_sources(frontmatter: Mapping[str, Any], *, rel_path: str) -> tuple[OkfSource, ...]:
-    if "sources" not in frontmatter or frontmatter["sources"] is None:
-        return ()
-    raw_sources = frontmatter["sources"]
-    if not isinstance(raw_sources, list):
-        raise OkfValidationError(f"Frontmatter 'sources' must be a list in '{rel_path}'")
-
-    parsed: list[OkfSource] = []
-    seen_ids: set[str] = set()
-    for item in raw_sources:
-        if not isinstance(item, Mapping):
-            raise OkfValidationError(f"Each entry in 'sources' must be a mapping in '{rel_path}'")
-        src_id = item.get("id")
-        resource = item.get("resource")
-        title = item.get("title", "")
-        if not isinstance(src_id, str) or not src_id.strip():
-            raise OkfValidationError(f"Source entry missing non-empty string 'id' in '{rel_path}'")
-        if not isinstance(resource, str) or not resource.strip():
-            raise OkfValidationError(f"Source '{src_id}' missing non-empty string 'resource' in '{rel_path}'")
-        if title is None:
-            title = ""
-        if not isinstance(title, str):
-            raise OkfValidationError(f"Source '{src_id}' 'title' must be a string in '{rel_path}'")
-        if src_id in seen_ids:
-            raise OkfValidationError(f"Duplicate source id {src_id!r} in '{rel_path}'")
-        seen_ids.add(src_id)
-        parsed.append(OkfSource(id=src_id, resource=resource, title=title))
-    return tuple(parsed)
-
-
-def _validate_okf_document(
-    *,
-    rel_path: str,
-    frontmatter: Mapping[str, Any],
-    has_frontmatter: bool,
-    truth_lines: tuple[str, ...],
-    sources: tuple[OkfSource, ...],
-    footnotes: Mapping[str, str],
-    inline_refs: set[str],
-    max_truth_lines: int,
-) -> None:
-    if len(truth_lines) > max_truth_lines:
-        raise OkfValidationError(
-            f"Truth block line count ({len(truth_lines)}) exceeds max_truth_lines ({max_truth_lines}) in '{rel_path}'"
-        )
-
-    filename = rel_path.rsplit("/", 1)[-1]
-    if rel_path == "index.md":
-        if frontmatter.get("okf_version") != "0.2":
-            raise OkfValidationError("Root 'index.md' must declare frontmatter okf_version == '0.2'")
-        return
-
-    if filename in OKF_RESERVED_FILENAMES:
-        if has_frontmatter:
-            raise OkfValidationError(f"Reserved OKF file '{rel_path}' must not carry YAML frontmatter")
-        return
-
-    is_content_doc = rel_path.startswith(("product/", "knowledge/"))
-    if is_content_doc:
-        if not has_frontmatter:
-            raise OkfValidationError(f"Content document '{rel_path}' must include YAML frontmatter")
-        status = frontmatter.get("status")
-        if not isinstance(status, str) or status not in VALID_OKF_STATUSES:
-            raise OkfValidationError(
-                f"Invalid OKF status {status!r} in '{rel_path}'; expected one of {sorted(VALID_OKF_STATUSES)}"
-            )
-
-    source_ids = {source.id for source in sources}
-    footnote_ids = set(footnotes.keys())
-
-    if is_content_doc or source_ids or footnote_ids:
-        missing_footnotes = sorted(source_ids - footnote_ids)
-        if missing_footnotes:
-            raise OkfValidationError(f"Sources missing footnote definitions in '{rel_path}': {missing_footnotes}")
-        undeclared_footnotes = sorted(footnote_ids - source_ids)
-        if undeclared_footnotes:
-            raise OkfValidationError(
-                f"Footnote definitions missing from frontmatter sources in '{rel_path}': {undeclared_footnotes}"
-            )
-        dangling_refs = sorted(inline_refs - footnote_ids)
-        if dangling_refs:
-            raise OkfValidationError(f"Dangling footnote references in '{rel_path}': {dangling_refs}")

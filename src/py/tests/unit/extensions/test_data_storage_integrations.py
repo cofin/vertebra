@@ -2368,12 +2368,13 @@ async def test_sqlspec_arrow_midstream_failure_and_cancellation_abort_upload(
             )
     assert not await backend.exists_async(fresh_key)
 
-    yielded_first = threading.Event()
+    loop = asyncio.get_running_loop()
+    yielded_first = asyncio.Event()
     unblock = threading.Event()
 
     def blocking_batches() -> Iterator[pa.RecordBatch]:
         yield pa.record_batch([pa.array([1, 2]), pa.array(["x" * 4096, "y" * 4096])], schema=schema)
-        yielded_first.set()
+        loop.call_soon_threadsafe(yielded_first.set)
         unblock.wait(timeout=5.0)
         yield pa.record_batch([pa.array([3, 4]), pa.array(["z" * 4096, "w" * 4096])], schema=schema)
 
@@ -2395,9 +2396,7 @@ async def test_sqlspec_arrow_midstream_failure_and_cancellation_abort_upload(
 
     task = asyncio.create_task(coro)
     try:
-        async with asyncio.timeout(5):
-            while not yielded_first.is_set():
-                await asyncio.sleep(0.005)
+        await asyncio.wait_for(yielded_first.wait(), timeout=5.0)
         task.cancel()
         unblock.set()
         with pytest.raises(CancelledError):

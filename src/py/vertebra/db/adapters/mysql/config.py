@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
@@ -15,6 +14,7 @@ from vertebra.db.driver._cloud_auth import (
     AZURE_MYSQL_SCOPE,
     AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
+    is_loopback_host,
 )
 from vertebra.db.driver._common import MYSQL_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
@@ -78,23 +78,6 @@ _CANONICAL_SSL_MODE_MAP: dict[str, str] = {
     "verify-identity": "verify-full",
     "verify_identity": "verify-full",
 }
-
-
-def _is_loopback_host(host: str) -> bool:
-    """Return True when `host` resolves to localhost or an IPv4/IPv6 loopback address."""
-    cleaned = host.strip().lower()
-    if cleaned.startswith("[") and cleaned.endswith("]"):
-        cleaned = cleaned[1:-1]
-    cleaned = cleaned.partition("%")[0]
-    if cleaned in {"localhost", "localhost."}:
-        return True
-    try:
-        addr = ipaddress.ip_address(cleaned)
-    except ValueError:
-        return False
-    if addr.is_loopback:
-        return True
-    return isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
 
 
 class MySQLPoolConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -290,7 +273,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             effective_unix_socket is None
             and self.cloud_sql_instance is None
             and not lower_dsn.startswith("cloudsql://")
-            and not _is_loopback_host(effective_host)
+            and not is_loopback_host(effective_host)
         )
         if (
             is_remote_endpoint

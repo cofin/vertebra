@@ -1848,6 +1848,9 @@ def test_arrow_cursor_lazy_zero_copy_and_post_release_errors(
             if import_optional("polars") is not None:
                 with pytest.raises(ValueError, match="released"):
                     cursor.to_polars()
+            if hasattr(cursor, "to_pyarrow"):
+                with pytest.raises((BufferError, ValueError), match="released"):
+                    cursor.to_pyarrow()
             if hasattr(cursor, "read_bytes"):
                 with pytest.raises(ValueError, match="released"):
                     cursor.read_bytes()
@@ -1858,3 +1861,31 @@ def test_arrow_cursor_lazy_zero_copy_and_post_release_errors(
         retained_mv.release()
         if native_shm is not None:
             native_shm.release()
+
+
+@pytest.mark.parametrize(
+    "index_type_name",
+    ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"],
+)
+def test_arrow_cursor_dictionary_array_to_pylist_roundtrip(index_type_name: str) -> None:
+    """Native ArrowCursor.to_pylist decodes signed and unsigned dictionary-encoded columns."""
+    pa = pytest.importorskip("pyarrow")
+    index_type = getattr(pa, index_type_name)()
+    dict_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, None, 0], type=index_type),
+        pa.array(["primary", "replica"]),
+    )
+    table = pa.table({"role": dict_arr})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    native_cursor = native_vertebra.ArrowCursor.from_ipc_bytes(sink.getvalue().to_pybytes())
+    try:
+        assert native_cursor.to_pylist() == [
+            {"role": "primary"},
+            {"role": "replica"},
+            {"role": None},
+            {"role": "primary"},
+        ]
+    finally:
+        native_cursor.release()

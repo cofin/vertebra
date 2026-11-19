@@ -55,7 +55,7 @@ alloydb = SyncAlloyDBDialer(
 
 ## Capabilities
 
-- **Cloud SQL (`CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`)**: Parses `project:region:instance` (including domain-scoped projects), fetches ephemeral X.509 client certificates via the SQL Admin `generateEphemeralCert` API, and establishes TLS 1.3 connections on port `3307` with custom `project:instance` server certificate verification across PostgreSQL, MySQL, and SQL Server.
+- **Cloud SQL (`CloudSQLConfig`, `SyncCloudSQLDialer`, `AsyncCloudSQLDialer`)**: Parses `project:region:instance` (including domain-scoped projects) and fetches ephemeral X.509 client certificates via SQL Admin `generateEphemeralCert`. It then establishes TLS 1.3 connections on port `3307` with `project:instance` server verification across PostgreSQL, MySQL, and SQL Server.
 - **AlloyDB (`AlloyDBConfig`, `SyncAlloyDBDialer`, `AsyncAlloyDBDialer`)**: Parses `projects/<p>/locations/<l>/clusters/<c>/instances/<i>` URIs, negotiates client certificates via `generateClientCertificate`, and executes the port `5433` protobuf `MetadataExchangeRequest` handshake (`BUILT_IN` or `IAM` token auth).
 - **Automatic Session GUCs**: When `alloydb_instance_uri` is set or `enable_alloydb_columnar_engine=True` is configured on `PostgreSQLConfig`, `build_session_gucs` enables both `google_columnar_engine.enabled=on` and `alloydb.enable_columnar_engine=on`.
 - **In-Database Vector Embeddings**: Pair AlloyDB connections with [`PushdownEmbedder` with `PostgresEmbeddingPushdown`](embeddings-and-vectors.md) to push `embedding()` execution directly into SQL.
@@ -101,7 +101,7 @@ rds_ca_pem = aws_rds_root_ca_pem()
 
 ## Azure Entra ID
 
-Construct `SyncAzureEntraDialer` / `AsyncAzureEntraDialer` for Azure Database for PostgreSQL Flexible Server, Azure Database for MySQL Flexible Server, and Azure SQL Database / Managed Instance with automatic engine detection, `verify-full` TLS, and cached OAuth2 token acquisition (Managed Identity IMDS, Workload Identity federation, or service principal client credentials):
+Construct `SyncAzureEntraDialer` or `AsyncAzureEntraDialer` for Azure Database for PostgreSQL Flexible Server, Azure Database for MySQL Flexible Server, and Azure SQL Database or Managed Instance. Both dialers provide automatic engine detection, `verify-full` TLS, and cached OAuth2 acquisition via Managed Identity IMDS, Workload Identity federation, or client credentials:
 
 ```python
 from vertebra.db import SyncAzureEntraDialer

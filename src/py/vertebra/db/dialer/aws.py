@@ -11,6 +11,12 @@ from typing import Any, Final
 from urllib.parse import quote
 
 from vertebra._vertebra import AwsAuroraDsqlDialer, AwsRdsDialer, aws_rds_root_ca_pem
+from vertebra.db.dialer._base import (
+    build_verify_full_tls_context,
+    format_dialer_url_host,
+    validate_dialer_non_empty,
+    validate_dialer_port,
+)
 from vertebra.db.driver._cloud_auth import (
     AwsAuroraDsqlIamTokenProvider,
     AwsRdsIamTokenProvider,
@@ -30,71 +36,10 @@ __all__ = (
 )
 
 
-def _validate_port(port: int) -> int:
-    """Validate that a TCP port is a non-boolean integer within 1..65535."""
-    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
-        msg = f"port must be an integer between 1 and 65535, got {port!r}"
-        raise ImproperConfigurationError(msg)
-    return port
-
-
-def _validate_non_empty(value: str, *, field_name: str) -> str:
-    """Validate that a string configuration field is non-empty and free of NUL bytes."""
-    if "\x00" in value:
-        msg = f"{field_name} must not contain NUL bytes"
-        raise ImproperConfigurationError(msg)
-    stripped = value.strip()
-    if not stripped:
-        msg = f"{field_name} must be a non-empty string"
-        raise ImproperConfigurationError(msg)
-    return stripped
-
-
-def _format_url_host(host: str) -> str:
-    """Format a hostname or IPv6 literal for safe inclusion in a database URI authority."""
-    if ":" in host and not (host.startswith("[") and host.endswith("]")):
-        return f"[{host}]"
-    return host
-
-
-def _normalize_rds_engine(engine: str | None, *, default_from_port: int | None = None) -> str:
-    """Normalize an AWS RDS engine identifier to `'postgres'` or `'mysql'`."""
-    if engine is None:
-        return "mysql" if default_from_port == 3306 else "postgres"
-    lowered = _validate_non_empty(engine, field_name="engine").lower()
-    if lowered in _POSTGRES_ENGINE_ALIASES:
-        return "postgres"
-    if lowered in _MYSQL_ENGINE_ALIASES:
-        return "mysql"
-    msg = f"Unsupported AWS RDS engine {engine!r}; expected 'postgres' or 'mysql'"
-    raise ImproperConfigurationError(msg)
-
-
-def _has_embedded_port(endpoint_host: str) -> bool:
-    """Return True when an endpoint string explicitly embeds a `:port` suffix."""
-    if endpoint_host.startswith("["):
-        return "]:" in endpoint_host
-    return endpoint_host.count(":") == 1
-
-
 def _ambient_aws_region() -> str | None:
     """Return `AWS_REGION` or `AWS_DEFAULT_REGION` when set in the process environment."""
     raw = (os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "").strip()
     return raw or None
-
-
-def _build_verify_full_tls_context(ca_pem: str | None = None) -> ssl.SSLContext:
-    """Build a `verify-full` client `SSLContext` enforcing TLS 1.2+, `CERT_REQUIRED`, and hostname verification."""
-    if ca_pem is not None:
-        validated_pem = _validate_non_empty(ca_pem, field_name="ca_pem")
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.load_verify_locations(cadata=validated_pem)
-    else:
-        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.verify_mode = ssl.CERT_REQUIRED
-    ctx.check_hostname = True
-    return ctx
 
 
 class _BaseAwsRdsDialer:
@@ -108,6 +53,26 @@ class _BaseAwsRdsDialer:
         "_ssl_context",
         "_token_provider",
     )
+
+    @staticmethod
+    def _normalize_rds_engine(engine: str | None, *, default_from_port: int | None = None) -> str:
+        """Normalize an AWS RDS engine identifier to `'postgres'` or `'mysql'`."""
+        if engine is None:
+            return "mysql" if default_from_port == 3306 else "postgres"
+        lowered = validate_dialer_non_empty(engine, field_name="engine").lower()
+        if lowered in _POSTGRES_ENGINE_ALIASES:
+            return "postgres"
+        if lowered in _MYSQL_ENGINE_ALIASES:
+            return "mysql"
+        msg = f"Unsupported AWS RDS engine {engine!r}; expected 'postgres' or 'mysql'"
+        raise ImproperConfigurationError(msg)
+
+    @staticmethod
+    def _has_embedded_port(endpoint_host: str) -> bool:
+        """Return True when an endpoint string explicitly embeds a `:port` suffix."""
+        if endpoint_host.startswith("["):
+            return "]:" in endpoint_host
+        return endpoint_host.count(":") == 1
 
     def __init__(
         self,
@@ -132,12 +97,12 @@ class _BaseAwsRdsDialer:
         signer: Callable[..., Any] | None = None,
     ) -> None:
         if port is not None:
-            _validate_port(port)
+            validate_dialer_port(port)
         if token_provider is not None and not isinstance(token_provider, DatabaseTokenProvider):
             msg = "token_provider must implement DatabaseTokenProvider"
             raise ImproperConfigurationError(msg)
 
-        provisional_engine = _normalize_rds_engine(engine, default_from_port=port) if engine is not None else None
+        provisional_engine = self._normalize_rds_engine(engine, default_from_port=port) if engine is not None else None
         provider_user = getattr(token_provider, "username", None) if token_provider is not None else None
         provider_region = getattr(token_provider, "region", None) if token_provider is not None else None
 
@@ -161,7 +126,7 @@ class _BaseAwsRdsDialer:
                     raise ImproperConfigurationError(str(exc)) from exc
         else:
             effective_port = port
-            if effective_port is None and provisional_engine == "mysql" and not _has_embedded_port(endpoint_host):
+            if effective_port is None and provisional_engine == "mysql" and not self._has_embedded_port(endpoint_host):
                 effective_port = 3306
             effective_user = (
                 username
@@ -191,15 +156,15 @@ class _BaseAwsRdsDialer:
         resolved_engine = (
             provisional_engine
             if provisional_engine is not None
-            else _normalize_rds_engine(None, default_from_port=native.port)
+            else self._normalize_rds_engine(None, default_from_port=native.port)
         )
         resolved_db = (
-            _validate_non_empty(database, field_name="database")
+            validate_dialer_non_empty(database, field_name="database")
             if database is not None
             else ("mysql" if resolved_engine == "mysql" else "postgres")
         )
         effective_ca_pem = aws_rds_root_ca_pem() if ca_pem is None else ca_pem
-        ssl_ctx = _build_verify_full_tls_context(effective_ca_pem)
+        ssl_ctx = build_verify_full_tls_context(effective_ca_pem)
 
         resolved_provider: DatabaseTokenProvider = (
             token_provider
@@ -298,7 +263,7 @@ class _BaseAwsRdsDialer:
 
     def build_tls_context(self, *, ca_pem: str | None = None) -> ssl.SSLContext:
         """Construct a fresh `verify-full` `ssl.SSLContext` seeded with `ca_pem` or the dialer's CA bundle."""
-        return _build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
+        return build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
 
     def invalidate_token(self) -> None:
         """Clear any cached RDS IAM token snapshot."""
@@ -306,8 +271,8 @@ class _BaseAwsRdsDialer:
 
     def connection_kwargs(self, *, database: str | None = None, **overrides: Any) -> dict[str, Any]:
         """Return driver-ready `PostgreSQLConfig` or `MySQLConfig` keyword arguments."""
-        db_name = _validate_non_empty(database, field_name="database") if database is not None else self._database
-        url_host = _format_url_host(self.endpoint_host)
+        db_name = validate_dialer_non_empty(database, field_name="database") if database is not None else self._database
+        url_host = format_dialer_url_host(self.endpoint_host)
         escaped_user = quote(self.username, safe="")
         escaped_db = quote(db_name, safe="")
         if self._engine == "mysql":
@@ -350,12 +315,12 @@ class SyncAwsRdsDialer(_BaseAwsRdsDialer):
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
         """Establish a synchronous `verify-full` TLS socket to the RDS endpoint."""
-        target_host = self.endpoint_host if host is None else _validate_non_empty(host, field_name="host")
-        target_port = self.port if port is None else _validate_port(port)
+        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
+        target_port = self.port if port is None else validate_dialer_port(port)
         tls_hostname = (
             self.endpoint_host
             if server_hostname is None
-            else _validate_non_empty(server_hostname, field_name="server_hostname")
+            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
         )
         ctx = self._ssl_context if ssl_context is None else ssl_context
         raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
@@ -407,12 +372,12 @@ class AsyncAwsRdsDialer(_BaseAwsRdsDialer):
         timeout: float = 10.0,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Establish an asynchronous `verify-full` TLS stream pair to the RDS endpoint."""
-        target_host = self.endpoint_host if host is None else _validate_non_empty(host, field_name="host")
-        target_port = self.port if port is None else _validate_port(port)
+        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
+        target_port = self.port if port is None else validate_dialer_port(port)
         tls_hostname = (
             self.endpoint_host
             if server_hostname is None
-            else _validate_non_empty(server_hostname, field_name="server_hostname")
+            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
         )
         ctx = self._ssl_context if ssl_context is None else ssl_context
         async with asyncio.timeout(timeout):
@@ -463,7 +428,7 @@ class _BaseAwsAuroraDsqlDialer:
         signer: Callable[..., Any] | None = None,
     ) -> None:
         if port is not None:
-            _validate_port(port)
+            validate_dialer_port(port)
         if token_provider is not None and not isinstance(token_provider, DatabaseTokenProvider):
             msg = "token_provider must implement DatabaseTokenProvider"
             raise ImproperConfigurationError(msg)
@@ -500,12 +465,12 @@ class _BaseAwsAuroraDsqlDialer:
                 raise ImproperConfigurationError(str(exc)) from exc
 
         resolved_user = (
-            _validate_non_empty(username, field_name="username")
+            validate_dialer_non_empty(username, field_name="username")
             if username is not None
             else ("admin" if native.admin else "postgres")
         )
-        resolved_db = _validate_non_empty(database, field_name="database")
-        ssl_ctx = _build_verify_full_tls_context(ca_pem)
+        resolved_db = validate_dialer_non_empty(database, field_name="database")
+        ssl_ctx = build_verify_full_tls_context(ca_pem)
 
         resolved_provider: DatabaseTokenProvider = (
             token_provider
@@ -608,7 +573,7 @@ class _BaseAwsAuroraDsqlDialer:
 
     def build_tls_context(self, *, ca_pem: str | None = None) -> ssl.SSLContext:
         """Construct a fresh `verify-full` `ssl.SSLContext` using WebPKI roots or `ca_pem`."""
-        return _build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
+        return build_verify_full_tls_context(self._ca_pem if ca_pem is None else ca_pem)
 
     def invalidate_token(self) -> None:
         """Clear any cached Aurora DSQL IAM token snapshot."""
@@ -616,8 +581,8 @@ class _BaseAwsAuroraDsqlDialer:
 
     def connection_kwargs(self, *, database: str | None = None, **overrides: Any) -> dict[str, Any]:
         """Return driver-ready `PostgreSQLConfig` keyword arguments for Aurora DSQL."""
-        db_name = _validate_non_empty(database, field_name="database") if database is not None else self._database
-        url_host = _format_url_host(self.endpoint_host)
+        db_name = validate_dialer_non_empty(database, field_name="database") if database is not None else self._database
+        url_host = format_dialer_url_host(self.endpoint_host)
         escaped_user = quote(self._username, safe="")
         escaped_db = quote(db_name, safe="")
         kwargs: dict[str, Any] = {
@@ -649,12 +614,12 @@ class SyncAwsAuroraDsqlDialer(_BaseAwsAuroraDsqlDialer):
         timeout: float = 10.0,
     ) -> ssl.SSLSocket:
         """Establish a synchronous `verify-full` TLS socket to the Aurora DSQL endpoint."""
-        target_host = self.endpoint_host if host is None else _validate_non_empty(host, field_name="host")
-        target_port = self.port if port is None else _validate_port(port)
+        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
+        target_port = self.port if port is None else validate_dialer_port(port)
         tls_hostname = (
             self.endpoint_host
             if server_hostname is None
-            else _validate_non_empty(server_hostname, field_name="server_hostname")
+            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
         )
         ctx = self._ssl_context if ssl_context is None else ssl_context
         raw_sock = socket.create_connection((target_host, target_port), timeout=timeout)
@@ -706,12 +671,12 @@ class AsyncAwsAuroraDsqlDialer(_BaseAwsAuroraDsqlDialer):
         timeout: float = 10.0,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Establish an asynchronous `verify-full` TLS stream pair to the Aurora DSQL endpoint."""
-        target_host = self.endpoint_host if host is None else _validate_non_empty(host, field_name="host")
-        target_port = self.port if port is None else _validate_port(port)
+        target_host = self.endpoint_host if host is None else validate_dialer_non_empty(host, field_name="host")
+        target_port = self.port if port is None else validate_dialer_port(port)
         tls_hostname = (
             self.endpoint_host
             if server_hostname is None
-            else _validate_non_empty(server_hostname, field_name="server_hostname")
+            else validate_dialer_non_empty(server_hostname, field_name="server_hostname")
         )
         ctx = self._ssl_context if ssl_context is None else ssl_context
         async with asyncio.timeout(timeout):

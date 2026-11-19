@@ -84,7 +84,7 @@ def _generate_test_tls_credentials() -> tuple[str, str]:
             "-subj",
             "/CN=my-proj:my-pg",
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
         return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
 
 
@@ -1649,7 +1649,7 @@ def _generate_san_tls_credentials(dns_name: str) -> tuple[str, str]:
             "-addext",
             f"subjectAltName=DNS:{dns_name}",
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
         return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
 
 
@@ -2099,5 +2099,5 @@ def test_vertebra_db_lazy_cloud_dialer_resolution_in_fresh_interpreter() -> None
         "assert 'vertebra.db.dialer.azure' in sys.modules\n"
         "assert aws_rds_root_ca_pem().startswith('-----BEGIN CERTIFICATE-----')\n"
     )
-    proc = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr

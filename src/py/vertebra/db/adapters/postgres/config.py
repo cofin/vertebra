@@ -9,7 +9,6 @@ from typing import Any, ClassVar, Literal, Self
 import msgspec
 
 from vertebra.db.adapters.postgres.options import (
-    is_postgres_loopback_host,
     merge_postgres_options,
     normalize_pem_bytes,
     parse_postgres_dsn,
@@ -22,6 +21,7 @@ from vertebra.db.driver._cloud_auth import (
     AwsAuroraDsqlIamTokenProvider,
     AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
+    is_loopback_host,
 )
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
@@ -145,7 +145,7 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                     candidate_hosts = list(parsed_candidate.hosts)
                 else:
                     candidate_hosts = ["localhost"]
-                if any(not h.startswith("/") and not is_postgres_loopback_host(h) for h in candidate_hosts):
+                if any(not h.startswith("/") and not is_loopback_host(h) for h in candidate_hosts):
                     msg = (
                         f"{type(self.token_provider).__name__} requires TLS on remote hosts "
                         "and cannot be used with sslmode='disable'"

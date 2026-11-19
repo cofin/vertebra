@@ -331,6 +331,7 @@ class ArrowCursor:
 
     def to_arrow_table(self) -> Any:
         """Deserialize the Arrow IPC buffer into a `pyarrow.Table` with zero copy."""
+        self._check_not_released()
         pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
         ipc_table = self._ipc_table()
         if ipc_table is not None:

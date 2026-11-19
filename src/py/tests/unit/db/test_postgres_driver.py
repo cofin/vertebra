@@ -1292,11 +1292,16 @@ def test_postgres_cloud_auth_rds_ca_bundle_and_ca_pem_normalization(
     assert opts.targets[0].sslmode == expected_sslmode
     assert opts.ca_pem == expected_ca_bytes
 
-    for bad_pem in ("", "   ", "bad\x00pem"):
-        with pytest.raises(ImproperConfigurationError, match="ca_pem"):
-            PostgreSQLConfig(dsn=base_dsn, ca_pem=bad_pem)
-        with pytest.raises(ImproperConfigurationError, match="ca_pem"):
-            build_native_client_options(cfg, env={}, ca_pem=bad_pem)
+
+@pytest.mark.parametrize("bad_pem", ["", "   ", "bad\x00pem"])
+def test_postgres_cloud_auth_rejects_invalid_ca_pem(bad_pem: str) -> None:
+    """Reject blank or NUL-containing PostgreSQL ca_pem values in config and native option building."""
+    base_dsn = "postgresql://rds_user@orders.c9akciq32.us-east-1.rds.amazonaws.com:5432/orders"
+    cfg = PostgreSQLConfig(dsn=base_dsn)
+    with pytest.raises(ImproperConfigurationError, match="ca_pem"):
+        PostgreSQLConfig(dsn=base_dsn, ca_pem=bad_pem)
+    with pytest.raises(ImproperConfigurationError, match="ca_pem"):
+        build_native_client_options(cfg, env={}, ca_pem=bad_pem)
 
 
 @pytest.mark.parametrize("provider_kind", ["aws_rds", "aws_dsql", "azure_entra"])

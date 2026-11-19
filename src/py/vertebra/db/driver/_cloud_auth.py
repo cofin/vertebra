@@ -61,6 +61,7 @@ __all__ = (
     "AzureEntraTokenProvider",
     "DatabaseTokenProvider",
     "TokenSnapshot",
+    "is_loopback_host",
 )
 
 
@@ -851,27 +852,36 @@ def _normalize_host(raw: str, *, field_name: str) -> str:
     return host
 
 
-def _is_loopback_host(host: str) -> bool:
+def is_loopback_host(host: str) -> bool:
     """Return True when `host` resolves syntactically to `localhost` or an IPv4/IPv6 loopback IP."""
-    lowered = host.strip().lower()
-    if lowered == "localhost":
+    cleaned = host.strip().lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    cleaned = cleaned.partition("%")[0]
+    if cleaned in {"localhost", "localhost."}:
         return True
     try:
-        return ipaddress.ip_address(lowered).is_loopback
+        addr = ipaddress.ip_address(cleaned)
     except ValueError:
         return False
+    if addr.is_loopback:
+        return True
+    return isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
 
 
 def _should_bypass_proxy(host: str) -> bool:
     """Return True when `host` is a loopback, link-local, or EC2 IPv6 metadata address."""
-    lowered = host.strip().lower()
-    if lowered == "localhost":
+    if is_loopback_host(host):
         return True
+    cleaned = host.strip().lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    cleaned = cleaned.partition("%")[0]
     try:
-        ip = ipaddress.ip_address(lowered)
+        ip = ipaddress.ip_address(cleaned)
     except ValueError:
         return False
-    if ip.is_loopback or ip.is_link_local:
+    if ip.is_link_local:
         return True
     return isinstance(ip, ipaddress.IPv6Address) and ip in _AWS_IPV6_METADATA_NETWORK
 
@@ -892,7 +902,7 @@ def _validate_aws_sts_url(raw: str, *, field_name: str) -> str:
     parsed = urlsplit(normalized)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
-    if scheme == "http" and not _is_loopback_host(host):
+    if scheme == "http" and not is_loopback_host(host):
         msg = f"{field_name} must use HTTPS unless targeting a local loopback endpoint"
         raise ImproperConfigurationError(msg)
     return normalized
@@ -907,7 +917,7 @@ def _validate_ecs_credentials_url(raw_url: str) -> tuple[str, bool]:
     bypass_proxy = _should_bypass_proxy(host)
     if scheme == "https":
         return normalized, bypass_proxy
-    if _is_loopback_host(host) or host in _AWS_ECS_LINK_LOCAL_HOSTS:
+    if is_loopback_host(host) or host in _AWS_ECS_LINK_LOCAL_HOSTS:
         return normalized, True
     try:
         ip = ipaddress.ip_address(host)
@@ -928,7 +938,7 @@ def _validate_aws_imds_base_url(raw_url: str, *, field_name: str) -> str:
     parsed = urlsplit(normalized)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
-    if scheme == "https" or _is_loopback_host(host) or host in _AWS_IMDS_LINK_LOCAL_HOSTS:
+    if scheme == "https" or is_loopback_host(host) or host in _AWS_IMDS_LINK_LOCAL_HOSTS:
         return normalized
     try:
         ip = ipaddress.ip_address(host)
@@ -946,7 +956,7 @@ def _validate_azure_authority_host(raw: str, *, field_name: str) -> str:
     parsed = urlsplit(normalized)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
-    if scheme == "http" and not _is_loopback_host(host):
+    if scheme == "http" and not is_loopback_host(host):
         msg = f"{field_name} must use HTTPS unless targeting a local loopback endpoint"
         raise ImproperConfigurationError(msg)
     return normalized

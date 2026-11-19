@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import vertebra.agent as agent_pkg
 from vertebra.agent.okf import (
     MAX_OKF_ENTRY_BYTES,
     OkfBundle,
@@ -200,18 +201,10 @@ def test_standalone_horizontal_rule_and_unclosed_truth_rejected() -> None:
 
 
 def test_reserved_files_validation_rules() -> None:
-    """Root index.md requires okf_version '0.2', while subdir index.md and log.md forbid frontmatter."""
+    """Root index.md accepts okf_version '0.2', while subdir index.md and log.md parse without frontmatter."""
     valid_root = '---\nokf_version: "0.2"\nbundle: demo\n---\n\n# Root Index\n'
     root_doc = OkfDocument.parse("index.md", valid_root)
     assert root_doc.frontmatter["okf_version"] == "0.2"
-
-    for bad_root in (
-        "---\nokf_version: 0.2\n---\n\n# Float version\n",
-        "---\nbundle: demo\n---\n\n# Missing okf_version\n",
-        "# No frontmatter\n",
-    ):
-        with pytest.raises(OkfValidationError):
-            OkfDocument.parse("index.md", bad_root)
 
     subdir_idx = OkfDocument.parse("knowledge/index.md", "# Knowledge Index\n")
     assert subdir_idx.frontmatter == {}
@@ -219,9 +212,26 @@ def test_reserved_files_validation_rules() -> None:
     log_doc = OkfDocument.parse("log.md", "# Log\n\n- Entry 1\n")
     assert log_doc.frontmatter == {}
 
-    for reserved_path in ("knowledge/index.md", "product/index.md", "log.md"):
-        with pytest.raises(OkfValidationError, match="must not carry YAML frontmatter"):
-            OkfDocument.parse(reserved_path, "---\ntitle: Illegal\n---\n\n# Reserved\n")
+
+@pytest.mark.parametrize(
+    "bad_root",
+    [
+        "---\nokf_version: 0.2\n---\n\n# Float version\n",
+        "---\nbundle: demo\n---\n\n# Missing okf_version\n",
+        "# No frontmatter\n",
+    ],
+)
+def test_invalid_root_index_rejected(bad_root: str) -> None:
+    """Root index.md without string okf_version '0.2' fails validation."""
+    with pytest.raises(OkfValidationError):
+        OkfDocument.parse("index.md", bad_root)
+
+
+@pytest.mark.parametrize("reserved_path", ["knowledge/index.md", "product/index.md", "log.md"])
+def test_reserved_paths_reject_frontmatter(reserved_path: str) -> None:
+    """Subdirectory index.md and log.md files forbid YAML frontmatter."""
+    with pytest.raises(OkfValidationError, match="must not carry YAML frontmatter"):
+        OkfDocument.parse(reserved_path, "---\ntitle: Illegal\n---\n\n# Reserved\n")
 
 
 @pytest.mark.parametrize(
@@ -448,8 +458,6 @@ def test_vertebra_agent_exports_okf_and_knowledge_catalog_symbols(
     source_module: str,
 ) -> None:
     """vertebra.agent.__all__ stays sorted and resolves all OKF and Knowledge Catalog exports."""
-    import vertebra.agent as agent_pkg
-
     assert list(agent_pkg.__all__) == sorted(agent_pkg.__all__)
     assert symbol_name in agent_pkg.__all__
 
@@ -498,5 +506,6 @@ def test_vertebra_agent_lazy_imports_avoid_eager_okf_and_catalog_loads() -> None
         check=True,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert completed.returncode == 0

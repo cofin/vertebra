@@ -71,7 +71,7 @@ sources:
 
 <!-- truth: start -->
 - `run_supervisor` selects the newest `vertebra-server` binary (`st_mtime_ns` across Cargo target directories), exports `VERTEBRA_*` launch configuration, and enforces graceful drain and `SIGTERM` shutdown timeouts.
-- `create_event_loop()` attaches `_eager_task_factory` across every resolved `LoopBackend` (`uvloop`, `winloop`, `zuvloop`, `rloop`, and `asyncio`), while `sync_tools.run_()` delegates blocking loop creation to `create_event_loop`.
+- `create_event_loop()` attaches `asyncio.eager_task_factory` across every resolved `LoopBackend` (`uvloop`, `winloop`, `zuvloop`, `rloop`, and `asyncio`), while `sync_tools.run_()` delegates blocking loop creation to `create_event_loop`.
 - `EventLoopPool` manages `1` inline or background shard on GIL builds and `N` shards on `3.14t`/`3.15t`, names shard tasks `vertebra.loop.shard.{idx}.task.{seq}`, and drains tracked tasks plus async generators (`_drain_loop` / `shutdown_asyncgens`) on `stop()` across both inline and sharded pools.
 - `EventLoopMetricSample` and `EventLoopRecorder` (`vertebra.telemetry`) record per-shard scheduling lag histograms, active-task counts, Python 3.14+ `zuvloop` loop telemetry callbacks, and optional `opentelemetry.metrics` instruments (`vertebra-core[opentelemetry]`).
 - `WorkerRunner` names background tasks (`vertebra.worker.runner`, `vertebra.worker.lane.{lane}.{seq}`), and `ZPagesRegistry` plus `HealthProbeServer` serve `/taskz` and `/debug/zpages/tasks` backed by Python 3.14+ `asyncio.capture_call_graph` with Python 3.12–3.13 stack fallbacks.

@@ -1765,7 +1765,13 @@ def test_object_store_ambient_gcs_probe_suppresses_missing_adc(
 ) -> None:
     """Ambient ADC auto-probing stays non-fatal when no explicit GCS credential option is supplied."""
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing-ambient-adc.json"))
-    sync_store = SyncObjectStore("gs://ambient-probe-bucket", options={"allow_ambient_adc": "false"})
-    async_store = AsyncObjectStore("gs://ambient-probe-bucket", options={"allow_ambient_adc": "false"})
-    sync_store.close()
-    async_store.close()
+    sync_store = SyncObjectStore("gs://ambient-probe-bucket")
+    async_store = AsyncObjectStore("gs://ambient-probe-bucket")
+    try:
+        assert sync_store.url == "gs://ambient-probe-bucket"
+        assert async_store.url == "gs://ambient-probe-bucket"
+        assert isinstance(sync_store.token_cache, native_core_mod.SyncGcpTokenCache)
+        assert isinstance(async_store.token_cache, CoreAsyncGcpTokenCache)
+    finally:
+        sync_store.close()
+        async_store.close()

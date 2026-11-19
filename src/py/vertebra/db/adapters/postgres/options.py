@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import getpass
-import ipaddress
 import os
 import posixpath
 import re
@@ -20,6 +19,7 @@ from vertebra.db.driver._cloud_auth import (
     AwsAuroraDsqlIamTokenProvider,
     AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
+    is_loopback_host,
 )
 from vertebra.typing import ImproperConfigurationError
 
@@ -32,7 +32,6 @@ __all__ = (
     "PostgresTarget",
     "build_native_client_options",
     "is_postgres_auth_rejection",
-    "is_postgres_loopback_host",
     "merge_postgres_options",
     "normalize_pem_bytes",
     "parse_libpq_conninfo",
@@ -523,7 +522,7 @@ def build_native_client_options(
     has_remote_target = False
     resolved_targets: list[PostgresTarget] = []
     for target in targets:
-        is_remote_target = not target.is_unix and not is_postgres_loopback_host(target.host)
+        is_remote_target = not target.is_unix and not is_loopback_host(target.host)
         if is_remote_target:
             has_remote_target = True
             if isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS) and target.sslmode == "disable":
@@ -1039,23 +1038,6 @@ def _normalize_unix_socket_path(directory_or_socket: str, port: int) -> str:
     if basename.startswith(".s.PGSQL."):
         return cleaned
     return posixpath.join(cleaned, f".s.PGSQL.{port}")
-
-
-def is_postgres_loopback_host(host: str) -> bool:
-    """Return True when ``host`` targets localhost or an IPv4/IPv6 loopback address."""
-    cleaned = host.strip().lower()
-    if cleaned.startswith("[") and cleaned.endswith("]"):
-        cleaned = cleaned[1:-1]
-    cleaned = cleaned.partition("%")[0]
-    if cleaned in {"localhost", "localhost."}:
-        return True
-    try:
-        addr = ipaddress.ip_address(cleaned)
-    except ValueError:
-        return False
-    if addr.is_loopback:
-        return True
-    return isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
 
 
 def normalize_pem_bytes(value: Any, *, field_name: str = "ca_pem") -> bytes:

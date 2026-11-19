@@ -238,19 +238,6 @@ def _validate_lookup_entry_group_id(entry_group_id: str) -> str:
     )
 
 
-def _okf_rel_path_to_entry_id(rel_path: str) -> str:
-    """Convert an OKF relative path into a deterministic RFC-1035-safe Dataplex entry ID."""
-    digest_suffix = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:8]
-    slug = _NON_SLUG_RE.sub("-", rel_path.lower()).strip("-")
-    if not slug or not slug[0].isalpha():
-        slug = f"okf-{slug}" if slug else "okf"
-    max_prefix = 63 - 1 - len(digest_suffix)
-    trimmed = slug[:max_prefix].rstrip("-")
-    if not trimmed:
-        trimmed = "okf"
-    return f"{trimmed}-{digest_suffix}"
-
-
 def _parse_retry_delay_ms(raw_delay: object) -> int | None:
     """Parse a protobuf duration string such as `2s` or `500ms` into milliseconds."""
     if not isinstance(raw_delay, str):
@@ -399,12 +386,6 @@ def _matches_labels(group: Mapping[str, Any], labels: Mapping[str, str] | None) 
     if not isinstance(group_labels, Mapping):
         return False
     return all(group_labels.get(k) == v for k, v in labels.items())
-
-
-def _extract_group_id(group: Mapping[str, Any]) -> str:
-    """Extract the short `entryGroupId` from a Dataplex entryGroup resource dictionary."""
-    name = str(group.get("name", ""))
-    return name.rsplit("/", 1)[-1] if name else ""
 
 
 class _BaseKnowledgeCatalogClient:
@@ -673,7 +654,7 @@ class _BaseKnowledgeCatalogClient:
         desired_ids: set[str] = set()
 
         for doc in bundle.documents:
-            entry_id = _okf_rel_path_to_entry_id(doc.rel_path)
+            entry_id = self._okf_rel_path_to_entry_id(doc.rel_path)
             desired_ids.add(entry_id)
             remote = remote_by_id.get(entry_id)
             if remote is None:
@@ -691,6 +672,25 @@ class _BaseKnowledgeCatalogClient:
         return (mutations, skipped_ids)
 
     @staticmethod
+    def _okf_rel_path_to_entry_id(rel_path: str) -> str:
+        """Convert an OKF relative path into a RFC-1035-safe Dataplex entry ID."""
+        digest_suffix = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:8]
+        slug = _NON_SLUG_RE.sub("-", rel_path.lower()).strip("-")
+        if not slug or not slug[0].isalpha():
+            slug = f"okf-{slug}" if slug else "okf"
+        max_prefix = 63 - 1 - len(digest_suffix)
+        trimmed = slug[:max_prefix].rstrip("-")
+        if not trimmed:
+            trimmed = "okf"
+        return f"{trimmed}-{digest_suffix}"
+
+    @staticmethod
+    def _extract_group_id(group: Mapping[str, Any]) -> str:
+        """Extract the short `entryGroupId` from a Dataplex entryGroup resource dictionary."""
+        name = str(group.get("name", ""))
+        return name.rsplit("/", 1)[-1] if name else ""
+
+    @staticmethod
     def _partition_mutation_batches(
         mutations: Sequence[tuple[str, str, OkfDocument | None]],
     ) -> list[tuple[tuple[str, str, OkfDocument | None], ...]]:
@@ -700,8 +700,9 @@ class _BaseKnowledgeCatalogClient:
             for idx in range(0, len(mutations), MAX_BATCH_SYNC_ENTRIES)
         ]
 
-    @staticmethod
+    @classmethod
     def _plan_context_set_action(
+        cls,
         groups: Sequence[dict[str, Any]],
         *,
         requested_id: str | None,
@@ -711,7 +712,7 @@ class _BaseKnowledgeCatalogClient:
         """Decide whether to return, adopt (PATCH), or create a `type=context-set` entry group."""
         target_id = requested_id if requested_id is not None else default_id
         for group in groups:
-            if _extract_group_id(group) == target_id:
+            if cls._extract_group_id(group) == target_id:
                 if _matches_labels(group, required_labels):
                     return ("return", group, target_id)
                 return ("adopt", group, target_id)
@@ -719,7 +720,7 @@ class _BaseKnowledgeCatalogClient:
         if requested_id is None:
             for group in groups:
                 if _matches_labels(group, required_labels):
-                    return ("return", group, _extract_group_id(group))
+                    return ("return", group, cls._extract_group_id(group))
 
         return ("create", None, target_id)
 

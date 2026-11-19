@@ -1015,42 +1015,51 @@ fn arrow_array_value_to_py<'py>(
         }
         return Ok(out.into_any());
     }
+    let mut dict_lookup = |idx: usize, values: &dyn Array| -> PyResult<Bound<'py, PyAny>> {
+        if idx >= values.len() {
+            return Err(PyValueError::new_err(
+                "Arrow dictionary key index out of bounds",
+            ));
+        }
+        arrow_array_value_to_py(py, values, idx, helpers)
+    };
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int8Type>>() {
         let idx = usize::try_from(a.keys().value(row))
             .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int16Type>>() {
         let idx = usize::try_from(a.keys().value(row))
             .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
         let idx = usize::try_from(a.keys().value(row))
             .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<Int64Type>>() {
         let idx = usize::try_from(a.keys().value(row))
             .map_err(|_| PyValueError::new_err("negative Arrow dictionary key"))?;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
         let idx = usize::from(a.keys().value(row));
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
         let idx = usize::from(a.keys().value(row));
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
-        let idx = a.keys().value(row) as usize;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        let idx = usize::try_from(a.keys().value(row))
+            .map_err(|_| PyValueError::new_err("Arrow dictionary key overflow"))?;
+        return dict_lookup(idx, a.values().as_ref());
     }
     if let Some(a) = arr.as_any().downcast_ref::<DictionaryArray<UInt64Type>>() {
         let idx = usize::try_from(a.keys().value(row))
             .map_err(|_| PyValueError::new_err("Arrow dictionary key overflow"))?;
-        return arrow_array_value_to_py(py, a.values().as_ref(), idx, helpers);
+        return dict_lookup(idx, a.values().as_ref());
     }
     Err(PyNotImplementedError::new_err(format!(
         "ArrowCursor.to_pylist does not support Arrow data type {:?}",
@@ -1510,8 +1519,11 @@ impl ArrowCursor {
 
     pub fn to_pyarrow<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let pa = py.import(pyo3::intern!(py, "pyarrow"))?;
         let this = slf.get();
+        if this.released.load(Ordering::Acquire) {
+            return Err(PyValueError::new_err("ArrowCursor has been released"));
+        }
+        let pa = py.import(pyo3::intern!(py, "pyarrow"))?;
         let pa_buf = if let Some(ref backing) = this.backing {
             let (start, end) = backing
                 .checked_bounds(this.byte_len)

@@ -535,7 +535,7 @@ def test_create_event_loop_attaches_eager_task_factory_across_backends(
     backend_name: str,
     platform_name: str,
 ) -> None:
-    """Verify create_event_loop attaches _eager_task_factory and runs tasks eagerly up to first suspension."""
+    """Verify create_event_loop attaches asyncio.eager_task_factory and runs tasks eagerly up to first suspension."""
     monkeypatch.delenv("VERTEBRA_LOOP", raising=False)
     monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
     monkeypatch.setattr("vertebra.server._loops.sys.platform", platform_name)

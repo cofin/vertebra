@@ -300,14 +300,8 @@ def _make_okf_doc(rel_path: str, title: str, body: str = "Primary verified knowl
     return OkfDocument.parse(rel_path, raw)
 
 
-def _okf_entry_id(rel_path: str) -> str:
-    """Compute the deterministic entry ID matching `knowledge_catalog._okf_rel_path_to_entry_id`."""
-    from vertebra.agent.knowledge_catalog import _okf_rel_path_to_entry_id
-
-    return _okf_rel_path_to_entry_id(rel_path)
-
-
-def test_config_validation_and_token_cache_normalization() -> None:
+@pytest.mark.anyio
+async def test_config_validation_and_token_cache_normalization() -> None:
     """Verify KnowledgeCatalogConfig constraints, default transports, and token cache normalization."""
     assert MAX_BATCH_SYNC_ENTRIES == 250
     with pytest.raises(ImproperConfigurationError, match="project_id"):
@@ -319,18 +313,25 @@ def test_config_validation_and_token_cache_normalization() -> None:
     with pytest.raises(ImproperConfigurationError, match="timeout_ms"):
         KnowledgeCatalogConfig(project_id="proj-1", timeout_ms=0)
 
-    cfg = KnowledgeCatalogConfig(project_id="proj-1")
-    assert cfg.entry_group_id == "okf-context"
+    default_cfg = KnowledgeCatalogConfig(project_id="proj-1")
+    assert default_cfg.entry_group_id == "okf-context"
 
-    async_cache = AsyncGcpTokenCache({"access_token": "test-token-placeholder"}, allow_ambient_adc=False)
-    sync_client = SyncKnowledgeCatalogClient(cfg, token_cache=async_cache)
-    assert isinstance(sync_client._token_cache, SyncGcpTokenCache)
-    assert sync_client._transport is gcp_http2_request_sync
+    with _ephemeral_http_server() as (base_url, recorded):
+        local_cfg = KnowledgeCatalogConfig(project_id="proj-1", endpoint=base_url)
 
-    sync_cache = SyncGcpTokenCache({"access_token": "test-token-placeholder"}, allow_ambient_adc=False)
-    async_client = AsyncKnowledgeCatalogClient(cfg, token_cache=sync_cache)
-    assert isinstance(async_client._token_cache, AsyncGcpTokenCache)
-    assert async_client._transport is gcp_http2_request_async
+        async_cache = AsyncGcpTokenCache({"access_token": "tok-sync-normalized"}, allow_ambient_adc=False)
+        sync_client = SyncKnowledgeCatalogClient(local_cfg, token_cache=async_cache)
+        assert sync_client.list_entry_groups() == []
+
+        sync_cache = SyncGcpTokenCache({"access_token": "tok-async-normalized"}, allow_ambient_adc=False)
+        async_client = AsyncKnowledgeCatalogClient(local_cfg, token_cache=sync_cache)
+        assert await async_client.list_entry_groups() == []
+
+    assert len(recorded) == 2
+    assert recorded[0][0] == "GET"
+    assert recorded[0][2]["authorization"] == "Bearer tok-sync-normalized"
+    assert recorded[1][0] == "GET"
+    assert recorded[1][2]["authorization"] == "Bearer tok-async-normalized"
 
 
 @pytest.mark.anyio
@@ -818,8 +819,8 @@ async def test_sync_bundle_progressive_digest_chunking_and_delete_stale(use_asyn
     changed_doc = _make_okf_doc("knowledge/changed.md", "Changed v2", "Updated truth.")
     new_doc = _make_okf_doc("knowledge/new.md", "New Doc")
 
-    unchanged_id = _okf_entry_id(unchanged_doc.rel_path)
-    changed_id = _okf_entry_id(changed_doc.rel_path)
+    unchanged_id = "knowledge-unchanged-md-ff13e3e1"
+    changed_id = "knowledge-changed-md-fa295c26"
     stale_id = "stale-removed-00001111"
 
     remote_entries: dict[str, dict[str, Any]] = {

@@ -781,18 +781,22 @@ def test_zpages_and_health_probe_server_serve_taskz_across_inline_and_sharded_po
             pool = EventLoopPool(size=2, loop_backend=LoopBackend.ASYNCIO)
             zpages.register_loop_pool("http", pool)
             started = threading.Event()
-            release = threading.Event()
+            shard_loop: asyncio.AbstractEventLoop | None = None
+            release_event: asyncio.Event | None = None
 
             async def _shard_worker() -> str:
+                nonlocal shard_loop, release_event
+                shard_loop = asyncio.get_running_loop()
+                release_event = asyncio.Event()
                 started.set()
-                while not release.is_set():
-                    await asyncio.sleep(0.01)
+                await asyncio.wait_for(release_event.wait(), timeout=5.0)
                 current = asyncio.current_task()
                 return current.get_name() if current is not None else ""
 
             try:
                 first_fut = pool.schedule(_shard_worker(), worker_index=0)
                 assert started.wait(timeout=5.0)
+                assert shard_loop is not None and release_event is not None
 
                 sync_code, sync_raw = zpages.handle_zpage(endpoint)
                 assert sync_code == 200
@@ -831,10 +835,12 @@ def test_zpages_and_health_probe_server_serve_taskz_across_inline_and_sharded_po
                 second_name = pool.schedule(_second_name(), worker_index=0).result(timeout=5.0)
                 assert second_name == "vertebra.loop.shard.0.task.2"
 
-                release.set()
+                shard_loop.call_soon_threadsafe(release_event.set)
                 assert first_fut.result(timeout=5.0) == "vertebra.loop.shard.0.task.1"
             finally:
-                release.set()
+                if shard_loop is not None and release_event is not None and not shard_loop.is_closed():
+                    with contextlib.suppress(RuntimeError):
+                        shard_loop.call_soon_threadsafe(release_event.set)
                 pool.stop()
 
             after_stop = zpages.get_tasks_payload()

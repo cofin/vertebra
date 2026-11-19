@@ -10,7 +10,7 @@ Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/co
 | **SQL Trace Propagation** | `SqlTracePropagator` | Inject W3C `traceparent` comments (`/*traceparent='...'*/`) or session GUCs into outbound SQL queries |
 | **Structured Logging** | `LoggingConfig`, `LogHandler` | Emit JSON or console logs automatically enriched with `trace_id` and `span_id` |
 
-Install the optional `opentelemetry` extra to emit live `opentelemetry.metrics` instruments (`vertebra.event_loop.lag` and `vertebra.event_loop.active_tasks`) from `EventLoopRecorder`:
+Install the optional `opentelemetry` extra to emit live `opentelemetry.metrics` instruments (`vertebra.loop.lag_ms` and `vertebra.loop.active_tasks`) from `EventLoopRecorder`:
 
 === "uv"
 
