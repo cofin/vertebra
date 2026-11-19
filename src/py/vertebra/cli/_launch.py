@@ -105,6 +105,8 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
     with_workers: bool = False
     worker_queues: tuple[str, ...] = ("default",)
     worker_lane_concurrency: dict[str, int] = msgspec.field(default_factory=dict)
+    zpages: bool = False
+    zpages_token: str | None = None
 
     def to_environ(self, base: Mapping[str, str] | None = None) -> dict[str, str]:
         """Assemble environment variables dictionary while preserving omitted runtime overrides."""
@@ -183,5 +185,13 @@ class ServerLaunchEnv(msgspec.Struct, frozen=True, gc=False):
                 env["VERTEBRA_WORKER_LANE_CONCURRENCY"] = ",".join(
                     f"{k}={v}" for k, v in self.worker_lane_concurrency.items()
                 )
+
+        if self.zpages:
+            env["VERTEBRA_ZPAGES_ENABLED"] = "1"
+
+        if self.zpages_token is not None:
+            trimmed_zpages_token = self.zpages_token.strip()
+            if trimmed_zpages_token:
+                env["VERTEBRA_ZPAGES_TOKEN"] = trimmed_zpages_token
 
         return env

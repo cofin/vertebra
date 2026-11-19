@@ -14,7 +14,7 @@ from typing import Any, ClassVar, Final
 
 import anyio
 
-from vertebra.typing import FrozenBaseStruct
+from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import ensure_module, import_optional
 
 VALID_GCP_IP_TYPES: Final[frozenset[str]] = frozenset({"PUBLIC", "PRIVATE", "PSC"})
@@ -22,8 +22,53 @@ VALID_GCP_IP_TYPES: Final[frozenset[str]] = frozenset({"PUBLIC", "PRIVATE", "PSC
 __all__ = (
     "VALID_GCP_IP_TYPES",
     "EphemeralCertBundle",
+    "build_verify_full_tls_context",
+    "format_dialer_url_host",
     "generate_ephemeral_keypair",
+    "validate_dialer_non_empty",
+    "validate_dialer_port",
 )
+
+
+def validate_dialer_port(port: int) -> int:
+    """Validate that a TCP port is a non-boolean integer within 1..65535."""
+    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+        msg = f"port must be an integer between 1 and 65535, got {port!r}"
+        raise ImproperConfigurationError(msg)
+    return port
+
+
+def validate_dialer_non_empty(value: str, *, field_name: str) -> str:
+    """Validate that a string configuration field is non-empty and free of NUL bytes."""
+    if "\x00" in value:
+        msg = f"{field_name} must not contain NUL bytes"
+        raise ImproperConfigurationError(msg)
+    stripped = value.strip()
+    if not stripped:
+        msg = f"{field_name} must be a non-empty string"
+        raise ImproperConfigurationError(msg)
+    return stripped
+
+
+def format_dialer_url_host(host: str) -> str:
+    """Format a hostname or IPv6 literal for safe inclusion in a database URI authority."""
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        return f"[{host}]"
+    return host
+
+
+def build_verify_full_tls_context(ca_pem: str | None = None) -> ssl.SSLContext:
+    """Build a `verify-full` client `SSLContext` enforcing TLS 1.2+, `CERT_REQUIRED`, and hostname checks."""
+    if ca_pem is not None:
+        validated_pem = validate_dialer_non_empty(ca_pem, field_name="ca_pem")
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(cadata=validated_pem)
+    else:
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    return ctx
 
 
 class EphemeralCertBundle(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):

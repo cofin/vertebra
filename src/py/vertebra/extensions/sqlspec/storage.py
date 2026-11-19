@@ -303,8 +303,8 @@ class ObjectStoreBackend(ObjectStoreBase):
         }
 
     def read_arrow_sync(self, path: str | Path, **kwargs: Any) -> ArrowTable:
-        """Read a Parquet or Arrow IPC object into a `pyarrow.Table` synchronously."""
-        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
+        """Read a Parquet, Arrow IPC, or CSV object into a `pyarrow.Table` synchronously."""
+        file_format = self._resolve_arrow_format(path, kwargs)
         return read_table_sync(self._sync_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
@@ -509,8 +509,8 @@ class ObjectStoreBackend(ObjectStoreBase):
         }
 
     async def read_arrow_async(self, path: str | Path, **kwargs: Any) -> ArrowTable:
-        """Read a Parquet or Arrow IPC object into a `pyarrow.Table` asynchronously."""
-        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
+        """Read a Parquet, Arrow IPC, or CSV object into a `pyarrow.Table` asynchronously."""
+        file_format = self._resolve_arrow_format(path, kwargs)
         return await read_table_async(self._async_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
@@ -535,7 +535,7 @@ class ObjectStoreBackend(ObjectStoreBase):
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
-        """Return an `AsyncIterator[ArrowRecordBatch]` streaming matching Parquet or IPC objects."""
+        """Return an `AsyncIterator[ArrowRecordBatch]` streaming matching Parquet, IPC, or CSV objects."""
         resolved_format = normalize_arrow_format(file_format, pattern)
         return self._iter_arrow_async(
             pattern,
@@ -784,21 +784,48 @@ class ObjectStoreBackend(ObjectStoreBase):
     def _prepare_arrow_write(
         self, path: str | Path, kwargs: dict[str, Any]
     ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-        """Resolve key, format, integrity arguments, and normalized Arrow codec options."""
-        raw_format = kwargs.pop("file_format", None) or kwargs.pop("format_hint", None)
-        file_format = normalize_arrow_format(raw_format, path)
+        """Resolve key, format, conditional/integrity arguments, and normalized Arrow codec options.
+
+        `overwrite=None` selects the default (`True`). `file_format` and `format_hint` may both be
+        given when they name the same format.
+
+        Raises:
+            ValueError: When `file_format` and `format_hint` name different formats.
+        """
+        raw_overwrite = kwargs.pop("overwrite", None)
+        overwrite = True if raw_overwrite is None else bool(raw_overwrite)
+        explicit_if_not_exists = bool(kwargs.pop("if_not_exists", False))
+        file_format = self._resolve_arrow_format(path, kwargs)
         self._normalize_arrow_write_options(file_format, kwargs)
         integrity: dict[str, Any] = {
             key: kwargs.pop(key)
             for key in ("checksum", "expected_sha256", "expected_crc32c", "expected_md5")
             if key in kwargs
         }
+        if not overwrite or explicit_if_not_exists:
+            integrity["if_not_exists"] = True
         return self._qualify(path), file_format, integrity, kwargs
+
+    @staticmethod
+    def _resolve_arrow_format(path: str | Path, kwargs: dict[str, Any]) -> str:
+        """Pop `file_format` and `format_hint` from `kwargs` and resolve the single Arrow format they name.
+
+        Raises:
+            ValueError: When both are given and normalize to different formats, or either is unsupported.
+        """
+        file_format = kwargs.pop("file_format", None)
+        format_hint = kwargs.pop("format_hint", None)
+        if not file_format or not format_hint:
+            return normalize_arrow_format(file_format or format_hint, path)
+        resolved = normalize_arrow_format(file_format, path)
+        if normalize_arrow_format(format_hint, path) != resolved:
+            msg = f"Conflicting Arrow formats: file_format={file_format!r} and format_hint={format_hint!r}"
+            raise ValueError(msg)
+        return resolved
 
     @staticmethod
     def _normalize_arrow_write_options(file_format: str, options: dict[str, Any]) -> None:
         """Normalize SQLSpec Arrow options while preserving PyArrow default settings."""
-        options.pop("format_hint", None)
         extra_options = options.pop("write_options", None)
         if isinstance(extra_options, Mapping):
             for key, value in extra_options.items():

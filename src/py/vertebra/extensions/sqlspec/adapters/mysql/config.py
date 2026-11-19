@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
+from urllib.parse import parse_qs, urlsplit
 
 from sqlspec.core import StatementConfig
 
@@ -28,7 +29,11 @@ from vertebra.typing import ImproperConfigurationError
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from vertebra.db.driver._cloud_auth import DatabaseTokenProvider
+
 __all__ = ("MySQLAsyncConfig", "MySQLSyncConfig")
+
+_UNSET: Any = object()
 
 _POOL_ONLY_KEYS: frozenset[str] = frozenset({"pool_recycle", "share_pool"})
 _URL_KEYS: tuple[str, ...] = ("url", "dsn", "conninfo", "connection_string")
@@ -76,7 +81,20 @@ def _resolve_mysql_config(
     else:
         resolved_broker = None
     if config is not None:
-        return config, resolved_broker
+        if not connection_config and not kwargs:
+            return config, resolved_broker
+        seed_conn: dict[str, Any] = {f: getattr(config, f) for f in MySQLConfig.__struct_fields__ if f != "dsn"}
+        if config.dsn != "mysql://localhost:3306/vertebra":
+            seed_conn["url"] = config.dsn
+        if isinstance(connection_config, Mapping):
+            seed_conn.update(connection_config)
+        rebuilt = build_connection_config(
+            connection_config=seed_conn,
+            driver_features=driver_features,
+            broker=resolved_broker,
+            overrides=kwargs,
+        )
+        return rebuilt, resolved_broker
     built = build_connection_config(
         connection_config=connection_config,
         driver_features=driver_features,
@@ -183,6 +201,24 @@ def _build_mysql_replica_overrides(adapter: Any, spec_input: str | bool | Mappin
     return meta
 
 
+def _inherited_endpoint_fields(driver_config: MySQLConfig) -> dict[str, Any]:
+    """Return the endpoint fields a derived pool inherits from its parent `MySQLConfig`.
+
+    Only an SSL mode the caller set explicitly is inherited. An unset mode is left out so the derived
+    `MySQLConfig` resolves its own default for the new target and token provider.
+    """
+    parsed = driver_config._parse_dsn_fields()
+    inherited = {
+        field_key: parsed[field_key]
+        for field_key in ("host", "port", "user", "password", "database", "charset", "unix_socket")
+        if parsed.get(field_key) is not None
+    }
+    explicit_ssl_mode = driver_config.explicit_ssl_mode
+    if explicit_ssl_mode is not None:
+        inherited["ssl_mode"] = explicit_ssl_mode
+    return inherited
+
+
 def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
     """Clone `MySQLSyncConfig` or `MySQLAsyncConfig` with non-mutating connection and feature overrides."""
     merged_features = dict(overrides.get("driver_features", adapter.driver_features))
@@ -198,11 +234,8 @@ def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
 
     merged_conn: dict[str, Any] = dict(adapter.connection_config)
     override_conn = overrides.get("connection_config")
-    if isinstance(override_conn, Mapping):
-        merged_conn.update(override_conn)
-
     conn_overrides = overrides.get("connection_config_overrides")
-    extra_conn_updates: dict[str, Any] = dict(conn_overrides) if isinstance(conn_overrides, Mapping) else {}
+    extra_conn_updates: dict[str, Any] = {}
     for key, value in overrides.items():
         if key in _DERIVE_META_KEYS:
             continue
@@ -211,27 +244,60 @@ def _derive_mysql_adapter(adapter: Any, overrides: Mapping[str, Any]) -> Any:
         else:
             extra_conn_updates[key] = value
 
-    has_url_override = any(
-        isinstance(extra_conn_updates.get(alias), str) and extra_conn_updates[alias].strip() for alias in _URL_KEYS
-    )
+    explicit_conn: dict[str, Any] = {}
+    if isinstance(override_conn, Mapping):
+        explicit_conn.update(override_conn)
+    if isinstance(conn_overrides, Mapping):
+        explicit_conn.update(conn_overrides)
+    explicit_conn.update(extra_conn_updates)
+
+    override_url: str | None = None
+    for alias in _URL_KEYS:
+        candidate = explicit_conn.get(alias)
+        if isinstance(candidate, str) and candidate.strip():
+            override_url = candidate.strip()
+            break
+    has_url_override = override_url is not None
     if has_url_override:
+        assert override_url is not None
         for alias in _URL_KEYS:
             merged_conn.pop(alias, None)
         for endpoint_key in _ENDPOINT_KEYS:
-            if endpoint_key not in extra_conn_updates:
+            if endpoint_key not in explicit_conn:
                 merged_conn.pop(endpoint_key, None)
-    elif any(k in _ENDPOINT_KEYS for k in extra_conn_updates):
+        override_query = parse_qs(urlsplit(override_url).query)
+        url_sets_ssl_ca = any(ca_key in override_query for ca_key in ("ssl_ca", "ssl-ca", "sslca"))
+        if "ssl_ca" not in explicit_conn:
+            if url_sets_ssl_ca:
+                merged_conn.pop("ssl_ca", None)
+            elif adapter.driver_config.ssl_ca is not None:
+                merged_conn["ssl_ca"] = adapter.driver_config.ssl_ca
+        if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
+            merged_conn["token_provider"] = adapter.driver_config.token_provider
+    elif any(k in _ENDPOINT_KEYS for k in explicit_conn):
         for alias in _URL_KEYS:
             merged_conn.pop(alias, None)
-        base_fields = adapter.driver_config._parse_dsn_fields()
-        for field_key in ("host", "port", "user", "password", "database", "charset", "ssl_mode", "unix_socket"):
-            if (
-                field_key not in merged_conn
-                and field_key not in extra_conn_updates
-                and base_fields.get(field_key) is not None
-            ):
-                merged_conn[field_key] = base_fields[field_key]
-    merged_conn.update(extra_conn_updates)
+        base_fields = _inherited_endpoint_fields(adapter.driver_config)
+        for field_key, field_value in base_fields.items():
+            if field_key not in merged_conn and field_key not in explicit_conn:
+                merged_conn[field_key] = field_value
+        if "ssl_ca" not in explicit_conn and adapter.driver_config.ssl_ca is not None:
+            merged_conn["ssl_ca"] = adapter.driver_config.ssl_ca
+        if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
+            merged_conn["token_provider"] = adapter.driver_config.token_provider
+    else:
+        if not any(k in merged_conn for k in _URL_KEYS) and not any(k in merged_conn for k in _ENDPOINT_KEYS):
+            if adapter.driver_config.dsn != "mysql://localhost:3306/vertebra":
+                merged_conn["dsn"] = adapter.driver_config.dsn
+            else:
+                for field_key, field_value in _inherited_endpoint_fields(adapter.driver_config).items():
+                    if field_key not in merged_conn:
+                        merged_conn[field_key] = field_value
+        if "ssl_ca" not in explicit_conn and adapter.driver_config.ssl_ca is not None:
+            merged_conn["ssl_ca"] = adapter.driver_config.ssl_ca
+        if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
+            merged_conn["token_provider"] = adapter.driver_config.token_provider
+    merged_conn.update(explicit_conn)
 
     return type(adapter)(
         None,
@@ -308,9 +374,15 @@ class MySQLSyncConfig(SyncAdapterConfig[MySQLConfig, SyncMySQLDriver, SyncMySQLD
         replicas: Any | None = None,
         is_replica: bool = False,
         reset_session_on_release: bool | None = None,
+        token_provider: DatabaseTokenProvider | None = _UNSET,
+        ssl_ca: str | None = _UNSET,
         **kwargs: Any,
     ) -> None:
         """Initialize synchronous MySQL SQLSpec configuration supporting URLs, replicas, and session reset."""
+        if token_provider is not _UNSET:
+            kwargs["token_provider"] = token_provider
+        if ssl_ca is not _UNSET:
+            kwargs["ssl_ca"] = ssl_ca
         resolved_cfg, resolved_broker, resolved_share_pool, normalized_conn, features = _prepare_mysql_setup(
             config,
             share_pool=share_pool,
@@ -445,9 +517,15 @@ class MySQLAsyncConfig(AsyncAdapterConfig[MySQLConfig, AsyncMySQLDriver, AsyncMy
         replicas: Any | None = None,
         is_replica: bool = False,
         reset_session_on_release: bool | None = None,
+        token_provider: DatabaseTokenProvider | None = _UNSET,
+        ssl_ca: str | None = _UNSET,
         **kwargs: Any,
     ) -> None:
         """Initialize asynchronous MySQL SQLSpec configuration supporting URLs, replicas, and session reset."""
+        if token_provider is not _UNSET:
+            kwargs["token_provider"] = token_provider
+        if ssl_ca is not _UNSET:
+            kwargs["ssl_ca"] = ssl_ca
         resolved_cfg, resolved_broker, resolved_share_pool, normalized_conn, features = _prepare_mysql_setup(
             config,
             share_pool=share_pool,

@@ -191,22 +191,33 @@ impl MySQLConnectConfig {
         let mut resolved_cloud_sql = cloud_sql_instance;
         let mut resolved_iam_auth = enable_iam_auth;
 
-        if let Some(rest) = trimmed_dsn.strip_prefix("cloudsql://") {
-            let (instance_part, db_part) = match rest.split_once('/') {
-                Some((inst, db)) => (inst, db),
-                None => (rest, ""),
-            };
-            let (db_clean, query_str) = match db_part.split_once('?') {
-                Some((db, q)) => (db, Some(q)),
-                None => (db_part, None),
-            };
-            if !instance_part.is_empty() {
-                resolved_cloud_sql = Some(instance_part.to_string());
+        if is_cloudsql_dsn(trimmed_dsn) {
+            let parsed = parse_cloudsql_dsn(trimmed_dsn)?;
+            if let Some(ref explicit_inst) = resolved_cloud_sql {
+                let explicit_trimmed = explicit_inst.trim();
+                if explicit_trimmed.is_empty() {
+                    return Err(MySQLError::config(
+                        "MySQL cloud_sql_instance must not be empty",
+                    ));
+                }
+                if explicit_trimmed != parsed.instance {
+                    return Err(MySQLError::config(format!(
+                        "Conflicting Cloud SQL instance: DSN specifies '{}', explicit cloud_sql_instance specifies '{explicit_trimmed}'",
+                        parsed.instance
+                    )));
+                }
             }
-            if !db_clean.is_empty() {
-                resolved_database = db_clean.to_string();
+            resolved_cloud_sql = Some(parsed.instance.clone());
+            if let Some(u) = parsed.user {
+                resolved_user = u;
             }
-            if let Some(q) = query_str {
+            if let Some(p) = parsed.password {
+                resolved_password = Some(p);
+            }
+            if let Some(db) = parsed.database {
+                resolved_database = db;
+            }
+            if let Some(q) = parsed.query {
                 for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
                     apply_query_param(
                         &k,
@@ -219,6 +230,15 @@ impl MySQLConnectConfig {
                         &mut resolved_cloud_sql,
                         &mut resolved_iam_auth,
                     )?;
+                    if resolved_cloud_sql.as_deref().map(str::trim)
+                        != Some(parsed.instance.as_str())
+                    {
+                        return Err(MySQLError::config(format!(
+                            "Conflicting Cloud SQL instance in query parameter '{k}': expected '{}', got '{}'",
+                            parsed.instance,
+                            resolved_cloud_sql.as_deref().unwrap_or_default()
+                        )));
+                    }
                 }
             }
         } else {
@@ -292,7 +312,7 @@ impl MySQLConnectConfig {
 
         let final_ssl_mode = resolved_ssl_mode.unwrap_or(MySQLSslMode::Prefer);
         if let Some(ref ca_val) = resolved_ssl_ca {
-            if ca_val.trim_start().starts_with("-----BEGIN") {
+            if is_inline_pem(ca_val) {
                 validate_inline_pem_cert(ca_val, "ssl_ca")?;
             } else if matches!(
                 final_ssl_mode,
@@ -305,12 +325,12 @@ impl MySQLConnectConfig {
             }
         }
         if let Some(ref cert_val) = resolved_ssl_cert
-            && cert_val.trim_start().starts_with("-----BEGIN")
+            && is_inline_pem(cert_val)
         {
             validate_inline_pem_cert(cert_val, "ssl_cert")?;
         }
         if let Some(ref key_val) = resolved_ssl_key
-            && key_val.trim_start().starts_with("-----BEGIN")
+            && is_inline_pem(key_val)
         {
             validate_inline_pem_key(key_val, "ssl_key")?;
         }
@@ -534,15 +554,29 @@ impl MySQLConnectConfig {
             .with_danger_skip_domain_validation(skip_domain_validation);
 
         if let Some(ref ca) = self.ssl_ca {
-            let path = PathBuf::from(ca);
+            let root_cert = if is_inline_pem(ca) {
+                inline_pem_bytes(ca).into()
+            } else {
+                PathBuf::from(ca).into()
+            };
             ssl = ssl
-                .with_root_certs(vec![path.into()])
+                .with_root_certs(vec![root_cert])
                 .with_disable_built_in_roots(true);
         }
 
         if let (Some(cert), Some(key)) = (&self.ssl_cert, &self.ssl_key) {
-            let identity =
-                ClientIdentity::new(PathBuf::from(cert).into(), PathBuf::from(key).into());
+            let identity = ClientIdentity::new(
+                if is_inline_pem(cert) {
+                    inline_pem_bytes(cert).into()
+                } else {
+                    PathBuf::from(cert).into()
+                },
+                if is_inline_pem(key) {
+                    inline_pem_bytes(key).into()
+                } else {
+                    PathBuf::from(key).into()
+                },
+            );
             ssl = ssl.with_client_identity(Some(identity));
         }
 
@@ -565,8 +599,18 @@ impl MySQLConnectConfig {
     }
 }
 
+/// Returns true when a TLS option carries PEM text instead of a filesystem path.
+fn is_inline_pem(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN")
+}
+
+/// Returns the in-memory bytes of an inline PEM TLS option without leading whitespace.
+fn inline_pem_bytes(value: &str) -> Vec<u8> {
+    value.trim_start().as_bytes().to_vec()
+}
+
 fn validate_inline_pem_cert(pem: &str, field: &str) -> Result<(), MySQLError> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let mut reader = std::io::BufReader::new(pem.trim_start().as_bytes());
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     match certs {
         Ok(list) if !list.is_empty() => Ok(()),
@@ -580,7 +624,7 @@ fn validate_inline_pem_cert(pem: &str, field: &str) -> Result<(), MySQLError> {
 }
 
 fn validate_inline_pem_key(pem: &str, field: &str) -> Result<(), MySQLError> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let mut reader = std::io::BufReader::new(pem.trim_start().as_bytes());
     match rustls_pemfile::private_key(&mut reader) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(MySQLError::config(format!(
@@ -620,11 +664,131 @@ fn normalize_mysql_scheme(dsn: &str) -> Result<String, MySQLError> {
     }
 }
 
+struct ParsedCloudSqlDsn<'a> {
+    instance: String,
+    user: Option<String>,
+    password: Option<String>,
+    database: Option<String>,
+    query: Option<&'a str>,
+}
+
+fn is_cloudsql_dsn(trimmed_dsn: &str) -> bool {
+    trimmed_dsn
+        .as_bytes()
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"cloudsql://"))
+}
+
+fn parse_cloudsql_dsn(trimmed_dsn: &str) -> Result<ParsedCloudSqlDsn<'_>, MySQLError> {
+    let rest = &trimmed_dsn[11..];
+    let without_fragment = rest.split_once('#').map_or(rest, |(head, _)| head);
+    let (target, query) = match without_fragment.split_once('?') {
+        Some((t, q)) => (t, Some(q)),
+        None => (without_fragment, None),
+    };
+    let (authority, raw_path) = match target.split_once('/') {
+        Some((auth, path)) => (auth, path),
+        None => (target, ""),
+    };
+
+    let (user, password, raw_instance) = match authority.rsplit_once('@') {
+        Some((userinfo, inst)) => {
+            let (raw_user, raw_pass_opt) = match userinfo.split_once(':') {
+                Some((u, p)) => (u, Some(p)),
+                None => (userinfo, None),
+            };
+            let decoded_user = percent_decode_str(raw_user);
+            if decoded_user.contains('\0') {
+                return Err(MySQLError::config(
+                    "MySQL DSN user must not contain NUL bytes",
+                ));
+            }
+            let user = (!decoded_user.is_empty()).then_some(decoded_user);
+            let password = match raw_pass_opt {
+                Some(raw_pass) => {
+                    let decoded_pass = percent_decode_str(raw_pass);
+                    if decoded_pass.contains('\0') {
+                        return Err(MySQLError::config(
+                            "MySQL DSN password must not contain NUL bytes",
+                        ));
+                    }
+                    Some(decoded_pass)
+                }
+                None => None,
+            };
+            (user, password, inst)
+        }
+        None => (None, None, authority),
+    };
+
+    let instance = raw_instance.trim();
+    if instance.is_empty() {
+        return Err(MySQLError::config(
+            "Cloud SQL MySQL DSN must specify an instance connection name",
+        ));
+    }
+    CloudSqlInstanceUri::parse(instance).map_err(|e| {
+        MySQLError::config(format!("Invalid Cloud SQL instance URI '{instance}': {e}"))
+    })?;
+
+    let trimmed_path = raw_path.trim_start_matches('/');
+    let database = if trimmed_path.is_empty() {
+        None
+    } else {
+        let decoded_db = percent_decode_str(trimmed_path);
+        if decoded_db.contains('\0') {
+            return Err(MySQLError::config(
+                "MySQL DSN database must not contain NUL bytes",
+            ));
+        }
+        let db_trimmed = decoded_db.trim();
+        if db_trimmed.eq_ignore_ascii_case("memory") || db_trimmed.eq_ignore_ascii_case(":memory:")
+        {
+            return Err(MySQLError::config(
+                "MySQL does not support in-memory ('memory://') execution; configure a MySQL or MariaDB server endpoint",
+            ));
+        }
+        Some(decoded_db)
+    };
+
+    Ok(ParsedCloudSqlDsn {
+        instance: instance.to_string(),
+        user,
+        password,
+        database,
+        query,
+    })
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn percent_decode_str(input: &str) -> String {
-    url::form_urlencoded::parse(format!("v={input}").as_bytes())
-        .next()
-        .map(|(_, val)| val.into_owned())
-        .unwrap_or_else(|| input.to_string())
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                decode_hex_nibble(bytes[i + 1]),
+                decode_hex_nibble(bytes[i + 2]),
+            )
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -737,5 +901,313 @@ mod tests {
         assert_eq!(cfg.ssl_mode, MySQLSslMode::VerifyCa);
         assert!(cfg.enable_iam_auth);
         assert_eq!(cfg.cloud_sql_ip_type, IpType::Private);
+    }
+
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ3Jvc3NDaGVja0NBMAoGCCqGSM49BAMCMA0xCzAJBgNV\n-----END CERTIFICATE-----\n";
+
+    fn tls_config(ssl_mode: &str, ssl_ca: Option<String>) -> MySQLConnectConfig {
+        MySQLConnectConfig::from_dsn_and_kwargs(
+            "mysql://app@db.example.internal:3306/app",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(ssl_mode),
+            ssl_ca,
+            None,
+            None,
+            5000,
+            5000,
+            5000,
+            1,
+            4,
+            64,
+            "utf8mb4",
+            true,
+            None,
+            None,
+            "PUBLIC",
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn read_root_cert(cfg: &MySQLConnectConfig) -> std::io::Result<Vec<u8>> {
+        let ssl = cfg.build_ssl_opts().unwrap().unwrap();
+        assert!(ssl.disable_built_in_roots());
+        assert_eq!(ssl.root_certs().len(), 1);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                ssl.root_certs()[0]
+                    .read()
+                    .await
+                    .map(|data| data.into_owned())
+            })
+    }
+
+    #[test]
+    fn test_inline_pem_ssl_ca_is_loaded_from_memory() {
+        let large_pem = TEST_CA_PEM.repeat(600);
+        assert!(large_pem.len() > 4096);
+        for mode in ["require", "verify-ca", "verify-full"] {
+            for pem in [
+                TEST_CA_PEM.to_string(),
+                format!("\n  {TEST_CA_PEM}"),
+                large_pem.clone(),
+            ] {
+                let cfg = tls_config(mode, Some(pem.clone()));
+                let loaded = read_root_cert(&cfg).unwrap();
+                assert_eq!(loaded, pem.trim_start().as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_ssl_ca_is_read_from_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "vtb-mysql-ssl-ca-{}-{:?}.pem",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, TEST_CA_PEM).unwrap();
+        let cfg = tls_config("verify-full", Some(path.to_string_lossy().into_owned()));
+        let loaded = read_root_cert(&cfg);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.unwrap(), TEST_CA_PEM.as_bytes());
+    }
+
+    #[test]
+    fn test_ssl_modes_map_to_verification_flags() {
+        for (mode, accept_invalid, skip_domain) in [
+            ("require", true, true),
+            ("verify-ca", false, true),
+            ("verify-full", false, false),
+        ] {
+            let ssl = tls_config(mode, Some(TEST_CA_PEM.to_string()))
+                .build_ssl_opts()
+                .unwrap()
+                .unwrap();
+            assert_eq!(ssl.accept_invalid_certs(), accept_invalid, "{mode}");
+            assert_eq!(ssl.skip_domain_validation(), skip_domain, "{mode}");
+        }
+        assert!(
+            tls_config("disable", None)
+                .build_ssl_opts()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn parse_cloudsql_config(
+        dsn: &str,
+        user: Option<&str>,
+        password: Option<&str>,
+        database: Option<&str>,
+        cloud_sql_instance: Option<&str>,
+    ) -> Result<MySQLConnectConfig, MySQLError> {
+        MySQLConnectConfig::from_dsn_and_kwargs(
+            dsn,
+            None,
+            None,
+            user.map(str::to_string),
+            password.map(str::to_string),
+            database.map(str::to_string),
+            None,
+            None,
+            None,
+            None,
+            None,
+            5000,
+            5000,
+            5000,
+            1,
+            4,
+            64,
+            "utf8mb4",
+            true,
+            None,
+            cloud_sql_instance.map(str::to_string),
+            "PUBLIC",
+            false,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_parses_cloudsql_query_only_uri_without_database() {
+        let cfg = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst?enable_iam_auth=true&ssl_mode=verify-full",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg.database, "");
+        assert!(cfg.enable_iam_auth);
+        assert_eq!(cfg.ssl_mode, MySQLSslMode::VerifyFull);
+
+        let cfg_require = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst?enable_iam_auth=true&ssl_mode=require",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_require.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg_require.database, "");
+        assert!(cfg_require.enable_iam_auth);
+        assert_eq!(cfg_require.ssl_mode, MySQLSslMode::Require);
+    }
+
+    #[test]
+    fn test_parses_cloudsql_uppercase_userinfo_domain_instance_and_fragment() {
+        let cfg = parse_cloudsql_config(
+            "CLOUDSQL://alice%40corp.test:p%3As%40w+1&2%2F3@example.com:proj:us-central1:inst/my%20db?enable_iam_auth=true#frag",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("example.com:proj:us-central1:inst")
+        );
+        assert_eq!(cfg.user, "alice@corp.test");
+        assert_eq!(cfg.password.as_deref(), Some("p:s@w+1&2/3"));
+        assert_eq!(cfg.database, "my db");
+        assert!(cfg.enable_iam_auth);
+    }
+
+    #[test]
+    fn test_parses_cloudsql_userinfo_empty_password_and_kwarg_overrides() {
+        let no_pass = parse_cloudsql_config(
+            "cloudsql://alice@proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(no_pass.user, "alice");
+        assert_eq!(no_pass.password, None);
+        assert_eq!(no_pass.database, "app_db");
+
+        let empty_pass = parse_cloudsql_config(
+            "cloudsql://alice:@proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(empty_pass.user, "alice");
+        assert_eq!(empty_pass.password.as_deref(), Some(""));
+        assert_eq!(empty_pass.database, "app_db");
+
+        let overridden = parse_cloudsql_config(
+            "cloudsql://alice:secret@proj:us-central1:inst/app_db",
+            Some("override"),
+            None,
+            Some("override_db"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(overridden.user, "override");
+        assert_eq!(overridden.password.as_deref(), Some("secret"));
+        assert_eq!(overridden.database, "override_db");
+    }
+
+    #[test]
+    fn test_accepts_matching_explicit_and_query_cloudsql_instance() {
+        let cfg = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            Some("proj:us-central1:inst"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg.database, "app_db");
+
+        let cfg_query = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=proj:us-central1:inst&unix_socket=/cloudsql/proj:us-central1:inst",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_query.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+    }
+
+    #[test]
+    fn test_rejects_invalid_and_conflicting_cloudsql_dsns() {
+        for (dsn, explicit_inst) in [
+            ("cloudsql://", None),
+            ("cloudsql:///app_db", None),
+            ("cloudsql://alice@", None),
+            ("cloudsql://a:b/app_db", None),
+            ("cloudsql://a:b:c:d:e/app_db", None),
+            (
+                "cloudsql://proj:us-central1:inst/app_db",
+                Some("other:us-central1:inst"),
+            ),
+            ("cloudsql://proj:us-central1:inst/app_db", Some("   ")),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=other:us-central1:inst",
+                None,
+            ),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=other:us-central1:inst&cloud_sql_instance=proj:us-central1:inst",
+                None,
+            ),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?unix_socket=/cloudsql/other:us-central1:inst",
+                None,
+            ),
+            ("cloudsql://proj:us-central1:inst/memory", None),
+            ("cloudsql://proj:us-central1:inst/%3Amemory%3A", None),
+            ("cloudsql://alice%00@proj:us-central1:inst/app_db", None),
+            ("cloudsql://alice:pw%00@proj:us-central1:inst/app_db", None),
+            ("cloudsql://proj:us-central1:inst/app%00db", None),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?ssl_mode=bogus",
+                None,
+            ),
+            ("éééééé://proj:us-central1:inst/app_db", None),
+        ] {
+            let err = parse_cloudsql_config(dsn, None, None, None, explicit_inst).unwrap_err();
+            assert_eq!(
+                err.kind,
+                crate::errors::MySQLErrorKind::ImproperConfiguration,
+                "expected ImproperConfiguration for dsn={dsn:?}, explicit={explicit_inst:?}"
+            );
+        }
     }
 }

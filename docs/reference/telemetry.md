@@ -1,13 +1,40 @@
 # `vertebra.telemetry` — OpenTelemetry Spans, Metrics, SQL Propagation & Logging
 
-Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/cost instrumentation (`GenAiUsage`, `ModelPricing`, `GenAiRecorder`), database connection pool telemetry (`DbPoolMetricSample`, `DbPoolRecorder`), SQL `sqlcommenter` trace propagation (`SqlTracePropagator`), and structured JSON logging (`LoggingConfig`, `LogHandler`).
+Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/cost instrumentation (`GenAiUsage`, `ModelPricing`, `GenAiRecorder`), database connection pool telemetry (`DbPoolMetricSample`, `DbPoolRecorder`), event loop scheduling lag and active-task telemetry (`EventLoopMetricSample`, `EventLoopRecorder`), SQL `sqlcommenter` trace propagation (`SqlTracePropagator`), and structured JSON logging (`LoggingConfig`, `LogHandler`).
 
 | Subsystem | Classes | Purpose |
 | --- | --- | --- |
 | **Tracing & Span Export** | `TraceContext`, `SpanData`, `SpanExporter` | Propagate W3C `traceparent` contexts across HTTP, SHM rings, and worker lanes and export OTLP spans |
 | **GenAI & DB Pool Metrics** | `GenAiUsage`, `ModelPricing`, `GenAiRecorder`, `DbPoolMetricSample`, `DbPoolRecorder` | Record OpenTelemetry `gen_ai.*` token/cost metrics and `db.client.connections.*` pool utilization |
+| **Event Loop Telemetry** | `EventLoopMetricSample`, `EventLoopRecorder` | Record per-shard event loop scheduling lag histograms, active-task counts, `zuvloop` loop telemetry, and optional OpenTelemetry meter instruments |
 | **SQL Trace Propagation** | `SqlTracePropagator` | Inject W3C `traceparent` comments (`/*traceparent='...'*/`) or session GUCs into outbound SQL queries |
 | **Structured Logging** | `LoggingConfig`, `LogHandler` | Emit JSON or console logs automatically enriched with `trace_id` and `span_id` |
+
+Install the optional `opentelemetry` extra to emit live `opentelemetry.metrics` instruments (`vertebra.loop.lag_ms` and `vertebra.loop.active_tasks`) from `EventLoopRecorder`:
+
+=== "uv"
+
+    ```bash
+    uv add "vertebra-core[opentelemetry]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "vertebra-core[opentelemetry]"
+    ```
+
+=== "pdm"
+
+    ```bash
+    pdm add "vertebra-core[opentelemetry]"
+    ```
+
+=== "poetry"
+
+    ```bash
+    poetry add "vertebra-core[opentelemetry]"
+    ```
 
 ## Tracing & Span Export (`vertebra.telemetry.otel`)
 
@@ -25,7 +52,7 @@ Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/co
     options:
       heading_level: 3
 
-## GenAI & Database Pool Metrics (`vertebra.telemetry.otel`)
+## GenAI, Database Pool & Event Loop Metrics (`vertebra.telemetry.otel`)
 
 ::: vertebra.telemetry.otel.GenAiUsage
     options:
@@ -49,6 +76,22 @@ Distributed tracing (`TraceContext`, `SpanData`, `SpanExporter`), GenAI token/co
 ::: vertebra.telemetry.otel.DbPoolRecorder
     options:
       heading_level: 3
+
+::: vertebra.telemetry.otel.EventLoopMetricSample
+    options:
+      heading_level: 4
+      members: false
+
+::: vertebra.telemetry.otel.EventLoopRecorder
+    options:
+      heading_level: 3
+      members:
+        - __init__
+        - record
+        - configure_zuvloop
+        - lag_histogram
+        - latest_by_shard
+        - samples
 
 ## SQL Trace Propagation (`vertebra.telemetry.db_propagation`)
 

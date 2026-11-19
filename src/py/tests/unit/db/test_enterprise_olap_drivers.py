@@ -821,6 +821,8 @@ def test_native_arrow_cursor_pep3118_zero_copy_survives_shm_unlink() -> None:
 
     mv = memoryview(cursor)
     view = cursor.buffer_view()
+    pyarrow_table = cursor.to_pyarrow()
+    arrow_table = cursor.to_arrow_table()
     assert mv.readonly
     assert len(mv) == len(ipc_bytes)
     assert bytes(view) == ipc_bytes
@@ -835,9 +837,13 @@ def test_native_arrow_cursor_pep3118_zero_copy_survives_shm_unlink() -> None:
         {"id": 3, "name": "gamma"},
         {"id": 4, "name": "delta"},
     ]
-    assert cursor.to_pyarrow().to_pylist() == decoded_from_mv.to_pylist()
-    assert cursor.to_arrow_table().num_rows == 4
-    del decoded_from_mv
+    assert pyarrow_table.to_pylist() == decoded_from_mv.to_pylist()
+    assert arrow_table.num_rows == 4
+    with pytest.raises(ValueError, match="released"):
+        cursor.to_pyarrow()
+    with pytest.raises(ValueError, match="released"):
+        cursor.to_arrow_table()
+    del decoded_from_mv, pyarrow_table, arrow_table
     mv.release()
     view.release()
 

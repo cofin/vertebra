@@ -88,6 +88,8 @@ _POSTGRES_CONNECT_ARGS: Final[frozenset[str]] = frozenset(
         "alloydb_ip_type",
         "enable_iam_auth",
         "iam_auth_options",
+        "token_provider",
+        "ca_pem",
         "enable_alloydb_columnar_engine",
         "application_name",
         "statement_timeout_ms",
@@ -156,6 +158,7 @@ _SUPPORTED_CONNECT_ARGS_BY_DIALECT: Final[dict[str, frozenset[str]]] = {
             "credentials_path",
             "credentials_json",
             "target_service_account",
+            "token_provider",
             "pool",
             "statement",
         }
@@ -247,6 +250,7 @@ _SUPPORTED_CONNECT_ARGS_BY_DIALECT: Final[dict[str, frozenset[str]]] = {
             "cloudsql_ip_type",
             "cloudsql_auth_type",
             "cloudsql_proxy_addr",
+            "token_provider",
             "pool_min_size",
             "pool_max_size",
             "statement_cache_size",
@@ -925,7 +929,7 @@ def _resolve_dbapi_config(
             _validate_connect_kwargs(_config_dialect(driver), connect_kwargs)
         return resolved_url, None
 
-    raw_scheme, sep, _ = resolved_url.partition("://")
+    raw_scheme, sep, rest = resolved_url.partition("://")
     scheme = (raw_scheme if sep else urlparse(resolved_url).scheme).lower()
     base_scheme = scheme
     if "+" in scheme:
@@ -944,9 +948,12 @@ def _resolve_dbapi_config(
     overrides = dict(connect_kwargs)
     if driver_broker is not None:
         overrides["broker"] = driver_broker
+    target_url = (
+        f"{base_scheme}://{rest}" if sep and known_scheme is not None and base_scheme != scheme else resolved_url
+    )
     with _translate_errors():
         try:
-            parsed_config = DatabaseRegistry.parse_url(resolved_url, **overrides)
+            parsed_config = DatabaseRegistry.parse_url(target_url, **overrides)
         except ValueError as exc:
             msg = f"Cannot parse Vertebra database URL: {exc}"
             raise InterfaceError(msg) from exc

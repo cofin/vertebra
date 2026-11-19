@@ -11,7 +11,9 @@ description = "PyO3 bindings for Vertebra native extension"
 vertebra-core = { path = "../vertebra-core" }
 vertebra-db = { path = "../vertebra-db", features = ["pyo3"] }
 arrow-array = { workspace = true, features = ["ffi"] }
+arrow-buffer = { workspace = true }
 arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
 bytes = { workspace = true }
 pyo3 = { workspace = true }
 serde_json = { workspace = true }

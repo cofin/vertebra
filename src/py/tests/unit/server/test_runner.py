@@ -23,6 +23,9 @@ from vertebra.framework.security import Principal, requires_role
 from vertebra.server import _dispatch, worker
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.server._dispatch import (
+    _JSON_CONTENT_TYPE_COMPACT,
+    _MOUNT_HANDLER_MASK,
+    _ZPAGES_HANDLER_ID,
     BatchDispatchPlan,
     _call_handler,
     _handler_meta,
@@ -34,8 +37,10 @@ from vertebra.server._dispatch import (
     shutdown_worker_executor,
 )
 from vertebra.server._gil_audit import is_free_threaded
-from vertebra.server._loops import EventLoopPool
+from vertebra.server._loops import _TASKZ_PROBE_TASK_NAME, EventLoopPool
+from vertebra.server.platform import ZPagesRegistry
 from vertebra.server.worker import Worker, WorkerStartupError, _AsgiMountRunner, _instantiate_mount_runners, run_worker
+from vertebra.telemetry.otel import EventLoopRecorder
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json_bytes, encode_msgpack_bytes
 
@@ -976,6 +981,9 @@ def test_worker_process_batch_single_root_asgi_dispatches_via_fastpath_wrapper(
         def __len__(self) -> int:
             return 1
 
+        def __getitem__(self, _index: int) -> MockRequest:
+            return MockRequest(handler_id=0)
+
     app = _RootAsgiApp()
     asgi_runner = AsgiRunner(app)
     captured_apps: list[Any] = []
@@ -1635,3 +1643,309 @@ def test_worker_run_joins_worker_and_dispatch_executors_on_exit(
         assert _dispatch._WORKER_EXECUTOR is None
     finally:
         shutdown_worker_executor(wait=True)
+
+
+def test_zpages_handler_id_distinct_from_mount_mask() -> None:
+    """Verify _ZPAGES_HANDLER_ID matches Rust ZPAGES_HANDLER_ID and never collides with mount masks."""
+    assert _ZPAGES_HANDLER_ID == 0xFFFE_0000_0000_0001
+    assert (_ZPAGES_HANDLER_ID & _MOUNT_HANDLER_MASK) != _MOUNT_HANDLER_MASK
+
+
+def test_worker_process_batch_intercepts_zpages_before_all_sync_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Worker._process_batch intercepts _ZPAGES_HANDLER_ID ahead of all_sync_native handlers."""
+    called_handlers: list[int] = []
+
+    def sync_handler() -> bytes:
+        called_handlers.append(1)
+        return b"ok"
+
+    compiled = compile_handler_table({1: sync_handler})
+    raw_submissions: list[tuple[int, int, bytes, bytes | None]] = []
+
+    def fake_submit_response_raw(
+        request_id: int,
+        status: int,
+        body: bytes,
+        content_type: bytes | None = None,
+    ) -> None:
+        raw_submissions.append((request_id, status, body, content_type))
+
+    monkeypatch.setattr(worker, "submit_response_raw", fake_submit_response_raw)
+    zpages = ZPagesRegistry("sync-native-zpages")
+    w = Worker({1: sync_handler}, zpages=zpages)
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        w._process_batch(
+            [MockRequest(handler_id=_ZPAGES_HANDLER_ID, request_id=41, path="/statusz")],
+            compiled_handlers=compiled,
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=True,
+            loop_pool=pool,
+        )
+    finally:
+        pool.stop()
+
+    assert called_handlers == []
+    assert len(raw_submissions) == 1
+    req_id, status, body, content_type = raw_submissions[0]
+    assert req_id == 41
+    assert status == 200
+    assert content_type == _JSON_CONTENT_TYPE_COMPACT
+    payload = decode_json(body)
+    assert payload["service"] == "sync-native-zpages"
+
+
+@pytest.mark.parametrize("fastpath", ["asgi", "rsgi", "wsgi"])
+def test_worker_process_batch_intercepts_zpages_before_single_root_fastpaths(
+    monkeypatch: pytest.MonkeyPatch,
+    fastpath: str,
+) -> None:
+    """Verify Worker._process_batch intercepts _ZPAGES_HANDLER_ID ahead of single_root_{asgi,rsgi,wsgi}."""
+
+    class _FakeRequestBatch(list[Any]):
+        pass
+
+    driver_calls: list[str] = []
+
+    def fail_driver(name: str) -> Any:
+        def _driver(*_args: Any, **_kwargs: Any) -> None:
+            driver_calls.append(name)
+
+        return _driver
+
+    raw_submissions: list[tuple[int, int, bytes, bytes | None]] = []
+
+    def fake_submit_response_raw(
+        request_id: int,
+        status: int,
+        body: bytes,
+        content_type: bytes | None = None,
+    ) -> None:
+        raw_submissions.append((request_id, status, body, content_type))
+
+    monkeypatch.setattr(worker, "RequestBatch", _FakeRequestBatch)
+    monkeypatch.setattr(worker, "drive_asgi_batch", fail_driver("asgi"))
+    monkeypatch.setattr(worker, "drive_rsgi_batch", fail_driver("rsgi"))
+    monkeypatch.setattr(worker, "drive_wsgi_batch", fail_driver("wsgi"))
+    monkeypatch.setattr(worker, "submit_response_raw", fake_submit_response_raw)
+
+    zpages = ZPagesRegistry(f"single-root-{fastpath}")
+    w = Worker({}, zpages=zpages)
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    sentinel_adapter: Any = object()
+    try:
+        w._process_batch(
+            _FakeRequestBatch([MockRequest(handler_id=_ZPAGES_HANDLER_ID, request_id=42, path="/statusz")]),
+            compiled_handlers={},
+            mount_runners=[],
+            mount_lookup={},
+            all_sync_native=False,
+            loop_pool=pool,
+            single_root_asgi=sentinel_adapter if fastpath == "asgi" else None,
+            single_root_rsgi=sentinel_adapter if fastpath == "rsgi" else None,
+            single_root_wsgi=sentinel_adapter if fastpath == "wsgi" else None,
+        )
+    finally:
+        pool.stop()
+
+    assert driver_calls == []
+    assert len(raw_submissions) == 1
+    req_id, status, body, content_type = raw_submissions[0]
+    assert req_id == 42
+    assert status == 200
+    assert content_type == _JSON_CONTENT_TYPE_COMPACT
+    assert decode_json(body)["service"] == f"single-root-{fastpath}"
+
+
+def test_worker_handle_zpage_taskz_background_shard_pool_uses_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify /taskz on a multi-shard EventLoopPool runs asynchronously and excludes the probe task."""
+    submitted = threading.Event()
+    raw_submissions: list[tuple[int, int, bytes, bytes | None]] = []
+
+    def fake_submit_response_raw(
+        request_id: int,
+        status: int,
+        body: bytes,
+        content_type: bytes | None = None,
+    ) -> None:
+        raw_submissions.append((request_id, status, body, content_type))
+        submitted.set()
+
+    monkeypatch.setattr(worker, "submit_response_raw", fake_submit_response_raw)
+    zpages = ZPagesRegistry("sharded-taskz")
+    w = Worker({}, zpages=zpages)
+    pool = EventLoopPool(size=2)
+    zpages.register_loop_pool("worker", pool)
+    started = threading.Event()
+    release = threading.Event()
+
+    async def active_background_job() -> None:
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+
+    try:
+        pool.spawn(active_background_job(), worker_index=0, name="shard-active-job")
+        assert started.wait(timeout=2.0)
+
+        w._handle_zpage_request(
+            MockRequest(handler_id=_ZPAGES_HANDLER_ID, request_id=55, path="/taskz"),
+            pool,
+        )
+        assert submitted.wait(timeout=2.0)
+    finally:
+        release.set()
+        pool.stop()
+
+    assert len(raw_submissions) == 1
+    req_id, status, body, content_type = raw_submissions[0]
+    assert req_id == 55
+    assert status == 200
+    assert content_type == _JSON_CONTENT_TYPE_COMPACT
+    payload = decode_json(body)
+    task_names = {entry["task_name"] for entry in payload["tasks"]}
+    assert "shard-active-job" in task_names
+    assert _TASKZ_PROBE_TASK_NAME not in task_names
+
+
+def test_worker_handle_zpage_taskz_inline_single_loop_uses_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify /taskz on an inline single loop with no remote loops submits synchronously."""
+    raw_submissions: list[tuple[int, int, bytes, bytes | None]] = []
+
+    def fake_submit_response_raw(
+        request_id: int,
+        status: int,
+        body: bytes,
+        content_type: bytes | None = None,
+    ) -> None:
+        raw_submissions.append((request_id, status, body, content_type))
+
+    monkeypatch.setattr(worker, "submit_response_raw", fake_submit_response_raw)
+    zpages = ZPagesRegistry("inline-taskz")
+    w = Worker({}, zpages=zpages)
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    zpages.register_loop_pool("worker", pool)
+    try:
+        w._handle_zpage_request(
+            MockRequest(handler_id=_ZPAGES_HANDLER_ID, request_id=56, path="/taskz"),
+            pool,
+        )
+    finally:
+        pool.stop()
+
+    assert len(raw_submissions) == 1
+    req_id, status, body, content_type = raw_submissions[0]
+    assert req_id == 56
+    assert status == 200
+    assert content_type == _JSON_CONTENT_TYPE_COMPACT
+    payload = decode_json(body)
+    assert "worker.shard.0" in payload["loops"]
+
+
+def test_worker_custom_loop_pool_name_exports_loop_telemetry_and_lazy_active_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify loop_pool_name namespaces /taskz and /varz loop_telemetry with zero set_var calls in _process_batch."""
+    app = App()
+
+    @app.get("/ping")
+    async def ping() -> bytes:
+        return b"pong"
+
+    recorder = EventLoopRecorder(emit_otel=False)
+    zpages = ZPagesRegistry("named-worker")
+    set_var_calls_during_batch: list[tuple[str, Any]] = []
+    in_batch = False
+    orig_set_var = ZPagesRegistry.set_var
+
+    def tracked_set_var(self: ZPagesRegistry, name: str, value: Any) -> None:
+        if in_batch:
+            set_var_calls_during_batch.append((name, value))
+        orig_set_var(self, name, value)
+
+    monkeypatch.setattr(ZPagesRegistry, "set_var", tracked_set_var)
+    monkeypatch.setattr(worker, "get_request_notify_fd", lambda: -1)
+    monkeypatch.setattr(
+        worker,
+        "get_batch",
+        lambda _timeout: [MockRequest(handler_id=1, request_id=10, path="/ping")],
+    )
+    monkeypatch.setattr(worker, "submit_response_raw", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "submit_response", lambda *_args, **_kwargs: None)
+
+    captured_taskz: dict[str, Any] = {}
+    captured_varz: dict[str, Any] = {}
+    orig_process_batch = Worker._process_batch
+
+    def wrapped_process_batch(self: Worker, batch: Any, **kwargs: Any) -> None:
+        nonlocal in_batch
+        in_batch = True
+        try:
+            orig_process_batch(self, batch, **kwargs)
+        finally:
+            in_batch = False
+        captured_taskz.update(zpages.get_tasks_payload())
+        captured_varz.update(zpages.get_vars_payload())
+
+    monkeypatch.setattr(Worker, "_process_batch", wrapped_process_batch)
+
+    w = Worker(
+        app._handlers,
+        zpages=zpages,
+        loop_recorder=recorder,
+        loop_pool_name="worker-2",
+        max_batches=1,
+        batch_timeout_ms=10,
+    )
+    w.run()
+
+    assert set_var_calls_during_batch == []
+    assert "worker-2.shard.0" in captured_taskz["loops"]
+    assert "loop_telemetry" in captured_varz
+    assert "worker-2" in captured_varz["loop_telemetry"]
+    assert captured_varz["active_requests"] == 0
+    assert captured_varz["worker_state"] == "ready"
+    assert zpages.get_vars_payload()["worker_state"] == "stopped"
+
+
+def test_worker_handle_zpage_broken_broker_returns_500_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a failing custom broker provider returns 500 JSON instead of crashing the worker."""
+    raw_submissions: list[tuple[int, int, bytes, bytes | None]] = []
+
+    def fake_submit_response_raw(
+        request_id: int,
+        status: int,
+        body: bytes,
+        content_type: bytes | None = None,
+    ) -> None:
+        raw_submissions.append((request_id, status, body, content_type))
+
+    def broken_broker() -> dict[str, object]:
+        msg = "broker snapshot failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(worker, "submit_response_raw", fake_submit_response_raw)
+    zpages = ZPagesRegistry("broken-broker")
+    zpages.register_broker("bad", broken_broker)
+    w = Worker({}, zpages=zpages)
+    pool = EventLoopPool(size=1, inline_single_loop=True)
+    try:
+        w._handle_zpage_request(
+            MockRequest(handler_id=_ZPAGES_HANDLER_ID, request_id=77, path="/brokerz"),
+            pool,
+        )
+    finally:
+        pool.stop()
+
+    assert raw_submissions == [
+        (77, 500, b'{"error":"zpages_internal_error"}', _JSON_CONTENT_TYPE_COMPACT),
+    ]

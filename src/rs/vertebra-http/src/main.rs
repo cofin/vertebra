@@ -123,6 +123,7 @@ struct PreparedEmbeddedApp {
     handlers: Py<PyAny>,
     mounts: Py<PyAny>,
     stop_event: Py<PyAny>,
+    zpages: Py<PyAny>,
     worker_threads: usize,
 }
 
@@ -287,6 +288,12 @@ fn spawn_python_workers(
         let threading = py.import("threading")?;
         let stop_event = threading.getattr("Event")?.call0()?.unbind();
 
+        let platform_mod = py.import("vertebra.server.platform")?;
+        let zpages = platform_mod
+            .getattr("ZPagesRegistry")?
+            .call1(("vertebra-server",))?
+            .unbind();
+
         let free_threaded = native_mod
             .getattr("FREE_THREADED")
             .and_then(|v| v.extract::<bool>())
@@ -308,6 +315,7 @@ fn spawn_python_workers(
             handlers,
             mounts,
             stop_event,
+            zpages,
             worker_threads,
         })
     })?;
@@ -317,6 +325,7 @@ fn spawn_python_workers(
         let handlers_ref = Python::attach(|py| prepared.handlers.clone_ref(py));
         let mounts_ref = Python::attach(|py| prepared.mounts.clone_ref(py));
         let stop_ref = Python::attach(|py| prepared.stop_event.clone_ref(py));
+        let zpages_ref = Python::attach(|py| prepared.zpages.clone_ref(py));
         let worker_threads = prepared.worker_threads;
         let shutdown_token = shutdown_token.clone();
         let worker_failed = Arc::clone(&worker_failed);
@@ -331,6 +340,8 @@ fn spawn_python_workers(
                         kwargs.set_item("mounts", mounts_ref.bind(py))?;
                         kwargs.set_item("worker_count", worker_threads)?;
                         kwargs.set_item("stop_event", stop_ref.bind(py))?;
+                        kwargs.set_item("zpages", zpages_ref.bind(py))?;
+                        kwargs.set_item("loop_pool_name", format!("worker-{idx}"))?;
                         runner
                             .getattr("run_worker")?
                             .call((handlers_ref.bind(py),), Some(&kwargs))?;

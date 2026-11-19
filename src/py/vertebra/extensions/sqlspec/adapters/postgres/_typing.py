@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from sqlspec.core import StatementConfig
 
+    from vertebra.db.driver._cloud_auth import DatabaseTokenProvider
     from vertebra.extensions.sqlspec.adapters.postgres.config import PostgresAsyncConfig, PostgresSyncConfig
     from vertebra.extensions.sqlspec.adapters.postgres.driver import PostgresAsyncDriver, PostgresSyncDriver
 
@@ -55,6 +56,10 @@ class PostgresConnectionParams(TypedDict):
     """Maximum cached prepared statements per connection."""
     direct_dsn: NotRequired[str | Mapping[str, Any] | None]
     """Direct database DSN bypassing pooler endpoints when needed."""
+    token_provider: NotRequired[DatabaseTokenProvider | None]
+    """Cloud database token provider supplying dynamic IAM passwords."""
+    ca_pem: NotRequired[str | None]
+    """Inline Root CA PEM bundle used for PostgreSQL TLS verification."""
 
 
 class PostgresPoolParams(PostgresConnectionParams):

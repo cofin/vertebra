@@ -12,10 +12,9 @@ import sys
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from vertebra.typing import UVLOOP_INSTALLED
-from vertebra.utils.module_loader import import_optional
+from vertebra.server._loops import create_event_loop
 from vertebra.utils.portal import PortalProvider
 
 if TYPE_CHECKING:
@@ -357,11 +356,7 @@ class _RunWrapper[**ParamSpecT, ReturnT]:
         if loop is not None and loop.is_running():
             return PortalProvider.default().call(self._function, *args, **kwargs)
 
-        if bool(UVLOOP_INSTALLED) and sys.platform != "win32" and not _is_gil_disabled():
-            uvloop_mod = import_optional("uvloop")
-            if uvloop_mod is not None and hasattr(uvloop_mod, "run"):
-                return cast("ReturnT", uvloop_mod.run(self._function(*args, **kwargs)))
-        return asyncio.run(self._function(*args, **kwargs))
+        return asyncio.run(self._function(*args, **kwargs), loop_factory=create_event_loop)
 
 
 class _AsyncWrapper[**ParamSpecT, ReturnT]:

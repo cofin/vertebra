@@ -71,6 +71,7 @@ __all__ = (
     "_MOUNT_HANDLER_MASK",
     "_MOUNT_INDEX_MASK",
     "_RAW_BUFFER_TYPES",
+    "_ZPAGES_HANDLER_ID",
     "_call_handler",
     "_handler_meta",
     "_is_potential_special_return",
@@ -98,6 +99,7 @@ _JSON_CONTENT_TYPE_COMPACT = b"\x0ccontent-type\x10\x00application/json"
 _RAW_BUFFER_TYPES = (bytes, bytearray, memoryview)
 _MOUNT_HANDLER_MASK = 0xFFFF_0000_0000_0000
 _MOUNT_INDEX_MASK = 0xFFFF
+_ZPAGES_HANDLER_ID: int = 0xFFFE_0000_0000_0001
 _SCALAR_QUERY_TYPES: dict[type[Any], Callable[[str], Any]] = {
     str: str,
     int: int,

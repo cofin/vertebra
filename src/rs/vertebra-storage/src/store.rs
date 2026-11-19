@@ -727,6 +727,283 @@ impl Drop for PartFileGuard {
     }
 }
 
+fn local_staged_upload_path(dest: &FsPath, pid: u32, seq: u64) -> PathBuf {
+    let mut staging = dest.as_os_str().to_os_string();
+    staging.push(format!("#{pid}{seq:012}"));
+    PathBuf::from(staging)
+}
+
+fn local_file_etag(metadata: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(metadata);
+    #[cfg(not(unix))]
+    let inode = 0u64;
+    let size = metadata.len();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or_default()
+        .as_micros();
+    format!("{inode:x}-{mtime:x}-{size:x}")
+}
+
+#[derive(Debug)]
+struct LocalCreateOnlyUpload {
+    location: StorePath,
+    dest: PathBuf,
+    state: Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    staging: Option<PathBuf>,
+    offset: u64,
+}
+
+impl LocalCreateOnlyUpload {
+    async fn open(location: StorePath, dest: PathBuf) -> Result<Self, StorageError> {
+        let dest_for_open = dest.clone();
+        let (file, staging) = tokio::task::spawn_blocking(move || {
+            let mut created_dirs = false;
+            loop {
+                let seq = PART_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+                let staging = local_staged_upload_path(&dest_for_open, std::process::id(), seq);
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staging)
+                {
+                    Ok(file) => return Ok((file, staging)),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound && !created_dirs => {
+                        if let Some(parent) = dest_for_open.parent() {
+                            std::fs::create_dir_all(parent)?;
+                            created_dirs = true;
+                            continue;
+                        }
+                        return Err(StorageError::Io(err));
+                    }
+                    Err(err) => return Err(StorageError::Io(err)),
+                }
+            }
+        })
+        .await
+        .map_err(|err| StorageError::Io(std::io::Error::other(err)))??;
+
+        Ok(Self {
+            location,
+            dest,
+            state: Arc::new(std::sync::Mutex::new(Some(file))),
+            staging: Some(staging),
+            offset: 0,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartUpload for LocalCreateOnlyUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        let offset = self.offset;
+        self.offset += data.content_length() as u64;
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                use std::io::{Seek, SeekFrom, Write};
+
+                let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(file) = guard.as_mut() else {
+                    return Err(object_store::Error::Generic {
+                        store: "LocalFileSystem",
+                        source: "local create-only upload already closed".into(),
+                    });
+                };
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|err| object_store::Error::Generic {
+                        store: "LocalFileSystem",
+                        source: Box::new(err),
+                    })?;
+                for chunk in data.iter() {
+                    file.write_all(chunk)
+                        .map_err(|err| object_store::Error::Generic {
+                            store: "LocalFileSystem",
+                            source: Box::new(err),
+                        })?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|source| object_store::Error::JoinError { source })?
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        let Some(staging) = self.staging.take() else {
+            return Err(object_store::Error::Generic {
+                store: "LocalFileSystem",
+                source: "local create-only upload already completed or aborted".into(),
+            });
+        };
+        let dest = self.dest.clone();
+        let location = self.location.to_string();
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+
+            let file = state.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let Some(mut file) = file else {
+                let _ = std::fs::remove_file(&staging);
+                return Err(object_store::Error::Generic {
+                    store: "LocalFileSystem",
+                    source: "local create-only upload file handle already closed".into(),
+                });
+            };
+            if let Err(err) = file.flush() {
+                drop(file);
+                let _ = std::fs::remove_file(&staging);
+                return Err(object_store::Error::Generic {
+                    store: "LocalFileSystem",
+                    source: Box::new(err),
+                });
+            }
+            let staged_meta = file.metadata().ok();
+            drop(file);
+            match std::fs::hard_link(&staging, &dest) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&staging);
+                    let meta = std::fs::metadata(&dest).ok().or(staged_meta);
+                    let e_tag = meta.map(|m| local_file_etag(&m));
+                    Ok(PutResult {
+                        e_tag,
+                        version: None,
+                    })
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = std::fs::remove_file(&staging);
+                    Err(object_store::Error::AlreadyExists {
+                        path: location,
+                        source: Box::new(source),
+                    })
+                }
+                Err(source) => {
+                    let _ = std::fs::remove_file(&staging);
+                    Err(object_store::Error::Generic {
+                        store: "LocalFileSystem",
+                        source: Box::new(source),
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(|source| object_store::Error::JoinError { source })?
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        let Some(staging) = self.staging.take() else {
+            return Ok(());
+        };
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            let file = state.lock().unwrap_or_else(|e| e.into_inner()).take();
+            drop(file);
+            match std::fs::remove_file(&staging) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(object_store::Error::Generic {
+                    store: "LocalFileSystem",
+                    source: Box::new(err),
+                }),
+            }
+        })
+        .await
+        .map_err(|source| object_store::Error::JoinError { source })?
+    }
+}
+
+impl Drop for LocalCreateOnlyUpload {
+    fn drop(&mut self) {
+        if let Some(staging) = self.staging.take() {
+            let file = self.state.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    drop(file);
+                    let _ = std::fs::remove_file(staging);
+                });
+            } else {
+                drop(file);
+                let _ = std::fs::remove_file(staging);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MemoryCreateOnlyUpload {
+    inner: Arc<dyn ObjectStore>,
+    location: StorePath,
+    attributes: Attributes,
+    parts: Vec<PutPayload>,
+    closed: bool,
+}
+
+impl MemoryCreateOnlyUpload {
+    fn new(inner: Arc<dyn ObjectStore>, location: StorePath, attributes: Attributes) -> Self {
+        Self {
+            inner,
+            location,
+            attributes,
+            parts: Vec::new(),
+            closed: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartUpload for MemoryCreateOnlyUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        if self.closed {
+            return Box::pin(futures::future::ready(Err(object_store::Error::Generic {
+                store: "InMemory",
+                source: format!("multipart upload for '{}' is already closed", self.location)
+                    .into(),
+            })));
+        }
+        self.parts.push(data);
+        Box::pin(futures::future::ready(Ok(())))
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        if self.closed {
+            return Err(object_store::Error::Generic {
+                store: "InMemory",
+                source: format!(
+                    "multipart upload for '{}' is already completed or aborted",
+                    self.location
+                )
+                .into(),
+            });
+        }
+        self.closed = true;
+        let payload: PutPayload = std::mem::take(&mut self.parts)
+            .into_iter()
+            .flatten()
+            .collect();
+        self.inner
+            .put_opts(
+                &self.location,
+                payload,
+                PutOptions {
+                    mode: PutMode::Create,
+                    attributes: std::mem::take(&mut self.attributes),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.closed = true;
+        self.parts.clear();
+        Ok(())
+    }
+}
+
 /// Unlink batch download destinations created by one `get_files` call unless disarmed.
 ///
 /// Only destinations that did not exist before the call are recorded, so pre-existing files
@@ -925,6 +1202,10 @@ pub enum BackendConfig {
         container: String,
         account: Option<String>,
         access_key: Option<String>,
+        sas_token: Option<String>,
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
         endpoint: Option<String>,
         allow_http: bool,
     },
@@ -985,6 +1266,41 @@ fn parse_http_headers_from_options(
     Ok(headers)
 }
 
+/// Parse an Azure Shared Access Signature query string into decoded `(key, value)` pairs.
+fn parse_azure_sas_query_pairs(raw_sas: &str) -> Result<Vec<(String, String)>, StorageError> {
+    let without_prefix = raw_sas.trim().trim_start_matches('?').trim();
+    if without_prefix.is_empty() || without_prefix.chars().any(char::is_whitespace) {
+        return Err(StorageError::InvalidInput(
+            "invalid Azure sas_token: expected non-empty query string".to_string(),
+        ));
+    }
+    for segment in without_prefix.split('&') {
+        let Some((raw_k, raw_v)) = segment.split_once('=') else {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid Azure sas_token segment '{segment}': expected key=value query pairs"
+            )));
+        };
+        if raw_k.is_empty() || raw_v.is_empty() {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid Azure sas_token segment '{segment}': key and value must be non-empty"
+            )));
+        }
+    }
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(without_prefix.as_bytes())
+        .into_owned()
+        .collect();
+    if pairs.is_empty()
+        || pairs.iter().any(|(k, v)| {
+            k.is_empty() || v.is_empty() || k.contains('\u{FFFD}') || v.contains('\u{FFFD}')
+        })
+    {
+        return Err(StorageError::InvalidInput(
+            "invalid Azure sas_token: query pairs must be non-empty valid UTF-8".to_string(),
+        ));
+    }
+    Ok(pairs)
+}
+
 /// Connection and credential state for GCS JSON API calls that `object_store` does not expose.
 ///
 /// `credential_cache` is preferred because its snapshots carry a generation that can be
@@ -1015,6 +1331,7 @@ struct GcsComposeResponse {
 #[derive(Clone)]
 pub struct ObjectStoreEngine {
     inner: Arc<dyn ObjectStore>,
+    local_fs: Option<Arc<LocalFileSystem>>,
     scheme: String,
     supports_atomic_rename: bool,
     local_metadata: Option<LocalMetadataRegistry>,
@@ -1027,6 +1344,7 @@ impl ObjectStoreEngine {
         match config {
             BackendConfig::Memory => Ok(Self {
                 inner: Arc::new(InMemory::new()),
+                local_fs: None,
                 scheme: "memory".to_string(),
                 supports_atomic_rename,
                 local_metadata: None,
@@ -1039,9 +1357,10 @@ impl ObjectStoreEngine {
                         format!("failed creating directory: {e}"),
                     )
                 })?;
-                let store = LocalFileSystem::new_with_prefix(&root)?;
+                let local = Arc::new(LocalFileSystem::new_with_prefix(&root)?);
                 Ok(Self {
-                    inner: Arc::new(store),
+                    inner: Arc::clone(&local) as Arc<dyn ObjectStore>,
+                    local_fs: Some(local),
                     scheme: "file".to_string(),
                     supports_atomic_rename,
                     local_metadata: Some(Arc::new(RwLock::new(HashMap::new()))),
@@ -1094,6 +1413,7 @@ impl ObjectStoreEngine {
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
+                    local_fs: None,
                     scheme: "s3".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1206,6 +1526,7 @@ impl ObjectStoreEngine {
                 };
                 Ok(Self {
                     inner: Arc::new(store),
+                    local_fs: None,
                     scheme: "gs".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1216,6 +1537,10 @@ impl ObjectStoreEngine {
                 container,
                 account,
                 access_key,
+                sas_token,
+                tenant_id,
+                client_id,
+                client_secret,
                 endpoint,
                 allow_http,
             } => {
@@ -1231,11 +1556,38 @@ impl ObjectStoreEngine {
                 if let Some(key) = access_key {
                     builder = builder.with_access_key(key);
                 }
+                match (tenant_id, client_id, client_secret) {
+                    (Some(tid), Some(cid), Some(csec)) => {
+                        if tid.trim().is_empty() || cid.trim().is_empty() || csec.trim().is_empty()
+                        {
+                            return Err(StorageError::InvalidInput(
+                                "Azure Entra ID credentials (tenant_id, client_id, client_secret) must not be empty"
+                                    .to_string(),
+                            ));
+                        }
+                        builder = builder
+                            .with_tenant_id(tid)
+                            .with_client_id(cid)
+                            .with_client_secret(csec);
+                    }
+                    (None, None, None) => {}
+                    _ => {
+                        return Err(StorageError::InvalidInput(
+                            "incomplete Azure Entra ID credentials: tenant_id, client_id, and client_secret must all be provided together"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Some(raw_sas) = sas_token {
+                    let sas_pairs = parse_azure_sas_query_pairs(&raw_sas)?;
+                    builder = builder.with_sas_authorization(sas_pairs);
+                }
                 if let Some(ep) = endpoint {
                     builder = builder.with_endpoint(ep);
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
+                    local_fs: None,
                     scheme: "az".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1252,6 +1604,7 @@ impl ObjectStoreEngine {
                 let store = OciObjectStore::new(namespace, bucket, region, endpoint, credentials)?;
                 Ok(Self {
                     inner: Arc::new(store),
+                    local_fs: None,
                     scheme: "oci".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1302,6 +1655,7 @@ impl ObjectStoreEngine {
                 }
                 Ok(Self {
                     inner: Arc::new(builder.build()?),
+                    local_fs: None,
                     scheme: "r2".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1340,6 +1694,7 @@ impl ObjectStoreEngine {
                     .build()?;
                 Ok(Self {
                     inner: Arc::new(store),
+                    local_fs: None,
                     scheme: "http".to_string(),
                     supports_atomic_rename,
                     local_metadata: None,
@@ -1454,13 +1809,31 @@ impl ObjectStoreEngine {
                     opts.get("fingerprint"),
                     opts.get("private_key_pem"),
                 ) {
-                    (Some(t), Some(u), Some(fp), Some(pem)) => Some(OciCavageCredentials {
-                        tenancy_ocid: t.clone(),
-                        user_ocid: u.clone(),
-                        fingerprint: fp.clone(),
-                        private_key_pem: pem.clone(),
-                    }),
-                    _ => None,
+                    (Some(t), Some(u), Some(fp), Some(pem)) => {
+                        if t.trim().is_empty()
+                            || u.trim().is_empty()
+                            || fp.trim().is_empty()
+                            || pem.trim().is_empty()
+                        {
+                            return Err(StorageError::InvalidInput(
+                                "OCI Cavage credentials (tenancy_ocid, user_ocid, fingerprint, private_key_pem) must not be empty"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(OciCavageCredentials {
+                            tenancy_ocid: t.clone(),
+                            user_ocid: u.clone(),
+                            fingerprint: fp.clone(),
+                            private_key_pem: pem.clone(),
+                        })
+                    }
+                    (None, None, None, None) => None,
+                    _ => {
+                        return Err(StorageError::InvalidInput(
+                            "incomplete OCI Cavage credentials: tenancy_ocid, user_ocid, fingerprint, and private_key_pem must all be provided together"
+                                .to_string(),
+                        ));
+                    }
                 };
                 Self::new(BackendConfig::Oci {
                     bucket,
@@ -1518,6 +1891,10 @@ impl ObjectStoreEngine {
                     container,
                     account: opts.get("account").cloned(),
                     access_key: opts.get("access_key").cloned(),
+                    sas_token: opts.get("sas_token").cloned(),
+                    tenant_id: opts.get("tenant_id").cloned(),
+                    client_id: opts.get("client_id").cloned(),
+                    client_secret: opts.get("client_secret").cloned(),
                     endpoint,
                     allow_http,
                 })
@@ -1545,6 +1922,7 @@ impl ObjectStoreEngine {
         };
         Self {
             inner,
+            local_fs: None,
             scheme,
             supports_atomic_rename,
             local_metadata,
@@ -1964,16 +2342,31 @@ impl ObjectStoreEngine {
             }
         }
 
-        let mp_opts = PutMultipartOptions {
-            attributes: build_store_attributes(opts.content_type.as_deref(), &opts.attributes),
-            ..Default::default()
-        };
-        let upload = match self.inner.put_multipart_opts(&location, mp_opts).await {
-            Ok(up) => up,
-            Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
-                self.inner.put_multipart(&location).await?
+        let upload: Box<dyn MultipartUpload> = if create_only
+            && let Some(ref local_fs) = self.local_fs
+        {
+            let dest = local_fs.path_to_filesystem(&location)?;
+            Box::new(LocalCreateOnlyUpload::open(location.clone(), dest).await?)
+        } else if create_only && self.scheme == "memory" {
+            let store_attributes =
+                build_store_attributes(opts.content_type.as_deref(), &opts.attributes);
+            Box::new(MemoryCreateOnlyUpload::new(
+                Arc::clone(&self.inner),
+                location.clone(),
+                store_attributes,
+            ))
+        } else {
+            let mp_opts = PutMultipartOptions {
+                attributes: build_store_attributes(opts.content_type.as_deref(), &opts.attributes),
+                ..Default::default()
+            };
+            match self.inner.put_multipart_opts(&location, mp_opts).await {
+                Ok(up) => up,
+                Err(object_store::Error::NotImplemented { .. }) if self.scheme == "file" => {
+                    self.inner.put_multipart(&location).await?
+                }
+                Err(err) => return Err(err.into()),
             }
-            Err(err) => return Err(err.into()),
         };
 
         let accumulator = if requires_uniform_part_size(&self.scheme) {
@@ -2703,5 +3096,554 @@ impl ObjectStoreEngine {
             store: "GCS",
             source: message.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Barrier;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_create_only_concurrent_barrier_race() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(
+            ObjectStoreEngine::new(BackendConfig::Local {
+                root: dir.path().to_string_lossy().into_owned(),
+            })
+            .expect("local engine"),
+        );
+        let racers = 8usize;
+        let barrier = Arc::new(Barrier::new(racers));
+        let mut handles = Vec::with_capacity(racers);
+
+        for idx in 0..racers {
+            let eng = Arc::clone(&engine);
+            let bar = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                let mut attributes = HashMap::new();
+                attributes.insert("owner".to_string(), format!("racer-{idx}"));
+                let opts = PutConditionalOptions {
+                    if_not_exists: true,
+                    content_type: Some(format!("application/x-racer-{idx}")),
+                    attributes: attributes.clone(),
+                    ..Default::default()
+                };
+                let mut session = eng.create_multipart("nested/race.bin", opts).await?;
+                let payload =
+                    Bytes::from(format!("payload-from-racer-{idx:02}-{}", "x".repeat(64)));
+                session.write_chunk(payload.clone()).await?;
+                bar.wait().await;
+                match session.complete_with_meta().await {
+                    Ok(meta) => Ok((idx, payload, attributes, meta)),
+                    Err(err) => {
+                        let _ = session.abort().await;
+                        Err(err)
+                    }
+                }
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut already_exists_count = 0usize;
+        for handle in handles {
+            match handle.await.expect("racer task panicked") {
+                Ok(win) => winners.push(win),
+                Err(err) => {
+                    assert!(
+                        err.is_already_exists(),
+                        "expected AlreadyExists error, got {err:?}"
+                    );
+                    already_exists_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(winners.len(), 1, "expected exactly one winner");
+        assert_eq!(already_exists_count, racers - 1);
+
+        let (winner_idx, winner_payload, winner_attrs, winner_meta) = winners.pop().unwrap();
+        let stored_bytes = engine.get("nested/race.bin").await.expect("get winner");
+        assert_eq!(stored_bytes, winner_payload);
+
+        let head = engine.head("nested/race.bin").await.expect("head winner");
+        assert_eq!(head.size, winner_payload.len() as u64);
+        assert_eq!(
+            head.content_type.as_deref(),
+            Some(format!("application/x-racer-{winner_idx}").as_str())
+        );
+        assert_eq!(head.attributes, winner_attrs);
+        assert!(winner_meta.etag.is_some());
+        assert_eq!(head.etag, winner_meta.etag);
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path().join("nested"))
+            .expect("read_dir nested")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entries, vec!["race.bin".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_create_only_if_none_match_star_race() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(
+            ObjectStoreEngine::new(BackendConfig::Local {
+                root: dir.path().to_string_lossy().into_owned(),
+            })
+            .expect("local engine"),
+        );
+        let racers = 6usize;
+        let barrier = Arc::new(Barrier::new(racers));
+        let mut handles = Vec::with_capacity(racers);
+
+        for idx in 0..racers {
+            let eng = Arc::clone(&engine);
+            let bar = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                let opts = PutConditionalOptions {
+                    if_not_exists: false,
+                    if_none_match: Some("*".to_string()),
+                    ..Default::default()
+                };
+                let mut session = eng.create_multipart("star-race.bin", opts).await?;
+                let payload = Bytes::from(format!("star-racer-{idx:02}-{}", "y".repeat(32)));
+                session.write_chunk(payload.clone()).await?;
+                bar.wait().await;
+                match session.complete_with_meta().await {
+                    Ok(meta) => Ok((payload, meta)),
+                    Err(err) => {
+                        let _ = session.abort().await;
+                        Err(err)
+                    }
+                }
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut already_exists_count = 0usize;
+        for handle in handles {
+            match handle.await.expect("racer task panicked") {
+                Ok(win) => winners.push(win),
+                Err(err) => {
+                    assert!(
+                        err.is_already_exists(),
+                        "expected AlreadyExists error, got {err:?}"
+                    );
+                    already_exists_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(winners.len(), 1);
+        assert_eq!(already_exists_count, racers - 1);
+        let (winner_payload, _winner_meta) = winners.pop().unwrap();
+        let stored = engine.get("star-race.bin").await.expect("get winner");
+        assert_eq!(stored, winner_payload);
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir root")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entries, vec!["star-race.bin".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn local_create_only_fast_fails_on_existing_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = ObjectStoreEngine::new(BackendConfig::Local {
+            root: dir.path().to_string_lossy().into_owned(),
+        })
+        .expect("local engine");
+
+        engine
+            .put("taken.bin", Bytes::from_static(b"existing-content"))
+            .await
+            .expect("seed taken.bin");
+
+        let err = engine
+            .create_multipart(
+                "taken.bin",
+                PutConditionalOptions {
+                    if_not_exists: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .expect("expected fast-fail AlreadyExists");
+        assert!(
+            err.is_already_exists(),
+            "expected AlreadyExists, got {err:?}"
+        );
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir root")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entries, vec!["taken.bin".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_create_only_hides_staging_in_list_and_cleans_on_abort_and_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = ObjectStoreEngine::new(BackendConfig::Local {
+            root: dir.path().to_string_lossy().into_owned(),
+        })
+        .expect("local engine");
+
+        let mut aborted = engine
+            .create_multipart(
+                "aborted.bin",
+                PutConditionalOptions {
+                    if_not_exists: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("open aborted session");
+        aborted
+            .write_chunk(Bytes::from_static(b"aborted-chunk"))
+            .await
+            .expect("write aborted chunk");
+
+        let drop_location = validate_object_path("dropped.bin").expect("valid path");
+        let drop_dest = engine
+            .local_fs
+            .as_ref()
+            .expect("local_fs")
+            .path_to_filesystem(&drop_location)
+            .expect("dest path");
+        let mut dropped = LocalCreateOnlyUpload::open(drop_location, drop_dest)
+            .await
+            .expect("open direct upload");
+        dropped
+            .put_part(PutPayload::from(Bytes::from_static(b"dropped-chunk")))
+            .await
+            .expect("put_part dropped");
+
+        let active_entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir active")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(active_entries.len(), 2, "expected 2 staging files on disk");
+        assert!(active_entries.iter().all(|name| name.contains('#')));
+
+        let listed = engine.list(None).await.expect("list while staging active");
+        assert!(
+            listed.is_empty(),
+            "expected list(None) to hide active staging files, got {listed:?}"
+        );
+
+        aborted.abort().await.expect("abort session");
+        drop(dropped);
+
+        for _ in 0..50 {
+            let remaining = std::fs::read_dir(dir.path())
+                .expect("read_dir cleanup")
+                .count();
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let remaining: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir final")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "expected zero destination or staging files after abort/drop, got {remaining:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_create_only_put_file_opts_large_race() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src_dir = tempfile::tempdir().expect("src tempdir");
+        let payload_len = 9 * 1024 * 1024;
+        let payload_a = vec![b'A'; payload_len];
+        let payload_b = vec![b'B'; payload_len];
+        let src_a = src_dir.path().join("src_a.bin");
+        let src_b = src_dir.path().join("src_b.bin");
+        std::fs::write(&src_a, &payload_a).expect("write src_a");
+        std::fs::write(&src_b, &payload_b).expect("write src_b");
+
+        let engine = Arc::new(
+            ObjectStoreEngine::new(BackendConfig::Local {
+                root: dir.path().to_string_lossy().into_owned(),
+            })
+            .expect("local engine"),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for (marker, src_path) in [(b'A', src_a), (b'B', src_b)] {
+            let eng = Arc::clone(&engine);
+            let bar = Arc::clone(&barrier);
+            let src_str = src_path.to_string_lossy().into_owned();
+            handles.push(tokio::spawn(async move {
+                bar.wait().await;
+                let opts = PutConditionalOptions {
+                    if_not_exists: true,
+                    ..Default::default()
+                };
+                eng.put_file_opts("large.bin", &src_str, opts)
+                    .await
+                    .map(|meta| (marker, meta))
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut already_exists_count = 0usize;
+        for handle in handles {
+            match handle.await.expect("put_file_opts task panicked") {
+                Ok(win) => winners.push(win),
+                Err(err) => {
+                    assert!(
+                        err.is_already_exists(),
+                        "expected AlreadyExists error, got {err:?}"
+                    );
+                    already_exists_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(winners.len(), 1);
+        assert_eq!(already_exists_count, 1);
+        let (winner_marker, winner_meta) = winners.pop().unwrap();
+        assert_eq!(winner_meta.size, payload_len as u64);
+
+        let stored = engine.get("large.bin").await.expect("get large.bin");
+        assert_eq!(stored.len(), payload_len);
+        assert!(stored.iter().all(|&b| b == winner_marker));
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir root")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entries, vec!["large.bin".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn memory_create_only_concurrent_barrier_race() {
+        let engine =
+            Arc::new(ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"));
+        let racers = 8usize;
+        let barrier = Arc::new(Barrier::new(racers));
+        let mut handles = Vec::with_capacity(racers);
+
+        for idx in 0..racers {
+            let eng = Arc::clone(&engine);
+            let bar = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                let mut attributes = HashMap::new();
+                attributes.insert("owner".to_string(), format!("mem-racer-{idx}"));
+                let opts = PutConditionalOptions {
+                    if_not_exists: true,
+                    content_type: Some(format!("application/x-mem-racer-{idx}")),
+                    attributes: attributes.clone(),
+                    ..Default::default()
+                };
+                let mut session = eng.create_multipart("mem/race.bin", opts).await?;
+                let part1 = Bytes::from(format!("part1-racer-{idx:02}-"));
+                let part2 = Bytes::from(format!("part2-racer-{idx:02}-{}", "z".repeat(48)));
+                let mut expected = Vec::with_capacity(part1.len() + part2.len());
+                expected.extend_from_slice(&part1);
+                expected.extend_from_slice(&part2);
+                session.write_chunk(part1).await?;
+                session.write_chunk(part2).await?;
+                bar.wait().await;
+                match session.complete_with_meta().await {
+                    Ok(meta) => Ok((idx, Bytes::from(expected), attributes, meta)),
+                    Err(err) => {
+                        let _ = session.abort().await;
+                        Err(err)
+                    }
+                }
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut already_exists_count = 0usize;
+        for handle in handles {
+            match handle.await.expect("racer task panicked") {
+                Ok(win) => winners.push(win),
+                Err(err) => {
+                    assert!(
+                        err.is_already_exists(),
+                        "expected AlreadyExists error, got {err:?}"
+                    );
+                    already_exists_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(winners.len(), 1, "expected exactly one winner");
+        assert_eq!(already_exists_count, racers - 1);
+
+        let (winner_idx, winner_payload, winner_attrs, winner_meta) = winners.pop().unwrap();
+        assert!(
+            winner_meta
+                .etag
+                .as_deref()
+                .is_some_and(|etag| !etag.is_empty()),
+            "expected non-empty etag on winner meta"
+        );
+
+        let stored_bytes = engine.get("mem/race.bin").await.expect("get winner");
+        assert_eq!(stored_bytes, winner_payload);
+
+        let head = engine.head("mem/race.bin").await.expect("head winner");
+        assert_eq!(head.size, winner_payload.len() as u64);
+        assert_eq!(
+            head.content_type.as_deref(),
+            Some(format!("application/x-mem-racer-{winner_idx}").as_str())
+        );
+        assert_eq!(head.attributes, winner_attrs);
+        assert_eq!(head.etag, winner_meta.etag);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn memory_create_only_if_none_match_star_race() {
+        let engine =
+            Arc::new(ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine"));
+        let racers = 6usize;
+        let barrier = Arc::new(Barrier::new(racers));
+        let mut handles = Vec::with_capacity(racers);
+
+        for idx in 0..racers {
+            let eng = Arc::clone(&engine);
+            let bar = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                let opts = PutConditionalOptions {
+                    if_not_exists: false,
+                    if_none_match: Some("*".to_string()),
+                    ..Default::default()
+                };
+                let mut session = eng.create_multipart("mem-star-race.bin", opts).await?;
+                let payload = Bytes::from(format!("mem-star-racer-{idx:02}-{}", "y".repeat(32)));
+                session.write_chunk(payload.clone()).await?;
+                bar.wait().await;
+                match session.complete_with_meta().await {
+                    Ok(meta) => Ok((payload, meta)),
+                    Err(err) => {
+                        let _ = session.abort().await;
+                        Err(err)
+                    }
+                }
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut already_exists_count = 0usize;
+        for handle in handles {
+            match handle.await.expect("racer task panicked") {
+                Ok(win) => winners.push(win),
+                Err(err) => {
+                    assert!(
+                        err.is_already_exists(),
+                        "expected AlreadyExists error, got {err:?}"
+                    );
+                    already_exists_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(winners.len(), 1);
+        assert_eq!(already_exists_count, racers - 1);
+        let (winner_payload, _winner_meta) = winners.pop().unwrap();
+        let stored = engine.get("mem-star-race.bin").await.expect("get winner");
+        assert_eq!(stored, winner_payload);
+    }
+
+    #[tokio::test]
+    async fn memory_create_only_fast_fails_on_existing_key() {
+        let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+        let original = Bytes::from_static(b"existing-memory-content");
+        engine
+            .put("taken.bin", original.clone())
+            .await
+            .expect("seed taken.bin");
+
+        let err = engine
+            .create_multipart(
+                "taken.bin",
+                PutConditionalOptions {
+                    if_not_exists: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .expect("expected fast-fail AlreadyExists");
+        assert!(
+            err.is_already_exists(),
+            "expected AlreadyExists, got {err:?}"
+        );
+
+        let stored = engine.get("taken.bin").await.expect("get taken.bin");
+        assert_eq!(stored, original);
+    }
+
+    #[tokio::test]
+    async fn memory_create_only_abort_discards_without_creating() {
+        let engine = ObjectStoreEngine::new(BackendConfig::Memory).expect("memory engine");
+        let mut session = engine
+            .create_multipart(
+                "aborted.bin",
+                PutConditionalOptions {
+                    if_not_exists: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create_multipart");
+        session
+            .write_chunk(Bytes::from_static(b"first-chunk-"))
+            .await
+            .expect("write chunk 1");
+        session
+            .write_chunk(Bytes::from_static(b"second-chunk"))
+            .await
+            .expect("write chunk 2");
+
+        session.abort().await.expect("first abort");
+        session.abort().await.expect("second abort");
+
+        assert!(
+            !engine.exists("aborted.bin").await.expect("exists check"),
+            "aborted key should not exist"
+        );
     }
 }

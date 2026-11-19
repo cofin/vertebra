@@ -13,7 +13,7 @@ from vertebra.db.adapters.mssql.core import (
     MSSQLCore,
 )
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver._cloud_auth import AZURE_MSSQL_SCOPE, AzureEntraTokenProvider
+from vertebra.db.driver._cloud_auth import AZURE_MSSQL_SCOPE, AzureEntraTokenProvider, is_loopback_host
 from vertebra.db.driver._common import BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 
@@ -42,6 +42,21 @@ _VALID_ENCRYPTION_MODES: Final[frozenset[str]] = frozenset(
         "false",
         "off",
         "no",
+    }
+)
+_VERIFIED_SESSION_ENCRYPTION_MODES: Final[frozenset[str]] = frozenset(
+    {
+        "required",
+        "require",
+        "true",
+        "on",
+        "yes",
+        "mandatory",
+        "strict",
+        "verify-full",
+        "verify_full",
+        "verify-ca",
+        "verify_ca",
     }
 )
 
@@ -132,6 +147,7 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         self._validate_pem_bytes(self.client_cert_pem, "client_cert_pem")
         self._validate_pem_bytes(self.client_key_pem, "client_key_pem")
         if isinstance(self.token_provider, AzureEntraTokenProvider):
+            self._validate_entra_transport_security()
             msgspec.structs.force_setattr(
                 self,
                 "token_provider",
@@ -306,6 +322,28 @@ class MSSQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             host_part = f"{host_part}:{parsed.port}"
         user_part = f"{parsed.username}:[REDACTED]@" if parsed.username is not None else ":[REDACTED]@"
         return urlunparse(parsed._replace(netloc=f"{user_part}{host_part}"))
+
+    def _validate_entra_transport_security(self) -> None:
+        """Reject settings that could expose an Entra bearer token to a remote or unverified server.
+
+        Login-only and disabled encryption modes let the `LOGIN7` packet travel without TLS when the
+        server declines encryption, and `trust_server_certificate` accepts any server certificate.
+        Loopback hosts are exempt.
+        """
+        if is_loopback_host(self.host):
+            return
+        if self.encryption.strip().lower() not in _VERIFIED_SESSION_ENCRYPTION_MODES:
+            msg = (
+                f"AzureEntraTokenProvider requires an encrypted login on remote hosts and cannot be used "
+                f"with MSSQLConfig.encryption={self.encryption!r}; use 'required' or 'strict'"
+            )
+            raise ImproperConfigurationError(msg)
+        if self.trust_server_certificate:
+            msg = (
+                "AzureEntraTokenProvider requires server certificate verification on remote hosts "
+                "and cannot be used with MSSQLConfig.trust_server_certificate=True"
+            )
+            raise ImproperConfigurationError(msg)
 
     @staticmethod
     def _validate_pem_bytes(pem: bytes | None, field_name: str) -> None:

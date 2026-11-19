@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
 
+from vertebra.server._loops import create_event_loop
+from vertebra.utils import sync_tools as sync_tools_mod
+from vertebra.utils.module_loader import import_optional
 from vertebra.utils.portal import PortalProvider
 from vertebra.utils.serializers import decode_json, format_json
 from vertebra.utils.sync_tools import (
@@ -93,3 +97,70 @@ def test_portal_provider_default_and_call() -> None:
 
     result = portal.call(_add, 10, 32)
     assert result == 42
+
+
+@pytest.mark.parametrize(
+    ("loop_env", "quarantined_env", "expected_prefix"),
+    [
+        ("asyncio", None, "asyncio"),
+        ("auto", "uvloop,winloop,rloop,zuvloop", "asyncio"),
+        ("uvloop", "uvloop==0.21.0", "asyncio"),
+        (
+            "uvloop",
+            "",
+            "uvloop" if sys.platform != "win32" and import_optional("uvloop") is not None else "asyncio",
+        ),
+    ],
+    ids=["explicit-asyncio", "quarantined-all", "quarantined-uvloop", "uvloop-or-fallback"],
+)
+def test_run_wrapper_delegates_to_create_event_loop_and_honors_env(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_env: str,
+    quarantined_env: str | None,
+    expected_prefix: str,
+) -> None:
+    """Verify run_() delegates to create_event_loop and honors VERTEBRA_LOOP and VERTEBRA_QUARANTINED_LOOPS."""
+    monkeypatch.setenv("VERTEBRA_LOOP", loop_env)
+    if quarantined_env is None:
+        monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
+    else:
+        monkeypatch.setenv("VERTEBRA_QUARANTINED_LOOPS", quarantined_env)
+
+    factory_calls: list[asyncio.AbstractEventLoop] = []
+
+    def _spy_factory() -> asyncio.AbstractEventLoop:
+        created = create_event_loop()
+        factory_calls.append(created)
+        return created
+
+    monkeypatch.setattr(sync_tools_mod, "create_event_loop", _spy_factory)
+
+    async def _inspect_loop(multiplier: int) -> tuple[str, list[str], int]:
+        running = asyncio.get_running_loop()
+        steps: list[str] = []
+
+        async def _eager_probe() -> None:
+            steps.append("eager_before_suspend")
+            await asyncio.sleep(0)
+            steps.append("resumed")
+
+        probe_task = running.create_task(_eager_probe())
+        steps.append("after_create_task")
+        await probe_task
+        return type(running).__module__, steps, 21 * multiplier
+
+    blocking_inspect = run_(_inspect_loop)
+    module_name, step_order, value = blocking_inspect(2)
+
+    assert len(factory_calls) == 1
+    assert factory_calls[0].is_closed()
+    assert module_name.startswith(expected_prefix)
+    assert step_order == ["eager_before_suspend", "after_create_task", "resumed"]
+    assert value == 42
+
+    async def _call_from_running_loop() -> int:
+        _, _, nested_val = blocking_inspect(3)
+        return nested_val
+
+    assert asyncio.run(_call_from_running_loop(), loop_factory=create_event_loop) == 63
+    assert len(factory_calls) == 1

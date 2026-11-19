@@ -58,6 +58,8 @@ vtb run [OPTIONS] [APP]
 | `--with-workers`, `--no-workers` | `flag` | `False` | Co-locate background WorkerRunner lanes inside the server process |
 | `--queues` | `text` | - | Comma-separated queue lane names for co-located workers (e.g. default,embeddings) |
 | `--lane-concurrency` | `text` | - | Comma-separated lane=limit assignments (e.g. default=4,embeddings=1) |
+| `--zpages` | `flag` | `False` | Enable HTTP diagnostic Z-Pages (/taskz, /statusz, /varz, /rpcz, /brokerz) |
+| `--zpages-token` | `text` | - | Bearer token required for HTTP diagnostic Z-Pages |
 | `--no-banner` | `flag` | `False` | Disable startup banner |
 
 #### `vtb dev`

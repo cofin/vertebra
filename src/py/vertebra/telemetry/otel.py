@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import math
 import secrets
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Mapping
+from contextlib import suppress
 from contextvars import ContextVar, Token
 from typing import Any, Literal
 
 import msgspec
 
 from vertebra._vertebra import format_traceparent, parse_traceparent
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "CostTable",
     "DbPoolMetricSample",
     "DbPoolRecorder",
+    "EventLoopMetricSample",
+    "EventLoopRecorder",
     "GenAiMetricSample",
     "GenAiRecorder",
     "GenAiUsage",
@@ -434,3 +439,291 @@ class DbPoolRecorder:
             samples = list(self._samples)
             self._samples.clear()
             return samples
+
+
+class EventLoopMetricSample(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Point-in-time event loop scheduling lag and active task telemetry sample."""
+
+    shard_id: int
+    """Zero-based event loop shard identifier."""
+
+    backend: str
+    """Resolved event loop backend name (for example ``uvloop``, ``zuvloop``, or ``asyncio``)."""
+
+    lag_ms: float
+    """Measured event loop scheduling lag in milliseconds."""
+
+    active_tasks: int
+    """Number of currently active ``asyncio.Task`` instances on the shard."""
+
+    pending_callbacks: int = 0
+    """Number of queued event loop callbacks awaiting execution."""
+
+    unhandled_exceptions: int = 0
+    """Count of unhandled event loop exceptions observed on the shard."""
+
+    recorded_at_ns: int = msgspec.field(default_factory=time.time_ns)
+    """Timestamp in nanoseconds when the metric sample was recorded."""
+
+
+class EventLoopRecorder:
+    """Thread-safe recorder for event loop scheduling lag, task counts, and optional OpenTelemetry metrics."""
+
+    DEFAULT_LAG_BUCKETS_MS: tuple[float, ...] = (
+        0.1,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        25.0,
+        50.0,
+        100.0,
+        250.0,
+        500.0,
+        1000.0,
+        5000.0,
+    )
+
+    __slots__ = (
+        "_active_tasks_by_shard",
+        "_active_tasks_instrument",
+        "_active_tasks_is_gauge",
+        "_bucket_bounds",
+        "_bucket_counts",
+        "_lag_count",
+        "_lag_instrument",
+        "_lag_max",
+        "_lag_min",
+        "_lag_sum",
+        "_latest_by_shard",
+        "_lock",
+        "_otel_metrics_mod",
+        "_samples",
+        "emit_otel",
+        "max_samples",
+        "meter_name",
+    )
+
+    def __init__(
+        self,
+        max_samples: int = 1024,
+        *,
+        emit_otel: bool = False,
+        meter_name: str = "vertebra.server.loop",
+    ) -> None:
+        self.max_samples = max(1, max_samples)
+        self.emit_otel = emit_otel
+        self.meter_name = meter_name
+        self._samples: deque[EventLoopMetricSample] = deque(maxlen=self.max_samples)
+        self._bucket_bounds: tuple[float, ...] = self.DEFAULT_LAG_BUCKETS_MS
+        self._bucket_counts: list[int] = [0] * len(self._bucket_bounds)
+        self._lag_count = 0
+        self._lag_sum = 0.0
+        self._lag_min = 0.0
+        self._lag_max = 0.0
+        self._latest_by_shard: dict[int, EventLoopMetricSample] = {}
+        self._active_tasks_by_shard: dict[int, int] = {}
+        self._otel_metrics_mod: Any | None = None
+        self._lag_instrument: Any | None = None
+        self._active_tasks_instrument: Any | None = None
+        self._active_tasks_is_gauge = False
+        self._lock = threading.Lock()
+
+    def record(self, sample: EventLoopMetricSample) -> None:
+        """Append an event loop sample, update lag histogram buckets, and optionally emit OTel metrics."""
+        lag = float(sample.lag_ms)
+        with self._lock:
+            self._samples.append(sample)
+            self._latest_by_shard[sample.shard_id] = sample
+            prev_active = self._active_tasks_by_shard.get(sample.shard_id, 0)
+            self._active_tasks_by_shard[sample.shard_id] = sample.active_tasks
+            active_delta = sample.active_tasks - prev_active
+            if self._lag_count == 0:
+                self._lag_min = lag
+                self._lag_max = lag
+            else:
+                if lag < self._lag_min:
+                    self._lag_min = lag
+                if lag > self._lag_max:
+                    self._lag_max = lag
+            self._lag_count += 1
+            self._lag_sum += lag
+            for idx, upper_bound in enumerate(self._bucket_bounds):
+                if lag <= upper_bound:
+                    self._bucket_counts[idx] += 1
+            if self.emit_otel:
+                self._emit_otel_sample(sample, active_delta)
+
+    def configure_zuvloop(
+        self,
+        loop: Any,
+        *,
+        metrics_interval_ms: int = 1000,
+        slow_callback_ms: float = 100.0,
+    ) -> bool:
+        """Attach native zuvloop OpenTelemetry and slow-callback hooks when supported on Python 3.14+."""
+        if loop is None or sys.version_info < (3, 14):
+            return False
+
+        loop_module = getattr(type(loop), "__module__", "") or ""
+        is_zuvloop_type = loop_module == "zuvloop" or loop_module.startswith("zuvloop.")
+        configure_fn = getattr(loop, "configure_telemetry", None)
+        set_callback_fn = getattr(loop, "set_metrics_callback", None)
+        has_native_attrs = hasattr(loop, "metrics_interval") or hasattr(loop, "slow_callback_cpu_time_enabled")
+
+        if not (is_zuvloop_type or callable(configure_fn) or callable(set_callback_fn) or has_native_attrs):
+            return False
+
+        interval_seconds = max(0.001, float(metrics_interval_ms) / 1000.0)
+        slow_seconds = max(0.0, float(slow_callback_ms) / 1000.0)
+        configured = False
+
+        if callable(configure_fn):
+            candidate_kwargs: tuple[dict[str, Any], ...] = (
+                {
+                    "metrics_interval_ms": metrics_interval_ms,
+                    "slow_callback_ms": slow_callback_ms,
+                    "meter_name": self.meter_name,
+                },
+                {
+                    "metrics_interval_ms": metrics_interval_ms,
+                    "slow_callback_ms": slow_callback_ms,
+                },
+                {},
+            )
+            for kwargs in candidate_kwargs:
+                try:
+                    configure_fn(**kwargs)
+                    configured = True
+                    break
+                except TypeError:
+                    continue
+                except (AttributeError, ValueError):
+                    break
+
+        if callable(set_callback_fn):
+            with suppress(AttributeError, TypeError, ValueError):
+                set_callback_fn(self.record)
+                configured = True
+
+        if is_zuvloop_type or hasattr(loop, "metrics_interval"):
+            with suppress(AttributeError, TypeError, ValueError):
+                loop.metrics_interval = interval_seconds
+                configured = True
+
+        if is_zuvloop_type or hasattr(loop, "slow_callback_cpu_time_enabled"):
+            with suppress(AttributeError, TypeError, ValueError):
+                loop.slow_callback_cpu_time_enabled = True
+                configured = True
+
+        if configured or is_zuvloop_type:
+            with suppress(AttributeError, TypeError, ValueError):
+                loop.slow_callback_duration = slow_seconds
+                configured = True
+
+        return configured
+
+    def lag_histogram(self) -> HistogramSnapshot:
+        """Return a statistical lag histogram snapshot across recorded loop samples."""
+        with self._lock:
+            count = self._lag_count
+            total_sum = self._lag_sum
+            min_lag = self._lag_min
+            max_lag = self._lag_max
+            buckets = tuple(
+                HistogramBucket(upper_bound=bound, count=bucket_count)
+                for bound, bucket_count in zip(self._bucket_bounds, self._bucket_counts, strict=True)
+            )
+            window_lags = [sample.lag_ms for sample in self._samples]
+
+        if count == 0:
+            return HistogramSnapshot(
+                count=0,
+                sum=0.0,
+                min=0.0,
+                max=0.0,
+                buckets=buckets,
+                p50=0.0,
+                p90=0.0,
+                p99=0.0,
+            )
+
+        sorted_lags = sorted(window_lags)
+        return HistogramSnapshot(
+            count=count,
+            sum=total_sum,
+            min=min_lag,
+            max=max_lag,
+            buckets=buckets,
+            p50=calculate_percentile(sorted_lags, 50.0),
+            p90=calculate_percentile(sorted_lags, 90.0),
+            p99=calculate_percentile(sorted_lags, 99.0),
+        )
+
+    def latest_by_shard(self) -> dict[int, EventLoopMetricSample]:
+        """Return the most recently recorded telemetry sample for each shard."""
+        with self._lock:
+            return dict(self._latest_by_shard)
+
+    def samples(self) -> list[EventLoopMetricSample]:
+        """Return buffered event loop telemetry samples in chronological order."""
+        with self._lock:
+            return list(self._samples)
+
+    def _emit_otel_sample(self, sample: EventLoopMetricSample, active_tasks_delta: int) -> None:
+        """Emit loop lag and active task metrics through optional opentelemetry.metrics."""
+        metrics_mod = import_optional("opentelemetry.metrics")
+        if metrics_mod is None:
+            self._otel_metrics_mod = None
+            self._lag_instrument = None
+            self._active_tasks_instrument = None
+            return
+
+        if metrics_mod is not self._otel_metrics_mod:
+            get_meter = getattr(metrics_mod, "get_meter", None)
+            if not callable(get_meter):
+                return
+            meter = get_meter(self.meter_name)
+            create_histogram = getattr(meter, "create_histogram", None)
+            self._lag_instrument = (
+                create_histogram(
+                    "vertebra.loop.lag_ms",
+                    unit="ms",
+                    description="Event loop scheduling lag in milliseconds",
+                )
+                if callable(create_histogram)
+                else None
+            )
+            create_gauge = getattr(meter, "create_gauge", None)
+            create_up_down = getattr(meter, "create_up_down_counter", None)
+            if callable(create_gauge):
+                self._active_tasks_instrument = create_gauge(
+                    "vertebra.loop.active_tasks",
+                    unit="{task}",
+                    description="Active asyncio tasks on the event loop shard",
+                )
+                self._active_tasks_is_gauge = True
+            elif callable(create_up_down):
+                self._active_tasks_instrument = create_up_down(
+                    "vertebra.loop.active_tasks",
+                    unit="{task}",
+                    description="Active asyncio tasks on the event loop shard",
+                )
+                self._active_tasks_is_gauge = False
+            else:
+                self._active_tasks_instrument = None
+                self._active_tasks_is_gauge = False
+            self._otel_metrics_mod = metrics_mod
+
+        attrs: dict[str, str | int] = {
+            "shard_id": sample.shard_id,
+            "backend": sample.backend,
+        }
+        if self._lag_instrument is not None:
+            self._lag_instrument.record(sample.lag_ms, attributes=attrs)
+        if self._active_tasks_instrument is not None:
+            if self._active_tasks_is_gauge:
+                self._active_tasks_instrument.set(sample.active_tasks, attributes=attrs)
+            else:
+                self._active_tasks_instrument.add(active_tasks_delta, attributes=attrs)

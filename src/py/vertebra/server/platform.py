@@ -3,11 +3,13 @@
 import array
 import asyncio
 import collections.abc
+import concurrent.futures
 import contextlib
 import math
 import os
 import socket
 import tempfile
+import threading
 import time
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any, Final, Protocol, cast
 
 import msgspec
 
+from vertebra.utils.module_loader import ensure_module
 from vertebra.utils.serializers import encode_json_bytes
 
 __all__ = (
@@ -230,7 +233,7 @@ class SHMAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
 
 
 class ZPagesRegistry:
-    """Provides diagnostic payloads for /statusz, /healthz, /varz, /rpcz, and /brokerz."""
+    """Provides diagnostic payloads for /statusz, /healthz, /varz, /rpcz, /brokerz, and /taskz."""
 
     def __init__(
         self,
@@ -241,9 +244,14 @@ class ZPagesRegistry:
         self.started_at = time.time()
         self._started_monotonic = time.monotonic()
         self.lame_duck = lame_duck or LameDuckController()
+        self._lock = threading.Lock()
         self._vars: dict[str, Any] = {}
         self._rpc_stats: dict[str, dict[str, int]] = {}
         self._broker_providers: dict[str, collections.abc.Callable[[], dict[str, object]]] = {}
+        self._event_loops: dict[str, tuple[asyncio.AbstractEventLoop, int | None]] = {}
+        self._loop_pools: dict[str, Any] = {}
+        self._loop_recorders: dict[str, Any] = {}
+        self._workers: dict[str, tuple[Any, int | None, str]] = {}
 
     def register_broker(
         self,
@@ -251,7 +259,49 @@ class ZPagesRegistry:
         provider: collections.abc.Callable[[], dict[str, object]],
     ) -> None:
         """Register a broker telemetry provider function."""
-        self._broker_providers[name] = provider
+        with self._lock:
+            self._broker_providers[name] = provider
+
+    def register_event_loop(
+        self,
+        name: str,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        shard_id: int | None = None,
+    ) -> None:
+        """Register a named asyncio event loop for /taskz diagnostics."""
+        with self._lock:
+            self._event_loops[name] = (loop, shard_id)
+
+    def register_loop_pool(self, name: str, pool: Any) -> None:
+        """Register an EventLoopPool for /taskz diagnostics across all shards."""
+        with self._lock:
+            self._loop_pools[name] = pool
+
+    def register_worker(
+        self,
+        name: str,
+        lame_duck: Any,
+        *,
+        worker_id: int | None = None,
+        state: str = "ready",
+    ) -> None:
+        """Register a worker lifecycle handle for lazy /varz active_requests and state reporting."""
+        with self._lock:
+            self._workers[name] = (lame_duck, worker_id, state)
+
+    def set_worker_state(self, name: str, state: str) -> None:
+        """Update a registered worker's lifecycle state without hot-path locking."""
+        with self._lock:
+            existing = self._workers.get(name)
+            if existing is not None:
+                lame_duck, worker_id, _prev_state = existing
+                self._workers[name] = (lame_duck, worker_id, state)
+
+    def register_loop_recorder(self, name: str, recorder: Any) -> None:
+        """Register an EventLoopRecorder so /varz exports its latest lag and active-task snapshots."""
+        with self._lock:
+            self._loop_recorders[name] = recorder
 
     @staticmethod
     def discover_adapters(
@@ -271,14 +321,175 @@ class ZPagesRegistry:
 
     def set_var(self, name: str, value: Any) -> None:
         """Export a runtime variable in /varz."""
-        self._vars[name] = value
+        with self._lock:
+            self._vars[name] = value
 
     def record_rpc(self, method: str, *, ok: bool = True) -> None:
         """Record an RPC or route invocation for /rpcz."""
-        stats = self._rpc_stats.setdefault(method, {"count": 0, "errors": 0})
-        stats["count"] += 1
-        if not ok:
-            stats["errors"] += 1
+        with self._lock:
+            stats = self._rpc_stats.setdefault(method, {"count": 0, "errors": 0})
+            stats["count"] += 1
+            if not ok:
+                stats["errors"] += 1
+
+    def get_vars_payload(self) -> dict[str, Any]:
+        """Build the /varz payload, adding lazy worker stats and loop_telemetry when registered."""
+        with self._lock:
+            payload: dict[str, Any] = dict(self._vars)
+            workers = list(self._workers.items())
+            recorders = list(self._loop_recorders.items())
+
+        if workers:
+            if len(workers) == 1:
+                _name, (ld, wid, st) = workers[0]
+                payload["active_requests"] = int(getattr(ld, "in_flight", 0))
+                payload["worker_state"] = st
+                if wid is not None:
+                    payload["worker_id"] = wid
+            else:
+                sorted_workers = sorted(workers, key=lambda item: item[0])
+                worker_details: dict[str, dict[str, Any]] = {}
+                total_active = 0
+                states: set[str] = set()
+                for name, (ld, wid, st) in sorted_workers:
+                    in_flight = int(getattr(ld, "in_flight", 0))
+                    total_active += in_flight
+                    states.add(st)
+                    worker_details[name] = {
+                        "worker_id": wid,
+                        "state": st,
+                        "active_requests": in_flight,
+                    }
+                payload["active_requests"] = total_active
+                if "ready" in states:
+                    payload["worker_state"] = "ready"
+                elif "draining" in states:
+                    payload["worker_state"] = "draining"
+                else:
+                    payload["worker_state"] = "stopped"
+                payload["workers"] = worker_details
+
+        if recorders:
+            payload["loop_telemetry"] = {
+                name: self._serialize_loop_recorder(rec) for name, rec in sorted(recorders, key=lambda item: item[0])
+            }
+
+        return payload
+
+    def has_remote_loops(self, caller_loop: asyncio.AbstractEventLoop | None = None) -> bool:
+        """Return True when any registered active loop runs on a loop other than caller_loop."""
+        active_caller = caller_loop if caller_loop is not None else self._running_loop_or_none()
+        for _label, loop, _shard_id, _allow_idle_direct in self._collect_loop_targets(active_caller):
+            if not loop.is_closed() and loop is not active_caller and loop.is_running():
+                return True
+        return False
+
+    def get_tasks_payload(self) -> dict[str, Any]:
+        """Collect synchronous /taskz diagnostic snapshots across active registered event loops."""
+        loops_mod = ensure_module("vertebra.server._loops")
+        capture_local = loops_mod.capture_loop_task_snapshots
+        capture_remote = loops_mod._capture_loop_task_snapshots_remote
+        probe_name: str = loops_mod._TASKZ_PROBE_TASK_NAME
+        caller_loop = self._running_loop_or_none()
+        entries = self._collect_loop_targets(caller_loop)
+
+        per_loop: dict[str, list[dict[str, Any]]] = {}
+        all_tasks: list[dict[str, Any]] = []
+        for label, loop, shard_id, allow_idle_direct in entries:
+            if loop.is_closed():
+                continue
+            if loop is caller_loop or (allow_idle_direct and not loop.is_running()):
+                raw_snaps = [snap for snap in capture_local(loop, shard_id=shard_id) if snap.task_name != probe_name]
+            elif loop.is_running():
+                coro = capture_remote(loop, shard_id=shard_id)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except RuntimeError:
+                    coro.close()
+                    continue
+                try:
+                    raw_snaps = fut.result(timeout=1.0)
+                except (
+                    TimeoutError,
+                    concurrent.futures.TimeoutError,
+                    concurrent.futures.CancelledError,
+                    RuntimeError,
+                ):
+                    fut.cancel()
+                    continue
+            else:
+                continue
+
+            serialized = [self._snapshot_to_dict(snap) for snap in raw_snaps]
+            per_loop[label] = serialized
+            all_tasks.extend(serialized)
+
+        return {
+            "status": "ok",
+            "service": self.service_name,
+            "total_tasks": len(all_tasks),
+            "tasks": all_tasks,
+            "loops": per_loop,
+        }
+
+    async def get_tasks_payload_async(self) -> dict[str, Any]:
+        """Collect non-blocking async /taskz snapshots across inline and background shard loops."""
+        loops_mod = ensure_module("vertebra.server._loops")
+        capture_local = loops_mod.capture_loop_task_snapshots
+        capture_remote = loops_mod._capture_loop_task_snapshots_remote
+        probe_name: str = loops_mod._TASKZ_PROBE_TASK_NAME
+        caller_loop = self._running_loop_or_none()
+        entries = self._collect_loop_targets(caller_loop)
+
+        ordered_labels: list[str] = []
+        local_results: dict[str, list[Any]] = {}
+        remote_jobs: list[tuple[str, concurrent.futures.Future[Any]]] = []
+
+        for label, loop, shard_id, allow_idle_direct in entries:
+            if loop.is_closed():
+                continue
+            if loop is caller_loop or (allow_idle_direct and not loop.is_running()):
+                ordered_labels.append(label)
+                local_results[label] = [
+                    snap for snap in capture_local(loop, shard_id=shard_id) if snap.task_name != probe_name
+                ]
+            elif loop.is_running():
+                coro = capture_remote(loop, shard_id=shard_id)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except RuntimeError:
+                    coro.close()
+                    continue
+                ordered_labels.append(label)
+                remote_jobs.append((label, fut))
+
+        if remote_jobs:
+            awaited = await asyncio.gather(
+                *(asyncio.wait_for(asyncio.wrap_future(fut), timeout=1.0) for _, fut in remote_jobs),
+                return_exceptions=True,
+            )
+            for (label, fut), outcome in zip(remote_jobs, awaited, strict=True):
+                if isinstance(outcome, BaseException):
+                    fut.cancel()
+                    continue
+                local_results[label] = outcome
+
+        per_loop: dict[str, list[dict[str, Any]]] = {}
+        all_tasks: list[dict[str, Any]] = []
+        for label in ordered_labels:
+            if label not in local_results:
+                continue
+            serialized = [self._snapshot_to_dict(snap) for snap in local_results[label]]
+            per_loop[label] = serialized
+            all_tasks.extend(serialized)
+
+        return {
+            "status": "ok",
+            "service": self.service_name,
+            "total_tasks": len(all_tasks),
+            "tasks": all_tasks,
+            "loops": per_loop,
+        }
 
     def handle_zpage(self, path: str) -> tuple[int, bytes]:
         """Render a JSON diagnostic z-page for path."""
@@ -295,17 +506,99 @@ class ZPagesRegistry:
                 }
             )
         if path == "/varz":
-            return 200, encode_json_bytes(self._vars)
+            return 200, encode_json_bytes(self.get_vars_payload())
         if path == "/rpcz":
-            return 200, encode_json_bytes(self._rpc_stats)
+            with self._lock:
+                rpc_snapshot = {method: dict(stats) for method, stats in self._rpc_stats.items()}
+            return 200, encode_json_bytes(rpc_snapshot)
         if path in ("/brokerz", "/debug/zpages/broker"):
+            with self._lock:
+                providers = list(self._broker_providers.items())
             return 200, encode_json_bytes(
                 {
                     "status": "ok",
-                    "brokers": {name: provider() for name, provider in self._broker_providers.items()},
+                    "brokers": {name: provider() for name, provider in providers},
                 }
             )
+        if path in ("/taskz", "/debug/zpages/tasks"):
+            return 200, encode_json_bytes(self.get_tasks_payload())
         return 404, encode_json_bytes({"error": "not_found"})
+
+    def _collect_loop_targets(
+        self,
+        caller_loop: asyncio.AbstractEventLoop | None,
+    ) -> list[tuple[str, asyncio.AbstractEventLoop, int | None, bool]]:
+        with self._lock:
+            event_loops = list(self._event_loops.items())
+            loop_pools = list(self._loop_pools.items())
+
+        targets: list[tuple[str, asyncio.AbstractEventLoop, int | None, bool]] = []
+        for name, (loop, shard_id) in event_loops:
+            if loop.is_closed():
+                continue
+            targets.append((name, loop, shard_id, False))
+
+        for pool_name, pool in loop_pools:
+            if getattr(pool, "_stopped", False):
+                continue
+            inline_single = bool(getattr(pool, "_inline_single", False))
+            pool_loops = getattr(pool, "loops", ())
+            for idx, loop in enumerate(pool_loops):
+                if loop.is_closed():
+                    continue
+                targets.append((f"{pool_name}.shard.{idx}", loop, idx, inline_single))
+
+        if not event_loops and not loop_pools and caller_loop is not None and not caller_loop.is_closed():
+            targets.append(("default", caller_loop, None, False))
+
+        return targets
+
+    @staticmethod
+    def _serialize_loop_recorder(recorder: Any) -> dict[str, Any]:
+        """Serialize an EventLoopRecorder's per-shard latest samples and lag histogram for /varz."""
+        latest = recorder.latest_by_shard()
+        hist = recorder.lag_histogram()
+        return {
+            "shards": {
+                str(shard_id): {
+                    "shard_id": sample.shard_id,
+                    "backend": sample.backend,
+                    "lag_ms": sample.lag_ms,
+                    "active_tasks": sample.active_tasks,
+                    "pending_callbacks": sample.pending_callbacks,
+                    "unhandled_exceptions": sample.unhandled_exceptions,
+                    "recorded_at_ns": sample.recorded_at_ns,
+                }
+                for shard_id, sample in sorted(latest.items())
+            },
+            "lag_histogram": {
+                "count": hist.count,
+                "min_ms": hist.min,
+                "max_ms": hist.max,
+                "sum_ms": hist.sum,
+                "p50_ms": hist.p50,
+                "p90_ms": hist.p90,
+                "p99_ms": hist.p99,
+            },
+        }
+
+    @staticmethod
+    def _running_loop_or_none() -> asyncio.AbstractEventLoop | None:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _snapshot_to_dict(snap: Any) -> dict[str, Any]:
+        return {
+            "task_name": snap.task_name,
+            "coro_qualname": snap.coro_qualname,
+            "done": snap.done,
+            "cancelled": snap.cancelled,
+            "shard_id": snap.shard_id,
+            "call_graph": snap.call_graph,
+        }
 
 
 class HealthProbeServer:
@@ -390,6 +683,8 @@ class HealthProbeServer:
             status, payload = self._zpages.handle_zpage("/healthz")
         elif path in {"/statusz", "/varz"}:
             status, payload = self._zpages.handle_zpage(path)
+        elif path in {"/taskz", "/debug/zpages/tasks"}:
+            status, payload = 200, encode_json_bytes(await self._zpages.get_tasks_payload_async())
         else:
             status, payload = 404, encode_json_bytes({"error": "not_found"})
 

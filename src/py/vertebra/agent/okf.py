@@ -1,0 +1,1310 @@
+"""Application-agnostic Open Knowledge Format (OKF v0.2) bundle serializer.
+
+Provides pure-Python canonical YAML frontmatter parsing and emission,
+fence-aware Markdown truth-block and footnote extraction, OKF v0.2 validation,
+canonical SHA-256 content digests, and safe directory and reproducible ZIP
+archive import/export with zero external YAML dependencies.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import math
+import os
+import re
+import stat
+import zipfile
+from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
+from typing import IO, Any, Final
+
+import msgspec
+
+from vertebra.typing import VertebraError
+from vertebra.utils.serializers import decode_json, encode_json, encode_json_bytes
+
+__all__ = (
+    "DEFAULT_MAX_TRUTH_LINES",
+    "MAX_OKF_ENTRY_BYTES",
+    "OKF_RESERVED_FILENAMES",
+    "VALID_OKF_STATUSES",
+    "OkfBundle",
+    "OkfDocument",
+    "OkfSource",
+    "OkfValidationError",
+)
+
+MAX_OKF_ENTRY_BYTES: Final[int] = 120_832
+DEFAULT_MAX_TRUTH_LINES: Final[int] = 40
+OKF_RESERVED_FILENAMES: Final[frozenset[str]] = frozenset({"index.md", "log.md"})
+VALID_OKF_STATUSES: Final[frozenset[str]] = frozenset({"draft", "stable", "deprecated"})
+
+_REPRODUCIBLE_ZIP_DATE: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
+_ZIP_FILE_ATTR: Final[int] = 0o644 << 16
+_STREAM_CHUNK_BYTES: Final[int] = 16_384
+
+_DRIVE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z]:")
+_INT_SCALAR_RE: Final[re.Pattern[str]] = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+_FLOAT_SCALAR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$"
+)
+_NUMERIC_OR_HEX_STR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9][0-9a-fA-F]*|0[xX][0-9a-fA-F]+)$"
+)
+_YAML_FOREIGN_TYPED_STR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:"
+    r"[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?"
+    r"|[+-]?\.[0-9_]+(?:[eE][+-]?[0-9]+)?"
+    r"|[+-]?0[oObBxX][0-9a-fA-F_]+"
+    r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt \t].*)?"
+    r"|=|<<"
+    r")$"
+)
+_BLOCK_SCALAR_HEADER_RE: Final[re.Pattern[str]] = re.compile(r"^([|>])(?:([+-])([0-9])?|([0-9])([+-])?)?$")
+_YAML_RESERVED_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "true",
+        "false",
+        "null",
+        "~",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "y",
+        "n",
+        "inf",
+        "+inf",
+        "-inf",
+        "nan",
+        ".inf",
+        "+.inf",
+        "-.inf",
+        ".nan",
+    }
+)
+_YAML_SPECIAL_CHARS: Final[frozenset[str]] = frozenset({":", "#", '"', "'", "\\", "{", "}", "[", "]"})
+_YAML_LEADING_CHARS: Final[frozenset[str]] = frozenset(
+    {"-", "?", ":", ",", "[", "]", "{", "}", "&", "*", "!", "|", ">", "'", '"', "%", "@", "`"}
+)
+_FOOTNOTE_DEF_RE: Final[re.Pattern[str]] = re.compile(r"^\[\^([^\]]+)\]:\s*(.*)$")
+_FOOTNOTE_REF_RE: Final[re.Pattern[str]] = re.compile(r"\[\^([^\]]+)\](?!:)")
+_INLINE_CODE_RE: Final[re.Pattern[str]] = re.compile(r"`+[^`]*`+")
+
+
+class OkfValidationError(VertebraError):
+    """Raised when an OKF v0.2 document, bundle, or archive fails validation."""
+
+
+class OkfSource(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Provenance source descriptor declared in OKF v0.2 frontmatter."""
+
+    id: str
+    resource: str
+    title: str = ""
+
+
+class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
+    """Parsed and validated OKF v0.2 Markdown document with canonical digest."""
+
+    rel_path: str
+    frontmatter: dict[str, Any] = msgspec.field(default_factory=dict)
+    body: str = ""
+    truth_lines: tuple[str, ...] = ()
+    sources: tuple[OkfSource, ...] = ()
+    footnotes: dict[str, str] = msgspec.field(default_factory=dict)
+    sha256: str = ""
+
+    @classmethod
+    def parse(
+        cls,
+        rel_path: str,
+        content: str | bytes,
+        *,
+        max_truth_lines: int = DEFAULT_MAX_TRUTH_LINES,
+    ) -> OkfDocument:
+        """Parse, normalize, validate, and digest a single OKF v0.2 Markdown document."""
+        normalized_path = _normalize_rel_path(rel_path)
+        text = cls._decode_utf8_text(content, rel_path=normalized_path)
+        normalized_text = cls._normalize_line_endings(text)
+
+        frontmatter, body, has_frontmatter = cls._split_frontmatter(normalized_text, rel_path=normalized_path)
+        truth_lines, footnotes, inline_refs = cls._scan_markdown_body(body, rel_path=normalized_path)
+        sources = cls._parse_sources(frontmatter, rel_path=normalized_path)
+
+        cls._validate_okf_document(
+            rel_path=normalized_path,
+            frontmatter=frontmatter,
+            has_frontmatter=has_frontmatter,
+            truth_lines=truth_lines,
+            sources=sources,
+            footnotes=footnotes,
+            inline_refs=inline_refs,
+            max_truth_lines=max_truth_lines,
+        )
+
+        canonical_text = cls._render_markdown(frontmatter, body)
+        digest = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+
+        return cls(
+            rel_path=normalized_path,
+            frontmatter=frontmatter,
+            body=body,
+            truth_lines=truth_lines,
+            sources=sources,
+            footnotes=footnotes,
+            sha256=digest,
+        )
+
+    def to_markdown(self) -> str:
+        """Render the document as canonical UTF-8 Markdown with normalized line endings."""
+        return self._render_markdown(self.frontmatter, self.body)
+
+    def to_bytes(self) -> bytes:
+        """Encode the canonical Markdown representation as UTF-8 bytes."""
+        return self.to_markdown().encode("utf-8")
+
+    @staticmethod
+    def _decode_utf8_text(content: str | bytes, *, rel_path: str) -> str:
+        if isinstance(content, str):
+            raw_bytes = content.encode("utf-8")
+            if len(raw_bytes) > MAX_OKF_ENTRY_BYTES:
+                raise _entry_too_large_error(rel_path, len(raw_bytes), MAX_OKF_ENTRY_BYTES)
+            return content
+        if len(content) > MAX_OKF_ENTRY_BYTES:
+            raise _entry_too_large_error(rel_path, len(content), MAX_OKF_ENTRY_BYTES)
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise OkfValidationError(f"OKF entry '{rel_path}' is not valid UTF-8: {exc}") from exc
+
+    @staticmethod
+    def _normalize_line_endings(text: str) -> str:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        if normalized.startswith("\ufeff"):
+            return normalized[1:]
+        return normalized
+
+    @staticmethod
+    def _split_frontmatter(text: str, *, rel_path: str) -> tuple[dict[str, Any], str, bool]:
+        lines = text.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return {}, text, False
+
+        close_idx: int | None = None
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                close_idx = idx
+                break
+        if close_idx is None:
+            raise OkfValidationError(f"Unterminated YAML frontmatter in '{rel_path}'")
+
+        yaml_lines = lines[1:close_idx]
+        frontmatter = _parse_yaml_frontmatter(yaml_lines, rel_path=rel_path)
+        body = "\n".join(lines[close_idx + 1 :])
+        return frontmatter, body, True
+
+    @staticmethod
+    def _render_markdown(frontmatter: Mapping[str, Any], body: str) -> str:
+        if not frontmatter:
+            return body
+        yaml_text = _dump_yaml_frontmatter(frontmatter)
+        return f"---\n{yaml_text}\n---\n{body}"
+
+    @classmethod
+    def _scan_markdown_body(
+        cls,
+        body: str,
+        *,
+        rel_path: str,
+    ) -> tuple[tuple[str, ...], dict[str, str], set[str]]:
+        truth_lines: list[str] = []
+        footnotes: dict[str, str] = {}
+        inline_refs: set[str] = set()
+
+        in_fence = False
+        fence_char = ""
+        fence_len = 0
+        in_truth = False
+
+        for line_no, line in enumerate(body.split("\n"), start=1):
+            stripped = line.strip()
+            if not in_fence:
+                opened = cls._fence_opening(stripped)
+                if opened is not None:
+                    in_fence = True
+                    fence_char, fence_len = opened
+                    if in_truth:
+                        truth_lines.append(line)
+                    continue
+            else:
+                if cls._is_fence_closing(stripped, fence_char, fence_len):
+                    in_fence = False
+                    fence_char = ""
+                    fence_len = 0
+                if in_truth:
+                    truth_lines.append(line)
+                continue
+
+            if stripped == "---":
+                raise OkfValidationError(
+                    f"Standalone '---' horizontal rule is forbidden in bundle markdown body ({rel_path}:{line_no})"
+                )
+
+            if stripped == "<!-- truth: start -->":
+                if in_truth:
+                    raise OkfValidationError(f"Nested truth block start marker in '{rel_path}:{line_no}'")
+                in_truth = True
+                continue
+            if stripped == "<!-- truth: end -->":
+                if not in_truth:
+                    raise OkfValidationError(f"Unexpected truth block end marker in '{rel_path}:{line_no}'")
+                in_truth = False
+                continue
+            if in_truth:
+                truth_lines.append(line)
+
+            fn_match = _FOOTNOTE_DEF_RE.match(line)
+            if fn_match is not None:
+                fn_id = fn_match.group(1).strip()
+                fn_text = fn_match.group(2).strip()
+                if not fn_id:
+                    raise OkfValidationError(f"Empty footnote identifier in '{rel_path}:{line_no}'")
+                if fn_id in footnotes:
+                    raise OkfValidationError(f"Duplicate footnote definition '[^{fn_id}]:' in '{rel_path}:{line_no}'")
+                footnotes[fn_id] = fn_text
+                continue
+
+            scrubbed_line = _INLINE_CODE_RE.sub("", line)
+            for ref_match in _FOOTNOTE_REF_RE.finditer(scrubbed_line):
+                inline_refs.add(ref_match.group(1).strip())
+
+        if in_truth:
+            raise OkfValidationError(f"Unterminated '<!-- truth: start -->' block in '{rel_path}'")
+
+        return tuple(truth_lines), footnotes, inline_refs
+
+    @staticmethod
+    def _parse_sources(frontmatter: Mapping[str, Any], *, rel_path: str) -> tuple[OkfSource, ...]:
+        if "sources" not in frontmatter or frontmatter["sources"] is None:
+            return ()
+        raw_sources = frontmatter["sources"]
+        if not isinstance(raw_sources, list):
+            raise OkfValidationError(f"Frontmatter 'sources' must be a list in '{rel_path}'")
+
+        parsed: list[OkfSource] = []
+        seen_ids: set[str] = set()
+        for item in raw_sources:
+            if not isinstance(item, Mapping):
+                raise OkfValidationError(f"Each entry in 'sources' must be a mapping in '{rel_path}'")
+            src_id = item.get("id")
+            resource = item.get("resource")
+            title = item.get("title", "")
+            if not isinstance(src_id, str) or not src_id.strip():
+                raise OkfValidationError(f"Source entry missing non-empty string 'id' in '{rel_path}'")
+            if not isinstance(resource, str) or not resource.strip():
+                raise OkfValidationError(f"Source '{src_id}' missing non-empty string 'resource' in '{rel_path}'")
+            if title is None:
+                title = ""
+            if not isinstance(title, str):
+                raise OkfValidationError(f"Source '{src_id}' 'title' must be a string in '{rel_path}'")
+            if src_id in seen_ids:
+                raise OkfValidationError(f"Duplicate source id {src_id!r} in '{rel_path}'")
+            seen_ids.add(src_id)
+            parsed.append(OkfSource(id=src_id, resource=resource, title=title))
+        return tuple(parsed)
+
+    @staticmethod
+    def _validate_okf_document(
+        *,
+        rel_path: str,
+        frontmatter: Mapping[str, Any],
+        has_frontmatter: bool,
+        truth_lines: tuple[str, ...],
+        sources: tuple[OkfSource, ...],
+        footnotes: Mapping[str, str],
+        inline_refs: set[str],
+        max_truth_lines: int,
+    ) -> None:
+        if len(truth_lines) > max_truth_lines:
+            raise OkfValidationError(
+                f"Truth block line count ({len(truth_lines)}) exceeds max_truth_lines ({max_truth_lines}) in '{rel_path}'"
+            )
+
+        filename = rel_path.rsplit("/", 1)[-1]
+        if rel_path == "index.md":
+            if frontmatter.get("okf_version") != "0.2":
+                raise OkfValidationError("Root 'index.md' must declare frontmatter okf_version == '0.2'")
+            return
+
+        if filename in OKF_RESERVED_FILENAMES:
+            if has_frontmatter:
+                raise OkfValidationError(f"Reserved OKF file '{rel_path}' must not carry YAML frontmatter")
+            return
+
+        is_content_doc = rel_path.startswith(("product/", "knowledge/"))
+        if is_content_doc:
+            if not has_frontmatter:
+                raise OkfValidationError(f"Content document '{rel_path}' must include YAML frontmatter")
+            status = frontmatter.get("status")
+            if not isinstance(status, str) or status not in VALID_OKF_STATUSES:
+                raise OkfValidationError(
+                    f"Invalid OKF status {status!r} in '{rel_path}'; expected one of {sorted(VALID_OKF_STATUSES)}"
+                )
+
+        source_ids = {source.id for source in sources}
+        footnote_ids = set(footnotes.keys())
+
+        if is_content_doc or source_ids or footnote_ids:
+            missing_footnotes = sorted(source_ids - footnote_ids)
+            if missing_footnotes:
+                raise OkfValidationError(f"Sources missing footnote definitions in '{rel_path}': {missing_footnotes}")
+            undeclared_footnotes = sorted(footnote_ids - source_ids)
+            if undeclared_footnotes:
+                raise OkfValidationError(
+                    f"Footnote definitions missing from frontmatter sources in '{rel_path}': {undeclared_footnotes}"
+                )
+            dangling_refs = sorted(inline_refs - footnote_ids)
+            if dangling_refs:
+                raise OkfValidationError(f"Dangling footnote references in '{rel_path}': {dangling_refs}")
+
+    @staticmethod
+    def _fence_opening(stripped: str) -> tuple[str, int] | None:
+        for fence_char in ("`", "~"):
+            if stripped.startswith(fence_char * 3):
+                count = 0
+                for ch in stripped:
+                    if ch == fence_char:
+                        count += 1
+                    else:
+                        break
+                if fence_char == "`" and "`" in stripped[count:]:
+                    return None
+                return fence_char, count
+        return None
+
+    @staticmethod
+    def _is_fence_closing(stripped: str, fence_char: str, fence_len: int) -> bool:
+        if not stripped or len(stripped) < fence_len:
+            return False
+        return all(ch == fence_char for ch in stripped)
+
+
+class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
+    """Collection of validated OKF v0.2 documents with directory and ZIP serialization."""
+
+    documents: tuple[OkfDocument, ...] = ()
+
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for doc in self.documents:
+            normalized = _normalize_rel_path(doc.rel_path)
+            if normalized != doc.rel_path:
+                raise OkfValidationError(f"Non-canonical document path: {doc.rel_path!r}")
+            if normalized in seen:
+                raise OkfValidationError(f"Duplicate document path in bundle: {normalized!r}")
+            seen.add(normalized)
+
+    def __len__(self) -> int:
+        return len(self.documents)
+
+    def __iter__(self) -> Iterator[OkfDocument]:
+        return iter(self.documents)
+
+    def get(self, rel_path: str) -> OkfDocument | None:
+        """Return the document matching a relative POSIX path, or ``None``."""
+        normalized = _normalize_rel_path(rel_path)
+        for doc in self.documents:
+            if doc.rel_path == normalized:
+                return doc
+        return None
+
+    def digest(self) -> str:
+        """Return the deterministic 64-char SHA-256 digest across sorted bundle entries."""
+        manifest = [[doc.rel_path, doc.sha256] for doc in sorted(self.documents, key=lambda item: item.rel_path)]
+        return hashlib.sha256(encode_json_bytes(manifest)).hexdigest()
+
+    @classmethod
+    def from_directory(
+        cls,
+        root: str | Path,
+        *,
+        exclude_specs: bool = True,
+        exclude_log: bool = True,
+        max_truth_lines: int = DEFAULT_MAX_TRUTH_LINES,
+    ) -> OkfBundle:
+        """Load and validate an OKF v0.2 bundle from a filesystem directory.
+
+        Every loaded Markdown entry, including a reserved `log.md` loaded with `exclude_log=False`,
+        must fit `MAX_OKF_ENTRY_BYTES`; the error names the entry, its size, and the limit.
+        """
+        root_path = Path(root)
+        if root_path.is_symlink():
+            raise OkfValidationError(f"OKF bundle root must not be a symlink: {root_path}")
+        if not root_path.is_dir():
+            raise OkfValidationError(f"OKF bundle root is not a directory: {root_path}")
+
+        resolved_root = root_path.resolve()
+        loaded: list[OkfDocument] = []
+        cls._collect_directory_documents(
+            current_dir=root_path,
+            root_path=root_path,
+            resolved_root=resolved_root,
+            exclude_specs=exclude_specs,
+            exclude_log=exclude_log,
+            max_truth_lines=max_truth_lines,
+            out=loaded,
+        )
+        loaded.sort(key=lambda doc: doc.rel_path)
+        return cls(documents=tuple(loaded))
+
+    def export_directory(self, root: str | Path) -> tuple[Path, ...]:
+        """Write canonical bundle documents to a directory tree with safe relative paths."""
+        root_path = Path(root)
+        if root_path.is_symlink():
+            raise OkfValidationError(f"OKF export target must not be a symlink: {root_path}")
+        root_path.mkdir(parents=True, exist_ok=True)
+        resolved_root = root_path.resolve()
+
+        written: list[Path] = []
+        for doc in sorted(self.documents, key=lambda item: item.rel_path):
+            rel_path = _normalize_rel_path(doc.rel_path)
+            target = root_path.joinpath(*rel_path.split("/"))
+            self._ensure_safe_export_target(target, root_path=root_path, resolved_root=resolved_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(doc.to_bytes())
+            written.append(target)
+        return tuple(written)
+
+    @classmethod
+    def from_zip(
+        cls,
+        source: str | Path | bytes | bytearray | memoryview | IO[bytes],
+        *,
+        exclude_specs: bool = False,
+        exclude_log: bool = False,
+        max_truth_lines: int = DEFAULT_MAX_TRUTH_LINES,
+    ) -> OkfBundle:
+        """Load and validate an OKF v0.2 bundle from a ZIP archive path, buffer, or stream.
+
+        Symlink, path-safety, and duplicate-path checks apply to every archive member. Members that
+        are not Markdown, or that `exclude_specs` / `exclude_log` filter out, are skipped before the
+        `MAX_OKF_ENTRY_BYTES` check and are never decompressed.
+        """
+        loaded: list[OkfDocument] = []
+        seen_paths: set[str] = set()
+
+        try:
+            with cls._open_zip_reader(source) as archive:
+                for info in archive.infolist():
+                    if stat.S_ISLNK(info.external_attr >> 16):
+                        raise OkfValidationError(f"ZIP entry must not be a symlink: {info.filename!r}")
+                    if info.is_dir():
+                        dir_name = info.filename[:-1] if info.filename.endswith("/") else info.filename
+                        if not dir_name and info.filename == "/":
+                            raise OkfValidationError(f"Absolute ZIP directory entry is not allowed: {info.filename!r}")
+                        if dir_name:
+                            _normalize_rel_path(dir_name)
+                        continue
+
+                    rel_path = _normalize_rel_path(info.filename)
+                    if rel_path in seen_paths:
+                        raise OkfValidationError(f"Duplicate ZIP entry path: {rel_path!r}")
+                    seen_paths.add(rel_path)
+
+                    if exclude_specs and cls._is_specs_path(rel_path):
+                        continue
+                    if exclude_log and cls._is_log_path(rel_path):
+                        continue
+                    if not rel_path.endswith(".md"):
+                        continue
+
+                    if info.file_size > MAX_OKF_ENTRY_BYTES:
+                        raise _entry_too_large_error(rel_path, info.file_size, MAX_OKF_ENTRY_BYTES)
+
+                    with archive.open(info, "r") as member_stream:
+                        raw_bytes = cls._read_stream_bounded(
+                            member_stream,
+                            rel_path=rel_path,
+                            max_bytes=MAX_OKF_ENTRY_BYTES,
+                        )
+
+                    loaded.append(
+                        OkfDocument.parse(
+                            rel_path,
+                            raw_bytes,
+                            max_truth_lines=max_truth_lines,
+                        )
+                    )
+        except zipfile.BadZipFile as exc:
+            raise OkfValidationError(f"Invalid OKF ZIP archive: {exc}") from exc
+
+        loaded.sort(key=lambda doc: doc.rel_path)
+        return cls(documents=tuple(loaded))
+
+    def to_zip_bytes(self) -> bytes:
+        """Serialize the bundle into a reproducible DEFLATE-compressed ZIP byte buffer."""
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for doc in sorted(self.documents, key=lambda item: item.rel_path):
+                rel_path = _normalize_rel_path(doc.rel_path)
+                info = zipfile.ZipInfo(filename=rel_path, date_time=_REPRODUCIBLE_ZIP_DATE)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = _ZIP_FILE_ATTR
+                archive.writestr(info, doc.to_bytes())
+        return buffer.getvalue()
+
+    def export_zip(self, destination: str | Path) -> Path:
+        """Write the reproducible ZIP archive to ``destination`` and return the path."""
+        dest_path = Path(destination)
+        if dest_path.is_symlink():
+            raise OkfValidationError(f"OKF ZIP export destination must not be a symlink: {dest_path}")
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(self.to_zip_bytes())
+        return dest_path
+
+    @classmethod
+    def _collect_directory_documents(
+        cls,
+        *,
+        current_dir: Path,
+        root_path: Path,
+        resolved_root: Path,
+        exclude_specs: bool,
+        exclude_log: bool,
+        max_truth_lines: int,
+        out: list[OkfDocument],
+    ) -> None:
+        entries = sorted(current_dir.iterdir(), key=lambda item: item.name)
+        for entry in entries:
+            if entry.is_symlink():
+                raise OkfValidationError(f"Symlink is not allowed in OKF bundle: {entry}")
+            rel_posix = entry.relative_to(root_path).as_posix()
+            if entry.is_dir():
+                if exclude_specs and cls._is_specs_path(rel_posix):
+                    continue
+                cls._collect_directory_documents(
+                    current_dir=entry,
+                    root_path=root_path,
+                    resolved_root=resolved_root,
+                    exclude_specs=exclude_specs,
+                    exclude_log=exclude_log,
+                    max_truth_lines=max_truth_lines,
+                    out=out,
+                )
+                continue
+
+            if not entry.is_file():
+                continue
+            if not entry.resolve().is_relative_to(resolved_root):
+                raise OkfValidationError(f"Entry escapes OKF bundle root: {entry}")
+            if exclude_specs and cls._is_specs_path(rel_posix):
+                continue
+            if exclude_log and cls._is_log_path(rel_posix):
+                continue
+            if not rel_posix.endswith(".md"):
+                continue
+
+            rel_path = _normalize_rel_path(rel_posix)
+            with cls._open_file_nofollow(entry) as handle:
+                on_disk_bytes = os.fstat(handle.fileno()).st_size
+                if on_disk_bytes > MAX_OKF_ENTRY_BYTES:
+                    raise _entry_too_large_error(rel_path, on_disk_bytes, MAX_OKF_ENTRY_BYTES)
+                raw_bytes = cls._read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
+            out.append(OkfDocument.parse(rel_path, raw_bytes, max_truth_lines=max_truth_lines))
+
+    @staticmethod
+    def _ensure_safe_export_target(target: Path, *, root_path: Path, resolved_root: Path) -> None:
+        current = target
+        while current != root_path and current != current.parent:
+            if current.is_symlink():
+                raise OkfValidationError(f"Refusing to export through symlink path: {current}")
+            current = current.parent
+        if not target.resolve().is_relative_to(resolved_root):
+            raise OkfValidationError(f"Export path escapes destination root: {target}")
+
+    @classmethod
+    def _open_zip_reader(
+        cls,
+        source: str | Path | bytes | bytearray | memoryview | IO[bytes],
+    ) -> zipfile.ZipFile:
+        if isinstance(source, (str, Path)):
+            zip_path = Path(source)
+            if zip_path.is_symlink():
+                raise OkfValidationError(f"OKF ZIP archive must not be a symlink: {zip_path}")
+            if not zip_path.is_file():
+                raise OkfValidationError(f"OKF ZIP archive does not exist: {zip_path}")
+            return zipfile.ZipFile(cls._open_file_nofollow(zip_path), mode="r")
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            return zipfile.ZipFile(io.BytesIO(source), mode="r")
+        return zipfile.ZipFile(source, mode="r")
+
+    @staticmethod
+    def _is_specs_path(rel_path: str) -> bool:
+        return rel_path == "specs" or rel_path.startswith("specs/")
+
+    @staticmethod
+    def _is_log_path(rel_path: str) -> bool:
+        return rel_path == "log.md" or rel_path.endswith("/log.md")
+
+    @staticmethod
+    def _read_stream_bounded(
+        stream: IO[bytes],
+        *,
+        rel_path: str,
+        max_bytes: int = MAX_OKF_ENTRY_BYTES,
+        chunk_size: int = _STREAM_CHUNK_BYTES,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OkfValidationError(
+                    f"OKF entry '{rel_path}' streamed more than the maximum entry size of {max_bytes} bytes"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _open_file_nofollow(path: Path) -> IO[bytes]:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise OkfValidationError(f"Unable to safely open OKF entry '{path}': {exc}") from exc
+        return os.fdopen(fd, "rb")
+
+
+def _entry_too_large_error(rel_path: str, actual_bytes: int, max_bytes: int) -> OkfValidationError:
+    """Build the size-ceiling error naming the entry, its size, and the per-entry limit."""
+    return OkfValidationError(
+        f"OKF entry '{rel_path}' is {actual_bytes} bytes, exceeding the maximum entry size of {max_bytes} bytes"
+    )
+
+
+def _normalize_rel_path(raw_path: str) -> str:
+    if not raw_path or "\x00" in raw_path:
+        raise OkfValidationError(f"Invalid OKF entry path: {raw_path!r}")
+    if raw_path.startswith(("/", "\\")):
+        raise OkfValidationError(f"Absolute path is not allowed in OKF bundle: {raw_path!r}")
+    if _DRIVE_PREFIX_RE.match(raw_path):
+        raise OkfValidationError(f"Windows drive prefix is not allowed in OKF bundle: {raw_path!r}")
+    if "\\" in raw_path:
+        raise OkfValidationError(f"Backslash path separator is not allowed in OKF bundle: {raw_path!r}")
+
+    segments = raw_path.split("/")
+    for segment in segments:
+        if segment in ("", ".", ".."):
+            raise OkfValidationError(f"Unsafe or malformed path segment in OKF bundle: {raw_path!r}")
+    return raw_path
+
+
+def _parse_yaml_frontmatter(yaml_lines: list[str], *, rel_path: str) -> dict[str, Any]:
+    tokens = _tokenize_yaml_lines(yaml_lines, rel_path=rel_path)
+    if not tokens:
+        return {}
+    first_indent, first_text, first_line_no = tokens[0]
+    if first_indent != 0:
+        raise OkfValidationError(f"Unexpected indentation on frontmatter line {first_line_no} in '{rel_path}'")
+    if _is_sequence_line(first_text):
+        raise OkfValidationError(f"Frontmatter root must be a mapping in '{rel_path}'")
+    mapping, next_idx = _parse_yaml_mapping(tokens, 0, 0, rel_path=rel_path)
+    if next_idx < len(tokens):
+        _, leftover_text, leftover_line_no = tokens[next_idx]
+        raise OkfValidationError(
+            f"Unexpected trailing frontmatter line {leftover_line_no} ({leftover_text!r}) in '{rel_path}'"
+        )
+    return mapping
+
+
+def _tokenize_yaml_lines(
+    yaml_lines: list[str],
+    *,
+    rel_path: str,
+) -> list[tuple[int, str, int]]:
+    """Tokenize frontmatter lines into `(indent, text, line_no)`, inlining block scalars as quoted strings."""
+    tokens: list[tuple[int, str, int]] = []
+    idx = 0
+    while idx < len(yaml_lines):
+        raw_line = yaml_lines[idx]
+        line_no = idx + 2
+        idx += 1
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]:
+            raise OkfValidationError(f"Tabs are forbidden in YAML indentation on line {line_no} in '{rel_path}'")
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        header = _match_block_scalar_header(stripped, line_no=line_no, rel_path=rel_path)
+        if header is not None:
+            prefix, parent_offset, style, chomp, explicit_indent = header
+            block_text, idx = _read_block_scalar(
+                yaml_lines,
+                idx,
+                parent_indent=indent + parent_offset,
+                style=style,
+                chomp=chomp,
+                explicit_indent=explicit_indent,
+                rel_path=rel_path,
+            )
+            stripped = f"{prefix}{encode_json(block_text)}"
+        tokens.append((indent, stripped, line_no))
+    return tokens
+
+
+def _match_block_scalar_header(
+    text: str,
+    *,
+    line_no: int,
+    rel_path: str,
+) -> tuple[str, int, str, str, int] | None:
+    """Detect a `|` or `>` block scalar header at the end of a `key:` or `- ` line.
+
+    Returns:
+        `(prefix, parent_offset, style, chomp, explicit_indent)` where `prefix` is the line text up
+        to the value, `parent_offset` is the column of the owning key or dash relative to the line
+        indentation, `chomp` is `""`, `"-"`, or `"+"`, and `explicit_indent` is `0` when the content
+        indentation is auto-detected. `None` when the line does not open a block scalar.
+    """
+    rest = text
+    offset = 0
+    parent_offset: int | None = None
+    while rest != "-" and _is_sequence_line(rest):
+        after_dash = rest[2:].lstrip(" ")
+        parent_offset = offset
+        offset += len(rest) - len(after_dash)
+        rest = after_dash
+
+    colon_pos = _find_mapping_colon(rest)
+    if colon_pos is not None:
+        value_text = rest[colon_pos + 1 :]
+        prefix = f"{text[: offset + colon_pos + 1]} "
+        parent_offset = offset
+    elif parent_offset is not None:
+        value_text = rest
+        prefix = text[:offset]
+    else:
+        return None
+
+    matched = _BLOCK_SCALAR_HEADER_RE.match(_strip_inline_yaml_comment(value_text.strip()))
+    if matched is None:
+        return None
+    chomp = matched.group(2) or matched.group(5) or ""
+    indent_digit = matched.group(3) or matched.group(4)
+    if indent_digit == "0":
+        raise OkfValidationError(f"Block scalar indentation indicator must be 1-9 on line {line_no} in '{rel_path}'")
+    return prefix, parent_offset, matched.group(1), chomp, int(indent_digit) if indent_digit else 0
+
+
+def _read_block_scalar(
+    yaml_lines: list[str],
+    idx: int,
+    *,
+    parent_indent: int,
+    style: str,
+    chomp: str,
+    explicit_indent: int,
+    rel_path: str,
+) -> tuple[str, int]:
+    """Read literal (`|`) or folded (`>`) block scalar content starting at `yaml_lines[idx]`.
+
+    Content lines are those indented deeper than `parent_indent`; whitespace-only lines inside the
+    block count as empty lines. Chomping follows YAML: clip keeps one trailing newline, `-` strips
+    all, and `+` keeps every trailing empty line.
+    """
+    content_indent = parent_indent + explicit_indent if explicit_indent else 0
+    collected: list[str] = []
+    while idx < len(yaml_lines):
+        raw_line = yaml_lines[idx]
+        if not raw_line.strip():
+            collected.append("")
+            idx += 1
+            continue
+        lead = len(raw_line) - len(raw_line.lstrip(" "))
+        if lead <= parent_indent:
+            break
+        if not content_indent:
+            content_indent = lead
+        if lead < content_indent:
+            raise OkfValidationError(f"Under-indented block scalar line {idx + 2} in '{rel_path}'")
+        collected.append(raw_line[content_indent:])
+        idx += 1
+
+    trailing_empty = 0
+    while trailing_empty < len(collected) and not collected[len(collected) - 1 - trailing_empty]:
+        trailing_empty += 1
+    body = collected[: len(collected) - trailing_empty]
+    if not body:
+        return ("\n" * trailing_empty if chomp == "+" else ""), idx
+    text = "\n".join(body) if style == "|" else _fold_block_lines(body)
+    if chomp == "-":
+        return text, idx
+    if chomp == "+":
+        return text + "\n" * (trailing_empty + 1), idx
+    return f"{text}\n", idx
+
+
+def _fold_block_lines(lines: list[str]) -> str:
+    """Fold `>` block scalar lines: adjacent text lines join with a space and empty lines become newlines.
+
+    Line breaks next to a more-indented line (one starting with a space or tab) are preserved.
+    """
+    parts: list[str] = []
+    previous: str | None = None
+    empty_run = 0
+    for line in lines:
+        if not line:
+            empty_run += 1
+            continue
+        if previous is None:
+            parts.append("\n" * empty_run)
+        elif previous[0] in " \t" or line[0] in " \t":
+            parts.append("\n" * (empty_run + 1))
+        elif empty_run == 0:
+            parts.append(" ")
+        else:
+            parts.append("\n" * empty_run)
+        parts.append(line)
+        previous = line
+        empty_run = 0
+    return "".join(parts)
+
+
+def _is_sequence_line(stripped: str) -> bool:
+    return stripped == "-" or stripped.startswith("- ")
+
+
+def _parse_yaml_mapping(
+    tokens: list[tuple[int, str, int]],
+    idx: int,
+    base_indent: int,
+    *,
+    rel_path: str,
+) -> tuple[dict[str, Any], int]:
+    mapping: dict[str, Any] = {}
+    while idx < len(tokens):
+        indent, text, line_no = tokens[idx]
+        if indent < base_indent:
+            break
+        if indent > base_indent:
+            raise OkfValidationError(f"Unexpected indentation on line {line_no} in '{rel_path}'")
+        if _is_sequence_line(text):
+            break
+
+        key, rest = _split_yaml_key_value(text, line_no=line_no, rel_path=rel_path)
+        if key in mapping:
+            raise OkfValidationError(f"Duplicate frontmatter key {key!r} on line {line_no} in '{rel_path}'")
+
+        idx += 1
+        if rest:
+            mapping[key] = _parse_yaml_inline_value(rest, line_no=line_no, rel_path=rel_path)
+            continue
+
+        value, idx = _parse_yaml_nested_block(tokens, idx, base_indent, rel_path=rel_path)
+        mapping[key] = value
+    return mapping, idx
+
+
+def _parse_yaml_nested_block(
+    tokens: list[tuple[int, str, int]],
+    idx: int,
+    parent_indent: int,
+    *,
+    rel_path: str,
+) -> tuple[Any, int]:
+    if idx >= len(tokens):
+        return None, idx
+    next_indent, next_text, _ = tokens[idx]
+    if next_indent < parent_indent:
+        return None, idx
+    if next_indent == parent_indent:
+        if _is_sequence_line(next_text):
+            return _parse_yaml_sequence(tokens, idx, next_indent, rel_path=rel_path)
+        return None, idx
+    if _is_sequence_line(next_text):
+        return _parse_yaml_sequence(tokens, idx, next_indent, rel_path=rel_path)
+    return _parse_yaml_mapping(tokens, idx, next_indent, rel_path=rel_path)
+
+
+def _parse_yaml_sequence(
+    tokens: list[tuple[int, str, int]],
+    idx: int,
+    seq_indent: int,
+    *,
+    rel_path: str,
+) -> tuple[list[Any], int]:
+    items: list[Any] = []
+    while idx < len(tokens):
+        indent, text, line_no = tokens[idx]
+        if indent < seq_indent:
+            break
+        if indent > seq_indent:
+            raise OkfValidationError(f"Unexpected sequence indentation on line {line_no} in '{rel_path}'")
+        if not _is_sequence_line(text):
+            break
+
+        after_dash = "" if text == "-" else text[2:].lstrip(" ")
+        if _is_sequence_line(after_dash):
+            nested_indent = seq_indent + len(text) - len(after_dash)
+            tokens[idx] = (nested_indent, after_dash, line_no)
+            inline_nested, idx = _parse_yaml_sequence(tokens, idx, nested_indent, rel_path=rel_path)
+            items.append(inline_nested)
+            continue
+        item_indent = seq_indent + 2
+        idx += 1
+
+        if not after_dash:
+            if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                child_indent, child_text, _ = tokens[idx]
+                if _is_sequence_line(child_text):
+                    nested_list, idx = _parse_yaml_sequence(tokens, idx, child_indent, rel_path=rel_path)
+                    items.append(nested_list)
+                else:
+                    nested_map, idx = _parse_yaml_mapping(tokens, idx, child_indent, rel_path=rel_path)
+                    items.append(nested_map)
+            else:
+                items.append(None)
+            continue
+
+        if _has_mapping_colon(after_dash):
+            item_key, item_rest = _split_yaml_key_value(after_dash, line_no=line_no, rel_path=rel_path)
+            item_map: dict[str, Any] = {}
+            if item_rest:
+                item_map[item_key] = _parse_yaml_inline_value(item_rest, line_no=line_no, rel_path=rel_path)
+            else:
+                nested_val, idx = _parse_yaml_nested_block(tokens, idx, item_indent, rel_path=rel_path)
+                item_map[item_key] = nested_val
+
+            if idx < len(tokens) and tokens[idx][0] == item_indent and not _is_sequence_line(tokens[idx][1]):
+                rest_map, idx = _parse_yaml_mapping(tokens, idx, item_indent, rel_path=rel_path)
+                for extra_k, extra_v in rest_map.items():
+                    if extra_k in item_map:
+                        raise OkfValidationError(
+                            f"Duplicate frontmatter key {extra_k!r} in sequence mapping in '{rel_path}'"
+                        )
+                    item_map[extra_k] = extra_v
+            items.append(item_map)
+            continue
+
+        items.append(_parse_yaml_inline_value(after_dash, line_no=line_no, rel_path=rel_path))
+
+    return items, idx
+
+
+def _find_mapping_colon(text: str) -> int | None:
+    """Return the index of the first unquoted `:` followed by whitespace or end of text, or `None`."""
+    quote_char: str | None = None
+    escaped = False
+    for i, ch in enumerate(text):
+        if quote_char is not None:
+            if quote_char == '"' and not escaped and ch == "\\":
+                escaped = True
+                continue
+            if not escaped and ch == quote_char:
+                quote_char = None
+            escaped = False
+            continue
+        if ch in ('"', "'"):
+            quote_char = ch
+            continue
+        if ch == ":" and (i + 1 == len(text) or text[i + 1] in (" ", "\t")):
+            return i
+    return None
+
+
+def _has_mapping_colon(text: str) -> bool:
+    return _find_mapping_colon(text) is not None
+
+
+def _split_yaml_key_value(text: str, *, line_no: int, rel_path: str) -> tuple[str, str]:
+    split_pos = _find_mapping_colon(text)
+    if split_pos is None:
+        raise OkfValidationError(f"Expected 'key: value' on frontmatter line {line_no} in '{rel_path}'")
+
+    raw_key = text[:split_pos].strip()
+    raw_val = text[split_pos + 1 :].strip()
+    if not raw_key:
+        raise OkfValidationError(f"Empty key on frontmatter line {line_no} in '{rel_path}'")
+    key = _parse_yaml_key(raw_key, line_no=line_no, rel_path=rel_path)
+    return key, _strip_inline_yaml_comment(raw_val)
+
+
+def _parse_yaml_key(raw_key: str, *, line_no: int, rel_path: str) -> str:
+    if raw_key[0] in ('"', "'"):
+        parsed = _parse_quoted_scalar(raw_key, line_no=line_no, rel_path=rel_path)
+        return parsed
+    return raw_key
+
+
+def _strip_inline_yaml_comment(raw_val: str) -> str:
+    quote_char: str | None = None
+    escaped = False
+    bracket_depth = 0
+    for i, ch in enumerate(raw_val):
+        if quote_char is not None:
+            if quote_char == '"' and not escaped and ch == "\\":
+                escaped = True
+                continue
+            if not escaped and ch == quote_char:
+                quote_char = None
+            escaped = False
+            continue
+        if ch in ('"', "'"):
+            quote_char = ch
+            continue
+        if ch in ("[", "{"):
+            bracket_depth += 1
+            continue
+        if ch in ("]", "}") and bracket_depth > 0:
+            bracket_depth -= 1
+            continue
+        if ch == "#" and bracket_depth == 0 and (i == 0 or raw_val[i - 1] in (" ", "\t")):
+            return raw_val[:i].rstrip()
+    return raw_val
+
+
+def _parse_yaml_inline_value(raw_val: str, *, line_no: int, rel_path: str) -> Any:
+    if not raw_val:
+        return None
+    if raw_val == "{}":
+        return {}
+    if raw_val.startswith("[") and raw_val.endswith("]"):
+        inner = raw_val[1:-1].strip()
+        if not inner:
+            return []
+        return [
+            _parse_yaml_inline_value(item, line_no=line_no, rel_path=rel_path)
+            for item in _split_flow_items(inner, line_no=line_no, rel_path=rel_path)
+        ]
+    if raw_val.startswith("{") and raw_val.endswith("}"):
+        inner = raw_val[1:-1].strip()
+        if not inner:
+            return {}
+        result: dict[str, Any] = {}
+        for entry in _split_flow_items(inner, line_no=line_no, rel_path=rel_path):
+            k, v = _split_yaml_key_value(entry, line_no=line_no, rel_path=rel_path)
+            result[k] = _parse_yaml_inline_value(v, line_no=line_no, rel_path=rel_path)
+        return result
+    if (raw_val.startswith("[") and not raw_val.endswith("]")) or (
+        raw_val.startswith("{") and not raw_val.endswith("}")
+    ):
+        raise OkfValidationError(f"Unclosed YAML flow collection on line {line_no} in '{rel_path}'")
+    return _parse_yaml_scalar(raw_val, line_no=line_no, rel_path=rel_path)
+
+
+def _split_flow_items(inner: str, *, line_no: int, rel_path: str) -> list[str]:
+    items: list[str] = []
+    current: list[str] = []
+    quote_char: str | None = None
+    escaped = False
+    depth = 0
+    for ch in inner:
+        if quote_char is not None:
+            current.append(ch)
+            if quote_char == '"' and not escaped and ch == "\\":
+                escaped = True
+                continue
+            if not escaped and ch == quote_char:
+                quote_char = None
+            escaped = False
+            continue
+        if ch in ('"', "'"):
+            quote_char = ch
+            current.append(ch)
+            continue
+        if ch in ("[", "{"):
+            depth += 1
+            current.append(ch)
+            continue
+        if ch in ("]", "}"):
+            depth -= 1
+            if depth < 0:
+                raise OkfValidationError(f"Unbalanced YAML flow bracket on line {line_no} in '{rel_path}'")
+            current.append(ch)
+            continue
+        if ch == "," and depth == 0:
+            item = "".join(current).strip()
+            if not item:
+                raise OkfValidationError(f"Empty YAML flow item on line {line_no} in '{rel_path}'")
+            items.append(item)
+            current.clear()
+            continue
+        current.append(ch)
+
+    if quote_char is not None or depth != 0:
+        raise OkfValidationError(f"Unterminated YAML flow collection on line {line_no} in '{rel_path}'")
+    tail = "".join(current).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _parse_yaml_scalar(raw_val: str, *, line_no: int, rel_path: str) -> Any:
+    if raw_val[0] in ('"', "'"):
+        return _parse_quoted_scalar(raw_val, line_no=line_no, rel_path=rel_path)
+
+    lower = raw_val.lower()
+    if lower in ("true",):
+        return True
+    if lower in ("false",):
+        return False
+    if lower in ("null", "~"):
+        return None
+    if _INT_SCALAR_RE.match(raw_val):
+        return int(raw_val)
+    if _FLOAT_SCALAR_RE.match(raw_val):
+        parsed_float = float(raw_val)
+        if math.isfinite(parsed_float):
+            return parsed_float
+    return raw_val
+
+
+def _parse_quoted_scalar(raw_val: str, *, line_no: int, rel_path: str) -> str:
+    quote_char = raw_val[0]
+    if len(raw_val) < 2 or raw_val[-1] != quote_char:
+        raise OkfValidationError(f"Unterminated quoted string on line {line_no} in '{rel_path}'")
+    if quote_char == '"':
+        try:
+            decoded = decode_json(raw_val)
+        except Exception as exc:
+            raise OkfValidationError(
+                f"Malformed double-quoted string on line {line_no} in '{rel_path}': {exc}"
+            ) from exc
+        if not isinstance(decoded, str):
+            raise OkfValidationError(f"Expected string scalar on line {line_no} in '{rel_path}'")
+        return decoded
+
+    inner = raw_val[1:-1]
+    idx = 0
+    chars: list[str] = []
+    while idx < len(inner):
+        if inner[idx] == "'":
+            if idx + 1 < len(inner) and inner[idx + 1] == "'":
+                chars.append("'")
+                idx += 2
+                continue
+            raise OkfValidationError(f"Unescaped single quote on line {line_no} in '{rel_path}'")
+        chars.append(inner[idx])
+        idx += 1
+    return "".join(chars)
+
+
+def _dump_yaml_frontmatter(frontmatter: Mapping[str, Any]) -> str:
+    lines: list[str] = []
+    _emit_yaml_mapping(frontmatter, indent=0, out=lines)
+    return "\n".join(lines)
+
+
+def _emit_yaml_mapping(mapping: Mapping[str, Any], *, indent: int, out: list[str]) -> None:
+    pad = " " * indent
+    for key, value in mapping.items():
+        if not isinstance(key, str) or not key:
+            raise OkfValidationError(f"Frontmatter keys must be non-empty strings, got {key!r}")
+        rendered_key = _emit_yaml_key(key)
+        if isinstance(value, Mapping):
+            if not value:
+                out.append(f"{pad}{rendered_key}: {{}}")
+            else:
+                out.append(f"{pad}{rendered_key}:")
+                _emit_yaml_mapping(value, indent=indent + 2, out=out)
+        elif isinstance(value, (list, tuple)):
+            if not value:
+                out.append(f"{pad}{rendered_key}: []")
+            else:
+                out.append(f"{pad}{rendered_key}:")
+                _emit_yaml_sequence(value, indent=indent + 2, out=out)
+        else:
+            out.append(f"{pad}{rendered_key}: {_emit_yaml_scalar(value)}")
+
+
+def _emit_yaml_sequence(items: Sequence[Any], *, indent: int, out: list[str]) -> None:
+    pad = " " * indent
+    for item in items:
+        if isinstance(item, Mapping):
+            if not item:
+                out.append(f"{pad}- {{}}")
+                continue
+            first = True
+            for sub_key, sub_val in item.items():
+                if not isinstance(sub_key, str) or not sub_key:
+                    raise OkfValidationError(f"Frontmatter keys must be non-empty strings, got {sub_key!r}")
+                rendered_sub_key = _emit_yaml_key(sub_key)
+                prefix = f"{pad}- " if first else f"{pad}  "
+                first = False
+                if isinstance(sub_val, Mapping):
+                    if not sub_val:
+                        out.append(f"{prefix}{rendered_sub_key}: {{}}")
+                    else:
+                        out.append(f"{prefix}{rendered_sub_key}:")
+                        _emit_yaml_mapping(sub_val, indent=indent + 4, out=out)
+                elif isinstance(sub_val, (list, tuple)):
+                    if not sub_val:
+                        out.append(f"{prefix}{rendered_sub_key}: []")
+                    else:
+                        out.append(f"{prefix}{rendered_sub_key}:")
+                        _emit_yaml_sequence(sub_val, indent=indent + 4, out=out)
+                else:
+                    out.append(f"{prefix}{rendered_sub_key}: {_emit_yaml_scalar(sub_val)}")
+        elif isinstance(item, (list, tuple)):
+            if not item:
+                out.append(f"{pad}- []")
+            else:
+                out.append(f"{pad}-")
+                _emit_yaml_sequence(item, indent=indent + 2, out=out)
+        else:
+            out.append(f"{pad}- {_emit_yaml_scalar(item)}")
+
+
+def _emit_yaml_key(key: str) -> str:
+    if _needs_yaml_quoting(key):
+        return str(encode_json(key))
+    return key
+
+
+def _emit_yaml_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise OkfValidationError(f"Non-finite float is forbidden in OKF frontmatter: {value!r}")
+        return _emit_yaml_float(value)
+    if isinstance(value, str):
+        if _needs_yaml_quoting(value):
+            return str(encode_json(value))
+        return value
+    raise OkfValidationError(f"Unsupported frontmatter value type: {type(value).__name__}")
+
+
+def _emit_yaml_float(value: float) -> str:
+    """Render a finite float as its shortest repr, forcing a fractional part before any exponent.
+
+    `1e+20` becomes `1.0e+20` so YAML 1.1 readers, which require a dot in floats, agree with this parser.
+    """
+    text = repr(value)
+    mantissa, exp_marker, exponent = text.partition("e")
+    if exp_marker and "." not in mantissa:
+        return f"{mantissa}.0e{exponent}"
+    return text
+
+
+def _needs_yaml_quoting(value: str) -> bool:
+    """Return whether a string must be double-quoted to stay a string for this parser and standard YAML readers."""
+    if not value or value != value.strip():
+        return True
+    if value[0] in _YAML_LEADING_CHARS:
+        return True
+    if value.lower() in _YAML_RESERVED_WORDS:
+        return True
+    if _NUMERIC_OR_HEX_STR_RE.match(value) or _YAML_FOREIGN_TYPED_STR_RE.match(value):
+        return True
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _YAML_SPECIAL_CHARS for ch in value)

@@ -16,6 +16,7 @@ use crate::multipart::MultipartLimits;
 use crate::payload::PayloadLimits;
 use crate::profile::ProfileConfig;
 use crate::tls::{MtlsConfig, TrustedProxyConfig};
+pub use crate::zpages::ZPagesConfig;
 
 /// Static asset mount specification offloaded from Python frameworks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -119,6 +120,8 @@ pub struct ServerConfig {
     pub max_grpc_message_size: usize,
     /// Token-guarded `/debug/pprof/*` diagnostic endpoint configuration.
     pub profile: ProfileConfig,
+    /// Opt-in z-pages diagnostic endpoint configuration.
+    pub zpages: ZPagesConfig,
     /// Optional compiled HTTP access log format.
     pub access_log: Option<AccessLogFormat>,
     /// Pre-registered `/.well-known/*` discovery documents served in Rust.
@@ -224,6 +227,7 @@ impl Default for ServerConfig {
             multipart_limits: MultipartLimits::default(),
             max_grpc_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
             profile: ProfileConfig::default(),
+            zpages: ZPagesConfig::default(),
             access_log: None,
             discovery: HashMap::new(),
         }
@@ -544,7 +548,26 @@ impl ServerConfig {
 
         config.apply_http3_env(|key| std::env::var(key).ok());
         config.apply_limits_env(|key| std::env::var(key).ok());
+        config.apply_zpages_env(|key| std::env::var(key).ok());
         config
+    }
+
+    fn apply_zpages_env<F>(&mut self, get_env: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(raw) = get_env("VERTEBRA_ZPAGES_ENABLED") {
+            let normalized = raw.trim().to_ascii_lowercase();
+            self.zpages.enabled = matches!(normalized.as_str(), "1" | "true");
+        }
+        if let Some(raw) = get_env("VERTEBRA_ZPAGES_TOKEN") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                self.zpages.bearer_token = None;
+            } else {
+                self.zpages.bearer_token = Some(trimmed.to_string());
+            }
+        }
     }
 
     fn apply_limits_env<F>(&mut self, get_env: F)
@@ -766,5 +789,38 @@ mod tests {
         assert_eq!(cfg.header_read_timeout, Duration::from_millis(2500));
         assert_eq!(cfg.drain_timeout, Duration::from_millis(4500));
         assert_eq!(cfg.stream_queue_depth, 128);
+    }
+
+    #[test]
+    fn zpages_defaults_and_env_parsing() {
+        let mut cfg = ServerConfig::default();
+        assert!(!cfg.zpages.enabled);
+        assert_eq!(cfg.zpages.bearer_token, None);
+
+        cfg.apply_zpages_env(|_| None);
+        assert!(!cfg.zpages.enabled);
+        assert_eq!(cfg.zpages.bearer_token, None);
+
+        cfg.apply_zpages_env(|key| match key {
+            "VERTEBRA_ZPAGES_ENABLED" => Some("1".to_string()),
+            "VERTEBRA_ZPAGES_TOKEN" => Some(" my-secret ".to_string()),
+            _ => None,
+        });
+        assert!(cfg.zpages.enabled);
+        assert_eq!(cfg.zpages.bearer_token.as_deref(), Some("my-secret"));
+
+        cfg.apply_zpages_env(|key| match key {
+            "VERTEBRA_ZPAGES_ENABLED" => Some("TRUE".to_string()),
+            "VERTEBRA_ZPAGES_TOKEN" => Some("   ".to_string()),
+            _ => None,
+        });
+        assert!(cfg.zpages.enabled);
+        assert_eq!(cfg.zpages.bearer_token, None);
+
+        cfg.apply_zpages_env(|key| match key {
+            "VERTEBRA_ZPAGES_ENABLED" => Some("0".to_string()),
+            _ => None,
+        });
+        assert!(!cfg.zpages.enabled);
     }
 }

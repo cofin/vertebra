@@ -38,16 +38,22 @@ __all__ = (
 
 
 def normalize_arrow_format(raw_format: Any, path: str | Path) -> str:
-    """Resolve an optional format hint or path suffix to ``'parquet'`` or ``'arrow-ipc'``."""
+    """Resolve an optional format hint or path suffix to ``'parquet'``, ``'arrow-ipc'``, or ``'csv'``."""
     if not raw_format:
         suffix = Path(str(path)).suffix.lower()
-        return "arrow-ipc" if suffix in {".arrow", ".ipc", ".feather"} else "parquet"
+        if suffix in {".arrow", ".ipc", ".feather"}:
+            return "arrow-ipc"
+        if suffix == ".csv":
+            return "csv"
+        return "parquet"
     lowered = str(raw_format).strip().lower()
     if lowered == "parquet":
         return "parquet"
     if lowered in {"arrow", "ipc", "arrow-ipc", "feather"}:
         return "arrow-ipc"
-    msg = f"Unsupported Arrow format {raw_format!r}; expected 'parquet' or 'arrow-ipc'"
+    if lowered == "csv":
+        return "csv"
+    msg = f"Unsupported Arrow format {raw_format!r}; expected 'parquet', 'arrow-ipc', or 'csv'"
     raise ValueError(msg)
 
 
@@ -178,6 +184,7 @@ def write_batches_sync(
     batch_size: int = 65536,
     schema: Any = None,
     options: Mapping[str, Any] | None = None,
+    if_not_exists: bool = False,
     checksum: bool = False,
     expected_sha256: str | None = None,
     expected_crc32c: str | None = None,
@@ -192,6 +199,8 @@ def write_batches_sync(
     kwargs = dict(options or {})
     if file_format == "parquet":
         batch_size = kwargs.pop("row_group_size", batch_size)
+    elif file_format == "csv" and kwargs.get("batch_size") is not None:
+        batch_size = kwargs["batch_size"]
     _validate_batch_size(batch_size)
     writer = _BatchWriter()
 
@@ -213,6 +222,7 @@ def write_batches_sync(
             key,
             output,
             content_type=_media_type(file_format),
+            if_not_exists=if_not_exists,
             checksum=checksum,
             expected_sha256=expected_sha256,
             expected_crc32c=expected_crc32c,
@@ -231,6 +241,7 @@ async def write_batches_async(
     batch_size: int = 65536,
     schema: Any = None,
     options: Mapping[str, Any] | None = None,
+    if_not_exists: bool = False,
     checksum: bool = False,
     expected_sha256: str | None = None,
     expected_crc32c: str | None = None,
@@ -245,6 +256,8 @@ async def write_batches_async(
     kwargs = dict(options or {})
     if file_format == "parquet":
         batch_size = kwargs.pop("row_group_size", batch_size)
+    elif file_format == "csv" and kwargs.get("batch_size") is not None:
+        batch_size = kwargs["batch_size"]
     _validate_batch_size(batch_size)
     bridge = _CodecBridge()
     writer = _BatchWriter()
@@ -270,6 +283,7 @@ async def write_batches_async(
             key,
             output,
             content_type=_media_type(file_format),
+            if_not_exists=if_not_exists,
             checksum=checksum,
             expected_sha256=expected_sha256,
             expected_crc32c=expected_crc32c,
@@ -388,10 +402,11 @@ class _StreamFile(io.RawIOBase):
     ``io.RawIOBase`` default.
     """
 
-    __slots__ = ("_next_chunk", "_pos", "_remaining")
+    __slots__ = ("_head", "_next_chunk", "_pos", "_remaining")
 
     def __init__(self, next_chunk: Callable[[], Any]) -> None:
         self._next_chunk = next_chunk
+        self._head = memoryview(b"")
         self._remaining = memoryview(b"")
         self._pos = 0
 
@@ -415,16 +430,31 @@ class _StreamFile(io.RawIOBase):
         pieces = self._take(nbytes)
         return pieces[0] if len(pieces) == 1 else b"".join(pieces)
 
+    def skip_prefix(self, prefix: bytes) -> None:
+        """Consume ``prefix`` when the stream begins with it, leaving non-matching bytes unread."""
+        head = b"".join(self._take(len(prefix)))
+        if head != prefix:
+            self._pos -= len(head)
+            self._head = memoryview(head)
+
     def _take(self, size: int | None) -> list[memoryview]:
         """Detach zero-copy slices totalling up to ``size`` bytes from pending native chunks."""
         if size is None or size < 0:
             raise io.UnsupportedOperation("Arrow streaming requires a bounded read size")
         pieces: list[memoryview] = []
         needed = size
-        while needed and self._next_ready():
-            count = min(needed, len(self._remaining))
-            pieces.append(self._remaining[:count])
-            self._remaining = self._remaining[count:]
+        while needed:
+            active = self._head if self._head else self._remaining
+            if not active:
+                if not self._next_ready():
+                    break
+                active = self._remaining
+            count = min(needed, len(active))
+            pieces.append(active[:count])
+            if self._head:
+                self._head = active[count:]
+            else:
+                self._remaining = active[count:]
             needed -= count
         self._pos += size - needed
         return pieces
@@ -464,11 +494,24 @@ class _BatchReader:
             kwargs.setdefault("pre_buffer", False)
             self.reader = pq.ParquetFile(source, **kwargs)
             self._batches = self.reader.iter_batches(batch_size=batch_size, columns=columns, **batch_options)
-        else:
-            ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
-            self.reader = ipc.open_stream(source, **_ipc_options(kwargs, ipc.IpcReadOptions))
+        elif file_format == "csv":
+            pacsv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
+            self.reader = pacsv.open_csv(source, **_csv_read_options(kwargs, columns=columns))
             self._batches = (
                 batch.slice(offset, batch_size)
+                for batch in self.reader
+                for offset in range(0, batch.num_rows, batch_size)
+            )
+        else:
+            ipc = ensure_module("pyarrow.ipc", package="pyarrow", extra="arrow")
+            columns = kwargs.pop("columns", columns)
+            kwargs.pop("arrow_schema", None)
+            if isinstance(source, _StreamFile):
+                source.skip_prefix(b"ARROW1\x00\x00")
+            self.reader = ipc.open_stream(source, **_ipc_options(kwargs, ipc.IpcReadOptions))
+            projected = list(columns) if columns is not None else None
+            self._batches = (
+                (batch.select(projected) if projected is not None else batch).slice(offset, batch_size)
                 for batch in self.reader
                 for offset in range(0, batch.num_rows, batch_size)
             )
@@ -544,6 +587,9 @@ class _BatchWriter:
             payload = data if isinstance(data, Buffer) else data.buffer_view()
             self._source = pa.ipc.open_stream(payload if isinstance(payload, pa.Buffer) else pa.py_buffer(payload))
             schema = schema if schema is not None else self._source.schema
+        elif hasattr(data, "__arrow_c_stream__") and not hasattr(data, "__iter__"):
+            self._source = pa.RecordBatchReader.from_stream(data)
+            schema = schema if schema is not None else self._source.schema
         else:
             schema = schema if schema is not None else getattr(data, "schema", None)
             self._source = iter(data)
@@ -561,6 +607,15 @@ class _BatchWriter:
         if self._parquet:
             pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
             self._writer = pq.ParquetWriter(self.sink, schema, **kwargs)
+        elif file_format == "csv":
+            pacsv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
+            memory_pool = kwargs.pop("memory_pool", None)
+            self._writer = pacsv.CSVWriter(
+                self.sink,
+                schema,
+                write_options=_csv_write_options(kwargs),
+                memory_pool=memory_pool,
+            )
         else:
             self._writer = pa.ipc.new_stream(self.sink, schema, **_ipc_options(kwargs, pa.ipc.IpcWriteOptions))
         return self.sink.drain()
@@ -601,8 +656,8 @@ class _BatchWriter:
 
 
 def _validate_format(file_format: str) -> None:
-    if file_format not in {"parquet", "arrow-ipc"}:
-        msg = f"Unsupported Arrow format {file_format!r}; expected 'parquet' or 'arrow-ipc'"
+    if file_format not in {"parquet", "arrow-ipc", "csv"}:
+        msg = f"Unsupported Arrow format {file_format!r}; expected 'parquet', 'arrow-ipc', or 'csv'"
         raise ValueError(msg)
 
 
@@ -614,7 +669,103 @@ def _validate_batch_size(batch_size: int) -> None:
 
 
 def _media_type(file_format: str) -> str:
-    return "application/vnd.apache.parquet" if file_format == "parquet" else "application/vnd.apache.arrow.stream"
+    if file_format == "parquet":
+        return "application/vnd.apache.parquet"
+    if file_format == "csv":
+        return "text/csv"
+    return "application/vnd.apache.arrow.stream"
+
+
+_CSV_READ_OPTION_KEYS: frozenset[str] = frozenset(
+    {
+        "autogenerate_column_names",
+        "block_size",
+        "column_names",
+        "encoding",
+        "skip_rows",
+        "skip_rows_after_names",
+        "use_threads",
+    }
+)
+_CSV_PARSE_OPTION_KEYS: frozenset[str] = frozenset(
+    {
+        "delimiter",
+        "double_quote",
+        "escape_char",
+        "ignore_empty_lines",
+        "invalid_row_handler",
+        "newlines_in_values",
+        "quote_char",
+    }
+)
+_CSV_CONVERT_OPTION_KEYS: frozenset[str] = frozenset(
+    {
+        "auto_dict_encode",
+        "auto_dict_max_cardinality",
+        "check_utf8",
+        "column_types",
+        "decimal_point",
+        "default_column_type",
+        "false_values",
+        "include_columns",
+        "include_missing_columns",
+        "null_values",
+        "quoted_strings_can_be_null",
+        "strings_can_be_null",
+        "timestamp_parsers",
+        "true_values",
+    }
+)
+
+
+def _csv_write_options(kwargs: dict[str, Any]) -> Any:
+    """Fold loose CSV writer option keys or a prebuilt ``WriteOptions`` instance."""
+    pacsv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
+    prebuilt = kwargs.pop("write_options", None)
+    if isinstance(prebuilt, Mapping):
+        for key, value in prebuilt.items():
+            kwargs.setdefault(key, value)
+        prebuilt = None
+    if prebuilt is not None:
+        if kwargs:
+            msg = "Pass CSV settings either as a prebuilt WriteOptions or as option keys, not both"
+            raise ValueError(msg)
+        return prebuilt
+    if not kwargs:
+        return None
+    return pacsv.WriteOptions(**kwargs)
+
+
+def _csv_read_options(kwargs: dict[str, Any], *, columns: Sequence[str] | None = None) -> dict[str, Any]:
+    """Fold loose CSV reader option keys into ``ReadOptions``, ``ParseOptions``, and ``ConvertOptions``."""
+    pacsv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
+    columns = kwargs.pop("columns", columns)
+    arrow_schema = kwargs.pop("arrow_schema", None)
+    passthrough: dict[str, Any] = {
+        key: kwargs.pop(key)
+        for key in ("memory_pool", "read_options", "parse_options", "convert_options")
+        if key in kwargs
+    }
+    read_kw = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _CSV_READ_OPTION_KEYS}
+    parse_kw = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _CSV_PARSE_OPTION_KEYS}
+    convert_kw = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _CSV_CONVERT_OPTION_KEYS}
+    if columns is not None:
+        convert_kw.setdefault("include_columns", list(columns))
+    if arrow_schema is not None:
+        convert_kw.setdefault("column_types", arrow_schema)
+    if kwargs:
+        pacsv.ReadOptions(**kwargs)
+    for opt_name, group_kw, opt_type in (
+        ("read_options", read_kw, pacsv.ReadOptions),
+        ("parse_options", parse_kw, pacsv.ParseOptions),
+        ("convert_options", convert_kw, pacsv.ConvertOptions),
+    ):
+        if group_kw:
+            if passthrough.get(opt_name) is not None:
+                msg = f"Pass CSV settings either as a prebuilt {opt_type.__name__} or as option keys, not both"
+                raise ValueError(msg)
+            passthrough[opt_name] = opt_type(**group_kw)
+    return passthrough
 
 
 def _ipc_options(kwargs: dict[str, Any], options_type: Any) -> dict[str, Any]:
@@ -642,7 +793,12 @@ def _read_table(source: Any, file_format: str, options: Mapping[str, Any] | None
         pq = ensure_module("pyarrow.parquet", package="pyarrow", extra="arrow")
         kwargs.setdefault("pre_buffer", True)
         return pq.read_table(source, **kwargs)
+    if file_format == "csv":
+        pacsv = ensure_module("pyarrow.csv", package="pyarrow", extra="arrow")
+        return pacsv.read_csv(source, **_csv_read_options(kwargs))
     pa = ensure_module("pyarrow", package="pyarrow", extra="arrow")
+    columns = kwargs.pop("columns", None)
+    kwargs.pop("arrow_schema", None)
     ipc_kwargs = _ipc_options(kwargs, pa.ipc.IpcReadOptions)
     try:
         reader = pa.ipc.open_stream(source, **ipc_kwargs)
@@ -650,4 +806,5 @@ def _read_table(source: Any, file_format: str, options: Mapping[str, Any] | None
         source.seek(0)
         reader = pa.ipc.open_file(source, **ipc_kwargs)
     with reader:
-        return reader.read_all()
+        table = reader.read_all()
+    return table.select(list(columns)) if columns is not None else table

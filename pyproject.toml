@@ -153,6 +153,9 @@ httpx = [
 numpy = [
     "numpy>=1.26",
 ]
+opentelemetry = [
+    "opentelemetry-api>=1.28.0",
+]
 pandas = [
     "pandas>=2.2",
 ]

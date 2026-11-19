@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Database Drivers & Cloud Dialers
-description: Per-adapter database and cache package contracts, standalone database driver wheels, shared Rust transport and Arrow SHM bridges, wire codecs, cloud IAM token providers, and Cloud SQL / AlloyDB mTLS dialers across vertebra-db and vertebra.db.
+description: Per-adapter database and cache contracts, standalone driver wheels, shared Rust transport and Arrow SHM bridges, cloud IAM token providers, and Cloud SQL, AlloyDB, AWS, and Azure dialers.
 status: stable
 tags:
   - domains
@@ -11,11 +11,16 @@ tags:
   - oracle
   - cloud-sql
   - alloydb
+  - aws-rds
+  - azure-entra
   - shm
 generated:
   by: flow/0.30.1
   at: "2026-11-04T04:33:00Z"
 verified:
+  - by: agent:flow-executor
+    at: "2026-11-19T03:10:00Z"
+    commit: 6f76f8a7
   - by: agent:flow-executor
     at: "2026-11-17T01:22:00Z"
     commit: 5a833832
@@ -49,10 +54,16 @@ sources:
     title: Per-extension event-loop completion drainer and ShmCapsule bridge
   - id: src-vertebra-db-src-dialer-rs
     resource: src/rs/vertebra-db/src/dialer.rs
-    title: Zero-sidecar Cloud SQL and AlloyDB mTLS dialers
+    title: Zero-sidecar Cloud SQL, AlloyDB, AWS RDS, Aurora DSQL, and Azure Entra dialers plus AWS RDS Root CAs
   - id: src-dialer-base-py
     resource: src/py/vertebra/db/dialer/_base.py
     title: Shared _BaseGCPDialer, EphemeralCertBundle, and VALID_GCP_IP_TYPES primitives
+  - id: src-dialer-aws-py
+    resource: src/py/vertebra/db/dialer/aws.py
+    title: Python SyncAwsRdsDialer, AsyncAwsRdsDialer, SyncAwsAuroraDsqlDialer, and AsyncAwsAuroraDsqlDialer
+  - id: src-dialer-azure-py
+    resource: src/py/vertebra/db/dialer/azure.py
+    title: Python SyncAzureEntraDialer and AsyncAzureEntraDialer TLS and token dialers
   - id: src-vertebra-postgres-src-lib-rs
     resource: src/rs/vertebra-postgres/src/lib.rs
     title: Standalone vertebra._postgres free-threaded extension exports
@@ -145,10 +156,10 @@ sources:
 - **Uniform Per-Adapter Layout (`adapters/<engine>/` & `vertebra.db`)**: All ten client/embedded engine adapters (`postgres`, `mysql`, `sqlite`, `oracle`, `mssql`, `duckdb`, `bigquery`, `spanner`, `redis`, `valkey`) split synchronous and asynchronous drivers into `_sync.py` and `_async.py` behind a thin `driver.py` barrel (`config.py`, `core.py`, relational `{postgres,mysql,oracle,mssql,duckdb,sqlite}/pipeline.py`, `bigquery/object_tables.py`, `spanner/{mutations,transactions}.py`, `{redis,valkey}/notify.py`, and lazy `__init__.py` `_EXPORT_MAP`). Embedded `datafusion` (`config.py`, `core.py`, `driver.py`, `__init__.py`, `mode="in_process"`) builds `SessionContext` with `target_partitions` and `memory_limit_mb`, registers Parquet/CSV/NDJSON/Arrow/store sources via `DataFusionCore`, and `vertebra.db` lazily exports only engine-agnostic bases, dialers, `ArrowCursor`, `DatabaseRegistry`, CDC, and RLS primitives (no `vertebra/drivers/` package exists) [^src-db-init-py] [^src-datafusion-core-py].
 - **Single Lease, Statement-Cache, RESP & Cloud-Auth Paths (`db/driver/`)**: `CommonDriverMixin` (`_common.py`) is the single holder of broker lease acquisition/release and `StatementCache` lookups (`bytes` keys); `_resp.py` centralizes `ClusterRedirect`, `PubSubMessage`, `NON_KEY_COMMANDS`, `crc16_xmodem`, `hash_slot`, `parse_cluster_redirect`, and `Resp3Error(DatabaseError)`; `_cloud_auth.py` provides `AwsRdsIamTokenProvider`, `AwsAuroraDsqlIamTokenProvider`, and `AzureEntraTokenProvider` across PostgreSQL, MySQL, MSSQL, Redis, and Valkey [^src-db-driver-common-py] [^src-db-driver-resp-py] [^src-db-driver-cloud-auth-py].
 - **Fail-Loud Companion Wheels & Shared Async Bridge**: Optional driver wheels (`vertebra._postgres`, `_mysql`, `_oracle`, `_mssql`, `_duckdb`, `_sqlite`, `_bigquery`, `_spanner`, `_redis`, `_valkey`) resolve via `ensure_module` (`MissingDependencyError(install_package="vertebra-core[<extra>]")`); `connection.rs` and `py_async.rs` provide unified stream transport, event-loop completion drainers, and `ShmCapsule` `ArrowCursor` transfer; `postgres`/`mysql`/`redis`/`valkey` reject `memory://` with `ImproperConfigurationError` [^src-module-loader] [^src-vertebra-db-src-connection-rs] [^src-vertebra-db-src-py-async-rs].
-- **Wire Extensions & Zero-Sidecar Dialers**: `vertebra-postgres` supports CockroachDB (`cockroach_cluster` `--cluster=<id>` startup options, `crdb_version` `RESET ALL`, `40001` / `SAVEPOINT cockroach_restart` retry) and AlloyDB (`v1beta` with `v1alpha` fallback, `pscDnsName`/`pscAutoDnsName` precedence, `enable_alloydb_columnar_engine` GUCs, and structured `MetadataExchangeResponse` diagnostics) over `vertebra-db` stateless codecs and dialers [^src-vertebra-db-src-dialer-rs] [^src-vertebra-core-src-proto-rs].
+- **Wire Extensions & Zero-Sidecar Dialers**: `vertebra-postgres` supports CockroachDB (`cockroach_cluster` `--cluster=<id>` startup options, `crdb_version` `RESET ALL`, `40001` / `SAVEPOINT cockroach_restart` retry) and AlloyDB (`v1beta` with `v1alpha` fallback, `pscDnsName`/`pscAutoDnsName` precedence, `enable_alloydb_columnar_engine` GUCs, and structured `MetadataExchangeResponse` diagnostics) over `vertebra-db` stateless codecs. [`dialer.rs`](../../../../../src/rs/vertebra-db/src/dialer.rs)[^src-vertebra-db-src-dialer-rs] and `vertebra.db.dialer` bundle 114 AWS RDS Root CAs (`aws_rds_root_ca_pem()`) alongside Cloud SQL, AlloyDB, `AwsRdsDialer`, `AwsAuroraDsqlDialer`, and `AzureEntraDialer` dialers plus ambient AWS and Azure credential chains.
 <!-- truth: end -->
 
-[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs] and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] define Vertebra's engine-neutral database contracts, companion PyO3 wheel seams, `VTBARROW` `ArrowCursor` transport, wire codecs, cloud IAM token providers, and zero-sidecar Cloud SQL / AlloyDB dialers. Standalone extensions are detailed in [PostgreSQL Native Extension](postgres-native-driver.md), [GCP BigQuery & Spanner Native Drivers](gcp-bigquery-and-spanner-drivers.md), and [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md); query pipelines, CDC, and RLS live in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md); runtime caveats live in [PostgreSQL Limitations](postgres-limitations.md) and [Database Driver Limitations](database-driver-limitations.md).
+[`src/rs/vertebra-db`](../../../../../src/rs/vertebra-db/src/lib.rs)[^src-vertebra-db-src-lib-rs] and [`vertebra.db`](../../../../../src/py/vertebra/db/__init__.py)[^src-db-init-py] define Vertebra's engine-neutral database contracts, companion PyO3 wheel seams, `VTBARROW` `ArrowCursor` transport, wire codecs, cloud IAM token providers, and zero-sidecar Cloud SQL, AlloyDB, AWS, and Azure dialers. Standalone extensions are detailed in [PostgreSQL Native Extension](postgres-native-driver.md), [Google Cloud BigQuery & Spanner Native Drivers](gcp-bigquery-and-spanner-drivers.md), and [ADR-004](../../decisions/adr-004-optional-driver-wheels-and-shm-ownership.md); query pipelines, CDC, and RLS live in [query-pipeline-cdc-and-tenancy](query-pipeline-cdc-and-tenancy.md); runtime caveats live in [PostgreSQL Limitations](postgres-limitations.md) and [Database Driver Limitations](database-driver-limitations.md).
 
 ## Polymorphic Registry, `CommonDriverMixin` & Cloud Auth
 
@@ -156,7 +167,7 @@ sources:
 
 - **URL Dispatch & Pool Deduplication**: `parse_url(url, **overrides)` resolves `postgresql`/`postgres`, `mysql`/`mariadb`, `sqlite`, `oracle`, `mssql`/`sqlserver`, `duckdb`, `bigquery`/`bq`, `spanner`/`spangres`/`spanner+googlesql`/`spanner+spangres`, `redis`/`rediss`, `valkey`/`valkeys`, `datafusion`, `cloudsql`, and `alloydb`. `get_shared_driver` and `get_shared_sync_driver` deduplicate by `config.pool_key()` (`None` isolates `:memory:` SQLite/DuckDB), while `provide_driver` rejects `CloudSQLConfig` / `AlloyDBConfig` with `TypeError` (use `get_dialer`).
 - **Uniform Driver Surface & `CommonDriverMixin`**: [`vertebra.db.driver`](../../../../../src/py/vertebra/db/driver/__init__.py)[^src-db-driver-init-py] standardizes `execute`, `execute_many`, `execute_tuples`, `execute_with_description`, `select`, `select_one` (`NotFoundError`), `select_one_or_none`, `select_value`, `select_to_arrow -> ArrowCursor`, `stream_arrow_batches`, `load_from_arrow`, `transaction()`, `cancel()`, and `close()`. [`CommonDriverMixin`](../../../../../src/py/vertebra/db/driver/_common.py)[^src-db-driver-common-py] owns `_acquire_broker_lease`, `_release_broker_lease`, `_acquire_pid_lease`, `_release_pid_lease`, and `_lookup_or_cache_statement` (encoding SQL as UTF-8 `bytes` for the native `StatementCache`); adapters (`oracle`, `duckdb`, `mssql`, `mysql`, `sqlite`, `postgres`) inherit this single path with no adapter-local lease probes. [`capabilities.py`](../../../../../src/py/vertebra/db/driver/capabilities.py)[^src-db-driver-capabilities-py] defines `SyncPipelineCapable`, `AsyncPipelineCapable`, `SyncNotificationSource`, `AsyncNotificationSource`, `SyncChangeSource`, `AsyncChangeSource`, `QueueStore`, and `EmbeddingPushdown`.
-- **Cloud IAM Database Token Providers (`_cloud_auth.py`)**: [`_cloud_auth.py`](../../../../../src/py/vertebra/db/driver/_cloud_auth.py)[^src-db-driver-cloud-auth-py] implements `DatabaseTokenProvider` (`resolve_sync`, `resolve_async`, `invalidate`, `TokenSnapshot`) with pre-expiry refresh margins: `AwsRdsIamTokenProvider` (`refresh_margin_seconds = 60.0`, PostgreSQL and MySQL), `AwsAuroraDsqlIamTokenProvider` (`refresh_margin_seconds = 60.0`, PostgreSQL with TLS required), and `AzureEntraTokenProvider` (`refresh_margin_seconds = 120.0`, engine scopes `AZURE_POSTGRES_SCOPE`, `AZURE_MYSQL_SCOPE`, `AZURE_MSSQL_SCOPE`, `AZURE_REDIS_SCOPE`), forwarding tokens into `tiberius` `AuthMethod::aad_token` (`set_aad_token`) on MSSQL and `token_provider` / `iam_token_provider` on PostgreSQL, MySQL, Redis, and Valkey.
+- **Cloud IAM Database Token Providers (`_cloud_auth.py`)**: [`_cloud_auth.py`](../../../../../src/py/vertebra/db/driver/_cloud_auth.py)[^src-db-driver-cloud-auth-py] implements `DatabaseTokenProvider` (`resolve_sync`, `resolve_async`, `invalidate`, `TokenSnapshot`) with pre-expiry refresh margins and temporary credential expiry clamping. `AwsRdsIamTokenProvider` (`refresh_margin_seconds = 60.0`, `ttl <= 900s`) and `AwsAuroraDsqlIamTokenProvider` (`refresh_margin_seconds = 60.0`, `ttl <= 604800s`) resolve `AWS_*` env vars, `~/.aws/{credentials,config}` profiles, `AWS_WEB_IDENTITY_TOKEN_FILE` STS XML, host-allowlisted `AWS_CONTAINER_CREDENTIALS_*`, and EC2 IMDSv2 off-loop via `anyio.to_thread.run_sync`. `AzureEntraTokenProvider` (`refresh_margin_seconds = 120.0`, `AZURE_{POSTGRES,MYSQL,MSSQL,REDIS}_SCOPE`) supports explicit client secrets, ambient `AZURE_*` env vars, `AZURE_FEDERATED_TOKEN_FILE`, `IDENTITY_ENDPOINT` + `IDENTITY_HEADER`, and VM IMDS, forwarding tokens into `tiberius`, PostgreSQL, MySQL, Redis, and Valkey.
 
 ## Relational, Analytical & Cache Adapters
 
@@ -175,7 +186,7 @@ sources:
 
 - **Transport & Drainers**: [`connection.rs`](../../../../../src/rs/vertebra-db/src/connection.rs)[^src-vertebra-db-src-connection-rs] normalizes TCP, `rustls`, Unix socket, Cloud SQL `:3307`, and AlloyDB `:5433` streams with `is_transient()` / SQLSTATE mapping. [`py_async.rs`](../../../../../src/rs/vertebra-db/src/py_async.rs)[^src-vertebra-db-src-py-async-rs] attaches per-extension `AsyncCompletionQueue` drainers (`_vertebra_{core,bigquery,mysql,mssql,oracle,spanner,duckdb,postgres,sqlite,redis}_completion_drainer`), converting panics to `TaskPanicError`, binding Python future cancellation to Tokio `AbortHandle` (`spawn_rust_db_task_with_attr_and_future` / `DbTaskCanceller`) or cancel callbacks (`spawn_rust_db_task_with_attr_and_cancel` / `CustomDbTaskCanceller`), and wrapping [`ShmRegion`](../../../../../src/rs/vertebra-core/src/shm.rs)[^src-vertebra-core-src-shm-rs] ownership in `c"vertebra.ShmCapsule"` via `construct_py_arrow_cursor`. [`arrow_shm.rs`](../../../../../src/rs/vertebra-db/src/arrow_shm.rs)[^src-vertebra-db-src-arrow-shm-rs] handles `VTBARROW` IPC framing and `allocate_shm_region`, while `ArrowCursor.release()`, `close()`, `__exit__()`, and `Drop` (`src/rs/vertebra-py/src/db.rs`) trigger `ShmRegion::unlink_now()`.
 - **Missing Dependencies**: [`ensure_module`](../../../../../src/py/vertebra/utils/module_loader.py)[^src-module-loader] raises `MissingDependencyError` defaulting `install_package="vertebra-core[<extra>]"`, enforced by AST scanning in [`test_packaging_and_pgo.py`](../../../../../src/py/tests/unit/build/test_packaging_and_pgo.py)[^src-packaging-extras-gate].
-- **Cloud Dialers (`_base.py`, `cloudsql.py`, `alloydb.py`, `dialer.rs`)**: `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` (`dialer/_base.py`) share async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified TLS 1.3 mTLS, and explicit IAM token propagation with `cloudsql.py`, `alloydb.py`, and pure-Rust dialers (`zero third-party driver packages`) [^src-dialer-base-py].
+- **Cloud Dialers (`_base.py`, `cloudsql.py`, `alloydb.py`, `aws.py`, `azure.py`, `dialer.rs`)**: `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` (`dialer/_base.py`) share async cert refresh (`generateEphemeralCert` `:3307` / `generateClientCertificate` `:5433`), RSA keygen, verified TLS 1.3 mTLS, and explicit IAM token propagation with `cloudsql.py`, `alloydb.py`, and pure-Rust dialers (`zero third-party driver packages`) [^src-dialer-base-py]. [`aws.py`](../../../../../src/py/vertebra/db/dialer/aws.py)[^src-dialer-aws-py] (`SyncAwsRdsDialer`, `AsyncAwsRdsDialer`, `SyncAwsAuroraDsqlDialer`, `AsyncAwsAuroraDsqlDialer`) and [`azure.py`](../../../../../src/py/vertebra/db/dialer/azure.py)[^src-dialer-azure-py] (`SyncAzureEntraDialer`, `AsyncAzureEntraDialer`) provide `verify-full` TLS contexts (defaulting AWS RDS to the bundled 114-cert `aws_rds_root_ca_pem()`), verified async TLS connections, and `connection_kwargs()`. All AWS and Azure dialers are lazily re-exported by `vertebra.db` and `vertebra.db.dialer`.
 
 ## Database Driver Conformance
 
@@ -187,8 +198,10 @@ Driver operational paths catch `Exception` (preserving `asyncio.CancelledError`,
 [^src-vertebra-db-src-arrow-shm-rs]: `src/rs/vertebra-db/src/arrow_shm.rs` — Shared-memory Arrow IPC writers and unregistered regions.
 [^src-vertebra-db-src-connection-rs]: `src/rs/vertebra-db/src/connection.rs` — TransportStream, TlsMode, EndpointTarget, and Connection traits.
 [^src-vertebra-db-src-py-async-rs]: `src/rs/vertebra-db/src/py_async.rs` — Per-extension event-loop completion drainer and ShmCapsule bridge.
-[^src-vertebra-db-src-dialer-rs]: `src/rs/vertebra-db/src/dialer.rs` — Zero-sidecar Cloud SQL and AlloyDB mTLS dialers.
+[^src-vertebra-db-src-dialer-rs]: `src/rs/vertebra-db/src/dialer.rs` — Zero-sidecar Cloud SQL, AlloyDB, AWS RDS, Aurora DSQL, and Azure Entra dialers plus AWS RDS Root CAs.
 [^src-dialer-base-py]: `src/py/vertebra/db/dialer/_base.py` — Shared `_BaseGCPDialer`, `EphemeralCertBundle`, and `VALID_GCP_IP_TYPES` primitives.
+[^src-dialer-aws-py]: `src/py/vertebra/db/dialer/aws.py` — Python `SyncAwsRdsDialer`, `AsyncAwsRdsDialer`, `SyncAwsAuroraDsqlDialer`, and `AsyncAwsAuroraDsqlDialer`.
+[^src-dialer-azure-py]: `src/py/vertebra/db/dialer/azure.py` — Python `SyncAzureEntraDialer` and `AsyncAzureEntraDialer` TLS and token dialers.
 [^src-vertebra-postgres-src-lib-rs]: `src/rs/vertebra-postgres/src/lib.rs` — Standalone `vertebra._postgres` extension exports.
 [^src-postgres-driver-py]: `src/py/vertebra/db/adapters/postgres/driver.py` — PostgreSQL `SyncPostgreSQLDriver` and `AsyncPostgreSQLDriver` re-exports.
 [^src-vertebra-mysql-src-lib-rs]: `src/rs/vertebra-mysql/src/lib.rs` — Native MySQL and MariaDB binary wire extension crate.

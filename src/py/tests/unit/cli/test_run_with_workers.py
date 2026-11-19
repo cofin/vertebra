@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,13 @@ from vertebra.cli import dev as cli_dev_mod
 from vertebra.cli import run as cli_run_mod
 from vertebra.cli import workers as cli_workers_mod
 from vertebra.cli._launch import ServerLaunchEnv, load_workers_pyproject_config
+from vertebra.cli.errors import EXIT_CONFIG_ERROR
 from vertebra.framework.queues import QueueService, task
 from vertebra.server.lanes import QUEUE_SERVICE_STATE_KEY, WorkerRunner
 from vertebra.server.platform import HealthProbeServer, LameDuckController, ZPagesRegistry
 from vertebra.server.worker import Worker
+from vertebra.telemetry.otel import EventLoopRecorder
+from vertebra.utils.serializers import decode_json
 
 
 @pytest.fixture
@@ -412,6 +416,329 @@ def test_vtb_run_worker_only_serves_health_probe_and_exits_cleanly(
             response_bytes = client.recv(4096)
 
         assert b"200 OK" in response_bytes
+        runner = app_state.get("vertebra_worker_runner")
+        assert runner is not None
+        runner._stopping = True
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+    finally:
+        runner = app_state.get("vertebra_worker_runner")
+        if runner is not None:
+            runner._stopping = True
+        thread.join(timeout=1.0)
+
+    assert result_box == [0]
+
+
+@pytest.mark.parametrize(
+    ("zpages", "zpages_token", "base", "expected_enabled", "expected_token"),
+    [
+        (False, None, {}, None, None),
+        (True, " test-token-placeholder ", {}, "1", "test-token-placeholder"),
+        (True, "   ", {}, "1", None),
+        (
+            False,
+            None,
+            {"VERTEBRA_ZPAGES_ENABLED": "1", "VERTEBRA_ZPAGES_TOKEN": "test-token-placeholder"},
+            "1",
+            "test-token-placeholder",
+        ),
+    ],
+)
+def test_server_launch_env_zpages_options(
+    zpages: bool,
+    zpages_token: str | None,
+    base: dict[str, str],
+    expected_enabled: str | None,
+    expected_token: str | None,
+) -> None:
+    """ServerLaunchEnv emits VERTEBRA_ZPAGES_* only when configured and preserves base overrides."""
+    launch_env = ServerLaunchEnv(
+        app_path="app:app",
+        host="127.0.0.1",
+        port=8000,
+        zpages=zpages,
+        zpages_token=zpages_token,
+    )
+    env = launch_env.to_environ(base=base)
+    if expected_enabled is None:
+        assert "VERTEBRA_ZPAGES_ENABLED" not in env
+    else:
+        assert env["VERTEBRA_ZPAGES_ENABLED"] == expected_enabled
+    if expected_token is None:
+        assert "VERTEBRA_ZPAGES_TOKEN" not in env
+    else:
+        assert env["VERTEBRA_ZPAGES_TOKEN"] == expected_token
+
+
+def test_vtb_run_zpages_cli_flags_populate_server_launch_env(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify vtb run --zpages --zpages-token forwards Z-Pages env vars to the supervisor."""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(cli_run_mod, "build_server_command", lambda: ["vertebra-server"])
+
+    def fake_supervisor(*, server_cmd: list[str], env: dict[str, str], **_kwargs: Any) -> int:
+        captured["cmd"] = server_cmd
+        captured["env"] = dict(env)
+        return 0
+
+    monkeypatch.setattr(cli_run_mod, "run_supervisor", fake_supervisor)
+
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "sample_app:app",
+            "--zpages",
+            "--zpages-token",
+            "test-token-placeholder",
+            "--no-banner",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured["env"]["VERTEBRA_ZPAGES_ENABLED"] == "1"
+    assert captured["env"]["VERTEBRA_ZPAGES_TOKEN"] == "test-token-placeholder"
+
+
+def test_vtb_run_worker_only_rejects_zpages_token(runner: CliRunner) -> None:
+    """Verify vtb run --worker-only --zpages-token fails closed with EXIT_CONFIG_ERROR."""
+    res = runner.invoke(
+        cli,
+        [
+            "run",
+            "sample_app:app",
+            "--worker-only",
+            "--zpages-token",
+            "test-token-placeholder",
+        ],
+    )
+    assert res.exit_code == EXIT_CONFIG_ERROR, res.output
+    assert "--zpages-token cannot be combined with --worker-only" in res.output
+
+
+def _http_get_json(port: int, path: str) -> tuple[int, dict[str, Any]]:
+    """Perform a simple HTTP/1.1 GET request against 127.0.0.1 and decode the JSON body."""
+    with socket.create_connection(("127.0.0.1", port), timeout=2.0) as client:
+        client.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".encode("ascii"))
+        chunks: list[bytes] = []
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    raw = b"".join(chunks)
+    header_bytes, _, body_bytes = raw.partition(b"\r\n\r\n")
+    status_line = header_bytes.split(b"\r\n", 1)[0].decode("ascii")
+    status_code = int(status_line.split(" ", 2)[1])
+    payload = decode_json(body_bytes)
+    assert isinstance(payload, dict)
+    return status_code, payload
+
+
+def _allocate_ephemeral_port() -> int:
+    """Bind an ephemeral localhost TCP port and return its port number."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.mark.parametrize("telemetry_env", ["1", "true"])
+def test_vtb_run_worker_only_exports_loop_telemetry_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry_env: str,
+) -> None:
+    """execute_worker_cli samples loop lag and exports loop_telemetry on /varz when enabled."""
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", telemetry_env)
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY_INTERVAL", "0.01")
+
+    qs = QueueService()
+    app_state: dict[str, Any] = {QUEUE_SERVICE_STATE_KEY: qs}
+    app_double = type("WorkerOnlyTelemetryApp", (), {"state": app_state})()
+    monkeypatch.setattr(cli_workers_mod, "import_app", lambda _path: app_double)
+
+    probe_port = _allocate_ephemeral_port()
+    probe_ready = threading.Event()
+    orig_set_var = ZPagesRegistry.set_var
+
+    def signal_probe_ready(self: ZPagesRegistry, key: str, value: Any) -> None:
+        orig_set_var(self, key, value)
+        if key == "worker_state" and value == "ready":
+            probe_ready.set()
+
+    monkeypatch.setattr(ZPagesRegistry, "set_var", signal_probe_ready)
+
+    result_box: list[int] = []
+
+    def run_worker_only_thread() -> None:
+        code = cli_workers_mod.execute_worker_cli(
+            "worker_only_telemetry_app:app",
+            queues="io",
+            concurrency="1",
+            drain_timeout_s=2.0,
+            run_until_stopped=True,
+            health_probe=("127.0.0.1", probe_port),
+        )
+        result_box.append(code)
+
+    thread = threading.Thread(target=run_worker_only_thread, daemon=True)
+    thread.start()
+    try:
+        assert probe_ready.wait(timeout=5.0)
+        deadline = time.monotonic() + 2.0
+        payload: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            status_code, payload = _http_get_json(probe_port, "/varz")
+            assert status_code == 200
+            worker_telemetry = payload.get("loop_telemetry", {}).get("worker", {})
+            if "0" in worker_telemetry.get("shards", {}):
+                break
+            time.sleep(0.01)
+
+        assert "loop_telemetry" in payload
+        worker_telemetry = payload["loop_telemetry"]["worker"]
+        shard = worker_telemetry["shards"]["0"]
+        assert shard["lag_ms"] >= 0.0
+        assert shard["active_tasks"] >= 1
+        assert worker_telemetry["lag_histogram"]["count"] >= 1
+        assert isinstance(app_state.get("vertebra_loop_recorder"), EventLoopRecorder)
+
+        runner = app_state.get("vertebra_worker_runner")
+        assert runner is not None
+        runner._stopping = True
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+    finally:
+        runner = app_state.get("vertebra_worker_runner")
+        if runner is not None:
+            runner._stopping = True
+        thread.join(timeout=1.0)
+
+    assert result_box == [0]
+
+
+@pytest.mark.parametrize("telemetry_env", [None, "0", "false"])
+def test_vtb_run_worker_only_omits_loop_telemetry_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry_env: str | None,
+) -> None:
+    """execute_worker_cli omits loop_telemetry from /varz and state when VERTEBRA_LOOP_TELEMETRY is off."""
+    if telemetry_env is None:
+        monkeypatch.delenv("VERTEBRA_LOOP_TELEMETRY", raising=False)
+    else:
+        monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", telemetry_env)
+
+    qs = QueueService()
+    app_state: dict[str, Any] = {QUEUE_SERVICE_STATE_KEY: qs}
+    app_double = type("WorkerOnlyNoTelemetryApp", (), {"state": app_state})()
+    monkeypatch.setattr(cli_workers_mod, "import_app", lambda _path: app_double)
+
+    probe_port = _allocate_ephemeral_port()
+    probe_ready = threading.Event()
+    orig_set_var = ZPagesRegistry.set_var
+
+    def signal_probe_ready(self: ZPagesRegistry, key: str, value: Any) -> None:
+        orig_set_var(self, key, value)
+        if key == "worker_state" and value == "ready":
+            probe_ready.set()
+
+    monkeypatch.setattr(ZPagesRegistry, "set_var", signal_probe_ready)
+
+    result_box: list[int] = []
+
+    def run_worker_only_thread() -> None:
+        code = cli_workers_mod.execute_worker_cli(
+            "worker_only_no_telemetry_app:app",
+            queues="io",
+            concurrency="1",
+            drain_timeout_s=2.0,
+            run_until_stopped=True,
+            health_probe=("127.0.0.1", probe_port),
+        )
+        result_box.append(code)
+
+    thread = threading.Thread(target=run_worker_only_thread, daemon=True)
+    thread.start()
+    try:
+        assert probe_ready.wait(timeout=5.0)
+        status_code, payload = _http_get_json(probe_port, "/varz")
+        assert status_code == 200
+        assert "loop_telemetry" not in payload
+        assert "vertebra_loop_recorder" not in app_state
+
+        runner = app_state.get("vertebra_worker_runner")
+        assert runner is not None
+        runner._stopping = True
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+    finally:
+        runner = app_state.get("vertebra_worker_runner")
+        if runner is not None:
+            runner._stopping = True
+        thread.join(timeout=1.0)
+
+    assert result_box == [0]
+
+
+@pytest.mark.parametrize("raw_interval", ["invalid", "0", "-1", "nan", "inf"])
+def test_vtb_run_worker_only_invalid_loop_telemetry_interval_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_interval: str,
+) -> None:
+    """Invalid VERTEBRA_LOOP_TELEMETRY_INTERVAL values fall back to 1.0s and still attach recorder."""
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY", "1")
+    monkeypatch.setenv("VERTEBRA_LOOP_TELEMETRY_INTERVAL", raw_interval)
+
+    qs = QueueService()
+    app_state: dict[str, Any] = {QUEUE_SERVICE_STATE_KEY: qs}
+    app_double = type("WorkerOnlyInvalidIntervalApp", (), {"state": app_state})()
+    monkeypatch.setattr(cli_workers_mod, "import_app", lambda _path: app_double)
+
+    probe_port = _allocate_ephemeral_port()
+    probe_ready = threading.Event()
+    observed_intervals: list[float] = []
+    orig_interval = Worker._loop_telemetry_interval
+    orig_set_var = ZPagesRegistry.set_var
+
+    def capture_interval() -> float:
+        resolved = orig_interval()
+        observed_intervals.append(resolved)
+        return resolved
+
+    def signal_probe_ready(self: ZPagesRegistry, key: str, value: Any) -> None:
+        orig_set_var(self, key, value)
+        if key == "worker_state" and value == "ready":
+            probe_ready.set()
+
+    monkeypatch.setattr(Worker, "_loop_telemetry_interval", staticmethod(capture_interval))
+    monkeypatch.setattr(ZPagesRegistry, "set_var", signal_probe_ready)
+
+    result_box: list[int] = []
+
+    def run_worker_only_thread() -> None:
+        code = cli_workers_mod.execute_worker_cli(
+            "worker_only_invalid_interval_app:app",
+            queues="io",
+            concurrency="1",
+            drain_timeout_s=2.0,
+            run_until_stopped=True,
+            health_probe=("127.0.0.1", probe_port),
+        )
+        result_box.append(code)
+
+    thread = threading.Thread(target=run_worker_only_thread, daemon=True)
+    thread.start()
+    try:
+        assert probe_ready.wait(timeout=5.0)
+        status_code, payload = _http_get_json(probe_port, "/varz")
+        assert status_code == 200
+        assert "loop_telemetry" in payload
+        assert "worker" in payload["loop_telemetry"]
+        assert isinstance(app_state.get("vertebra_loop_recorder"), EventLoopRecorder)
+        assert observed_intervals == [1.0]
+
         runner = app_state.get("vertebra_worker_runner")
         assert runner is not None
         runner._stopping = True

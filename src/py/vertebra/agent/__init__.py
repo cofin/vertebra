@@ -11,6 +11,20 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from vertebra.agent import tools
+    from vertebra.agent.knowledge_catalog import (
+        AsyncKnowledgeCatalogClient,
+        CatalogEntryRecord,
+        CatalogSyncError,
+        CatalogSyncSummary,
+        KnowledgeCatalogConfig,
+        SyncKnowledgeCatalogClient,
+    )
+    from vertebra.agent.okf import (
+        OkfBundle,
+        OkfDocument,
+        OkfSource,
+        OkfValidationError,
+    )
     from vertebra.agent.tools import build_tools
 
 __all__ = (
@@ -35,10 +49,14 @@ __all__ = (
     "AgentStreamFrame",
     "AgentTelemetryRecorder",
     "AlchemySessionStore",
+    "AsyncKnowledgeCatalogClient",
     "BudgetExceededError",
     "CacheSessionStore",
     "CallerIdentity",
     "CancellationToken",
+    "CatalogEntryRecord",
+    "CatalogSyncError",
+    "CatalogSyncSummary",
     "ChatRequest",
     "ConfirmationCapacityError",
     "ConfirmationDecisionRequest",
@@ -55,6 +73,7 @@ __all__ = (
     "JSONRPCRequest",
     "JSONRPCResponse",
     "JSONRPCRouter",
+    "KnowledgeCatalogConfig",
     "MCPCore",
     "McpHttpRequest",
     "McpHttpResponse",
@@ -63,6 +82,10 @@ __all__ = (
     "ModelDelta",
     "ModelProvider",
     "ObjectStoreSessionStore",
+    "OkfBundle",
+    "OkfDocument",
+    "OkfSource",
+    "OkfValidationError",
     "PermissionDeniedError",
     "ProgressCallback",
     "ProgressReporter",
@@ -85,6 +108,7 @@ __all__ = (
     "SseReplayBuffer",
     "SseStreamBroker",
     "StepResult",
+    "SyncKnowledgeCatalogClient",
     "TRANSFER_TOOL_NAME",
     "TenantIsolationGuard",
     "TokenBucketGuard",
@@ -271,6 +295,26 @@ _PLUGIN_EXPORTS = frozenset(
     }
 )
 
+_OKF_EXPORTS = frozenset(
+    {
+        "OkfBundle",
+        "OkfDocument",
+        "OkfSource",
+        "OkfValidationError",
+    }
+)
+
+_KNOWLEDGE_CATALOG_EXPORTS = frozenset(
+    {
+        "AsyncKnowledgeCatalogClient",
+        "CatalogEntryRecord",
+        "CatalogSyncError",
+        "CatalogSyncSummary",
+        "KnowledgeCatalogConfig",
+        "SyncKnowledgeCatalogClient",
+    }
+)
+
 
 def __getattr__(name: str) -> Any:
     """Lazy-load agent package exports on first attribute access."""
@@ -362,6 +406,18 @@ def __getattr__(name: str) -> Any:
 
     if name in _PLUGIN_EXPORTS:
         mod = ensure_module("vertebra.agent.plugin")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
+
+    if name in _OKF_EXPORTS:
+        mod = ensure_module("vertebra.agent.okf")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
+
+    if name in _KNOWLEDGE_CATALOG_EXPORTS:
+        mod = ensure_module("vertebra.agent.knowledge_catalog")
         val = getattr(mod, name)
         globals()[name] = val
         return val

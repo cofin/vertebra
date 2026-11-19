@@ -6,17 +6,20 @@ import getpass
 import os
 import posixpath
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 import msgspec
 
+from vertebra.db.dialer import aws_rds_root_ca_pem
 from vertebra.db.driver._cloud_auth import (
     AZURE_POSTGRES_SCOPE,
     AwsAuroraDsqlIamTokenProvider,
+    AwsRdsIamTokenProvider,
     AzureEntraTokenProvider,
+    is_loopback_host,
 )
 from vertebra.typing import ImproperConfigurationError
 
@@ -28,15 +31,24 @@ __all__ = (
     "PostgresClientOptions",
     "PostgresTarget",
     "build_native_client_options",
+    "enforce_cloud_token_sslmode",
     "is_postgres_auth_rejection",
     "merge_postgres_options",
+    "normalize_pem_bytes",
     "parse_libpq_conninfo",
     "parse_postgres_dsn",
     "parse_query_pairs_strict",
     "validate_cockroach_cluster",
 )
 
+_CLOUD_TLS_TOKEN_PROVIDERS = (
+    AwsAuroraDsqlIamTokenProvider,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+)
+
 _VALID_SSLMODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
+_PLAINTEXT_CAPABLE_SSLMODES = frozenset({"disable", "allow", "prefer"})
 _VALID_CHANNEL_BINDINGS = frozenset({"prefer", "require", "disable"})
 _VALID_POOLER_MODES = frozenset({"direct", "transaction", "session", "statement", "auto"})
 _VALID_CLOUD_IP_TYPES = frozenset({"PUBLIC", "PRIVATE", "PSC"})
@@ -416,6 +428,26 @@ def parse_postgres_dsn(dsn: str) -> ParsedPostgresDsn:
     )
 
 
+def enforce_cloud_token_sslmode(token_provider: object, hosts: Iterable[str], explicit_sslmode: str | None) -> None:
+    """Reject an explicit sslmode that can send a cloud IAM or Entra token to a remote host in plaintext.
+
+    `disable`, `allow`, and `prefer` all continue without TLS when the server declines it, so they are
+    refused whenever `token_provider` is a cloud token provider and any TCP host in `hosts` is not loopback.
+    Unix socket paths and loopback hosts are exempt.
+    """
+    if explicit_sslmode is None or not isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS):
+        return
+    normalized_sslmode = explicit_sslmode.strip().lower()
+    if normalized_sslmode not in _PLAINTEXT_CAPABLE_SSLMODES:
+        return
+    if any(not host.startswith("/") and not is_loopback_host(host) for host in hosts):
+        msg = (
+            f"{type(token_provider).__name__} requires TLS on remote hosts "
+            f"and cannot be used with sslmode='{normalized_sslmode}'"
+        )
+        raise ImproperConfigurationError(msg)
+
+
 def build_native_client_options(
     config: PostgreSQLConfig,
     *,
@@ -504,15 +536,28 @@ def build_native_client_options(
         active_env,
         explicit_sslmode=explicit_sslmode,
     )
-    primary = targets[0]
 
     token_provider = explicit.get("token_provider", config.token_provider)
     if isinstance(token_provider, AzureEntraTokenProvider):
         token_provider = token_provider.with_default_scope(AZURE_POSTGRES_SCOPE)
-    if isinstance(token_provider, AwsAuroraDsqlIamTokenProvider) and primary.sslmode == "disable":
-        raise ImproperConfigurationError(
-            "AwsAuroraDsqlIamTokenProvider requires TLS and cannot be used with sslmode='disable'"
-        )
+
+    enforce_cloud_token_sslmode(
+        token_provider,
+        (target.host for target in targets if not target.is_unix),
+        explicit_sslmode,
+    )
+    upgrades_remote_default = explicit_sslmode is None and isinstance(token_provider, _CLOUD_TLS_TOKEN_PROVIDERS)
+    has_remote_target = False
+    resolved_targets: list[PostgresTarget] = []
+    for target in targets:
+        if not target.is_unix and not is_loopback_host(target.host):
+            has_remote_target = True
+            if upgrades_remote_default:
+                target = msgspec.structs.replace(target, sslmode="verify-full")
+        resolved_targets.append(target)
+    targets = tuple(resolved_targets)
+    primary = targets[0]
+
     if password_str is None and token_provider is not None:
         password_str = str(token_provider.resolve_sync())
 
@@ -530,18 +575,26 @@ def build_native_client_options(
     if primary.sslmode == "disable" and channel_binding == "require":
         raise ImproperConfigurationError("channel_binding='require' is incompatible with sslmode='disable'")
 
-    ca_pem: bytes | None = explicit.get("ca_pem")
-    if ca_pem is None:
+    ca_pem: bytes | None = None
+    if explicit.get("ca_pem") is not None:
+        ca_pem = normalize_pem_bytes(explicit["ca_pem"], field_name="ca_pem")
+    else:
         ca_path = _resolve_scalar(
             explicit,
             parsed.params,
-            active_env,
+            {},
             explicit_keys=("sslrootcert",),
             dsn_keys=("sslrootcert", "ssl_ca", "sslca"),
-            env_key="PGSSLROOTCERT",
         )
         if ca_path is not None:
             ca_pem = _read_pem_file(str(ca_path), field_name="sslrootcert")
+        elif config.ca_pem is not None:
+            ca_pem = normalize_pem_bytes(config.ca_pem, field_name="ca_pem")
+        elif active_env.get("PGSSLROOTCERT"):
+            ca_pem = _read_pem_file(str(active_env["PGSSLROOTCERT"]), field_name="sslrootcert")
+
+    if ca_pem is None and has_remote_target and isinstance(token_provider, AwsRdsIamTokenProvider):
+        ca_pem = aws_rds_root_ca_pem().encode("utf-8")
 
     client_cert_pem: bytes | None = explicit.get("client_cert_pem")
     if client_cert_pem is None:
@@ -1007,6 +1060,19 @@ def _normalize_unix_socket_path(directory_or_socket: str, port: int) -> str:
     if basename.startswith(".s.PGSQL."):
         return cleaned
     return posixpath.join(cleaned, f".s.PGSQL.{port}")
+
+
+def normalize_pem_bytes(value: Any, *, field_name: str = "ca_pem") -> bytes:
+    """Normalize an inline PEM string or byte buffer into validated UTF-8 bytes."""
+    if isinstance(value, bytes):
+        if b"\x00" in value or not value.strip():
+            raise ImproperConfigurationError(f"PostgreSQL {field_name} must be non-empty and free of NUL bytes")
+        return value
+    if isinstance(value, str):
+        if "\x00" in value or not value.strip():
+            raise ImproperConfigurationError(f"PostgreSQL {field_name} must be non-empty and free of NUL bytes")
+        return value.encode("utf-8")
+    raise ImproperConfigurationError(f"PostgreSQL {field_name} must be str or bytes, got {type(value).__name__}")
 
 
 def _read_pem_file(path: str, *, field_name: str) -> bytes:

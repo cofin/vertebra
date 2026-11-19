@@ -31,6 +31,9 @@ __all__ = [
     "AsgiScopeIterator",
     "AsyncGcpIdTokenCache",
     "AsyncGcpTokenCache",
+    "AwsAuroraDsqlDialer",
+    "AwsRdsDialer",
+    "AzureEntraDialer",
     "BigQueryError",
     "BigQueryRowError",
     "BrokerAttachClient",
@@ -104,6 +107,7 @@ __all__ = [
     "_set_stream_sink",
     "_synthetic_webtransport_pair",
     "__version__",
+    "aws_rds_root_ca_pem",
     "camelize",
     "cancel_request_sleep",
     "call_vectorcall",
@@ -144,6 +148,8 @@ __all__ = [
     "format_traceparent",
     "gcp_http2_post_async",
     "gcp_http2_post_sync",
+    "gcp_http2_request_async",
+    "gcp_http2_request_sync",
     "get_batch",
     "get_request_notify_fd",
     "humanize",
@@ -1279,6 +1285,103 @@ class AlloyDBDialer:
     ) -> bytes: ...
 
 @final
+class AwsRdsDialer:
+    def __new__(
+        cls,
+        endpoint_host: str,
+        port: int | None = None,
+        region: str | None = None,
+        username: str = "postgres",
+    ) -> Self: ...
+    @property
+    def endpoint_host(self) -> str: ...
+    @property
+    def port(self) -> int: ...
+    @property
+    def server_port(self) -> int: ...
+    @property
+    def region(self) -> str: ...
+    @property
+    def username(self) -> str: ...
+    @property
+    def identifier(self) -> str | None: ...
+    @property
+    def cluster_or_proxy(self) -> str | None: ...
+    @property
+    def is_cluster_endpoint(self) -> bool: ...
+    @property
+    def is_proxy_endpoint(self) -> bool: ...
+    @property
+    def ca_pem(self) -> str: ...
+    def sign_iam_token(
+        self,
+        access_key_id: str,
+        secret_access_key: str,
+        session_token: str | None = None,
+        ttl_seconds: int = 900,
+        now_ts: float | None = None,
+    ) -> str: ...
+
+@final
+class AwsAuroraDsqlDialer:
+    def __new__(
+        cls,
+        endpoint_host: str,
+        port: int | None = None,
+        region: str | None = None,
+        admin: bool = False,
+    ) -> Self: ...
+    @property
+    def endpoint_host(self) -> str: ...
+    @property
+    def hostname(self) -> str: ...
+    @property
+    def port(self) -> int: ...
+    @property
+    def server_port(self) -> int: ...
+    @property
+    def region(self) -> str: ...
+    @property
+    def cluster_id(self) -> str | None: ...
+    @property
+    def admin(self) -> bool: ...
+    @property
+    def action(self) -> str: ...
+    def sign_iam_token(
+        self,
+        access_key_id: str,
+        secret_access_key: str,
+        session_token: str | None = None,
+        ttl_seconds: int = 900,
+        now_ts: float | None = None,
+    ) -> str: ...
+
+@final
+class AzureEntraDialer:
+    def __new__(
+        cls,
+        endpoint_host: str,
+        port: int | None = None,
+        engine: str | None = None,
+    ) -> Self: ...
+    @property
+    def endpoint_host(self) -> str: ...
+    @property
+    def port(self) -> int: ...
+    @property
+    def server_port(self) -> int: ...
+    @property
+    def engine(self) -> str: ...
+    @property
+    def scope(self) -> str: ...
+    @property
+    def cloud(self) -> str: ...
+    @property
+    def authority_host(self) -> str: ...
+    @property
+    def server_name(self) -> str | None: ...
+
+@final
 class ArrowCursor:
     """Zero-copy shared-memory Arrow IPC cursor backed by `vertebra-core`."""
 
@@ -1290,7 +1393,12 @@ class ArrowCursor:
     """Total number of rows encoded across all record batches in the stream."""
     def __new__(cls, shm_name: str, byte_len: int, row_count: int = 0) -> Self: ...
     def __buffer__(self, flags: int, /) -> memoryview: ...
+    def __arrow_c_schema__(self) -> object: ...
     def __arrow_c_stream__(self, requested_schema: object | None = None) -> object: ...
+    @property
+    def columns(self) -> list[str]: ...
+    @staticmethod
+    def from_ipc_bytes(payload: Buffer) -> ArrowCursor: ...
     @staticmethod
     def write_ipc_to_shm(shm_name: str, payload: bytes, row_count: int = 0) -> ArrowCursor: ...
     @staticmethod
@@ -1309,6 +1417,7 @@ class ArrowCursor:
     def to_pyarrow(self) -> Any: ...
     def to_arrow_table(self) -> Any: ...
     def to_polars(self) -> Any: ...
+    def to_pylist(self) -> list[dict[str, Any]]: ...
     def release(self) -> bool: ...
     def close(self) -> bool: ...
     def __enter__(self) -> Self: ...
@@ -1319,6 +1428,7 @@ class ArrowCursor:
         exc_tb: TracebackType | None = None,
     ) -> None: ...
 
+def aws_rds_root_ca_pem() -> str: ...
 def encode_alloydb_metadata_exchange(
     user_agent: str = "vertebra-db/0.1",
     oauth2_token: str = "",
@@ -1751,6 +1861,20 @@ def gcp_http2_post_async(
     url: str,
     headers: dict[str, str],
     body: bytes,
+    timeout_ms: int = 30000,
+) -> RustDbTaskAwaitable[tuple[int, dict[str, str], bytes]]: ...
+def gcp_http2_request_sync(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes | None = None,
+    timeout_ms: int = 30000,
+) -> tuple[int, dict[str, str], bytes]: ...
+def gcp_http2_request_async(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes | None = None,
     timeout_ms: int = 30000,
 ) -> RustDbTaskAwaitable[tuple[int, dict[str, str], bytes]]: ...
 

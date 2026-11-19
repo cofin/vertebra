@@ -14,6 +14,9 @@ pub type HandlerId = u64;
 /// High-bit tag identifying pre-indexed mounted sub-application routes in O(1).
 pub const MOUNT_HANDLER_BASE: HandlerId = 0xFFFF_0000_0000_0000;
 
+/// Reserved internal handler ID for HTTP diagnostic Z-Pages (`/taskz`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`).
+pub const ZPAGES_HANDLER_ID: HandlerId = 0xFFFE_0000_0000_0001;
+
 /// HTTP methods registered on mounted ASGI/RSGI/WSGI prefix catch-alls.
 pub const MOUNT_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
 
@@ -318,5 +321,11 @@ mod tests {
         assert_eq!(handler_id("GET", "/users/{id}"), 12798828550840791120);
         assert_eq!(handler_id("POST", "/api/v1/items"), 1576413124061346619);
         assert_eq!(handler_id("DELETE", "/healthz"), 17830759806517673951);
+    }
+
+    #[test]
+    fn zpages_handler_id_is_distinct_from_mount_range() {
+        assert_ne!(ZPAGES_HANDLER_ID, MOUNT_HANDLER_BASE);
+        assert_ne!(ZPAGES_HANDLER_ID & MOUNT_HANDLER_BASE, MOUNT_HANDLER_BASE);
     }
 }

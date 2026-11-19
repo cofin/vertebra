@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import contextvars
 import inspect
+import itertools
 import logging
 import signal
 import time
@@ -95,6 +96,7 @@ class WorkerRunner:
         "_heartbeat_interval_seconds",
         "_in_flight",
         "_lame_duck",
+        "_lane_counters",
         "_lanes",
         "_last_reap_at",
         "_metrics",
@@ -119,6 +121,7 @@ class WorkerRunner:
         reap_interval_seconds: float = 60.0,
     ) -> None:
         self._lanes: dict[str, LaneConfig] = {lane.queue_name: lane for lane in lanes}
+        self._lane_counters: dict[str, itertools.count[int]] = {lane.queue_name: itertools.count(1) for lane in lanes}
         self._semaphores: dict[str, asyncio.Semaphore] = {
             lane.queue_name: asyncio.Semaphore(max(1, lane.concurrency)) for lane in lanes
         }
@@ -207,7 +210,10 @@ class WorkerRunner:
                     self._adjust_in_flight_metric(lane_key, -1)
                     _HELD_LANE_KEY.reset(tok)
 
-        task = asyncio.create_task(_guarded())
+        task = asyncio.get_running_loop().create_task(
+            _guarded(),
+            name=self._next_lane_task_name(lane_key),
+        )
         self._in_flight.add(task)
         task.add_done_callback(self._in_flight.discard)
         return task
@@ -245,13 +251,19 @@ class WorkerRunner:
         poll_interval_s: float = 0.05,
     ) -> None:
         """Run continuous concurrent pull loop across lanes until stopped."""
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            current_task.set_name("vertebra.worker.runner")
         if install_signal_handlers:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                     loop.add_signal_handler(
                         sig,
-                        lambda: asyncio.create_task(self._handle_shutdown_signal()),
+                        lambda: loop.create_task(
+                            self._handle_shutdown_signal(),
+                            name="vertebra.worker.shutdown",
+                        ),
                     )
 
         total_cap = self._total_concurrency()
@@ -510,6 +522,14 @@ class WorkerRunner:
             dlq_total=cur.dlq_total,
         )
 
+    def _next_lane_task_name(self, lane_key: str) -> str:
+        """Return the next structured task name for ``lane_key``."""
+        counter = self._lane_counters.get(lane_key)
+        if counter is None:
+            counter = itertools.count(1)
+            self._lane_counters[lane_key] = counter
+        return f"vertebra.worker.lane.{lane_key}.{next(counter)}"
+
     def _spawn_envelope_task(self, env: TaskEnvelope, *, skip_semaphore: bool = False) -> asyncio.Task[int]:
         """Spawn a tracked asyncio.Task executing env under its resolved lane semaphore."""
         lane_key = self._resolve_lane_key(env.lane)
@@ -521,7 +541,10 @@ class WorkerRunner:
             async with semaphore:
                 return await self._process_envelope_guarded(env, lane_key=lane_key, track_metric=True)
 
-        task = asyncio.create_task(_runner())
+        task = asyncio.get_running_loop().create_task(
+            _runner(),
+            name=self._next_lane_task_name(lane_key),
+        )
         self._in_flight.add(task)
         self._envelope_tasks.add(task)
         task.add_done_callback(self._in_flight.discard)
@@ -591,7 +614,10 @@ class WorkerRunner:
                         if inspect.isawaitable(res):
                             await res
 
-            heartbeat_task = asyncio.create_task(_heartbeat_loop())
+            heartbeat_task = asyncio.get_running_loop().create_task(
+                _heartbeat_loop(),
+                name=f"vertebra.worker.heartbeat.{resolved_key}",
+            )
 
         try:
             await self._queue_service.process_envelope(env, container=self._container)

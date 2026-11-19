@@ -26,6 +26,7 @@ from vertebra.storage import (
     SyncObjectStore,
     SyncReadableFile,
 )
+from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
 
@@ -378,3 +379,115 @@ async def test_multibackend_streaming_conditional_and_rename(
     items, next_cursor = await store.list_page("datasets/", limit=10)
     assert [item.path for item in items] == ["datasets/committed-000.bin"]
     assert next_cursor is None
+
+
+class _MockAzureSasBlobHandler(BaseHTTPRequestHandler):
+    """Mock HTTP handler capturing Azure Blob GET request paths for SAS verification."""
+
+    seen_paths: list[str] = []
+
+    def do_GET(self) -> None:
+        self.seen_paths.append(self.path)
+        body = b"azure-sas-roundtrip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("x-ms-blob-type", "BlockBlob")
+        self.send_header("ETag", '"0x1"')
+        self.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        _ = (format, args)
+
+
+def test_azure_config_sas_and_entra_options_roundtrip() -> None:
+    """AzureConfig forwards SAS and Entra options to native stores without silent drops."""
+    sas_cfg = AzureConfig(
+        container="lake",
+        account="devstoreaccount1",
+        sas_token="?sv=2020-12-06&sp=r&sig=test%2Btoken%3D",
+    )
+    sas_url, sas_opts = sas_cfg.to_url_and_options()
+    assert sas_url == "az://lake"
+    assert sas_opts["sas_token"] == "?sv=2020-12-06&sp=r&sig=test%2Btoken%3D"
+
+    entra_cfg = AzureConfig(
+        container="lake",
+        account="devstoreaccount1",
+        tenant_id="tenant-id-placeholder",
+        client_id="client-id-placeholder",
+        client_secret="test-token-placeholder",
+    )
+    entra_url, entra_opts = entra_cfg.to_url_and_options()
+    assert entra_url == "az://lake"
+    assert entra_opts == {
+        "account": "devstoreaccount1",
+        "tenant_id": "tenant-id-placeholder",
+        "client_id": "client-id-placeholder",
+        "client_secret": "test-token-placeholder",
+    }
+    SyncObjectStore(entra_cfg)
+    AsyncObjectStore(entra_cfg)
+
+    _MockAzureSasBlobHandler.seen_paths = []
+    server = HTTPServer(("127.0.0.1", 0), _MockAzureSasBlobHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        live_sas_cfg = AzureConfig(
+            container="lake",
+            account="devstoreaccount1",
+            sas_token="?sv=2020-12-06&sp=r&sig=test%2Btoken%3D",
+            endpoint=f"http://127.0.0.1:{port}/devstoreaccount1",
+        )
+        store = SyncObjectStore(live_sas_cfg)
+        assert store.get("dir/file.bin") == b"azure-sas-roundtrip"
+        assert len(_MockAzureSasBlobHandler.seen_paths) == 1
+        req_path = _MockAzureSasBlobHandler.seen_paths[0]
+        assert "sv=2020-12-06" in req_path
+        assert "sp=r" in req_path
+        assert "sig=test%2Btoken%3D" in req_path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        AzureConfig(container="lake", account="devstoreaccount1", sas_token=""),
+        AzureConfig(container="lake", account="devstoreaccount1", sas_token="?"),
+        AzureConfig(container="lake", account="devstoreaccount1", sas_token="not-a-query-pair"),
+        AzureConfig(container="lake", account="devstoreaccount1", tenant_id="tenant-only"),
+        AzureConfig(
+            container="lake",
+            account="devstoreaccount1",
+            tenant_id="tenant-only",
+            client_id="client-only",
+        ),
+        OCIConfig(
+            bucket="models",
+            namespace="mytenancy",
+            tenancy_ocid="ocid1.tenancy.oc1..aaaa",
+        ),
+        OCIConfig(
+            bucket="models",
+            namespace="mytenancy",
+            tenancy_ocid="ocid1.tenancy.oc1..aaaa",
+            user_ocid="ocid1.user.oc1..bbbb",
+            fingerprint="12:34:56:78",
+        ),
+    ],
+)
+def test_azure_and_oci_partial_or_malformed_credentials_raise_improper_configuration(
+    config: AzureConfig | OCIConfig,
+) -> None:
+    """SyncObjectStore and AsyncObjectStore fail closed with ImproperConfigurationError on invalid Azure/OCI auth."""
+    with pytest.raises(ImproperConfigurationError):
+        SyncObjectStore(config)
+    with pytest.raises(ImproperConfigurationError):
+        AsyncObjectStore(config)

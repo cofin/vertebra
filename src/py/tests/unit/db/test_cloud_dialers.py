@@ -18,6 +18,22 @@ from urllib.parse import parse_qs, quote, urlsplit
 import anyio
 import pytest
 
+import vertebra.db as db_pkg
+import vertebra.db.dialer as dialer_pkg
+from vertebra._vertebra import (
+    AwsAuroraDsqlDialer,
+    AwsRdsDialer,
+    AzureEntraDialer,
+    aws_rds_root_ca_pem,
+)
+from vertebra.db.dialer import (
+    AsyncAwsAuroraDsqlDialer,
+    AsyncAwsRdsDialer,
+    AsyncAzureEntraDialer,
+    SyncAwsAuroraDsqlDialer,
+    SyncAwsRdsDialer,
+    SyncAzureEntraDialer,
+)
 from vertebra.db.dialer.alloydb import (
     AlloyDBAuthType,
     AlloyDBClusterURI,
@@ -42,6 +58,7 @@ from vertebra.db.driver import (
     AzureEntraTokenProvider,
     DatabaseTokenProvider,
 )
+from vertebra.db.driver._cloud_auth import _sign_sigv4_presigned_token
 from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 from vertebra.utils.serializers import decode_json, encode_json_bytes
 
@@ -67,7 +84,7 @@ def _generate_test_tls_credentials() -> tuple[str, str]:
             "-subj",
             "/CN=my-proj:my-pg",
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
         return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
 
 
@@ -1079,24 +1096,37 @@ def test_azure_entra_token_provider_validation_errors(kwargs: dict[str, Any]) ->
         AzureEntraTokenProvider(**kwargs)
 
 
-@pytest.mark.anyio
-async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> None:
-    """Verify missing standalone scope and malformed token JSON fail loudly without leaking secrets."""
+def test_azure_entra_token_provider_missing_scope() -> None:
+    """Verify unscoped Entra provider raises ImproperConfigurationError for sync resolution."""
     unscoped = AzureEntraTokenProvider(fetcher=lambda scope: ("test-token-placeholder", 5000.0))
     with pytest.raises(ImproperConfigurationError, match="scope"):
         unscoped.resolve_sync()
+
+
+@pytest.mark.anyio
+async def test_azure_entra_token_provider_missing_scope_async() -> None:
+    """Verify unscoped Entra provider raises ImproperConfigurationError for async resolution."""
+    unscoped = AzureEntraTokenProvider(fetcher=lambda scope: ("test-token-placeholder", 5000.0))
     with pytest.raises(ImproperConfigurationError, match="scope"):
         await unscoped.resolve_async()
 
-    malformed_bodies: list[tuple[int, bytes]] = [
+
+@pytest.mark.parametrize(
+    ("status_code", "response_body"),
+    [
         (200, b"not-valid-json"),
         (200, encode_json_bytes(["unexpected-list"])),
         (200, encode_json_bytes({"expires_in": 300})),
         (200, encode_json_bytes({"access_token": "test-token-placeholder-secret", "expires_in": "bogus"})),
         (200, encode_json_bytes({"access_token": "test-token-placeholder-secret"})),
         (401, b'{"error":"invalid_client","secret":"test-client-secret-placeholder"}'),
-    ]
-    idx = [0]
+    ],
+)
+def test_azure_entra_token_provider_malformed_json_errors_redact_secrets(
+    status_code: int,
+    response_body: bytes,
+) -> None:
+    """Verify malformed and error token JSON payloads fail loudly without leaking client secrets."""
 
     class _MalformedHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -1105,13 +1135,11 @@ async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
-            status, body = malformed_bodies[idx[0]]
-            idx[0] += 1
-            self.send_response(status)
+            self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(response_body)))
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(response_body)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _MalformedHandler)
     port = server.server_address[1]
@@ -1125,14 +1153,1147 @@ async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> 
             scope=AZURE_POSTGRES_SCOPE,
             token_endpoint=f"http://127.0.0.1:{port}/token",
         )
-        for _ in malformed_bodies:
-            with pytest.raises(ImproperConfigurationError) as exc_info:
-                provider.resolve_sync()
-            err_text = str(exc_info.value)
-            assert "test-client-secret-placeholder" not in err_text
-            assert "test-token-placeholder-secret" not in err_text
-        assert idx[0] == len(malformed_bodies)
+        with pytest.raises(ImproperConfigurationError) as exc_info:
+            provider.resolve_sync()
+        err_text = str(exc_info.value)
+        assert "test-client-secret-placeholder" not in err_text
+        assert "test-token-placeholder-secret" not in err_text
     finally:
         server.shutdown()
         server.server_close()
         srv_thread.join(timeout=2.0)
+
+
+def test_aws_rds_root_ca_pem_loads_into_ssl_context() -> None:
+    """Verify bundled AWS RDS Global Root CA PEM loads cleanly into ssl.SSLContext."""
+    pem = aws_rds_root_ca_pem()
+    assert pem.startswith("-----BEGIN CERTIFICATE-----")
+    assert pem.count("-----BEGIN CERTIFICATE-----") >= 3
+
+    ctx = ssl.create_default_context(cadata=pem)
+    certs = ctx.get_ca_certs()
+    assert len(certs) >= 3
+    common_names: set[str] = set()
+    for cert in certs:
+        subject = cert.get("subject", ())
+        if isinstance(subject, tuple):
+            for rdn in subject:
+                if isinstance(rdn, tuple):
+                    for pair in rdn:
+                        if isinstance(pair, tuple) and len(pair) == 2 and pair[0] == "commonName":
+                            common_names.add(str(pair[1]))
+    assert any("2019" in cn or "Root CA" in cn for cn in common_names)
+    assert any("RSA2048 G1" in cn for cn in common_names)
+    assert any("ECC384 G1" in cn for cn in common_names)
+
+
+@pytest.mark.parametrize(
+    (
+        "endpoint_host",
+        "port",
+        "region",
+        "username",
+        "expected_host",
+        "expected_port",
+        "expected_region",
+        "expected_id",
+        "expected_cluster",
+        "expected_proxy",
+    ),
+    [
+        (
+            "mydb.c9akciq32.us-east-1.rds.amazonaws.com",
+            None,
+            None,
+            "iam_user",
+            "mydb.c9akciq32.us-east-1.rds.amazonaws.com",
+            5432,
+            "us-east-1",
+            "mydb",
+            False,
+            False,
+        ),
+        (
+            "orders.cluster-abc123xyz.eu-west-1.rds.amazonaws.com",
+            3306,
+            None,
+            "aurora_writer",
+            "orders.cluster-abc123xyz.eu-west-1.rds.amazonaws.com",
+            3306,
+            "eu-west-1",
+            "orders",
+            True,
+            False,
+        ),
+        (
+            "orders.cluster-ro-abc123xyz.cn-north-1.rds.amazonaws.com.cn",
+            None,
+            None,
+            "aurora_reader",
+            "orders.cluster-ro-abc123xyz.cn-north-1.rds.amazonaws.com.cn",
+            5432,
+            "cn-north-1",
+            "orders",
+            True,
+            False,
+        ),
+        (
+            "app-proxy.proxy-xyz789.ap-northeast-1.rds.amazonaws.com:5432",
+            None,
+            None,
+            "proxy_user",
+            "app-proxy.proxy-xyz789.ap-northeast-1.rds.amazonaws.com",
+            5432,
+            "ap-northeast-1",
+            "app-proxy",
+            False,
+            True,
+        ),
+        (
+            "ro-ep.endpoint.proxy-xyz789.us-gov-west-1.rds.amazonaws.com",
+            None,
+            None,
+            "gov_user",
+            "ro-ep.endpoint.proxy-xyz789.us-gov-west-1.rds.amazonaws.com",
+            5432,
+            "us-gov-west-1",
+            "ro-ep",
+            False,
+            True,
+        ),
+        (
+            "db.internal.corp",
+            15432,
+            "us-west-2",
+            "explicit_user",
+            "db.internal.corp",
+            15432,
+            "us-west-2",
+            None,
+            False,
+            False,
+        ),
+    ],
+)
+def test_native_aws_rds_dialer_endpoint_parsing(
+    endpoint_host: str,
+    port: int | None,
+    region: str | None,
+    username: str,
+    expected_host: str,
+    expected_port: int,
+    expected_region: str,
+    expected_id: str | None,
+    expected_cluster: bool,
+    expected_proxy: bool,
+) -> None:
+    """Verify AwsRdsDialer parses RDS, Aurora, RDS Proxy, China, GovCloud, and explicit endpoints."""
+    dialer = AwsRdsDialer(endpoint_host, port=port, region=region, username=username)
+    assert dialer.endpoint_host == expected_host
+    assert dialer.port == expected_port
+    assert dialer.server_port == expected_port
+    assert dialer.region == expected_region
+    assert dialer.username == username
+    assert dialer.identifier == expected_id
+    assert dialer.is_cluster_endpoint is expected_cluster
+    assert dialer.is_proxy_endpoint is expected_proxy
+    assert dialer.ca_pem == aws_rds_root_ca_pem()
+
+
+@pytest.mark.parametrize(
+    (
+        "endpoint_host",
+        "port",
+        "region",
+        "admin",
+        "expected_host",
+        "expected_port",
+        "expected_region",
+        "expected_cluster",
+        "expected_action",
+    ),
+    [
+        (
+            "abc123def456.dsql.us-east-1.on.aws",
+            None,
+            None,
+            False,
+            "abc123def456.dsql.us-east-1.on.aws",
+            5432,
+            "us-east-1",
+            "abc123def456",
+            "DbConnect",
+        ),
+        (
+            "abc123def456.dsql-fnh4.us-west-2.on.aws",
+            None,
+            None,
+            True,
+            "abc123def456.dsql-fnh4.us-west-2.on.aws",
+            5432,
+            "us-west-2",
+            "abc123def456",
+            "DbConnectAdmin",
+        ),
+        (
+            "127.0.0.1",
+            15432,
+            "eu-central-1",
+            True,
+            "127.0.0.1",
+            15432,
+            "eu-central-1",
+            None,
+            "DbConnectAdmin",
+        ),
+    ],
+)
+def test_native_aws_aurora_dsql_dialer_endpoint_parsing(
+    endpoint_host: str,
+    port: int | None,
+    region: str | None,
+    admin: bool,
+    expected_host: str,
+    expected_port: int,
+    expected_region: str,
+    expected_cluster: str | None,
+    expected_action: str,
+) -> None:
+    """Verify AwsAuroraDsqlDialer parses DSQL cluster endpoints, default port 5432, and admin actions."""
+    dialer = AwsAuroraDsqlDialer(endpoint_host, port=port, region=region, admin=admin)
+    assert dialer.endpoint_host == expected_host
+    assert dialer.hostname == expected_host
+    assert dialer.port == expected_port
+    assert dialer.server_port == expected_port
+    assert dialer.region == expected_region
+    assert dialer.cluster_id == expected_cluster
+    assert dialer.admin is admin
+    assert dialer.action == expected_action
+
+
+@pytest.mark.parametrize(
+    (
+        "endpoint_host",
+        "port",
+        "engine",
+        "expected_host",
+        "expected_port",
+        "expected_engine",
+        "expected_scope",
+        "expected_server",
+    ),
+    [
+        (
+            "contoso-pg.postgres.database.azure.com",
+            None,
+            None,
+            "contoso-pg.postgres.database.azure.com",
+            5432,
+            "postgres",
+            AZURE_POSTGRES_SCOPE,
+            "contoso-pg",
+        ),
+        (
+            "contoso-mysql.mysql.database.azure.com",
+            None,
+            None,
+            "contoso-mysql.mysql.database.azure.com",
+            3306,
+            "mysql",
+            AZURE_MYSQL_SCOPE,
+            "contoso-mysql",
+        ),
+        (
+            "contoso-sql.database.windows.net",
+            None,
+            None,
+            "contoso-sql.database.windows.net",
+            1433,
+            "mssql",
+            AZURE_MSSQL_SCOPE,
+            "contoso-sql",
+        ),
+        (
+            "127.0.0.1",
+            15432,
+            "postgresql",
+            "127.0.0.1",
+            15432,
+            "postgres",
+            AZURE_POSTGRES_SCOPE,
+            None,
+        ),
+        (
+            "sql-privatelink.internal.corp",
+            None,
+            "sqlserver",
+            "sql-privatelink.internal.corp",
+            1433,
+            "mssql",
+            AZURE_MSSQL_SCOPE,
+            None,
+        ),
+    ],
+)
+def test_native_azure_entra_dialer_endpoint_parsing(
+    endpoint_host: str,
+    port: int | None,
+    engine: str | None,
+    expected_host: str,
+    expected_port: int,
+    expected_engine: str,
+    expected_scope: str,
+    expected_server: str | None,
+) -> None:
+    """Verify AzureEntraDialer resolves canonical OAuth2 scopes and default ports across engines."""
+    dialer = AzureEntraDialer(endpoint_host, port=port, engine=engine)
+    assert dialer.endpoint_host == expected_host
+    assert dialer.port == expected_port
+    assert dialer.server_port == expected_port
+    assert dialer.engine == expected_engine
+    assert dialer.scope == expected_scope
+    assert dialer.server_name == expected_server
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        (AwsRdsDialer, {"endpoint_host": "https://mydb.c1.us-east-1.rds.amazonaws.com"}),
+        (AwsRdsDialer, {"endpoint_host": "postgres://mydb.c1.us-east-1.rds.amazonaws.com"}),
+        (AwsRdsDialer, {"endpoint_host": " mydb.c1.us-east-1.rds.amazonaws.com"}),
+        (AwsRdsDialer, {"endpoint_host": "my db.c1.us-east-1.rds.amazonaws.com"}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.c1.us-east-1.rds.amazonaws.com", "port": 0}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.c1.us-east-1.rds.amazonaws.com", "port": -1}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.c1.us-east-1.rds.amazonaws.com", "port": 70000}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.c1.us-east-1.rds.amazonaws.com:0"}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.us-east-1.rds.amazonaws.com"}),
+        (AwsRdsDialer, {"endpoint_host": "custom.internal.corp"}),
+        (AwsRdsDialer, {"endpoint_host": "mydb.c1.us-east-1.rds.amazonaws.com", "username": "   "}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": "https://abc123.dsql.us-east-1.on.aws"}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": " abc123.dsql.us-east-1.on.aws"}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": "abc123.dsql.us-east-1.on.aws", "port": 0}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": "abc123.s3.us-east-1.on.aws"}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": "dsql.us-east-1.on.aws"}),
+        (AwsAuroraDsqlDialer, {"endpoint_host": "custom.internal.corp"}),
+        (AzureEntraDialer, {"endpoint_host": "https://pg.postgres.database.azure.com"}),
+        (AzureEntraDialer, {"endpoint_host": "pg.postgres.database.azure.com "}),
+        (AzureEntraDialer, {"endpoint_host": "pg.postgres.database.azure.com", "port": 0}),
+        (AzureEntraDialer, {"endpoint_host": "postgres.database.azure.com"}),
+        (AzureEntraDialer, {"endpoint_host": "database.windows.net"}),
+        (AzureEntraDialer, {"endpoint_host": "pg.postgres.database.azure.com", "engine": "mssql"}),
+        (AzureEntraDialer, {"endpoint_host": "127.0.0.1", "engine": "oracle"}),
+        (AzureEntraDialer, {"endpoint_host": "custom.internal.corp"}),
+    ],
+)
+def test_native_aws_and_azure_dialer_invalid_endpoints_raise_value_error(
+    factory: Any,
+    kwargs: dict[str, Any],
+) -> None:
+    """Verify schemes, whitespace, port 0, and malformed hostnames raise ValueError."""
+    with pytest.raises(ValueError):
+        factory(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("endpoint_host", "port", "region", "username", "session_token", "ttl_seconds", "now_ts"),
+    [
+        (
+            "mydb.c9akciq32.us-east-1.rds.amazonaws.com",
+            5432,
+            None,
+            "iam_app_user",
+            None,
+            900,
+            1_700_000_000.0,
+        ),
+        (
+            "orders.cluster-abc123.cn-north-1.rds.amazonaws.com.cn",
+            3306,
+            None,
+            "iam.reader+role",
+            "test-token-placeholder/with+special=chars==",
+            600,
+            1_715_123_456.0,
+        ),
+        (
+            "127.0.0.1",
+            15432,
+            "us-gov-west-1",
+            "gov_db_user",
+            "test-token-placeholder",
+            300,
+            1_725_000_001.0,
+        ),
+    ],
+)
+def test_native_aws_rds_sigv4_vectors_match_python_identically(
+    endpoint_host: str,
+    port: int,
+    region: str | None,
+    username: str,
+    session_token: str | None,
+    ttl_seconds: int,
+    now_ts: float,
+) -> None:
+    """Verify Rust AwsRdsDialer.sign_iam_token matches Python SigV4 vectors byte-for-byte."""
+    dialer = AwsRdsDialer(endpoint_host, port=port, region=region, username=username)
+    rust_token = dialer.sign_iam_token(
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+        session_token=session_token,
+        ttl_seconds=ttl_seconds,
+        now_ts=now_ts,
+    )
+    py_token = _sign_sigv4_presigned_token(
+        host_header=f"{dialer.endpoint_host}:{dialer.port}",
+        region=dialer.region,
+        service="rds-db",
+        action="connect",
+        ttl_seconds=ttl_seconds,
+        now_ts=now_ts,
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+        session_token=session_token,
+        db_user=username,
+    )
+    provider = AwsRdsIamTokenProvider(
+        endpoint_host=dialer.endpoint_host,
+        port=dialer.port,
+        region=dialer.region,
+        username=username,
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+        session_token=session_token,
+        token_ttl_seconds=ttl_seconds,
+        refresh_margin_seconds=10.0,
+        clock=lambda: now_ts,
+    )
+    assert rust_token == py_token
+    assert rust_token == provider.resolve_sync()
+
+
+@pytest.mark.parametrize(
+    ("endpoint_host", "admin", "session_token", "ttl_seconds", "now_ts"),
+    [
+        (
+            "abc123def456.dsql.us-east-1.on.aws",
+            False,
+            None,
+            900,
+            1_700_000_000.0,
+        ),
+        (
+            "abc123def456.dsql-fnh4.us-west-2.on.aws",
+            True,
+            "test-token-placeholder/sts+session==",
+            3600,
+            1_715_123_456.0,
+        ),
+    ],
+)
+def test_native_aws_aurora_dsql_sigv4_vectors_match_python_identically(
+    endpoint_host: str,
+    admin: bool,
+    session_token: str | None,
+    ttl_seconds: int,
+    now_ts: float,
+) -> None:
+    """Verify Rust AwsAuroraDsqlDialer.sign_iam_token omits DBUser and matches Python SigV4 vectors."""
+    dialer = AwsAuroraDsqlDialer(endpoint_host, admin=admin)
+    rust_token = dialer.sign_iam_token(
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+        session_token=session_token,
+        ttl_seconds=ttl_seconds,
+        now_ts=now_ts,
+    )
+    py_token = _sign_sigv4_presigned_token(
+        host_header=dialer.hostname,
+        region=dialer.region,
+        service="dsql",
+        action="DbConnectAdmin" if admin else "DbConnect",
+        ttl_seconds=ttl_seconds,
+        now_ts=now_ts,
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+        session_token=session_token,
+    )
+    assert "DBUser=" not in rust_token
+    assert rust_token == py_token
+    if ttl_seconds <= 900:
+        provider = AwsAuroraDsqlIamTokenProvider(
+            hostname=dialer.hostname,
+            region=dialer.region,
+            admin=admin,
+            access_key_id="test-access-key-placeholder",
+            secret_access_key="test-secret-key-placeholder",
+            session_token=session_token,
+            token_ttl_seconds=ttl_seconds,
+            refresh_margin_seconds=10.0,
+            clock=lambda: now_ts,
+        )
+        assert rust_token == provider.resolve_sync()
+
+
+def _generate_san_tls_credentials(dns_name: str) -> tuple[str, str]:
+    """Generate a self-signed X.509 certificate and private key with a DNS SubjectAltName."""
+    with tempfile.TemporaryDirectory(prefix="vtb-san-tls-") as tmpdir:
+        key_path = Path(tmpdir) / "key.pem"
+        cert_path = Path(tmpdir) / "cert.pem"
+        cmd = [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-days",
+            "1",
+            "-subj",
+            f"/CN={dns_name}",
+            "-addext",
+            f"subjectAltName=DNS:{dns_name}",
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
+
+
+def _build_tls13_server_context(cert_pem: str, key_pem: str) -> ssl.SSLContext:
+    """Create a server SSLContext restricted to TLS 1.3 for loopback handshake tests."""
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    with tempfile.TemporaryDirectory(prefix="vtb-srv-san-") as tmpdir:
+        cert_file = Path(tmpdir) / "cert.pem"
+        key_file = Path(tmpdir) / "key.pem"
+        cert_file.write_text(cert_pem, encoding="utf-8")
+        key_file.write_text(key_pem, encoding="utf-8")
+        server_ctx.load_cert_chain(str(cert_file), str(key_file))
+    return server_ctx
+
+
+def _serve_single_tls_greeting(server_sock: socket.socket, server_ctx: ssl.SSLContext, greeting: bytes) -> None:
+    """Accept one TCP connection, complete or absorb a TLS 1.3 handshake, and write a greeting."""
+    raw_conn, _ = server_sock.accept()
+    try:
+        with server_ctx.wrap_socket(raw_conn, server_side=True) as tls_conn:
+            tls_conn.sendall(greeting)
+    except OSError:
+        raw_conn.close()
+
+
+def _make_cloud_dialer_pair(
+    kind: str,
+    *,
+    endpoint_host: str,
+    port: int,
+    ca_pem: str | None,
+    clock: Any = None,
+) -> tuple[Any, Any]:
+    """Build matching sync and async AWS or Azure dialers for parameterized handshake and token tests."""
+    now_fn = clock or (lambda: 1_794_873_600.0)
+    if kind == "aws_rds":
+        common_rds: dict[str, Any] = {
+            "port": port,
+            "username": "iam_app_user",
+            "ca_pem": ca_pem,
+            "access_key_id": "test-access-key-placeholder",
+            "secret_access_key": "test-secret-key-placeholder",
+            "session_token": "test-token-placeholder",
+            "token_ttl_seconds": 900,
+            "refresh_margin_seconds": 60.0,
+            "clock": now_fn,
+        }
+        return SyncAwsRdsDialer(endpoint_host, **common_rds), AsyncAwsRdsDialer(endpoint_host, **common_rds)
+    if kind == "aws_dsql":
+        common_dsql: dict[str, Any] = {
+            "port": port,
+            "admin": True,
+            "ca_pem": ca_pem,
+            "access_key_id": "test-access-key-placeholder",
+            "secret_access_key": "test-secret-key-placeholder",
+            "session_token": "test-token-placeholder",
+            "token_ttl_seconds": 900,
+            "refresh_margin_seconds": 60.0,
+            "clock": now_fn,
+        }
+        return (
+            SyncAwsAuroraDsqlDialer(endpoint_host, **common_dsql),
+            AsyncAwsAuroraDsqlDialer(endpoint_host, **common_dsql),
+        )
+    seq = [0]
+
+    def _entra_fetcher(scope: str) -> dict[str, Any]:
+        seq[0] += 1
+        return {
+            "access_token": f"test-token-placeholder-{seq[0]}:{scope}",
+            "expires_in": 900,
+        }
+
+    common_azure: dict[str, Any] = {
+        "port": port,
+        "username": "entra_user",
+        "ca_pem": ca_pem,
+        "refresh_margin_seconds": 120.0,
+        "clock": now_fn,
+        "fetcher": _entra_fetcher,
+    }
+    return SyncAzureEntraDialer(endpoint_host, **common_azure), AsyncAzureEntraDialer(endpoint_host, **common_azure)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("dialer_kind", "endpoint_host", "mismatch_host"),
+    [
+        (
+            "aws_rds",
+            "orders.cluster-c9akciq32.us-east-1.rds.amazonaws.com",
+            "other.cluster-c9akciq32.us-east-1.rds.amazonaws.com",
+        ),
+        (
+            "aws_dsql",
+            "abc123def456.dsql.us-east-1.on.aws",
+            "xyz987uvw654.dsql.us-east-1.on.aws",
+        ),
+        (
+            "azure_entra",
+            "contoso-pg.postgres.database.azure.com",
+            "other-pg.postgres.database.azure.com",
+        ),
+    ],
+)
+async def test_aws_and_azure_dialers_tls13_verify_full_untrusted_and_hostname_mismatch(
+    dialer_kind: str,
+    endpoint_host: str,
+    mismatch_host: str,
+) -> None:
+    """Verify TLS 1.3 handshake, untrusted CA rejection, and hostname mismatch failure across all six dialers."""
+    cert_pem, key_pem = _generate_san_tls_credentials(endpoint_host)
+    untrusted_ca_pem, _ = _generate_san_tls_credentials("untrusted-root.internal")
+    server_ctx = _build_tls13_server_context(cert_pem, key_pem)
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.bind(("127.0.0.1", 0))
+    server_sock.listen(12)
+    port = server_sock.getsockname()[1]
+
+    try:
+        sync_dialer, async_dialer = _make_cloud_dialer_pair(
+            dialer_kind,
+            endpoint_host=endpoint_host,
+            port=port,
+            ca_pem=cert_pem,
+        )
+        assert sync_dialer.ssl_context.verify_mode == ssl.CERT_REQUIRED
+        assert sync_dialer.ssl_context.check_hostname is True
+        assert sync_dialer.ssl_context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert "test-token-placeholder" not in repr(sync_dialer)
+        assert "test-secret-key-placeholder" not in repr(sync_dialer)
+
+        t_sync_ok = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"SYNC_TLS13_OK"),
+            daemon=True,
+        )
+        t_sync_ok.start()
+        with sync_dialer.connect("127.0.0.1") as tls_sock:
+            assert tls_sock.version() == "TLSv1.3"
+            assert tls_sock.recv(13) == b"SYNC_TLS13_OK"
+        t_sync_ok.join(timeout=2.0)
+
+        t_async_ok = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"ASYNC_TLS13_OK"),
+            daemon=True,
+        )
+        t_async_ok.start()
+        reader, writer = await async_dialer.connect("127.0.0.1")
+        ssl_obj = writer.get_extra_info("ssl_object")
+        assert ssl_obj is not None
+        assert ssl_obj.version() == "TLSv1.3"
+        assert await reader.readexactly(14) == b"ASYNC_TLS13_OK"
+        writer.close()
+        await writer.wait_closed()
+        t_async_ok.join(timeout=2.0)
+
+        default_untrusted_sync, default_untrusted_async = _make_cloud_dialer_pair(
+            dialer_kind,
+            endpoint_host=endpoint_host,
+            port=port,
+            ca_pem=None if dialer_kind == "aws_rds" else untrusted_ca_pem,
+        )
+        if dialer_kind == "aws_rds":
+            assert default_untrusted_sync.ca_pem == aws_rds_root_ca_pem()
+
+        t_sync_untrusted = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"NEVER"),
+            daemon=True,
+        )
+        t_sync_untrusted.start()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            default_untrusted_sync.connect("127.0.0.1")
+        t_sync_untrusted.join(timeout=2.0)
+
+        t_async_untrusted = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"NEVER"),
+            daemon=True,
+        )
+        t_async_untrusted.start()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            await default_untrusted_async.connect("127.0.0.1")
+        t_async_untrusted.join(timeout=2.0)
+
+        mismatch_sync, mismatch_async = _make_cloud_dialer_pair(
+            dialer_kind,
+            endpoint_host=mismatch_host,
+            port=port,
+            ca_pem=cert_pem,
+        )
+
+        t_sync_mismatch = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"NEVER"),
+            daemon=True,
+        )
+        t_sync_mismatch.start()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            mismatch_sync.connect("127.0.0.1")
+        t_sync_mismatch.join(timeout=2.0)
+
+        t_async_mismatch = threading.Thread(
+            target=_serve_single_tls_greeting,
+            args=(server_sock, server_ctx, b"NEVER"),
+            daemon=True,
+        )
+        t_async_mismatch.start()
+        with pytest.raises(ssl.SSLCertVerificationError):
+            await mismatch_async.connect("127.0.0.1")
+        t_async_mismatch.join(timeout=2.0)
+    finally:
+        server_sock.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("dialer_kind", "endpoint_host", "pre_margin_ts", "rotate_ts"),
+    [
+        ("aws_rds", "orders.cluster-c9akciq32.us-east-1.rds.amazonaws.com", 1_500.0, 1_845.0),
+        ("aws_dsql", "abc123def456.dsql.us-east-1.on.aws", 1_500.0, 1_845.0),
+        ("azure_entra", "contoso-pg.postgres.database.azure.com", 1_500.0, 1_785.0),
+    ],
+)
+async def test_aws_and_azure_dialers_pre_expiry_token_rotation(
+    dialer_kind: str,
+    endpoint_host: str,
+    pre_margin_ts: float,
+    rotate_ts: float,
+) -> None:
+    """Verify sync and async resolve_token() cache valid tokens and rotate before expiry."""
+    sync_now = [1_000.0]
+    async_now = [1_000.0]
+    sync_dialer, _ = _make_cloud_dialer_pair(
+        dialer_kind,
+        endpoint_host=endpoint_host,
+        port=5432,
+        ca_pem=None,
+        clock=lambda: sync_now[0],
+    )
+    _, async_dialer = _make_cloud_dialer_pair(
+        dialer_kind,
+        endpoint_host=endpoint_host,
+        port=5432,
+        ca_pem=None,
+        clock=lambda: async_now[0],
+    )
+
+    first_sync = sync_dialer.resolve_token()
+    sync_now[0] = pre_margin_ts
+    assert sync_dialer.resolve_token() == first_sync
+
+    sync_now[0] = rotate_ts
+    rotated_sync = sync_dialer.resolve_token()
+    assert rotated_sync != first_sync
+
+    sync_now[0] = rotate_ts + 5.0
+    assert sync_dialer.resolve_token() == rotated_sync
+    sync_dialer.close()
+    sync_now[0] = rotate_ts + 10.0
+    after_close_sync = sync_dialer.resolve_token()
+    assert after_close_sync != rotated_sync
+
+    first_async = await async_dialer.resolve_token()
+    async_now[0] = pre_margin_ts
+    assert await async_dialer.resolve_token() == first_async
+
+    async_now[0] = rotate_ts
+    rotated_async = await async_dialer.resolve_token()
+    assert rotated_async != first_async
+
+    await async_dialer.close()
+    async_now[0] = rotate_ts + 10.0
+    after_close_async = await async_dialer.resolve_token()
+    assert after_close_async != rotated_async
+
+
+@pytest.mark.parametrize(
+    ("endpoint_host", "explicit_authority", "env_authority", "expected_authority"),
+    [
+        ("contoso-pg.postgres.database.azure.com", None, None, None),
+        ("gov-pg.postgres.database.usgovcloudapi.net", None, None, "https://login.microsoftonline.us"),
+        ("cn-sql.database.chinacloudapi.cn", None, None, "https://login.chinacloudapi.cn"),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            None,
+            "https://login.example.test",
+            "https://login.example.test",
+        ),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            "https://login.override.test",
+            "https://login.example.test",
+            "https://login.override.test",
+        ),
+    ],
+)
+def test_azure_entra_dialer_selects_authority_host_for_endpoint_cloud(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_host: str,
+    explicit_authority: str | None,
+    env_authority: str | None,
+    expected_authority: str | None,
+) -> None:
+    """Verify Azure dialers pick the Entra authority for sovereign clouds unless one is set explicitly."""
+    if env_authority is None:
+        monkeypatch.delenv("AZURE_AUTHORITY_HOST", raising=False)
+    else:
+        monkeypatch.setenv("AZURE_AUTHORITY_HOST", env_authority)
+
+    dialer = SyncAzureEntraDialer(
+        endpoint_host,
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="cid",
+        client_secret="test-client-secret-placeholder",
+        authority_host=explicit_authority,
+    )
+    provider = dialer.token_provider
+    assert isinstance(provider, AzureEntraTokenProvider)
+    assert provider.authority_host == expected_authority
+
+
+@pytest.mark.parametrize(
+    ("endpoint_host", "engine", "expected_engine", "expected_port", "expected_scope"),
+    [
+        ("contoso-pg.postgres.database.azure.com", None, "postgres", 5432, AZURE_POSTGRES_SCOPE),
+        ("contoso-mysql.mysql.database.azure.com", None, "mysql", 3306, AZURE_MYSQL_SCOPE),
+        ("contoso-sql.database.windows.net", None, "mssql", 1433, AZURE_MSSQL_SCOPE),
+        ("privatelink-sql.internal.corp", "sqlserver", "mssql", 1433, AZURE_MSSQL_SCOPE),
+        (
+            "gov-pg.postgres.database.usgovcloudapi.net",
+            None,
+            "postgres",
+            5432,
+            "https://ossrdbms-aad.database.usgovcloudapi.net/.default",
+        ),
+        (
+            "gov-sql.database.usgovcloudapi.net",
+            None,
+            "mssql",
+            1433,
+            "https://database.usgovcloudapi.net/.default",
+        ),
+        (
+            "cn-mysql.mysql.database.chinacloudapi.cn",
+            None,
+            "mysql",
+            3306,
+            "https://ossrdbms-aad.database.chinacloudapi.cn/.default",
+        ),
+    ],
+)
+def test_azure_entra_dialer_scope_selection_and_connection_kwargs(
+    endpoint_host: str,
+    engine: str | None,
+    expected_engine: str,
+    expected_port: int,
+    expected_scope: str,
+) -> None:
+    """Verify Azure dialers auto-select engine scope, inject unscoped providers, and build connection_kwargs."""
+    seen_scopes: list[str] = []
+
+    def _capture_scope(scope: str) -> dict[str, Any]:
+        seen_scopes.append(scope)
+        return {"access_token": "test-token-placeholder", "expires_in": 600}
+
+    unscoped_provider = AzureEntraTokenProvider(fetcher=_capture_scope)
+    dialer = SyncAzureEntraDialer(
+        endpoint_host,
+        engine=engine,
+        username="entra_app",
+        database="orders",
+        token_provider=unscoped_provider,
+    )
+    assert dialer.engine == expected_engine
+    assert dialer.port == expected_port
+    assert dialer.scope == expected_scope
+    assert dialer.resolve_token() == "test-token-placeholder"
+    assert seen_scopes == [expected_scope]
+
+    kwargs = dialer.connection_kwargs()
+    assert kwargs["token_provider"] is dialer.token_provider
+    if expected_engine == "postgres":
+        assert kwargs["dsn"] == f"postgresql://entra_app@{endpoint_host}:5432/orders?sslmode=verify-full"
+    elif expected_engine == "mysql":
+        assert kwargs["ssl_mode"] == "verify-full"
+        assert kwargs["port"] == 3306
+        assert kwargs["database"] == "orders"
+    else:
+        assert kwargs["encryption"] == "required"
+        assert kwargs["trust_server_certificate"] is False
+        assert kwargs["port"] == 1433
+        assert kwargs["database"] == "orders"
+
+
+def test_aws_dialers_connection_kwargs_and_lazy_package_exports() -> None:
+    """Verify AWS RDS Postgres/MySQL and DSQL connection_kwargs plus vertebra.db.dialer lazy exports."""
+    rds_pg = SyncAwsRdsDialer(
+        "orders.c9akciq32.us-east-1.rds.amazonaws.com",
+        username="iam_pg",
+        database="appdb",
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+    )
+    pg_kwargs = rds_pg.connection_kwargs()
+    assert (
+        pg_kwargs["dsn"]
+        == "postgresql://iam_pg@orders.c9akciq32.us-east-1.rds.amazonaws.com:5432/appdb?sslmode=verify-full"
+    )
+    assert pg_kwargs["ca_pem"] == aws_rds_root_ca_pem()
+    assert pg_kwargs["token_provider"] is rds_pg.token_provider
+
+    rds_mysql = SyncAwsRdsDialer(
+        "orders.c9akciq32.us-east-1.rds.amazonaws.com",
+        engine="mysql",
+        username="iam_mysql",
+        database="shop",
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+    )
+    mysql_kwargs = rds_mysql.connection_kwargs()
+    assert rds_mysql.port == 3306
+    assert mysql_kwargs["ssl_mode"] == "verify-full"
+    assert mysql_kwargs["ssl_ca"] == aws_rds_root_ca_pem()
+    assert mysql_kwargs["user"] == "iam_mysql"
+
+    dsql = SyncAwsAuroraDsqlDialer(
+        "abc123def456.dsql.us-east-1.on.aws",
+        admin=False,
+        access_key_id="test-access-key-placeholder",
+        secret_access_key="test-secret-key-placeholder",
+    )
+    dsql_kwargs = dsql.connection_kwargs(database="analytics")
+    assert dsql.action == "DbConnect"
+    assert (
+        dsql_kwargs["dsn"]
+        == "postgresql://postgres@abc123def456.dsql.us-east-1.on.aws:5432/analytics?sslmode=verify-full"
+    )
+    assert "ca_pem" not in dsql_kwargs
+
+    expected_exports = {
+        "SyncAwsRdsDialer": SyncAwsRdsDialer,
+        "AsyncAwsRdsDialer": AsyncAwsRdsDialer,
+        "SyncAwsAuroraDsqlDialer": SyncAwsAuroraDsqlDialer,
+        "AsyncAwsAuroraDsqlDialer": AsyncAwsAuroraDsqlDialer,
+        "SyncAzureEntraDialer": SyncAzureEntraDialer,
+        "AsyncAzureEntraDialer": AsyncAzureEntraDialer,
+        "aws_rds_root_ca_pem": aws_rds_root_ca_pem,
+    }
+    for symbol_name, symbol_obj in expected_exports.items():
+        assert symbol_name in dialer_pkg.__all__
+        assert symbol_name in dir(dialer_pkg)
+        assert getattr(dialer_pkg, symbol_name) is symbol_obj
+
+    with pytest.raises(ImproperConfigurationError):
+        SyncAwsRdsDialer("orders.c9akciq32.us-east-1.rds.amazonaws.com", ca_pem="   ")
+    with pytest.raises(ImproperConfigurationError):
+        SyncAzureEntraDialer("contoso-pg.postgres.database.azure.com", port=True)
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "expected_symbol"),
+    [
+        ("SyncAwsRdsDialer", SyncAwsRdsDialer),
+        ("AsyncAwsRdsDialer", AsyncAwsRdsDialer),
+        ("SyncAwsAuroraDsqlDialer", SyncAwsAuroraDsqlDialer),
+        ("AsyncAwsAuroraDsqlDialer", AsyncAwsAuroraDsqlDialer),
+        ("SyncAzureEntraDialer", SyncAzureEntraDialer),
+        ("AsyncAzureEntraDialer", AsyncAzureEntraDialer),
+        ("aws_rds_root_ca_pem", aws_rds_root_ca_pem),
+    ],
+)
+def test_vertebra_db_top_level_cloud_dialer_exports(symbol_name: str, expected_symbol: Any) -> None:
+    """Verify vertebra.db re-exports AWS and Azure dialers and aws_rds_root_ca_pem in __all__ and __dir__."""
+    assert symbol_name in db_pkg.__all__
+    assert symbol_name in dir(db_pkg)
+    assert getattr(db_pkg, symbol_name) is expected_symbol
+
+
+def test_vertebra_db_lazy_cloud_dialer_resolution_in_fresh_interpreter() -> None:
+    """Verify importing vertebra.db keeps dialer submodules lazy until AWS and Azure symbols are imported."""
+    script = (
+        "import sys\n"
+        "import vertebra.db\n"
+        "for mod in ('vertebra.db.dialer', 'vertebra.db.dialer.aws', 'vertebra.db.dialer.azure'):\n"
+        "    assert mod not in sys.modules, f'{mod} loaded eagerly'\n"
+        "from vertebra.db import (\n"
+        "    SyncAwsRdsDialer,\n"
+        "    AsyncAwsRdsDialer,\n"
+        "    SyncAwsAuroraDsqlDialer,\n"
+        "    AsyncAwsAuroraDsqlDialer,\n"
+        "    SyncAzureEntraDialer,\n"
+        "    AsyncAzureEntraDialer,\n"
+        "    aws_rds_root_ca_pem,\n"
+        ")\n"
+        "expected = {\n"
+        "    'SyncAwsRdsDialer': SyncAwsRdsDialer,\n"
+        "    'AsyncAwsRdsDialer': AsyncAwsRdsDialer,\n"
+        "    'SyncAwsAuroraDsqlDialer': SyncAwsAuroraDsqlDialer,\n"
+        "    'AsyncAwsAuroraDsqlDialer': AsyncAwsAuroraDsqlDialer,\n"
+        "    'SyncAzureEntraDialer': SyncAzureEntraDialer,\n"
+        "    'AsyncAzureEntraDialer': AsyncAzureEntraDialer,\n"
+        "    'aws_rds_root_ca_pem': aws_rds_root_ca_pem,\n"
+        "}\n"
+        "for name, obj in expected.items():\n"
+        "    assert name in vertebra.db.__all__\n"
+        "    assert getattr(vertebra.db, name) is obj\n"
+        "assert 'vertebra.db.dialer.aws' in sys.modules\n"
+        "assert 'vertebra.db.dialer.azure' in sys.modules\n"
+        "assert aws_rds_root_ca_pem().startswith('-----BEGIN CERTIFICATE-----')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
+_DSQL_TEST_ENDPOINT = "abc123def456.dsql.us-east-1.on.aws"
+_AWS_TEST_KEYS: dict[str, Any] = {
+    "access_key_id": "test-access-key-placeholder",
+    "secret_access_key": "test-secret-key-placeholder",
+}
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize("native_admin", [True, False])
+@pytest.mark.parametrize("rebuild_port", [None, 5433], ids=["reuse-native", "rebuild-native"])
+def test_aws_aurora_dsql_dialer_wrapping_inherits_native_admin(
+    dialer_cls: Any,
+    native_admin: bool,
+    rebuild_port: int | None,
+) -> None:
+    """Verify wrapping a native `AwsAuroraDsqlDialer` keeps its `admin` flag on the dialer and its token provider."""
+    native = AwsAuroraDsqlDialer(_DSQL_TEST_ENDPOINT, admin=native_admin)
+    dialer = dialer_cls(native, port=rebuild_port, **_AWS_TEST_KEYS)
+
+    assert dialer.admin is native_admin
+    assert dialer.token_provider.admin is native_admin
+    assert dialer.action == ("DbConnectAdmin" if native_admin else "DbConnect")
+    assert dialer.username == ("admin" if native_admin else "postgres")
+    assert dialer_cls(native, admin=native_admin, port=rebuild_port, **_AWS_TEST_KEYS).admin is native_admin
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize(
+    ("native_admin", "provider_admin", "explicit_admin"),
+    [
+        (True, None, False),
+        (False, None, True),
+        (True, False, None),
+        (None, True, False),
+        (None, False, True),
+    ],
+)
+def test_aws_aurora_dsql_dialer_rejects_conflicting_admin_sources(
+    dialer_cls: Any,
+    native_admin: bool | None,
+    provider_admin: bool | None,
+    explicit_admin: bool | None,
+) -> None:
+    """Verify an `admin` argument, wrapped dialer, and DSQL token provider that disagree fail instead of one winning."""
+    endpoint: Any = (
+        _DSQL_TEST_ENDPOINT if native_admin is None else AwsAuroraDsqlDialer(_DSQL_TEST_ENDPOINT, admin=native_admin)
+    )
+    kwargs: dict[str, Any] = dict(_AWS_TEST_KEYS)
+    if provider_admin is not None:
+        kwargs = {
+            "token_provider": AwsAuroraDsqlIamTokenProvider(
+                hostname=_DSQL_TEST_ENDPOINT,
+                region="us-east-1",
+                admin=provider_admin,
+                **_AWS_TEST_KEYS,
+            )
+        }
+    if explicit_admin is not None:
+        kwargs["admin"] = explicit_admin
+    with pytest.raises(ImproperConfigurationError, match="admin"):
+        dialer_cls(endpoint, **kwargs)
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsAuroraDsqlDialer, AsyncAwsAuroraDsqlDialer])
+@pytest.mark.parametrize("provider_admin", [True, False])
+def test_aws_aurora_dsql_dialer_admin_defaults_to_token_provider(dialer_cls: Any, provider_admin: bool) -> None:
+    """Verify an omitted `admin` argument follows a supplied `AwsAuroraDsqlIamTokenProvider`."""
+    provider = AwsAuroraDsqlIamTokenProvider(
+        hostname=_DSQL_TEST_ENDPOINT,
+        region="us-east-1",
+        admin=provider_admin,
+        **_AWS_TEST_KEYS,
+    )
+    dialer = dialer_cls(_DSQL_TEST_ENDPOINT, token_provider=provider)
+    assert dialer.admin is provider_admin
+    assert dialer.token_provider is provider
+
+
+@pytest.mark.parametrize("dialer_cls", [SyncAwsRdsDialer, AsyncAwsRdsDialer])
+@pytest.mark.parametrize(
+    ("endpoint_host", "port", "engine", "expected_engine", "expected_port", "expected_user", "expected_db"),
+    [
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:3306", None, None, "mysql", 3306, "admin", "mysql"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", 3306, None, "mysql", 3306, "admin", "mysql"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", None, "mysql", "mysql", 3306, "admin", "mysql"),
+        (
+            "orders.c9akciq32.us-east-1.rds.amazonaws.com:3306",
+            None,
+            "postgres",
+            "postgres",
+            3306,
+            "postgres",
+            "postgres",
+        ),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:5432", None, None, "postgres", 5432, "postgres", "postgres"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", None, None, "postgres", 5432, "postgres", "postgres"),
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com:3307", None, "mariadb", "mysql", 3307, "admin", "mysql"),
+    ],
+)
+def test_aws_rds_dialer_resolves_engine_before_default_username(
+    dialer_cls: Any,
+    endpoint_host: str,
+    port: int | None,
+    engine: str | None,
+    expected_engine: str,
+    expected_port: int,
+    expected_user: str,
+    expected_db: str,
+) -> None:
+    """Verify the default IAM username follows the engine resolved from `engine`, `port`, or an embedded port."""
+    dialer = dialer_cls(endpoint_host, port=port, engine=engine, clock=lambda: 1_794_873_600.0, **_AWS_TEST_KEYS)
+
+    assert dialer.engine == expected_engine
+    assert dialer.port == expected_port
+    assert dialer.username == expected_user
+    assert dialer.database == expected_db
+    assert dialer.token_provider.username == expected_user
+    signed = dialer.token_provider.resolve_sync()
+    assert parse_qs(urlsplit(f"https://{signed}").query)["DBUser"] == [expected_user]

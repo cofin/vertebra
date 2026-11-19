@@ -37,6 +37,7 @@ from vertebra.db import (
     SyncPipeline,
     SyncPipelineCapable,
 )
+from vertebra.db import dbapi as vertebra_dbapi
 from vertebra.db.adapters.mssql import (
     AsyncMSSQLDriver,
     AsyncMSSQLPipeline,
@@ -1086,3 +1087,132 @@ async def test_mssql_driver_azure_entra_token_wire_and_reconnect_refresh(mode: s
     finally:
         server.close()
     assert all(s == AZURE_MSSQL_SCOPE for s in seen_scopes)
+
+
+def _make_mssql_entra_provider() -> AzureEntraTokenProvider:
+    """Build an offline Azure Entra token provider for SQL Server transport-security policy tests."""
+    return AzureEntraTokenProvider(
+        fetcher=lambda scope: (f"test-token-placeholder-{scope}", 5000.0),
+        clock=lambda: 1000.0,
+    )
+
+
+_MSSQL_PLAINTEXT_LOGIN_MODES = [
+    "not_supported",
+    "disabled",
+    "disable",
+    "false",
+    "off",
+    "no",
+    "NOT_SUPPORTED",
+    "login_only",
+    "login-only",
+    "prefer",
+    "optional",
+]
+_MSSQL_TLS_LOGIN_MODES = [
+    "required",
+    "require",
+    "true",
+    "on",
+    "yes",
+    "mandatory",
+    "strict",
+    "verify-full",
+    "verify_full",
+    "verify-ca",
+    "verify_ca",
+]
+
+
+@pytest.mark.parametrize("encryption", _MSSQL_PLAINTEXT_LOGIN_MODES)
+@pytest.mark.parametrize(
+    "source", ["field", "url_encryption", "url_encrypt", "sqlserver_url", "replace", "dbapi_vtb_url"]
+)
+def test_mssql_entra_remote_host_rejects_unencrypted_login_modes(encryption: str, source: str) -> None:
+    """Verify an Entra token provider on a remote host rejects encryption modes that allow a plaintext login."""
+    provider = _make_mssql_entra_provider()
+    remote = "entra_user@sql.remote.example:1433/appdb"
+    if source == "dbapi_vtb_url":
+        with pytest.raises(vertebra_dbapi.InterfaceError, match="encryption") as dbapi_exc:
+            vertebra_dbapi.connect(f"mssql+vtb://{remote}?encryption={encryption}", token_provider=provider)
+        assert isinstance(dbapi_exc.value.__cause__, ImproperConfigurationError)
+        return
+    with pytest.raises(ImproperConfigurationError, match="encryption") as exc_info:
+        if source == "field":
+            MSSQLConfig(host="sql.remote.example", encryption=encryption, token_provider=provider)
+        elif source == "url_encryption":
+            MSSQLConfig.from_url(f"mssql://{remote}?encryption={encryption}", token_provider=provider)
+        elif source == "url_encrypt":
+            MSSQLConfig.from_url(f"mssql://{remote}?encrypt={encryption}", token_provider=provider)
+        elif source == "sqlserver_url":
+            MSSQLConfig.from_url(f"sqlserver://{remote}?encryption={encryption}", token_provider=provider)
+        else:
+            msgspec.structs.replace(
+                MSSQLConfig(host="sql.remote.example", token_provider=provider),
+                encryption=encryption,
+            )
+    assert "test-token-placeholder" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("encryption", ["required", "strict"])
+@pytest.mark.parametrize("source", ["field", "url_snake", "url_pascal", "dbapi_vtb_url"])
+def test_mssql_entra_remote_host_rejects_trust_server_certificate(encryption: str, source: str) -> None:
+    """Verify an Entra token provider on a remote host rejects skipping server certificate verification."""
+    provider = _make_mssql_entra_provider()
+    remote = f"entra_user@sql.remote.example:1433/appdb?encryption={encryption}"
+    if source == "dbapi_vtb_url":
+        with pytest.raises(vertebra_dbapi.InterfaceError, match="trust_server_certificate") as dbapi_exc:
+            vertebra_dbapi.connect(f"mssql+vtb://{remote}&trust_server_certificate=true", token_provider=provider)
+        assert isinstance(dbapi_exc.value.__cause__, ImproperConfigurationError)
+        return
+    with pytest.raises(ImproperConfigurationError, match="trust_server_certificate"):
+        if source == "field":
+            MSSQLConfig(
+                host="sql.remote.example",
+                encryption=encryption,
+                trust_server_certificate=True,
+                token_provider=provider,
+            )
+        elif source == "url_snake":
+            MSSQLConfig.from_url(f"mssql://{remote}&trust_server_certificate=true", token_provider=provider)
+        else:
+            MSSQLConfig.from_url(f"mssql://{remote}&TrustServerCertificate=yes", token_provider=provider)
+
+
+@pytest.mark.parametrize("encryption", _MSSQL_TLS_LOGIN_MODES)
+@pytest.mark.parametrize("host", ["sql.remote.example", "10.0.0.42", "localhost%evil.example.com"])
+def test_mssql_entra_remote_host_accepts_verified_tls_modes(encryption: str, host: str) -> None:
+    """Verify an Entra token provider on a remote host keeps accepting verified full-session TLS modes."""
+    cfg = MSSQLConfig(host=host, encryption=encryption, token_provider=_make_mssql_entra_provider())
+    assert cfg.encryption == encryption
+    assert cfg.trust_server_certificate is False
+    assert cfg.token_provider.scope == AZURE_MSSQL_SCOPE
+
+
+@pytest.mark.parametrize("encryption", ["not_supported", "off", "login_only", "required"])
+@pytest.mark.parametrize("trust_server_certificate", [False, True])
+@pytest.mark.parametrize(
+    ("host", "with_provider"),
+    [
+        ("127.0.0.1", True),
+        ("localhost", True),
+        ("::1", True),
+        ("sql.remote.example", False),
+    ],
+)
+def test_mssql_transport_security_unchanged_for_loopback_or_password_auth(
+    encryption: str,
+    trust_server_certificate: bool,
+    host: str,
+    with_provider: bool,
+) -> None:
+    """Verify loopback Entra targets and remote password logins keep every encryption and trust setting."""
+    cfg = MSSQLConfig(
+        host=host,
+        encryption=encryption,
+        trust_server_certificate=trust_server_certificate,
+        token_provider=_make_mssql_entra_provider() if with_provider else None,
+    )
+    assert cfg.encryption == encryption
+    assert cfg.trust_server_certificate is trust_server_certificate

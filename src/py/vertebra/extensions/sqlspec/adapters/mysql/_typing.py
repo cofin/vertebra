@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
 
     from vertebra.db.adapters.mysql import AsyncMySQLDriver, SyncMySQLDriver
+    from vertebra.db.driver._cloud_auth import DatabaseTokenProvider
     from vertebra.extensions.sqlspec.adapters.mysql.config import MySQLAsyncConfig, MySQLSyncConfig
     from vertebra.extensions.sqlspec.adapters.mysql.driver import MySQLAsyncDriver, MySQLSyncDriver
 
@@ -79,6 +80,8 @@ class MySQLConnectionParams(TypedDict, total=False):
     """Preferred IP type for Cloud SQL Dialer connections."""
     enable_iam_auth: NotRequired[bool]
     """Authenticate database connections with cloud IAM tokens."""
+    token_provider: NotRequired[DatabaseTokenProvider | None]
+    """Cloud database token provider supplying dynamic IAM passwords."""
     extra: NotRequired[dict[str, Any]]
     """Additional backend-specific keyword parameters."""
 

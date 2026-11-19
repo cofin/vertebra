@@ -55,6 +55,7 @@ from litestar.params import SkipValidation
 from litestar.plugins import InitPluginProtocol
 from litestar.testing import TestClient
 from sqlalchemy import ForeignKey, String, create_engine, event, select
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError as SQLAlchemyIntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 from sqlalchemy.pool import StaticPool
@@ -79,6 +80,7 @@ from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, S
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.mysql.config import build_mysql_client_kwargs
 from vertebra.db.adapters.oracle import (
     AsyncOracleDriver,
     AsyncOraclePool,
@@ -89,6 +91,14 @@ from vertebra.db.adapters.oracle import (
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.dbapi import AsyncDBAPIConnection, InterfaceError
+from vertebra.db.dialer import aws_rds_root_ca_pem
+from vertebra.db.driver._cloud_auth import (
+    AZURE_MYSQL_SCOPE,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+    DatabaseTokenProvider,
+)
 from vertebra.extensions.alchemy import (
     AsyncSHMBrokerTransport,
     AsyncSHMSessionBroker,
@@ -116,7 +126,16 @@ from vertebra.extensions.litestar import (
     VertebraConfig,
     VertebraPlugin,
 )
-from vertebra.extensions.sqlalchemy.dialects import ALL_DIALECT_SCHEMES, DIALECT_DESCRIPTORS
+from vertebra.extensions.sqlalchemy.dialects import (
+    ALL_DIALECT_SCHEMES,
+    DIALECT_DESCRIPTORS,
+    AsyncMSSQLDialect,
+    AsyncMySQLDialect,
+    AsyncPostgreSQLDialect,
+    SyncMSSQLDialect,
+    SyncMySQLDialect,
+    SyncPostgreSQLDialect,
+)
 from vertebra.extensions.sqlspec import (
     AsyncAdapterConfig,
     BigQueryAsyncConfig,
@@ -133,6 +152,7 @@ from vertebra.extensions.sqlspec import (
     MSSQLSyncDriver,
     MySQLAsyncConfig,
     MySQLAsyncDriver,
+    MySQLConnectionParams,
     MySQLSyncConfig,
     MySQLSyncDriver,
     OracleAsyncConfig,
@@ -141,6 +161,7 @@ from vertebra.extensions.sqlspec import (
     OracleSyncDriver,
     PostgresAsyncConfig,
     PostgresAsyncDriver,
+    PostgresConnectionParams,
     PostgresSyncConfig,
     PostgresSyncDriver,
     ProxyAsyncConfig,
@@ -158,8 +179,10 @@ from vertebra.extensions.sqlspec import (
     create_sqlspec_plugin,
 )
 from vertebra.extensions.sqlspec.adapters.bigquery.core import BigQueryConnectionShim
+from vertebra.extensions.sqlspec.adapters.mysql.core import build_connection_config as build_mysql_connection_config
 from vertebra.extensions.sqlspec.adapters.spanner.core import SpannerConnectionShim
 from vertebra.storage import SyncObjectStore
+from vertebra.typing import ImproperConfigurationError
 
 
 class _DummySyncDriver:
@@ -1185,3 +1208,433 @@ assert "google.adk" not in sys.modules
 """
     proc = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True)
     assert proc.returncode == 0, f"Subprocess failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+
+class _StaticTokenProvider(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Deterministic `DatabaseTokenProvider` fixture returning a static placeholder token."""
+
+    token: str = "test-token-placeholder"
+
+    def resolve_sync(self, *, force_refresh: bool = False) -> str:
+        _ = force_refresh
+        return self.token
+
+    async def resolve_async(self, *, force_refresh: bool = False) -> str:
+        _ = force_refresh
+        return self.token
+
+    def invalidate(self) -> None:
+        return None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sync_dialect_cls", "async_dialect_cls", "sync_url", "async_url", "ca_kwarg", "ca_is_bytes"),
+    [
+        (
+            SyncPostgreSQLDialect,
+            AsyncPostgreSQLDialect,
+            "postgresql+vtb://iam_user@localhost:5432/app",
+            "postgresql+vtb_async://iam_user@localhost:5432/app",
+            "ca_pem",
+            False,
+        ),
+        (
+            SyncMySQLDialect,
+            AsyncMySQLDialect,
+            "mysql+vtb://iam_user@localhost:3306/app",
+            "mysql+vtb_async://iam_user@localhost:3306/app",
+            "ssl_ca",
+            False,
+        ),
+        (
+            SyncMSSQLDialect,
+            AsyncMSSQLDialect,
+            "mssql+vtb://iam_user@localhost:1433/app",
+            "mssql+vtb_async://iam_user@localhost:1433/app",
+            "ca_pem",
+            True,
+        ),
+    ],
+    ids=["postgresql+vtb", "mysql+vtb", "mssql+vtb"],
+)
+async def test_sqlalchemy_vtb_dialects_forward_token_provider_and_ca_connect_args(
+    sync_dialect_cls: type[Any],
+    async_dialect_cls: type[Any],
+    sync_url: str,
+    async_url: str,
+    ca_kwarg: str,
+    ca_is_bytes: bool,
+) -> None:
+    """Verify SQLAlchemy +vtb and +vtb_async dialects forward token_provider and CA options into DBAPI configs."""
+    provider = _StaticTokenProvider()
+    assert isinstance(provider, DatabaseTokenProvider)
+    ca_pem_text = aws_rds_root_ca_pem()
+    ca_value: str | bytes = ca_pem_text.encode("utf-8") if ca_is_bytes else ca_pem_text
+    ca_kwargs: dict[str, Any] = {ca_kwarg: ca_value}
+
+    sync_dialect = sync_dialect_cls()
+    sync_args, sync_params = sync_dialect.create_connect_args(make_url(sync_url))
+    sync_dbapi = sync_dialect.import_dbapi()
+    sync_conn = sync_dbapi.connect(
+        *sync_args,
+        **sync_params,
+        share_pool=False,
+        token_provider=provider,
+        **ca_kwargs,
+    )
+    try:
+        assert sync_conn.config is not None
+        sync_cfg = cast("Any", sync_conn.config)
+        assert sync_cfg.token_provider is provider
+        assert getattr(sync_cfg, ca_kwarg) == ca_value
+    finally:
+        sync_conn.close()
+
+    async_dialect = async_dialect_cls()
+    async_args, async_params = async_dialect.create_connect_args(make_url(async_url))
+    assert async_args == []
+    async_conn = AsyncDBAPIConnection(
+        async_params["url"],
+        share_pool=False,
+        token_provider=provider,
+        **ca_kwargs,
+    )
+    try:
+        assert async_conn.config is not None
+        async_cfg = cast("Any", async_conn.config)
+        assert async_cfg.token_provider is provider
+        assert getattr(async_cfg, ca_kwarg) == ca_value
+    finally:
+        await async_conn.close()
+
+    with pytest.raises(InterfaceError, match="unsupported_cloud_arg"):
+        sync_dbapi.connect(*sync_args, **sync_params, share_pool=False, unsupported_cloud_arg=True)
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [PostgresSyncConfig, PostgresAsyncConfig],
+    ids=["sync", "async"],
+)
+@pytest.mark.parametrize(
+    "init_mode",
+    ["kwargs", "typed_mapping", "pg_config"],
+)
+@pytest.mark.parametrize(
+    "derive_mode",
+    ["dsn", "url", "connection_config_overrides", "replicas"],
+)
+def test_sqlspec_postgres_configs_forward_and_preserve_cloud_auth_across_derive_pool(
+    config_cls: type[PostgresSyncConfig | PostgresAsyncConfig],
+    init_mode: str,
+    derive_mode: str,
+) -> None:
+    """Verify PostgresSyncConfig and PostgresAsyncConfig forward and preserve token_provider and ca_pem on derive_pool."""
+    provider = _StaticTokenProvider()
+    override_provider = _StaticTokenProvider(token="test-token-placeholder-replica")
+    ca_pem = aws_rds_root_ca_pem()
+    primary_dsn = "postgresql://iam_user@primary.internal:5432/app"
+    replica_dsn = "postgresql://iam_user@replica.internal:5432/app"
+    replicas_arg = [replica_dsn] if derive_mode == "replicas" else None
+
+    if init_mode == "kwargs":
+        primary = config_cls(
+            primary_dsn,
+            token_provider=provider,
+            ca_pem=ca_pem,
+            share_pool=False,
+            replicas=replicas_arg,
+        )
+    elif init_mode == "typed_mapping":
+        typed_params: PostgresConnectionParams = {
+            "dsn": primary_dsn,
+            "token_provider": provider,
+            "ca_pem": ca_pem,
+        }
+        primary = config_cls(typed_params, share_pool=False, replicas=replicas_arg)
+    else:
+        pg_cfg = PostgreSQLConfig(dsn=primary_dsn, token_provider=provider, ca_pem=ca_pem)
+        primary = config_cls(pg_cfg, share_pool=False, replicas=replicas_arg)
+
+    assert primary.driver_config.dsn == primary_dsn
+    assert primary.driver_config.token_provider is provider
+    assert primary.driver_config.ca_pem == ca_pem
+
+    if derive_mode == "dsn":
+        derived = primary.derive_pool(dsn=replica_dsn)
+    elif derive_mode == "url":
+        derived = primary.derive_pool(url=replica_dsn)
+    elif derive_mode == "connection_config_overrides":
+        derived = primary.derive_pool(connection_config_overrides={"dsn": replica_dsn})
+    else:
+        derived = primary.replica_groups["default"].specs[0].config
+
+    assert derived.driver_config.dsn == replica_dsn
+    assert derived.driver_config.token_provider is provider
+    assert derived.driver_config.ca_pem == ca_pem
+
+    replaced = primary.derive_pool(dsn=replica_dsn, token_provider=override_provider)
+    assert replaced.driver_config.dsn == replica_dsn
+    assert replaced.driver_config.token_provider is override_provider
+    assert replaced.driver_config.ca_pem == ca_pem
+    assert primary.driver_config.token_provider is provider
+
+    cleared = primary.derive_pool(dsn=replica_dsn, token_provider=None, ca_pem=None)
+    assert cleared.driver_config.dsn == replica_dsn
+    assert cleared.driver_config.token_provider is None
+    assert cleared.driver_config.ca_pem is None
+    assert primary.driver_config.token_provider is provider
+    assert primary.driver_config.ca_pem == ca_pem
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [MySQLSyncConfig, MySQLAsyncConfig],
+    ids=["sync", "async"],
+)
+@pytest.mark.parametrize(
+    "provider_kind",
+    ["rds_iam", "azure_entra_unscoped"],
+)
+@pytest.mark.parametrize(
+    "init_mode",
+    ["kwargs", "typed_mapping", "mysql_config"],
+)
+@pytest.mark.parametrize(
+    "derive_mode",
+    ["dsn", "url", "endpoint", "connection_config_overrides", "replicas_url", "replicas_endpoint"],
+)
+def test_sqlspec_mysql_configs_forward_and_preserve_cloud_auth_across_derive_pool(
+    config_cls: type[MySQLSyncConfig | MySQLAsyncConfig],
+    provider_kind: str,
+    init_mode: str,
+    derive_mode: str,
+) -> None:
+    """Verify MySQLSyncConfig and MySQLAsyncConfig forward and preserve token_provider and ssl_ca on derive_pool."""
+    raw_entra = AzureEntraTokenProvider()
+    if provider_kind == "rds_iam":
+        provider: DatabaseTokenProvider = AwsRdsIamTokenProvider(
+            endpoint_host="primary.internal",
+            port=3306,
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-id",
+            secret_access_key="test-token-placeholder-secret",
+        )
+    else:
+        assert raw_entra.scope is None
+        provider = raw_entra
+
+    override_provider = _StaticTokenProvider(token="test-token-placeholder-replica")
+    custom_ca = "-----BEGIN CERTIFICATE-----\nMIIBCgKCAQEAtestcustomca\n-----END CERTIFICATE-----\n"
+    override_ca = aws_rds_root_ca_pem()
+    primary_dsn = "mysql://iam_user@primary.internal:3306/app"
+    replica_dsn = "mysql://iam_user@replica.internal:3307/app"
+    replicas_arg: list[Any] | None = None
+    if derive_mode == "replicas_url":
+        replicas_arg = [replica_dsn]
+    elif derive_mode == "replicas_endpoint":
+        replicas_arg = [{"host": "replica.internal", "port": 3307}]
+
+    if init_mode == "kwargs":
+        primary = config_cls(
+            primary_dsn,
+            token_provider=provider,
+            ssl_ca=custom_ca,
+            share_pool=False,
+            replicas=replicas_arg,
+        )
+    elif init_mode == "typed_mapping":
+        typed_params: MySQLConnectionParams = {
+            "dsn": primary_dsn,
+            "token_provider": provider,
+            "ssl_ca": custom_ca,
+        }
+        primary = config_cls(typed_params, share_pool=False, replicas=replicas_arg)
+    else:
+        mysql_cfg = MySQLConfig(dsn=primary_dsn, token_provider=provider, ssl_ca=custom_ca)
+        primary = config_cls(mysql_cfg, share_pool=False, replicas=replicas_arg)
+
+    assert primary.driver_config.dsn == primary_dsn
+    assert primary.driver_config.ssl_ca == custom_ca
+    if provider_kind == "rds_iam":
+        assert primary.driver_config.token_provider is provider
+    else:
+        assert raw_entra.scope is None
+        assert isinstance(primary.driver_config.token_provider, AzureEntraTokenProvider)
+        assert primary.driver_config.token_provider.scope == AZURE_MYSQL_SCOPE
+    expected_provider = primary.driver_config.token_provider
+
+    if derive_mode == "dsn":
+        derived = primary.derive_pool(dsn=replica_dsn)
+    elif derive_mode == "url":
+        derived = primary.derive_pool(url=replica_dsn)
+    elif derive_mode == "endpoint":
+        derived = primary.derive_pool(host="replica.internal", port=3307)
+    elif derive_mode == "connection_config_overrides":
+        derived = primary.derive_pool(connection_config_overrides={"url": replica_dsn})
+    else:
+        derived = primary.replica_groups["default"].specs[0].config
+
+    derived_key = derived.driver_config.pool_key()
+    assert derived_key[1] == "replica.internal"
+    assert derived_key[2] == 3307
+    assert derived.driver_config.token_provider is expected_provider
+    assert derived.driver_config.ssl_ca == custom_ca
+    assert primary.driver_config.canonical_ssl_mode == "verify-full"
+    assert derived.driver_config.canonical_ssl_mode == "verify-full"
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_mode"] == "verify-full"
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_ca"] == custom_ca
+
+    replaced = primary.derive_pool(url=replica_dsn, token_provider=override_provider, ssl_ca=override_ca)
+    assert replaced.driver_config.dsn == replica_dsn
+    assert replaced.driver_config.token_provider is override_provider
+    assert replaced.driver_config.ssl_ca == override_ca
+    assert replaced.driver_config.canonical_ssl_mode == "require"
+    assert primary.driver_config.token_provider is expected_provider
+    assert primary.driver_config.ssl_ca == custom_ca
+
+    cleared = primary.derive_pool(dsn=replica_dsn, token_provider=None, ssl_ca=None)
+    assert cleared.driver_config.dsn == replica_dsn
+    assert cleared.driver_config.token_provider is None
+    assert cleared.driver_config.ssl_ca is None
+    assert cleared.driver_config.canonical_ssl_mode == "prefer"
+    assert primary.driver_config.token_provider is expected_provider
+    assert primary.driver_config.ssl_ca == custom_ca
+
+
+@pytest.mark.parametrize("config_cls", [MySQLSyncConfig, MySQLAsyncConfig], ids=["sync", "async"])
+def test_sqlspec_mysql_build_connection_config_and_rds_default_ca_derive_pool(
+    config_cls: type[MySQLSyncConfig | MySQLAsyncConfig],
+) -> None:
+    """Verify build_connection_config forwards cloud auth and RDS default ssl_ca survives or yields to URL query."""
+    rds_provider = AwsRdsIamTokenProvider(
+        endpoint_host="primary.rds.internal",
+        port=3306,
+        region="us-west-2",
+        username="iam_user",
+        access_key_id="test-token-placeholder-id",
+        secret_access_key="test-token-placeholder-secret",
+    )
+    built = build_mysql_connection_config(
+        connection_config={"dsn": "mysql://iam_user@primary.rds.internal:3306/app", "token_provider": rds_provider},
+        overrides={"url": "mysql://iam_user@replica.rds.internal:3306/app"},
+    )
+    assert built.dsn == "mysql://iam_user@replica.rds.internal:3306/app"
+    assert built.token_provider is rds_provider
+    assert built.ssl_ca == aws_rds_root_ca_pem()
+    assert built.canonical_ssl_mode == "verify-full"
+
+    primary = config_cls(
+        "mysql://iam_user@primary.rds.internal:3306/app",
+        token_provider=rds_provider,
+        share_pool=False,
+    )
+    assert primary.driver_config.ssl_ca == aws_rds_root_ca_pem()
+    assert build_mysql_client_kwargs(primary.driver_config)["ssl_mode"] == "verify-full"
+    assert build_mysql_client_kwargs(primary.driver_config)["ssl_ca"] == aws_rds_root_ca_pem()
+
+    derived_query_ca = primary.derive_pool(
+        url="mysql://iam_user@replica.rds.internal:3306/app?ssl_ca=/etc/ssl/replica-ca.pem"
+    )
+    assert derived_query_ca.driver_config.token_provider is rds_provider
+    assert derived_query_ca.driver_config.ssl_ca == "/etc/ssl/replica-ca.pem"
+    assert derived_query_ca.driver_config.canonical_ssl_mode == "verify-full"
+
+    seen_scopes: list[str] = []
+
+    def _fake_entra_fetcher(scope: str) -> str:
+        seen_scopes.append(scope)
+        return "test-token-placeholder-entra"
+
+    entra_primary = config_cls(
+        "mysql://iam_user@primary.mysql.database.azure.com:3306/app",
+        token_provider=AzureEntraTokenProvider(fetcher=_fake_entra_fetcher),
+        share_pool=False,
+    )
+    entra_replica = entra_primary.derive_pool(host="replica.mysql.database.azure.com")
+    assert entra_primary.driver_config.canonical_ssl_mode == "verify-full"
+    assert entra_replica.driver_config.canonical_ssl_mode == "verify-full"
+    assert entra_replica.driver_config.ssl_ca is None
+    assert entra_primary.driver_config.parse_dsn_params()["password"] == "test-token-placeholder-entra"
+    assert entra_replica.driver_config.parse_dsn_params()["password"] == "test-token-placeholder-entra"
+    assert seen_scopes == [AZURE_MYSQL_SCOPE]
+
+
+def _mysql_cloud_token_provider(provider_kind: str) -> DatabaseTokenProvider:
+    """Build an AWS RDS or Azure Entra token provider that never reaches the network."""
+    if provider_kind == "rds_iam":
+        return AwsRdsIamTokenProvider(
+            endpoint_host="primary.internal",
+            port=3306,
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-id",
+            secret_access_key="test-token-placeholder-secret",
+        )
+    return AzureEntraTokenProvider(fetcher=lambda scope: f"test-token-placeholder-{scope}")
+
+
+@pytest.mark.parametrize("config_cls", [MySQLSyncConfig, MySQLAsyncConfig], ids=["sync", "async"])
+@pytest.mark.parametrize("provider_kind", ["rds_iam", "azure_entra"])
+@pytest.mark.parametrize(
+    ("primary_dsn", "primary_ssl_mode", "derive_mode", "primary_mode", "derived_mode"),
+    [
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "url", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "endpoint", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "replicas_url", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app", None, "replicas_endpoint", "require", "verify-full"),
+        ("mysql://iam_user@127.0.0.1:3306/app?ssl_mode=disable", None, "url", "disable", "verify-full"),
+        ("mysql://iam_user@primary.internal:3306/app", None, "endpoint", "verify-full", "verify-full"),
+        ("mysql://iam_user@primary.internal:3306/app", "verify-ca", "endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@primary.internal:3306/app", "verify-ca", "replicas_endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@primary.internal:3306/app", "required", "endpoint", "require", "require"),
+        ("mysql://iam_user@primary.internal:3306/app?ssl_mode=verify-ca", None, "endpoint", "verify-ca", "verify-ca"),
+        ("mysql://iam_user@127.0.0.1:3306/app?ssl_mode=disable", None, "endpoint", "disable", None),
+        ("mysql://iam_user@127.0.0.1:3306/app", "prefer", "replicas_endpoint", "prefer", None),
+    ],
+)
+def test_sqlspec_mysql_cloud_iam_ssl_mode_across_derive_pool_and_replicas(
+    config_cls: type[MySQLSyncConfig | MySQLAsyncConfig],
+    provider_kind: str,
+    primary_dsn: str,
+    primary_ssl_mode: str | None,
+    derive_mode: str,
+    primary_mode: str,
+    derived_mode: str | None,
+) -> None:
+    """Verify derived MySQL pools verify remote cloud IAM servers by default and inherit only explicit modes."""
+    provider = _mysql_cloud_token_provider(provider_kind)
+    replica_dsn = "mysql://iam_user@replica.internal:3307/app"
+    replicas_arg: list[Any] | None = None
+    if derive_mode == "replicas_url":
+        replicas_arg = [replica_dsn]
+    elif derive_mode == "replicas_endpoint":
+        replicas_arg = [{"host": "replica.internal", "port": 3307}]
+    extra: dict[str, Any] = {} if primary_ssl_mode is None else {"ssl_mode": primary_ssl_mode}
+
+    def _derive() -> MySQLSyncConfig | MySQLAsyncConfig:
+        primary = config_cls(primary_dsn, token_provider=provider, share_pool=False, replicas=replicas_arg, **extra)
+        assert primary.driver_config.canonical_ssl_mode == primary_mode
+        assert build_mysql_client_kwargs(primary.driver_config)["ssl_mode"] == primary_mode
+        if derive_mode == "url":
+            return primary.derive_pool(url=replica_dsn)
+        if derive_mode == "endpoint":
+            return primary.derive_pool(host="replica.internal", port=3307)
+        replica: MySQLSyncConfig | MySQLAsyncConfig = primary.replica_groups["default"].specs[0].config
+        return replica
+
+    if derived_mode is None:
+        with pytest.raises(ImproperConfigurationError, match="requires TLS on remote hosts"):
+            _derive()
+        return
+
+    derived = _derive()
+    assert derived.driver_config.pool_key()[1] == "replica.internal"
+    assert derived.driver_config.canonical_ssl_mode == derived_mode
+    assert derived.driver_config.parse_dsn_params()["ssl_mode"] == derived_mode
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_mode"] == derived_mode
+    expected_ca = aws_rds_root_ca_pem() if provider_kind == "rds_iam" else None
+    assert derived.driver_config.ssl_ca == expected_ca
+    assert build_mysql_client_kwargs(derived.driver_config)["ssl_ca"] == expected_ca

@@ -1,5 +1,17 @@
 # Bundle Activity Log
 
+- **2026-11-19 `archive` (`runtime-hardening-and-zpages`)**: Completed and archived `runtime-hardening-and-zpages` (4 chapters, 19 tasks closed across MySQL `cloudsql://` DSN parsing in Python and Rust, atomic create-only multipart storage writes on `file://` and `memory://`, release `panic = "unwind"` and single-pass `CompiledIpcLayout` Arrow IPC hardening with overflow and signal guards, and opt-in HTTP Z-Pages with Embedded/SHM dispatch and `--worker-only` loop telemetry), and contracted `.agents/bundles/specs/` back to lazy mode.
+
+- 2026-11-19 `sync`: Closed 0 task(s), recorded 19 commit(s), freed 0 claim(s), updated 5 file(s).
+
+- **2026-11-19 `archive` (`open-issues-backlog`)**: Completed and archived `open-issues-backlog` (4 chapters, 20 tasks closed across server event loops, OpenTelemetry metrics and Python 3.14 call graphs, `pyarrow`-free `ArrowCursor` exports and streaming SQLSpec Arrow pipelines, AWS SigV4 and Azure Entra database dialers, OKF v0.2 serialization, and Dataplex v1 Knowledge Catalog clients for `#67`, `#68`, `#100`, `#116`, `#128`, `#129`, and `#130`), and contracted `.agents/bundles/specs/` back to lazy mode.
+
+- 2026-11-19 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 1 file(s).
+
+- 2026-11-19 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 1 file(s).
+
+- 2026-11-19 `sync`: Closed 0 task(s), recorded 20 commit(s), freed 0 claim(s), updated 5 file(s).
+
 - **2026-11-17 (`flow-archive`: `stack-alignment`)**: Completed and archived `stack-alignment` (7 chapters, 146 tasks closed across data drivers/broker, Alchemy/config, SQLAlchemy dialects/DBAPI, SQLSpec adapters, framework extensions/protocols, Rust runtime/ingress, TypeScript client/packaging/CI, and OKF knowledge resynchronization), and contracted `.agents/bundles/specs/` back to lazy mode.
 
 - 2026-11-17 `setup`: Aligned OKF v0.2 bundle (verified).

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use http::uri::PathAndQuery;
 use tokio::sync::oneshot;
 
-use super::{DispatchBackend, Dispatcher, ShmDispatcher};
+use super::{BridgeCorrelation, DispatchBackend, Dispatcher, ShmDispatcher, ShmTargetError};
 use crate::batcher::{Batch, PendingRequest};
 use crate::body::PendingResponse;
 
@@ -379,4 +379,256 @@ async fn shm_dispatcher_shard_sticky_affinity_and_least_loaded_spillover() {
     for worker_id in 0..4 {
         assert_eq!(shm.worker_in_flight(worker_id), 0);
     }
+}
+
+fn make_pending_request(
+    handler_id: u64,
+    path: &'static str,
+    body: bytes::Bytes,
+) -> (PendingRequest, oneshot::Receiver<PendingResponse>) {
+    let (tx, rx) = oneshot::channel();
+    (
+        PendingRequest {
+            handler_id,
+            method_tag: 0,
+            http_version_tag: 1,
+            flags: 0,
+            path_and_query: PathAndQuery::from_static(path),
+            headers_mp: bytes::Bytes::new(),
+            body,
+            reply: tx,
+        },
+        rx,
+    )
+}
+
+#[test]
+fn shm_worker_count_and_healthy_worker_ids() {
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..3)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs, 64);
+
+    assert_eq!(shm.worker_count(), 3);
+    assert_eq!(shm.healthy_worker_ids(), vec![0, 1, 2]);
+
+    shm.set_worker_healthy(1, false);
+    assert_eq!(shm.worker_count(), 3);
+    assert_eq!(shm.healthy_worker_ids(), vec![0, 2]);
+}
+
+#[tokio::test]
+async fn shm_dispatch_to_worker_delivers_to_exact_ring_and_completes() {
+    use vertebra_core::transport::BatchSnapshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..3)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs.clone(), 64);
+
+    let (req, rx) = make_pending_request(42, "/taskz?format=json", bytes::Bytes::new());
+    let cid = shm
+        .dispatch_to_worker(2, req)
+        .expect("targeted dispatch to healthy worker 2 should succeed");
+
+    assert_eq!(shm.in_flight(), 1);
+    assert_eq!(shm.worker_in_flight(0), 0);
+    assert_eq!(shm.worker_in_flight(1), 0);
+    assert_eq!(shm.worker_in_flight(2), 1);
+
+    assert!(pairs[0].request_ring.try_recv_view().is_err());
+    assert!(pairs[1].request_ring.try_recv_view().is_err());
+
+    let view = pairs[2]
+        .request_ring
+        .try_recv_view()
+        .expect("worker 2 ring should contain the dispatched request");
+    let snap = BatchSnapshot::from_mpmc_slot(view).unwrap();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(snap.node(0).handler_id, 42);
+    assert_eq!(snap.node(0).correlation_id, cid);
+    assert_eq!(snap.path(0), "/taskz");
+    assert_eq!(snap.query(0), Some("format=json"));
+
+    assert!(shm.complete_one(
+        cid,
+        PendingResponse {
+            status: 200,
+            headers_mp: bytes::Bytes::new(),
+            body: bytes::Bytes::from_static(b"worker-2"),
+            stream_rx: None,
+        },
+    ));
+    let resp = rx.await.expect("reply channel should receive response");
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, bytes::Bytes::from_static(b"worker-2"));
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(2), 0);
+}
+
+#[test]
+fn shm_dispatch_to_worker_wakes_sleeping_worker() {
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..3)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs.clone(), 64);
+
+    assert!(pairs[1].prepare_request_sleep());
+
+    let (req, _rx) = make_pending_request(7, "/taskz", bytes::Bytes::new());
+    let cid = shm
+        .dispatch_to_worker(1, req)
+        .expect("dispatch to sleeping worker should succeed");
+
+    assert!(pairs[1].request_notifier.wait(50).unwrap());
+    assert!(shm.cancel_correlation(cid));
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(1), 0);
+}
+
+#[test]
+fn shm_dispatch_to_worker_error_paths_preserve_state() {
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let config = RingPairConfig {
+        request_slots: 2,
+        request_slot_size: 256,
+        ..RingPairConfig::default()
+    };
+    let pairs: Vec<Arc<RingPair>> = (0..3)
+        .map(|_| Arc::new(RingPair::create(config.clone()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs.clone(), 64);
+
+    // Out-of-range worker ID.
+    let (req, _rx) = make_pending_request(1, "/taskz", bytes::Bytes::new());
+    assert_eq!(
+        shm.dispatch_to_worker(3, req),
+        Err(ShmTargetError::NotFound)
+    );
+    assert_eq!(shm.in_flight(), 0);
+
+    // Unhealthy worker rejected without spillover.
+    shm.set_worker_healthy(1, false);
+    let (req, _rx) = make_pending_request(2, "/taskz", bytes::Bytes::new());
+    assert_eq!(
+        shm.dispatch_to_worker(1, req),
+        Err(ShmTargetError::Unhealthy)
+    );
+    assert_eq!(shm.in_flight(), 0);
+    for pair in &pairs {
+        assert!(pair.request_ring.try_recv_view().is_err());
+    }
+    shm.set_worker_healthy(1, true);
+
+    // Oversized payload rejected before allocating correlation.
+    let (req, _rx) = make_pending_request(3, "/taskz", bytes::Bytes::from(vec![b'x'; 512]));
+    assert_eq!(
+        shm.dispatch_to_worker(0, req),
+        Err(ShmTargetError::SendFailed)
+    );
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(0), 0);
+
+    // Fill worker 0 ring to capacity, then confirm RingFull rolls back cleanly.
+    let mut filled_cids = Vec::new();
+    loop {
+        let (req, _rx) = make_pending_request(4, "/taskz", bytes::Bytes::new());
+        match shm.dispatch_to_worker(0, req) {
+            Ok(cid) => filled_cids.push(cid),
+            Err(ShmTargetError::RingFull) => break,
+            Err(other) => panic!("unexpected error while filling ring: {other:?}"),
+        }
+    }
+    let expected_count = filled_cids.len();
+    assert!(expected_count >= 1);
+    assert_eq!(shm.in_flight(), expected_count);
+    assert_eq!(shm.worker_in_flight(0), expected_count);
+
+    let (overflow_req, _overflow_rx) = make_pending_request(5, "/taskz", bytes::Bytes::new());
+    assert_eq!(
+        shm.dispatch_to_worker(0, overflow_req),
+        Err(ShmTargetError::RingFull)
+    );
+    assert_eq!(shm.in_flight(), expected_count);
+    assert_eq!(shm.worker_in_flight(0), expected_count);
+
+    for cid in filled_cids {
+        assert!(shm.cancel_correlation(cid));
+    }
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(0), 0);
+}
+
+#[test]
+fn shm_dispatch_to_worker_correlation_full_returns_error() {
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = vec![Arc::new(
+        RingPair::create(RingPairConfig::default()).unwrap(),
+    )];
+    let shm = ShmDispatcher::new(pairs, 8);
+
+    let mut cids = Vec::new();
+    for i in 0..8 {
+        let (req, _rx) = make_pending_request(i, "/taskz", bytes::Bytes::new());
+        cids.push(
+            shm.dispatch_to_worker(0, req)
+                .expect("initial 8 correlations should fit across 8 shards"),
+        );
+    }
+
+    let (extra_req, _extra_rx) = make_pending_request(99, "/taskz", bytes::Bytes::new());
+    assert_eq!(
+        shm.dispatch_to_worker(0, extra_req),
+        Err(ShmTargetError::CorrelationFull)
+    );
+    assert_eq!(shm.in_flight(), 8);
+    assert_eq!(shm.worker_in_flight(0), 8);
+
+    for cid in cids {
+        assert!(shm.cancel_correlation(cid));
+    }
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(0), 0);
+}
+
+#[tokio::test]
+async fn immediate_correlation_cancellation_shm_and_bridge() {
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    let pairs: Vec<Arc<RingPair>> = (0..2)
+        .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+        .collect();
+    let shm = ShmDispatcher::new(pairs, 64);
+
+    let (req, rx) = make_pending_request(11, "/taskz", bytes::Bytes::new());
+    let cid = shm
+        .dispatch_to_worker(1, req)
+        .expect("dispatch_to_worker should succeed");
+    assert_eq!(shm.in_flight(), 1);
+    assert_eq!(shm.worker_in_flight(1), 1);
+
+    assert!(shm.cancel_correlation(cid));
+    assert_eq!(shm.in_flight(), 0);
+    assert_eq!(shm.worker_in_flight(1), 0);
+    assert!(!shm.cancel_correlation(cid));
+    assert!(rx.await.is_err());
+
+    let bridge = BridgeCorrelation::with_capacity(64);
+    let (b_tx, b_rx) = oneshot::channel();
+    let b_cid = bridge
+        .register_pending(b_tx)
+        .expect("register_pending should succeed");
+    assert_eq!(bridge.in_flight(), 1);
+
+    assert!(bridge.cancel_correlation(b_cid));
+    assert_eq!(bridge.in_flight(), 0);
+    assert!(!bridge.cancel_correlation(b_cid));
+    assert!(b_rx.await.is_err());
 }

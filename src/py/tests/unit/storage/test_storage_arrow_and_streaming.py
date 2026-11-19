@@ -10,7 +10,9 @@ import sys
 import threading
 import warnings
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -580,7 +582,11 @@ async def test_storage_arrow_native_network_barrier(
         else store.iter_arrow_batches("data.parquet")
     )
     before = asyncio.all_tasks()
-    task: asyncio.Task[Any] = asyncio.create_task(batches.__anext__())
+
+    async def next_batch() -> Any:
+        return await anext(batches)
+
+    task: asyncio.Task[Any] = asyncio.create_task(next_batch())
     try:
         await entered.wait_or_task(task, 5)
         assert await asyncio.create_task(asyncio.sleep(0, result="responsive")) == "responsive"
@@ -1316,13 +1322,14 @@ def test_sync_writer_supports_gzip_and_buffered_writer() -> None:
 async def test_open_writer_aborts_on_exception(asynchronous: bool, part_size: int) -> None:
     """An exception inside the writer context propagates and leaves no object behind."""
     store, base, native = _recording_store(asynchronous)
+    wf = store.open_writer("aborted.bin", part_size=part_size)
     with pytest.raises(ValueError, match="boom"):
         if asynchronous:
-            async with store.open_writer("aborted.bin", part_size=part_size) as wf:
+            async with wf:
                 await wf.write(b"partial-payload")
                 raise ValueError("boom")
         else:
-            with store.open_writer("aborted.bin", part_size=part_size) as wf:
+            with wf:
                 wf.write(b"partial-payload")
                 raise ValueError("boom")
     assert wf.closed
@@ -1376,12 +1383,13 @@ async def test_open_writer_if_not_exists_preserves_existing_object(asynchronous:
     """if_not_exists rejects completion over an existing key and keeps the original payload."""
     store, base, _native = _recording_store(asynchronous)
     base.put("taken.bin", b"original")
+    wf = store.open_writer("taken.bin", if_not_exists=True)
     with pytest.raises(FileExistsError):
         if asynchronous:
-            async with store.open_writer("taken.bin", if_not_exists=True) as wf:
+            async with wf:
                 await wf.write(b"replacement")
         else:
-            with store.open_writer("taken.bin", if_not_exists=True) as wf:
+            with wf:
                 wf.write(b"replacement")
     assert wf.closed
     assert wf.result is None
@@ -1549,3 +1557,177 @@ def test_storage_exports_writers_and_precondition_error() -> None:
     assert {"AsyncWritableFile", "IntegrityError", "PreconditionError", "SyncWritableFile"} <= set(storage.__all__)
     assert list(storage.__all__) == sorted(storage.__all__)
     assert issubclass(SyncWritableFile, io.RawIOBase)
+
+
+def _make_concurrent_store(backend: str, tmp_path: Path) -> SyncObjectStore:
+    """Create a sync object store backed by either a local directory or an in-memory store."""
+    if backend == "file":
+        return SyncObjectStore.from_local(tmp_path)
+    return SyncObjectStore("memory://")
+
+
+def _assert_no_staging_files(root: Path) -> None:
+    """Assert that no temporary local staging files remain under root."""
+    leftover = [path for path in root.rglob("*") if "#" in path.name]
+    assert leftover == []
+
+
+@pytest.mark.parametrize("backend", ["file", "memory"])
+@pytest.mark.parametrize("mode", ["if_not_exists", "if_none_match"])
+def test_put_stream_create_only_concurrent_writers(backend: str, mode: str, tmp_path: Path) -> None:
+    """Concurrent create-only put_stream writers produce one winner, N-1 FileExistsError, and no staging residue."""
+    store = _make_concurrent_store(backend, tmp_path)
+    worker_count = 8
+    barrier = threading.Barrier(worker_count)
+
+    def chunks(idx: int) -> Iterator[bytes]:
+        yield f"w{idx}-head-".encode()
+        barrier.wait(timeout=10.0)
+        yield f"w{idx}-tail".encode()
+
+    def run_worker(idx: int) -> tuple[int, PutResult | None, Exception | None]:
+        try:
+            result = store.put_stream(
+                "nested/race-stream.bin",
+                chunks(idx),
+                if_not_exists=(mode == "if_not_exists"),
+                if_none_match="*" if mode == "if_none_match" else None,
+            )
+        except Exception as exc:
+            return (idx, None, exc)
+        else:
+            return (idx, result, None)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        outcomes = list(pool.map(run_worker, range(worker_count)))
+
+    winners = [(idx, res) for idx, res, exc in outcomes if exc is None and res is not None]
+    losers = [exc for _idx, _res, exc in outcomes if exc is not None]
+    assert len(winners) == 1
+    assert len(losers) == worker_count - 1
+    assert all(type(exc) is FileExistsError for exc in losers)
+    winner_idx, winner_result = winners[0]
+    assert isinstance(winner_result, PutResult)
+    expected_payload = f"w{winner_idx}-head-w{winner_idx}-tail".encode()
+    assert store.get("nested/race-stream.bin") == expected_payload
+    assert winner_result.size == len(expected_payload)
+    if backend == "file":
+        _assert_no_staging_files(tmp_path)
+
+
+@pytest.mark.parametrize("backend", ["file", "memory"])
+def test_open_writer_create_only_concurrent_writers(backend: str, tmp_path: Path) -> None:
+    """Concurrent create-only open_writer sessions produce one winner, clean aborted losers, and no staging residue."""
+    store = _make_concurrent_store(backend, tmp_path)
+    worker_count = 8
+    barrier = threading.Barrier(worker_count)
+
+    def run_worker(idx: int) -> tuple[int, SyncWritableFile, Exception | None]:
+        wf = store.open_writer("nested/race-writer.bin", part_size=4, if_not_exists=True)
+        try:
+            with wf:
+                wf.write(f"w{idx:02d}-part1-".encode())
+                barrier.wait(timeout=10.0)
+                wf.write(f"w{idx:02d}-tail".encode())
+        except Exception as exc:
+            return (idx, wf, exc)
+        else:
+            return (idx, wf, None)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        outcomes = list(pool.map(run_worker, range(worker_count)))
+
+    winners = [(idx, wf) for idx, wf, exc in outcomes if exc is None]
+    losers = [(wf, exc) for _idx, wf, exc in outcomes if exc is not None]
+    assert len(winners) == 1
+    assert len(losers) == worker_count - 1
+    for loser_wf, exc in losers:
+        assert type(exc) is FileExistsError
+        assert loser_wf.closed is True
+        assert loser_wf.result is None
+    winner_idx, winner_wf = winners[0]
+    assert winner_wf.closed is True
+    assert isinstance(winner_wf.result, PutResult)
+    expected_payload = f"w{winner_idx:02d}-part1-w{winner_idx:02d}-tail".encode()
+    assert store.get("nested/race-writer.bin") == expected_payload
+    assert winner_wf.result.size == len(expected_payload)
+    if backend == "file":
+        _assert_no_staging_files(tmp_path)
+
+
+@pytest.mark.parametrize("backend", ["file", "memory"])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+def test_sqlspec_write_arrow_sync_overwrite_false_concurrent_writers(
+    backend: str, file_format: str, tmp_path: Path
+) -> None:
+    """Concurrent SQLSpec write_arrow_sync with overwrite=False yields one winner and N-1 FileExistsError."""
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("sqlspec")
+    sqlspec_storage = pytest.importorskip("vertebra.extensions.sqlspec.storage")
+
+    store = _make_concurrent_store(backend, tmp_path)
+    backend_store = sqlspec_storage.ObjectStoreBackend(store=store)
+    worker_count = 6
+    barrier = threading.Barrier(worker_count)
+    ext = "parquet" if file_format == "parquet" else "arrow"
+    key = f"nested/race-sync.{ext}"
+    tables = [pa.table({"worker": [idx, idx], "tag": [f"w{idx}", f"w{idx}"]}) for idx in range(worker_count)]
+
+    def run_worker(idx: int) -> tuple[int, Exception | None]:
+        barrier.wait(timeout=10.0)
+        try:
+            backend_store.write_arrow_sync(key, tables[idx], overwrite=False, file_format=file_format)
+        except Exception as exc:
+            return (idx, exc)
+        else:
+            return (idx, None)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        outcomes = list(pool.map(run_worker, range(worker_count)))
+
+    winners = [idx for idx, exc in outcomes if exc is None]
+    losers = [exc for _idx, exc in outcomes if exc is not None]
+    assert len(winners) == 1
+    assert len(losers) == worker_count - 1
+    assert all(type(exc) is FileExistsError for exc in losers)
+    stored = backend_store.read_arrow_sync(key, file_format=file_format)
+    assert stored.equals(tables[winners[0]])
+    if backend == "file":
+        _assert_no_staging_files(tmp_path)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["file", "memory"])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc"])
+async def test_sqlspec_write_arrow_async_overwrite_false_concurrent_writers(
+    backend: str, file_format: str, tmp_path: Path
+) -> None:
+    """Concurrent SQLSpec write_arrow_async with overwrite=False yields one winner and N-1 FileExistsError."""
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("sqlspec")
+    sqlspec_storage = pytest.importorskip("vertebra.extensions.sqlspec.storage")
+
+    store = _make_concurrent_store(backend, tmp_path)
+    backend_store = sqlspec_storage.ObjectStoreBackend(store=store)
+    worker_count = 6
+    barrier = asyncio.Barrier(worker_count)
+    ext = "parquet" if file_format == "parquet" else "arrow"
+    key = f"nested/race-async.{ext}"
+    tables = [pa.table({"worker": [idx, idx], "tag": [f"w{idx}", f"w{idx}"]}) for idx in range(worker_count)]
+
+    async def run_worker(idx: int) -> int:
+        await asyncio.wait_for(barrier.wait(), timeout=10.0)
+        await backend_store.write_arrow_async(key, tables[idx], overwrite=False, file_format=file_format)
+        return idx
+
+    outcomes = await asyncio.gather(*(run_worker(idx) for idx in range(worker_count)), return_exceptions=True)
+
+    winners = [item for item in outcomes if isinstance(item, int)]
+    losers = [item for item in outcomes if isinstance(item, BaseException)]
+    assert len(winners) == 1
+    assert len(losers) == worker_count - 1
+    assert all(type(exc) is FileExistsError for exc in losers)
+    stored = await backend_store.read_arrow_async(key, file_format=file_format)
+    assert stored.equals(tables[winners[0]])
+    if backend == "file":
+        _assert_no_staging_files(tmp_path)

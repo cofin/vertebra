@@ -46,6 +46,7 @@ use crate::response::handle_with_peer;
 use crate::routing::Router;
 use crate::sse::SseHub;
 use crate::ws_mount::{WsConfig, WsConnectionRegistry};
+use crate::zpages::ZPagesEndpoint;
 
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
@@ -216,6 +217,7 @@ pub struct ServerState {
     pub static_mounts: Vec<StaticAssetMount>,
     pub openapi_cache: Option<CompiledOpenApiCache>,
     pub profile_endpoint: ProfileEndpoint,
+    pub zpages_endpoint: ZPagesEndpoint,
     pub discovery_cache: WellKnownDiscoveryCache,
     pub access_logger: Option<Arc<AccessLogger>>,
     pub sse_hub: Arc<SseHub>,
@@ -249,6 +251,8 @@ impl ServerState {
             .as_ref()
             .and_then(CompiledOpenApiCache::from_config);
         let profile_endpoint = ProfileEndpoint::new(config.profile.clone());
+        let zpages_endpoint =
+            ZPagesEndpoint::new(config.zpages.clone(), config.bind.ip().is_loopback());
         let discovery_cache = WellKnownDiscoveryCache::new();
         for (doc_path, body_str) in &config.discovery {
             let body_bytes = Bytes::copy_from_slice(body_str.as_bytes());
@@ -303,6 +307,7 @@ impl ServerState {
             static_mounts,
             openapi_cache,
             profile_endpoint,
+            zpages_endpoint,
             discovery_cache,
             access_logger,
             sse_hub,
