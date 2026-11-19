@@ -41,6 +41,7 @@ from vertebra.server._dispatch import (
     _DEFAULT_ASGI_BATCH_TIMEOUT_SECONDS,
     _JSON_CONTENT_TYPE_COMPACT,
     _RAW_BUFFER_TYPES,
+    _ZPAGES_HANDLER_ID,
     HandlerSpec,
     _is_potential_special_return,
     _resolve_asgi_batch_timeout,
@@ -54,6 +55,7 @@ from vertebra.server._dispatch import (
 from vertebra.server._fastpath import attach_framework_fastpath
 from vertebra.server._gil_audit import GilAuditReport
 from vertebra.server._loops import (
+    _TASKZ_PROBE_TASK_NAME,
     EventLoopPool,
     configure_worker_affinity,
     resolve_loop_shards,
@@ -360,6 +362,7 @@ class Worker:
         "_gil_report",
         "_handlers",
         "_lame_duck",
+        "_loop_pool_name",
         "_loop_recorder",
         "_max_batches",
         "_mounts",
@@ -367,6 +370,7 @@ class Worker:
         "_shm_policy",
         "_stop_event",
         "_worker_count",
+        "_zpage_tasks",
         "_zpages",
     )
 
@@ -387,6 +391,7 @@ class Worker:
         queue_service: QueueService | None = None,
         app_obj: Any = None,
         loop_recorder: EventLoopRecorder | None = None,
+        loop_pool_name: str = _LOOP_POOL_ZPAGES_NAME,
     ) -> None:
         self._app_obj: Any = app_obj
         if hasattr(handlers, "_handlers") and not isinstance(handlers, Mapping):
@@ -417,8 +422,11 @@ class Worker:
         self._max_batches = max_batches
         self._queue_service = queue_service
         self._loop_recorder = loop_recorder
+        self._loop_pool_name = loop_pool_name or _LOOP_POOL_ZPAGES_NAME
+        self._zpage_tasks: set[asyncio.Task[Any]] = set()
         self._cgroup_quota: CgroupQuota | None = None
         self._gil_report: GilAuditReport | None = None
+        self._zpages.register_worker(self._loop_pool_name, self._lame_duck, state="starting")
 
     @property
     def lame_duck(self) -> LameDuckController:
@@ -459,7 +467,7 @@ class Worker:
         del signum, frame
         self._shm_policy.validate_environment()
         self._lame_duck.enter_lame_duck()
-        self._zpages.set_var("worker_state", "draining")
+        self._zpages.set_worker_state(self._loop_pool_name, "draining")
         if self._stop_event is not None and hasattr(self._stop_event, "set"):
             self._stop_event.set()
 
@@ -516,7 +524,7 @@ class Worker:
             inline_single_loop=inline_single_loop,
             gil_report=self._gil_report,
         )
-        self._zpages.register_loop_pool(_LOOP_POOL_ZPAGES_NAME, loop_pool)
+        self._zpages.register_loop_pool(self._loop_pool_name, loop_pool)
         self._attach_loop_telemetry(
             loop_pool,
             loop_runs_continuously=use_inline_event_loop or not inline_single_loop,
@@ -588,8 +596,12 @@ class Worker:
                 elif root_proto == "wsgi" and isinstance(root_adapter, WsgiAdapter):
                     single_root_wsgi = root_adapter
 
-            self._zpages.set_var("worker_state", "ready")
-            self._zpages.set_var("worker_id", worker_idx)
+            self._zpages.register_worker(
+                self._loop_pool_name,
+                self._lame_duck,
+                worker_id=worker_idx,
+                state="ready",
+            )
 
             timeout_sec = max(0.001, self._batch_timeout_ms / 1000.0)
 
@@ -629,7 +641,7 @@ class Worker:
                     batch = None
                     batches_processed += 1
         finally:
-            self._zpages.set_var("worker_state", "stopped")
+            self._zpages.set_worker_state(self._loop_pool_name, "stopped")
             if colocated_runner is not None:
                 with suppress(Exception, asyncio.CancelledError):
                     if use_inline_event_loop:
@@ -673,6 +685,7 @@ class Worker:
             logger.debug("Loop telemetry sampling skipped: the worker event loop does not run continuously")
             return
         loop_pool.attach_recorder(recorder, interval_seconds=self._loop_telemetry_interval())
+        self._zpages.register_loop_recorder(self._loop_pool_name, recorder)
 
     @staticmethod
     def _loop_telemetry_enabled() -> bool:
@@ -860,13 +873,30 @@ class Worker:
     ) -> None:
         batch_len = len(batch)
         self._lame_duck.acquire_request(batch_len)
-        self._zpages.set_var("active_requests", self._lame_duck.in_flight)
         try:
+            if batch_len == 1 and batch[0].handler_id == _ZPAGES_HANDLER_ID:
+                self._handle_zpage_request(batch[0], loop_pool)
+                return
+
+            if not isinstance(batch, RequestBatch) and any(req.handler_id == _ZPAGES_HANDLER_ID for req in batch):
+                remaining: list[Any] = []
+                for req in batch:
+                    if req.handler_id == _ZPAGES_HANDLER_ID:
+                        self._handle_zpage_request(req, loop_pool)
+                    else:
+                        remaining.append(req)
+                if not remaining:
+                    return
+                batch = remaining
+
             if all_sync_native:
                 raw_items: list[tuple[int, int, Any] | tuple[int, int, Any, bytes]] = []
                 append_raw = raw_items.append
                 get_spec = compiled_handlers.get
                 for req in batch:
+                    if req.handler_id == _ZPAGES_HANDLER_ID:
+                        self._handle_zpage_request(req, loop_pool)
+                        continue
                     req_id = req.request_id
                     spec = get_spec(req.handler_id)
                     if spec is None:
@@ -951,7 +981,56 @@ class Worker:
             )
         finally:
             self._lame_duck.release_request(batch_len)
-            self._zpages.set_var("active_requests", self._lame_duck.in_flight)
+
+    def _handle_zpage_request(self, req: Any, loop_pool: EventLoopPool) -> None:
+        """Render a diagnostic z-page request without blocking background or remote event loops."""
+        req_id = int(getattr(req, "request_id", 0))
+        path = str(getattr(req, "path", "") or "").split("?", 1)[0]
+        try:
+            if path in ("/taskz", "/debug/zpages/tasks"):
+                running_loop = ZPagesRegistry._running_loop_or_none()
+                if running_loop is not None:
+                    if self._zpages.has_remote_loops(running_loop):
+                        task = running_loop.create_task(
+                            self._submit_taskz_async(req_id),
+                            name=_TASKZ_PROBE_TASK_NAME,
+                        )
+                        self._zpage_tasks.add(task)
+                        task.add_done_callback(self._zpage_tasks.discard)
+                        return
+                    payload = self._zpages.get_tasks_payload()
+                    submit_response_raw(req_id, 200, encode_json_bytes(payload), _JSON_CONTENT_TYPE_COMPACT)
+                    return
+                if not getattr(loop_pool, "_inline_single", False):
+                    loop_pool.spawn(self._submit_taskz_async(req_id), name=_TASKZ_PROBE_TASK_NAME)
+                    return
+                payload = self._zpages.get_tasks_payload()
+                submit_response_raw(req_id, 200, encode_json_bytes(payload), _JSON_CONTENT_TYPE_COMPACT)
+                return
+            status, body = self._zpages.handle_zpage(path)
+            submit_response_raw(req_id, status, body, _JSON_CONTENT_TYPE_COMPACT)
+        except Exception:
+            logger.exception("Failed to render z-page for path %r", path)
+            submit_response_raw(
+                req_id,
+                500,
+                encode_json_bytes({"error": "zpages_internal_error"}),
+                _JSON_CONTENT_TYPE_COMPACT,
+            )
+
+    async def _submit_taskz_async(self, request_id: int) -> None:
+        """Collect /taskz asynchronously across shards and submit the JSON response."""
+        try:
+            payload = await self._zpages.get_tasks_payload_async()
+            submit_response_raw(request_id, 200, encode_json_bytes(payload), _JSON_CONTENT_TYPE_COMPACT)
+        except Exception:
+            logger.exception("Failed to collect async /taskz payload for request %d", request_id)
+            submit_response_raw(
+                request_id,
+                500,
+                encode_json_bytes({"error": "zpages_internal_error"}),
+                _JSON_CONTENT_TYPE_COMPACT,
+            )
 
 
 def run_worker(
@@ -970,6 +1049,7 @@ def run_worker(
     queue_service: QueueService | None = None,
     app_obj: Any = None,
     loop_recorder: EventLoopRecorder | None = None,
+    loop_pool_name: str = _LOOP_POOL_ZPAGES_NAME,
 ) -> None:
     """Entry point that constructs and runs a ``Worker``.
 
@@ -992,6 +1072,7 @@ def run_worker(
         queue_service=queue_service,
         app_obj=app_obj,
         loop_recorder=loop_recorder,
+        loop_pool_name=loop_pool_name,
     )
     worker.run()
 

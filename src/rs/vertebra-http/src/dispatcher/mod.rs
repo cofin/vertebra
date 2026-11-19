@@ -21,7 +21,7 @@ pub mod types;
 
 pub use self::bridge::BridgeCorrelation;
 pub use self::correlation::{CorrelationId, InFlightRequests};
-pub use self::shm::ShmDispatcher;
+pub use self::shm::{ShmDispatcher, ShmTargetError};
 pub use self::streams::ResponseStreamRegistry;
 
 use std::sync::Arc;

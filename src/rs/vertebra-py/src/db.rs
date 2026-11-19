@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_int, c_void};
-use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +23,8 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow_ipc::reader::StreamReader;
+use arrow_buffer::Buffer as ArrowBuffer;
+use arrow_ipc::reader::RecordBatchDecoder;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyBufferError, PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
@@ -468,67 +468,172 @@ const MAX_ARROW_CURSOR_BYTE_LEN: usize = (isize::MAX as usize) - ShmArrowFrameHe
 const IPC_CONTINUATION_MARKER: [u8; 4] = [0xFF; 4];
 const UNIX_EPOCH_ORDINAL: i64 = 719_163;
 
-fn validate_arrow_ipc_stream_framing(payload: &[u8]) -> Result<(), String> {
+#[inline]
+fn read_ipc_meta_header(payload: &[u8], mut pos: usize) -> Result<(usize, usize), String> {
+    if payload.len().saturating_sub(pos) < 4 {
+        return Err("corrupt Arrow IPC stream: truncated message length".to_string());
+    }
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&payload[pos..pos + 4]);
+    pos += 4;
+    if word == IPC_CONTINUATION_MARKER {
+        if payload.len() - pos < 4 {
+            return Err("corrupt Arrow IPC stream: truncated continuation length".to_string());
+        }
+        word.copy_from_slice(&payload[pos..pos + 4]);
+        pos += 4;
+    }
+    let raw_meta_len = i32::from_le_bytes(word);
+    if raw_meta_len == 0 {
+        return Ok((pos, 0));
+    }
+    let meta_len = usize::try_from(raw_meta_len).map_err(|_| {
+        format!("invalid Arrow IPC stream: negative metadata length {raw_meta_len}")
+    })?;
+    if payload.len() - pos < meta_len {
+        return Err("corrupt Arrow IPC stream: truncated message metadata".to_string());
+    }
+    Ok((pos, meta_len))
+}
+
+#[inline]
+fn read_ipc_message_body_len(meta: &[u8]) -> Result<usize, String> {
+    const VT_BODYLENGTH: usize = arrow_ipc::Message::VT_BODYLENGTH as usize;
+
+    if meta.len() < 4 {
+        return Err("corrupt Arrow IPC stream: truncated message root offset".to_string());
+    }
+    let table_pos = u32::from_le_bytes([meta[0], meta[1], meta[2], meta[3]]) as usize;
+    let table_hdr_end = table_pos
+        .checked_add(4)
+        .ok_or_else(|| "corrupt Arrow IPC stream: message table offset overflow".to_string())?;
+    if table_hdr_end > meta.len() {
+        return Err("corrupt Arrow IPC stream: message table offset out of bounds".to_string());
+    }
+    let vtable_rel = i32::from_le_bytes([
+        meta[table_pos],
+        meta[table_pos + 1],
+        meta[table_pos + 2],
+        meta[table_pos + 3],
+    ]);
+    let vtable_pos_i128 = (table_pos as i128)
+        .checked_sub(i128::from(vtable_rel))
+        .ok_or_else(|| "corrupt Arrow IPC stream: vtable offset overflow".to_string())?;
+    let vtable_pos = usize::try_from(vtable_pos_i128)
+        .map_err(|_| "corrupt Arrow IPC stream: negative vtable offset".to_string())?;
+    let vtable_hdr_end = vtable_pos
+        .checked_add(4)
+        .ok_or_else(|| "corrupt Arrow IPC stream: vtable header overflow".to_string())?;
+    if vtable_hdr_end > meta.len() {
+        return Err("corrupt Arrow IPC stream: vtable offset out of bounds".to_string());
+    }
+    let vtable_len = u16::from_le_bytes([meta[vtable_pos], meta[vtable_pos + 1]]) as usize;
+    let table_len = u16::from_le_bytes([meta[vtable_pos + 2], meta[vtable_pos + 3]]) as usize;
+    if vtable_len < 4
+        || vtable_pos
+            .checked_add(vtable_len)
+            .is_none_or(|end| end > meta.len())
+        || table_pos
+            .checked_add(table_len)
+            .is_none_or(|end| end > meta.len())
+    {
+        return Err("corrupt Arrow IPC stream: invalid message vtable or table bounds".to_string());
+    }
+    if VT_BODYLENGTH + 2 > vtable_len {
+        return Ok(0);
+    }
+    let field_rel = u16::from_le_bytes([
+        meta[vtable_pos + VT_BODYLENGTH],
+        meta[vtable_pos + VT_BODYLENGTH + 1],
+    ]) as usize;
+    if field_rel == 0 {
+        return Ok(0);
+    }
+    let field_pos = table_pos
+        .checked_add(field_rel)
+        .ok_or_else(|| "corrupt Arrow IPC stream: bodyLength offset overflow".to_string())?;
+    let field_end = field_pos
+        .checked_add(8)
+        .ok_or_else(|| "corrupt Arrow IPC stream: bodyLength end overflow".to_string())?;
+    if field_end > meta.len() {
+        return Err("corrupt Arrow IPC stream: bodyLength field out of bounds".to_string());
+    }
+    let raw_body_len = i64::from_le_bytes([
+        meta[field_pos],
+        meta[field_pos + 1],
+        meta[field_pos + 2],
+        meta[field_pos + 3],
+        meta[field_pos + 4],
+        meta[field_pos + 5],
+        meta[field_pos + 6],
+        meta[field_pos + 7],
+    ]);
+    usize::try_from(raw_body_len).map_err(|_| {
+        format!("corrupt Arrow IPC stream: negative message body length {raw_body_len}")
+    })
+}
+
+fn scan_ipc_frame_bounds(payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() {
         return Err("invalid Arrow IPC stream: empty stream".to_string());
     }
     let mut pos = 0usize;
-    let mut saw_schema = false;
-    let mut schema = None;
+    let mut frame_count = 0usize;
     while pos < payload.len() {
-        if payload.len() - pos < 4 {
-            return Err("corrupt Arrow IPC stream: truncated message length".to_string());
-        }
-        let mut word = [0u8; 4];
-        word.copy_from_slice(&payload[pos..pos + 4]);
-        pos += 4;
-        if word == IPC_CONTINUATION_MARKER {
-            if payload.len() - pos < 4 {
-                return Err("corrupt Arrow IPC stream: truncated continuation length".to_string());
-            }
-            word.copy_from_slice(&payload[pos..pos + 4]);
-            pos += 4;
-        }
-        let raw_meta_len = i32::from_le_bytes(word);
-        if raw_meta_len == 0 {
+        let (meta_start, meta_len) = read_ipc_meta_header(payload, pos)?;
+        if meta_len == 0 {
             break;
         }
-        let meta_len = usize::try_from(raw_meta_len).map_err(|_| {
-            format!("invalid Arrow IPC stream: negative metadata length {raw_meta_len}")
-        })?;
-        if payload.len() - pos < meta_len {
-            return Err("corrupt Arrow IPC stream: truncated message metadata".to_string());
-        }
-        let message = arrow_ipc::root_as_message(&payload[pos..pos + meta_len])
-            .map_err(|e| format!("invalid Arrow IPC stream: {e:?}"))?;
-        pos += meta_len;
-        if !saw_schema {
-            if message.header_type() != arrow_ipc::MessageHeader::Schema {
-                return Err(format!(
-                    "invalid Arrow IPC stream: expected Schema header first, got {:?}",
-                    message.header_type()
-                ));
-            }
-            saw_schema = true;
-            schema = message.header_as_schema();
-            validate_arrow_ipc_schema_fields(schema.as_ref().and_then(|schema| schema.fields()))?;
-        }
-        let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
-            format!(
-                "corrupt Arrow IPC stream: negative message body length {}",
-                message.bodyLength()
-            )
-        })?;
-        if payload.len() - pos < body_len {
+        let meta_end = meta_start + meta_len;
+        let body_len = read_ipc_message_body_len(&payload[meta_start..meta_end])?;
+        if payload.len() - meta_end < body_len {
             return Err("corrupt Arrow IPC stream: truncated message body".to_string());
         }
-        validate_arrow_ipc_message_ranges(&message, body_len, schema.as_ref())?;
-        pos += body_len;
+        frame_count += 1;
+        pos = meta_end + body_len;
     }
-    if !saw_schema {
+    if frame_count == 0 {
         return Err("invalid Arrow IPC stream: missing schema message".to_string());
     }
     Ok(())
+}
+
+fn parse_ipc_schema_frame(payload: &[u8]) -> Result<(CompiledIpcLayout, usize), String> {
+    if payload.is_empty() {
+        return Err("invalid Arrow IPC stream: empty stream".to_string());
+    }
+    let (meta_start, meta_len) = read_ipc_meta_header(payload, 0)?;
+    if meta_len == 0 {
+        return Err("invalid Arrow IPC stream: missing schema message".to_string());
+    }
+    let meta_end = meta_start + meta_len;
+    let message = arrow_ipc::root_as_message(&payload[meta_start..meta_end])
+        .map_err(|e| format!("invalid Arrow IPC stream: {e:?}"))?;
+    if message.header_type() != arrow_ipc::MessageHeader::Schema {
+        return Err(format!(
+            "invalid Arrow IPC stream: expected Schema header first, got {:?}",
+            message.header_type()
+        ));
+    }
+    let ipc_schema = message
+        .header_as_schema()
+        .ok_or_else(|| "invalid Arrow IPC stream: missing schema header".to_string())?;
+    let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
+        format!(
+            "corrupt Arrow IPC stream: negative message body length {}",
+            message.bodyLength()
+        )
+    })?;
+    if payload.len() - meta_end < body_len {
+        return Err("corrupt Arrow IPC stream: truncated message body".to_string());
+    }
+    let layout = CompiledIpcLayout::compile(ipc_schema)?;
+    Ok((layout, meta_end + body_len))
+}
+
+fn parse_ipc_schema_only(payload: &[u8]) -> Result<arrow_schema::SchemaRef, String> {
+    let (layout, _) = parse_ipc_schema_frame(payload)?;
+    Ok(layout.schema)
 }
 
 type IpcArrowError = arrow_schema::ArrowError;
@@ -545,14 +650,15 @@ fn ipc_range_within_body(offset: i64, length: i64, body_len: usize) -> bool {
 }
 
 /// Rejects record-batch metadata whose buffers fall outside the message body or whose field
-/// nodes carry negative or inconsistent counts, which `arrow-ipc` slices without checking.
+/// nodes carry negative, overflowing, or inconsistent counts, which `arrow-ipc` slices without
+/// checking.
 fn validate_arrow_ipc_batch_ranges(
     batch: &arrow_ipc::RecordBatch<'_>,
     body_len: usize,
 ) -> Result<(), String> {
-    if batch.length() < 0 {
+    if usize::try_from(batch.length()).is_err() {
         return Err(format!(
-            "corrupt Arrow IPC stream: negative record batch length {}",
+            "corrupt Arrow IPC stream: invalid record batch length {}",
             batch.length()
         ));
     }
@@ -569,7 +675,14 @@ fn validate_arrow_ipc_batch_ranges(
     }
     if let Some(nodes) = batch.nodes() {
         for (index, node) in nodes.iter().enumerate() {
-            if node.length() < 0 || node.null_count() < 0 || node.null_count() > node.length() {
+            let valid = match (
+                usize::try_from(node.length()),
+                usize::try_from(node.null_count()),
+            ) {
+                (Ok(node_len), Ok(null_count)) => null_count <= node_len,
+                _ => false,
+            };
+            if !valid {
                 return Err(format!(
                     "corrupt Arrow IPC stream: field node {index} has invalid length {} or null count {}",
                     node.length(),
@@ -577,43 +690,6 @@ fn validate_arrow_ipc_batch_ranges(
                 ));
             }
         }
-    }
-    Ok(())
-}
-
-fn find_ipc_dictionary_field<'a, I>(fields: Option<I>, id: i64) -> Option<arrow_ipc::Field<'a>>
-where
-    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
-{
-    for field in fields.into_iter().flatten() {
-        if field.dictionary().is_some_and(|dict| dict.id() == id) {
-            return Some(field);
-        }
-        if let Some(found) = find_ipc_dictionary_field(field.children(), id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Rejects fixed-size binary and fixed-size list fields with a negative width, which
-/// `arrow-data` unwraps into `usize` while laying out buffers.
-fn validate_arrow_ipc_schema_fields<'a, I>(fields: Option<I>) -> Result<(), String>
-where
-    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
-{
-    for field in fields.into_iter().flatten() {
-        let width = field
-            .type_as_fixed_size_binary()
-            .map(|binary| binary.byteWidth())
-            .or_else(|| field.type_as_fixed_size_list().map(|list| list.listSize()));
-        if let Some(width) = width.filter(|width| *width < 0) {
-            return Err(format!(
-                "invalid Arrow IPC stream: field {:?} declares negative fixed size {width}",
-                field.name().unwrap_or_default()
-            ));
-        }
-        validate_arrow_ipc_schema_fields(field.children())?;
     }
     Ok(())
 }
@@ -637,222 +713,376 @@ enum IpcFieldRole {
     RunEnds,
 }
 
-/// Walks one record batch in schema order, mirroring the node and buffer consumption of
-/// `arrow_ipc::reader::RecordBatchDecoder`, and rejects the buffer shapes that `arrow-ipc` and
-/// `arrow-data` assert on instead of reporting: typed offset, view, dictionary-key, and run-end
-/// buffers whose byte length is not a whole number of elements, and union type-id or offset
-/// buffers shorter than the field node length.
-struct IpcBatchLayoutWalker<N, B, V> {
-    nodes: N,
-    buffers: B,
-    variadic_counts: V,
-    legacy_union_validity: bool,
-    compressed: bool,
+#[derive(Clone, Copy)]
+enum LayoutOp {
+    NoBuffers,
+    SkipBuffers(u8),
+    FixedSize {
+        element_width: usize,
+        trailing_buffers: u8,
+        label: &'static str,
+    },
+    TypedBuffer {
+        width: i64,
+        trailing_buffers: u8,
+        label: &'static str,
+    },
+    ListView {
+        width: i64,
+    },
+    VariadicView,
+    Union {
+        dense: bool,
+    },
 }
 
-impl<'a, N, B, V> IpcBatchLayoutWalker<N, B, V>
-where
-    N: Iterator<Item = &'a arrow_ipc::FieldNode>,
-    B: Iterator<Item = &'a arrow_ipc::Buffer>,
-    V: Iterator<Item = i64>,
-{
-    fn skip_buffers(&mut self, count: usize) -> bool {
-        for _ in 0..count {
-            if self.buffers.next().is_none() {
-                return false;
-            }
+struct CompiledIpcLayout {
+    schema: arrow_schema::SchemaRef,
+    root_ops: Vec<LayoutOp>,
+    dict_ops: HashMap<i64, Vec<LayoutOp>>,
+}
+
+impl CompiledIpcLayout {
+    fn compile(ipc_schema: arrow_ipc::Schema<'_>) -> Result<Self, String> {
+        let mut root_ops = Vec::new();
+        let mut dict_ops = HashMap::new();
+        for field in ipc_schema.fields().into_iter().flatten() {
+            Self::compile_field(&mut root_ops, &mut dict_ops, &field, IpcFieldRole::Plain)?;
         }
-        true
+        let schema = match catch_unwind(AssertUnwindSafe(|| {
+            arrow_ipc::convert::try_fb_to_schema(ipc_schema)
+        })) {
+            Ok(Ok(schema)) => Arc::new(schema),
+            Ok(Err(err)) => return Err(format!("invalid Arrow IPC stream: {err}")),
+            Err(payload) => {
+                return Err(format!(
+                    "invalid Arrow IPC stream: schema decoder panicked: {}",
+                    ipc_panic_message(payload.as_ref())
+                ));
+            }
+        };
+        Ok(Self {
+            schema,
+            root_ops,
+            dict_ops,
+        })
     }
 
-    fn walk_children(&mut self, field: &arrow_ipc::Field<'_>) -> Result<bool, String> {
+    fn compile_children(
+        ops: &mut Vec<LayoutOp>,
+        dict_ops: &mut HashMap<i64, Vec<LayoutOp>>,
+        field: &arrow_ipc::Field<'_>,
+    ) -> Result<(), String> {
         for child in field.children().into_iter().flatten() {
-            if !self.walk(&child, IpcFieldRole::Plain)? {
-                return Ok(false);
-            }
+            Self::compile_field(ops, dict_ops, &child, IpcFieldRole::Plain)?;
         }
-        Ok(true)
+        Ok(())
     }
 
-    /// Compressed buffers are skipped: this build of `arrow-ipc` has no codecs and rejects
-    /// every non-empty compressed buffer before interpreting it.
-    fn check_typed_buffer(&mut self, width: i64, label: &str) -> Result<bool, String> {
-        let Some(buffer) = self.buffers.next() else {
-            return Ok(false);
-        };
-        if !self.compressed && buffer.length() % width != 0 {
-            return Err(format!(
-                "corrupt Arrow IPC stream: {label} buffer length {} is not a multiple of {width} bytes",
-                buffer.length()
-            ));
-        }
-        Ok(true)
-    }
-
-    fn check_union_buffer(&mut self, rows: i64, width: i64, label: &str) -> Result<bool, String> {
-        let Some(buffer) = self.buffers.next() else {
-            return Ok(false);
-        };
-        if rows == 0 {
-            return Ok(true);
-        }
-        if self.compressed {
-            return Err(
-                "invalid Arrow IPC stream: compressed union columns are not supported".to_string(),
-            );
-        }
-        let required = rows.checked_mul(width);
-        if required.is_none_or(|required| buffer.length() < required)
-            || buffer.offset() % width != 0
-        {
-            return Err(format!(
-                "corrupt Arrow IPC stream: union {label} buffer (offset {}, length {}) cannot hold {rows} rows",
-                buffer.offset(),
-                buffer.length()
-            ));
-        }
-        Ok(true)
-    }
-
-    /// Returns `Ok(false)` when the metadata runs out of nodes or buffers; `arrow-ipc` reports
-    /// that mismatch itself as an error.
-    fn walk(&mut self, field: &arrow_ipc::Field<'_>, role: IpcFieldRole) -> Result<bool, String> {
+    fn compile_field(
+        ops: &mut Vec<LayoutOp>,
+        dict_ops: &mut HashMap<i64, Vec<LayoutOp>>,
+        field: &arrow_ipc::Field<'_>,
+        role: IpcFieldRole,
+    ) -> Result<(), String> {
         use arrow_ipc::Type;
 
-        let Some(node) = self.nodes.next() else {
-            return Ok(false);
-        };
         if role != IpcFieldRole::DictionaryValues
             && let Some(dictionary) = field.dictionary()
         {
             let width = ipc_int_byte_width(dictionary.indexType(), 4);
-            return Ok(self.skip_buffers(1) && self.check_typed_buffer(width, "dictionary key")?);
+            ops.push(LayoutOp::TypedBuffer {
+                width,
+                trailing_buffers: 0,
+                label: "dictionary key",
+            });
+            let mut value_ops = Vec::new();
+            Self::compile_field(
+                &mut value_ops,
+                dict_ops,
+                field,
+                IpcFieldRole::DictionaryValues,
+            )?;
+            dict_ops.insert(dictionary.id(), value_ops);
+            return Ok(());
         }
         match field.type_type() {
-            Type::Null => Ok(true),
-            Type::Utf8 | Type::Binary => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(4, "offset")?
-                && self.skip_buffers(1)),
-            Type::LargeUtf8 | Type::LargeBinary => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(8, "offset")?
-                && self.skip_buffers(1)),
-            Type::Utf8View | Type::BinaryView => {
-                let Some(count) = self
-                    .variadic_counts
-                    .next()
-                    .and_then(|count| usize::try_from(count).ok())
-                else {
-                    return Ok(false);
-                };
-                Ok(self.skip_buffers(1)
-                    && self.check_typed_buffer(16, "view")?
-                    && self.skip_buffers(count))
+            Type::Null => ops.push(LayoutOp::NoBuffers),
+            Type::Utf8 | Type::Binary => ops.push(LayoutOp::TypedBuffer {
+                width: 4,
+                trailing_buffers: 1,
+                label: "offset",
+            }),
+            Type::LargeUtf8 | Type::LargeBinary => ops.push(LayoutOp::TypedBuffer {
+                width: 8,
+                trailing_buffers: 1,
+                label: "offset",
+            }),
+            Type::Utf8View | Type::BinaryView => ops.push(LayoutOp::VariadicView),
+            Type::List | Type::Map => {
+                ops.push(LayoutOp::TypedBuffer {
+                    width: 4,
+                    trailing_buffers: 0,
+                    label: "offset",
+                });
+                Self::compile_children(ops, dict_ops, field)?;
             }
-            Type::List | Type::Map => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(4, "offset")?
-                && self.walk_children(field)?),
-            Type::LargeList => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(8, "offset")?
-                && self.walk_children(field)?),
-            Type::ListView => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(4, "offset")?
-                && self.check_typed_buffer(4, "size")?
-                && self.walk_children(field)?),
-            Type::LargeListView => Ok(self.skip_buffers(1)
-                && self.check_typed_buffer(8, "offset")?
-                && self.check_typed_buffer(8, "size")?
-                && self.walk_children(field)?),
-            Type::FixedSizeList | Type::Struct_ => {
-                Ok(self.skip_buffers(1) && self.walk_children(field)?)
+            Type::LargeList => {
+                ops.push(LayoutOp::TypedBuffer {
+                    width: 8,
+                    trailing_buffers: 0,
+                    label: "offset",
+                });
+                Self::compile_children(ops, dict_ops, field)?;
+            }
+            Type::ListView => {
+                ops.push(LayoutOp::ListView { width: 4 });
+                Self::compile_children(ops, dict_ops, field)?;
+            }
+            Type::LargeListView => {
+                ops.push(LayoutOp::ListView { width: 8 });
+                Self::compile_children(ops, dict_ops, field)?;
+            }
+            Type::FixedSizeList => {
+                let raw_width = field
+                    .type_as_fixed_size_list()
+                    .map(|list| list.listSize())
+                    .unwrap_or(0);
+                let element_width = usize::try_from(raw_width).map_err(|_| {
+                    format!(
+                        "invalid Arrow IPC stream: field {:?} declares negative fixed size {raw_width}",
+                        field.name().unwrap_or_default()
+                    )
+                })?;
+                ops.push(LayoutOp::FixedSize {
+                    element_width,
+                    trailing_buffers: 0,
+                    label: "fixed-size list",
+                });
+                Self::compile_children(ops, dict_ops, field)?;
+            }
+            Type::FixedSizeBinary => {
+                let raw_width = field
+                    .type_as_fixed_size_binary()
+                    .map(|binary| binary.byteWidth())
+                    .unwrap_or(0);
+                let element_width = usize::try_from(raw_width).map_err(|_| {
+                    format!(
+                        "invalid Arrow IPC stream: field {:?} declares negative fixed size {raw_width}",
+                        field.name().unwrap_or_default()
+                    )
+                })?;
+                ops.push(LayoutOp::FixedSize {
+                    element_width,
+                    trailing_buffers: 1,
+                    label: "fixed-size binary",
+                });
+            }
+            Type::Struct_ => {
+                ops.push(LayoutOp::SkipBuffers(1));
+                Self::compile_children(ops, dict_ops, field)?;
             }
             Type::RunEndEncoded => {
-                let mut role = IpcFieldRole::RunEnds;
+                ops.push(LayoutOp::NoBuffers);
+                let mut child_role = IpcFieldRole::RunEnds;
                 for child in field.children().into_iter().flatten() {
-                    if !self.walk(&child, role)? {
-                        return Ok(false);
-                    }
-                    role = IpcFieldRole::Plain;
+                    Self::compile_field(ops, dict_ops, &child, child_role)?;
+                    child_role = IpcFieldRole::Plain;
                 }
-                Ok(true)
             }
             Type::Union => {
-                if self.legacy_union_validity && !self.skip_buffers(1) {
-                    return Ok(false);
-                }
-                if !self.check_union_buffer(node.length(), 1, "type id")? {
-                    return Ok(false);
-                }
                 let dense = field
                     .type_as_union()
                     .is_some_and(|union| union.mode() == arrow_ipc::UnionMode::Dense);
-                if dense && !self.check_union_buffer(node.length(), 4, "offset")? {
-                    return Ok(false);
-                }
-                self.walk_children(field)
+                ops.push(LayoutOp::Union { dense });
+                Self::compile_children(ops, dict_ops, field)?;
             }
             Type::Int if role == IpcFieldRole::RunEnds => {
                 let width = ipc_int_byte_width(field.type_as_int(), 1);
-                Ok(self.skip_buffers(1) && self.check_typed_buffer(width, "run end")?)
+                ops.push(LayoutOp::TypedBuffer {
+                    width,
+                    trailing_buffers: 0,
+                    label: "run end",
+                });
             }
-            _ => Ok(self.skip_buffers(2)),
+            _ => ops.push(LayoutOp::SkipBuffers(2)),
         }
+        Ok(())
     }
 }
 
-fn validate_arrow_ipc_batch_layout<'a, I>(
-    batch: &arrow_ipc::RecordBatch<'_>,
-    fields: I,
-    role: IpcFieldRole,
-    version: arrow_ipc::MetadataVersion,
-) -> Result<(), String>
+#[inline]
+fn skip_ipc_buffers<'a, B>(buffers: &mut B, count: usize) -> bool
 where
-    I: IntoIterator<Item = arrow_ipc::Field<'a>>,
+    B: Iterator<Item = &'a arrow_ipc::Buffer>,
 {
-    let mut walker = IpcBatchLayoutWalker {
-        nodes: batch.nodes().into_iter().flatten(),
-        buffers: batch.buffers().into_iter().flatten(),
-        variadic_counts: batch.variadicBufferCounts().into_iter().flatten(),
-        legacy_union_validity: version < arrow_ipc::MetadataVersion::V5,
-        compressed: batch.compression().is_some(),
-    };
-    for field in fields {
-        if !walker.walk(&field, role)? {
-            break;
+    for _ in 0..count {
+        if buffers.next().is_none() {
+            return false;
         }
     }
-    Ok(())
+    true
 }
 
-/// Validates the buffer and field-node ranges of one record-batch or dictionary-batch message
-/// against its declared body length and the stream schema before `arrow-ipc` decodes it.
-fn validate_arrow_ipc_message_ranges(
-    message: &arrow_ipc::Message<'_>,
-    body_len: usize,
-    schema: Option<&arrow_ipc::Schema<'_>>,
-) -> Result<(), String> {
-    if let Some(batch) = message.header_as_record_batch() {
-        validate_arrow_ipc_batch_ranges(&batch, body_len)?;
-        if let Some(fields) = schema.and_then(|schema| schema.fields()) {
-            validate_arrow_ipc_batch_layout(
-                &batch,
-                fields,
-                IpcFieldRole::Plain,
-                message.version(),
-            )?;
-        }
-    } else if let Some(dictionary) = message.header_as_dictionary_batch()
-        && let Some(batch) = dictionary.data()
+/// Compressed buffers are skipped: this build of `arrow-ipc` has no codecs and rejects
+/// every non-empty compressed buffer before interpreting it.
+#[inline]
+fn check_ipc_typed_buffer<'a, B>(
+    buffers: &mut B,
+    compressed: bool,
+    width: i64,
+    label: &str,
+) -> Result<bool, String>
+where
+    B: Iterator<Item = &'a arrow_ipc::Buffer>,
+{
+    let Some(buffer) = buffers.next() else {
+        return Ok(false);
+    };
+    if !compressed && buffer.length() % width != 0 {
+        return Err(format!(
+            "corrupt Arrow IPC stream: {label} buffer length {} is not a multiple of {width} bytes",
+            buffer.length()
+        ));
+    }
+    Ok(true)
+}
+
+#[inline]
+fn check_ipc_union_buffer<'a, B>(
+    buffers: &mut B,
+    compressed: bool,
+    rows: i64,
+    width: i64,
+    label: &str,
+) -> Result<bool, String>
+where
+    B: Iterator<Item = &'a arrow_ipc::Buffer>,
+{
+    let Some(buffer) = buffers.next() else {
+        return Ok(false);
+    };
+    if rows == 0 {
+        return Ok(true);
+    }
+    if compressed {
+        return Err(
+            "invalid Arrow IPC stream: compressed union columns are not supported".to_string(),
+        );
+    }
+    let required = usize::try_from(rows)
+        .ok()
+        .and_then(|rows| rows.checked_mul(width as usize));
+    let buf_len = usize::try_from(buffer.length()).ok();
+    if required.is_none_or(|required| buf_len.is_none_or(|len| len < required))
+        || buffer.offset() % width != 0
     {
-        validate_arrow_ipc_batch_ranges(&batch, body_len)?;
-        if let Some(field) =
-            schema.and_then(|schema| find_ipc_dictionary_field(schema.fields(), dictionary.id()))
-        {
-            validate_arrow_ipc_batch_layout(
-                &batch,
-                [field],
-                IpcFieldRole::DictionaryValues,
-                message.version(),
-            )?;
+        return Err(format!(
+            "corrupt Arrow IPC stream: union {label} buffer (offset {}, length {}) cannot hold {rows} rows",
+            buffer.offset(),
+            buffer.length()
+        ));
+    }
+    Ok(true)
+}
+
+/// Validates one record batch against a pre-compiled `LayoutOp` sequence, rejecting buffer shapes
+/// and length overflows that `arrow-ipc` and `arrow-data` assert on instead of returning an error.
+fn validate_compiled_batch_layout(
+    batch: &arrow_ipc::RecordBatch<'_>,
+    ops: &[LayoutOp],
+    version: arrow_ipc::MetadataVersion,
+) -> Result<(), String> {
+    let mut nodes = batch.nodes().into_iter().flatten();
+    let mut buffers = batch.buffers().into_iter().flatten();
+    let mut variadic_counts = batch.variadicBufferCounts().into_iter().flatten();
+    let legacy_union_validity = version < arrow_ipc::MetadataVersion::V5;
+    let compressed = batch.compression().is_some();
+
+    for &op in ops {
+        let Some(node) = nodes.next() else {
+            break;
+        };
+        match op {
+            LayoutOp::NoBuffers => {}
+            LayoutOp::SkipBuffers(count) => {
+                if !skip_ipc_buffers(&mut buffers, usize::from(count)) {
+                    break;
+                }
+            }
+            LayoutOp::FixedSize {
+                element_width,
+                trailing_buffers,
+                label,
+            } => {
+                let node_len = usize::try_from(node.length()).map_err(|_| {
+                    format!(
+                        "corrupt Arrow IPC stream: {label} length {} overflows usize",
+                        node.length()
+                    )
+                })?;
+                if node_len.checked_mul(element_width).is_none() {
+                    return Err(format!(
+                        "corrupt Arrow IPC stream: {label} length {node_len} * width {element_width} overflows usize"
+                    ));
+                }
+                if !skip_ipc_buffers(&mut buffers, 1 + usize::from(trailing_buffers)) {
+                    break;
+                }
+            }
+            LayoutOp::TypedBuffer {
+                width,
+                trailing_buffers,
+                label,
+            } => {
+                if !skip_ipc_buffers(&mut buffers, 1)
+                    || !check_ipc_typed_buffer(&mut buffers, compressed, width, label)?
+                    || !skip_ipc_buffers(&mut buffers, usize::from(trailing_buffers))
+                {
+                    break;
+                }
+            }
+            LayoutOp::ListView { width } => {
+                if !skip_ipc_buffers(&mut buffers, 1)
+                    || !check_ipc_typed_buffer(&mut buffers, compressed, width, "offset")?
+                    || !check_ipc_typed_buffer(&mut buffers, compressed, width, "size")?
+                {
+                    break;
+                }
+            }
+            LayoutOp::VariadicView => {
+                let Some(count) = variadic_counts
+                    .next()
+                    .and_then(|count| usize::try_from(count).ok())
+                else {
+                    break;
+                };
+                if !skip_ipc_buffers(&mut buffers, 1)
+                    || !check_ipc_typed_buffer(&mut buffers, compressed, 16, "view")?
+                    || !skip_ipc_buffers(&mut buffers, count)
+                {
+                    break;
+                }
+            }
+            LayoutOp::Union { dense } => {
+                if legacy_union_validity && !skip_ipc_buffers(&mut buffers, 1) {
+                    break;
+                }
+                if !check_ipc_union_buffer(&mut buffers, compressed, node.length(), 1, "type id")? {
+                    break;
+                }
+                if dense
+                    && !check_ipc_union_buffer(
+                        &mut buffers,
+                        compressed,
+                        node.length(),
+                        4,
+                        "offset",
+                    )?
+                {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -866,33 +1096,135 @@ fn ipc_panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// Opens a `StreamReader`, converting a decoder panic on the schema message into an error.
-fn try_open_arrow_ipc_reader<R: Read>(reader: R) -> Result<StreamReader<R>, String> {
-    match catch_unwind(AssertUnwindSafe(|| StreamReader::try_new(reader, None))) {
-        Ok(result) => result.map_err(|e| format!("invalid Arrow IPC stream: {e}")),
-        Err(payload) => Err(format!(
-            "invalid Arrow IPC stream: decoder panicked: {}",
-            ipc_panic_message(payload.as_ref())
-        )),
-    }
-}
-
-/// Batch iterator that turns a panic inside `StreamReader::next` into one `ArrowError` and then
-/// ends the stream, so unwinding never crosses `py.detach` or the `extern "C"` stream callbacks.
-struct PanicGuardedIpcBatches<R: Read> {
-    inner: StreamReader<R>,
+/// Zero-copy single-pass Arrow IPC batch iterator that parses each message FlatBuffer once,
+/// validates buffer ranges and compiled field layouts, and runs decoding inside `catch_unwind`.
+struct SinglePassIpcBatches {
+    buffer: ArrowBuffer,
+    pos: usize,
+    layout: CompiledIpcLayout,
+    dictionaries_by_id: HashMap<i64, arrow_array::ArrayRef>,
+    validated_flag: Option<Arc<AtomicBool>>,
     poisoned: bool,
 }
 
-impl<R: Read> Iterator for PanicGuardedIpcBatches<R> {
+impl SinglePassIpcBatches {
+    fn decode_next_batch(&mut self) -> Result<Option<RecordBatch>, IpcArrowError> {
+        loop {
+            let slice = self.buffer.as_slice();
+            if self.pos >= slice.len() {
+                if let Some(ref flag) = self.validated_flag {
+                    flag.store(true, Ordering::Release);
+                }
+                return Ok(None);
+            }
+            let (meta_start, meta_len) =
+                read_ipc_meta_header(slice, self.pos).map_err(IpcArrowError::IpcError)?;
+            if meta_len == 0 {
+                self.pos = slice.len();
+                if let Some(ref flag) = self.validated_flag {
+                    flag.store(true, Ordering::Release);
+                }
+                return Ok(None);
+            }
+            let meta_end = meta_start + meta_len;
+            let message =
+                arrow_ipc::root_as_message(&slice[meta_start..meta_end]).map_err(|e| {
+                    IpcArrowError::ParseError(format!("invalid Arrow IPC message: {e:?}"))
+                })?;
+            let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
+                IpcArrowError::IpcError(format!(
+                    "corrupt Arrow IPC stream: negative message body length {}",
+                    message.bodyLength()
+                ))
+            })?;
+            if slice.len() - meta_end < body_len {
+                return Err(IpcArrowError::IpcError(
+                    "corrupt Arrow IPC stream: truncated message body".to_string(),
+                ));
+            }
+            let body_end = meta_end + body_len;
+            self.pos = body_end;
+            let version = message.version();
+            let raw_body = self.buffer.slice_with_length(meta_end, body_len);
+            let body = if !raw_body.is_empty() && ((raw_body.as_ptr() as usize) & 7) != 0 {
+                ArrowBuffer::from_slice_ref(raw_body.as_slice())
+            } else {
+                raw_body
+            };
+            match message.header_type() {
+                arrow_ipc::MessageHeader::RecordBatch => {
+                    let batch = message.header_as_record_batch().ok_or_else(|| {
+                        IpcArrowError::IpcError(
+                            "invalid Arrow IPC stream: missing record batch header".to_string(),
+                        )
+                    })?;
+                    validate_arrow_ipc_batch_ranges(&batch, body_len)
+                        .map_err(IpcArrowError::IpcError)?;
+                    validate_compiled_batch_layout(&batch, &self.layout.root_ops, version)
+                        .map_err(IpcArrowError::IpcError)?;
+                    let record_batch = RecordBatchDecoder::try_new(
+                        &body,
+                        batch,
+                        Arc::clone(&self.layout.schema),
+                        &self.dictionaries_by_id,
+                        &version,
+                    )?
+                    .with_require_alignment(false)
+                    .read_record_batch()?;
+                    return Ok(Some(record_batch));
+                }
+                arrow_ipc::MessageHeader::DictionaryBatch => {
+                    let dict = message.header_as_dictionary_batch().ok_or_else(|| {
+                        IpcArrowError::IpcError(
+                            "invalid Arrow IPC stream: missing dictionary batch header".to_string(),
+                        )
+                    })?;
+                    if let Some(batch) = dict.data() {
+                        validate_arrow_ipc_batch_ranges(&batch, body_len)
+                            .map_err(IpcArrowError::IpcError)?;
+                        if let Some(ops) = self.layout.dict_ops.get(&dict.id()) {
+                            validate_compiled_batch_layout(&batch, ops, version)
+                                .map_err(IpcArrowError::IpcError)?;
+                        }
+                    }
+                    arrow_ipc::reader::read_dictionary(
+                        &body,
+                        dict,
+                        self.layout.schema.as_ref(),
+                        &mut self.dictionaries_by_id,
+                        &version,
+                    )?;
+                }
+                arrow_ipc::MessageHeader::Schema => {
+                    return Err(IpcArrowError::IpcError(
+                        "invalid Arrow IPC stream: unexpected Schema message after stream header"
+                            .to_string(),
+                    ));
+                }
+                other => {
+                    return Err(IpcArrowError::ParseError(format!(
+                        "unsupported Arrow IPC message header: {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for SinglePassIpcBatches {
     type Item = IpcBatchResult;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.poisoned {
             return None;
         }
-        match catch_unwind(AssertUnwindSafe(|| self.inner.next())) {
-            Ok(item) => item,
+        match catch_unwind(AssertUnwindSafe(|| self.decode_next_batch())) {
+            Ok(Ok(Some(batch))) => Some(Ok(batch)),
+            Ok(Ok(None)) => None,
+            Ok(Err(err)) => {
+                self.poisoned = true;
+                Some(Err(err))
+            }
             Err(payload) => {
                 self.poisoned = true;
                 Some(Err(IpcArrowError::IpcError(format!(
@@ -904,22 +1236,25 @@ impl<R: Read> Iterator for PanicGuardedIpcBatches<R> {
     }
 }
 
-type GuardedIpcReader<R> = RecordBatchIterator<PanicGuardedIpcBatches<R>>;
+type GuardedIpcReader = RecordBatchIterator<SinglePassIpcBatches>;
 
-/// Validates stream framing plus every batch's buffer and node ranges, then opens a
-/// panic-guarded lazy batch reader.
-fn open_validated_arrow_ipc_reader<T>(
-    carrier: T,
-) -> Result<GuardedIpcReader<std::io::Cursor<T>>, String>
-where
-    T: AsRef<[u8]>,
-{
-    validate_arrow_ipc_stream_framing(carrier.as_ref())?;
-    let inner = try_open_arrow_ipc_reader(std::io::Cursor::new(carrier))?;
-    let schema = inner.schema();
+fn open_single_pass_ipc_stream(
+    buffer: ArrowBuffer,
+    skip_frame_scan: bool,
+    validated_flag: Option<Arc<AtomicBool>>,
+) -> Result<GuardedIpcReader, String> {
+    if !skip_frame_scan {
+        scan_ipc_frame_bounds(buffer.as_slice())?;
+    }
+    let (layout, pos) = parse_ipc_schema_frame(buffer.as_slice())?;
+    let schema = Arc::clone(&layout.schema);
     Ok(RecordBatchIterator::new(
-        PanicGuardedIpcBatches {
-            inner,
+        SinglePassIpcBatches {
+            buffer,
+            pos,
+            layout,
+            dictionaries_by_id: HashMap::new(),
+            validated_flag,
             poisoned: false,
         },
         schema,
@@ -974,18 +1309,17 @@ impl AsRef<[u8]> for OwnedArrowIpcSlice {
 
 fn open_lazy_arrow_ipc_stream(
     carrier: OwnedArrowIpcSlice,
-) -> Result<GuardedIpcReader<std::io::Cursor<OwnedArrowIpcSlice>>, String> {
-    open_validated_arrow_ipc_reader(carrier)
+    skip_frame_scan: bool,
+    validated_flag: Option<Arc<AtomicBool>>,
+) -> Result<GuardedIpcReader, String> {
+    let buffer = ArrowBuffer::from(bytes::Bytes::from_owner(carrier));
+    open_single_pass_ipc_stream(buffer, skip_frame_scan, validated_flag)
 }
 
-fn open_arrow_ipc_schema_reader(
-    carrier: OwnedArrowIpcSlice,
-) -> Result<StreamReader<std::io::Cursor<OwnedArrowIpcSlice>>, String> {
-    try_open_arrow_ipc_reader(std::io::Cursor::new(carrier))
-}
-
-fn validate_and_summarize_ipc_bytes(payload: &[u8]) -> Result<(usize, Arc<[String]>), String> {
-    let reader = open_validated_arrow_ipc_reader(payload)?;
+fn validate_and_summarize_ipc_bytes(payload: Arc<[u8]>) -> Result<(usize, Arc<[String]>), String> {
+    let byte_len = payload.len();
+    let carrier = OwnedArrowIpcSlice::try_new(ArrowBacking::Bytes(payload), byte_len)?;
+    let reader = open_lazy_arrow_ipc_stream(carrier, false, None)?;
     let columns: Arc<[String]> = reader
         .schema()
         .fields()
@@ -1473,21 +1807,31 @@ fn arrow_array_value_to_py<'py>(
     )))
 }
 
+const PYLIST_SIGNAL_CHECK_INTERVAL: usize = 4096;
+const PYLIST_BATCH_SIGNAL_CHECK_MASK: usize = 1023;
+const MAX_PYLIST_ROWS: usize = (isize::MAX as usize) / core::mem::size_of::<*mut ffi::PyObject>();
+
 fn append_record_batch_to_pylist<'py>(
     py: Python<'py>,
     batch: &RecordBatch,
     col_keys: &[Bound<'py, PyString>],
     helpers: &mut PyArrowDecodeHelpers<'py>,
     out: &Bound<'py, PyList>,
+    processed_rows: &mut usize,
 ) -> PyResult<()> {
     let cols = batch.columns();
     for row in 0..batch.num_rows() {
+        if *processed_rows > 0 && (*processed_rows & (PYLIST_SIGNAL_CHECK_INTERVAL - 1)) == 0 {
+            py.detach(|| ());
+            py.check_signals()?;
+        }
         let dict = PyDict::new(py);
         for (key, col) in col_keys.iter().zip(cols.iter()) {
             let val = arrow_array_value_to_py(py, col.as_ref(), row, helpers)?;
             dict.set_item(key, val)?;
         }
         out.append(dict)?;
+        *processed_rows += 1;
     }
     Ok(())
 }
@@ -1605,6 +1949,7 @@ pub struct ArrowCursor {
     columns_cache: Option<Arc<[String]>>,
     backing: Option<ArrowBacking>,
     released: Arc<AtomicBool>,
+    validated: Arc<AtomicBool>,
 }
 
 impl ArrowCursor {
@@ -1621,6 +1966,7 @@ impl ArrowCursor {
             columns_cache: None,
             backing: Some(ArrowBacking::Region(region)),
             released: Arc::new(AtomicBool::new(false)),
+            validated: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1676,6 +2022,7 @@ impl ArrowCursor {
             columns_cache: None,
             backing,
             released: Arc::new(AtomicBool::new(false)),
+            validated: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1688,7 +2035,7 @@ impl ArrowCursor {
         let byte_len = bytes.len();
         let bytes_for_scan = Arc::clone(&bytes);
         let (row_count, columns) = py
-            .detach(move || validate_and_summarize_ipc_bytes(&bytes_for_scan))
+            .detach(move || validate_and_summarize_ipc_bytes(bytes_for_scan))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             shm_name: String::new(),
@@ -1697,6 +2044,7 @@ impl ArrowCursor {
             columns_cache: Some(columns),
             backing: Some(ArrowBacking::Bytes(bytes)),
             released: Arc::new(AtomicBool::new(false)),
+            validated: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -1710,9 +2058,8 @@ impl ArrowCursor {
         }
         let carrier = self.resolve_arrow_backing()?;
         py.detach(move || -> Result<Vec<String>, String> {
-            let reader = open_arrow_ipc_schema_reader(carrier)?;
-            Ok(reader
-                .schema()
+            let schema = parse_ipc_schema_only(carrier.as_ref())?;
+            Ok(schema
                 .fields()
                 .iter()
                 .map(|f| f.name().clone())
@@ -1739,6 +2086,7 @@ impl ArrowCursor {
             columns_cache: None,
             backing: Some(ArrowBacking::Region(region)),
             released: Arc::new(AtomicBool::new(false)),
+            validated: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1811,6 +2159,7 @@ impl ArrowCursor {
                 unlinked: AtomicBool::new(false),
             }))),
             released: Arc::new(AtomicBool::new(false)),
+            validated: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1871,8 +2220,8 @@ impl ArrowCursor {
         let carrier = self.resolve_arrow_backing()?;
         let ffi_schema = py
             .detach(move || {
-                let reader = open_arrow_ipc_schema_reader(carrier)?;
-                FFI_ArrowSchema::try_from(reader.schema().as_ref())
+                let schema = parse_ipc_schema_only(carrier.as_ref())?;
+                FFI_ArrowSchema::try_from(schema.as_ref())
                     .map_err(|e| format!("failed to export FFI_ArrowSchema: {e}"))
             })
             .map_err(PyValueError::new_err)?;
@@ -1908,8 +2257,11 @@ impl ArrowCursor {
         };
 
         let carrier = self.resolve_arrow_backing()?;
+        let skip_frame_scan = self.validated.load(Ordering::Acquire);
+        let validated_flag =
+            (!skip_frame_scan && self.backing.is_some()).then(|| Arc::clone(&self.validated));
         let batch_reader = py
-            .detach(move || open_lazy_arrow_ipc_stream(carrier))
+            .detach(move || open_lazy_arrow_ipc_stream(carrier, skip_frame_scan, validated_flag))
             .map_err(PyValueError::new_err)?;
 
         if let Some(ffi_schema) = requested_ffi_schema {
@@ -1988,8 +2340,11 @@ impl ArrowCursor {
 
     pub fn to_pylist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let carrier = self.resolve_arrow_backing()?;
+        let skip_frame_scan = self.validated.load(Ordering::Acquire);
+        let validated_flag =
+            (!skip_frame_scan && self.backing.is_some()).then(|| Arc::clone(&self.validated));
         let mut reader = py
-            .detach(move || open_lazy_arrow_ipc_stream(carrier))
+            .detach(move || open_lazy_arrow_ipc_stream(carrier, skip_frame_scan, validated_flag))
             .map_err(PyValueError::new_err)?;
         let col_keys: Vec<Bound<'py, PyString>> = reader
             .schema()
@@ -1999,14 +2354,37 @@ impl ArrowCursor {
             .collect();
         let out = PyList::empty(py);
         let mut helpers = PyArrowDecodeHelpers::new();
+        let mut total_rows = 0usize;
+        let mut processed_rows = 0usize;
+        let mut batch_count = 0usize;
         loop {
+            if batch_count > 0 && (batch_count & PYLIST_BATCH_SIGNAL_CHECK_MASK) == 0 {
+                py.detach(|| ());
+                py.check_signals()?;
+            }
+            batch_count += 1;
             let next_res = py.detach(|| reader.next());
             let Some(batch_res) = next_res else {
                 break;
             };
             let batch = batch_res
                 .map_err(|e| PyValueError::new_err(format!("corrupt Arrow IPC batch: {e}")))?;
-            append_record_batch_to_pylist(py, &batch, &col_keys, &mut helpers, &out)?;
+            total_rows = total_rows
+                .checked_add(batch.num_rows())
+                .filter(|&count| count <= MAX_PYLIST_ROWS)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "ArrowCursor.to_pylist row count exceeds maximum Python list size ({MAX_PYLIST_ROWS})"
+                    ))
+                })?;
+            append_record_batch_to_pylist(
+                py,
+                &batch,
+                &col_keys,
+                &mut helpers,
+                &out,
+                &mut processed_rows,
+            )?;
         }
         Ok(out)
     }
@@ -2676,12 +3054,14 @@ mod tests {
             attrs.append(true).unwrap();
             attrs.append(false).unwrap();
             attrs.append(true).unwrap();
-            let mut pair = FixedSizeListBuilder::new(Int32Builder::new(), 2);
-            pair.values().append_slice(&[base, base + 1]);
+            let mut pair = FixedSizeListBuilder::new(Int32Builder::new(), 4);
+            pair.values()
+                .append_slice(&[base, base + 1, base + 2, base + 3]);
             pair.append(true);
-            pair.values().append_slice(&[0, 0]);
+            pair.values().append_slice(&[0, 0, 0, 0]);
             pair.append(false);
-            pair.values().append_slice(&[base + 2, base + 3]);
+            pair.values()
+                .append_slice(&[base + 4, base + 5, base + 6, base + 7]);
             pair.append(true);
             let mut runs = StringRunBuilder::<Int16Type>::new();
             runs.append_value("run");
@@ -2766,19 +3146,27 @@ mod tests {
         buf
     }
 
+    fn drain_ipc_stream(payload: &[u8]) -> Result<usize, String> {
+        let reader = super::open_single_pass_ipc_stream(
+            arrow_buffer::Buffer::from_slice_ref(payload),
+            false,
+            None,
+        )?;
+        let mut total_rows = 0usize;
+        for batch in reader {
+            let batch = batch.map_err(|e| e.to_string())?;
+            total_rows += batch.num_rows();
+        }
+        Ok(total_rows)
+    }
+
     #[test]
     fn arrow_ipc_range_validation_rejects_every_panicking_single_byte_mutation() {
+        use std::collections::HashMap;
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
-        use arrow_ipc::reader::StreamReader;
-
         let valid = fuzz_ipc_stream();
-        super::validate_arrow_ipc_stream_framing(&valid).unwrap();
-        let valid_rows: usize = StreamReader::try_new(std::io::Cursor::new(&valid[..]), None)
-            .unwrap()
-            .map(|batch| batch.unwrap().num_rows())
-            .sum();
-        assert_eq!(valid_rows, 6);
+        assert_eq!(drain_ipc_stream(&valid).unwrap(), 6);
 
         const FLIPS: usize = 1;
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
@@ -2792,27 +3180,39 @@ mod tests {
                 let flip = (state % 255) as u8 + 1;
                 let mut mutated = valid.clone();
                 mutated[offset] ^= flip;
-                if super::validate_arrow_ipc_stream_framing(&mutated).is_err() {
+                if super::scan_ipc_frame_bounds(&mutated).is_err() {
                     rejected += 1;
                     continue;
                 }
+                let Ok((layout, pos)) = super::parse_ipc_schema_frame(&mutated) else {
+                    rejected += 1;
+                    continue;
+                };
+                let mut batches = super::SinglePassIpcBatches {
+                    buffer: arrow_buffer::Buffer::from_vec(mutated),
+                    pos,
+                    layout,
+                    dictionaries_by_id: HashMap::new(),
+                    validated_flag: None,
+                    poisoned: false,
+                };
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    if let Ok(reader) =
-                        StreamReader::try_new(std::io::Cursor::new(&mutated[..]), None)
-                    {
-                        for batch in reader {
-                            if batch.is_err() {
-                                break;
-                            }
+                    loop {
+                        match batches.decode_next_batch() {
+                            Ok(Some(_)) => {}
+                            Ok(None) => break false,
+                            Err(_) => break true,
                         }
                     }
                 }));
-                if let Err(payload) = outcome {
-                    panics.push((
+                match outcome {
+                    Ok(true) => rejected += 1,
+                    Ok(false) => {}
+                    Err(payload) => panics.push((
                         offset,
                         flip,
                         super::ipc_panic_message(payload.as_ref()).to_string(),
-                    ));
+                    )),
                 }
             }
         }
@@ -2827,10 +3227,16 @@ mod tests {
         for offset in 0..valid.len() {
             let mut mutated = valid.clone();
             mutated[offset] ^= 0x80;
-            match super::open_validated_arrow_ipc_reader(&mutated[..]) {
+            match super::open_single_pass_ipc_stream(
+                arrow_buffer::Buffer::from_vec(mutated),
+                false,
+                None,
+            ) {
                 Ok(reader) => {
                     for batch in reader {
-                        if batch.is_err() {
+                        if let Err(err) = batch {
+                            saw_range_error |=
+                                err.to_string().contains("exceeds message body length");
                             break;
                         }
                     }
@@ -2841,6 +3247,141 @@ mod tests {
             }
         }
         assert!(saw_range_error);
+    }
+
+    #[test]
+    fn arrow_ipc_multi_byte_mutations_never_panic() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let valid = fuzz_ipc_stream();
+        let ranges = ipc_message_meta_ranges(&valid);
+        assert!(ranges.len() >= 2);
+        let schema_range = ranges[0];
+        let batch_offsets: Vec<usize> = ranges[1..]
+            .iter()
+            .flat_map(|&(start, end)| start..end)
+            .collect();
+        let schema_offsets: Vec<usize> = (schema_range.0..schema_range.1).collect();
+        assert!(!schema_offsets.is_empty() && !batch_offsets.is_empty());
+
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+        let mut next_u64 = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut panics = Vec::new();
+        for &mutation_count in &[2usize, 4usize] {
+            for trial in 0..512usize {
+                let mut mutated = valid.clone();
+                for idx in 0..mutation_count {
+                    let pool = if idx % 2 == 0 {
+                        &schema_offsets
+                    } else {
+                        &batch_offsets
+                    };
+                    let offset = pool[(next_u64() as usize) % pool.len()];
+                    let flip = (next_u64() % 255) as u8 + 1;
+                    mutated[offset] ^= flip;
+                }
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    if let Ok(reader) = super::open_single_pass_ipc_stream(
+                        arrow_buffer::Buffer::from_vec(mutated),
+                        false,
+                        None,
+                    ) {
+                        for batch in reader {
+                            if batch.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }));
+                if let Err(payload) = outcome {
+                    panics.push((
+                        mutation_count,
+                        trial,
+                        super::ipc_panic_message(payload.as_ref()).to_string(),
+                    ));
+                }
+            }
+        }
+        assert!(panics.is_empty(), "multi-byte mutation panics: {panics:?}");
+    }
+
+    #[test]
+    fn arrow_ipc_misaligned_dense_union_decodes_without_panicking() {
+        use std::sync::Arc;
+
+        use arrow_array::builder::UnionBuilder;
+        use arrow_array::types::{Float64Type, Int32Type};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+
+        let mut dense = UnionBuilder::new_dense();
+        dense.append::<Int32Type>("i", 42).unwrap();
+        dense.append::<Float64Type>("f", 3.5).unwrap();
+        dense.append_null::<Int32Type>("i").unwrap();
+        let batch = RecordBatch::try_from_iter(vec![(
+            "dense",
+            Arc::new(dense.build().unwrap()) as ArrayRef,
+        )])
+        .unwrap();
+
+        let mut ipc_bytes = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc_bytes, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut prefixed = Vec::with_capacity(1 + ipc_bytes.len());
+        prefixed.push(0xAA);
+        prefixed.extend_from_slice(&ipc_bytes);
+        let carrier = super::OwnedArrowIpcSlice {
+            backing: super::ArrowBacking::Bytes(Arc::<[u8]>::from(prefixed.as_slice())),
+            start: 1,
+            end: 1 + ipc_bytes.len(),
+        };
+        assert_eq!((carrier.as_ref().as_ptr() as usize) & 1, 1);
+
+        let reader = super::open_lazy_arrow_ipc_stream(carrier, false, None).unwrap();
+        let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn arrow_ipc_frame_scan_and_validated_flag_semantics() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        assert!(super::scan_ipc_frame_bounds(&[]).is_err());
+        let eos_only = [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0];
+        assert!(super::scan_ipc_frame_bounds(&eos_only).is_err());
+        assert!(super::parse_ipc_schema_only(&eos_only).is_err());
+
+        let valid = fuzz_ipc_stream();
+        let schema = super::parse_ipc_schema_only(&valid).unwrap();
+        assert_eq!(schema.fields().len(), 18);
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut reader = super::open_single_pass_ipc_stream(
+            arrow_buffer::Buffer::from_slice_ref(&valid),
+            false,
+            Some(Arc::clone(&flag)),
+        )
+        .unwrap();
+        assert!(!flag.load(Ordering::Acquire));
+        let mut rows = 0usize;
+        for batch in &mut reader {
+            rows += batch.unwrap().num_rows();
+        }
+        assert_eq!(rows, 6);
+        assert!(flag.load(Ordering::Acquire));
+        assert!(reader.next().is_none());
     }
 
     #[test]
@@ -2877,7 +3418,7 @@ mod tests {
             empty_buf.len(),
         )
         .unwrap();
-        let empty_reader = super::open_lazy_arrow_ipc_stream(empty_carrier).unwrap();
+        let empty_reader = super::open_lazy_arrow_ipc_stream(empty_carrier, false, None).unwrap();
         assert_eq!(empty_reader.schema(), schema);
         let empty_ffi = FFI_ArrowArrayStream::new(Box::new(empty_reader));
         let empty_imported = RecordBatchStreamReader::try_new(empty_ffi).unwrap();
@@ -2898,7 +3439,7 @@ mod tests {
             multi_buf.len(),
         )
         .unwrap();
-        let multi_reader = super::open_lazy_arrow_ipc_stream(multi_carrier).unwrap();
+        let multi_reader = super::open_lazy_arrow_ipc_stream(multi_carrier, false, None).unwrap();
         let multi_ffi = FFI_ArrowArrayStream::new(Box::new(multi_reader));
         let multi_imported = RecordBatchStreamReader::try_new(multi_ffi).unwrap();
         assert_eq!(multi_imported.schema(), schema);
@@ -2913,14 +3454,14 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(super::open_lazy_arrow_ipc_stream(empty_slice).is_err());
+        assert!(super::open_lazy_arrow_ipc_stream(empty_slice, false, None).is_err());
         let truncated = &multi_buf[..multi_buf.len() / 2];
         let trunc_slice = super::OwnedArrowIpcSlice::try_new(
             super::ArrowBacking::Bytes(Arc::<[u8]>::from(truncated)),
             truncated.len(),
         )
         .unwrap();
-        assert!(super::open_lazy_arrow_ipc_stream(trunc_slice).is_err());
+        assert!(super::open_lazy_arrow_ipc_stream(trunc_slice, false, None).is_err());
 
         Python::initialize();
         Python::attach(|py| {
@@ -2962,6 +3503,485 @@ mod tests {
             assert!(cursor.__arrow_c_schema__(py).is_err());
             assert!(cursor.__arrow_c_stream__(py, None).is_err());
             assert!(cursor.read_bytes(py).is_err());
+        });
+    }
+
+    fn fb_u32(buf: &[u8], pos: usize) -> usize {
+        u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize
+    }
+
+    fn fb_table_field_pos(buf: &[u8], table_pos: usize, vtable_offset: usize) -> usize {
+        let vtable_rel = i32::from_le_bytes(buf[table_pos..table_pos + 4].try_into().unwrap());
+        let vtable_pos = table_pos.checked_sub_signed(vtable_rel as isize).unwrap();
+        let vtable_len =
+            u16::from_le_bytes(buf[vtable_pos..vtable_pos + 2].try_into().unwrap()) as usize;
+        assert!(vtable_offset < vtable_len);
+        let field_rel = u16::from_le_bytes(
+            buf[vtable_pos + vtable_offset..vtable_pos + vtable_offset + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert!(field_rel != 0);
+        table_pos + field_rel
+    }
+
+    fn fb_follow_table(buf: &[u8], field_pos: usize) -> usize {
+        field_pos + fb_u32(buf, field_pos)
+    }
+
+    fn ipc_message_meta_ranges(payload: &[u8]) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut pos = 0usize;
+        while pos < payload.len() {
+            let mut word = [0u8; 4];
+            word.copy_from_slice(&payload[pos..pos + 4]);
+            pos += 4;
+            if word == super::IPC_CONTINUATION_MARKER {
+                word.copy_from_slice(&payload[pos..pos + 4]);
+                pos += 4;
+            }
+            let meta_len = i32::from_le_bytes(word);
+            if meta_len == 0 {
+                break;
+            }
+            let meta_len = usize::try_from(meta_len).unwrap();
+            let meta_start = pos;
+            let meta_end = pos + meta_len;
+            let message = arrow_ipc::root_as_message(&payload[meta_start..meta_end]).unwrap();
+            let body_len = usize::try_from(message.bodyLength()).unwrap();
+            ranges.push((meta_start, meta_end));
+            pos = meta_end + body_len;
+        }
+        ranges
+    }
+
+    fn patch_first_batch_length_and_node0(
+        payload: &mut [u8],
+        header_type: arrow_ipc::MessageHeader,
+        new_length: i64,
+    ) {
+        let ranges = ipc_message_meta_ranges(payload);
+        let (meta_start, meta_end) = ranges
+            .into_iter()
+            .find(|&(start, end)| {
+                arrow_ipc::root_as_message(&payload[start..end])
+                    .unwrap()
+                    .header_type()
+                    == header_type
+            })
+            .expect("matching IPC message not found");
+        let meta = &mut payload[meta_start..meta_end];
+        let msg_table = fb_u32(meta, 0);
+        let header_field =
+            fb_table_field_pos(meta, msg_table, arrow_ipc::Message::VT_HEADER as usize);
+        let header_table = fb_follow_table(meta, header_field);
+        let batch_table = if header_type == arrow_ipc::MessageHeader::DictionaryBatch {
+            let data_field = fb_table_field_pos(
+                meta,
+                header_table,
+                arrow_ipc::DictionaryBatch::VT_DATA as usize,
+            );
+            fb_follow_table(meta, data_field)
+        } else {
+            header_table
+        };
+        let len_pos = fb_table_field_pos(
+            meta,
+            batch_table,
+            arrow_ipc::RecordBatch::VT_LENGTH as usize,
+        );
+        meta[len_pos..len_pos + 8].copy_from_slice(&new_length.to_le_bytes());
+        let nodes_field =
+            fb_table_field_pos(meta, batch_table, arrow_ipc::RecordBatch::VT_NODES as usize);
+        let nodes_vec = fb_follow_table(meta, nodes_field);
+        let node0_len_pos = nodes_vec + 4;
+        meta[node0_len_pos..node0_len_pos + 8].copy_from_slice(&new_length.to_le_bytes());
+    }
+
+    #[test]
+    fn arrow_ipc_fixed_size_overflow() {
+        use std::sync::Arc;
+
+        use arrow_array::builder::{FixedSizeListBuilder, Int32Builder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+
+        let mut list = FixedSizeListBuilder::new(Int32Builder::new(), 4);
+        list.values().append_slice(&[1, 2, 3, 4]);
+        list.append(true);
+        let batch =
+            RecordBatch::try_from_iter(vec![("fsl", Arc::new(list.finish()) as ArrayRef)]).unwrap();
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+
+        patch_first_batch_length_and_node0(
+            &mut buf,
+            arrow_ipc::MessageHeader::RecordBatch,
+            0x4000_0000_0000_0000_i64,
+        );
+        let err = drain_ipc_stream(&buf)
+            .expect_err("FixedSizeList multiplication overflow must be rejected");
+        assert!(err.contains("fixed-size list"), "unexpected error: {err}");
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+    }
+
+    fn patch_schema_first_field_type_i32(payload: &mut [u8], vtable_offset: usize, new_val: i32) {
+        let ranges = ipc_message_meta_ranges(payload);
+        let (meta_start, meta_end) = ranges
+            .into_iter()
+            .find(|&(start, end)| {
+                arrow_ipc::root_as_message(&payload[start..end])
+                    .unwrap()
+                    .header_type()
+                    == arrow_ipc::MessageHeader::Schema
+            })
+            .expect("Schema IPC message not found");
+        let meta = &mut payload[meta_start..meta_end];
+        let msg_table = fb_u32(meta, 0);
+        let header_field =
+            fb_table_field_pos(meta, msg_table, arrow_ipc::Message::VT_HEADER as usize);
+        let schema_table = fb_follow_table(meta, header_field);
+        let fields_field =
+            fb_table_field_pos(meta, schema_table, arrow_ipc::Schema::VT_FIELDS as usize);
+        let fields_vec = fb_follow_table(meta, fields_field);
+        let field0_table = fb_follow_table(meta, fields_vec + 4);
+        let type_field =
+            fb_table_field_pos(meta, field0_table, arrow_ipc::Field::VT_TYPE_ as usize);
+        let type_table = fb_follow_table(meta, type_field);
+        let val_pos = fb_table_field_pos(meta, type_table, vtable_offset);
+        meta[val_pos..val_pos + 4].copy_from_slice(&new_val.to_le_bytes());
+    }
+
+    #[test]
+    fn arrow_ipc_fixed_size_binary_overflow_and_zero_width() {
+        use std::sync::Arc;
+
+        use arrow_array::builder::{FixedSizeBinaryBuilder, FixedSizeListBuilder, Int32Builder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+
+        let mut bin = FixedSizeBinaryBuilder::new(16);
+        bin.append_value([0u8; 16]).unwrap();
+        let batch =
+            RecordBatch::try_from_iter(vec![("fsb", Arc::new(bin.finish()) as ArrayRef)]).unwrap();
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+
+        patch_first_batch_length_and_node0(
+            &mut buf,
+            arrow_ipc::MessageHeader::RecordBatch,
+            0x1000_0000_0000_0000_i64,
+        );
+        let err = drain_ipc_stream(&buf)
+            .expect_err("FixedSizeBinary multiplication overflow must be rejected");
+        assert!(err.contains("fixed-size binary"), "unexpected error: {err}");
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+
+        let mut empty_list = FixedSizeListBuilder::new(Int32Builder::new(), 0);
+        let mut empty_bin = FixedSizeBinaryBuilder::new(0);
+        let zero_batch = RecordBatch::try_from_iter(vec![
+            ("zero_fsl", Arc::new(empty_list.finish()) as ArrayRef),
+            ("zero_fsb", Arc::new(empty_bin.finish()) as ArrayRef),
+        ])
+        .unwrap();
+        let mut zero_buf = Vec::new();
+        let mut zero_writer = StreamWriter::try_new(&mut zero_buf, &zero_batch.schema()).unwrap();
+        zero_writer.write(&zero_batch).unwrap();
+        zero_writer.finish().unwrap();
+        drop(zero_writer);
+        drain_ipc_stream(&zero_buf).unwrap();
+    }
+
+    #[test]
+    fn arrow_ipc_negative_fixed_size_rejected() {
+        use std::sync::Arc;
+
+        use arrow_array::builder::{FixedSizeBinaryBuilder, FixedSizeListBuilder, Int32Builder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+
+        let mut list = FixedSizeListBuilder::new(Int32Builder::new(), 4);
+        list.values().append_slice(&[1, 2, 3, 4]);
+        list.append(true);
+        let list_batch =
+            RecordBatch::try_from_iter(vec![("fsl", Arc::new(list.finish()) as ArrayRef)]).unwrap();
+        let mut list_buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut list_buf, &list_batch.schema()).unwrap();
+        writer.write(&list_batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        patch_schema_first_field_type_i32(
+            &mut list_buf,
+            arrow_ipc::FixedSizeList::VT_LISTSIZE as usize,
+            -4,
+        );
+        let err = drain_ipc_stream(&list_buf).expect_err("negative listSize must be rejected");
+        assert!(
+            err.contains("negative fixed size"),
+            "unexpected error: {err}"
+        );
+
+        let mut bin = FixedSizeBinaryBuilder::new(16);
+        bin.append_value([0u8; 16]).unwrap();
+        let bin_batch =
+            RecordBatch::try_from_iter(vec![("fsb", Arc::new(bin.finish()) as ArrayRef)]).unwrap();
+        let mut bin_buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bin_buf, &bin_batch.schema()).unwrap();
+        writer.write(&bin_batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        patch_schema_first_field_type_i32(
+            &mut bin_buf,
+            arrow_ipc::FixedSizeBinary::VT_BYTEWIDTH as usize,
+            -4,
+        );
+        let err = drain_ipc_stream(&bin_buf).expect_err("negative byteWidth must be rejected");
+        assert!(
+            err.contains("negative fixed size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn arrow_ipc_dictionary_fixed_size_list_overflow_rejected() {
+        use std::sync::Arc;
+
+        use arrow_array::builder::{FixedSizeListBuilder, Int32Builder};
+        use arrow_array::types::Int32Type;
+        use arrow_array::{ArrayRef, DictionaryArray, Int32Array, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+
+        let mut values = FixedSizeListBuilder::new(Int32Builder::new(), 4);
+        values.values().append_slice(&[1, 2, 3, 4]);
+        values.append(true);
+        let dict = DictionaryArray::<Int32Type>::try_new(
+            Int32Array::from(vec![0]),
+            Arc::new(values.finish()) as ArrayRef,
+        )
+        .unwrap();
+        let batch =
+            RecordBatch::try_from_iter(vec![("dict_fsl", Arc::new(dict) as ArrayRef)]).unwrap();
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+
+        patch_first_batch_length_and_node0(
+            &mut buf,
+            arrow_ipc::MessageHeader::DictionaryBatch,
+            0x4000_0000_0000_0000_i64,
+        );
+        let err =
+            drain_ipc_stream(&buf).expect_err("dictionary FixedSizeList overflow must be rejected");
+        assert!(err.contains("fixed-size list"), "unexpected error: {err}");
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn arrow_ipc_release_catch_unwind_catches_panic() {
+        let outcome = std::panic::catch_unwind(|| {
+            panic!("release-unwind-check");
+        });
+        let payload = outcome.expect_err("catch_unwind must return Err without aborting");
+        assert_eq!(
+            super::ipc_panic_message(payload.as_ref()),
+            "release-unwind-check"
+        );
+    }
+
+    #[test]
+    fn arrow_cursor_validated_cache_transitions() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        use arrow_array::{ArrayRef, Int64Array, RecordBatch};
+        use arrow_ipc::writer::StreamWriter;
+        use pyo3::types::PyBytes;
+
+        let batch = RecordBatch::try_from_iter(vec![(
+            "id",
+            Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+        )])
+        .unwrap();
+        let mut valid_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut valid_buf, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut corrupt_buf = valid_buf.clone();
+        patch_first_batch_length_and_node0(
+            &mut corrupt_buf,
+            arrow_ipc::MessageHeader::RecordBatch,
+            0x1000_0000_0000_0000_i64,
+        );
+
+        Python::initialize();
+        Python::attach(|py| {
+            let py_bytes = PyBytes::new(py, &valid_buf);
+            let bytes_cursor = ArrowCursor::from_ipc_bytes(py, py_bytes.as_any()).unwrap();
+            assert!(bytes_cursor.validated.load(Ordering::Acquire));
+            assert_eq!(bytes_cursor.to_pylist(py).unwrap().len(), 2);
+            assert!(bytes_cursor.release(py));
+
+            let valid_shm = format!("vtb-py-val-ok-{}", std::process::id());
+            let shm_cursor = ArrowCursor::write_ipc_to_shm(py, &valid_shm, &valid_buf, 2).unwrap();
+            assert!(!shm_cursor.validated.load(Ordering::Acquire));
+            assert_eq!(shm_cursor.to_pylist(py).unwrap().len(), 2);
+            assert!(shm_cursor.validated.load(Ordering::Acquire));
+            assert_eq!(shm_cursor.to_pylist(py).unwrap().len(), 2);
+            assert!(shm_cursor.release(py));
+
+            let corrupt_shm = format!("vtb-py-val-bad-{}", std::process::id());
+            let bad_cursor =
+                ArrowCursor::write_ipc_to_shm(py, &corrupt_shm, &corrupt_buf, 0).unwrap();
+            assert!(!bad_cursor.validated.load(Ordering::Acquire));
+            assert!(bad_cursor.to_pylist(py).is_err());
+            assert!(!bad_cursor.validated.load(Ordering::Acquire));
+            assert!(bad_cursor.to_pylist(py).is_err());
+            assert!(!bad_cursor.validated.load(Ordering::Acquire));
+            assert!(bad_cursor.release(py));
+        });
+    }
+
+    #[test]
+    fn arrow_cursor_to_pylist_rejects_inflated_and_cumulative_row_counts() {
+        use std::sync::Arc;
+
+        use arrow_array::{ArrayRef, NullArray, RecordBatch, RecordBatchOptions};
+        use arrow_ipc::writer::StreamWriter;
+        use arrow_schema::Schema;
+        use pyo3::types::PyBytes;
+
+        let null_batch =
+            RecordBatch::try_from_iter(vec![("n", Arc::new(NullArray::new(1)) as ArrayRef)])
+                .unwrap();
+        let mut null_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut null_buf, &null_batch.schema()).unwrap();
+            writer.write(&null_batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let inflated = 0x4000_0000_0000_0000_i64;
+        patch_first_batch_length_and_node0(
+            &mut null_buf,
+            arrow_ipc::MessageHeader::RecordBatch,
+            inflated,
+        );
+        let null_ranges = ipc_message_meta_ranges(&null_buf);
+        let (meta_start, meta_end) = null_ranges
+            .into_iter()
+            .find(|&(start, end)| {
+                arrow_ipc::root_as_message(&null_buf[start..end])
+                    .unwrap()
+                    .header_type()
+                    == arrow_ipc::MessageHeader::RecordBatch
+            })
+            .unwrap();
+        {
+            let meta = &mut null_buf[meta_start..meta_end];
+            let msg_table = fb_u32(meta, 0);
+            let header_field =
+                fb_table_field_pos(meta, msg_table, arrow_ipc::Message::VT_HEADER as usize);
+            let batch_table = fb_follow_table(meta, header_field);
+            let nodes_field =
+                fb_table_field_pos(meta, batch_table, arrow_ipc::RecordBatch::VT_NODES as usize);
+            let nodes_vec = fb_follow_table(meta, nodes_field);
+            let node0_null_pos = nodes_vec + 4 + 8;
+            meta[node0_null_pos..node0_null_pos + 8].copy_from_slice(&inflated.to_le_bytes());
+        }
+
+        let empty_schema = Arc::new(Schema::empty());
+        let zero_col_batch = RecordBatch::try_new_with_options(
+            Arc::clone(&empty_schema),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        let mut zero_col_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut zero_col_buf, &empty_schema).unwrap();
+            writer.write(&zero_col_batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let zc_ranges = ipc_message_meta_ranges(&zero_col_buf);
+        let (zc_start, zc_end) = zc_ranges
+            .into_iter()
+            .find(|&(start, end)| {
+                arrow_ipc::root_as_message(&zero_col_buf[start..end])
+                    .unwrap()
+                    .header_type()
+                    == arrow_ipc::MessageHeader::RecordBatch
+            })
+            .unwrap();
+        {
+            let meta = &mut zero_col_buf[zc_start..zc_end];
+            let msg_table = fb_u32(meta, 0);
+            let header_field =
+                fb_table_field_pos(meta, msg_table, arrow_ipc::Message::VT_HEADER as usize);
+            let batch_table = fb_follow_table(meta, header_field);
+            let len_pos = fb_table_field_pos(
+                meta,
+                batch_table,
+                arrow_ipc::RecordBatch::VT_LENGTH as usize,
+            );
+            meta[len_pos..len_pos + 8].copy_from_slice(&inflated.to_le_bytes());
+        }
+
+        let mut cumulative_buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut cumulative_buf, &empty_schema).unwrap();
+            writer.write(&zero_col_batch).unwrap();
+            writer.write(&zero_col_batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let cum_batches: Vec<(usize, usize)> = ipc_message_meta_ranges(&cumulative_buf)
+            .into_iter()
+            .filter(|&(start, end)| {
+                arrow_ipc::root_as_message(&cumulative_buf[start..end])
+                    .unwrap()
+                    .header_type()
+                    == arrow_ipc::MessageHeader::RecordBatch
+            })
+            .collect();
+        assert_eq!(cum_batches.len(), 2);
+        let (b2_start, b2_end) = cum_batches[1];
+        {
+            let meta = &mut cumulative_buf[b2_start..b2_end];
+            let msg_table = fb_u32(meta, 0);
+            let header_field =
+                fb_table_field_pos(meta, msg_table, arrow_ipc::Message::VT_HEADER as usize);
+            let batch_table = fb_follow_table(meta, header_field);
+            let len_pos = fb_table_field_pos(
+                meta,
+                batch_table,
+                arrow_ipc::RecordBatch::VT_LENGTH as usize,
+            );
+            let max_rows = super::MAX_PYLIST_ROWS as i64;
+            meta[len_pos..len_pos + 8].copy_from_slice(&max_rows.to_le_bytes());
+        }
+
+        Python::initialize();
+        Python::attach(|py| {
+            for payload in [&null_buf, &zero_col_buf, &cumulative_buf] {
+                let py_bytes = PyBytes::new(py, payload);
+                let cursor = ArrowCursor::from_ipc_bytes(py, py_bytes.as_any()).unwrap();
+                let err = cursor
+                    .to_pylist(py)
+                    .expect_err("inflated or cumulative overflow must fail");
+                assert!(
+                    err.to_string().contains("maximum Python list size"),
+                    "unexpected error: {err}"
+                );
+                assert!(cursor.release(py));
+            }
         });
     }
 }

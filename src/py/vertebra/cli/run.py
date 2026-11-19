@@ -94,6 +94,17 @@ logger = logging.getLogger("vertebra.cli.run")
     default=None,
     help="Comma-separated lane=limit assignments (e.g. default=4,embeddings=1)",
 )
+@click.option(
+    "--zpages",
+    is_flag=True,
+    default=False,
+    help="Enable HTTP diagnostic Z-Pages (/taskz, /statusz, /varz, /rpcz, /brokerz)",
+)
+@click.option(
+    "--zpages-token",
+    default=None,
+    help="Bearer token required for HTTP diagnostic Z-Pages",
+)
 @click.option("--no-banner", is_flag=True, help="Disable startup banner")
 def run(
     app: str | None,
@@ -117,6 +128,8 @@ def run(
     with_workers: bool | None,
     worker_queues: str | None,
     lane_concurrency: str | None,
+    zpages: bool,
+    zpages_token: str | None,
     no_banner: bool,
 ) -> None:
     """Run the Vertebra server."""
@@ -132,6 +145,12 @@ def run(
     if worker_only and with_workers:
         raise CLIError(
             "--worker-only cannot be combined with --with-workers",
+            exit_code=EXIT_CONFIG_ERROR,
+        )
+
+    if worker_only and zpages_token is not None:
+        raise CLIError(
+            "--zpages-token cannot be combined with --worker-only",
             exit_code=EXIT_CONFIG_ERROR,
         )
 
@@ -180,6 +199,8 @@ def run(
         with_workers=effective_with_workers,
         worker_queues=effective_queues or ("default",),
         worker_lane_concurrency=effective_lanes,
+        zpages=zpages,
+        zpages_token=zpages_token,
     )
     env = launch_env.to_environ()
     resolved_interface = "asgi" if asgi and interface.lower() == "auto" else interface.lower()

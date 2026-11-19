@@ -35,6 +35,7 @@ pub mod tls;
 pub mod webtransport;
 pub mod workers;
 pub mod ws_mount;
+pub mod zpages;
 
 pub use batcher::{Batch, BatchLimit, PendingRequest, RequestBatcher};
 pub use dispatcher::correlation::{CorrelationId, InFlightRequests};

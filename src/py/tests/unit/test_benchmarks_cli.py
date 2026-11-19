@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from tools.benchmarks.baseline import BaselineRecord, compare_baselines
-from tools.benchmarks.micro import run_all_micro_benchmarks
+from tools.benchmarks.micro import ArrowIpcBenchResult, benchmark_arrow_ipc_stream, run_all_micro_benchmarks
 from tools.benchmarks.targets import _ft_run
 
 
@@ -103,3 +103,36 @@ def test_baseline_check_fails_on_3pct_throughput_drop_or_5pct_p99_increase() -> 
     assert any("criterion_ns_per_iter" in r and "+10.00% exceeds +5.00% threshold" in r for r in regs_lat)
     assert any("micro_p99_ns" in r and "+10.00% exceeds +5.00% threshold" in r for r in regs_lat)
     assert any("import_ms" in r and "+10.00% exceeds +5.00% threshold" in r for r in regs_lat)
+
+
+def test_benchmark_arrow_ipc_stream_smoke() -> None:
+    """Verify benchmark_arrow_ipc_stream returns positive open and iterate metrics for both workloads."""
+    result = benchmark_arrow_ipc_stream(
+        tiny_batches=4,
+        tiny_rows_per_batch=4,
+        large_batches=2,
+        large_rows_per_batch=16,
+        columns=5,
+        iterations=1,
+        rounds=1,
+        warmup_rounds=0,
+    )
+    assert isinstance(result, ArrowIpcBenchResult)
+    for workload in (result.tiny_batches, result.large_batches):
+        assert workload.payload_bytes > 0
+        for sample in (workload.open_sample, workload.iterate_sample):
+            assert sample.median_ns > 0
+            assert sample.p99_ns >= sample.median_ns
+            assert sample.ops_per_sec > 0
+
+
+def test_benchmark_arrow_ipc_stream_missing_pyarrow_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify benchmark_arrow_ipc_stream returns None when pyarrow is unavailable."""
+
+    def _fake_import_optional(name: str) -> object | None:
+        if name == "pyarrow":
+            return None
+        return object()
+
+    monkeypatch.setattr("tools.benchmarks.micro.import_optional", _fake_import_optional)
+    assert benchmark_arrow_ipc_stream(iterations=1, rounds=1, warmup_rounds=0) is None

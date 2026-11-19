@@ -5,11 +5,18 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import http.client
 import importlib
 import logging
+import os
+import signal
+import socket
+import subprocess
 import sys
+import textwrap
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -28,6 +35,7 @@ from vertebra.server.platform import (
     ZPagesRegistry,
 )
 from vertebra.server.worker import Worker, run_worker
+from vertebra.supervisor._supervisor import EmbeddedPythonRuntime, find_server_binary
 from vertebra.telemetry import (
     EventLoopMetricSample,
     EventLoopRecorder,
@@ -1028,6 +1036,7 @@ def test_worker_run_attaches_loop_recorder_only_when_loop_telemetry_env_enabled(
     assert len(_WorkerSignalingRecorder.created) == (1 if enabled else 0)
     if enabled:
         recorder = worker.loop_recorder
+        assert recorder is not None
         assert recorder is _WorkerSignalingRecorder.created[0]
         assert set(recorder.latest_by_shard()) == {0}
     else:
@@ -1129,3 +1138,441 @@ def test_worker_skips_loop_sampling_when_inline_loop_never_runs_continuously(
     assert worker.loop_recorder is not None
     assert worker.loop_recorder.samples() == []
     assert worker_loop_harness["taskz_loops"] == ["worker.shard.0"]
+
+
+def test_zpages_varz_omits_loop_telemetry_when_no_recorder_registered() -> None:
+    """Verify /varz omits loop_telemetry when no EventLoopRecorder is registered."""
+    zpages = ZPagesRegistry("vertebra-varz-plain")
+    zpages.set_var("worker_state", "ready")
+
+    status, raw = zpages.handle_zpage("/varz")
+
+    assert status == 200
+    decoded = decode_json(raw)
+    assert decoded == {"worker_state": "ready"}
+    assert "loop_telemetry" not in decoded
+
+
+@pytest.mark.parametrize("record_samples", [False, True], ids=["empty-recorder", "populated-recorder"])
+def test_zpages_varz_exports_loop_telemetry_shards_and_histogram(record_samples: bool) -> None:
+    """Verify /varz exports per-shard latest samples and lag_histogram when a recorder is registered."""
+    zpages = ZPagesRegistry("vertebra-varz-loop")
+    recorder = EventLoopRecorder(max_samples=16, emit_otel=False)
+    if record_samples:
+        recorder.record(
+            EventLoopMetricSample(
+                shard_id=0,
+                backend="asyncio",
+                lag_ms=1.5,
+                active_tasks=3,
+                pending_callbacks=1,
+                unhandled_exceptions=0,
+                recorded_at_ns=1000,
+            )
+        )
+        recorder.record(
+            EventLoopMetricSample(
+                shard_id=1,
+                backend="asyncio",
+                lag_ms=4.5,
+                active_tasks=7,
+                pending_callbacks=2,
+                unhandled_exceptions=1,
+                recorded_at_ns=2000,
+            )
+        )
+    zpages.register_loop_recorder("worker-0", recorder)
+
+    status, raw = zpages.handle_zpage("/varz")
+
+    assert status == 200
+    decoded = decode_json(raw)
+    entry = decoded["loop_telemetry"]["worker-0"]
+    if not record_samples:
+        assert entry["shards"] == {}
+        assert entry["lag_histogram"] == {
+            "count": 0,
+            "min_ms": 0.0,
+            "max_ms": 0.0,
+            "sum_ms": 0.0,
+            "p50_ms": 0.0,
+            "p90_ms": 0.0,
+            "p99_ms": 0.0,
+        }
+        return
+
+    assert entry["shards"]["0"] == {
+        "shard_id": 0,
+        "backend": "asyncio",
+        "lag_ms": 1.5,
+        "active_tasks": 3,
+        "pending_callbacks": 1,
+        "unhandled_exceptions": 0,
+        "recorded_at_ns": 1000,
+    }
+    assert entry["shards"]["1"] == {
+        "shard_id": 1,
+        "backend": "asyncio",
+        "lag_ms": 4.5,
+        "active_tasks": 7,
+        "pending_callbacks": 2,
+        "unhandled_exceptions": 1,
+        "recorded_at_ns": 2000,
+    }
+    hist = recorder.lag_histogram()
+    assert entry["lag_histogram"] == {
+        "count": hist.count,
+        "min_ms": hist.min,
+        "max_ms": hist.max,
+        "sum_ms": hist.sum,
+        "p50_ms": hist.p50,
+        "p90_ms": hist.p90,
+        "p99_ms": hist.p99,
+    }
+
+
+@pytest.mark.parametrize(
+    ("worker_specs", "expected_state", "expected_active"),
+    [
+        ([("worker-0", 0, 2, "ready")], "ready", 2),
+        ([("worker-0", 0, 2, "ready"), ("worker-1", 1, 3, "draining")], "ready", 5),
+        ([("worker-0", 0, 1, "draining"), ("worker-1", 1, 0, "stopped")], "draining", 1),
+        ([("worker-0", 0, 0, "stopped"), ("worker-1", 1, 0, "stopped")], "stopped", 0),
+    ],
+    ids=["single-ready", "multi-ready-and-draining", "multi-draining-and-stopped", "multi-all-stopped"],
+)
+def test_zpages_varz_lazy_worker_aggregation(
+    worker_specs: list[tuple[str, int, int, str]],
+    expected_state: str,
+    expected_active: int,
+) -> None:
+    """Verify ZPagesRegistry lazily aggregates worker active_requests and lifecycle state in /varz."""
+    zpages = ZPagesRegistry("vertebra-workers")
+    for name, wid, in_flight, state in worker_specs:
+        ld = LameDuckController()
+        if in_flight:
+            ld.acquire_request(in_flight)
+        zpages.register_worker(name, ld, worker_id=wid, state="ready")
+        if state != "ready":
+            zpages.set_worker_state(name, state)
+
+    status, raw = zpages.handle_zpage("/varz")
+
+    assert status == 200
+    decoded = decode_json(raw)
+    assert decoded["active_requests"] == expected_active
+    assert decoded["worker_state"] == expected_state
+    if len(worker_specs) == 1:
+        assert decoded["worker_id"] == worker_specs[0][1]
+        assert "workers" not in decoded
+    else:
+        for name, wid, in_flight, state in worker_specs:
+            assert decoded["workers"][name] == {
+                "worker_id": wid,
+                "state": state,
+                "active_requests": in_flight,
+            }
+
+
+@pytest.mark.parametrize("pool_mode", ["inline", "background"], ids=["inline-single", "background-sharded"])
+def test_zpages_has_remote_loops_distinguishes_inline_and_background_pools(pool_mode: str) -> None:
+    """Verify has_remote_loops returns False for inline/same loops and True for running background shard loops."""
+    zpages = ZPagesRegistry("vertebra-remote-loops")
+    assert zpages.has_remote_loops() is False
+
+    if pool_mode == "inline":
+        inline_pool = EventLoopPool(size=1, inline_single_loop=True, loop_backend=LoopBackend.ASYNCIO)
+        zpages.register_loop_pool("inline", inline_pool)
+        try:
+            assert zpages.has_remote_loops() is False
+
+            async def _check_inside_inline() -> bool:
+                return zpages.has_remote_loops(caller_loop=asyncio.get_running_loop())
+
+            assert inline_pool.primary_loop.run_until_complete(_check_inside_inline()) is False
+        finally:
+            inline_pool.stop()
+        return
+
+    bg_pool = EventLoopPool(size=2, loop_backend=LoopBackend.ASYNCIO)
+    zpages.register_loop_pool("bg", bg_pool)
+    try:
+        assert zpages.has_remote_loops() is True
+    finally:
+        bg_pool.stop()
+    assert zpages.has_remote_loops() is False
+
+
+def test_zpages_thread_safe_concurrent_mutations_and_varz_reads() -> None:
+    """Verify concurrent multi-thread mutations and /varz reads on a shared ZPagesRegistry raise zero errors."""
+    zpages = ZPagesRegistry("vertebra-concurrent")
+    thread_count = 4
+    barrier = threading.Barrier(thread_count)
+    errors: list[BaseException] = []
+
+    def _worker_thread(tid: int) -> None:
+        try:
+            ld = LameDuckController()
+            ld.acquire_request(tid + 1)
+            recorder = EventLoopRecorder(max_samples=16, emit_otel=False)
+            barrier.wait(timeout=5.0)
+            worker_name = f"worker-{tid}"
+            zpages.register_worker(worker_name, ld, worker_id=tid, state="ready")
+            zpages.register_loop_recorder(worker_name, recorder)
+            for step in range(40):
+                zpages.set_var(f"var_{tid}", step)
+                zpages.record_rpc(f"svc/method_{tid}", ok=(step % 2 == 0))
+                recorder.record(
+                    EventLoopMetricSample(
+                        shard_id=0,
+                        backend="asyncio",
+                        lag_ms=float(step) * 0.25,
+                        active_tasks=step,
+                        recorded_at_ns=step + 1,
+                    )
+                )
+                code, body = zpages.handle_zpage("/varz")
+                assert code == 200
+                assert isinstance(decode_json(body), dict)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker_thread, args=(tid,)) for tid in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15.0)
+
+    assert not errors
+    code, raw = zpages.handle_zpage("/varz")
+    assert code == 200
+    decoded = decode_json(raw)
+    assert decoded["active_requests"] == sum(range(1, thread_count + 1))
+    assert decoded["worker_state"] == "ready"
+    assert set(decoded["workers"].keys()) == {f"worker-{tid}" for tid in range(thread_count)}
+    assert set(decoded["loop_telemetry"].keys()) == {f"worker-{tid}" for tid in range(thread_count)}
+    for tid in range(thread_count):
+        assert decoded[f"var_{tid}"] == 39
+    rpcz_code, rpcz_raw = zpages.handle_zpage("/rpcz")
+    assert rpcz_code == 200
+    rpcz_decoded = decode_json(rpcz_raw)
+    for tid in range(thread_count):
+        assert rpcz_decoded[f"svc/method_{tid}"] == {"count": 40, "errors": 20}
+
+
+_LIVE_ZPAGES_APP_MODULE = textwrap.dedent(
+    """\
+    from vertebra.framework._app import App
+
+    app = App()
+
+
+    @app.get("/taskz")
+    async def user_taskz() -> dict[str, bool]:
+        return {"user_route": True}
+
+
+    @app.get("/ping")
+    async def ping() -> dict[str, bool]:
+        return {"ok": True}
+    """
+)
+
+
+def _reserve_loopback_port() -> int:
+    """Reserve and release an ephemeral 127.0.0.1 TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _http_request_sync(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """Send an HTTP/1.1 request over loopback and return status, lowercased headers, and body bytes."""
+    conn = http.client.HTTPConnection(host, port, timeout=5.0)
+    try:
+        conn.request(method, path, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read()
+        resp_headers = {key.lower(): value for key, value in resp.getheaders()}
+        return resp.status, resp_headers, body
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def _live_embedded_zpages_server(
+    tmp_path: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> Iterator[tuple[str, int]]:
+    """Launch a live Embedded vertebra-server subprocess on loopback and tear it down via SIGTERM."""
+    try:
+        binary_path = find_server_binary()
+    except SystemExit:
+        pytest.skip("vertebra-server binary not built yet")
+
+    repo_root = Path(__file__).resolve().parents[5]
+    module_name = "live_zpages_app"
+    (tmp_path / f"{module_name}.py").write_text(_LIVE_ZPAGES_APP_MODULE, encoding="utf-8")
+
+    port = _reserve_loopback_port()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VERTEBRA_ZPAGES_", "VERTEBRA_LOOP_TELEMETRY"))
+    }
+    env["VERTEBRA_APP"] = f"{module_name}:app"
+    env["VERTEBRA_TOPOLOGY"] = "embedded"
+    env["VERTEBRA_WORKERS"] = "1"
+    env["VERTEBRA_HOST"] = "127.0.0.1"
+    env["VERTEBRA_PORT"] = str(port)
+    EmbeddedPythonRuntime.detect().apply(env)
+    py_paths = [str(tmp_path), str(repo_root / "src" / "py")]
+    if existing_pythonpath := env.get("PYTHONPATH"):
+        py_paths.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(py_paths)
+    if extra_env:
+        env.update(extra_env)
+
+    proc = subprocess.Popen(
+        [binary_path],
+        cwd=str(repo_root),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15.0
+        last_error: str | None = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                stdout_text, stderr_text = proc.communicate(timeout=2.0)
+                raise AssertionError(
+                    f"vertebra-server exited prematurely with code {proc.returncode}\n"
+                    f"stdout:\n{stdout_text}\nstderr:\n{stderr_text}"
+                )
+            try:
+                status, _, _ = _http_request_sync("127.0.0.1", port, "GET", "/healthz")
+                if status == 200:
+                    break
+                last_error = f"unexpected /healthz status {status}"
+            except OSError as exc:
+                last_error = repr(exc)
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"vertebra-server did not become healthy on 127.0.0.1:{port}: {last_error}")
+
+        yield ("127.0.0.1", port)
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2.0)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
+
+def test_live_embedded_server_zpages_disabled_preserves_user_taskz_route(tmp_path: Path) -> None:
+    """Verify GET /taskz reaches the user application route when VERTEBRA_ZPAGES_ENABLED is unset."""
+    with _live_embedded_zpages_server(tmp_path) as (host, port):
+        ping_status, _, ping_body = _http_request_sync(host, port, "GET", "/ping")
+        assert ping_status == 200
+        assert decode_json(ping_body) == {"ok": True}
+
+        status, _, body = _http_request_sync(host, port, "GET", "/taskz")
+        assert status == 200
+        assert decode_json(body) == {"user_route": True}
+
+
+def test_live_embedded_server_zpages_loopback_taskz_statusz_varz_head_and_post(tmp_path: Path) -> None:
+    """Verify live Embedded HTTP z-pages serve /taskz, /debug/zpages/tasks, /statusz, /varz, HEAD, and POST 405."""
+    extra_env = {
+        "VERTEBRA_ZPAGES_ENABLED": "1",
+        "VERTEBRA_LOOP_TELEMETRY": "1",
+        "VERTEBRA_LOOP_TELEMETRY_INTERVAL": "0.01",
+    }
+    with _live_embedded_zpages_server(tmp_path, extra_env=extra_env) as (host, port):
+        for endpoint in ("/taskz", "/debug/zpages/tasks"):
+            status, headers, body = _http_request_sync(host, port, "GET", endpoint)
+            assert status == 200
+            assert headers["content-type"].startswith("application/json")
+            assert headers["cache-control"] == "no-store"
+            payload = decode_json(body)
+            assert payload["status"] == "ok"
+            assert payload["service"] == "vertebra-server"
+            assert "worker-0.shard.0" in payload["loops"]
+
+        statusz_code, _, statusz_body = _http_request_sync(host, port, "GET", "/statusz")
+        assert statusz_code == 200
+        assert decode_json(statusz_body)["service"] == "vertebra-server"
+
+        deadline = time.monotonic() + 5.0
+        varz_payload: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            varz_code, _, varz_body = _http_request_sync(host, port, "GET", "/varz")
+            assert varz_code == 200
+            varz_payload = decode_json(varz_body)
+            shards = varz_payload.get("loop_telemetry", {}).get("worker-0", {}).get("shards", {})
+            if "0" in shards:
+                break
+            time.sleep(0.02)
+        assert "0" in varz_payload.get("loop_telemetry", {}).get("worker-0", {}).get("shards", {})
+
+        head_code, head_headers, head_body = _http_request_sync(host, port, "HEAD", "/taskz")
+        assert head_code == 200
+        assert head_headers["content-type"].startswith("application/json")
+        assert head_headers["cache-control"] == "no-store"
+        assert head_body == b""
+
+        post_code, post_headers, _ = _http_request_sync(host, port, "POST", "/taskz")
+        assert post_code == 405
+        assert post_headers["allow"] == "GET, HEAD"
+
+
+def test_live_embedded_server_zpages_bearer_token_guard(tmp_path: Path) -> None:
+    """Verify live Embedded HTTP z-pages enforce VERTEBRA_ZPAGES_TOKEN Bearer authentication."""
+    extra_env = {
+        "VERTEBRA_ZPAGES_ENABLED": "1",
+        "VERTEBRA_ZPAGES_TOKEN": "live-zpages-secret",
+    }
+    with _live_embedded_zpages_server(tmp_path, extra_env=extra_env) as (host, port):
+        missing_code, missing_headers, _ = _http_request_sync(host, port, "GET", "/taskz")
+        assert missing_code == 401
+        assert missing_headers["www-authenticate"] == 'Bearer realm="vertebra-zpages"'
+
+        wrong_code, wrong_headers, _ = _http_request_sync(
+            host,
+            port,
+            "GET",
+            "/taskz",
+            headers={"Authorization": "Bearer wrong-zpages-token"},
+        )
+        assert wrong_code == 401
+        assert wrong_headers["www-authenticate"] == 'Bearer realm="vertebra-zpages"'
+
+        ok_code, _, ok_body = _http_request_sync(
+            host,
+            port,
+            "GET",
+            "/taskz",
+            headers={"Authorization": "Bearer live-zpages-secret"},
+        )
+        assert ok_code == 200
+        ok_payload = decode_json(ok_body)
+        assert "worker-0.shard.0" in ok_payload["loops"]

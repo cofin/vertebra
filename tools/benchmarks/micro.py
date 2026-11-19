@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -44,6 +45,25 @@ class ArrowPipelineBenchResult(msgspec.Struct, frozen=True, gc=False, kw_only=Tr
     buffered: MicroBenchSample
 
 
+class ArrowIpcWorkloadBenchResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Open and full-iteration latency metrics for one Arrow IPC stream workload."""
+
+    workload: str
+    batches: int
+    rows_per_batch: int
+    columns: int
+    payload_bytes: int
+    open_sample: MicroBenchSample
+    iterate_sample: MicroBenchSample
+
+
+class ArrowIpcBenchResult(msgspec.Struct, frozen=True, gc=False, kw_only=True):
+    """Combined Arrow IPC stream benchmarks across tiny-batch and large-batch shapes."""
+
+    tiny_batches: ArrowIpcWorkloadBenchResult
+    large_batches: ArrowIpcWorkloadBenchResult
+
+
 class MicroBenchSuiteResult(msgspec.Struct, frozen=True, gc=False):
     """Aggregated suite result containing all micro samples and import timings."""
 
@@ -51,6 +71,7 @@ class MicroBenchSuiteResult(msgspec.Struct, frozen=True, gc=False):
     import_ms: dict[str, float]
     timestamp: str
     arrow_storage: ArrowPipelineBenchResult | None = None
+    arrow_ipc: ArrowIpcBenchResult | None = None
 
 
 def _time_callable(
@@ -423,6 +444,94 @@ def measure_import_time_ms(module_name: str, rounds: int = 5) -> float:
     return float(statistics.median(durations))
 
 
+def benchmark_arrow_ipc_stream(
+    *,
+    tiny_batches: int = 2000,
+    tiny_rows_per_batch: int = 8,
+    large_batches: int = 20,
+    large_rows_per_batch: int = 50_000,
+    columns: int = 20,
+    iterations: int = 5,
+    rounds: int = 5,
+    warmup_rounds: int = 1,
+) -> ArrowIpcBenchResult | None:
+    """Benchmark SHM ArrowCursor stream open and single-pass iteration across tiny and large batches."""
+    pa = import_optional("pyarrow")
+    native = import_optional("vertebra._vertebra")
+    if pa is None or native is None:
+        return None
+
+    arrow_cursor_cls = native.ArrowCursor
+    pid_hex = f"{os.getpid() & 0xFFFFF:x}"
+    workloads = (
+        ("tiny_2000x8x20", tiny_batches, tiny_rows_per_batch, 0),
+        ("large_20x50000x20", large_batches, large_rows_per_batch, 1),
+    )
+    results: list[ArrowIpcWorkloadBenchResult] = []
+
+    for workload_name, batches, rows_per_batch, idx in workloads:
+        payload = _build_arrow_ipc_workload_bytes(
+            pa,
+            batches=batches,
+            rows_per_batch=rows_per_batch,
+            columns=columns,
+        )
+        segment_name = f"/vtb-ipc-{pid_hex}-{idx}"
+        cursor = arrow_cursor_cls.write_ipc_to_shm(segment_name, payload)
+        try:
+
+            def run_open(target: Any = cursor) -> None:
+                _ = target.__arrow_c_stream__()
+
+            def run_iterate(target: Any = cursor, pa_mod: Any = pa) -> None:
+                reader = pa_mod.RecordBatchReader.from_stream(target)
+                for _batch in reader:
+                    pass
+
+            open_median, open_p99, open_ops = _time_callable(
+                run_open,
+                iterations=iterations,
+                rounds=rounds,
+                warmup_rounds=warmup_rounds,
+            )
+            iter_median, iter_p99, iter_ops = _time_callable(
+                run_iterate,
+                iterations=iterations,
+                rounds=rounds,
+                warmup_rounds=warmup_rounds,
+            )
+            results.append(
+                ArrowIpcWorkloadBenchResult(
+                    workload=workload_name,
+                    batches=batches,
+                    rows_per_batch=rows_per_batch,
+                    columns=columns,
+                    payload_bytes=len(payload),
+                    open_sample=MicroBenchSample(
+                        name=f"arrow_ipc_{workload_name}_open",
+                        iterations=iterations,
+                        median_ns=open_median,
+                        p99_ns=open_p99,
+                        ops_per_sec=open_ops,
+                    ),
+                    iterate_sample=MicroBenchSample(
+                        name=f"arrow_ipc_{workload_name}_iterate",
+                        iterations=iterations,
+                        median_ns=iter_median,
+                        p99_ns=iter_p99,
+                        ops_per_sec=iter_ops,
+                    ),
+                )
+            )
+        finally:
+            cursor.release()
+
+    return ArrowIpcBenchResult(
+        tiny_batches=results[0],
+        large_batches=results[1],
+    )
+
+
 def run_all_micro_benchmarks(*, iterations: int = 2000) -> MicroBenchSuiteResult:
     """Execute all registered micro-benchmarks and import measurements."""
     samples: dict[str, MicroBenchSample] = {}
@@ -447,6 +556,20 @@ def run_all_micro_benchmarks(*, iterations: int = 2000) -> MicroBenchSuiteResult
         iterations=arrow_iterations,
         rounds=arrow_rounds,
     )
+    if iterations < 10:
+        arrow_ipc = benchmark_arrow_ipc_stream(
+            tiny_batches=8,
+            large_batches=2,
+            large_rows_per_batch=32,
+            iterations=1,
+            rounds=1,
+            warmup_rounds=0,
+        )
+    else:
+        arrow_ipc = benchmark_arrow_ipc_stream(
+            iterations=arrow_iterations,
+            rounds=arrow_rounds,
+        )
 
     import_timings: dict[str, float] = {
         "import_vertebra_ms": measure_import_time_ms("vertebra"),
@@ -458,6 +581,7 @@ def run_all_micro_benchmarks(*, iterations: int = 2000) -> MicroBenchSuiteResult
         import_ms=import_timings,
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         arrow_storage=arrow_storage,
+        arrow_ipc=arrow_ipc,
     )
 
 
@@ -466,7 +590,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Vertebra micro-benchmarks runner")
     parser.add_argument("--iterations", type=int, default=1000, help="Iterations per round")
     parser.add_argument("--json", action="store_true", help="Emit raw JSON")
+    parser.add_argument(
+        "--arrow-ipc-only",
+        action="store_true",
+        help="Run only the Arrow IPC stream open and iteration micro-benchmarks",
+    )
     args = parser.parse_args(argv)
+
+    if args.arrow_ipc_only:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        arrow_ipc = benchmark_arrow_ipc_stream()
+        if args.json:
+            payload = {
+                "timestamp": timestamp,
+                "arrow_ipc": msgspec.to_builtins(arrow_ipc) if arrow_ipc is not None else None,
+            }
+            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        else:
+            sys.stdout.write(f"=== Arrow IPC Stream Benchmarks ({timestamp}) ===\n")
+            _write_arrow_ipc_summary(arrow_ipc)
+        return 0
 
     suite = run_all_micro_benchmarks(iterations=args.iterations)
 
@@ -475,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
             "timestamp": suite.timestamp,
             "samples": {k: msgspec.to_builtins(v) for k, v in suite.samples.items()},
             "arrow_storage": msgspec.to_builtins(suite.arrow_storage) if suite.arrow_storage is not None else None,
+            "arrow_ipc": msgspec.to_builtins(suite.arrow_ipc) if suite.arrow_ipc is not None else None,
             "import_ms": suite.import_ms,
         }
         sys.stdout.write(json.dumps(raw_dict, indent=2) + "\n")
@@ -504,11 +648,65 @@ def main(argv: list[str] | None = None) -> int:
                     f"{sample.name:<35} {sample.ops_per_sec:>12.2f} "
                     f"{sample.median_ns:>14.1f} {sample.p99_ns:>12.1f} {peak_kib:>12.1f}\n"
                 )
+        sys.stdout.write("\n=== Arrow IPC Stream (Open vs Full Iteration) ===\n")
+        _write_arrow_ipc_summary(suite.arrow_ipc)
         sys.stdout.write("\n=== Subprocess Warm Import Latencies ===\n")
         for mod, ms in suite.import_ms.items():
             sys.stdout.write(f"{mod:<35} {ms:>8.2f} ms\n")
 
     return 0
+
+
+def _build_arrow_ipc_workload_bytes(
+    pa: Any,
+    *,
+    batches: int,
+    rows_per_batch: int,
+    columns: int,
+) -> bytes:
+    """Serialize a multi-batch Arrow IPC stream with cycling scalar column types."""
+    column_types = (pa.int64(), pa.float64(), pa.string(), pa.bool_(), pa.binary())
+    fields = [pa.field(f"col_{i}", column_types[i % len(column_types)]) for i in range(columns)]
+    schema = pa.schema(fields)
+    arrays: list[Any] = []
+    for i in range(columns):
+        kind = i % len(column_types)
+        if kind == 0:
+            arrays.append(pa.array(range(rows_per_batch), type=pa.int64()))
+        elif kind == 1:
+            arrays.append(pa.array([float(r) * 0.5 for r in range(rows_per_batch)], type=pa.float64()))
+        elif kind == 2:
+            arrays.append(pa.array([f"val-{r % 64}" for r in range(rows_per_batch)], type=pa.string()))
+        elif kind == 3:
+            arrays.append(pa.array([(r & 1) == 0 for r in range(rows_per_batch)], type=pa.bool_()))
+        else:
+            arrays.append(pa.array([b"payload-bytes" for _ in range(rows_per_batch)], type=pa.binary()))
+    batch = pa.RecordBatch.from_arrays(arrays, schema=schema)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        for _ in range(batches):
+            writer.write_batch(batch)
+    return bytes(sink.getvalue().to_pybytes())
+
+
+def _write_arrow_ipc_summary(arrow_ipc: ArrowIpcBenchResult | None) -> None:
+    """Render Arrow IPC benchmark results in plain text."""
+    if arrow_ipc is None:
+        sys.stdout.write("skipped (optional pyarrow or vertebra._vertebra unavailable)\n")
+        return
+    sys.stdout.write(f"{'Benchmark':<38} {'Ops/sec':>10} {'Median (ms)':>13} {'p99 (ms)':>11}\n")
+    sys.stdout.write("-" * 76 + "\n")
+    for workload in (arrow_ipc.tiny_batches, arrow_ipc.large_batches):
+        sys.stdout.write(
+            f"workload={workload.workload} batches={workload.batches} "
+            f"rows_per_batch={workload.rows_per_batch} cols={workload.columns} "
+            f"payload={workload.payload_bytes / 1024.0:.1f} KiB\n"
+        )
+        for sample in (workload.open_sample, workload.iterate_sample):
+            sys.stdout.write(
+                f"{sample.name:<38} {sample.ops_per_sec:>10.2f} "
+                f"{sample.median_ns / 1_000_000.0:>13.3f} {sample.p99_ns / 1_000_000.0:>11.3f}\n"
+            )
 
 
 if __name__ == "__main__":

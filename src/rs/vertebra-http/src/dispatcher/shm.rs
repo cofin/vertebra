@@ -27,6 +27,21 @@ use vertebra_core::bridge::{ResponseStreamFrame, StreamDelivery};
 const SHM_CORRELATION_SHARDS: usize = 8;
 const SHM_CORRELATION_MASK: usize = SHM_CORRELATION_SHARDS - 1;
 
+/// Failure reason when dispatching a targeted single request to a specific SHM worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShmTargetError {
+    /// `worker_id` is out of range (`worker_id >= worker_count`).
+    NotFound,
+    /// Target worker is currently marked unhealthy.
+    Unhealthy,
+    /// Target worker request ring has no available entry.
+    RingFull,
+    /// All correlation shards are at capacity.
+    CorrelationFull,
+    /// Serialized request exceeds ring payload capacity or failed ring transmission.
+    SendFailed,
+}
+
 struct StagedShmRequest {
     node: TransportNode,
     flags: u32,
@@ -100,6 +115,158 @@ impl ShmDispatcher {
         self.workers
             .get(worker_id)
             .is_some_and(|w| w.healthy.load(Ordering::Acquire))
+    }
+
+    /// Return the total number of configured SHM workers.
+    #[inline]
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Return the IDs of all SHM workers currently marked healthy, in ascending order.
+    pub fn healthy_worker_ids(&self) -> Vec<usize> {
+        (0..self.workers.len())
+            .filter(|&id| self.is_worker_healthy(id))
+            .collect()
+    }
+
+    /// Dispatch a single request directly to a specific SHM worker without mutating
+    /// warm-worker affinity (`last_worker` / `next_worker`).
+    pub fn dispatch_to_worker(
+        &self,
+        worker_id: usize,
+        req: crate::batcher::PendingRequest,
+    ) -> Result<u64, ShmTargetError> {
+        use vertebra_core::protocol::flags;
+
+        let Some(worker) = self.workers.get(worker_id) else {
+            return Err(ShmTargetError::NotFound);
+        };
+        if !worker.healthy.load(Ordering::Acquire) {
+            return Err(ShmTargetError::Unhealthy);
+        }
+        if !worker.ring_pair.request_ring.has_capacity() {
+            return Err(ShmTargetError::RingFull);
+        }
+
+        let crate::batcher::PendingRequest {
+            handler_id,
+            method_tag,
+            http_version_tag,
+            flags: req_flags,
+            path_and_query,
+            headers_mp,
+            body,
+            reply,
+        } = req;
+
+        let path_str = path_and_query.path();
+        let query_str = path_and_query.query();
+        let req_slab_bytes = request_slab_size(&TransportRequestView {
+            path: path_str,
+            query: query_str,
+            headers_mp: &headers_mp,
+            body: &body,
+        });
+        let max_payload = worker.ring_pair.request_ring.payload_capacity();
+        if batch_snapshot_serialized_size(1, req_slab_bytes) > max_payload {
+            return Err(ShmTargetError::SendFailed);
+        }
+
+        let is_fnf = (req_flags & flags::FIRE_AND_FORGET) != 0;
+        let correlation_id = if is_fnf {
+            0
+        } else {
+            let start_shard = worker_id & SHM_CORRELATION_MASK;
+            let mut reply_opt = Some(reply);
+            let mut allocated = None;
+            for attempt in 0..SHM_CORRELATION_SHARDS {
+                let shard_idx = (start_shard + attempt) & SHM_CORRELATION_MASK;
+                let mut shard_guard = self.correlation_shards[shard_idx].lock().unwrap();
+                if shard_guard.in_flight() < shard_guard.capacity() {
+                    let cid = shard_guard
+                        .insert(shard_idx as u8, reply_opt.take().unwrap(), worker_id as u32)
+                        .expect("correlation slot should be available after capacity check");
+                    allocated = Some(cid.raw());
+                    break;
+                }
+            }
+            let Some(cid_raw) = allocated else {
+                return Err(ShmTargetError::CorrelationFull);
+            };
+            self.active_requests.0.fetch_add(1, Ordering::AcqRel);
+            worker.in_flight.0.fetch_add(1, Ordering::AcqRel);
+            cid_raw
+        };
+
+        let node = TransportNode {
+            method_tag,
+            http_version_tag,
+            _pad: [0; 2],
+            handler_id,
+            correlation_id,
+            path_offset: 0,
+            path_len: path_str.len() as u32,
+            query_offset: 0,
+            query_len: query_str.map_or(0, |q| q.len() as u32),
+            headers_offset: 0,
+            headers_len: headers_mp.len() as u32,
+            body_offset: 0,
+            body_len: body.len() as u32,
+        };
+
+        let mut components = Vec::with_capacity(4);
+        components.push(path_str.as_bytes());
+        if let Some(q) = query_str {
+            components.push(q.as_bytes());
+        }
+        components.push(headers_mp.as_ref());
+        components.push(body.as_ref());
+
+        let writer = ShmBatchWriter {
+            nodes: vec![node],
+            components,
+            flags: req_flags,
+        };
+
+        match worker
+            .ring_pair
+            .request_ring
+            .try_send_with(req_flags, |slot| writer.serialize_into(slot))
+        {
+            Ok(()) => {
+                let _ = worker.ring_pair.notify_request_if_sleeping();
+                Ok(correlation_id)
+            }
+            Err(_) => {
+                if !is_fnf {
+                    let _ = self.cancel_correlation(correlation_id);
+                }
+                Err(ShmTargetError::RingFull)
+            }
+        }
+    }
+
+    /// Cancel a pending correlation ID without sending a response on its reply channel.
+    ///
+    /// Returns `true` if the correlation entry was present and removed, or `false` if it
+    /// had already been completed or cancelled.
+    #[inline]
+    pub fn cancel_correlation(&self, correlation_id: u64) -> bool {
+        let cid = CorrelationId::from_raw(correlation_id);
+        let shard_idx = cid.shard() & SHM_CORRELATION_MASK;
+        let removed = {
+            let mut slab = self.correlation_shards[shard_idx].lock().unwrap();
+            slab.take_completed_with_worker(cid)
+        };
+        if let Some((reply, worker_id)) = removed {
+            drop(reply);
+            self.decrement_active(1);
+            self.decrement_worker_active(worker_id as usize, 1);
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]

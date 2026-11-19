@@ -191,22 +191,33 @@ impl MySQLConnectConfig {
         let mut resolved_cloud_sql = cloud_sql_instance;
         let mut resolved_iam_auth = enable_iam_auth;
 
-        if let Some(rest) = trimmed_dsn.strip_prefix("cloudsql://") {
-            let (instance_part, db_part) = match rest.split_once('/') {
-                Some((inst, db)) => (inst, db),
-                None => (rest, ""),
-            };
-            let (db_clean, query_str) = match db_part.split_once('?') {
-                Some((db, q)) => (db, Some(q)),
-                None => (db_part, None),
-            };
-            if !instance_part.is_empty() {
-                resolved_cloud_sql = Some(instance_part.to_string());
+        if is_cloudsql_dsn(trimmed_dsn) {
+            let parsed = parse_cloudsql_dsn(trimmed_dsn)?;
+            if let Some(ref explicit_inst) = resolved_cloud_sql {
+                let explicit_trimmed = explicit_inst.trim();
+                if explicit_trimmed.is_empty() {
+                    return Err(MySQLError::config(
+                        "MySQL cloud_sql_instance must not be empty",
+                    ));
+                }
+                if explicit_trimmed != parsed.instance {
+                    return Err(MySQLError::config(format!(
+                        "Conflicting Cloud SQL instance: DSN specifies '{}', explicit cloud_sql_instance specifies '{explicit_trimmed}'",
+                        parsed.instance
+                    )));
+                }
             }
-            if !db_clean.is_empty() {
-                resolved_database = db_clean.to_string();
+            resolved_cloud_sql = Some(parsed.instance.clone());
+            if let Some(u) = parsed.user {
+                resolved_user = u;
             }
-            if let Some(q) = query_str {
+            if let Some(p) = parsed.password {
+                resolved_password = Some(p);
+            }
+            if let Some(db) = parsed.database {
+                resolved_database = db;
+            }
+            if let Some(q) = parsed.query {
                 for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
                     apply_query_param(
                         &k,
@@ -219,6 +230,15 @@ impl MySQLConnectConfig {
                         &mut resolved_cloud_sql,
                         &mut resolved_iam_auth,
                     )?;
+                    if resolved_cloud_sql.as_deref().map(str::trim)
+                        != Some(parsed.instance.as_str())
+                    {
+                        return Err(MySQLError::config(format!(
+                            "Conflicting Cloud SQL instance in query parameter '{k}': expected '{}', got '{}'",
+                            parsed.instance,
+                            resolved_cloud_sql.as_deref().unwrap_or_default()
+                        )));
+                    }
                 }
             }
         } else {
@@ -644,11 +664,131 @@ fn normalize_mysql_scheme(dsn: &str) -> Result<String, MySQLError> {
     }
 }
 
+struct ParsedCloudSqlDsn<'a> {
+    instance: String,
+    user: Option<String>,
+    password: Option<String>,
+    database: Option<String>,
+    query: Option<&'a str>,
+}
+
+fn is_cloudsql_dsn(trimmed_dsn: &str) -> bool {
+    trimmed_dsn
+        .as_bytes()
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"cloudsql://"))
+}
+
+fn parse_cloudsql_dsn(trimmed_dsn: &str) -> Result<ParsedCloudSqlDsn<'_>, MySQLError> {
+    let rest = &trimmed_dsn[11..];
+    let without_fragment = rest.split_once('#').map_or(rest, |(head, _)| head);
+    let (target, query) = match without_fragment.split_once('?') {
+        Some((t, q)) => (t, Some(q)),
+        None => (without_fragment, None),
+    };
+    let (authority, raw_path) = match target.split_once('/') {
+        Some((auth, path)) => (auth, path),
+        None => (target, ""),
+    };
+
+    let (user, password, raw_instance) = match authority.rsplit_once('@') {
+        Some((userinfo, inst)) => {
+            let (raw_user, raw_pass_opt) = match userinfo.split_once(':') {
+                Some((u, p)) => (u, Some(p)),
+                None => (userinfo, None),
+            };
+            let decoded_user = percent_decode_str(raw_user);
+            if decoded_user.contains('\0') {
+                return Err(MySQLError::config(
+                    "MySQL DSN user must not contain NUL bytes",
+                ));
+            }
+            let user = (!decoded_user.is_empty()).then_some(decoded_user);
+            let password = match raw_pass_opt {
+                Some(raw_pass) => {
+                    let decoded_pass = percent_decode_str(raw_pass);
+                    if decoded_pass.contains('\0') {
+                        return Err(MySQLError::config(
+                            "MySQL DSN password must not contain NUL bytes",
+                        ));
+                    }
+                    Some(decoded_pass)
+                }
+                None => None,
+            };
+            (user, password, inst)
+        }
+        None => (None, None, authority),
+    };
+
+    let instance = raw_instance.trim();
+    if instance.is_empty() {
+        return Err(MySQLError::config(
+            "Cloud SQL MySQL DSN must specify an instance connection name",
+        ));
+    }
+    CloudSqlInstanceUri::parse(instance).map_err(|e| {
+        MySQLError::config(format!("Invalid Cloud SQL instance URI '{instance}': {e}"))
+    })?;
+
+    let trimmed_path = raw_path.trim_start_matches('/');
+    let database = if trimmed_path.is_empty() {
+        None
+    } else {
+        let decoded_db = percent_decode_str(trimmed_path);
+        if decoded_db.contains('\0') {
+            return Err(MySQLError::config(
+                "MySQL DSN database must not contain NUL bytes",
+            ));
+        }
+        let db_trimmed = decoded_db.trim();
+        if db_trimmed.eq_ignore_ascii_case("memory") || db_trimmed.eq_ignore_ascii_case(":memory:")
+        {
+            return Err(MySQLError::config(
+                "MySQL does not support in-memory ('memory://') execution; configure a MySQL or MariaDB server endpoint",
+            ));
+        }
+        Some(decoded_db)
+    };
+
+    Ok(ParsedCloudSqlDsn {
+        instance: instance.to_string(),
+        user,
+        password,
+        database,
+        query,
+    })
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn percent_decode_str(input: &str) -> String {
-    url::form_urlencoded::parse(format!("v={input}").as_bytes())
-        .next()
-        .map(|(_, val)| val.into_owned())
-        .unwrap_or_else(|| input.to_string())
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                decode_hex_nibble(bytes[i + 1]),
+                decode_hex_nibble(bytes[i + 2]),
+            )
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -863,5 +1003,211 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn parse_cloudsql_config(
+        dsn: &str,
+        user: Option<&str>,
+        password: Option<&str>,
+        database: Option<&str>,
+        cloud_sql_instance: Option<&str>,
+    ) -> Result<MySQLConnectConfig, MySQLError> {
+        MySQLConnectConfig::from_dsn_and_kwargs(
+            dsn,
+            None,
+            None,
+            user.map(str::to_string),
+            password.map(str::to_string),
+            database.map(str::to_string),
+            None,
+            None,
+            None,
+            None,
+            None,
+            5000,
+            5000,
+            5000,
+            1,
+            4,
+            64,
+            "utf8mb4",
+            true,
+            None,
+            cloud_sql_instance.map(str::to_string),
+            "PUBLIC",
+            false,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_parses_cloudsql_query_only_uri_without_database() {
+        let cfg = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst?enable_iam_auth=true&ssl_mode=verify-full",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg.database, "");
+        assert!(cfg.enable_iam_auth);
+        assert_eq!(cfg.ssl_mode, MySQLSslMode::VerifyFull);
+
+        let cfg_require = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst?enable_iam_auth=true&ssl_mode=require",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_require.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg_require.database, "");
+        assert!(cfg_require.enable_iam_auth);
+        assert_eq!(cfg_require.ssl_mode, MySQLSslMode::Require);
+    }
+
+    #[test]
+    fn test_parses_cloudsql_uppercase_userinfo_domain_instance_and_fragment() {
+        let cfg = parse_cloudsql_config(
+            "CLOUDSQL://alice%40corp.test:p%3As%40w+1&2%2F3@example.com:proj:us-central1:inst/my%20db?enable_iam_auth=true#frag",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("example.com:proj:us-central1:inst")
+        );
+        assert_eq!(cfg.user, "alice@corp.test");
+        assert_eq!(cfg.password.as_deref(), Some("p:s@w+1&2/3"));
+        assert_eq!(cfg.database, "my db");
+        assert!(cfg.enable_iam_auth);
+    }
+
+    #[test]
+    fn test_parses_cloudsql_userinfo_empty_password_and_kwarg_overrides() {
+        let no_pass = parse_cloudsql_config(
+            "cloudsql://alice@proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(no_pass.user, "alice");
+        assert_eq!(no_pass.password, None);
+        assert_eq!(no_pass.database, "app_db");
+
+        let empty_pass = parse_cloudsql_config(
+            "cloudsql://alice:@proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(empty_pass.user, "alice");
+        assert_eq!(empty_pass.password.as_deref(), Some(""));
+        assert_eq!(empty_pass.database, "app_db");
+
+        let overridden = parse_cloudsql_config(
+            "cloudsql://alice:secret@proj:us-central1:inst/app_db",
+            Some("override"),
+            None,
+            Some("override_db"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(overridden.user, "override");
+        assert_eq!(overridden.password.as_deref(), Some("secret"));
+        assert_eq!(overridden.database, "override_db");
+    }
+
+    #[test]
+    fn test_accepts_matching_explicit_and_query_cloudsql_instance() {
+        let cfg = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst/app_db",
+            None,
+            None,
+            None,
+            Some("proj:us-central1:inst"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+        assert_eq!(cfg.database, "app_db");
+
+        let cfg_query = parse_cloudsql_config(
+            "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=proj:us-central1:inst&unix_socket=/cloudsql/proj:us-central1:inst",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_query.cloud_sql_instance.as_deref(),
+            Some("proj:us-central1:inst")
+        );
+    }
+
+    #[test]
+    fn test_rejects_invalid_and_conflicting_cloudsql_dsns() {
+        for (dsn, explicit_inst) in [
+            ("cloudsql://", None),
+            ("cloudsql:///app_db", None),
+            ("cloudsql://alice@", None),
+            ("cloudsql://a:b/app_db", None),
+            ("cloudsql://a:b:c:d:e/app_db", None),
+            (
+                "cloudsql://proj:us-central1:inst/app_db",
+                Some("other:us-central1:inst"),
+            ),
+            ("cloudsql://proj:us-central1:inst/app_db", Some("   ")),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=other:us-central1:inst",
+                None,
+            ),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?cloud_sql_instance=other:us-central1:inst&cloud_sql_instance=proj:us-central1:inst",
+                None,
+            ),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?unix_socket=/cloudsql/other:us-central1:inst",
+                None,
+            ),
+            ("cloudsql://proj:us-central1:inst/memory", None),
+            ("cloudsql://proj:us-central1:inst/%3Amemory%3A", None),
+            ("cloudsql://alice%00@proj:us-central1:inst/app_db", None),
+            ("cloudsql://alice:pw%00@proj:us-central1:inst/app_db", None),
+            ("cloudsql://proj:us-central1:inst/app%00db", None),
+            (
+                "cloudsql://proj:us-central1:inst/app_db?ssl_mode=bogus",
+                None,
+            ),
+            ("éééééé://proj:us-central1:inst/app_db", None),
+        ] {
+            let err = parse_cloudsql_config(dsn, None, None, None, explicit_inst).unwrap_err();
+            assert_eq!(
+                err.kind,
+                crate::errors::MySQLErrorKind::ImproperConfiguration,
+                "expected ImproperConfiguration for dsn={dsn:?}, explicit={explicit_inst:?}"
+            );
+        }
     }
 }

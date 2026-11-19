@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import msgspec
 
 from vertebra.db.adapters.mysql.core import MySQLCore
-from vertebra.db.dialer import CloudSQLConfig, aws_rds_root_ca_pem
+from vertebra.db.dialer import CloudSQLConfig, CloudSQLInstanceURI, aws_rds_root_ca_pem
 from vertebra.db.driver._cloud_auth import (
     AZURE_MYSQL_SCOPE,
     AwsRdsIamTokenProvider,
@@ -82,6 +82,16 @@ _CANONICAL_SSL_MODE_MAP: dict[str, str] = {
 _DEFAULT_DSN = "mysql://localhost:3306/vertebra"
 _DSN_SSL_MODE_PARAMS: tuple[str, ...] = ("ssl_mode", "ssl-mode", "sslmode", "ssl")
 _PLAINTEXT_FALLBACK_SSL_MODES = frozenset({"disable", "prefer"})
+
+
+class _ParsedCloudSQLDSN(msgspec.Struct, frozen=True, gc=False):
+    """Parsed components of a `cloudsql://` MySQL DSN."""
+
+    instance: str
+    user: str | None
+    password: str | None
+    database: str | None
+    query: dict[str, list[str]]
 
 
 class MySQLPoolConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -231,10 +241,14 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             raise ImproperConfigurationError(msg)
 
         if self.cloud_sql_instance is not None:
-            parts = self.cloud_sql_instance.strip().split(":")
-            if len(parts) != 3 or not all(parts):
+            stripped_instance = self.cloud_sql_instance.strip()
+            try:
+                CloudSQLInstanceURI.parse(stripped_instance)
+            except ValueError as exc:
                 msg = f"Invalid Cloud SQL instance '{self.cloud_sql_instance}'; expected 'project:region:instance'"
-                raise ImproperConfigurationError(msg)
+                raise ImproperConfigurationError(msg) from exc
+            if stripped_instance != self.cloud_sql_instance:
+                msgspec.structs.force_setattr(self, "cloud_sql_instance", stripped_instance)
 
         if isinstance(self.token_provider, AzureEntraTokenProvider):
             msgspec.structs.force_setattr(
@@ -244,7 +258,32 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             )
 
         has_dsn_ssl_ca = False
-        if "://" in trimmed_dsn and not lower_dsn.startswith("cloudsql://"):
+        if self._is_cloudsql_dsn(trimmed_dsn):
+            parsed_cloudsql = self._parse_cloudsql_dsn(trimmed_dsn)
+            if self.cloud_sql_instance is None:
+                msgspec.structs.force_setattr(self, "cloud_sql_instance", parsed_cloudsql.instance)
+            elif self.cloud_sql_instance != parsed_cloudsql.instance:
+                msg = (
+                    f"Conflicting Cloud SQL instance '{self.cloud_sql_instance}' "
+                    f"does not match DSN instance '{parsed_cloudsql.instance}'"
+                )
+                raise ImproperConfigurationError(msg)
+            query_params = parsed_cloudsql.query
+            for csql_key in ("cloud_sql_instance", "cloudsql_instance"):
+                if csql_key in query_params:
+                    query_instance = query_params[csql_key][0].strip()
+                    if query_instance != parsed_cloudsql.instance:
+                        msg = (
+                            f"Conflicting Cloud SQL instance '{query_instance}' in query parameter '{csql_key}' "
+                            f"does not match DSN instance '{parsed_cloudsql.instance}'"
+                        )
+                        raise ImproperConfigurationError(msg)
+            has_dsn_ssl_ca = any(ca_key in query_params for ca_key in ("ssl_ca", "ssl-ca", "sslca"))
+            for ssl_param in _DSN_SSL_MODE_PARAMS:
+                if ssl_param in query_params and query_params[ssl_param][0].strip().lower() not in _ALLOWED_SSL_MODES:
+                    msg = f"Unsupported MySQL {ssl_param} '{query_params[ssl_param][0]}'"
+                    raise ImproperConfigurationError(msg)
+        elif "://" in trimmed_dsn:
             parsed = urlsplit(trimmed_dsn)
             try:
                 dsn_port = parsed.port
@@ -314,8 +353,62 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             return "verify-full"
         return "require"
 
+    @staticmethod
+    def _is_cloudsql_dsn(dsn: str) -> bool:
+        """Return True when `dsn` uses the `cloudsql://` scheme (case-insensitive)."""
+        return dsn.strip()[:11].lower() == "cloudsql://"
+
+    @staticmethod
+    def _parse_cloudsql_dsn(dsn: str) -> _ParsedCloudSQLDSN:
+        """Parse `cloudsql://[user[:password]@]project:region:instance[/database][?query]`."""
+        trimmed = dsn.strip()
+        if trimmed[:11].lower() != "cloudsql://":
+            msg = f"Invalid Cloud SQL MySQL DSN '{dsn}'; expected 'cloudsql://' scheme"
+            raise ImproperConfigurationError(msg)
+        rest = trimmed[11:]
+        without_fragment, _, _ = rest.partition("#")
+        target, _, raw_query = without_fragment.partition("?")
+        query = parse_qs(raw_query) if raw_query else {}
+        authority, path_sep, raw_path = target.partition("/")
+        userinfo, at_sep, raw_instance = authority.rpartition("@")
+        if at_sep:
+            raw_user, colon_sep, raw_password = userinfo.partition(":")
+            decoded_user = unquote(raw_user)
+            user: str | None = decoded_user or None
+            password: str | None = unquote(raw_password) if colon_sep else None
+        else:
+            user = None
+            password = None
+            raw_instance = authority
+        decoded_db = unquote(raw_path.lstrip("/")) if path_sep else ""
+        database: str | None = decoded_db or None
+        for field_name, val in (("user", user), ("password", password), ("database", database)):
+            if val is not None and "\x00" in val:
+                msg = f"MySQL {field_name} must not contain NUL bytes"
+                raise ImproperConfigurationError(msg)
+        if database is not None and database.strip().lower() in {"memory", ":memory:"}:
+            msg = (
+                "MySQL does not support in-memory ('memory://') execution; configure a MySQL or MariaDB server endpoint"
+            )
+            raise ImproperConfigurationError(msg)
+        instance = raw_instance.strip()
+        try:
+            CloudSQLInstanceURI.parse(instance)
+        except ValueError as exc:
+            msg = f"Invalid Cloud SQL instance '{instance}'; expected 'project:region:instance'"
+            raise ImproperConfigurationError(msg) from exc
+        return _ParsedCloudSQLDSN(
+            instance=instance,
+            user=user,
+            password=password,
+            database=database,
+            query=query,
+        )
+
     def _dsn_query(self) -> dict[str, list[str]]:
         dsn = self.dsn.strip()
+        if self._is_cloudsql_dsn(dsn):
+            return self._parse_cloudsql_dsn(dsn).query
         if "://" not in dsn or dsn == _DEFAULT_DSN:
             return {}
         return parse_qs(urlsplit(dsn).query)
@@ -336,7 +429,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         if not isinstance(self.token_provider, AwsRdsIamTokenProvider | AzureEntraTokenProvider):
             return False
         dsn = self.dsn.strip()
-        if self.cloud_sql_instance is not None or dsn.lower().startswith("cloudsql://"):
+        if self.cloud_sql_instance is not None or self._is_cloudsql_dsn(dsn):
             return False
         if self.unix_socket is not None:
             return False
@@ -349,8 +442,7 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
     @classmethod
     def from_url(cls, url: str, **overrides: Any) -> Self:
         """Parse a `mysql://` or `mariadb://` URL into a `MySQLConfig` instance."""
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
+        query = cls._parse_cloudsql_dsn(url).query if cls._is_cloudsql_dsn(url) else parse_qs(urlparse(url).query)
         kwargs: dict[str, Any] = dict(overrides)
         for ssl_key in ("ssl_mode", "ssl-mode", "sslmode", "ssl"):
             if ssl_key in query and "ssl_mode" not in kwargs:
@@ -392,12 +484,19 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
 
     def pool_key(self) -> tuple[Any, ...]:
         """Return a deterministic pool identity tuple for `DatabaseRegistry`."""
-        parsed = urlparse(self.dsn)
-        has_dsn = bool(self.dsn and self.dsn != _DEFAULT_DSN)
-        host = (parsed.hostname or self.host) if has_dsn else self.host
-        port = (parsed.port or self.port) if has_dsn else self.port
-        db = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
-        user = (unquote(parsed.username) if parsed.username else self.user) if has_dsn else self.user
+        if self._is_cloudsql_dsn(self.dsn):
+            parsed_cloudsql = self._parse_cloudsql_dsn(self.dsn)
+            host = self.host
+            port = self.port
+            db = parsed_cloudsql.database or self.database
+            user = parsed_cloudsql.user or self.user
+        else:
+            parsed = urlparse(self.dsn)
+            has_dsn = bool(self.dsn and self.dsn != _DEFAULT_DSN)
+            host = (parsed.hostname or self.host) if has_dsn else self.host
+            port = (parsed.port or self.port) if has_dsn else self.port
+            db = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
+            user = (unquote(parsed.username) if parsed.username else self.user) if has_dsn else self.user
         base_key = (
             self.dialect,
             host,
@@ -434,16 +533,27 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         return params
 
     def _parse_dsn_fields(self) -> dict[str, Any]:
-        parsed = urlparse(self.dsn)
-        has_dsn = bool(self.dsn and self.dsn != _DEFAULT_DSN)
-        query = parse_qs(parsed.query)
-        host = (parsed.hostname or self.host) if has_dsn else self.host
-        port = (parsed.port or self.port) if has_dsn else self.port
-        user = (unquote(parsed.username) if parsed.username else self.user) if has_dsn else self.user
-        password = (
-            (unquote(parsed.password) if parsed.password is not None else self.password) if has_dsn else self.password
-        )
-        database = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
+        if self._is_cloudsql_dsn(self.dsn):
+            parsed_cloudsql = self._parse_cloudsql_dsn(self.dsn)
+            query = parsed_cloudsql.query
+            host = self.host
+            port = self.port
+            user = parsed_cloudsql.user if parsed_cloudsql.user is not None else self.user
+            password = parsed_cloudsql.password if parsed_cloudsql.password is not None else self.password
+            database = parsed_cloudsql.database if parsed_cloudsql.database is not None else self.database
+        else:
+            parsed = urlparse(self.dsn)
+            has_dsn = bool(self.dsn and self.dsn != _DEFAULT_DSN)
+            query = parse_qs(parsed.query)
+            host = (parsed.hostname or self.host) if has_dsn else self.host
+            port = (parsed.port or self.port) if has_dsn else self.port
+            user = (unquote(parsed.username) if parsed.username else self.user) if has_dsn else self.user
+            password = (
+                (unquote(parsed.password) if parsed.password is not None else self.password)
+                if has_dsn
+                else self.password
+            )
+            database = (parsed.path.lstrip("/") or self.database) if has_dsn else self.database
         ssl_mode = self.canonical_ssl_mode
         unix_socket = self.unix_socket
         if unix_socket is None and "unix_socket" in query:

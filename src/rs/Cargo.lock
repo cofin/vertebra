@@ -7090,6 +7090,7 @@ name = "vertebra-py"
 version = "0.3.0"
 dependencies = [
  "arrow-array 60.1.0",
+ "arrow-buffer 60.1.0",
  "arrow-ipc 60.1.0",
  "arrow-schema 60.1.0",
  "bytes",

@@ -145,6 +145,78 @@ impl BridgeCorrelation {
         }
     }
 
+    /// Dispatch a single request directly through the in-process `BatchBridge`.
+    ///
+    /// Returns `Some(correlation_id)` on success, or `None` if the bridge is
+    /// unavailable, correlation capacity is exhausted, or submission fails.
+    pub fn dispatch_single(self: &Arc<Self>, req: PendingRequest) -> Option<u64> {
+        let bridge = BatchBridge::get()?;
+        self.ensure_sink_registered(bridge);
+
+        let is_fnf = (req.flags & flags::FIRE_AND_FORGET) != 0;
+        let correlation_id = if is_fnf {
+            0
+        } else {
+            self.register_pending(req.reply)?
+        };
+
+        let path_bytes = req.path_and_query.path().as_bytes();
+        let path = if path_bytes.is_empty() {
+            Bytes::new()
+        } else if path_bytes == b"/" {
+            Bytes::from_static(b"/")
+        } else {
+            Bytes::copy_from_slice(path_bytes)
+        };
+        let query = req
+            .path_and_query
+            .query()
+            .map_or_else(Bytes::new, |q| Bytes::copy_from_slice(q.as_bytes()));
+
+        let inproc_req = InProcessRequest::new(
+            req.method_tag,
+            req.http_version_tag,
+            req.handler_id,
+            correlation_id,
+            path,
+            query,
+            req.headers_mp,
+            req.body,
+            Bytes::new(),
+        );
+
+        if let Err(e) = bridge.submit_inprocess_batch(vec![inproc_req]) {
+            error!(error = %e, "in-process single request submit failed");
+            if !is_fnf {
+                let _ = self.cancel_correlation(correlation_id);
+            }
+            return None;
+        }
+
+        Some(correlation_id)
+    }
+
+    /// Cancel a pending correlation ID without sending a response on its reply channel.
+    ///
+    /// Returns `true` if the correlation entry was present and removed, or `false` if it
+    /// had already been completed or cancelled.
+    #[inline]
+    pub fn cancel_correlation(&self, correlation_id: u64) -> bool {
+        let cid = CorrelationId::from_raw(correlation_id);
+        let shard_idx = cid.shard() & BRIDGE_SHARD_MASK;
+        let tx = {
+            let mut slab = self.shards[shard_idx].lock().unwrap();
+            slab.take_completed(cid)
+        };
+        if let Some(tx) = tx {
+            drop(tx);
+            self.active_requests.0.fetch_sub(1, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Complete a batch of responses grouped by shard, releasing each shard lock before `oneshot::send`.
     pub fn complete_many(&self, responses: Vec<(u64, PendingResponse)>) {
         if responses.is_empty() {

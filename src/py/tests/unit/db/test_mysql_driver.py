@@ -52,6 +52,7 @@ from vertebra.db.adapters.mysql import (
     AsyncMySQLDriver,
     AsyncMySQLPipeline,
     MySQLConfig,
+    MySQLCore,
     MySQLPoolConfig,
     SyncMySQLDriver,
     SyncMySQLPipeline,
@@ -1316,6 +1317,257 @@ def test_mysql_cloud_iam_cloudsql_dsn_keeps_local_ssl_mode_rules(
     cfg = MySQLConfig(dsn=dsn, token_provider=_mysql_token_provider(provider_kind))
     assert cfg.canonical_ssl_mode == expected_mode
     assert cfg.ssl_ca is None
+    assert cfg.cloud_sql_instance == "proj:us-central1:inst"
+    assert expected_mode in cfg.pool_key()
+    assert "proj:us-central1:inst" in cfg.pool_key()
+    params = cfg.parse_dsn_params()
+    assert params["ssl_mode"] == expected_mode
+    assert params["cloud_sql_instance"] == "proj:us-central1:inst"
+    core_kwargs = MySQLCore.build_connect_kwargs(cfg)
+    assert core_kwargs["ssl_mode"] == expected_mode
+    assert core_kwargs["ssl_ca"] is None
+    assert core_kwargs["cloud_sql_instance"] == "proj:us-central1:inst"
+    client_kwargs = build_mysql_client_kwargs(cfg)
+    assert client_kwargs["ssl_mode"] == expected_mode
+    assert client_kwargs["ssl_ca"] is None
+    assert client_kwargs["cloud_sql_instance"] == "proj:us-central1:inst"
+
+
+@pytest.mark.parametrize("use_from_url", [False, True])
+@pytest.mark.parametrize(
+    (
+        "dsn",
+        "extra_kwargs",
+        "expected_instance",
+        "expected_user",
+        "expected_password",
+        "expected_database",
+        "expected_ssl_mode",
+        "expected_from_url_iam",
+    ),
+    [
+        (
+            "cloudsql://proj:us-central1:inst/appdb",
+            {},
+            "proj:us-central1:inst",
+            "root",
+            "",
+            "appdb",
+            "prefer",
+            False,
+        ),
+        (
+            "cloudsql://example.com:proj:us-central1:inst/appdb",
+            {},
+            "example.com:proj:us-central1:inst",
+            "root",
+            "",
+            "appdb",
+            "prefer",
+            False,
+        ),
+        (
+            "CLOUDSQL://proj:us-central1:inst/appdb",
+            {},
+            "proj:us-central1:inst",
+            "root",
+            "",
+            "appdb",
+            "prefer",
+            False,
+        ),
+        (
+            "cloudsql://proj:us-central1:inst?enable_iam_auth=true&ssl_mode=verify-ca",
+            {"iam_auth_options": {"access_token": "test-token-placeholder"}},
+            "proj:us-central1:inst",
+            "root",
+            "",
+            "vertebra",
+            "verify-ca",
+            True,
+        ),
+        (
+            "cloudsql://proj:us-central1:inst/",
+            {},
+            "proj:us-central1:inst",
+            "root",
+            "",
+            "vertebra",
+            "prefer",
+            False,
+        ),
+        (
+            "cloudsql://alice%40corp.test:p%3As%40w%2Bd%2F1@proj:us-central1:inst/my%20db#frag",
+            {},
+            "proj:us-central1:inst",
+            "alice@corp.test",
+            "p:s@w+d/1",
+            "my db",
+            "prefer",
+            False,
+        ),
+        (
+            "cloudsql://alice:@proj:us-central1:inst/appdb",
+            {"password": "fallback"},
+            "proj:us-central1:inst",
+            "alice",
+            "",
+            "appdb",
+            "prefer",
+            False,
+        ),
+        (
+            "cloudsql://alice@proj:us-central1:inst/appdb",
+            {"password": "fallback"},
+            "proj:us-central1:inst",
+            "alice",
+            "fallback",
+            "appdb",
+            "prefer",
+            False,
+        ),
+    ],
+)
+def test_mysql_cloudsql_dsn_valid_matrix(
+    use_from_url: bool,
+    dsn: str,
+    extra_kwargs: dict[str, Any],
+    expected_instance: str,
+    expected_user: str,
+    expected_password: str,
+    expected_database: str,
+    expected_ssl_mode: str,
+    expected_from_url_iam: bool,
+) -> None:
+    """Verify valid `cloudsql://` DSNs work across construction, pool keys, dialer config, and connect kwargs."""
+    cfg = MySQLConfig.from_url(dsn, **extra_kwargs) if use_from_url else MySQLConfig(dsn=dsn, **extra_kwargs)
+    expected_iam = expected_from_url_iam if use_from_url else False
+
+    assert cfg.cloud_sql_instance == expected_instance
+    assert cfg.enable_iam_auth is expected_iam
+    assert cfg.canonical_ssl_mode == expected_ssl_mode
+    assert cfg.pool_key() == (
+        "mysql",
+        "localhost",
+        3306,
+        expected_database,
+        expected_user,
+        expected_ssl_mode,
+        expected_instance,
+    )
+    assert cfg.to_cloud_dialer_config() == CloudSQLConfig(
+        instance_connection_name=expected_instance,
+        enable_iam_auth=expected_iam,
+    )
+
+    params = cfg.parse_dsn_params()
+    assert params["host"] == "localhost"
+    assert params["port"] == 3306
+    assert params["user"] == expected_user
+    assert params["password"] == ("test-token-placeholder" if expected_iam else expected_password)
+    assert params["database"] == expected_database
+    assert params["ssl_mode"] == expected_ssl_mode
+    assert params["cloud_sql_instance"] == expected_instance
+
+    core_kwargs = MySQLCore.build_connect_kwargs(cfg)
+    assert core_kwargs["host"] == "localhost"
+    assert core_kwargs["port"] == 3306
+    assert core_kwargs["user"] == expected_user
+    assert core_kwargs["database"] == expected_database
+    assert core_kwargs["ssl_mode"] == expected_ssl_mode
+    assert core_kwargs["cloud_sql_instance"] == expected_instance
+    assert core_kwargs["enable_iam_auth"] is expected_iam
+
+    client_kwargs = build_mysql_client_kwargs(cfg)
+    assert client_kwargs["host"] == "localhost"
+    assert client_kwargs["port"] == 3306
+    assert client_kwargs["user"] == expected_user
+    assert client_kwargs["database"] == expected_database
+    assert client_kwargs["ssl_mode"] == expected_ssl_mode
+    assert client_kwargs["cloud_sql_instance"] == expected_instance
+    assert client_kwargs["enable_iam_auth"] is expected_iam
+
+
+def test_mysql_cloudsql_explicit_4part_and_matching_instance() -> None:
+    """Verify explicit 4-part `cloud_sql_instance` and matching explicit/DSN instances succeed with stable pool keys."""
+    tcp_cfg = MySQLConfig(
+        dsn="mysql://root@localhost:3306/appdb",
+        cloud_sql_instance="example.com:proj:us-central1:inst",
+    )
+    assert tcp_cfg.cloud_sql_instance == "example.com:proj:us-central1:inst"
+    dialer_cfg = tcp_cfg.to_cloud_dialer_config()
+    assert dialer_cfg is not None
+    assert dialer_cfg.instance_connection_name == "example.com:proj:us-central1:inst"
+
+    matching_cfg = MySQLConfig(
+        dsn="cloudsql://proj:us-central1:inst/appdb",
+        cloud_sql_instance="proj:us-central1:inst",
+    )
+    upper_cfg = MySQLConfig(dsn="CLOUDSQL://proj:us-central1:inst/appdb")
+    query_match_cfg = MySQLConfig.from_url(
+        "cloudsql://proj:us-central1:inst/appdb?cloud_sql_instance=proj:us-central1:inst"
+    )
+    assert matching_cfg.pool_key() == upper_cfg.pool_key() == query_match_cfg.pool_key()
+
+
+@pytest.mark.parametrize(
+    ("use_from_url", "dsn", "extra_kwargs", "match_pattern"),
+    [
+        (
+            False,
+            "cloudsql://proj:us-central1:inst/appdb",
+            {"cloud_sql_instance": "other:us-central1:inst"},
+            "Conflicting Cloud SQL instance",
+        ),
+        (
+            False,
+            "cloudsql://proj:us-central1:inst/appdb?cloud_sql_instance=other:us-central1:inst",
+            {},
+            "Conflicting Cloud SQL instance",
+        ),
+        (
+            True,
+            "cloudsql://proj:us-central1:inst/appdb?cloud_sql_instance=other:us-central1:inst",
+            {},
+            "Conflicting Cloud SQL instance",
+        ),
+        (
+            False,
+            "cloudsql://proj:us-central1:inst/appdb?cloudsql_instance=other:us-central1:inst",
+            {},
+            "Conflicting Cloud SQL instance",
+        ),
+        (
+            False,
+            "cloudsql://proj:us-central1:inst/appdb?ssl_mode=bogus",
+            {},
+            "Unsupported MySQL ssl_mode",
+        ),
+        (False, "cloudsql://", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql:///appdb", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql://alice@", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql://a:b/db", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql://a:b:c:d:e/db", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql://a::c/db", {}, "Invalid Cloud SQL instance"),
+        (False, "cloudsql://proj:us-central1:inst/memory", {}, "in-memory"),
+        (False, "cloudsql://proj:us-central1:inst/%3Amemory%3A", {}, "in-memory"),
+        (False, "cloudsql://user%00bad@proj:us-central1:inst/appdb", {}, "NUL"),
+        (False, "cloudsql://user:pass%00bad@proj:us-central1:inst/appdb", {}, "NUL"),
+        (False, "cloudsql://proj:us-central1:inst/db%00bad", {}, "NUL"),
+    ],
+)
+def test_mysql_cloudsql_dsn_rejects_invalid_and_conflicting_inputs(
+    use_from_url: bool,
+    dsn: str,
+    extra_kwargs: dict[str, Any],
+    match_pattern: str,
+) -> None:
+    """Verify invalid or conflicting `cloudsql://` DSNs raise `ImproperConfigurationError`."""
+    with pytest.raises(ImproperConfigurationError, match=match_pattern):
+        if use_from_url:
+            MySQLConfig.from_url(dsn, **extra_kwargs)
+        else:
+            MySQLConfig(dsn=dsn, **extra_kwargs)
 
 
 @pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])

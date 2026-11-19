@@ -76,6 +76,9 @@ sources:
 - id: server-platform-py
   resource: src/py/vertebra/server/platform.py::ZPagesRegistry
   title: Diagnostic /taskz cross-shard call-graph timeout and fallback boundaries
+- id: http-zpages-rs
+  resource: src/rs/vertebra-http/src/zpages.rs::ZPagesEndpoint
+  title: Opt-in HTTP Z-Pages authorization, timeout, and SHM fan-out aggregation
 ---
 
 # Server Runtime Limitations
@@ -92,7 +95,7 @@ sources:
 - `ProfileEndpoint` (`/debug/pprof/*`) returns `404 Not Found` (`{"error":"heap profiling not supported"}`) for `/debug/pprof/heap` even when enabled and bearer-authorized, returns `404 Not Found` (`{"error":"profiling feature disabled"}`) for `/debug/pprof/profile` unless built with `all(unix, feature = "profiling")`, and clamps CPU capture duration to `10 ms..5000 ms` (default `1000 ms`) [^http-profile-rs].
 - Inline single-loop `EventLoopPool` instances wrap `loop.run_forever` and `loop.run_until_complete` at construction so `stop()` called from a running loop closes the loop on exit after `_drain_loop()`; custom C or Rust loop types with read-only method descriptors suppress wrapper assignment and still drain pending tasks and async generators before `loop.stop()`, leaving final `loop.close()` to the caller after `run_forever()` returns [^server-loops-py].
 - `capture_loop_task_snapshots` and `/taskz` (`ZPagesRegistry.get_tasks_payload` and `get_tasks_payload_async`) use Python 3.14+ `asyncio.capture_call_graph` and `asyncio.format_call_graph` when supported and fall back to `Task.get_stack(limit=8)` on Python 3.12–3.13 or non-stdlib task types; cross-thread background shard inspections bound each shard probe to a `1.0 s` timeout and omit unresponsive, stopped, or closed loops [^server-loops-py] [^server-platform-py].
-- Loop lag sampling runs only when `VERTEBRA_LOOP_TELEMETRY` is `1` or `true`, or a recorder is attached, and samples surface through `EventLoopRecorder` and optional OpenTelemetry instruments, not a diagnostic page. Workers with only sync handlers register their pool for `/taskz` but record no lag. `/taskz` is served over HTTP by `HealthProbeServer` in `vtb run --worker-only`; request-serving workers expose it through `ZPagesRegistry.handle_zpage` on the registry passed to `run_worker` [^server-loops-py] [^server-platform-py].
+- Opt-in HTTP Z-Pages on `vtb run` require `--zpages` (`VERTEBRA_ZPAGES_ENABLED=1`), enforce loopback-only or constant-time Bearer auth (failing closed with `401` on non-loopback binds without a token), bound diagnostic worker probes to `2.0 s`, share one `ZPagesRegistry` per process across Embedded threads, and support `?worker=<id>` or parallel fan-out merging on SHM. Loop lag sampling runs when `VERTEBRA_LOOP_TELEMETRY` is `1` or `true` (or a recorder is attached) and exports under `"loop_telemetry"` in `/varz` on both request-serving workers and `vtb run --worker-only` `HealthProbeServer`, while sync-only workers still record no scheduling lag [^http-zpages-rs] [^server-loops-py] [^server-platform-py].
 <!-- truth: end -->
 
 ## Operational Context
@@ -118,3 +121,4 @@ Current server architecture and streaming transport details live in [ASGI, RSGI 
 [^http-profile-rs]: `src/rs/vertebra-http/src/profile.rs::ProfileEndpoint` — Diagnostic `/debug/pprof/*` authorization and `404` guards.
 [^server-loops-py]: `src/py/vertebra/server/_loops.py::EventLoopPool` — Inline `EventLoopPool` exit hook and fast-loop eager task factory.
 [^server-platform-py]: `src/py/vertebra/server/platform.py::ZPagesRegistry` — Diagnostic `/taskz` cross-shard call-graph timeout and fallback boundaries.
+[^http-zpages-rs]: `src/rs/vertebra-http/src/zpages.rs::ZPagesEndpoint` — Opt-in HTTP Z-Pages authorization, `2.0 s` diagnostic timeout, and SHM fan-out aggregation.

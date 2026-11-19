@@ -12,10 +12,12 @@ import inspect
 import json
 import random
 import select
+import signal
 import struct
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -2122,5 +2124,188 @@ def test_arrow_c_stream_rejects_released_requested_schema_capsule(
             cursor.__arrow_c_stream__(consumed_capsule)
         assert str(excinfo.value) == _ARROW_RELEASED_SCHEMA_MESSAGE
         assert cursor.to_pylist() == [{"id": 1, "label": "alpha"}]
+    finally:
+        cursor.release()
+
+
+def _serialize_record_batches(batches: list[pa.RecordBatch]) -> bytes:
+    """Serialize one or more PyArrow RecordBatches into an Arrow IPC stream."""
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batches[0].schema) as writer:
+        for batch in batches:
+            writer.write_batch(batch)
+    return bytes(sink.getvalue().to_pybytes())
+
+
+def _patch_first_record_batch(
+    payload: bytes,
+    *,
+    batch_length: int | None = None,
+    node_updates: dict[int, tuple[int, int]] | None = None,
+) -> bytes:
+    """Patch the first RecordBatch FlatBuffer length and optional FieldNode entries in place."""
+    buf = bytearray(payload)
+    pos = 0
+    while pos + 8 <= len(buf):
+        meta_len = struct.unpack_from("<i", buf, pos + 4)[0]
+        if buf[pos : pos + 4] != b"\xff\xff\xff\xff" or meta_len <= 0:
+            break
+        meta_start = pos + 8
+        meta_end = meta_start + meta_len
+        table_pos = meta_start + struct.unpack_from("<I", buf, meta_start)[0]
+        vtable_pos = table_pos - struct.unpack_from("<i", buf, table_pos)[0]
+        vtable_len = struct.unpack_from("<H", buf, vtable_pos)[0]
+        header_type_slot = 6
+        header_slot = 8
+        header_type = 0
+        if header_type_slot + 2 <= vtable_len:
+            ht_off = struct.unpack_from("<H", buf, vtable_pos + header_type_slot)[0]
+            if ht_off != 0:
+                header_type = buf[table_pos + ht_off]
+        if header_type == 3:
+            assert header_slot + 2 <= vtable_len
+            hdr_off = struct.unpack_from("<H", buf, vtable_pos + header_slot)[0]
+            assert hdr_off != 0
+            hdr_ref = table_pos + hdr_off
+            rb_pos = hdr_ref + struct.unpack_from("<I", buf, hdr_ref)[0]
+            rb_vtable = rb_pos - struct.unpack_from("<i", buf, rb_pos)[0]
+            rb_vtable_len = struct.unpack_from("<H", buf, rb_vtable)[0]
+            if batch_length is not None:
+                assert rb_vtable_len >= 4 + 2
+                len_off = struct.unpack_from("<H", buf, rb_vtable + 4)[0]
+                assert len_off != 0
+                struct.pack_into("<q", buf, rb_pos + len_off, batch_length)
+            if node_updates:
+                assert rb_vtable_len >= 6 + 2
+                nodes_off = struct.unpack_from("<H", buf, rb_vtable + 6)[0]
+                assert nodes_off != 0
+                nodes_ref = rb_pos + nodes_off
+                vec_pos = nodes_ref + struct.unpack_from("<I", buf, nodes_ref)[0]
+                vec_len = struct.unpack_from("<I", buf, vec_pos)[0]
+                for idx, (node_len, null_count) in node_updates.items():
+                    assert 0 <= idx < vec_len
+                    struct.pack_into("<qq", buf, vec_pos + 4 + idx * 16, node_len, null_count)
+            return bytes(buf)
+        body_len = _message_body_length(bytes(buf[meta_start:meta_end]))
+        pos = meta_end + body_len
+    msg = "No RecordBatch message found in Arrow IPC payload"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("kind", ["null", "zero_col"])
+@pytest.mark.parametrize("source", ["bytes", "shm"])
+def test_arrow_cursor_to_pylist_rejects_inflated_row_count(kind: str, source: str) -> None:
+    """Verify inflated Null and zero-column batches fail to_pylist immediately with ValueError."""
+    inflated = 0x4000_0000_0000_0000
+    if kind == "null":
+        batch = pa.record_batch([pa.array([None], type=pa.null())], names=["n"])
+        payload = _patch_first_record_batch(
+            _serialize_record_batches([batch]),
+            batch_length=inflated,
+            node_updates={0: (inflated, inflated)},
+        )
+    else:
+        batch = pa.RecordBatch.from_pydict({"x": [1]}).select([])
+        payload = _patch_first_record_batch(
+            _serialize_record_batches([batch]),
+            batch_length=inflated,
+        )
+    if source == "bytes":
+        cursor = native_vertebra.ArrowCursor.from_ipc_bytes(payload)
+    else:
+        cursor = native_vertebra.ArrowCursor.write_ipc_to_shm(ArrowCursor._next_shm_segment_name(), payload, 0)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="maximum Python list size"):
+            cursor.to_pylist()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.1
+    finally:
+        cursor.release()
+
+
+@pytest.mark.parametrize(
+    ("kind", "inflated_length"),
+    [
+        ("fixed_size_list", 0x4000_0000_0000_0000),
+        ("fixed_size_binary", 0x1000_0000_0000_0000),
+    ],
+)
+def test_arrow_cursor_rejects_fixed_size_overflow(kind: str, inflated_length: int) -> None:
+    """Verify FixedSizeList and FixedSizeBinary length overflows raise ValueError on bytes and SHM cursors."""
+    if kind == "fixed_size_list":
+        arr = pa.array([[1, 2, 3, 4]], type=pa.list_(pa.int32(), 4))
+    else:
+        arr = pa.array([b"\x00" * 16], type=pa.binary(16))
+    batch = pa.record_batch([arr], names=["col"])
+    payload = _patch_first_record_batch(
+        _serialize_record_batches([batch]),
+        batch_length=inflated_length,
+        node_updates={0: (inflated_length, 0)},
+    )
+    with pytest.raises(ValueError):
+        native_vertebra.ArrowCursor.from_ipc_bytes(payload)
+
+    shm_cursor = native_vertebra.ArrowCursor.write_ipc_to_shm(ArrowCursor._next_shm_segment_name(), payload, 0)
+    try:
+        with pytest.raises(ValueError):
+            pa.RecordBatchReader.from_stream(shm_cursor).read_all()
+        with pytest.raises(ValueError):
+            shm_cursor.to_pylist()
+    finally:
+        shm_cursor.release()
+
+
+def test_arrow_cursor_to_pylist_honors_keyboard_interrupt() -> None:
+    """Verify to_pylist checks Python signals periodically so KeyboardInterrupt stops large streams promptly."""
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM"):
+        pytest.skip("POSIX interval timers are required for async signal delivery while the GIL is held")
+    row_count = 5_000_000
+    batch = pa.record_batch([pa.array([None], type=pa.null())], names=["n"])
+    payload = _patch_first_record_batch(
+        _serialize_record_batches([batch]),
+        batch_length=row_count,
+        node_updates={0: (row_count, row_count)},
+    )
+    cursor = native_vertebra.ArrowCursor.from_ipc_bytes(payload)
+
+    def _raise_keyboard_interrupt(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _raise_keyboard_interrupt)
+    try:
+        started = time.monotonic()
+        signal.setitimer(signal.ITIMER_REAL, 0.01)
+        with pytest.raises(KeyboardInterrupt):
+            cursor.to_pylist()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        cursor.release()
+
+
+@pytest.mark.parametrize("source", ["bytes", "shm"])
+def test_arrow_cursor_repeated_cached_reads(source: str) -> None:
+    """Verify bytes and SHM cursors return identical rows and schema across repeated stream and to_pylist reads."""
+    ipc_bytes = _serialize_multi_batch_ipc([[(1, "alpha"), (2, "beta")], [(3, "gamma")]])
+    if source == "bytes":
+        cursor = native_vertebra.ArrowCursor.from_ipc_bytes(ipc_bytes)
+    else:
+        cursor = native_vertebra.ArrowCursor.write_ipc_to_shm(ArrowCursor._next_shm_segment_name(), ipc_bytes, 3)
+    expected_rows = [
+        {"id": 1, "label": "alpha"},
+        {"id": 2, "label": "beta"},
+        {"id": 3, "label": "gamma"},
+    ]
+    try:
+        first_table = pa.RecordBatchReader.from_stream(cursor).read_all()
+        for _ in range(3):
+            table = pa.RecordBatchReader.from_stream(cursor).read_all()
+            assert table.schema == first_table.schema
+            assert table.to_pylist() == expected_rows
+            assert cursor.to_pylist() == expected_rows
     finally:
         cursor.release()

@@ -89,6 +89,15 @@ sources:
 - id: pg-mysql-cloud-tls
   resource: src/py/vertebra/db/adapters/postgres/options.py::build_native_client_options
   title: PostgreSQL and MySQL Azure Entra default scopes, bundled RDS Root CA attachment, and remote TLS enforcement
+- id: cargo-release-profile
+  resource: src/rs/Cargo.toml
+  title: Rust workspace release profile with panic = "unwind" for PyO3 PanicException safety
+- id: arrow-cursor-ipc
+  resource: src/rs/vertebra-py/src/db.rs::ArrowCursor
+  title: Single-pass CompiledIpcLayout validation, overflow guards, cached validation flag, and to_pylist signal checks
+- id: bench-arrow-ipc
+  resource: tools/benchmarks/micro.py::benchmark_arrow_ipc_stream
+  title: Arrow IPC stream open and single-pass iteration microbenchmark
 ---
 
 # Database Driver Limitations
@@ -114,7 +123,24 @@ sources:
 - `SyncSpannerQueueStore` and `AsyncSpannerQueueStore` (`db/adapters/spanner/queue.py`) implement the full extended `SyncQueueStore` / `AsyncQueueStore` protocol across GoogleSQL (`@param`) and Spangres (`$1`) dialects using transactional `run_in_transaction` `FOR UPDATE` reservation checks, `LEFT JOIN vertebra_queue_unique_keys` key lookups, and nullable `expires_at` for forever reservations; unit coverage runs against `_InMemorySpannerQueueWire` rather than a live Spanner instance or emulator [^spanner-queue].
 - `vertebra_db::dialer` embeds the 114-certificate AWS RDS Global Root CA PEM bundle (`aws_rds_root_ca_pem()`) and exposes `AwsRdsDialer`, `AwsAuroraDsqlDialer`, and `AzureEntraDialer` on `vertebra._vertebra`, paired with `SyncAwsRdsDialer`, `AsyncAwsRdsDialer`, `SyncAwsAuroraDsqlDialer`, `AsyncAwsAuroraDsqlDialer`, `SyncAzureEntraDialer`, and `AsyncAzureEntraDialer` in `vertebra.db.dialer`. `PostgreSQLConfig` (`ca_pem: str | None = None`) and `MySQLConfig` inject `AZURE_{POSTGRES,MYSQL}_SCOPE` for unscoped `AzureEntraTokenProvider` instances and attach `aws_rds_root_ca_pem()` for remote `AwsRdsIamTokenProvider` hosts without custom CAs. With an AWS or Azure token provider on a remote host and no explicit SSL mode, both default to `verify-full`. They reject `disable`, `allow`, and `prefer` there and keep explicit `require` and `verify-ca`. `MSSQLConfig` with an Entra provider rejects unencrypted or login-only encryption and `trust_server_certificate=True` on remote hosts. Loopback hosts, Unix sockets, and Cloud SQL targets keep their defaults so local wire harnesses run without live cloud endpoints [^aws-azure-rs-dialers] [^py-aws-azure-dialers] [^pg-mysql-cloud-tls].
 - Cloud token provider limits: refresh is single-flight per event loop, so one sync refresh plus one refresh per loop can run at once. Credential and token requests refuse redirects and cap responses at 1 MiB. `AzureEntraDialer` selects the scope and authority for Azure Government and Azure China hosts, while configs built without the dialer use the public-cloud scope unless `scope=` is set. On MySQL, `verify-ca` also checks the hostname, and an RDS CA attached at construction stays on the config after `msgspec.structs.replace` to another host [^entra-auth] [^aws-sigv4-auth] [^py-aws-azure-dialers].
+- Arrow IPC hardening and release unwind: `[profile.release]` in `src/rs/Cargo.toml` uses `panic = "unwind"` so `catch_unwind` and PyO3 `PanicException` protect host Python processes in release wheels [^cargo-release-profile]. `ArrowCursor` compiles stream schemas once into `CompiledIpcLayout`, validates `FixedSizeList`, `FixedSizeBinary`, and length conversions against `usize` overflow before decoding in a single pass, caches frame validation in `validated: Arc<AtomicBool>` across repeat reads (keeping per-batch layout and panic guards active), enforces `MAX_PYLIST_ROWS` with `checked_add`, and calls `py.check_signals()?` every `4096` rows (and every `1024` batches) in `to_pylist` [^arrow-cursor-ipc] [^bench-arrow-ipc].
 <!-- truth: end -->
+
+## Arrow IPC Release Timing Baseline
+
+Measured on a release build of `vertebra-py` using:
+
+```bash
+uv run --no-sync maturin develop --release --uv -m src/rs/vertebra-py/Cargo.toml
+uv run --no-sync python -m tools.benchmarks.micro --arrow-ipc-only --json
+```
+
+| Workload | Payload Size | Phase | Median (ms) | p99 (ms) | Ops/sec |
+| --- | --- | --- | --- | --- | --- |
+| `2,000 x (8 rows x 20 cols)` (`tiny_2000x8x20`) | 5,249,024 B (5.01 MiB) | Open (`__arrow_c_stream__`) | 0.510 | 0.539 | 1,959.62 |
+| `2,000 x (8 rows x 20 cols)` (`tiny_2000x8x20`) | 5,249,024 B (5.01 MiB) | Full iteration (`RecordBatchReader`) | 200.816 | 207.463 | 4.98 |
+| `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Open (`__arrow_c_stream__`) | 0.082 | 0.086 | 12,232.27 |
+| `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Full iteration (`RecordBatchReader`) | 469.724 | 475.618 | 2.13 |
 
 ## Related Context
 
@@ -142,3 +168,6 @@ sources:
 [^aws-sigv4-auth]: `src/py/vertebra/db/driver/_cloud_auth.py::AwsRdsIamTokenProvider` — Ambient AWS SigV4 credential chains (`~/.aws`, Web Identity STS, ECS, IMDSv2) and temporary credential expiry clamping.
 [^py-aws-azure-dialers]: `src/py/vertebra/db/dialer/aws.py::SyncAwsRdsDialer` — Python sync/async AWS RDS, Aurora DSQL, and Azure Entra `verify-full` TLS dialers and `connection_kwargs()`.
 [^pg-mysql-cloud-tls]: `src/py/vertebra/db/adapters/postgres/options.py::build_native_client_options` — PostgreSQL and MySQL Azure Entra default scopes, bundled RDS Root CA attachment, and remote TLS enforcement.
+[^cargo-release-profile]: `src/rs/Cargo.toml` — Rust workspace `[profile.release]` `panic = "unwind"` policy.
+[^arrow-cursor-ipc]: `src/rs/vertebra-py/src/db.rs::ArrowCursor` — Single-pass `CompiledIpcLayout` validation, overflow guards, cached `validated` flag, and `to_pylist` signal and row-ceiling checks.
+[^bench-arrow-ipc]: `tools/benchmarks/micro.py::benchmark_arrow_ipc_stream` — Release Arrow IPC stream open and iteration microbenchmark.

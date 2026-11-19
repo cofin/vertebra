@@ -5,8 +5,10 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
+use http::uri::PathAndQuery;
 use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, header};
 use http_body_util::{Either, Full};
 use hyper::Request;
@@ -25,6 +27,7 @@ use crate::backpressure::{BackpressureMetricsSnapshot, CircuitState, RejectionRe
 use crate::batcher::{PendingRequest, PendingResponse, http_version_tag, method_tag};
 use crate::compression::CompressionOffloadConfig;
 use crate::cors::CompiledCorsOffload;
+use crate::dispatcher::{BridgeCorrelation, DispatchBackend, ShmDispatcher, ShmTargetError};
 use crate::grpc::{
     GRPC_HEADER_LEN, GrpcError, GrpcStatus, GrpcWireFormat, build_grpc_trailers_only_response,
     parse_grpc_timeout,
@@ -36,12 +39,16 @@ use crate::multipart::parse_multipart_body;
 use crate::payload::{
     PayloadError, collect_bounded_body, decode_buffered_body, is_active_content_encoding,
 };
-use crate::routing::RouterError;
+use crate::routing::{RouterError, ZPAGES_HANDLER_ID};
 use crate::server::ServerState;
 use crate::ws_mount::{
     WebSocketHandshakeDecision, WsConfig, WsIncoming, WsOutgoing, build_handshake_response,
     client_offers_permessage_deflate, is_websocket_upgrade_parts, negotiate_subprotocol,
     run_ws_connection, validate_origin,
+};
+use crate::zpages::{
+    WorkerZPageOutcome, ZPAGES_REQUEST_TIMEOUT, ZPagesRequest, json_response,
+    merge_shm_zpages_responses,
 };
 
 /// Path for the backpressure-aware health endpoint. Always returns 200 so
@@ -158,6 +165,19 @@ async fn dispatch_request_inner(
         {
             return pprof_resp.map(Either::Left);
         }
+    }
+
+    // Opt-in z-pages diagnostic endpoints (`/taskz`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`).
+    if state.zpages_endpoint.is_enabled()
+        && let Some(decision) =
+            state
+                .zpages_endpoint
+                .preflight(&parts.method, &parts.uri, &parts.headers)
+    {
+        return match decision {
+            Ok(zreq) => handle_zpages_request(zreq, state).await,
+            Err(resp) => resp.map(Either::Left),
+        };
     }
 
     // Zero-GIL `/.well-known/*` discovery cache.
@@ -1019,9 +1039,731 @@ fn error_response(status: StatusCode, msg: &'static str) -> HttpResponse {
         .unwrap()
 }
 
+fn build_zpage_pending(path: &'static str) -> (PendingRequest, oneshot::Receiver<PendingResponse>) {
+    let (tx, rx) = oneshot::channel();
+    let pending = PendingRequest {
+        handler_id: ZPAGES_HANDLER_ID,
+        method_tag: 0,
+        http_version_tag: 1,
+        flags: vertebra_core::protocol::flags::NONE,
+        path_and_query: PathAndQuery::from_static(path),
+        headers_mp: Bytes::new(),
+        body: Bytes::new(),
+        reply: tx,
+    };
+    (pending, rx)
+}
+
+enum CancelTarget<'a> {
+    Bridge(&'a BridgeCorrelation),
+    Shm(&'a ShmDispatcher),
+}
+
+struct CorrelationCancelGuard<'a> {
+    target: CancelTarget<'a>,
+    cid: Option<u64>,
+}
+
+impl<'a> CorrelationCancelGuard<'a> {
+    fn bridge(corr: &'a BridgeCorrelation, cid: u64) -> Self {
+        Self {
+            target: CancelTarget::Bridge(corr),
+            cid: Some(cid),
+        }
+    }
+
+    fn shm(shm: &'a ShmDispatcher, cid: u64) -> Self {
+        Self {
+            target: CancelTarget::Shm(shm),
+            cid: Some(cid),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cid = None;
+    }
+}
+
+impl Drop for CorrelationCancelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(cid) = self.cid.take() {
+            match self.target {
+                CancelTarget::Bridge(corr) => {
+                    let _ = corr.cancel_correlation(cid);
+                }
+                CancelTarget::Shm(shm) => {
+                    let _ = shm.cancel_correlation(cid);
+                }
+            }
+        }
+    }
+}
+
+async fn handle_zpages_request(zreq: ZPagesRequest, state: &Arc<ServerState>) -> HttpResponse {
+    handle_zpages_request_with_timeout(zreq, state, ZPAGES_REQUEST_TIMEOUT).await
+}
+
+async fn handle_zpages_request_with_timeout(
+    zreq: ZPagesRequest,
+    state: &Arc<ServerState>,
+    timeout: Duration,
+) -> HttpResponse {
+    match state.dispatcher.backend() {
+        DispatchBackend::Bridge(corr) => {
+            if let Some(id) = zreq.target_worker
+                && id > 0
+            {
+                let body = format!(
+                    "{{\"error\":\"worker_not_found\",\"worker_id\":{id},\"worker_count\":1}}"
+                );
+                return json_response(StatusCode::NOT_FOUND, Bytes::from(body), zreq.is_head)
+                    .map(Either::Left);
+            }
+            let (pending, reply_rx) = build_zpage_pending(zreq.path);
+            let Some(cid) = corr.dispatch_single(pending) else {
+                return json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from_static(b"{\"error\":\"zpages_unavailable\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left);
+            };
+            let mut guard = CorrelationCancelGuard::bridge(corr, cid);
+            match tokio::time::timeout(timeout, reply_rx).await {
+                Ok(Ok(resp)) => {
+                    guard.disarm();
+                    let status = StatusCode::from_u16(resp.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    json_response(status, resp.body, zreq.is_head).map(Either::Left)
+                }
+                Ok(Err(_)) => json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from_static(b"{\"error\":\"zpages_unavailable\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left),
+                Err(_) => json_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"{\"error\":\"zpages_timeout\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left),
+            }
+        }
+        DispatchBackend::Direct(_) => {
+            if let Some(id) = zreq.target_worker
+                && id > 0
+            {
+                let body = format!(
+                    "{{\"error\":\"worker_not_found\",\"worker_id\":{id},\"worker_count\":1}}"
+                );
+                return json_response(StatusCode::NOT_FOUND, Bytes::from(body), zreq.is_head)
+                    .map(Either::Left);
+            }
+            let (pending, reply_rx) = build_zpage_pending(zreq.path);
+            let mut reqs = vec![pending];
+            if state.dispatcher.dispatch_requests(&mut reqs) == 0 {
+                return json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from_static(b"{\"error\":\"zpages_unavailable\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left);
+            }
+            match tokio::time::timeout(timeout, reply_rx).await {
+                Ok(Ok(resp)) => {
+                    let status = StatusCode::from_u16(resp.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    json_response(status, resp.body, zreq.is_head).map(Either::Left)
+                }
+                Ok(Err(_)) => json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from_static(b"{\"error\":\"zpages_unavailable\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left),
+                Err(_) => json_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"{\"error\":\"zpages_timeout\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left),
+            }
+        }
+        DispatchBackend::Shm(shm) => {
+            if let Some(worker_id) = zreq.target_worker {
+                let (pending, reply_rx) = build_zpage_pending(zreq.path);
+                let cid = match shm.dispatch_to_worker(worker_id, pending) {
+                    Ok(cid) => cid,
+                    Err(ShmTargetError::NotFound) => {
+                        let body = format!(
+                            "{{\"error\":\"worker_not_found\",\"worker_id\":{worker_id},\"worker_count\":{}}}",
+                            shm.worker_count()
+                        );
+                        return json_response(
+                            StatusCode::NOT_FOUND,
+                            Bytes::from(body),
+                            zreq.is_head,
+                        )
+                        .map(Either::Left);
+                    }
+                    Err(ShmTargetError::Unhealthy) => {
+                        let body =
+                            format!("{{\"error\":\"worker_unhealthy\",\"worker_id\":{worker_id}}}");
+                        return json_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Bytes::from(body),
+                            zreq.is_head,
+                        )
+                        .map(Either::Left);
+                    }
+                    Err(
+                        ShmTargetError::RingFull
+                        | ShmTargetError::CorrelationFull
+                        | ShmTargetError::SendFailed,
+                    ) => {
+                        let body = format!(
+                            "{{\"error\":\"worker_unavailable\",\"worker_id\":{worker_id}}}"
+                        );
+                        return json_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Bytes::from(body),
+                            zreq.is_head,
+                        )
+                        .map(Either::Left);
+                    }
+                };
+                let mut guard = CorrelationCancelGuard::shm(shm, cid);
+                return match tokio::time::timeout(timeout, reply_rx).await {
+                    Ok(Ok(resp)) => {
+                        guard.disarm();
+                        let status = StatusCode::from_u16(resp.status)
+                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                        json_response(status, resp.body, zreq.is_head).map(Either::Left)
+                    }
+                    Ok(Err(_)) => {
+                        let body = format!(
+                            "{{\"error\":\"worker_unavailable\",\"worker_id\":{worker_id}}}"
+                        );
+                        json_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Bytes::from(body),
+                            zreq.is_head,
+                        )
+                        .map(Either::Left)
+                    }
+                    Err(_) => {
+                        let body =
+                            format!("{{\"error\":\"zpages_timeout\",\"worker_id\":{worker_id}}}");
+                        json_response(StatusCode::GATEWAY_TIMEOUT, Bytes::from(body), zreq.is_head)
+                            .map(Either::Left)
+                    }
+                };
+            }
+
+            let healthy_ids = shm.healthy_worker_ids();
+            if healthy_ids.is_empty() {
+                return json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from_static(b"{\"error\":\"no_healthy_workers\"}"),
+                    zreq.is_head,
+                )
+                .map(Either::Left);
+            }
+
+            let futs = healthy_ids.into_iter().map(|worker_id| {
+                let (pending, reply_rx) = build_zpage_pending(zreq.path);
+                let guard_res = shm
+                    .dispatch_to_worker(worker_id, pending)
+                    .map(|cid| CorrelationCancelGuard::shm(shm, cid));
+                async move {
+                    let mut guard = match guard_res {
+                        Ok(guard) => guard,
+                        Err(ShmTargetError::NotFound) => {
+                            return WorkerZPageOutcome::Error {
+                                worker_id,
+                                message: "worker_not_found".to_string(),
+                            };
+                        }
+                        Err(ShmTargetError::Unhealthy) => {
+                            return WorkerZPageOutcome::Error {
+                                worker_id,
+                                message: "worker_unhealthy".to_string(),
+                            };
+                        }
+                        Err(
+                            ShmTargetError::RingFull
+                            | ShmTargetError::CorrelationFull
+                            | ShmTargetError::SendFailed,
+                        ) => {
+                            return WorkerZPageOutcome::Error {
+                                worker_id,
+                                message: "worker_unavailable".to_string(),
+                            };
+                        }
+                    };
+                    match tokio::time::timeout(timeout, reply_rx).await {
+                        Ok(Ok(resp)) => {
+                            guard.disarm();
+                            if resp.status != StatusCode::OK.as_u16() {
+                                return WorkerZPageOutcome::Error {
+                                    worker_id,
+                                    message: format!("worker_status_{}", resp.status),
+                                };
+                            }
+                            match serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                                Ok(payload) => WorkerZPageOutcome::Ok { worker_id, payload },
+                                Err(_) => WorkerZPageOutcome::Error {
+                                    worker_id,
+                                    message: "invalid_json".to_string(),
+                                },
+                            }
+                        }
+                        Ok(Err(_)) => WorkerZPageOutcome::Error {
+                            worker_id,
+                            message: "worker_unavailable".to_string(),
+                        },
+                        Err(_) => WorkerZPageOutcome::Timeout { worker_id },
+                    }
+                }
+            });
+
+            let outcomes = futures_util::future::join_all(futs).await;
+            let (status, body) = merge_shm_zpages_responses(zreq.path, outcomes);
+            json_response(status, body, zreq.is_head).map(Either::Left)
+        }
+    }
+}
+
 /// Encode response headers into the compact binary format.
 ///
 /// Format per header: `[name_len: u8][name: bytes][value_len: u16 LE][value: bytes]`
 pub fn encode_response_headers(headers: &[(Vec<u8>, Vec<u8>)]) -> Bytes {
     Bytes::from(encode_headers_compact(headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::time::Duration;
+
+    use http_body_util::BodyExt;
+    use tokio::sync::mpsc;
+    use vertebra_core::transport::BatchSnapshot;
+    use vertebra_core::transport::ring_pair::{RingPair, RingPairConfig};
+
+    use crate::backpressure::BackpressureConfig;
+    use crate::batcher::Batch;
+    use crate::config::ServerConfig;
+    use crate::dispatcher::{Dispatcher, ShmDispatcher};
+    use crate::routing::{RouteEntry, Router, ZPAGES_HANDLER_ID, handler_id};
+    use crate::zpages::{ZPagesConfig, ZPagesRequest};
+
+    async fn read_http_body(resp: HttpResponse) -> Bytes {
+        resp.into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes()
+    }
+
+    fn make_direct_state(
+        zpages: ZPagesConfig,
+        with_user_taskz: bool,
+        with_saturated_bp: bool,
+    ) -> (
+        Arc<ServerState>,
+        mpsc::Receiver<Batch>,
+        mpsc::Receiver<PendingRequest>,
+    ) {
+        let mut entries = Vec::new();
+        if with_user_taskz {
+            entries.push(RouteEntry {
+                method: "GET".to_string(),
+                path: "/taskz".to_string(),
+                handler_id: handler_id("GET", "/taskz"),
+            });
+        }
+        let router = Router::from_entries(entries).unwrap();
+        let (mut dispatcher, batch_rx) = Dispatcher::new_direct(16);
+        if with_saturated_bp {
+            dispatcher = dispatcher.with_backpressure(BackpressureConfig {
+                max_in_flight: 0,
+                ..BackpressureConfig::default()
+            });
+        }
+        let cfg = ServerConfig {
+            zpages,
+            ..ServerConfig::default()
+        };
+        let (collector_tx, collector_rx) = mpsc::channel(16);
+        let state = Arc::new(ServerState::new(
+            Arc::new(router),
+            Arc::new(dispatcher),
+            Arc::new(cfg),
+            vec![collector_tx],
+        ));
+        (state, batch_rx, collector_rx)
+    }
+
+    fn make_shm_state(
+        zpages: ZPagesConfig,
+        worker_count: usize,
+    ) -> (Arc<ServerState>, Arc<ShmDispatcher>, Vec<Arc<RingPair>>) {
+        let pairs: Vec<Arc<RingPair>> = (0..worker_count)
+            .map(|_| Arc::new(RingPair::create(RingPairConfig::default()).unwrap()))
+            .collect();
+        let shm = ShmDispatcher::new(pairs.clone(), 64);
+        let dispatcher = Dispatcher::from_shm(Arc::clone(&shm));
+        let cfg = ServerConfig {
+            zpages,
+            ..ServerConfig::default()
+        };
+        let (collector_tx, _collector_rx) = mpsc::channel(16);
+        let state = Arc::new(ServerState::new(
+            Arc::new(Router::from_entries(Vec::new()).unwrap()),
+            Arc::new(dispatcher),
+            Arc::new(cfg),
+            vec![collector_tx],
+        ));
+        (state, shm, pairs)
+    }
+
+    #[tokio::test]
+    async fn disabled_zpages_routes_to_user_app() {
+        let (state, _batch_rx, mut collector_rx) =
+            make_direct_state(ZPagesConfig::default(), true, false);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz")
+            .body(Bytes::new())
+            .unwrap();
+
+        let resp_task = tokio::spawn(handle_buffered(req, Arc::clone(&state)));
+        let pending = collector_rx
+            .recv()
+            .await
+            .expect("user route should reach collector");
+        assert_eq!(pending.handler_id, handler_id("GET", "/taskz"));
+        assert_ne!(pending.handler_id, ZPAGES_HANDLER_ID);
+        pending
+            .reply
+            .send(PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"user-taskz"),
+                stream_rx: None,
+            })
+            .unwrap();
+
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_http_body(resp).await.as_ref(), b"user-taskz");
+    }
+
+    #[tokio::test]
+    async fn enabled_zpages_intercepts_above_backpressure() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, mut batch_rx, _collector_rx) = make_direct_state(cfg, true, true);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz")
+            .body(Bytes::new())
+            .unwrap();
+
+        let resp_task = tokio::spawn(handle_buffered(req, Arc::clone(&state)));
+        let mut batch = batch_rx
+            .recv()
+            .await
+            .expect("zpages request should dispatch directly");
+        assert_eq!(batch.requests.len(), 1);
+        let pending = batch.requests.pop().unwrap();
+        assert_eq!(pending.handler_id, ZPAGES_HANDLER_ID);
+        assert_eq!(pending.path(), "/taskz");
+        pending
+            .reply
+            .send(PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"{\"total_tasks\":1}"),
+                stream_rx: None,
+            })
+            .unwrap();
+
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(read_http_body(resp).await.as_ref(), b"{\"total_tasks\":1}");
+    }
+
+    #[tokio::test]
+    async fn head_taskz_returns_empty_body() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, mut batch_rx, _collector_rx) = make_direct_state(cfg, false, false);
+        let req = Request::builder()
+            .method(Method::HEAD)
+            .uri("/taskz")
+            .body(Bytes::new())
+            .unwrap();
+
+        let resp_task = tokio::spawn(handle_buffered(req, Arc::clone(&state)));
+        let mut batch = batch_rx
+            .recv()
+            .await
+            .expect("zpages HEAD should dispatch directly");
+        let pending = batch.requests.pop().unwrap();
+        pending
+            .reply
+            .send(PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"{\"total_tasks\":3}"),
+                stream_rx: None,
+            })
+            .unwrap();
+
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert!(read_http_body(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wedged_worker_returns_504_timeout() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, mut batch_rx, _collector_rx) = make_direct_state(cfg, false, false);
+        let zreq = ZPagesRequest {
+            path: "/taskz",
+            is_head: false,
+            target_worker: None,
+        };
+
+        let resp_task = tokio::spawn(async move {
+            handle_zpages_request_with_timeout(zreq, &state, Duration::from_millis(50)).await
+        });
+        let _held_batch = batch_rx.recv().await.expect("receive wedged batch");
+
+        let resp = resp_task.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            read_http_body(resp).await.as_ref(),
+            b"{\"error\":\"zpages_timeout\"}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shm_targeted_worker_dispatch_and_errors() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, shm, pairs) = make_shm_state(cfg, 2);
+
+        // Target worker 1 only.
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz?worker=1")
+            .body(Bytes::new())
+            .unwrap();
+        let resp_task = tokio::spawn(handle_buffered(req, Arc::clone(&state)));
+
+        let view = loop {
+            if let Ok(v) = pairs[1].request_ring.try_recv_view() {
+                break v;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(pairs[0].request_ring.try_recv_view().is_err());
+        let snap = BatchSnapshot::from_mpmc_slot(view).unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.node(0).handler_id, ZPAGES_HANDLER_ID);
+        let cid = snap.node(0).correlation_id;
+        assert!(shm.complete_one(
+            cid,
+            PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"{\"worker\":1}"),
+                stream_rx: None,
+            },
+        ));
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_http_body(resp).await.as_ref(), b"{\"worker\":1}");
+
+        // Out-of-range worker 9 returns 404.
+        let req_missing = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz?worker=9")
+            .body(Bytes::new())
+            .unwrap();
+        let resp_missing = handle_buffered(req_missing, Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(resp_missing.status(), StatusCode::NOT_FOUND);
+        let missing_json: serde_json::Value =
+            serde_json::from_slice(&read_http_body(resp_missing).await).unwrap();
+        assert_eq!(missing_json["error"], "worker_not_found");
+        assert_eq!(missing_json["worker_id"], 9);
+        assert_eq!(missing_json["worker_count"], 2);
+
+        // Unhealthy worker 1 returns 503.
+        shm.set_worker_healthy(1, false);
+        let req_unhealthy = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz?worker=1")
+            .body(Bytes::new())
+            .unwrap();
+        let resp_unhealthy = handle_buffered(req_unhealthy, Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(resp_unhealthy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let unhealthy_json: serde_json::Value =
+            serde_json::from_slice(&read_http_body(resp_unhealthy).await).unwrap();
+        assert_eq!(unhealthy_json["error"], "worker_unhealthy");
+        assert_eq!(unhealthy_json["worker_id"], 1);
+    }
+
+    #[tokio::test]
+    async fn shm_fanout_merges_two_workers_in_parallel() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, shm, pairs) = make_shm_state(cfg, 2);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/taskz")
+            .body(Bytes::new())
+            .unwrap();
+        let resp_task = tokio::spawn(handle_buffered(req, Arc::clone(&state)));
+
+        for (worker_id, pair) in pairs.iter().enumerate() {
+            let view = loop {
+                if let Ok(v) = pair.request_ring.try_recv_view() {
+                    break v;
+                }
+                tokio::task::yield_now().await;
+            };
+            let snap = BatchSnapshot::from_mpmc_slot(view).unwrap();
+            assert_eq!(snap.node(0).handler_id, ZPAGES_HANDLER_ID);
+            let cid = snap.node(0).correlation_id;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "total_tasks": worker_id + 1,
+                "tasks": [{"id": worker_id, "name": format!("t{worker_id}")}],
+                "loops": {"main": {"running": true}}
+            }))
+            .unwrap();
+            assert!(shm.complete_one(
+                cid,
+                PendingResponse {
+                    status: 200,
+                    headers_mp: Bytes::new(),
+                    body: Bytes::from(body),
+                    stream_rx: None,
+                },
+            ));
+        }
+
+        let resp = resp_task.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&read_http_body(resp).await).unwrap();
+        assert_eq!(json["total_tasks"], 3);
+        assert_eq!(json["tasks"].as_array().unwrap().len(), 2);
+        assert!(json["loops"].get("worker.0.main").is_some());
+        assert!(json["loops"].get("worker.1.main").is_some());
+        assert_eq!(json["workers"].as_array().unwrap().len(), 2);
+        assert_eq!(shm.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn shm_timeout_and_client_drop_reclaim_slots_immediately() {
+        let cfg = ZPagesConfig {
+            enabled: true,
+            bearer_token: None,
+        };
+        let (state, shm, pairs) = make_shm_state(cfg, 2);
+
+        // 1. Timeout case: worker 0 replies, worker 1 never replies.
+        let zreq = ZPagesRequest {
+            path: "/taskz",
+            is_head: false,
+            target_worker: None,
+        };
+        let state_clone = Arc::clone(&state);
+        let resp_task = tokio::spawn(async move {
+            handle_zpages_request_with_timeout(zreq, &state_clone, Duration::from_millis(50)).await
+        });
+
+        let view0 = loop {
+            if let Ok(v) = pairs[0].request_ring.try_recv_view() {
+                break v;
+            }
+            tokio::task::yield_now().await;
+        };
+        let snap0 = BatchSnapshot::from_mpmc_slot(view0).unwrap();
+        assert!(shm.complete_one(
+            snap0.node(0).correlation_id,
+            PendingResponse {
+                status: 200,
+                headers_mp: Bytes::new(),
+                body: Bytes::from_static(b"{\"total_tasks\":1,\"tasks\":[],\"loops\":{}}"),
+                stream_rx: None,
+            },
+        ));
+        // Drain worker 1 ring without replying.
+        let _view1 = loop {
+            if let Ok(v) = pairs[1].request_ring.try_recv_view() {
+                break v;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        let resp = resp_task.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(shm.in_flight(), 0);
+        assert_eq!(shm.worker_in_flight(1), 0);
+
+        // 2. Client drop case: poll once so requests are dispatched, then drop future.
+        let mut drop_fut = Box::pin(handle_zpages_request_with_timeout(
+            zreq,
+            &state,
+            Duration::from_secs(5),
+        ));
+        let waker = futures_util::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(drop_fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(shm.in_flight(), 2);
+        drop(drop_fut);
+        assert_eq!(shm.in_flight(), 0);
+        assert_eq!(shm.worker_in_flight(0), 0);
+        assert_eq!(shm.worker_in_flight(1), 0);
+    }
 }
