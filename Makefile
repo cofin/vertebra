@@ -543,6 +543,56 @@ docs-rust:                                          ## Build Rust workspace rust
 # =============================================================================
 # Benchmarks
 # =============================================================================
+.PHONY: bench-tools
+bench-tools:                                        ## Check and install missing benchmark load drivers (oha, h2load, ghz, k6) on demand
+	@echo "${INFO} Checking benchmark load-driver binaries..."
+	@if [ -f "$(RUST_ENV)" ]; then . "$(RUST_ENV)"; fi; \
+	missing=0; \
+	if command -v oha >/dev/null 2>&1; then \
+		echo "${OK} oha already installed ($$(command -v oha))"; \
+	elif command -v cargo >/dev/null 2>&1; then \
+		echo "${INFO} Installing oha via cargo..."; \
+		cargo install --locked oha; \
+	else \
+		echo "${WARN} oha missing: install Rust/cargo and run 'cargo install --locked oha' or download from https://github.com/hatoo/oha/releases"; \
+		missing=1; \
+	fi; \
+	if command -v h2load >/dev/null 2>&1; then \
+		echo "${OK} h2load already installed ($$(command -v h2load))"; \
+	elif command -v brew >/dev/null 2>&1; then \
+		echo "${INFO} Installing nghttp2 (h2load) via Homebrew..."; \
+		brew install nghttp2; \
+	else \
+		echo "${WARN} h2load missing: install with 'sudo apt-get install -y nghttp2-client' (Debian/Ubuntu) or 'brew install nghttp2' (macOS)"; \
+		missing=1; \
+	fi; \
+	if command -v ghz >/dev/null 2>&1; then \
+		echo "${OK} ghz already installed ($$(command -v ghz))"; \
+	elif command -v brew >/dev/null 2>&1; then \
+		echo "${INFO} Installing ghz via Homebrew..."; \
+		brew install ghz; \
+	elif command -v go >/dev/null 2>&1; then \
+		echo "${INFO} Installing ghz via go install..."; \
+		go install github.com/bojand/ghz/cmd/ghz@latest; \
+	else \
+		echo "${WARN} ghz missing: download a release binary from https://github.com/bojand/ghz/releases or run 'go install github.com/bojand/ghz/cmd/ghz@latest'"; \
+		missing=1; \
+	fi; \
+	if command -v k6 >/dev/null 2>&1; then \
+		echo "${OK} k6 already installed ($$(command -v k6))"; \
+	elif command -v brew >/dev/null 2>&1; then \
+		echo "${INFO} Installing k6 via Homebrew..."; \
+		brew install k6; \
+	else \
+		echo "${WARN} k6 missing: install from https://grafana.com/docs/k6/latest/set-up/install-k6/ or run via Docker (grafana/k6:latest)"; \
+		missing=1; \
+	fi; \
+	if [ "$$missing" -eq 0 ]; then \
+		echo "${OK} All benchmark load drivers are available"; \
+	else \
+		echo "${WARN} Some benchmark load drivers require manual package installation or Docker fallback"; \
+	fi
+
 .PHONY: bench
 bench: build                                        ## Run benchmarks (use TARGETS= and SCENARIOS= to customize)
 	@echo "${INFO} Running benchmarks..."

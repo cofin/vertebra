@@ -31,5 +31,13 @@ CREATE TABLE IF NOT EXISTS benchmark_results (
     total_requests  INTEGER,
     errors          INTEGER DEFAULT 0,
     url             VARCHAR,
-    timestamp       TIMESTAMP
+    timestamp       TIMESTAMP,
+    adapter         VARCHAR DEFAULT 'none',
+    protocol        VARCHAR DEFAULT 'http1',
+    transport       VARCHAR DEFAULT 'native',
+    broker_mode     VARCHAR DEFAULT 'none',
+    load_mode       VARCHAR DEFAULT 'closed_loop',
+    target_rps      DOUBLE DEFAULT NULL,
+    pool_size       INTEGER DEFAULT NULL,
+    gil_enabled     BOOLEAN DEFAULT TRUE
 );

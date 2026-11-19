@@ -6,31 +6,160 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import rich_click as click
 from rich.console import Console
 from rich.table import Table
 
+from tools.benchmarks.drivers import LoadConfig, create_driver
 from tools.benchmarks.reports import print_comparison_table, print_runs_table, print_summary_table
-from tools.benchmarks.runner import OhaRunner, ServerRunner, build_url, expand_scenario_runs
+from tools.benchmarks.runner import (
+    BrokerHookConfig,
+    BrokerHostHook,
+    OhaRunner,
+    ServerRunner,
+    build_url,
+    expand_scenario_runs,
+)
 from tools.benchmarks.scenarios import (
+    DATA_SCENARIOS,
     DEFAULT_SCENARIOS,
     FULL_SCENARIOS,
+    GRPC_NATIVE_SCENARIOS,
+    GRPC_SCENARIOS,
     MULTIWORKER_SCENARIOS,
     QUICK_SCENARIOS,
     SCENARIOS,
+    STORAGE_SCENARIOS,
 )
 from tools.benchmarks.store import BenchmarkStore
 from tools.benchmarks.targets import (
     ALL_TARGETS,
     BASELINE_TARGETS,
+    DATA_BASELINE_TARGETS,
+    DATA_FREETHREADED_TARGETS,
+    DATA_TARGETS,
+    FRAMEWORK_TARGETS,
     FREETHREADED_TARGETS,
+    GRPC_TARGETS,
     VERTEBRA_TARGETS,
+    Topology,
 )
+
+if TYPE_CHECKING:
+    from tools.benchmarks.runner import ServerLifecycleHook
+    from tools.benchmarks.scenarios import Scenario
+    from tools.benchmarks.targets import Target
 
 console = Console()
 _RESULTS_DIR = Path(__file__).parent / "results"
+_PROTOCOL_CHOICES = click.Choice(["http1", "http2", "grpc"], case_sensitive=False)
+_TOPOLOGY_CHOICES = click.Choice(["embedded", "shm", "free-threaded", "baseline"], case_sensitive=False)
+_BROKER_MODE_CHOICES = click.Choice(["none", "per_worker", "shm_broker"], case_sensitive=False)
+_LOAD_MODE_CHOICES = click.Choice(["closed_loop", "open_loop"], case_sensitive=False)
+
+
+def filter_targets(
+    target_names: list[str],
+    *,
+    protocol: str | None = None,
+    topology: str | None = None,
+    adapter: str | None = None,
+    broker_mode: str | None = None,
+) -> list[str]:
+    """Filter resolved target keys by Target metadata (case-insensitive) preserving order."""
+    protocol_norm = protocol.strip().lower() if protocol is not None else None
+    topology_norm = topology.strip().lower() if topology is not None else None
+    adapter_norm = adapter.strip().lower() if adapter is not None else None
+    broker_mode_norm = broker_mode.strip().lower() if broker_mode is not None else None
+
+    matched: list[str] = []
+    for name in target_names:
+        target = ALL_TARGETS.get(name)
+        if target is None:
+            continue
+        if protocol_norm is not None and target.protocol.lower() != protocol_norm:
+            continue
+        if topology_norm is not None and str(target.topology).lower() != topology_norm:
+            continue
+        if adapter_norm is not None and target.adapter.lower() != adapter_norm:
+            continue
+        if broker_mode_norm is not None and target.broker_mode.lower() != broker_mode_norm:
+            continue
+        matched.append(name)
+    return matched
+
+
+def _build_target_hooks(target: Target) -> list[ServerLifecycleHook]:
+    """Build ServerRunner lifecycle hooks required for a target."""
+    if target.broker_mode.lower() != "shm_broker":
+        return []
+    shm_name = f"vertebra-bench-{target.name}-{target.port}"
+    pool_size = target.pool_size if target.pool_size is not None else 40
+    return [BrokerHostHook(BrokerHookConfig(shm_name=shm_name, pool_size=pool_size))]
+
+
+def _select_driver(target: Target, scenario: Scenario) -> str:
+    """Select the load driver name for a target and scenario pair."""
+    if scenario.driver != "oha":
+        return scenario.driver
+    if target.protocol.lower() == "grpc" or scenario.protocol.lower() == "grpc":
+        return "ghz"
+    if target.protocol.lower() == "http2" or scenario.protocol.lower() == "http2":
+        return "h2load"
+    return "oha"
+
+
+def _build_load_config(
+    target: Target,
+    scenario: Scenario,
+    *,
+    driver_name: str,
+    duration: int,
+    concurrency: int,
+    rate: float | None,
+) -> tuple[str, LoadConfig]:
+    """Build target URL and LoadConfig for the chosen load driver."""
+    if driver_name == "ghz":
+        url = f"grpc://{target.host}:{target.port}"
+        config = LoadConfig(
+            url=url,
+            duration=duration,
+            concurrency=concurrency,
+            method=scenario.method,
+            rate=rate,
+            grpc_call=scenario.grpc_method,
+            grpc_data=scenario.body,
+        )
+        return url, config
+
+    url = build_url(target.host, target.port, scenario.path)
+    config = LoadConfig(
+        url=url,
+        duration=duration,
+        concurrency=concurrency,
+        method=scenario.method,
+        body=scenario.body,
+        rate=rate,
+    )
+    return url, config
+
+
+def _run_load(driver_name: str, config: LoadConfig) -> dict[str, Any]:
+    """Execute a load test using OhaRunner or the matching Chapter 1 load driver."""
+    if driver_name == "oha":
+        runner = OhaRunner(
+            url=config.url,
+            duration=config.duration,
+            concurrency=config.concurrency,
+            method=config.method,
+            body=config.body,
+            rate=config.rate,
+        )
+        return runner.run()
+    driver = create_driver(driver_name)
+    return driver.run(config)
 
 
 @click.group()
@@ -42,12 +171,24 @@ def cli() -> None:
 @click.option(
     "-s", "--scenarios", "scenario_preset", default="default", help="Scenario preset or comma-separated names"
 )
-@click.option("-t", "--targets", "target_spec", default="vtb", help="Target spec: all, vtb, baselines, or name")
+@click.option(
+    "-t",
+    "--targets",
+    "target_spec",
+    default="vtb",
+    help="Target spec: all, vtb, baselines, freethreaded, data, data-baselines, frameworks, grpc, or names",
+)
 @click.option("-d", "--duration", default=10, type=int, help="Duration per scenario in seconds")
 @click.option("-c", "--concurrency", default=128, type=int, help="Default concurrency level")
 @click.option("-w", "--warmup", default=2, type=int, help="Warmup duration in seconds")
 @click.option("-o", "--output", "output_path", default=None, type=click.Path(), help="JSONL output file path")
 @click.option("--note", default="", help="Note to attach to the benchmark run")
+@click.option("--protocol", default=None, type=_PROTOCOL_CHOICES, help="Filter targets by protocol")
+@click.option("--topology", default=None, type=_TOPOLOGY_CHOICES, help="Filter targets by runtime topology")
+@click.option("--adapter", default=None, type=str, help="Filter targets by adapter")
+@click.option("--broker-mode", default=None, type=_BROKER_MODE_CHOICES, help="Filter targets by broker mode")
+@click.option("--load-mode", default="closed_loop", type=_LOAD_MODE_CHOICES, help="Load generation mode")
+@click.option("--rate", default=None, type=float, help="Target requests per second for open-loop runs")
 def run(
     scenario_preset: str,
     target_spec: str,
@@ -56,10 +197,31 @@ def run(
     warmup: int,
     output_path: str | None,
     note: str,
+    protocol: str | None,
+    topology: str | None,
+    adapter: str | None,
+    broker_mode: str | None,
+    load_mode: str,
+    rate: float | None,
 ) -> None:
     """Run benchmarks against server targets."""
+    normalized_load_mode = load_mode.strip().lower()
+    if rate is not None and rate <= 0:
+        msg = "--rate must be greater than 0"
+        raise click.BadParameter(msg, param_hint="'--rate'")
+    if normalized_load_mode == "open_loop" and rate is None:
+        msg = "--rate is required when --load-mode is open_loop"
+        raise click.BadParameter(msg, param_hint="'--rate'")
+
+    effective_rate = rate if normalized_load_mode == "open_loop" else None
     scenario_names = _resolve_scenarios(scenario_preset)
-    target_names = _resolve_targets(target_spec)
+    target_names = filter_targets(
+        _resolve_targets(target_spec),
+        protocol=protocol,
+        topology=topology,
+        adapter=adapter,
+        broker_mode=broker_mode,
+    )
 
     if output_path is None:
         _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,36 +233,49 @@ def run(
 
     for target_name in target_names:
         target = ALL_TARGETS[target_name]
+        hooks = _build_target_hooks(target)
         console.print(f"\n[bold cyan]>>> Target: {target.name}[/bold cyan] - {target.description}")
 
         try:
-            with ServerRunner(cmd=target.cmd, host=target.host, port=target.port, env=target.env or None):
+            with ServerRunner(
+                cmd=target.cmd,
+                host=target.host,
+                port=target.port,
+                env=target.env or None,
+                hooks=hooks or None,
+            ):
                 for scenario_name in scenario_names:
                     scenario = SCENARIOS[scenario_name]
+                    driver_name = _select_driver(target, scenario)
                     conc_levels = expand_scenario_runs(scenario.concurrency_levels, concurrency)
 
                     for conc in conc_levels:
-                        url = build_url(target.host, target.port, scenario.path)
+                        url, config = _build_load_config(
+                            target,
+                            scenario,
+                            driver_name=driver_name,
+                            duration=duration,
+                            concurrency=conc,
+                            rate=effective_rate,
+                        )
                         console.print(f"  [dim]{scenario_name}[/dim] c={conc} ({scenario.method} {scenario.path})")
 
                         if warmup > 0:
-                            warmup_runner = OhaRunner(
-                                url=url,
+                            _, warmup_config = _build_load_config(
+                                target,
+                                scenario,
+                                driver_name=driver_name,
                                 duration=warmup,
                                 concurrency=conc,
-                                method=scenario.method,
-                                body=scenario.body,
+                                rate=effective_rate,
                             )
                             try:
-                                warmup_runner.run()
+                                _run_load(driver_name, warmup_config)
                             except Exception:
                                 console.print("    [yellow]Warmup failed, continuing...[/yellow]")
 
-                        runner = OhaRunner(
-                            url=url, duration=duration, concurrency=conc, method=scenario.method, body=scenario.body
-                        )
                         try:
-                            raw_result = runner.run()
+                            raw_result = _run_load(driver_name, config)
                         except Exception as exc:
                             console.print(f"    [red]Error: {exc}[/red]")
                             continue
@@ -108,13 +283,21 @@ def run(
                         timestamp = datetime.now(tz=UTC).isoformat()
                         result_row: dict[str, Any] = {
                             "target": target.name,
-                            "topology": target.topology,
+                            "topology": str(target.topology),
                             "scenario": scenario_name,
                             "concurrency": conc,
                             "duration": duration,
                             "url": url,
                             "timestamp": timestamp,
                             **raw_result,
+                            "adapter": target.adapter,
+                            "protocol": target.protocol,
+                            "transport": target.transport,
+                            "broker_mode": target.broker_mode,
+                            "load_mode": normalized_load_mode,
+                            "target_rps": effective_rate,
+                            "pool_size": target.pool_size,
+                            "gil_enabled": target.topology != Topology.FREE_THREADED,
                         }
                         results.append(result_row)
 
@@ -171,21 +354,54 @@ def list_scenarios() -> None:
         )
 
     console.print(table)
-    console.print(f"\nPresets: quick={QUICK_SCENARIOS}, default={DEFAULT_SCENARIOS}")
+    console.print(
+        f"\nPresets: quick={QUICK_SCENARIOS}, default={DEFAULT_SCENARIOS}, "
+        f"data={DATA_SCENARIOS}, storage={STORAGE_SCENARIOS}, "
+        f"grpc={GRPC_SCENARIOS}, grpc-native={GRPC_NATIVE_SCENARIOS}"
+    )
 
 
 @cli.command("list-targets")
-def list_targets() -> None:
+@click.option("--protocol", default=None, type=_PROTOCOL_CHOICES, help="Filter targets by protocol")
+@click.option("--topology", default=None, type=_TOPOLOGY_CHOICES, help="Filter targets by runtime topology")
+@click.option("--adapter", default=None, type=str, help="Filter targets by adapter")
+@click.option("--broker-mode", default=None, type=_BROKER_MODE_CHOICES, help="Filter targets by broker mode")
+def list_targets(
+    protocol: str | None,
+    topology: str | None,
+    adapter: str | None,
+    broker_mode: str | None,
+) -> None:
     """List available benchmark targets."""
     table = Table(title="Available Targets", show_lines=True)
-    table.add_column("Name", style="cyan")
+    table.add_column("Name", style="cyan", no_wrap=True)
     table.add_column("Topology", style="yellow")
     table.add_column("Category", style="magenta")
+    table.add_column("Protocol", style="green")
+    table.add_column("Transport")
+    table.add_column("Broker")
     table.add_column("Port", justify="right")
     table.add_column("Description")
 
-    for name, target in ALL_TARGETS.items():
-        table.add_row(name, target.topology, target.category, str(target.port), target.description)
+    target_names = filter_targets(
+        list(ALL_TARGETS),
+        protocol=protocol,
+        topology=topology,
+        adapter=adapter,
+        broker_mode=broker_mode,
+    )
+    for name in target_names:
+        target = ALL_TARGETS[name]
+        table.add_row(
+            name,
+            str(target.topology),
+            target.category,
+            target.protocol,
+            target.transport,
+            target.broker_mode,
+            str(target.port),
+            target.description,
+        )
 
     console.print(table)
 
@@ -275,9 +491,13 @@ def _resolve_scenarios(preset: str) -> list[str]:
         "default": DEFAULT_SCENARIOS,
         "full": FULL_SCENARIOS,
         "multiworker": MULTIWORKER_SCENARIOS,
+        "data": DATA_SCENARIOS,
+        "storage": STORAGE_SCENARIOS,
+        "grpc": GRPC_SCENARIOS,
+        "grpc-native": GRPC_NATIVE_SCENARIOS,
     }
     if preset in presets:
-        return presets[preset]
+        return list(presets[preset])
     names = [s.strip() for s in preset.split(",")]
     for name in names:
         if name not in SCENARIOS:
@@ -288,14 +508,19 @@ def _resolve_scenarios(preset: str) -> list[str]:
 
 def _resolve_targets(target_spec: str) -> list[str]:
     """Resolve a target spec or comma-separated target names to a list of target keys."""
-    if target_spec == "all":
-        return list(ALL_TARGETS)
-    if target_spec == "vtb":
-        return VERTEBRA_TARGETS
-    if target_spec == "baselines":
-        return BASELINE_TARGETS
-    if target_spec == "freethreaded":
-        return FREETHREADED_TARGETS
+    presets: dict[str, list[str]] = {
+        "all": list(ALL_TARGETS),
+        "vtb": VERTEBRA_TARGETS,
+        "baselines": BASELINE_TARGETS,
+        "freethreaded": FREETHREADED_TARGETS,
+        "data": DATA_TARGETS,
+        "data-baselines": DATA_BASELINE_TARGETS,
+        "data-freethreaded": DATA_FREETHREADED_TARGETS,
+        "frameworks": FRAMEWORK_TARGETS,
+        "grpc": GRPC_TARGETS,
+    }
+    if target_spec in presets:
+        return list(presets[target_spec])
     names = [t.strip() for t in target_spec.split(",")]
     for name in names:
         if name not in ALL_TARGETS:

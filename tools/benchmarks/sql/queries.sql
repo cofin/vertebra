@@ -29,16 +29,23 @@ LIMIT $1;
 SELECT
     target, topology, scenario, concurrency, duration_s,
     rps, latency_mean_ms, latency_p50_ms, latency_p99_ms, latency_max_ms,
-    total_requests, errors, url, timestamp
+    total_requests, errors, url, timestamp,
+    adapter, protocol, transport, broker_mode, load_mode,
+    target_rps, pool_size, gil_enabled
 FROM benchmark_results
 WHERE run_id = $1
-ORDER BY target, scenario, concurrency;
+ORDER BY target, scenario, protocol, adapter, broker_mode, load_mode, concurrency;
 
 -- name: compare_runs
 SELECT
     COALESCE(c.target, b.target) AS target,
     COALESCE(c.scenario, b.scenario) AS scenario,
     COALESCE(c.concurrency, b.concurrency) AS concurrency,
+    COALESCE(c.adapter, b.adapter) AS adapter,
+    COALESCE(c.protocol, b.protocol) AS protocol,
+    COALESCE(c.transport, b.transport) AS transport,
+    COALESCE(c.broker_mode, b.broker_mode) AS broker_mode,
+    COALESCE(c.load_mode, b.load_mode) AS load_mode,
     c.rps AS current_rps,
     b.rps AS baseline_rps,
     CASE WHEN b.rps > 0 THEN ((c.rps - b.rps) / b.rps) * 100 ELSE NULL END AS rps_delta_pct,
@@ -50,9 +57,14 @@ FULL OUTER JOIN benchmark_results b
     ON c.target = b.target
     AND c.scenario = b.scenario
     AND c.concurrency = b.concurrency
+    AND c.adapter = b.adapter
+    AND c.protocol = b.protocol
+    AND c.transport = b.transport
+    AND c.broker_mode = b.broker_mode
+    AND c.load_mode = b.load_mode
     AND b.run_id = $2
 WHERE c.run_id = $1
-ORDER BY target, scenario, concurrency;
+ORDER BY target, scenario, protocol, adapter, broker_mode, load_mode, concurrency;
 
 -- name: select_latest_run_id
 SELECT run_id FROM benchmark_runs ORDER BY started_at DESC LIMIT 1;

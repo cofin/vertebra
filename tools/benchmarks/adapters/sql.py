@@ -1,0 +1,1243 @@
+"""Standalone SQL, SQLAlchemy `+vtb`, and SQLSpec adapter benchmark comparators."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sqlite3
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Final, Literal
+from urllib.parse import unquote, urlsplit
+
+from tools.benchmarks.adapters.base import (
+    ADAPTER_SCHEMA_VERSION,
+    DEFAULT_MAX_LATENCY_RATIO,
+    DEFAULT_MIN_THROUGHPUT_RATIO,
+    AdapterBenchmarkCase,
+    AdapterBenchmarkReport,
+    DriverMode,
+    assert_free_threaded_gil_disabled,
+    compare_adapter_reports,
+    compute_adapter_case_stats,
+    format_adapter_report_bytes,
+    from_postgres_report,
+    parse_adapter_report_bytes,
+    redact_target_uri,
+    sample_async,
+    sample_sync,
+)
+from tools.benchmarks.postgres import capture_live_report as capture_postgres_live_report
+from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
+from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
+from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
+from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
+from vertebra.db.registry import DatabaseRegistry
+from vertebra.utils.module_loader import import_optional
+
+type MySQLEngine = Literal["mysql", "mariadb"]
+type SqlSpecEngine = Literal["sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql"]
+
+SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
+    "postgres",
+    "mysql",
+    "mariadb",
+    "sqlite",
+    "duckdb",
+    "oracle",
+    "mssql",
+    "sqlalchemy",
+    "sqlspec",
+)
+
+_SQLSPEC_ENGINES: Final[tuple[SqlSpecEngine, ...]] = (
+    "sqlite",
+    "duckdb",
+    "postgres",
+    "mysql",
+    "oracle",
+    "mssql",
+)
+
+_SQLITE_MULTI_ROW_QUERY: Final[str] = (
+    "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 10) SELECT x FROM cnt"
+)
+_DUCKDB_SCAN_QUERY: Final[str] = "SELECT sum(i) FROM range(1000) t(i)"
+
+__all__ = (
+    "SUPPORTED_SQL_ENGINES",
+    "MySQLEngine",
+    "SqlSpecEngine",
+    "capture_duckdb_report",
+    "capture_mssql_report",
+    "capture_mysql_report",
+    "capture_oracle_report",
+    "capture_postgres_adapter_report",
+    "capture_sqlalchemy_report",
+    "capture_sqlite_report",
+    "capture_sqlspec_report",
+    "main",
+)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _validate_sampling(iterations: int, warmup: int) -> None:
+    if iterations < 1 or warmup < 0:
+        msg = f"iterations must be >= 1 and warmup must be >= 0 (got iterations={iterations}, warmup={warmup})"
+        raise ValueError(msg)
+
+
+def _strip_vtb_dialect_suffix(url: str) -> str:
+    if "://" not in url:
+        return url
+    scheme, remainder = url.split("://", 1)
+    if "+" not in scheme:
+        return url
+    base_scheme, driver_part = scheme.split("+", 1)
+    if driver_part not in {"vtb", "vtb_async"}:
+        return url
+    return f"{base_scheme}://{remainder}"
+
+
+def _resolve_sqlite_config(database: str) -> SQLiteConfig:
+    cfg = SQLiteConfig.from_url(database) if "://" in database else SQLiteConfig(database=database)
+    if database == ":memory:" and cfg.pool_key() is not None:
+        msg = "SQLiteConfig(database=':memory:').pool_key() must remain None for isolated in-memory databases"
+        raise RuntimeError(msg)
+    return cfg
+
+
+def _resolve_duckdb_config(database: str) -> DuckDBConfig:
+    cfg = DuckDBConfig.from_url(database) if "://" in database else DuckDBConfig(database=database)
+    if database == ":memory:" and cfg.pool_key() is not None:
+        msg = "DuckDBConfig(database=':memory:').pool_key() must remain None for isolated in-memory databases"
+        raise RuntimeError(msg)
+    return cfg
+
+
+def _mysql_connect_kwargs(dsn: str) -> dict[str, Any]:
+    parsed = urlsplit(dsn)
+    kwargs: dict[str, Any] = {
+        "host": parsed.hostname or "127.0.0.1",
+        "port": parsed.port or 3306,
+    }
+    if parsed.username:
+        kwargs["user"] = unquote(parsed.username)
+    if parsed.password:
+        kwargs["password"] = unquote(parsed.password)
+    database = unquote(parsed.path.lstrip("/"))
+    if database:
+        kwargs["database"] = database
+    return kwargs
+
+
+def _oracle_connect_kwargs(dsn: str) -> dict[str, Any]:
+    parsed = urlsplit(dsn)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 1521
+    service = unquote(parsed.path.lstrip("/")) or "FREEPDB1"
+    kwargs: dict[str, Any] = {"dsn": f"{host}:{port}/{service}"}
+    if parsed.username:
+        kwargs["user"] = unquote(parsed.username)
+    if parsed.password:
+        kwargs["password"] = unquote(parsed.password)
+    return kwargs
+
+
+def _mssql_connect_kwargs(dsn: str) -> dict[str, Any]:
+    parsed = urlsplit(dsn)
+    kwargs: dict[str, Any] = {
+        "server": parsed.hostname or "127.0.0.1",
+        "port": parsed.port or 1433,
+    }
+    if parsed.username:
+        kwargs["user"] = unquote(parsed.username)
+    if parsed.password:
+        kwargs["password"] = unquote(parsed.password)
+    database = unquote(parsed.path.lstrip("/"))
+    if database:
+        kwargs["database"] = database
+    return kwargs
+
+
+async def capture_postgres_adapter_report(
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Delegate live PostgreSQL benchmarks to `tools.benchmarks.postgres` and convert to adapter schema."""
+    _validate_sampling(iterations, warmup)
+    assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    pg_report = await capture_postgres_live_report(
+        dsn,
+        iterations=iterations,
+        warmup=warmup,
+        include_external=include_external,
+    )
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    return from_postgres_report(pg_report, gil_enabled=gil_enabled)
+
+
+async def capture_sqlite_report(
+    database: str = ":memory:",
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra SQLite drivers against stdlib `sqlite3` and optional `aiosqlite`."""
+    _validate_sampling(iterations, warmup)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cfg = _resolve_sqlite_config(database)
+    db_path = str(cfg.path)
+    cases: list[AdapterBenchmarkCase] = []
+
+    with SyncSQLiteDriver(cfg) as sync_drv:
+        sync_point = sample_sync(lambda: sync_drv.select_one("SELECT ?", (1,)), iterations=iterations, warmup=warmup)
+        sync_multi = sample_sync(lambda: sync_drv.select(_SQLITE_MULTI_ROW_QUERY), iterations=iterations, warmup=warmup)
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-sqlite-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+    cases.append(
+        compute_adapter_case_stats(
+            case="multi_row_select_10",
+            driver="vertebra-sqlite-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_multi,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async with AsyncSQLiteDriver(cfg) as async_drv:
+        async_point = await sample_async(
+            lambda: async_drv.select_one("SELECT ?", (1,)),
+            iterations=iterations,
+            warmup=warmup,
+        )
+        async_multi = await sample_async(
+            lambda: async_drv.select(_SQLITE_MULTI_ROW_QUERY),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-sqlite-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+    cases.append(
+        compute_adapter_case_stats(
+            case="multi_row_select_10",
+            driver="vertebra-sqlite-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_multi,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        conn = sqlite3.connect(db_path)
+        try:
+            stdlib_point = sample_sync(
+                lambda: conn.execute("SELECT ?", (1,)).fetchone(),
+                iterations=iterations,
+                warmup=warmup,
+            )
+            stdlib_multi = sample_sync(
+                lambda: conn.execute(_SQLITE_MULTI_ROW_QUERY).fetchall(),
+                iterations=iterations,
+                warmup=warmup,
+            )
+        finally:
+            conn.close()
+        cases.append(
+            compute_adapter_case_stats(
+                case="point_select_1",
+                driver="sqlite3",
+                category="sql",
+                driver_mode="sync_blocking",
+                latencies_ns=stdlib_point,
+                gil_enabled=gil_enabled,
+            )
+        )
+        cases.append(
+            compute_adapter_case_stats(
+                case="multi_row_select_10",
+                driver="sqlite3",
+                category="sql",
+                driver_mode="sync_blocking",
+                latencies_ns=stdlib_multi,
+                gil_enabled=gil_enabled,
+            )
+        )
+
+        aiosqlite_mod = import_optional("aiosqlite")
+        if aiosqlite_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            async with aiosqlite_mod.connect(db_path) as aio_conn:
+
+                async def _aio_point() -> Any:
+                    async with aio_conn.execute("SELECT ?", (1,)) as cur:
+                        return await cur.fetchone()
+
+                async def _aio_multi() -> Any:
+                    async with aio_conn.execute(_SQLITE_MULTI_ROW_QUERY) as cur:
+                        return await cur.fetchall()
+
+                aio_point_samples = await sample_async(_aio_point, iterations=iterations, warmup=warmup)
+                aio_multi_samples = await sample_async(_aio_multi, iterations=iterations, warmup=warmup)
+
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="aiosqlite",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=aio_point_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+            cases.append(
+                compute_adapter_case_stats(
+                    case="multi_row_select_10",
+                    driver="aiosqlite",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=aio_multi_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine="sqlite",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(database),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_duckdb_report(
+    database: str = ":memory:",
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra DuckDB drivers against optional third-party `duckdb`."""
+    _validate_sampling(iterations, warmup)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cfg = _resolve_duckdb_config(database)
+    db_path = cfg.resolved_path()
+    cases: list[AdapterBenchmarkCase] = []
+
+    with SyncDuckDBDriver(cfg) as sync_drv:
+        sync_point = sample_sync(lambda: sync_drv.select_one("SELECT ?", (1,)), iterations=iterations, warmup=warmup)
+        sync_scan = sample_sync(lambda: sync_drv.select_one(_DUCKDB_SCAN_QUERY), iterations=iterations, warmup=warmup)
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-duckdb-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+    cases.append(
+        compute_adapter_case_stats(
+            case="analytical_scan_1000",
+            driver="vertebra-duckdb-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_scan,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async with AsyncDuckDBDriver(cfg) as async_drv:
+        async_point = await sample_async(
+            lambda: async_drv.select_one("SELECT ?", (1,)),
+            iterations=iterations,
+            warmup=warmup,
+        )
+        async_scan = await sample_async(
+            lambda: async_drv.select_one(_DUCKDB_SCAN_QUERY),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-duckdb-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+    cases.append(
+        compute_adapter_case_stats(
+            case="analytical_scan_1000",
+            driver="vertebra-duckdb-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_scan,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        duckdb_mod = import_optional("duckdb")
+        if duckdb_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            ext_conn = duckdb_mod.connect(db_path)
+            try:
+                ext_point = sample_sync(
+                    lambda: ext_conn.execute("SELECT ?", [1]).fetchone(),
+                    iterations=iterations,
+                    warmup=warmup,
+                )
+                ext_scan = sample_sync(
+                    lambda: ext_conn.execute(_DUCKDB_SCAN_QUERY).fetchone(),
+                    iterations=iterations,
+                    warmup=warmup,
+                )
+            finally:
+                ext_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="duckdb",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=ext_point,
+                    gil_enabled=gil_enabled,
+                )
+            )
+            cases.append(
+                compute_adapter_case_stats(
+                    case="analytical_scan_1000",
+                    driver="duckdb",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=ext_scan,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine="duckdb",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(database),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_mysql_report(
+    dsn: str,
+    *,
+    engine: MySQLEngine = "mysql",
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra MySQL/MariaDB drivers against optional `aiomysql`, `pymysql`, and `MySQLdb`."""
+    _validate_sampling(iterations, warmup)
+    if engine not in ("mysql", "mariadb"):
+        msg = f"Unsupported MySQL engine variant: {engine!r}"
+        raise ValueError(msg)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cfg = MySQLConfig.from_url(dsn)
+    cases: list[AdapterBenchmarkCase] = []
+
+    with SyncMySQLDriver(cfg) as sync_drv:
+        sync_point = sample_sync(lambda: sync_drv.select_one("SELECT 1"), iterations=iterations, warmup=warmup)
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver=f"vertebra-{engine}-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async with AsyncMySQLDriver(cfg) as async_drv:
+        async_point = await sample_async(
+            lambda: async_drv.select_one("SELECT 1"),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver=f"vertebra-{engine}-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        conn_kwargs = _mysql_connect_kwargs(dsn)
+
+        aiomysql_mod = import_optional("aiomysql")
+        if aiomysql_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            aio_kwargs = {k: v for k, v in conn_kwargs.items() if k != "database"}
+            if "database" in conn_kwargs:
+                aio_kwargs["db"] = conn_kwargs["database"]
+            aio_conn = await aiomysql_mod.connect(**aio_kwargs)
+            try:
+
+                async def _aiomysql_select() -> Any:
+                    async with aio_conn.cursor() as cur:
+                        await cur.execute("SELECT 1")
+                        return await cur.fetchone()
+
+                aio_samples = await sample_async(_aiomysql_select, iterations=iterations, warmup=warmup)
+            finally:
+                aio_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="aiomysql",
+                    category="sql",
+                    driver_mode="async_native",
+                    latencies_ns=aio_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+        pymysql_mod = import_optional("pymysql")
+        if pymysql_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            py_conn = pymysql_mod.connect(**conn_kwargs)
+            try:
+
+                def _pymysql_select() -> Any:
+                    with py_conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                        return cur.fetchone()
+
+                py_samples = sample_sync(_pymysql_select, iterations=iterations, warmup=warmup)
+            finally:
+                py_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="pymysql",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=py_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+        mysqldb_mod = import_optional("MySQLdb")
+        if mysqldb_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            c_kwargs = {k: v for k, v in conn_kwargs.items() if k != "database"}
+            if "database" in conn_kwargs:
+                c_kwargs["db"] = conn_kwargs["database"]
+            c_conn = mysqldb_mod.connect(**c_kwargs)
+            try:
+
+                def _mysqldb_select() -> Any:
+                    cur = c_conn.cursor()
+                    try:
+                        cur.execute("SELECT 1")
+                        return cur.fetchone()
+                    finally:
+                        cur.close()
+
+                c_samples = sample_sync(_mysqldb_select, iterations=iterations, warmup=warmup)
+            finally:
+                c_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="MySQLdb",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=c_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine=engine,
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_oracle_report(
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra Oracle drivers on `SELECT 1 FROM DUAL` against optional `oracledb`."""
+    _validate_sampling(iterations, warmup)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cfg = OracleConfig.from_url(dsn)
+    cases: list[AdapterBenchmarkCase] = []
+
+    with SyncOracleDriver(cfg) as sync_drv:
+        sync_point = sample_sync(
+            lambda: sync_drv.select_one("SELECT 1 FROM DUAL"),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-oracle-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async with AsyncOracleDriver(cfg) as async_drv:
+        async_point = await sample_async(
+            lambda: async_drv.select_one("SELECT 1 FROM DUAL"),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-oracle-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        oracledb_mod = import_optional("oracledb")
+        if oracledb_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            ora_kwargs = _oracle_connect_kwargs(dsn)
+
+            with oracledb_mod.connect(**ora_kwargs) as sync_conn:
+
+                def _oracledb_sync() -> Any:
+                    with sync_conn.cursor() as cur:
+                        cur.execute("SELECT 1 FROM DUAL")
+                        return cur.fetchone()
+
+                sync_samples = sample_sync(_oracledb_sync, iterations=iterations, warmup=warmup)
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="oracledb-sync",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=sync_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+            connect_async: Any = getattr(oracledb_mod, "connect_async", None)
+            if connect_async is not None:
+                async_conn = await connect_async(**ora_kwargs)
+                try:
+
+                    async def _oracledb_async() -> Any:
+                        with async_conn.cursor() as cur:
+                            await cur.execute("SELECT 1 FROM DUAL")
+                            return await cur.fetchone()
+
+                    async_samples = await sample_async(_oracledb_async, iterations=iterations, warmup=warmup)
+                finally:
+                    await async_conn.close()
+                cases.append(
+                    compute_adapter_case_stats(
+                        case="point_select_1",
+                        driver="oracledb-async",
+                        category="sql",
+                        driver_mode="async_native",
+                        latencies_ns=async_samples,
+                        gil_enabled=gil_enabled,
+                    )
+                )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine="oracle",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_mssql_report(
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra MSSQL drivers on `SELECT 1` against optional `pymssql` and `pyodbc`."""
+    _validate_sampling(iterations, warmup)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cfg = MSSQLConfig.from_url(dsn)
+    cases: list[AdapterBenchmarkCase] = []
+
+    with SyncMSSQLDriver(cfg) as sync_drv:
+        sync_point = sample_sync(lambda: sync_drv.select_one("SELECT 1"), iterations=iterations, warmup=warmup)
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-mssql-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async with AsyncMSSQLDriver(cfg) as async_drv:
+        async_point = await sample_async(
+            lambda: async_drv.select_one("SELECT 1"),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver="vertebra-mssql-async",
+            category="sql",
+            driver_mode="async_native",
+            latencies_ns=async_point,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        ms_kwargs = _mssql_connect_kwargs(dsn)
+
+        pymssql_mod = import_optional("pymssql")
+        if pymssql_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            pyms_conn = pymssql_mod.connect(**ms_kwargs)
+            try:
+
+                def _pymssql_select() -> Any:
+                    cur = pyms_conn.cursor()
+                    try:
+                        cur.execute("SELECT 1")
+                        return cur.fetchone()
+                    finally:
+                        cur.close()
+
+                pyms_samples = sample_sync(_pymssql_select, iterations=iterations, warmup=warmup)
+            finally:
+                pyms_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="pymssql",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=pyms_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+        pyodbc_mod = import_optional("pyodbc")
+        if pyodbc_mod is not None:
+            gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+            conn_str_parts = [
+                "DRIVER={ODBC Driver 18 for SQL Server}",
+                f"SERVER={ms_kwargs['server']},{ms_kwargs['port']}",
+                "TrustServerCertificate=yes",
+            ]
+            if "database" in ms_kwargs:
+                conn_str_parts.append(f"DATABASE={ms_kwargs['database']}")
+            if "user" in ms_kwargs:
+                conn_str_parts.append(f"UID={ms_kwargs['user']}")
+            if "password" in ms_kwargs:
+                conn_str_parts.append(f"PWD={ms_kwargs['password']}")
+            odbc_conn = pyodbc_mod.connect(";".join(conn_str_parts))
+            try:
+
+                def _pyodbc_select() -> Any:
+                    cur = odbc_conn.cursor()
+                    try:
+                        cur.execute("SELECT 1")
+                        return cur.fetchone()
+                    finally:
+                        cur.close()
+
+                odbc_samples = sample_sync(_pyodbc_select, iterations=iterations, warmup=warmup)
+            finally:
+                odbc_conn.close()
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="pyodbc",
+                    category="sql",
+                    driver_mode="sync_blocking",
+                    latencies_ns=odbc_samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine="mssql",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_sqlalchemy_report(
+    url: str,
+    *,
+    use_broker_pool: bool = False,
+    broker: Any = None,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure SQLAlchemy `+vtb` dialect (with optional `BrokerPool`) against vanilla SQLAlchemy."""
+    _validate_sampling(iterations, warmup)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+
+    sqlalchemy_mod = import_optional("sqlalchemy")
+    sa_pool_mod = import_optional("sqlalchemy.pool")
+    if sqlalchemy_mod is None or sa_pool_mod is None:
+        msg = "sqlalchemy is required to run capture_sqlalchemy_report"
+        raise RuntimeError(msg)
+
+    vtb_sa_mod = import_optional("vertebra.extensions.sqlalchemy")
+    vtb_pool_mod = import_optional("vertebra.extensions.sqlalchemy.pool")
+    if vtb_sa_mod is None or vtb_pool_mod is None:
+        msg = "vertebra.extensions.sqlalchemy is required to run capture_sqlalchemy_report"
+        raise RuntimeError(msg)
+
+    if use_broker_pool:
+        resolved_broker = broker if broker is not None else DatabaseRegistry.default_broker()
+        if resolved_broker is None:
+            msg = "use_broker_pool=True requires an explicit broker or DatabaseRegistry.default_broker()"
+            raise ValueError(msg)
+        poolclass = vtb_pool_mod.BrokerPool.bind_class(broker=resolved_broker, url=url)
+    else:
+        poolclass = sa_pool_mod.NullPool
+
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    cases: list[AdapterBenchmarkCase] = []
+
+    vtb_engine = sqlalchemy_mod.create_engine(url, poolclass=poolclass)
+    try:
+        with vtb_engine.connect() as conn:
+            vtb_samples = sample_sync(
+                lambda: conn.execute(sqlalchemy_mod.text("SELECT 1")).scalar_one(),
+                iterations=iterations,
+                warmup=warmup,
+            )
+    finally:
+        vtb_engine.dispose()
+
+    cases.append(
+        compute_adapter_case_stats(
+            case="sa_point_select_1",
+            driver="sqlalchemy-vtb-sync",
+            category="orm",
+            driver_mode="sync_blocking",
+            latencies_ns=vtb_samples,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        vanilla_url = _strip_vtb_dialect_suffix(url)
+        vanilla_engine = sqlalchemy_mod.create_engine(vanilla_url, poolclass=sa_pool_mod.NullPool)
+        try:
+            with vanilla_engine.connect() as conn:
+                vanilla_samples = sample_sync(
+                    lambda: conn.execute(sqlalchemy_mod.text("SELECT 1")).scalar_one(),
+                    iterations=iterations,
+                    warmup=warmup,
+                )
+        finally:
+            vanilla_engine.dispose()
+
+        cases.append(
+            compute_adapter_case_stats(
+                case="sa_point_select_1",
+                driver="sqlalchemy-vanilla-sync",
+                category="orm",
+                driver_mode="sync_blocking",
+                latencies_ns=vanilla_samples,
+                gil_enabled=gil_enabled,
+            )
+        )
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="orm",
+        engine="sqlalchemy",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(url),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+def _sqlspec_connection_config(engine: SqlSpecEngine, dsn: str) -> dict[str, Any]:
+    if engine in ("sqlite", "duckdb"):
+        return {"url": dsn} if "://" in dsn else {"database": dsn}
+    return {"dsn": dsn}
+
+
+def _sqlspec_adapter_classes(engine: SqlSpecEngine) -> tuple[type[Any], type[Any]]:
+    class_map: dict[SqlSpecEngine, tuple[str, str, str]] = {
+        "sqlite": ("vertebra.extensions.sqlspec.adapters.sqlite", "SQLiteSyncConfig", "SQLiteAsyncConfig"),
+        "duckdb": ("vertebra.extensions.sqlspec.adapters.duckdb", "DuckDBSyncConfig", "DuckDBAsyncConfig"),
+        "postgres": ("vertebra.extensions.sqlspec.adapters.postgres", "PostgresSyncConfig", "PostgresAsyncConfig"),
+        "mysql": ("vertebra.extensions.sqlspec.adapters.mysql", "MySQLSyncConfig", "MySQLAsyncConfig"),
+        "oracle": ("vertebra.extensions.sqlspec.adapters.oracle", "OracleSyncConfig", "OracleAsyncConfig"),
+        "mssql": ("vertebra.extensions.sqlspec.adapters.mssql", "MSSQLSyncConfig", "MSSQLAsyncConfig"),
+    }
+    module_name, sync_name, async_name = class_map[engine]
+    mod = import_optional(module_name)
+    if mod is None:
+        msg = f"{module_name} is unavailable for capture_sqlspec_report"
+        raise RuntimeError(msg)
+    return getattr(mod, sync_name), getattr(mod, async_name)
+
+
+async def _measure_upstream_sqlspec_cases(
+    engine: SqlSpecEngine,
+    dsn: str,
+    query: str,
+    *,
+    iterations: int,
+    warmup: int,
+    gil_enabled: bool,
+) -> list[AdapterBenchmarkCase]:
+    cases: list[AdapterBenchmarkCase] = []
+    if engine == "sqlite":
+        sqlite_mod = import_optional("sqlspec.adapters.sqlite")
+        if sqlite_mod is not None and hasattr(sqlite_mod, "SqliteConfig"):
+            upstream_cfg = sqlite_mod.SqliteConfig(connection_config={"database": dsn})
+            with upstream_cfg.provide_session() as session:
+                samples = sample_sync(lambda: session.select_one(query), iterations=iterations, warmup=warmup)
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="sqlspec-sqlite-sync",
+                    category="orm",
+                    driver_mode="sync_blocking",
+                    latencies_ns=samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+    elif engine == "duckdb":
+        duckdb_mod = import_optional("sqlspec.adapters.duckdb")
+        if duckdb_mod is not None and hasattr(duckdb_mod, "DuckDBConfig"):
+            upstream_cfg = duckdb_mod.DuckDBConfig(connection_config={"database": dsn})
+            with upstream_cfg.provide_session() as session:
+                samples = sample_sync(lambda: session.select_one(query), iterations=iterations, warmup=warmup)
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="sqlspec-duckdb-sync",
+                    category="orm",
+                    driver_mode="sync_blocking",
+                    latencies_ns=samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+    elif engine == "postgres":
+        asyncpg_mod = import_optional("sqlspec.adapters.asyncpg")
+        if asyncpg_mod is not None and hasattr(asyncpg_mod, "AsyncpgConfig"):
+            upstream_cfg = asyncpg_mod.AsyncpgConfig(connection_config={"dsn": dsn})
+            async with upstream_cfg.provide_session() as session:
+                samples = await sample_async(lambda: session.select_one(query), iterations=iterations, warmup=warmup)
+            cases.append(
+                compute_adapter_case_stats(
+                    case="point_select_1",
+                    driver="sqlspec-asyncpg",
+                    category="orm",
+                    driver_mode="async_native",
+                    latencies_ns=samples,
+                    gil_enabled=gil_enabled,
+                )
+            )
+    return cases
+
+
+async def capture_sqlspec_report(
+    engine: SqlSpecEngine,
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra SQLSpec sync and async adapters against optional upstream `sqlspec` comparators."""
+    _validate_sampling(iterations, warmup)
+    if engine not in _SQLSPEC_ENGINES:
+        msg = f"Unsupported SQLSpec engine: {engine!r}"
+        raise ValueError(msg)
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+
+    sqlspec_mod = import_optional("sqlspec")
+    if sqlspec_mod is None:
+        msg = "sqlspec is required to run capture_sqlspec_report"
+        raise RuntimeError(msg)
+
+    sync_cls, async_cls = _sqlspec_adapter_classes(engine)
+    conn_cfg = _sqlspec_connection_config(engine, dsn)
+    query = "SELECT 1 FROM DUAL" if engine == "oracle" else "SELECT 1"
+    cases: list[AdapterBenchmarkCase] = []
+
+    sync_cfg = sync_cls(connection_config=conn_cfg)
+    with sync_cfg.provide_session() as sync_session:
+        sync_samples = sample_sync(lambda: sync_session.select_one(query), iterations=iterations, warmup=warmup)
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver=f"vertebra-sqlspec-{engine}-sync",
+            category="orm",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_samples,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    async_cfg = async_cls(connection_config=conn_cfg)
+    async with async_cfg.provide_session() as async_session:
+        async_samples = await sample_async(
+            lambda: async_session.select_one(query),
+            iterations=iterations,
+            warmup=warmup,
+        )
+    cases.append(
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver=f"vertebra-sqlspec-{engine}-async",
+            category="orm",
+            driver_mode="async_native",
+            latencies_ns=async_samples,
+            gil_enabled=gil_enabled,
+        )
+    )
+
+    if include_external:
+        gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+        upstream_cases = await _measure_upstream_sqlspec_cases(
+            engine,
+            dsn,
+            query,
+            iterations=iterations,
+            warmup=warmup,
+            gil_enabled=gil_enabled,
+        )
+        cases.extend(upstream_cases)
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="orm",
+        engine=f"sqlspec:{engine}",
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
+    engine: str = args.engine
+    include_external = not args.no_external
+    common_kwargs: dict[str, Any] = {
+        "iterations": args.iterations,
+        "warmup": args.warmup,
+        "include_external": include_external,
+        "strict_free_threading": args.strict_free_threading,
+    }
+    if engine == "postgres":
+        return await capture_postgres_adapter_report(args.dsn, **common_kwargs)
+    if engine == "sqlite":
+        return await capture_sqlite_report(args.dsn, **common_kwargs)
+    if engine == "duckdb":
+        return await capture_duckdb_report(args.dsn, **common_kwargs)
+    if engine in ("mysql", "mariadb"):
+        mysql_variant: MySQLEngine = "mariadb" if engine == "mariadb" else "mysql"
+        return await capture_mysql_report(args.dsn, engine=mysql_variant, **common_kwargs)
+    if engine == "oracle":
+        return await capture_oracle_report(args.dsn, **common_kwargs)
+    if engine == "mssql":
+        return await capture_mssql_report(args.dsn, **common_kwargs)
+    if engine == "sqlalchemy":
+        return await capture_sqlalchemy_report(
+            args.dsn,
+            use_broker_pool=bool(args.use_broker_pool),
+            **common_kwargs,
+        )
+    if engine == "sqlspec":
+        sqlspec_engine: SqlSpecEngine = args.sqlspec_engine
+        return await capture_sqlspec_report(sqlspec_engine, args.dsn, **common_kwargs)
+    msg = f"Unsupported SQL benchmark engine: {engine!r}"
+    raise ValueError(msg)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Standalone SQL and ORM adapter benchmark harness.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    capture_cmd = subparsers.add_parser("capture", help="Run SQL/ORM adapter benchmarks and emit JSON.")
+    capture_cmd.add_argument("--engine", required=True, help="Target engine name.")
+    capture_cmd.add_argument("--dsn", required=True, help="Target DSN, URL, or database path.")
+    capture_cmd.add_argument(
+        "--sqlspec-engine",
+        choices=_SQLSPEC_ENGINES,
+        default="sqlite",
+        help="Underlying database engine when --engine=sqlspec.",
+    )
+    capture_cmd.add_argument("--iterations", type=int, default=100, help="Measured iterations per workload.")
+    capture_cmd.add_argument("--warmup", type=int, default=10, help="Warmup iterations per workload.")
+    capture_cmd.add_argument(
+        "--use-broker-pool",
+        action="store_true",
+        help="Bind SQLAlchemy BrokerPool when --engine=sqlalchemy.",
+    )
+    capture_cmd.add_argument(
+        "--no-external",
+        action="store_true",
+        help="Benchmark Vertebra drivers only without optional third-party comparators.",
+    )
+    capture_cmd.add_argument(
+        "--strict-free-threading",
+        action="store_true",
+        help="Fail if the Python GIL is enabled or re-enabled during capture.",
+    )
+    capture_cmd.add_argument("--output", type=Path, default=None, help="Optional output file path.")
+
+    compare_cmd = subparsers.add_parser("compare", help="Compare candidate and baseline adapter benchmark reports.")
+    compare_cmd.add_argument("--candidate", type=Path, required=True, help="Candidate JSON report path.")
+    compare_cmd.add_argument("--baseline", type=Path, required=True, help="Baseline JSON report path.")
+    compare_cmd.add_argument("--candidate-driver", default=None, help="Candidate driver label within report.")
+    compare_cmd.add_argument("--baseline-driver", default=None, help="Baseline driver label within report.")
+    compare_cmd.add_argument(
+        "--driver-mode",
+        choices=("async_native", "sync_blocking"),
+        default=None,
+        help="Optional driver mode filter for comparison.",
+    )
+    compare_cmd.add_argument(
+        "--min-throughput-ratio",
+        type=float,
+        default=DEFAULT_MIN_THROUGHPUT_RATIO,
+        help="Minimum allowed candidate/baseline ops/sec ratio.",
+    )
+    compare_cmd.add_argument(
+        "--max-latency-ratio",
+        type=float,
+        default=DEFAULT_MAX_LATENCY_RATIO,
+        help="Maximum allowed candidate/baseline p99 latency ratio.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run CLI `capture` or `compare` commands returning exit status `0` (pass) or non-zero (failure)."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "capture":
+        if args.engine not in SUPPORTED_SQL_ENGINES:
+            sys.stderr.write(
+                f"Unsupported engine {args.engine!r}; expected one of: {', '.join(SUPPORTED_SQL_ENGINES)}\n"
+            )
+            return 2
+        report = asyncio.run(_dispatch_capture(args))
+        encoded = format_adapter_report_bytes(report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(encoded + b"\n")
+        else:
+            sys.stdout.write(encoded.decode("utf-8") + "\n")
+        return 0
+
+    candidate_report = parse_adapter_report_bytes(args.candidate.read_bytes())
+    baseline_report = parse_adapter_report_bytes(args.baseline.read_bytes())
+    driver_mode: DriverMode | None = args.driver_mode
+    outcomes = compare_adapter_reports(
+        candidate_report,
+        baseline_report,
+        candidate_driver=args.candidate_driver,
+        baseline_driver=args.baseline_driver,
+        driver_mode=driver_mode,
+        min_throughput_ratio=args.min_throughput_ratio,
+        max_latency_ratio=args.max_latency_ratio,
+    )
+    failures = [outcome for outcome in outcomes if not outcome.passed]
+    for outcome in outcomes:
+        status = "PASS" if outcome.passed else "FAIL"
+        line = (
+            f"[{status}] {outcome.case} ({outcome.candidate_driver} vs {outcome.baseline_driver}): "
+            f"throughput_ratio={outcome.throughput_ratio:.3f}, p99_ratio={outcome.p99_ratio:.3f}"
+        )
+        if outcome.reason:
+            line += f" ({outcome.reason})"
+        sys.stdout.write(line + "\n")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
