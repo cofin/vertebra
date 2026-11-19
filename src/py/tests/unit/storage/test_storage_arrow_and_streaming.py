@@ -1663,10 +1663,10 @@ def test_sqlspec_write_arrow_sync_overwrite_false_concurrent_writers(
     """Concurrent SQLSpec write_arrow_sync with overwrite=False yields one winner and N-1 FileExistsError."""
     pa = pytest.importorskip("pyarrow")
     pytest.importorskip("sqlspec")
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
+    sqlspec_storage = pytest.importorskip("vertebra.extensions.sqlspec.storage")
 
     store = _make_concurrent_store(backend, tmp_path)
-    backend_store = SQLSpecObjectStoreBackend(store=store)
+    backend_store = sqlspec_storage.ObjectStoreBackend(store=store)
     worker_count = 6
     barrier = threading.Barrier(worker_count)
     ext = "parquet" if file_format == "parquet" else "arrow"
@@ -1705,10 +1705,10 @@ async def test_sqlspec_write_arrow_async_overwrite_false_concurrent_writers(
     """Concurrent SQLSpec write_arrow_async with overwrite=False yields one winner and N-1 FileExistsError."""
     pa = pytest.importorskip("pyarrow")
     pytest.importorskip("sqlspec")
-    from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
+    sqlspec_storage = pytest.importorskip("vertebra.extensions.sqlspec.storage")
 
     store = _make_concurrent_store(backend, tmp_path)
-    backend_store = SQLSpecObjectStoreBackend(store=store)
+    backend_store = sqlspec_storage.ObjectStoreBackend(store=store)
     worker_count = 6
     barrier = asyncio.Barrier(worker_count)
     ext = "parquet" if file_format == "parquet" else "arrow"

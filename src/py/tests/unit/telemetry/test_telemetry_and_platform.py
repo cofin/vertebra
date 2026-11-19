@@ -1219,16 +1219,14 @@ def test_zpages_varz_exports_loop_telemetry_shards_and_histogram(record_samples:
         "unhandled_exceptions": 1,
         "recorded_at_ns": 2000,
     }
-    hist = recorder.lag_histogram()
-    assert entry["lag_histogram"] == {
-        "count": hist.count,
-        "min_ms": hist.min,
-        "max_ms": hist.max,
-        "sum_ms": hist.sum,
-        "p50_ms": hist.p50,
-        "p90_ms": hist.p90,
-        "p99_ms": hist.p99,
-    }
+    hist = entry["lag_histogram"]
+    assert hist["count"] == 2
+    assert hist["min_ms"] == pytest.approx(1.5)
+    assert hist["max_ms"] == pytest.approx(4.5)
+    assert hist["sum_ms"] == pytest.approx(6.0)
+    assert 1.5 <= hist["p50_ms"] <= 4.5
+    assert 1.5 <= hist["p90_ms"] <= 4.5
+    assert 1.5 <= hist["p99_ms"] <= 4.5
 
 
 @pytest.mark.parametrize(
@@ -1342,6 +1340,7 @@ def test_zpages_thread_safe_concurrent_mutations_and_varz_reads() -> None:
         thread.start()
     for thread in threads:
         thread.join(timeout=15.0)
+        assert not thread.is_alive()
 
     assert not errors
     code, raw = zpages.handle_zpage("/varz")

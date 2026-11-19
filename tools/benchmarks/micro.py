@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import statistics
@@ -21,7 +20,7 @@ import msgspec
 from vertebra._vertebra import Request, Response
 from vertebra.server._asgi._runner import AsgiRunner
 from vertebra.utils.module_loader import import_optional
-from vertebra.utils.serializers import decode_json, encode_json_bytes
+from vertebra.utils.serializers import decode_json, encode_json_bytes, format_json
 
 
 class MicroBenchSample(msgspec.Struct, frozen=True, gc=False):
@@ -605,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
                 "timestamp": timestamp,
                 "arrow_ipc": msgspec.to_builtins(arrow_ipc) if arrow_ipc is not None else None,
             }
-            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+            sys.stdout.write(format_json(payload, indent=2) + "\n")
         else:
             sys.stdout.write(f"=== Arrow IPC Stream Benchmarks ({timestamp}) ===\n")
             _write_arrow_ipc_summary(arrow_ipc)
@@ -621,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
             "arrow_ipc": msgspec.to_builtins(suite.arrow_ipc) if suite.arrow_ipc is not None else None,
             "import_ms": suite.import_ms,
         }
-        sys.stdout.write(json.dumps(raw_dict, indent=2) + "\n")
+        sys.stdout.write(format_json(raw_dict, indent=2) + "\n")
     else:
         sys.stdout.write(f"=== Vertebra Micro-Benchmarks ({suite.timestamp}) ===\n\n")
         sys.stdout.write(f"{'Benchmark':<35} {'Ops/sec':>12} {'Median (ns)':>14} {'p99 (ns)':>12}\n")

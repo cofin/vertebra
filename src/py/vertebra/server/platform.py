@@ -232,35 +232,6 @@ class SHMAllocationPolicy(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         return int(fds[0])
 
 
-def _serialize_loop_recorder(recorder: Any) -> dict[str, Any]:
-    """Serialize an EventLoopRecorder's per-shard latest samples and lag histogram for /varz."""
-    latest = recorder.latest_by_shard()
-    hist = recorder.lag_histogram()
-    return {
-        "shards": {
-            str(shard_id): {
-                "shard_id": sample.shard_id,
-                "backend": sample.backend,
-                "lag_ms": sample.lag_ms,
-                "active_tasks": sample.active_tasks,
-                "pending_callbacks": sample.pending_callbacks,
-                "unhandled_exceptions": sample.unhandled_exceptions,
-                "recorded_at_ns": sample.recorded_at_ns,
-            }
-            for shard_id, sample in sorted(latest.items())
-        },
-        "lag_histogram": {
-            "count": hist.count,
-            "min_ms": hist.min,
-            "max_ms": hist.max,
-            "sum_ms": hist.sum,
-            "p50_ms": hist.p50,
-            "p90_ms": hist.p90,
-            "p99_ms": hist.p99,
-        },
-    }
-
-
 class ZPagesRegistry:
     """Provides diagnostic payloads for /statusz, /healthz, /varz, /rpcz, /brokerz, and /taskz."""
 
@@ -400,7 +371,7 @@ class ZPagesRegistry:
 
         if recorders:
             payload["loop_telemetry"] = {
-                name: _serialize_loop_recorder(rec) for name, rec in sorted(recorders, key=lambda item: item[0])
+                name: self._serialize_loop_recorder(rec) for name, rec in sorted(recorders, key=lambda item: item[0])
             }
 
         return payload
@@ -581,6 +552,35 @@ class ZPagesRegistry:
             targets.append(("default", caller_loop, None, False))
 
         return targets
+
+    @staticmethod
+    def _serialize_loop_recorder(recorder: Any) -> dict[str, Any]:
+        """Serialize an EventLoopRecorder's per-shard latest samples and lag histogram for /varz."""
+        latest = recorder.latest_by_shard()
+        hist = recorder.lag_histogram()
+        return {
+            "shards": {
+                str(shard_id): {
+                    "shard_id": sample.shard_id,
+                    "backend": sample.backend,
+                    "lag_ms": sample.lag_ms,
+                    "active_tasks": sample.active_tasks,
+                    "pending_callbacks": sample.pending_callbacks,
+                    "unhandled_exceptions": sample.unhandled_exceptions,
+                    "recorded_at_ns": sample.recorded_at_ns,
+                }
+                for shard_id, sample in sorted(latest.items())
+            },
+            "lag_histogram": {
+                "count": hist.count,
+                "min_ms": hist.min,
+                "max_ms": hist.max,
+                "sum_ms": hist.sum,
+                "p50_ms": hist.p50,
+                "p90_ms": hist.p90,
+                "p99_ms": hist.p99,
+            },
+        }
 
     @staticmethod
     def _running_loop_or_none() -> asyncio.AbstractEventLoop | None:

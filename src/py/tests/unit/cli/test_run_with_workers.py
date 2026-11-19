@@ -698,13 +698,21 @@ def test_vtb_run_worker_only_invalid_loop_telemetry_interval_falls_back(
 
     probe_port = _allocate_ephemeral_port()
     probe_ready = threading.Event()
+    observed_intervals: list[float] = []
+    orig_interval = Worker._loop_telemetry_interval
     orig_set_var = ZPagesRegistry.set_var
+
+    def capture_interval() -> float:
+        resolved = orig_interval()
+        observed_intervals.append(resolved)
+        return resolved
 
     def signal_probe_ready(self: ZPagesRegistry, key: str, value: Any) -> None:
         orig_set_var(self, key, value)
         if key == "worker_state" and value == "ready":
             probe_ready.set()
 
+    monkeypatch.setattr(Worker, "_loop_telemetry_interval", staticmethod(capture_interval))
     monkeypatch.setattr(ZPagesRegistry, "set_var", signal_probe_ready)
 
     result_box: list[int] = []
@@ -729,6 +737,7 @@ def test_vtb_run_worker_only_invalid_loop_telemetry_interval_falls_back(
         assert "loop_telemetry" in payload
         assert "worker" in payload["loop_telemetry"]
         assert isinstance(app_state.get("vertebra_loop_recorder"), EventLoopRecorder)
+        assert observed_intervals == [1.0]
 
         runner = app_state.get("vertebra_worker_runner")
         assert runner is not None

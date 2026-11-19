@@ -53,12 +53,6 @@ pub struct ZPagesEndpoint {
     bind_is_loopback: bool,
 }
 
-/// Return `true` only for the seven exact z-page paths in [`ZPAGES_PATHS`].
-#[inline]
-pub fn is_zpages_path(path: &str) -> bool {
-    canonical_zpages_path(path).is_some()
-}
-
 /// Map an exact z-page path to its `'static` canonical slice.
 #[inline]
 pub fn canonical_zpages_path(path: &str) -> Option<&'static str> {
@@ -363,7 +357,7 @@ mod tests {
             "/api/taskz",
             "/taskz/",
         ] {
-            assert!(!is_zpages_path(path));
+            assert!(canonical_zpages_path(path).is_none());
             let uri: Uri = path.parse().unwrap();
             assert!(
                 ep.preflight(&Method::GET, &uri, &HeaderMap::new())
@@ -371,7 +365,6 @@ mod tests {
             );
         }
         for path in ZPAGES_PATHS {
-            assert!(is_zpages_path(path));
             assert_eq!(canonical_zpages_path(path), Some(path));
         }
     }

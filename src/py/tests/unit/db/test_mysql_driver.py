@@ -1539,7 +1539,19 @@ def test_mysql_cloudsql_explicit_4part_and_matching_instance() -> None:
         ),
         (
             False,
+            "cloudsql://proj:us-central1:inst/appdb?cloud_sql_instance=proj:us-central1:inst&cloud_sql_instance=other:us-central1:inst",
+            {},
+            "Conflicting Cloud SQL instance",
+        ),
+        (
+            False,
             "cloudsql://proj:us-central1:inst/appdb?ssl_mode=bogus",
+            {},
+            "Unsupported MySQL ssl_mode",
+        ),
+        (
+            False,
+            "cloudsql://proj:us-central1:inst/appdb?ssl_mode=require&ssl_mode=bogus",
             {},
             "Unsupported MySQL ssl_mode",
         ),

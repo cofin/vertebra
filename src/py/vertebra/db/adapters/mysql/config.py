@@ -270,8 +270,8 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 raise ImproperConfigurationError(msg)
             query_params = parsed_cloudsql.query
             for csql_key in ("cloud_sql_instance", "cloudsql_instance"):
-                if csql_key in query_params:
-                    query_instance = query_params[csql_key][0].strip()
+                for raw_query_instance in query_params.get(csql_key, ()):
+                    query_instance = raw_query_instance.strip()
                     if query_instance != parsed_cloudsql.instance:
                         msg = (
                             f"Conflicting Cloud SQL instance '{query_instance}' in query parameter '{csql_key}' "
@@ -280,9 +280,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                         raise ImproperConfigurationError(msg)
             has_dsn_ssl_ca = any(ca_key in query_params for ca_key in ("ssl_ca", "ssl-ca", "sslca"))
             for ssl_param in _DSN_SSL_MODE_PARAMS:
-                if ssl_param in query_params and query_params[ssl_param][0].strip().lower() not in _ALLOWED_SSL_MODES:
-                    msg = f"Unsupported MySQL {ssl_param} '{query_params[ssl_param][0]}'"
-                    raise ImproperConfigurationError(msg)
+                for raw_ssl_mode in query_params.get(ssl_param, ()):
+                    if raw_ssl_mode.strip().lower() not in _ALLOWED_SSL_MODES:
+                        msg = f"Unsupported MySQL {ssl_param} '{raw_ssl_mode}'"
+                        raise ImproperConfigurationError(msg)
         elif "://" in trimmed_dsn:
             parsed = urlsplit(trimmed_dsn)
             try:
