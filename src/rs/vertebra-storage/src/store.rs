@@ -925,6 +925,10 @@ pub enum BackendConfig {
         container: String,
         account: Option<String>,
         access_key: Option<String>,
+        sas_token: Option<String>,
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
         endpoint: Option<String>,
         allow_http: bool,
     },
@@ -983,6 +987,41 @@ fn parse_http_headers_from_options(
         }
     }
     Ok(headers)
+}
+
+/// Parse an Azure Shared Access Signature query string into decoded `(key, value)` pairs.
+fn parse_azure_sas_query_pairs(raw_sas: &str) -> Result<Vec<(String, String)>, StorageError> {
+    let without_prefix = raw_sas.trim().trim_start_matches('?').trim();
+    if without_prefix.is_empty() || without_prefix.chars().any(char::is_whitespace) {
+        return Err(StorageError::InvalidInput(
+            "invalid Azure sas_token: expected non-empty query string".to_string(),
+        ));
+    }
+    for segment in without_prefix.split('&') {
+        let Some((raw_k, raw_v)) = segment.split_once('=') else {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid Azure sas_token segment '{segment}': expected key=value query pairs"
+            )));
+        };
+        if raw_k.is_empty() || raw_v.is_empty() {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid Azure sas_token segment '{segment}': key and value must be non-empty"
+            )));
+        }
+    }
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(without_prefix.as_bytes())
+        .into_owned()
+        .collect();
+    if pairs.is_empty()
+        || pairs.iter().any(|(k, v)| {
+            k.is_empty() || v.is_empty() || k.contains('\u{FFFD}') || v.contains('\u{FFFD}')
+        })
+    {
+        return Err(StorageError::InvalidInput(
+            "invalid Azure sas_token: query pairs must be non-empty valid UTF-8".to_string(),
+        ));
+    }
+    Ok(pairs)
 }
 
 /// Connection and credential state for GCS JSON API calls that `object_store` does not expose.
@@ -1216,6 +1255,10 @@ impl ObjectStoreEngine {
                 container,
                 account,
                 access_key,
+                sas_token,
+                tenant_id,
+                client_id,
+                client_secret,
                 endpoint,
                 allow_http,
             } => {
@@ -1230,6 +1273,32 @@ impl ObjectStoreEngine {
                 }
                 if let Some(key) = access_key {
                     builder = builder.with_access_key(key);
+                }
+                match (tenant_id, client_id, client_secret) {
+                    (Some(tid), Some(cid), Some(csec)) => {
+                        if tid.trim().is_empty() || cid.trim().is_empty() || csec.trim().is_empty()
+                        {
+                            return Err(StorageError::InvalidInput(
+                                "Azure Entra ID credentials (tenant_id, client_id, client_secret) must not be empty"
+                                    .to_string(),
+                            ));
+                        }
+                        builder = builder
+                            .with_tenant_id(tid)
+                            .with_client_id(cid)
+                            .with_client_secret(csec);
+                    }
+                    (None, None, None) => {}
+                    _ => {
+                        return Err(StorageError::InvalidInput(
+                            "incomplete Azure Entra ID credentials: tenant_id, client_id, and client_secret must all be provided together"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Some(raw_sas) = sas_token {
+                    let sas_pairs = parse_azure_sas_query_pairs(&raw_sas)?;
+                    builder = builder.with_sas_authorization(sas_pairs);
                 }
                 if let Some(ep) = endpoint {
                     builder = builder.with_endpoint(ep);
@@ -1454,13 +1523,31 @@ impl ObjectStoreEngine {
                     opts.get("fingerprint"),
                     opts.get("private_key_pem"),
                 ) {
-                    (Some(t), Some(u), Some(fp), Some(pem)) => Some(OciCavageCredentials {
-                        tenancy_ocid: t.clone(),
-                        user_ocid: u.clone(),
-                        fingerprint: fp.clone(),
-                        private_key_pem: pem.clone(),
-                    }),
-                    _ => None,
+                    (Some(t), Some(u), Some(fp), Some(pem)) => {
+                        if t.trim().is_empty()
+                            || u.trim().is_empty()
+                            || fp.trim().is_empty()
+                            || pem.trim().is_empty()
+                        {
+                            return Err(StorageError::InvalidInput(
+                                "OCI Cavage credentials (tenancy_ocid, user_ocid, fingerprint, private_key_pem) must not be empty"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(OciCavageCredentials {
+                            tenancy_ocid: t.clone(),
+                            user_ocid: u.clone(),
+                            fingerprint: fp.clone(),
+                            private_key_pem: pem.clone(),
+                        })
+                    }
+                    (None, None, None, None) => None,
+                    _ => {
+                        return Err(StorageError::InvalidInput(
+                            "incomplete OCI Cavage credentials: tenancy_ocid, user_ocid, fingerprint, and private_key_pem must all be provided together"
+                                .to_string(),
+                        ));
+                    }
                 };
                 Self::new(BackendConfig::Oci {
                     bucket,
@@ -1518,6 +1605,10 @@ impl ObjectStoreEngine {
                     container,
                     account: opts.get("account").cloned(),
                     access_key: opts.get("access_key").cloned(),
+                    sas_token: opts.get("sas_token").cloned(),
+                    tenant_id: opts.get("tenant_id").cloned(),
+                    client_id: opts.get("client_id").cloned(),
+                    client_secret: opts.get("client_secret").cloned(),
                     endpoint,
                     allow_http,
                 })

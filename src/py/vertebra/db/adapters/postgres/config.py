@@ -9,13 +9,20 @@ from typing import Any, ClassVar, Literal, Self
 import msgspec
 
 from vertebra.db.adapters.postgres.options import (
+    is_postgres_loopback_host,
     merge_postgres_options,
+    normalize_pem_bytes,
     parse_postgres_dsn,
     validate_cockroach_cluster,
 )
 from vertebra.db.dialer.alloydb import AlloyDBConfig
 from vertebra.db.dialer.cloudsql import CloudSQLConfig
-from vertebra.db.driver._cloud_auth import AwsAuroraDsqlIamTokenProvider
+from vertebra.db.driver._cloud_auth import (
+    AZURE_POSTGRES_SCOPE,
+    AwsAuroraDsqlIamTokenProvider,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+)
 from vertebra.db.driver._common import POSTGRES_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
@@ -74,6 +81,8 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
     """Optional `GcpTokenCache` options (`service_account_key`, `application_credentials_path`, `scopes`) for direct :5432 or dialer IAM token resolution."""
     token_provider: Any = None
     """Optional cloud database token provider (`DatabaseTokenProvider`) supplying dynamic IAM passwords."""
+    ca_pem: str | None = None
+    """Optional inline Root CA PEM bundle used for PostgreSQL TLS verification."""
     enable_alloydb_columnar_engine: bool = False
     """When True, enable `google_columnar_engine.enabled = on` in session startup GUCs."""
     cockroach_cluster: str | None = None
@@ -106,14 +115,41 @@ class PostgreSQLConfig(BaseDatabaseConfig, frozen=True, gc=False, kw_only=True):
                 msgspec.structs.force_setattr(self, "pooler_mode", "transaction")
         msgspec.structs.force_setattr(self, "session_gucs", dict(self.session_gucs))
         msgspec.structs.force_setattr(self, "iam_auth_options", dict(self.iam_auth_options))
-        if isinstance(self.token_provider, AwsAuroraDsqlIamTokenProvider):
+        if self.ca_pem is not None:
+            try:
+                normalized_ca = normalize_pem_bytes(self.ca_pem, field_name="ca_pem").decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ImproperConfigurationError("PostgreSQL ca_pem must be valid UTF-8") from exc
+            if normalized_ca != self.ca_pem:
+                msgspec.structs.force_setattr(self, "ca_pem", normalized_ca)
+        if isinstance(self.token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "token_provider",
+                self.token_provider.with_default_scope(AZURE_POSTGRES_SCOPE),
+            )
+        if isinstance(
+            self.token_provider,
+            AwsAuroraDsqlIamTokenProvider | AwsRdsIamTokenProvider | AzureEntraTokenProvider,
+        ):
             for candidate_dsn in (self.dsn, self.direct_dsn):
                 if not candidate_dsn:
                     continue
                 parsed_candidate = parse_postgres_dsn(candidate_dsn)
                 sslmode = parsed_candidate.params.get("sslmode")
-                if sslmode is not None and sslmode.strip().lower() == "disable":
-                    msg = "AwsAuroraDsqlIamTokenProvider requires TLS and cannot be used with sslmode='disable'"
+                if sslmode is None or sslmode.strip().lower() != "disable":
+                    continue
+                if "host" in parsed_candidate.params and parsed_candidate.params["host"] != "":
+                    candidate_hosts = [part for part in parsed_candidate.params["host"].split(",") if part]
+                elif parsed_candidate.hosts:
+                    candidate_hosts = list(parsed_candidate.hosts)
+                else:
+                    candidate_hosts = ["localhost"]
+                if any(not h.startswith("/") and not is_postgres_loopback_host(h) for h in candidate_hosts):
+                    msg = (
+                        f"{type(self.token_provider).__name__} requires TLS on remote hosts "
+                        "and cannot be used with sslmode='disable'"
+                    )
                     raise ImproperConfigurationError(msg)
 
     @staticmethod

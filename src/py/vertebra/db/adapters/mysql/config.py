@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
@@ -9,7 +10,12 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import msgspec
 
 from vertebra.db.adapters.mysql.core import MySQLCore
-from vertebra.db.dialer import CloudSQLConfig
+from vertebra.db.dialer import CloudSQLConfig, aws_rds_root_ca_pem
+from vertebra.db.driver._cloud_auth import (
+    AZURE_MYSQL_SCOPE,
+    AwsRdsIamTokenProvider,
+    AzureEntraTokenProvider,
+)
 from vertebra.db.driver._common import MYSQL_DIALECT_TAG, BaseDatabaseConfig
 from vertebra.typing import FrozenBaseStruct, ImproperConfigurationError
 from vertebra.utils.module_loader import import_optional
@@ -72,6 +78,23 @@ _CANONICAL_SSL_MODE_MAP: dict[str, str] = {
     "verify-identity": "verify-full",
     "verify_identity": "verify-full",
 }
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True when `host` resolves to localhost or an IPv4/IPv6 loopback address."""
+    cleaned = host.strip().lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    cleaned = cleaned.partition("%")[0]
+    if cleaned in {"localhost", "localhost."}:
+        return True
+    try:
+        addr = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    return isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
 
 
 class MySQLPoolConfig(FrozenBaseStruct, frozen=True, gc=False):
@@ -220,7 +243,19 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                 msg = f"Invalid Cloud SQL instance '{self.cloud_sql_instance}'; expected 'project:region:instance'"
                 raise ImproperConfigurationError(msg)
 
+        if isinstance(self.token_provider, AzureEntraTokenProvider):
+            msgspec.structs.force_setattr(
+                self,
+                "token_provider",
+                self.token_provider.with_default_scope(AZURE_MYSQL_SCOPE),
+            )
+
+        has_custom_dsn = bool(trimmed_dsn and trimmed_dsn != "mysql://localhost:3306/vertebra")
+        effective_host = self.host
+        effective_unix_socket = self.unix_socket
         has_explicit_dsn_ssl = False
+        dsn_canonical_ssl_mode: str | None = None
+        has_dsn_ssl_ca = False
         if "://" in trimmed_dsn and not lower_dsn.startswith("cloudsql://"):
             parsed = urlsplit(trimmed_dsn)
             try:
@@ -231,7 +266,15 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
             if dsn_port is not None and not (1 <= dsn_port <= 65535):
                 msg = f"MySQL DSN port must be in 1..65535, got {dsn_port}"
                 raise ImproperConfigurationError(msg)
+            if has_custom_dsn and parsed.hostname:
+                effective_host = parsed.hostname
             query_params = parse_qs(parsed.query)
+            if effective_unix_socket is None:
+                if "unix_socket" in query_params:
+                    effective_unix_socket = query_params["unix_socket"][0]
+                elif "socket" in query_params:
+                    effective_unix_socket = query_params["socket"][0]
+            has_dsn_ssl_ca = any(ca_key in query_params for ca_key in ("ssl_ca", "ssl-ca", "sslca"))
             for ssl_param in ("ssl_mode", "ssl-mode", "sslmode", "ssl"):
                 if ssl_param in query_params:
                     has_explicit_dsn_ssl = True
@@ -239,9 +282,37 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
                     if q_mode not in _ALLOWED_SSL_MODES:
                         msg = f"Unsupported MySQL {ssl_param} '{query_params[ssl_param][0]}'"
                         raise ImproperConfigurationError(msg)
+                    if dsn_canonical_ssl_mode is None:
+                        dsn_canonical_ssl_mode = _CANONICAL_SSL_MODE_MAP[q_mode]
+
+        effective_ssl_mode = dsn_canonical_ssl_mode if dsn_canonical_ssl_mode is not None else self.canonical_ssl_mode
+        is_remote_endpoint = (
+            effective_unix_socket is None
+            and self.cloud_sql_instance is None
+            and not lower_dsn.startswith("cloudsql://")
+            and not _is_loopback_host(effective_host)
+        )
+        if (
+            is_remote_endpoint
+            and isinstance(self.token_provider, AwsRdsIamTokenProvider | AzureEntraTokenProvider)
+            and (self.canonical_ssl_mode == "disable" or effective_ssl_mode == "disable")
+        ):
+            msg = (
+                f"{type(self.token_provider).__name__} requires TLS on remote hosts "
+                "and cannot be used with ssl_mode='disable'"
+            )
+            raise ImproperConfigurationError(msg)
 
         if self.token_provider is not None and self.canonical_ssl_mode == "prefer" and not has_explicit_dsn_ssl:
             msgspec.structs.force_setattr(self, "ssl_mode", "require")
+
+        if (
+            is_remote_endpoint
+            and isinstance(self.token_provider, AwsRdsIamTokenProvider)
+            and self.ssl_ca is None
+            and not has_dsn_ssl_ca
+        ):
+            msgspec.structs.force_setattr(self, "ssl_ca", aws_rds_root_ca_pem())
 
     def __repr__(self) -> str:
         """Return a redacted representation that omits credentials and tokens."""
@@ -267,6 +338,10 @@ class MySQLConfig(BaseDatabaseConfig, frozen=True, gc=False):
         for ssl_key in ("ssl_mode", "ssl-mode", "sslmode", "ssl"):
             if ssl_key in query and "ssl_mode" not in kwargs:
                 kwargs["ssl_mode"] = query[ssl_key][0]
+                break
+        for ca_key in ("ssl_ca", "ssl-ca", "sslca"):
+            if ca_key in query and "ssl_ca" not in kwargs:
+                kwargs["ssl_ca"] = query[ca_key][0]
                 break
         if "unix_socket" in query and "unix_socket" not in kwargs:
             kwargs["unix_socket"] = query["unix_socket"][0]

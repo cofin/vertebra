@@ -1,6 +1,6 @@
 # `vertebra.agent` — Model Context Protocol (MCP), A2A & Workflow Engine
 
-Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`), Identity (`IapIdentitySource`, `MtlsIdentitySource`), Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`), bidirectional protocol bridges (`McpToolBridge`, `A2aAgentBridge`), hierarchical task planning (`SpecTree`), and multi-step DAG execution (`DynamicWorkflow`, `WorkflowEngine`). See the [Agent Protocols Usage Guide](../usage/agent-protocols.md) for end-to-end walkthroughs.
+Agent runtime (`AgentRuntime`), Model Context Protocol (`MCPCore`, `MCPSessionStore`, `ToolRegistry`, `MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`, `SkillCatalog`), Identity (`IapIdentitySource`, `MtlsIdentitySource`), Agent-to-Agent (`A2AService`, `A2AConfig`, `AgentCard`), bidirectional protocol bridges (`McpToolBridge`, `A2aAgentBridge`), hierarchical task planning (`SpecTree`), and multi-step DAG execution (`DynamicWorkflow`, `WorkflowEngine`). See [OKF v0.2 & Knowledge Catalog](okf-and-catalog.md) for bundle serialization and Dataplex synchronization, and [Agent Protocols Usage Guide](../usage/agent-protocols.md) for end-to-end walkthroughs.
 
 | Section | Core Classes | Responsibility |
 | --- | --- | --- |

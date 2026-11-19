@@ -45,4 +45,5 @@ Complete reference documentation for Vertebra's Python packages (`vertebra.*`), 
 | Module / Page | Summary |
 | --- | --- |
 | **[Agent Runtime (MCP & A2A)](agent.md)** | Model Context Protocol (`MCPRegistry`, `MCPConfig`, `MCPSkillsConfig`, `MCPTaskConfig`), Agent-to-Agent (`A2AService`, `A2AConfig`), `AgentRuntime`, and `WorkflowEngine`. |
+| **[OKF & Knowledge Catalog](okf-and-catalog.md)** | Pure-Python OKF v0.2 bundle parser/digester/ZIP archive (`OkfBundle`, `OkfDocument`) and Dataplex v1 `SyncKnowledgeCatalogClient` / `AsyncKnowledgeCatalogClient`. |
 | **[PyO3 Native Stubs](native-stubs.md)** | Low-level Rust/PyO3 extension classes and functions across `vertebra._vertebra`, `_bundler`, `_storage`, `_bigquery`, `_duckdb`, `_mssql`, `_mysql`, `_oracle`, `_postgres`, and `_spanner`. |

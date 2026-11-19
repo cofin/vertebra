@@ -8,12 +8,13 @@ import hashlib
 import subprocess
 import sys
 import threading
+import tracemalloc
 from asyncio import CancelledError
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Coroutine, Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -25,6 +26,7 @@ from django.core.files.base import ContentFile
 from sqlspec.protocols import ObjectStoreProtocol
 from sqlspec.storage.pipeline import AsyncStoragePipeline, SyncStoragePipeline
 from sqlspec.storage.registry import StorageRegistry as SQLSpecStorageRegistry
+from tools.benchmarks.micro import ArrowPipelineBenchResult, benchmark_arrow_storage_pipeline
 
 import vertebra.extensions.alchemy.storage as alchemy_storage_mod
 import vertebra.extensions.sqlspec.storage as sqlspec_storage_mod
@@ -41,6 +43,7 @@ from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteAsyncConfig, SQLit
 from vertebra.extensions.sqlspec.events import ChangeFeedAsyncEventBackend, ChangeFeedSyncEventBackend
 from vertebra.extensions.sqlspec.storage import (
     ArrowFlightSerializer,
+    ObjectStoreRegistry,
     register_storage_alias,
 )
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend as SQLSpecObjectStoreBackend
@@ -1916,19 +1919,21 @@ async def test_alchemy_save_arrow_streaming_and_checksum(
 @pytest.mark.parametrize("adapter", ["sqlspec", "alchemy"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize(
-    ("raw_format", "expected_parquet"),
+    ("raw_format", "expected_kind"),
     [
-        ("Parquet", True),
-        (" PARQUET ", True),
-        ("ARROW", False),
-        ("Feather", False),
-        ("IPC", False),
+        ("Parquet", "parquet"),
+        (" PARQUET ", "parquet"),
+        ("ARROW", "arrow-ipc"),
+        ("Feather", "arrow-ipc"),
+        ("IPC", "arrow-ipc"),
+        ("CSV", "csv"),
+        (" csv ", "csv"),
     ],
 )
 async def test_arrow_adapters_normalize_case_insensitive_formats(
-    adapter: str, asynchronous: bool, raw_format: str, expected_parquet: bool
+    adapter: str, asynchronous: bool, raw_format: str, expected_kind: str
 ) -> None:
-    """SQLSpec and Alchemy Arrow writers normalize case-insensitive format names to Parquet or Arrow IPC."""
+    """SQLSpec and Alchemy Arrow writers normalize case-insensitive format names to Parquet, IPC, or CSV."""
     table = pa.table({"id": [1, 2], "tag": ["x", "y"]})
     if adapter == "sqlspec":
         sqlspec_backend = SQLSpecObjectStoreBackend("memory://")
@@ -1940,7 +1945,7 @@ async def test_arrow_adapters_normalize_case_insensitive_formats(
             sqlspec_backend.write_arrow_sync("items/out.parquet", table, file_format=raw_format)
             raw = sqlspec_backend.read_bytes_sync("items/out.parquet")
             decoded = sqlspec_backend.read_arrow_sync("items/out.parquet", file_format=raw_format)
-        assert decoded.equals(table)
+        assert decoded.to_pydict() == table.to_pydict()
     else:
         alchemy_backend = AlchemyObjectStoreBackend(key="alchemy-fmt", fs="memory://")
         if asynchronous:
@@ -1949,13 +1954,15 @@ async def test_arrow_adapters_normalize_case_insensitive_formats(
             alchemy_backend.save_arrow("items/out.parquet", table, format=raw_format)
         raw = bytes(alchemy_backend.sync_store.get("items/out.parquet"))
 
-    assert (raw[:4] == b"PAR1" and raw[-4:] == b"PAR1") is expected_parquet
+    assert (raw[:4] == b"PAR1" and raw[-4:] == b"PAR1") is (expected_kind == "parquet")
+    if expected_kind == "csv":
+        assert raw.startswith(b'"id","tag"\n')
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("adapter", ["sqlspec", "alchemy"])
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("bad_format", ["csv", "jsonl", "json", "orc"])
+@pytest.mark.parametrize("bad_format", ["jsonl", "json", "orc"])
 async def test_arrow_adapters_reject_unsupported_formats(adapter: str, asynchronous: bool, bad_format: str) -> None:
     """SQLSpec and Alchemy Arrow methods reject non-Arrow formats instead of silently encoding IPC."""
     table = pa.table({"id": [1]})
@@ -2154,3 +2161,378 @@ async def test_changefeed_async_checkpoint_restart_and_notify_spill(tmp_path: Pa
         checkpoint_key="worker-orders-async",
     )
     assert await restarted_backend.load_checkpoint("orders") == large_id
+
+
+type ArrowWriteFormat = Literal["parquet", "arrow-ipc", "csv"]
+
+
+def _arrow_extension(file_format: ArrowWriteFormat) -> str:
+    if file_format == "parquet":
+        return "parquet"
+    if file_format == "csv":
+        return "csv"
+    return "ipc"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc", "csv"])
+async def test_sqlspec_pipeline_and_backend_arrow_formats_roundtrip(
+    tmp_path: Path, asynchronous: bool, file_format: ArrowWriteFormat
+) -> None:
+    """Sync/AsyncStoragePipeline and ObjectStoreBackend round-trip Parquet, Arrow IPC, and CSV."""
+    registry = ObjectStoreRegistry()
+    register_storage_alias("lake", tmp_path.as_uri(), registry=registry, backend="vertebra", base_path="warehouse")
+    assert isinstance(registry.get("lake"), SQLSpecObjectStoreBackend)
+    store = SyncObjectStore.from_local(tmp_path)
+    backend = SQLSpecObjectStoreBackend(store=store, base_path="warehouse")
+    table = pa.table({"id": [1, 2, 3, 4], "label": ["alpha", "beta", "gamma", "delta"]})
+    ext = _arrow_extension(file_format)
+    pipeline_dest = f"alias://lake/pipeline/items.{ext}"
+    direct_key = f"direct/items.{ext}"
+    cursor_key = f"cursor/items.{ext}"
+
+    if asynchronous:
+        async_pipeline = AsyncStoragePipeline(registry=registry)
+        write_tel = await async_pipeline.write_arrow(table, pipeline_dest, format_hint=file_format)
+        read_table, read_tel = await async_pipeline.read_arrow_async(pipeline_dest, file_format=file_format)
+        await backend.write_arrow_async(direct_key, table)
+        direct_table = await backend.read_arrow_async(direct_key)
+        await backend.write_arrow_cursor_async(cursor_key, table.to_reader(max_chunksize=2))
+        streamed = [
+            batch async for batch in backend.stream_arrow_async(cursor_key, file_format=file_format, batch_size=2)
+        ]
+    else:
+        sync_pipeline = SyncStoragePipeline(registry=registry)
+        write_tel = sync_pipeline.write_arrow(table, pipeline_dest, format_hint=file_format)
+        read_table, read_tel = sync_pipeline.read_arrow(pipeline_dest, file_format=file_format)
+        backend.write_arrow_sync(direct_key, table)
+        direct_table = backend.read_arrow_sync(direct_key)
+        backend.write_arrow_cursor_sync(cursor_key, table.to_reader(max_chunksize=2))
+        streamed = list(backend.stream_arrow_sync(cursor_key, file_format=file_format, batch_size=2))
+
+    assert write_tel.get("rows_processed") == 4
+    assert read_tel.get("rows_processed") == 4
+    assert read_table.to_pydict() == table.to_pydict()
+    assert direct_table.to_pydict() == table.to_pydict()
+    assert [batch.num_rows for batch in streamed] == [2, 2]
+    assert pa.Table.from_batches(streamed).to_pydict() == table.to_pydict()
+
+    if file_format == "csv":
+        mem_store = SyncObjectStore("memory://")
+        mem_backend = SQLSpecObjectStoreBackend(store=mem_store)
+        if asynchronous:
+            await mem_backend.write_arrow_async("custom.csv", table, write_options={"delimiter": ";"})
+            projected = [
+                batch
+                async for batch in mem_backend.stream_arrow_async(
+                    "custom.csv", file_format="csv", batch_size=2, delimiter=";", columns=["id"]
+                )
+            ]
+        else:
+            mem_backend.write_arrow_sync("custom.csv", table, write_options={"delimiter": ";"})
+            projected = list(
+                mem_backend.stream_arrow_sync(
+                    "custom.csv", file_format="csv", batch_size=2, delimiter=";", columns=["id"]
+                )
+            )
+        assert mem_store.head("custom.csv").content_type == "text/csv"
+        assert pa.Table.from_batches(projected).to_pydict() == {"id": [1, 2, 3, 4]}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc", "csv"])
+@pytest.mark.parametrize("surface", ["pipeline", "backend_table", "backend_cursor", "if_not_exists"])
+async def test_sqlspec_arrow_overwrite_false_preserves_existing_object(
+    tmp_path: Path, asynchronous: bool, file_format: ArrowWriteFormat, surface: str
+) -> None:
+    """overwrite=False and if_not_exists=True reject clobbering existing objects across all Arrow formats."""
+    registry = ObjectStoreRegistry()
+    register_storage_alias("lake", tmp_path.as_uri(), registry=registry, backend="vertebra")
+    assert isinstance(registry.get("lake"), SQLSpecObjectStoreBackend)
+    backend = SQLSpecObjectStoreBackend(LocalConfig(root=tmp_path))
+    ext = _arrow_extension(file_format)
+    key = f"protected/{surface}.{ext}"
+    dest = f"alias://lake/{key}"
+    initial = pa.table({"id": [1, 2], "name": ["keep-a", "keep-b"]})
+    replacement = pa.table({"id": [99], "name": ["clobber"]})
+
+    if asynchronous:
+        await backend.write_arrow_async(key, initial, file_format=file_format)
+        initial_bytes = await backend.read_bytes_async(key)
+        with pytest.raises(FileExistsError):
+            if surface == "pipeline":
+                await AsyncStoragePipeline(registry=registry).write_arrow(
+                    replacement, dest, format_hint=file_format, overwrite=False
+                )
+            elif surface == "backend_table":
+                await backend.write_arrow_async(key, replacement, file_format=file_format, overwrite=False)
+            elif surface == "backend_cursor":
+                await backend.write_arrow_cursor_async(
+                    key, replacement.to_reader(), file_format=file_format, overwrite=False
+                )
+            else:
+                await backend.write_arrow_async(key, replacement, file_format=file_format, if_not_exists=True)
+        assert await backend.read_bytes_async(key) == initial_bytes
+        assert (await backend.read_arrow_async(key, file_format=file_format)).to_pydict() == initial.to_pydict()
+
+        if surface == "pipeline":
+            await AsyncStoragePipeline(registry=registry).write_arrow(
+                replacement, dest, format_hint=file_format, overwrite=True
+            )
+        else:
+            await backend.write_arrow_async(key, replacement, file_format=file_format, overwrite=True)
+        assert (await backend.read_arrow_async(key, file_format=file_format)).to_pydict() == replacement.to_pydict()
+    else:
+        backend.write_arrow_sync(key, initial, file_format=file_format)
+        initial_bytes = backend.read_bytes_sync(key)
+        with pytest.raises(FileExistsError):
+            if surface == "pipeline":
+                SyncStoragePipeline(registry=registry).write_arrow(
+                    replacement, dest, format_hint=file_format, overwrite=False
+                )
+            elif surface == "backend_table":
+                backend.write_arrow_sync(key, replacement, file_format=file_format, overwrite=False)
+            elif surface == "backend_cursor":
+                backend.write_arrow_cursor_sync(key, replacement.to_reader(), file_format=file_format, overwrite=False)
+            else:
+                backend.write_arrow_sync(key, replacement, file_format=file_format, if_not_exists=True)
+        assert backend.read_bytes_sync(key) == initial_bytes
+        assert backend.read_arrow_sync(key, file_format=file_format).to_pydict() == initial.to_pydict()
+
+        if surface == "pipeline":
+            SyncStoragePipeline(registry=registry).write_arrow(
+                replacement, dest, format_hint=file_format, overwrite=True
+            )
+        else:
+            backend.write_arrow_sync(key, replacement, file_format=file_format, overwrite=True)
+        assert backend.read_arrow_sync(key, file_format=file_format).to_pydict() == replacement.to_pydict()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc", "csv"])
+@pytest.mark.parametrize("surface", ["pipeline", "backend"])
+async def test_sqlspec_arrow_midstream_failure_and_cancellation_abort_upload(
+    tmp_path: Path, file_format: ArrowWriteFormat, surface: str
+) -> None:
+    """Mid-stream batch errors and async task cancellation abort multipart uploads without corrupting objects."""
+    registry = ObjectStoreRegistry()
+    register_storage_alias("lake", tmp_path.as_uri(), registry=registry, backend="vertebra")
+    assert isinstance(registry.get("lake"), SQLSpecObjectStoreBackend)
+    backend = SQLSpecObjectStoreBackend(LocalConfig(root=tmp_path))
+    ext = _arrow_extension(file_format)
+    schema = pa.schema([("id", pa.int64()), ("blob", pa.string())])
+    prior_table = pa.table({"id": [10, 20], "blob": ["intact-a", "intact-b"]})
+    existing_key = f"abort/existing-{surface}.{ext}"
+    fresh_key = f"abort/fresh-{surface}.{ext}"
+    backend.write_arrow_sync(existing_key, prior_table, file_format=file_format)
+    prior_bytes = backend.read_bytes_sync(existing_key)
+    wopts = {"row_group_size": 2} if file_format == "parquet" else None
+
+    def failing_batches() -> Iterator[pa.RecordBatch]:
+        yield pa.record_batch([pa.array([1, 2]), pa.array(["x" * 1024, "y" * 1024])], schema=schema)
+        raise RuntimeError("mid-stream generator boom")
+
+    with pytest.raises(RuntimeError, match="mid-stream generator boom"):
+        if surface == "pipeline":
+            SyncStoragePipeline(registry=registry).write_arrow_batches(
+                f"alias://lake/{existing_key}",
+                pa.RecordBatchReader.from_batches(schema, failing_batches()),
+                file_format=file_format,
+                write_options=wopts,
+            )
+        else:
+            backend.write_arrow_cursor_sync(
+                existing_key,
+                pa.RecordBatchReader.from_batches(schema, failing_batches()),
+                file_format=file_format,
+                write_options=wopts,
+            )
+    assert backend.read_bytes_sync(existing_key) == prior_bytes
+
+    with pytest.raises(RuntimeError, match="mid-stream generator boom"):
+        if surface == "pipeline":
+            await AsyncStoragePipeline(registry=registry).write_arrow_batches_async(
+                f"alias://lake/{fresh_key}",
+                pa.RecordBatchReader.from_batches(schema, failing_batches()),
+                file_format=file_format,
+                write_options=wopts,
+            )
+        else:
+            await backend.write_arrow_cursor_async(
+                fresh_key,
+                pa.RecordBatchReader.from_batches(schema, failing_batches()),
+                file_format=file_format,
+                write_options=wopts,
+            )
+    assert not await backend.exists_async(fresh_key)
+
+    yielded_first = threading.Event()
+    unblock = threading.Event()
+
+    def blocking_batches() -> Iterator[pa.RecordBatch]:
+        yield pa.record_batch([pa.array([1, 2]), pa.array(["x" * 4096, "y" * 4096])], schema=schema)
+        yielded_first.set()
+        unblock.wait(timeout=5.0)
+        yield pa.record_batch([pa.array([3, 4]), pa.array(["z" * 4096, "w" * 4096])], schema=schema)
+
+    coro: Coroutine[Any, Any, Any]
+    if surface == "pipeline":
+        coro = AsyncStoragePipeline(registry=registry).write_arrow_batches_async(
+            f"alias://lake/{existing_key}",
+            pa.RecordBatchReader.from_batches(schema, blocking_batches()),
+            file_format=file_format,
+            write_options=wopts,
+        )
+    else:
+        coro = backend.write_arrow_cursor_async(
+            existing_key,
+            pa.RecordBatchReader.from_batches(schema, blocking_batches()),
+            file_format=file_format,
+            write_options=wopts,
+        )
+
+    task = asyncio.create_task(coro)
+    try:
+        async with asyncio.timeout(5):
+            while not yielded_first.is_set():
+                await asyncio.sleep(0.005)
+        task.cancel()
+        unblock.set()
+        with pytest.raises(CancelledError):
+            await task
+    finally:
+        unblock.set()
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+    assert await backend.read_bytes_async(existing_key) == prior_bytes
+    assert (
+        await backend.read_arrow_async(existing_key, file_format=file_format)
+    ).to_pydict() == prior_table.to_pydict()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("file_format", ["parquet", "arrow-ipc", "csv"])
+@pytest.mark.parametrize("surface", ["pipeline", "backend"])
+async def test_sqlspec_arrow_streaming_tracemalloc_peak_bounded(
+    tmp_path: Path, asynchronous: bool, file_format: ArrowWriteFormat, surface: str
+) -> None:
+    """Multi-batch streaming keeps Python tracemalloc peak memory bounded well below total payload size."""
+    registry = ObjectStoreRegistry()
+    register_storage_alias("lake", tmp_path.as_uri(), registry=registry, backend="vertebra")
+    assert isinstance(registry.get("lake"), SQLSpecObjectStoreBackend)
+    backend = SQLSpecObjectStoreBackend(LocalConfig(root=tmp_path))
+    schema = pa.schema([("id", pa.int64()), ("payload", pa.string())])
+    num_batches = 160
+    rows_per_batch = 128
+    row_body = "a" * 4096
+
+    def generate_batches() -> Iterator[pa.RecordBatch]:
+        for batch_idx in range(num_batches):
+            base = batch_idx * rows_per_batch
+            ids = pa.array(range(base, base + rows_per_batch), type=pa.int64())
+            payloads = pa.array([f"{batch_idx:06d}-{row_body}" for _ in range(rows_per_batch)], type=pa.string())
+            yield pa.record_batch([ids, payloads], schema=schema)
+
+    ext = _arrow_extension(file_format)
+    key = f"bounded/{surface}-{asynchronous}.{ext}"
+    dest = f"alias://lake/{key}"
+    wopts: dict[str, Any] | None = (
+        {"row_group_size": 256, "use_dictionary": False} if file_format == "parquet" else None
+    )
+    comp = "NONE" if file_format == "parquet" else None
+    backend_extra: dict[str, Any] = {"compression": "NONE", **(wopts or {})} if file_format == "parquet" else {}
+    reader = pa.RecordBatchReader.from_batches(schema, generate_batches())
+
+    tracemalloc.start()
+    try:
+        if asynchronous:
+            if surface == "pipeline":
+                await AsyncStoragePipeline(registry=registry).write_arrow_batches_async(
+                    dest, reader, file_format=file_format, compression=comp, write_options=wopts
+                )
+            else:
+                await backend.write_arrow_cursor_async(key, reader, file_format=file_format, **backend_extra)
+        elif surface == "pipeline":
+            SyncStoragePipeline(registry=registry).write_arrow_batches(
+                dest, reader, file_format=file_format, compression=comp, write_options=wopts
+            )
+        else:
+            backend.write_arrow_cursor_sync(key, reader, file_format=file_format, **backend_extra)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    meta = await backend.get_metadata_async(key) if asynchronous else backend.get_metadata_sync(key)
+    stored_size = int(cast("int", meta["size"]))
+    assert stored_size >= 75 * 1024 * 1024
+    assert peak < stored_size * 0.35
+    total_rows = sum(
+        batch.num_rows
+        for batch in backend.stream_arrow_sync(key, file_format=file_format, batch_size=512, columns=["id"])
+    )
+    assert total_rows == num_batches * rows_per_batch
+
+
+@pytest.mark.parametrize("format_hint", ["parquet", "arrow-ipc", "csv"])
+def test_arrow_storage_pipeline_microbenchmark_smoke(format_hint: ArrowWriteFormat) -> None:
+    """Smoke-invoke benchmark_arrow_storage_pipeline on a small fixture table across Arrow formats."""
+    fixture_table = pa.table(
+        {
+            "id": list(range(256)),
+            "payload": [f"{idx:04d}-" + ("v" * 256) for idx in range(256)],
+        }
+    )
+    result = benchmark_arrow_storage_pipeline(
+        table=fixture_table,
+        format_hint=format_hint,
+        iterations=2,
+        rounds=2,
+        warmup_rounds=1,
+    )
+    assert isinstance(result, ArrowPipelineBenchResult)
+    assert result.format_hint == format_hint
+    assert result.rows == 256
+    assert result.payload_bytes > 0
+    assert result.direct.ops_per_sec > 0.0
+    assert result.buffered.ops_per_sec > 0.0
+    assert result.direct.median_ns > 0.0
+    assert result.buffered.median_ns > 0.0
+    assert result.direct.p99_ns >= result.direct.median_ns
+    assert result.buffered.p99_ns >= result.buffered.median_ns
+    assert result.direct.peak_memory_kib is not None
+    assert result.buffered.peak_memory_kib is not None
+    assert 0.0 < result.direct.peak_memory_kib < 4096.0
+    assert 0.0 < result.buffered.peak_memory_kib < 4096.0
+
+
+def test_arrow_storage_pipeline_microbenchmark_default_bounds_streaming_peak() -> None:
+    """Default multi-batch table keeps direct streaming tracemalloc peak below buffered payload encoding."""
+    result = benchmark_arrow_storage_pipeline(iterations=1, rounds=1, warmup_rounds=1)
+    assert result is not None
+    assert result.payload_bytes >= 20 * 1024 * 1024
+    assert result.direct.ops_per_sec > 0.0
+    assert result.buffered.ops_per_sec > 0.0
+    assert result.direct.peak_memory_kib is not None
+    assert result.buffered.peak_memory_kib is not None
+    assert result.direct.peak_memory_kib < result.buffered.peak_memory_kib
+
+
+@pytest.mark.parametrize("missing_module", ["pyarrow", "sqlspec.storage.pipeline", "vertebra._storage"])
+def test_arrow_storage_pipeline_microbenchmark_skips_when_optional_extra_missing(
+    monkeypatch: pytest.MonkeyPatch, missing_module: str
+) -> None:
+    """benchmark_arrow_storage_pipeline returns None cleanly when optional extras are absent."""
+
+    def fake_import_optional(name: str) -> Any | None:
+        if name == missing_module:
+            return None
+        return import_optional(name)
+
+    monkeypatch.setattr("tools.benchmarks.micro.import_optional", fake_import_optional)
+    assert benchmark_arrow_storage_pipeline(iterations=1, rounds=1, warmup_rounds=0) is None

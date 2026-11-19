@@ -2324,38 +2324,75 @@ fn shared_gcp_direct_http_client() -> &'static reqwest::Client {
     })
 }
 
-async fn send_post_with_client(
+fn parse_gcp_http_method(method: &str) -> Result<reqwest::Method, String> {
+    if method.eq_ignore_ascii_case("GET") {
+        Ok(reqwest::Method::GET)
+    } else if method.eq_ignore_ascii_case("POST") {
+        Ok(reqwest::Method::POST)
+    } else if method.eq_ignore_ascii_case("PATCH") {
+        Ok(reqwest::Method::PATCH)
+    } else if method.eq_ignore_ascii_case("PUT") {
+        Ok(reqwest::Method::PUT)
+    } else if method.eq_ignore_ascii_case("DELETE") {
+        Ok(reqwest::Method::DELETE)
+    } else {
+        Err(format!(
+            "unsupported HTTP method `{method}`; expected GET, POST, PATCH, PUT, or DELETE"
+        ))
+    }
+}
+
+/// Validate and normalize an HTTP method supported by [`gcp_http2_request`].
+pub fn validate_gcp_http_method(method: &str) -> Result<&'static str, String> {
+    match parse_gcp_http_method(method)? {
+        reqwest::Method::GET => Ok("GET"),
+        reqwest::Method::POST => Ok("POST"),
+        reqwest::Method::PATCH => Ok("PATCH"),
+        reqwest::Method::PUT => Ok("PUT"),
+        reqwest::Method::DELETE => Ok("DELETE"),
+        other => Err(format!("unsupported HTTP method `{other}`")),
+    }
+}
+
+async fn send_request_with_client(
     client: &reqwest::Client,
+    method: reqwest::Method,
     url: &str,
     headers: &HashMap<String, String>,
-    body: bytes::Bytes,
+    body: Option<bytes::Bytes>,
     timeout: Duration,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let mut req = client.post(url).timeout(timeout).body(body);
+    let mut req = client.request(method, url).timeout(timeout);
+    if let Some(payload) = body {
+        req = req.body(payload);
+    }
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
     req.send().await
 }
 
-/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request and return `(status, lowercase_headers, body)`.
-pub async fn gcp_http2_post(
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 request and return `(status, lowercase_headers, body)`.
+pub async fn gcp_http2_request(
+    method: &str,
     url: &str,
     headers: &HashMap<String, String>,
-    body: Vec<u8>,
+    body: Option<Vec<u8>>,
     timeout_ms: u64,
 ) -> Result<(u16, HashMap<String, String>, Vec<u8>), String> {
+    let parsed_method = parse_gcp_http_method(method)?;
+    let method_name = parsed_method.as_str().to_owned();
     let timeout = Duration::from_millis(timeout_ms.max(1));
-    let payload = bytes::Bytes::from(body);
+    let payload = body.map(bytes::Bytes::from);
     let client = if url_is_loopback(url) {
         shared_gcp_direct_http_client()
     } else {
         shared_gcp_http_client()
     };
 
-    let resp = send_post_with_client(client, url, headers, payload, timeout)
+    let resp = send_request_with_client(client, parsed_method, url, headers, payload, timeout)
         .await
-        .map_err(|e| format!("GCP HTTP/2 POST to `{url}` failed: {e}"))?;
+        .map_err(|e| format!("GCP HTTP/2 {method_name} to `{url}` failed: {e}"))?;
 
     let status = resp.status().as_u16();
     let mut out_headers = HashMap::with_capacity(resp.headers().len() + 2);
@@ -2369,6 +2406,16 @@ pub async fn gcp_http2_post(
         .await
         .map_err(|e| format!("failed to read GCP HTTP/2 response body from `{url}`: {e}"))?;
     Ok((status, out_headers, body_bytes.to_vec()))
+}
+
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request and return `(status, lowercase_headers, body)`.
+pub async fn gcp_http2_post(
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Vec<u8>,
+    timeout_ms: u64,
+) -> Result<(u16, HashMap<String, String>, Vec<u8>), String> {
+    gcp_http2_request("POST", url, headers, Some(body), timeout_ms).await
 }
 
 pub type GcpCachedTokenVisitFn = unsafe extern "C" fn(

@@ -89,6 +89,7 @@ nav = [
     ] },
     { "Agents & Native SDKs" = [
       { "Agent Runtime (MCP & A2A)" = "reference/agent.md" },
+      { "OKF & Knowledge Catalog" = "reference/okf-and-catalog.md" },
       { "PyO3 Native Stubs" = "reference/native-stubs.md" },
     ] },
   ] },

@@ -1711,3 +1711,61 @@ async def test_async_gcp_token_cache_external_account_adc_refresh_and_executable
     )
     with pytest.raises((GoogleCloudAuthError, ValueError, RuntimeError)):
         SyncGcpTokenCache({"application_credentials": str(exec_adc_path)}, allow_ambient_adc=False)
+
+
+@pytest.mark.parametrize(
+    ("use_config", "option_key", "option_kind"),
+    [
+        (True, "service_account_key", "malformed_json"),
+        (False, "service_account_key", "malformed_json"),
+        (True, "service_account_path", "missing_path"),
+        (False, "service_account_path", "missing_path"),
+        (True, "application_credentials", "missing_path"),
+        (False, "application_credentials", "missing_path"),
+        (False, "application_credentials_path", "missing_path"),
+        (True, "application_credentials", "malformed_file"),
+        (False, "service_account_key", "blank_value"),
+    ],
+)
+def test_object_store_explicit_gcs_credentials_fail_closed(
+    tmp_path: Path,
+    use_config: bool,
+    option_key: str,
+    option_kind: str,
+) -> None:
+    """SyncObjectStore and AsyncObjectStore raise ImproperConfigurationError on invalid explicit GCS credentials."""
+    if option_kind == "malformed_json":
+        value = "{not-valid-service-account-json"
+    elif option_kind == "missing_path":
+        value = str(tmp_path / "does-not-exist-credentials.json")
+    elif option_kind == "malformed_file":
+        bad_file = tmp_path / "malformed_adc.json"
+        bad_file.write_text("{broken-json", encoding="utf-8")
+        value = str(bad_file)
+    else:
+        value = "   "
+
+    if use_config:
+        cfg_kwargs: dict[str, Any] = {"bucket": "fail-closed-bucket", option_key: value}
+        target: str | GCSConfig = GCSConfig(**cfg_kwargs)
+        options: dict[str, str] | None = None
+    else:
+        target = "gs://fail-closed-bucket"
+        options = {option_key: value}
+
+    with pytest.raises(ImproperConfigurationError):
+        SyncObjectStore(target, options=options)
+    with pytest.raises(ImproperConfigurationError):
+        AsyncObjectStore(target, options=options)
+
+
+def test_object_store_ambient_gcs_probe_suppresses_missing_adc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient ADC auto-probing stays non-fatal when no explicit GCS credential option is supplied."""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing-ambient-adc.json"))
+    sync_store = SyncObjectStore("gs://ambient-probe-bucket", options={"allow_ambient_adc": "false"})
+    async_store = AsyncObjectStore("gs://ambient-probe-bucket", options={"allow_ambient_adc": "false"})
+    sync_store.close()
+    async_store.close()

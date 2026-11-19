@@ -31,6 +31,7 @@ _MODULE_TO_EXTRA: tuple[tuple[str, str], ...] = (
     ("advanced_alchemy", "alchemy"),
     ("sqlalchemy", "alchemy"),
     ("fastembed", "embeddings"),
+    ("opentelemetry", "opentelemetry"),
     ("pyarrow", "arrow"),
     ("jwt", "iap"),
 )

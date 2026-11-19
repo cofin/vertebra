@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 from urllib.parse import quote
 
 import msgspec
@@ -35,9 +35,13 @@ from vertebra.extensions.sqlspec.adapters.postgres.litestar import PostgresLites
 if TYPE_CHECKING:
     from sqlspec.core import StatementConfig
 
+    from vertebra.db.driver._cloud_auth import DatabaseTokenProvider
+
 __all__ = ("PostgresAsyncConfig", "PostgresSyncConfig")
 
+_UNSET: Any = object()
 _URL_ALIAS_KEYS = ("url", "dsn", "conninfo", "connection_string")
+_PG_ENDPOINT_KEYS = ("host", "port", "user", "password", "database", "ssl")
 _PG_POOL_ONLY_KEYS = (
     "init",
     "max_inactive_connection_lifetime",
@@ -271,6 +275,83 @@ def _direct_connection_metadata(
     return metadata
 
 
+def _derive_pg_pool(
+    adapter: PostgresSyncConfig | PostgresAsyncConfig,
+    overrides: Mapping[str, Any],
+) -> Any:
+    """Clone `PostgresSyncConfig` or `PostgresAsyncConfig` preserving `token_provider` and `ca_pem` across URL overrides."""
+    explicit_conn: dict[str, Any] = {}
+    override_conn = overrides.get("connection_config")
+    if isinstance(override_conn, Mapping):
+        explicit_conn.update(override_conn)
+    conn_overrides = overrides.get("connection_config_overrides")
+    if isinstance(conn_overrides, Mapping):
+        explicit_conn.update(conn_overrides)
+    for key, value in overrides.items():
+        if key not in adapter._ADAPTER_META_KEYS and key != "pool_config":
+            explicit_conn[key] = value
+
+    has_url_override = any(
+        isinstance(explicit_conn.get(alias), str) and explicit_conn[alias].strip() for alias in _URL_ALIAS_KEYS
+    )
+    if not has_url_override:
+        return adapter._derive_adapter_pool(adapter, overrides)
+
+    merged_connection = dict(adapter.connection_config)
+    for alias in _URL_ALIAS_KEYS:
+        merged_connection.pop(alias, None)
+    for endpoint_key in _PG_ENDPOINT_KEYS:
+        if endpoint_key not in explicit_conn:
+            merged_connection.pop(endpoint_key, None)
+    if "token_provider" not in explicit_conn and adapter.driver_config.token_provider is not None:
+        merged_connection["token_provider"] = adapter.driver_config.token_provider
+    if "ca_pem" not in explicit_conn and adapter.driver_config.ca_pem is not None:
+        merged_connection["ca_pem"] = adapter.driver_config.ca_pem
+    merged_connection.update(explicit_conn)
+
+    merged_features = dict(overrides.get("driver_features", adapter.driver_features))
+    merged_features.pop("_statement_cache_holder", None)
+    feature_overrides = overrides.get("driver_features_overrides")
+    if isinstance(feature_overrides, Mapping):
+        merged_features.update(feature_overrides)
+
+    pool_cfg_override = overrides.get("pool_config")
+    resolved_pool_cfg = (
+        dict(pool_cfg_override)
+        if isinstance(pool_cfg_override, Mapping)
+        else (dict(adapter.pool_config) if adapter.pool_config else None)
+    )
+    if resolved_pool_cfg is not None:
+        for alias in _URL_ALIAS_KEYS:
+            resolved_pool_cfg.pop(alias, None)
+        for endpoint_key in _PG_ENDPOINT_KEYS:
+            if endpoint_key not in explicit_conn:
+                resolved_pool_cfg.pop(endpoint_key, None)
+
+    return type(adapter)(
+        None,
+        bind_key=str(overrides.get("bind_key", adapter.bind_key or "default")),
+        broker=overrides.get("broker", adapter.broker),
+        share_pool=bool(overrides.get("share_pool", adapter.share_pool)),
+        arrow_threshold_rows=int(overrides.get("arrow_threshold_rows", adapter.arrow_threshold_rows)),
+        statement_config=overrides.get("statement_config", adapter.statement_config),
+        connection_config={k: v for k, v in merged_connection.items() if k not in adapter._ADAPTER_META_KEYS},
+        pool_config=resolved_pool_cfg,
+        migration_config=(
+            dict(overrides["migration_config"])
+            if isinstance(overrides.get("migration_config"), Mapping)
+            else dict(adapter.migration_config)
+            if isinstance(adapter.migration_config, Mapping)
+            else cast("Any", adapter.migration_config)
+        ),
+        driver_features=merged_features,
+        extension_config=dict(overrides.get("extension_config", adapter.extension_config)),
+        observability_config=overrides.get("observability_config", adapter.observability_config),
+        replicas=None,
+        is_replica=bool(overrides.get("is_replica", False)),
+    )
+
+
 class PostgresSyncConfig(
     SyncAdapterConfig[PostgreSQLConfig, SyncPostgreSQLDriver, SyncPostgreSQLDriver, PostgresSyncDriver]
 ):
@@ -322,9 +403,15 @@ class PostgresSyncConfig(
         observability_config: Any | None = None,
         replicas: Any | None = None,
         is_replica: bool = False,
+        token_provider: DatabaseTokenProvider | None = _UNSET,
+        ca_pem: str | None = _UNSET,
         **kwargs: Any,
     ) -> None:
         """Initialize synchronous PostgreSQL SQLSpec adapter configuration."""
+        if token_provider is not _UNSET:
+            kwargs["token_provider"] = token_provider
+        if ca_pem is not _UNSET:
+            kwargs["ca_pem"] = ca_pem
         resolved_cfg, merged_conn, pool_cfg, features_dict = _resolve_pg_init_inputs(
             config,
             connection_config,
@@ -385,6 +472,10 @@ class PostgresSyncConfig(
             is_replica=self.is_replica,
         )
 
+    def derive_pool(self, **overrides: Any) -> Self:
+        """Clone this synchronous PostgreSQL configuration preserving cloud auth and Root CA settings."""
+        return cast("Self", _derive_pg_pool(self, overrides))
+
 
 class PostgresAsyncConfig(
     AsyncAdapterConfig[PostgreSQLConfig, AsyncPostgreSQLDriver, AsyncPostgreSQLDriver, PostgresAsyncDriver]
@@ -437,9 +528,15 @@ class PostgresAsyncConfig(
         observability_config: Any | None = None,
         replicas: Any | None = None,
         is_replica: bool = False,
+        token_provider: DatabaseTokenProvider | None = _UNSET,
+        ca_pem: str | None = _UNSET,
         **kwargs: Any,
     ) -> None:
         """Initialize asynchronous PostgreSQL SQLSpec adapter configuration."""
+        if token_provider is not _UNSET:
+            kwargs["token_provider"] = token_provider
+        if ca_pem is not _UNSET:
+            kwargs["ca_pem"] = ca_pem
         resolved_cfg, merged_conn, pool_cfg, features_dict = _resolve_pg_init_inputs(
             config,
             connection_config,
@@ -499,3 +596,7 @@ class PostgresAsyncConfig(
             replicas=_derive_direct_replicas(self),
             is_replica=self.is_replica,
         )
+
+    def derive_pool(self, **overrides: Any) -> Self:
+        """Clone this asynchronous PostgreSQL configuration preserving cloud auth and Root CA settings."""
+        return cast("Self", _derive_pg_pool(self, overrides))

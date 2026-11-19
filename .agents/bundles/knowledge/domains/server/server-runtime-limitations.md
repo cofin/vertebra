@@ -70,6 +70,12 @@ sources:
 - id: http-profile-rs
   resource: src/rs/vertebra-http/src/profile.rs::ProfileEndpoint
   title: Diagnostic /debug/pprof/* authorization and 404 guards
+- id: server-loops-py
+  resource: src/py/vertebra/server/_loops.py::EventLoopPool
+  title: Inline EventLoopPool exit hook and fast-loop eager task factory
+- id: server-platform-py
+  resource: src/py/vertebra/server/platform.py::ZPagesRegistry
+  title: Diagnostic /taskz cross-shard call-graph timeout and fallback boundaries
 ---
 
 # Server Runtime Limitations
@@ -84,6 +90,8 @@ sources:
 - HTTP/3 WebTransport (`WebTransportSession`, `WebTransportStream`, `register_webtransport_handler`) runs only in single-process `Topology::Embedded` over `BatchBridge`; `Topology::Shm` and unattached embedded endpoints log a warning and reject extended `CONNECT` with `501 Not Implemented`, and session dispatch forwards bidirectional streams and datagrams only (no unidirectional stream forwarding) [^wt-bridge-py].
 - SHM worker `pubsub_publish` frames `[topic_len][key_len][topic][key][payload]` into `ShmLeaseTable` channel `__vtb_pubsub__` and raises `ValueError` whenever the framed payload exceeds `CHAN_MAX_PAYLOAD_BYTES` (`256` bytes); payloads above `256` bytes are accepted only in `Topology::Embedded` via `BatchBridge::publish_pubsub` [^broker-py] [^core-bridge-rs].
 - `ProfileEndpoint` (`/debug/pprof/*`) returns `404 Not Found` (`{"error":"heap profiling not supported"}`) for `/debug/pprof/heap` even when enabled and bearer-authorized, returns `404 Not Found` (`{"error":"profiling feature disabled"}`) for `/debug/pprof/profile` unless built with `all(unix, feature = "profiling")`, and clamps CPU capture duration to `10 ms..5000 ms` (default `1000 ms`) [^http-profile-rs].
+- Inline single-loop `EventLoopPool` instances wrap `loop.run_forever` and `loop.run_until_complete` at construction so `stop()` called from a running loop closes the loop on exit after `_drain_loop()`; custom C or Rust loop types with read-only method descriptors suppress wrapper assignment and still drain pending tasks and async generators before `loop.stop()`, leaving final `loop.close()` to the caller after `run_forever()` returns [^server-loops-py].
+- `capture_loop_task_snapshots` and `/taskz` (`ZPagesRegistry.get_tasks_payload` and `get_tasks_payload_async`) use Python 3.14+ `asyncio.capture_call_graph` and `asyncio.format_call_graph` when supported and fall back to `Task.get_stack(limit=8)` on Python 3.12–3.13 or non-stdlib task types; cross-thread background shard inspections bound each shard probe to a `1.0 s` timeout and omit unresponsive, stopped, or closed loops [^server-loops-py] [^server-platform-py].
 <!-- truth: end -->
 
 ## Operational Context
@@ -107,3 +115,5 @@ Current server architecture and streaming transport details live in [ASGI, RSGI 
 [^broker-py]: `src/rs/vertebra-py/src/broker.rs::pubsub_publish` — Worker `pubsub_publish` Embedded and SHM bridge routing.
 [^core-bridge-rs]: `src/rs/vertebra-core/src/bridge.rs::encode_shm_pubsub_frame` — SHM pub/sub 256-byte `CHAN_MAX_PAYLOAD_BYTES` frame encoding.
 [^http-profile-rs]: `src/rs/vertebra-http/src/profile.rs::ProfileEndpoint` — Diagnostic `/debug/pprof/*` authorization and `404` guards.
+[^server-loops-py]: `src/py/vertebra/server/_loops.py::EventLoopPool` — Inline `EventLoopPool` exit hook and fast-loop eager task factory.
+[^server-platform-py]: `src/py/vertebra/server/platform.py::ZPagesRegistry` — Diagnostic `/taskz` cross-shard call-graph timeout and fallback boundaries.

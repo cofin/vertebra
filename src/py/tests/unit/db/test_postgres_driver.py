@@ -38,6 +38,7 @@ from vertebra.db.adapters.postgres import (
     SyncPostgreSQLDriver,
 )
 from vertebra.db.adapters.postgres.options import build_native_client_options
+from vertebra.db.dialer import aws_rds_root_ca_pem
 from vertebra.db.driver import (
     AZURE_POSTGRES_SCOPE,
     AwsAuroraDsqlIamTokenProvider,
@@ -1191,6 +1192,7 @@ async def test_postgres_drivers_token_provider_refresh_and_auth_retry(mode: str)
             srv_thread.join(timeout=2.0)
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("explicit_scope", "expected_scope"),
     [
@@ -1198,7 +1200,7 @@ async def test_postgres_drivers_token_provider_refresh_and_auth_retry(mode: str)
         ("https://custom.postgres.example/.default", "https://custom.postgres.example/.default"),
     ],
 )
-def test_postgres_config_azure_entra_default_scope_and_redaction(
+async def test_postgres_config_azure_entra_default_scope_and_redaction(
     explicit_scope: str | None,
     expected_scope: str,
 ) -> None:
@@ -1212,7 +1214,7 @@ def test_postgres_config_azure_entra_default_scope_and_redaction(
     provider = AzureEntraTokenProvider(
         tenant_id="contoso.onmicrosoft.com",
         client_id="pg-client",
-        client_secret="test-client-secret-placeholder",
+        client_secret="test-token-placeholder-secret",
         scope=explicit_scope,
         fetcher=_fetch,
         clock=lambda: 1000.0,
@@ -1221,14 +1223,145 @@ def test_postgres_config_azure_entra_default_scope_and_redaction(
         dsn="postgresql://entra_user@pg.postgres.database.azure.com:5432/appdb?sslmode=require",
         token_provider=provider,
     )
+    assert isinstance(cfg.token_provider, AzureEntraTokenProvider)
+    assert cfg.token_provider.scope == expected_scope
     rendered = repr(cfg)
     assert "AzureEntraTokenProvider" in rendered
-    assert "test-client-secret-placeholder" not in rendered
+    assert "test-token-placeholder-secret" not in rendered
+
+    assert cfg.resolve_iam_password_sync() == f"test-token-placeholder-{expected_scope}"
+    assert await cfg.resolve_iam_password_async(force_refresh=True) == f"test-token-placeholder-{expected_scope}"
 
     opts = build_native_client_options(cfg, env={})
     assert opts.password == f"test-token-placeholder-{expected_scope}"
-    assert seen_scopes == [expected_scope]
+    assert seen_scopes == [expected_scope, expected_scope]
     assert "test-token-placeholder-" not in repr(cfg)
+
+
+@pytest.mark.parametrize(
+    ("ca_source", "explicit_sslmode", "expected_sslmode"),
+    [
+        ("default_rds", None, "verify-full"),
+        ("default_rds", "verify-ca", "verify-ca"),
+        ("config_str", None, "verify-full"),
+        ("override_str", "require", "require"),
+        ("override_bytes", None, "verify-full"),
+        ("sslrootcert", None, "verify-full"),
+    ],
+)
+def test_postgres_cloud_auth_rds_ca_bundle_and_ca_pem_normalization(
+    tmp_path: Path,
+    ca_source: str,
+    explicit_sslmode: str | None,
+    expected_sslmode: str,
+) -> None:
+    """Verify remote AwsRdsIamTokenProvider attaches aws_rds_root_ca_pem and normalizes custom ca_pem/sslrootcert."""
+    rds_provider = AwsRdsIamTokenProvider(
+        endpoint_host="orders.c9akciq32.us-east-1.rds.amazonaws.com",
+        region="us-east-1",
+        username="iam_user",
+        access_key_id="test-token-placeholder-akid",
+        secret_access_key="test-token-placeholder-secret",
+        clock=lambda: 1_794_873_600.0,
+    )
+    custom_pem = "-----BEGIN CERTIFICATE-----\nMIIB+TCCAWACCQD=\n-----END CERTIFICATE-----\n"
+    dsn_suffix = f"?sslmode={explicit_sslmode}" if explicit_sslmode is not None else ""
+    base_dsn = f"postgresql://iam_user@orders.c9akciq32.us-east-1.rds.amazonaws.com:5432/appdb{dsn_suffix}"
+
+    overrides: dict[str, Any] = {}
+    config_ca: str | None = None
+    expected_ca_bytes = aws_rds_root_ca_pem().encode("utf-8")
+    if ca_source == "config_str":
+        config_ca = custom_pem
+        expected_ca_bytes = custom_pem.encode("utf-8")
+    elif ca_source == "override_str":
+        overrides["ca_pem"] = custom_pem
+        expected_ca_bytes = custom_pem.encode("utf-8")
+    elif ca_source == "override_bytes":
+        overrides["ca_pem"] = custom_pem.encode("utf-8")
+        expected_ca_bytes = custom_pem.encode("utf-8")
+    elif ca_source == "sslrootcert":
+        ca_file = tmp_path / "custom-rds-ca.pem"
+        ca_file.write_text(custom_pem, encoding="utf-8")
+        overrides["sslrootcert"] = str(ca_file)
+        expected_ca_bytes = custom_pem.encode("utf-8")
+
+    cfg = PostgreSQLConfig(dsn=base_dsn, token_provider=rds_provider, ca_pem=config_ca)
+    opts = build_native_client_options(cfg, env={}, **overrides)
+    assert opts.sslmode == expected_sslmode
+    assert opts.targets[0].sslmode == expected_sslmode
+    assert opts.ca_pem == expected_ca_bytes
+
+    for bad_pem in ("", "   ", "bad\x00pem"):
+        with pytest.raises(ImproperConfigurationError, match="ca_pem"):
+            PostgreSQLConfig(dsn=base_dsn, ca_pem=bad_pem)
+        with pytest.raises(ImproperConfigurationError, match="ca_pem"):
+            build_native_client_options(cfg, env={}, ca_pem=bad_pem)
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "aws_dsql", "azure_entra"])
+@pytest.mark.parametrize(
+    ("host_literal", "is_loopback"),
+    [
+        ("orders.c9akciq32.us-east-1.rds.amazonaws.com", False),
+        ("10.0.0.42", False),
+        ("127.0.0.1", True),
+        ("localhost", True),
+        ("[::1]", True),
+    ],
+)
+def test_postgres_cloud_auth_remote_tls_enforcement_and_loopback_exemption(
+    provider_kind: str,
+    host_literal: str,
+    is_loopback: bool,
+) -> None:
+    """Verify AWS and Azure token providers block sslmode='disable' on remote hosts while allowing loopback stands."""
+    provider: Any
+    if provider_kind == "aws_rds":
+        provider = AwsRdsIamTokenProvider(
+            endpoint_host="orders.c9akciq32.us-east-1.rds.amazonaws.com",
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-akid",
+            secret_access_key="test-token-placeholder-secret",
+            clock=lambda: 1_794_873_600.0,
+        )
+    elif provider_kind == "aws_dsql":
+        provider = AwsAuroraDsqlIamTokenProvider(
+            hostname="cluster.dsql.us-east-1.on.aws",
+            region="us-east-1",
+            access_key_id="test-token-placeholder-akid",
+            secret_access_key="test-token-placeholder-secret",
+            clock=lambda: 1_794_873_600.0,
+        )
+    else:
+        provider = AzureEntraTokenProvider(
+            fetcher=lambda scope: (f"test-token-placeholder-{scope}", 5000.0),
+            clock=lambda: 1000.0,
+        )
+
+    disabled_dsn = f"postgresql://iam_user@{host_literal}:5432/appdb?sslmode=disable"
+    plain_dsn = f"postgresql://iam_user@{host_literal}:5432/appdb"
+
+    if not is_loopback:
+        with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+            PostgreSQLConfig(dsn=disabled_dsn, token_provider=provider)
+        with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+            PostgreSQLConfig(
+                dsn="postgresql://iam_user@127.0.0.1:5432/appdb",
+                direct_dsn=disabled_dsn,
+                token_provider=provider,
+            )
+        remote_cfg = PostgreSQLConfig(dsn=plain_dsn, token_provider=provider)
+        with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+            build_native_client_options(remote_cfg, env={"PGSSLMODE": "disable"})
+        with pytest.raises(ImproperConfigurationError, match="sslmode='disable'"):
+            build_native_client_options(remote_cfg, env={}, sslmode="disable")
+    else:
+        local_cfg = PostgreSQLConfig(dsn=disabled_dsn, token_provider=provider)
+        opts = build_native_client_options(local_cfg, env={})
+        assert opts.sslmode == "disable"
+        assert opts.ca_pem is None
 
 
 @pytest.mark.parametrize(

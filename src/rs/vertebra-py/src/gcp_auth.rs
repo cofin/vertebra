@@ -10,13 +10,14 @@ use pyo3::types::{PyBytes, PyCapsule};
 use vertebra_core::gcp_auth::{
     GCP_TOKEN_CACHE_CAPSULE_NAME, GcpRefreshCompleteFn, GcpTokenCache as NativeGcpTokenCache,
     GcpTokenCacheCapsule, GcpTokenSnapshot as NativeGcpTokenSnapshot, current_unix_ms,
-    gcp_http2_post as native_gcp_http2_post, invoke_capsule_refresh_on_runtime,
+    gcp_http2_post as native_gcp_http2_post, gcp_http2_request as native_gcp_http2_request,
+    invoke_capsule_refresh_on_runtime, validate_gcp_http_method,
 };
 
 use crate::async_bridge::{
     RustDbTaskAwaitable, block_on_db, db_runtime_handle, spawn_rust_db_task,
 };
-use crate::errors::auth_error_to_py;
+use crate::errors::{auth_error_to_py, exception_types};
 
 // SAFETY: C-ABI callback registered inside `GcpTokenCacheCapsule`; callers must supply a live
 // `Arc<NativeGcpTokenCache>` pointer as `ctx`, valid `out_ctx`, and valid `complete_cb` pointer.
@@ -308,6 +309,40 @@ pub fn gcp_http2_post_sync<'py>(
     Ok((status, resp_headers, PyBytes::new(py, &resp_body)))
 }
 
+fn gcp_error_to_py(py: Python<'_>, message: String) -> PyErr {
+    match exception_types(py) {
+        Ok(types) => {
+            let err = PyErr::from_type(types.google_cloud.bind(py).clone(), (message.clone(),));
+            let val = err.value(py);
+            let (code, code_name) = if message.contains("timed out") {
+                (4i32, "DEADLINE_EXCEEDED")
+            } else {
+                (14i32, "UNAVAILABLE")
+            };
+            if let Err(e) = val
+                .setattr("code", code)
+                .and_then(|()| val.setattr("code_name", code_name))
+                .and_then(|()| val.setattr("message", message))
+                .and_then(|()| val.setattr("http_status", Option::<u16>::None))
+                .and_then(|()| val.setattr("retry_delay_ms", Option::<u64>::None))
+                .and_then(|()| val.setattr("reason", Option::<String>::None))
+            {
+                return e;
+            }
+            err
+        }
+        Err(e) => e,
+    }
+}
+
+fn validate_request_args(method: &str, timeout_ms: i64) -> PyResult<(&'static str, u64)> {
+    let normalized_method = validate_gcp_http_method(method).map_err(PyValueError::new_err)?;
+    if timeout_ms <= 0 {
+        return Err(PyValueError::new_err("timeout_ms must be > 0"));
+    }
+    Ok((normalized_method, timeout_ms as u64))
+}
+
 /// Execute a connection-pooled HTTP/2 or HTTP/1.1 unary POST request asynchronously via `RustDbTaskAwaitable`.
 #[pyfunction]
 #[pyo3(signature = (url, headers, body, timeout_ms=30_000))]
@@ -329,12 +364,70 @@ pub fn gcp_http2_post_async(
     )
 }
 
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 request synchronously off the GIL.
+#[pyfunction]
+#[pyo3(signature = (method, url, headers, body=None, timeout_ms=30_000))]
+pub fn gcp_http2_request_sync<'py>(
+    py: Python<'py>,
+    method: &str,
+    url: &str,
+    headers: HashMap<String, String>,
+    body: Option<&[u8]>,
+    timeout_ms: i64,
+) -> PyResult<(u16, HashMap<String, String>, Bound<'py, PyBytes>)> {
+    let (normalized_method, timeout_u64) = validate_request_args(method, timeout_ms)?;
+    let url_owned = url.to_string();
+    let payload = body.map(<[u8]>::to_vec);
+    let (status, resp_headers, resp_body) = py
+        .detach(|| {
+            block_on_db(async move {
+                native_gcp_http2_request(
+                    normalized_method,
+                    &url_owned,
+                    &headers,
+                    payload,
+                    timeout_u64,
+                )
+                .await
+            })
+        })
+        .map_err(|e| gcp_error_to_py(py, e))?;
+    Ok((status, resp_headers, PyBytes::new(py, &resp_body)))
+}
+
+/// Execute a connection-pooled HTTP/2 or HTTP/1.1 request asynchronously via `RustDbTaskAwaitable`.
+#[pyfunction]
+#[pyo3(signature = (method, url, headers, body=None, timeout_ms=30_000))]
+pub fn gcp_http2_request_async(
+    py: Python<'_>,
+    method: &str,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
+    timeout_ms: i64,
+) -> PyResult<RustDbTaskAwaitable> {
+    let (normalized_method, timeout_u64) = validate_request_args(method, timeout_ms)?;
+    spawn_rust_db_task(
+        py,
+        async move {
+            native_gcp_http2_request(normalized_method, &url, &headers, body, timeout_u64).await
+        },
+        |py, (status, resp_headers, resp_body)| {
+            let tuple = (status, resp_headers, PyBytes::new(py, &resp_body)).into_pyobject(py)?;
+            Ok(tuple.into_any().unbind())
+        },
+        gcp_error_to_py,
+    )
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGcpTokenSnapshot>()?;
     m.add_class::<PySyncGcpTokenCache>()?;
     m.add_class::<PyAsyncGcpTokenCache>()?;
     m.add_function(wrap_pyfunction!(gcp_http2_post_sync, m)?)?;
     m.add_function(wrap_pyfunction!(gcp_http2_post_async, m)?)?;
+    m.add_function(wrap_pyfunction!(gcp_http2_request_sync, m)?)?;
+    m.add_function(wrap_pyfunction!(gcp_http2_request_async, m)?)?;
     Ok(())
 }
 
@@ -372,5 +465,126 @@ mod tests {
         assert_eq!(result.0, 200);
         assert_eq!(result.1.get("grpc-status").map(String::as_str), Some("0"));
         assert_eq!(result.2, vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn gcp_http2_request_roundtrip_across_methods_and_optional_body() {
+        let observed = block_on_db(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let server = tokio::spawn(async move {
+                let mut captured = Vec::new();
+                for _ in 0..5 {
+                    let (mut socket, _) = listener.accept().await.expect("accept");
+                    let mut buf = vec![0u8; 4096];
+                    let n = socket.read(&mut buf).await.expect("read");
+                    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                    captured.push(raw);
+                    let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test-Resp: ok\r\nContent-Length: 9\r\n\r\n{\"ok\": 1}";
+                    socket.write_all(resp).await.expect("write");
+                }
+                captured
+            });
+
+            let mut headers = HashMap::new();
+            headers.insert("x-custom-hdr".to_string(), "val-1".to_string());
+            let base = format!("http://{addr}/v1/entryGroups");
+
+            let get_res = native_gcp_http2_request("get", &base, &headers, None, 5_000).await?;
+            let del_res = native_gcp_http2_request("Delete", &base, &headers, None, 5_000).await?;
+            let post_res = native_gcp_http2_request(
+                "POST",
+                &base,
+                &headers,
+                Some(b"{\"op\":\"create\"}".to_vec()),
+                5_000,
+            )
+            .await?;
+            let patch_res = native_gcp_http2_request(
+                "patch",
+                &base,
+                &headers,
+                Some(b"{\"op\":\"patch\"}".to_vec()),
+                5_000,
+            )
+            .await?;
+            let put_res = native_gcp_http2_request(
+                "PUT",
+                &base,
+                &headers,
+                Some(b"{\"op\":\"put\"}".to_vec()),
+                5_000,
+            )
+            .await?;
+
+            for res in [&get_res, &del_res, &post_res, &patch_res, &put_res] {
+                assert_eq!(res.0, 200);
+                assert_eq!(res.1.get("x-test-resp").map(String::as_str), Some("ok"));
+                assert_eq!(res.2, b"{\"ok\": 1}");
+            }
+
+            let captured = server.await.expect("server join");
+            Ok::<_, String>(captured)
+        })
+        .expect("gcp_http2_request roundtrips");
+
+        assert_eq!(observed.len(), 5);
+        assert!(observed[0].starts_with("GET /v1/entryGroups "));
+        assert!(!observed[0].to_ascii_lowercase().contains("content-length:"));
+        assert!(observed[0].ends_with("\r\n\r\n"));
+
+        assert!(observed[1].starts_with("DELETE /v1/entryGroups "));
+        assert!(!observed[1].to_ascii_lowercase().contains("content-length:"));
+        assert!(observed[1].ends_with("\r\n\r\n"));
+
+        assert!(observed[2].starts_with("POST /v1/entryGroups "));
+        assert!(observed[2].contains("{\"op\":\"create\"}"));
+
+        assert!(observed[3].starts_with("PATCH /v1/entryGroups "));
+        assert!(observed[3].contains("{\"op\":\"patch\"}"));
+
+        assert!(observed[4].starts_with("PUT /v1/entryGroups "));
+        assert!(observed[4].contains("{\"op\":\"put\"}"));
+    }
+
+    #[test]
+    fn gcp_http2_request_validates_method_and_timeout_before_network() {
+        Python::attach(|py| {
+            for bad_method in ["", "TRACE", "CONNECT", "HEAD", "INVALID"] {
+                let err = validate_request_args(bad_method, 1_000).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py));
+            }
+            for bad_timeout in [0, -1, -1000] {
+                let err = validate_request_args("GET", bad_timeout).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py));
+            }
+            assert_eq!(
+                validate_request_args("patch", 500).expect("valid"),
+                ("PATCH", 500)
+            );
+        });
+
+        let err = block_on_db(async {
+            let headers = HashMap::new();
+            native_gcp_http2_request("TRACE", "http://127.0.0.1:9/unused", &headers, None, 1_000)
+                .await
+        })
+        .unwrap_err();
+        assert!(err.contains("unsupported HTTP method"));
+    }
+
+    #[test]
+    fn gcp_http2_request_unreachable_endpoint_errors() {
+        let addr = block_on_db(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            listener.local_addr().expect("addr")
+        });
+        let url = format!("http://{addr}/unreachable");
+        let err = block_on_db(async {
+            let headers = HashMap::new();
+            native_gcp_http2_request("GET", &url, &headers, None, 2_000).await
+        })
+        .unwrap_err();
+        assert!(err.contains("GCP HTTP/2 GET"));
     }
 }

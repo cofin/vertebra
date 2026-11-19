@@ -16,6 +16,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:flow-executor
+    at: "2026-11-19T04:32:00Z"
+    commit: 6f76f8a7
+  - by: agent:flow-executor
     at: "2026-11-17T05:50:00Z"
     commit: 5a833832
   - by: agent:flow-executor
@@ -94,6 +97,12 @@ sources:
   - id: src-src-agent-index-ts
     resource: src/ts/vertebra-client/src/agent/index.ts
     title: TypeScript McpClient, A2aClient, and registerWebMCPTools
+  - id: src-agent-okf-py
+    resource: src/py/vertebra/agent/okf.py
+    title: Pure-Python OKF v0.2 bundle parser, validator, digester, and ZIP serializer
+  - id: src-agent-knowledge-catalog-py
+    resource: src/py/vertebra/agent/knowledge_catalog.py
+    title: Dataplex v1 SyncKnowledgeCatalogClient and AsyncKnowledgeCatalogClient with OKF sync
 ---
 
 # Agentic Harness, MCP 2026-07-28 & A2A 1.0 Protocols
@@ -105,6 +114,8 @@ sources:
 - `SKILLS_EXTENSION` (`io.modelcontextprotocol/skills`), SEP-1865 `UI_EXTENSION` (`io.modelcontextprotocol/ui`, `McpIcon`, app-only filtering, `MCPCore.validate()`), and canonical `/.well-known/mcp.json` wire identically across `AgentPlugin`, Starlette, FastAPI, Flask, Django, and `litestar-mcp>=0.20.0` [^agent-plugin] [^src-agent-mcp-skills-py] [^src-agent-mcp-routes-py].
 - `run_stdio_server` dispatches incrementally with `notifications/cancelled` cancellation and `vtb ai mcp serve --app` discovery; `run_stdio_http_bridge` supports dual-mode SSE + `OidcTokenSource` (`AsyncGcpIdTokenCache`, `401` retry); `IapIdentitySource` verifies ES256 `x-goog-iap-jwt-assertion` JWTs and `BearerJWTGuard` delegates to `JWKSVerifier` [^src-agent-mcp-stdio-py] [^src-agent-mcp-bridge-py] [^agent-identity].
 - `A2AService.stream_message` cleans up broker subscriptions in `finally`, `PushNotificationDispatcher.validate_webhook_url` pins DNS-resolved public IPs against SSRF, and `MCPTaskStore` dispatches via `QueueService` and prunes TTL-expired records [^src-agent-a2a-service-py] [^mcp-tasks].
+- `vertebra.agent.okf` provides `OkfSource`, `OkfDocument`, `OkfBundle`, and `OkfValidationError` without `PyYAML`, enforcing OKF v0.2 reserved files, fence-aware truth/footnote scanning, `120,832`-byte ceilings, SHA-256 digests, and reproducible ZIP archives [^src-agent-okf-py].
+- `vertebra.agent.knowledge_catalog` provides `KnowledgeCatalogConfig`, `CatalogEntryRecord`, `CatalogSyncSummary`, `SyncKnowledgeCatalogClient`, and `AsyncKnowledgeCatalogClient` over `dataplex.googleapis.com/v1` with LRO `entryGroups` polling, `view="ALL"` reads, `<= 250`-entry digest sync, and `locations/global:searchEntries` [^src-agent-knowledge-catalog-py].
 <!-- truth: end -->
 
 ## 1. Dual-Mode MCP (`MCPCore`, Sessions, SSE, Skills & UI)
@@ -127,8 +138,13 @@ Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` / `C
 
 ## 3. A2A 1.0, Workflows & Native FFI Acceleration
 
-- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, owner-isolated A2A tasks (`A2ATaskStore` or `CacheA2ATaskStore` + `CacheSseStreamBroker` via `A2AConfig.cache_url`), `stream_message` `finally` disconnect cleanup, DNS-pinned SSRF validation (`PushNotificationDispatcher.validate_webhook_url` rejecting loopback/private/reserved/metadata IPs and connecting to the resolved IP), stateless TS `McpClient`, `A2aClient`, and `registerWebMCPTools`.
+- **A2A 1.0 & TS Client ([`a2a/service.py`](../../../../../src/py/vertebra/agent/a2a/service.py)[^src-agent-a2a-service-py], [`agent/index.ts`](../../../../../src/ts/vertebra-client/src/agent/index.ts)[^src-src-agent-index-ts])**: Dynamic request-origin `/.well-known/agent-card.json` discovery, RFC 7515 JWS (`HS256`) card signing, and owner-isolated A2A tasks (`A2ATaskStore` or `CacheA2ATaskStore` + `CacheSseStreamBroker` via `A2AConfig.cache_url`). Includes `stream_message` `finally` disconnect cleanup, DNS-pinned SSRF validation (`PushNotificationDispatcher.validate_webhook_url`), and stateless TS `McpClient`, `A2aClient`, and `registerWebMCPTools`.
 - **Workflows & Native Caches ([`workflow.py`](../../../../../src/py/vertebra/agent/workflow.py)[^src-agent-workflow-py], [`agent.rs`](../../../../../src/rs/vertebra-py/src/agent.rs)[^src-vertebra-py-src-agent-rs], [`discovery.rs`](../../../../../src/rs/vertebra-http/src/discovery.rs)[^src-vertebra-http-src-discovery-rs])**: `DynamicWorkflow`, `WorkflowLiveState`, `SpecTree`, and `AgentRuntime` pair with PyO3 `classify_jsonrpc_frame`, `SchemaDigestCache`, and lock-free `WellKnownDiscoveryCache` `304` handling.
+
+## 4. OKF v0.2 Bundles & Knowledge Catalog
+
+- **OKF v0.2 Serializer ([`okf.py`](../../../../../src/py/vertebra/agent/okf.py)[^src-agent-okf-py])**: `OkfDocument` and `OkfBundle` parse canonical YAML frontmatter without `PyYAML` and scan fenced blocks safely. They enforce reserved-file rules (`index.md`, `log.md`), `120,832`-byte ceilings, symlink/traversal guards, canonical SHA-256 digests, and sorted POSIX ZIP export (`1980-01-01`).
+- **Dataplex v1 Clients ([`knowledge_catalog.py`](../../../../../src/py/vertebra/agent/knowledge_catalog.py)[^src-agent-knowledge-catalog-py])**: `SyncKnowledgeCatalogClient` and `AsyncKnowledgeCatalogClient` wrap native `GcpTokenCache` and HTTP/2 transport (`gcp_http2_request_*`) with single `401` retry and `x-goog-user-project` forwarding. They support LRO `entryGroups` creation, `resolve_context_set` label matching, `view="ALL"` entry reads, `aspectKeys` updates, `<= 250`-entry `sync_bundle`, and `global:searchEntries`.
 
 [^agent-context]: `src/py/vertebra/agent/core/context.py::AgentContext` — Trusted constructors, independent forks, and binding restoration.
 [^agent-identity]: `src/py/vertebra/agent/core/identity.py::IapIdentitySource` — ES256 IAP JWT, mTLS CIDR, and callable identity policies.
@@ -153,3 +169,5 @@ Promoted tasks fork independent `CancellationToken` state in `MCPTaskStore` / `C
 [^src-vertebra-py-src-agent-rs]: `src/rs/vertebra-py/src/agent.rs` — Rust JSON-RPC classifier and `SchemaDigestCache`.
 [^src-vertebra-http-src-discovery-rs]: `src/rs/vertebra-http/src/discovery.rs` — Rust `WellKnownDiscoveryCache` `ArcSwap` handler.
 [^src-src-agent-index-ts]: `src/ts/vertebra-client/src/agent/index.ts` — TypeScript `McpClient`, `A2aClient`, and `registerWebMCPTools`.
+[^src-agent-okf-py]: `src/py/vertebra/agent/okf.py` — Pure-Python OKF v0.2 parser, validator, digester, and ZIP archive serializer.
+[^src-agent-knowledge-catalog-py]: `src/py/vertebra/agent/knowledge_catalog.py` — `SyncKnowledgeCatalogClient` and `AsyncKnowledgeCatalogClient` over Dataplex v1.

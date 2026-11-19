@@ -81,6 +81,13 @@ GCS_DEFAULT_SCOPES: Final[tuple[str, str]] = (
     "https://www.googleapis.com/auth/cloud-platform",
 )
 
+_EXPLICIT_GCS_CREDENTIAL_KEYS: Final[tuple[str, ...]] = (
+    "service_account_path",
+    "service_account_key",
+    "application_credentials_path",
+    "application_credentials",
+)
+
 _SUPPORTED_SCHEMES: Final[frozenset[str]] = frozenset(
     {
         "memory",
@@ -394,13 +401,13 @@ class AzureConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
         opts: dict[str, str] = {"account": self.account}
         if self.access_key:
             opts["access_key"] = self.access_key
-        if self.sas_token:
+        if self.sas_token is not None:
             opts["sas_token"] = self.sas_token
-        if self.tenant_id:
+        if self.tenant_id is not None:
             opts["tenant_id"] = self.tenant_id
-        if self.client_id:
+        if self.client_id is not None:
             opts["client_id"] = self.client_id
-        if self.client_secret:
+        if self.client_secret is not None:
             opts["client_secret"] = self.client_secret
         if self.endpoint:
             opts["endpoint"] = self.endpoint
@@ -441,16 +448,16 @@ class OCIConfig(msgspec.Struct, frozen=True, gc=False, kw_only=True):
             "namespace": self.namespace,
             "region": self.region,
         }
-        if self.tenancy_ocid:
+        if self.tenancy_ocid is not None:
             opts["tenancy_ocid"] = self.tenancy_ocid
-        if self.user_ocid:
+        if self.user_ocid is not None:
             opts["user_ocid"] = self.user_ocid
-        if self.fingerprint:
+        if self.fingerprint is not None:
             opts["fingerprint"] = self.fingerprint
         pem = self.private_key_pem
         if pem is None and self.private_key_path is not None:
             pem = Path(self.private_key_path).read_text(encoding="utf-8")
-        if pem:
+        if pem is not None:
             opts["private_key_pem"] = pem
         if self.par_token:
             opts["par_token"] = self.par_token
@@ -1455,6 +1462,17 @@ class _BaseObjectStore:
         """Return True unless `allow_ambient_adc` is explicitly disabled in store options."""
         return self._options.get("allow_ambient_adc", "true").strip().lower() not in {"false", "0", "no"}
 
+    def _has_explicit_gcs_credentials(self) -> bool:
+        """Return True when explicit GCS credential options were provided."""
+        return any(key in self._options for key in _EXPLICIT_GCS_CREDENTIAL_KEYS)
+
+    def _validate_explicit_gcs_credentials(self) -> None:
+        """Raise ImproperConfigurationError when an explicit GCS credential option is empty."""
+        for key in _EXPLICIT_GCS_CREDENTIAL_KEYS:
+            if key in self._options and not self._options[key].strip():
+                msg = f"GCS credential option {key!r} must not be empty"
+                raise ImproperConfigurationError(msg)
+
     def _build_signing_adc_helper(self, effective_email: str) -> GCSConfig:
         """Build a source-credential GCSConfig for authenticating IAM signBlob calls."""
         assert self._signing is not None
@@ -1774,12 +1792,23 @@ class SyncObjectStore(_BaseObjectStore):
             cache_opts = self._auto_build_gcs_token_cache_options()
             if cache_opts is not None:
                 allow_ambient = self._allow_ambient_adc()
-                with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
-                    self._gcp_token_cache = SyncGcpTokenCache(
-                        cache_opts,
-                        list(GCS_DEFAULT_SCOPES),
-                        allow_ambient_adc=allow_ambient,
-                    )
+                if self._has_explicit_gcs_credentials():
+                    self._validate_explicit_gcs_credentials()
+                    try:
+                        self._gcp_token_cache = SyncGcpTokenCache(
+                            cache_opts,
+                            list(GCS_DEFAULT_SCOPES),
+                            allow_ambient_adc=allow_ambient,
+                        )
+                    except (ValueError, GoogleCloudAuthError, OSError) as exc:
+                        raise ImproperConfigurationError(str(exc)) from exc
+                else:
+                    with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
+                        self._gcp_token_cache = SyncGcpTokenCache(
+                            cache_opts,
+                            list(GCS_DEFAULT_SCOPES),
+                            allow_ambient_adc=allow_ambient,
+                        )
         capsule = self._gcp_token_cache._capsule() if self._gcp_token_cache is not None else None
         try:
             self._native = native_mod.SyncObjectStore(self._url, self._options or None, capsule)
@@ -2331,12 +2360,23 @@ class AsyncObjectStore(_BaseObjectStore):
             cache_opts = self._auto_build_gcs_token_cache_options()
             if cache_opts is not None:
                 allow_ambient = self._allow_ambient_adc()
-                with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
-                    self._gcp_token_cache = AsyncGcpTokenCache(
-                        cache_opts,
-                        list(GCS_DEFAULT_SCOPES),
-                        allow_ambient_adc=allow_ambient,
-                    )
+                if self._has_explicit_gcs_credentials():
+                    self._validate_explicit_gcs_credentials()
+                    try:
+                        self._gcp_token_cache = AsyncGcpTokenCache(
+                            cache_opts,
+                            list(GCS_DEFAULT_SCOPES),
+                            allow_ambient_adc=allow_ambient,
+                        )
+                    except (ValueError, GoogleCloudAuthError, OSError) as exc:
+                        raise ImproperConfigurationError(str(exc)) from exc
+                else:
+                    with contextlib.suppress(ValueError, GoogleCloudAuthError, OSError):
+                        self._gcp_token_cache = AsyncGcpTokenCache(
+                            cache_opts,
+                            list(GCS_DEFAULT_SCOPES),
+                            allow_ambient_adc=allow_ambient,
+                        )
         capsule = self._gcp_token_cache._capsule() if self._gcp_token_cache is not None else None
         try:
             self._native = native_mod.AsyncObjectStore(self._url, self._options or None, capsule)

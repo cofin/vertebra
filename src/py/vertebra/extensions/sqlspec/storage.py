@@ -303,8 +303,9 @@ class ObjectStoreBackend(ObjectStoreBase):
         }
 
     def read_arrow_sync(self, path: str | Path, **kwargs: Any) -> ArrowTable:
-        """Read a Parquet or Arrow IPC object into a `pyarrow.Table` synchronously."""
-        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
+        """Read a Parquet, Arrow IPC, or CSV object into a `pyarrow.Table` synchronously."""
+        raw_format = kwargs.pop("file_format", None) or kwargs.pop("format_hint", None)
+        file_format = normalize_arrow_format(raw_format, path)
         return read_table_sync(self._sync_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     def write_arrow_sync(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
@@ -509,8 +510,9 @@ class ObjectStoreBackend(ObjectStoreBase):
         }
 
     async def read_arrow_async(self, path: str | Path, **kwargs: Any) -> ArrowTable:
-        """Read a Parquet or Arrow IPC object into a `pyarrow.Table` asynchronously."""
-        file_format = normalize_arrow_format(kwargs.pop("file_format", None), path)
+        """Read a Parquet, Arrow IPC, or CSV object into a `pyarrow.Table` asynchronously."""
+        raw_format = kwargs.pop("file_format", None) or kwargs.pop("format_hint", None)
+        file_format = normalize_arrow_format(raw_format, path)
         return await read_table_async(self._async_store, self._qualify(path), file_format=file_format, options=kwargs)
 
     async def write_arrow_async(self, path: str | Path, table: ArrowTable, **kwargs: Any) -> None:
@@ -535,7 +537,7 @@ class ObjectStoreBackend(ObjectStoreBase):
         batch_size: int = 65_536,
         **kwargs: Any,
     ) -> AsyncIterator[ArrowRecordBatch]:
-        """Return an `AsyncIterator[ArrowRecordBatch]` streaming matching Parquet or IPC objects."""
+        """Return an `AsyncIterator[ArrowRecordBatch]` streaming matching Parquet, IPC, or CSV objects."""
         resolved_format = normalize_arrow_format(file_format, pattern)
         return self._iter_arrow_async(
             pattern,
@@ -784,7 +786,9 @@ class ObjectStoreBackend(ObjectStoreBase):
     def _prepare_arrow_write(
         self, path: str | Path, kwargs: dict[str, Any]
     ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
-        """Resolve key, format, integrity arguments, and normalized Arrow codec options."""
+        """Resolve key, format, conditional/integrity arguments, and normalized Arrow codec options."""
+        overwrite = bool(kwargs.pop("overwrite", True))
+        explicit_if_not_exists = bool(kwargs.pop("if_not_exists", False))
         raw_format = kwargs.pop("file_format", None) or kwargs.pop("format_hint", None)
         file_format = normalize_arrow_format(raw_format, path)
         self._normalize_arrow_write_options(file_format, kwargs)
@@ -793,6 +797,8 @@ class ObjectStoreBackend(ObjectStoreBase):
             for key in ("checksum", "expected_sha256", "expected_crc32c", "expected_md5")
             if key in kwargs
         }
+        if not overwrite or explicit_if_not_exists:
+            integrity["if_not_exists"] = True
         return self._qualify(path), file_format, integrity, kwargs
 
     @staticmethod

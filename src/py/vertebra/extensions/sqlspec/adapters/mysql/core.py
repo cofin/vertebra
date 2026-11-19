@@ -452,6 +452,17 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / denom if denom > 0.0 else 0.0
 
 
+def _extract_url_alias(mapping: Mapping[str, Any] | None) -> str | None:
+    """Return the first non-empty URL or DSN string alias from `mapping`, or `None`."""
+    if not isinstance(mapping, Mapping):
+        return None
+    for key in ("url", "dsn", "connection_string", "conninfo"):
+        val = mapping.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
 def build_connection_config(
     connection_config: Mapping[str, Any] | None = None,
     driver_features: Mapping[str, Any] | None = None,
@@ -465,9 +476,12 @@ def build_connection_config(
     if isinstance(overrides, Mapping):
         merged.update(overrides)
 
-    url = merged.pop("url", None) or merged.pop("dsn", None)
-    if "cloud_sql_instance" not in merged and isinstance(driver_features, Mapping):
-        if driver_features.get("cloud_sql_instance"):
+    url = _extract_url_alias(overrides) or _extract_url_alias(connection_config)
+    for alias in ("url", "dsn", "connection_string", "conninfo"):
+        merged.pop(alias, None)
+
+    if isinstance(driver_features, Mapping):
+        if "cloud_sql_instance" not in merged and driver_features.get("cloud_sql_instance"):
             merged["cloud_sql_instance"] = driver_features["cloud_sql_instance"]
         if "enable_iam_auth" in driver_features and "enable_iam_auth" not in merged:
             merged["enable_iam_auth"] = bool(driver_features["enable_iam_auth"])

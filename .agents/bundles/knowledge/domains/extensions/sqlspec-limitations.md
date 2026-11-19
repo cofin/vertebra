@@ -59,6 +59,15 @@ sources:
   - id: src-sqlspec-spanner-driver
     resource: src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py
     title: Spanner tenant isolation rejection guard
+  - id: src-sqlspec-postgres-config
+    resource: src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py
+    title: PostgresSyncConfig and PostgresAsyncConfig derive_pool cloud auth preservation
+  - id: src-sqlspec-mysql-config
+    resource: src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py
+    title: MySQLSyncConfig and MySQLAsyncConfig derive_pool cloud auth and ssl_ca preservation
+  - id: src-dbapi-sync
+    resource: src/py/vertebra/db/dbapi/_sync.py
+    title: PEP 249 connect_args allowlists and +vtb scheme normalization
 ---
 
 # SQLSpec Adapter, Proxy & Store Limitations
@@ -71,6 +80,7 @@ sources:
 - Upstream `StorageRegistry.register_alias` accepts only `"local"`, `"obstore"`, and `"fsspec"` backend names and rejects custom `ObjectStoreBackend` instances or pre-configured `SyncObjectStore` / `AsyncObjectStore` signing state (`SigningConfig`, credentials, custom endpoints); `register_storage_alias` forwards only the URI string without touching `_alias_configs`, so callers needing custom native stores or signing must construct `ObjectStoreBackend(store=...)` directly [^src-sqlspec-storage].
 - All copied fallback ADK memory and artifact stores are deleted; `<Engine>{Sync,Async}ADKMemoryStore` and `<Engine>{Sync,Async}ADKArtifactStore` load `sqlspec.extensions.adk` via `ensure_module(..., package="google-adk", extra="adk")` and fail with `MissingDependencyError` when `google-adk` is absent [^src-sqlspec-postgres-adk].
 - `OracleSyncEventsBackend` and `OracleAsyncEventsBackend` commit `DBMS_AQ.DEQUEUE` (TxEventQ) messages at dequeue time and re-enqueue via `publish` on `nack()`, DuckDB isolates plain `:memory:` instances per config while sharing `:memory:<name>` catalogs across drivers, and BigQuery and Spanner configs and drivers reject non-None `tenant_predicate` or `tenant_id` with `NotSupportedError` [^src-sqlspec-oracle-events] [^src-sqlspec-bigquery-driver] [^src-sqlspec-spanner-driver].
+- `PostgresSyncConfig.derive_pool` / `PostgresAsyncConfig.derive_pool` and `MySQLSyncConfig.derive_pool` / `MySQLAsyncConfig.derive_pool` preserve `driver_config.token_provider` (including the MySQL-scoped `AzureEntraTokenProvider` instance) and TLS CA settings (`ca_pem` on PostgreSQL, `ssl_ca` on MySQL unless superseded by a replica URL `?ssl_ca=` query parameter) across replica URL and endpoint overrides when not explicitly overridden, but host-scoped SigV4 providers (`AwsRdsIamTokenProvider`, `AwsAuroraDsqlIamTokenProvider`) sign a fixed `endpoint_host` and require an endpoint-matched `token_provider` override for distinct AWS replica hostnames; in PEP 249 / SQLAlchemy `+vtb` `connect_args`, `PostgreSQLConfig.ca_pem` and `MySQLConfig.ssl_ca` accept `str` while `MSSQLConfig.ca_pem` requires `bytes`, and cloud IAM dialect forwarding is verified against in-memory `DatabaseTokenProvider` fixtures rather than live AWS/Azure endpoints [^src-sqlspec-postgres-config] [^src-sqlspec-mysql-config] [^src-dbapi-sync].
 <!-- truth: end -->
 
 ## Operational Boundaries
@@ -86,6 +96,7 @@ sources:
 - **`StorageRegistry.register_alias` vs. Native Stores**: [`sqlspec/storage.py`](../../../../../src/py/vertebra/extensions/sqlspec/storage.py)[^src-sqlspec-storage] delegates `register_storage_alias` to upstream `StorageRegistry.register_alias`, which validates `backend` against `"local"`, `"obstore"`, and `"fsspec"` only and discards custom `ObjectStoreBackend` instances or `SyncObjectStore` / `AsyncObjectStore` `SigningConfig` state. Instantiate `ObjectStoreBackend(store=...)` directly whenever custom native store configuration or presigned URL signing is needed.
 - **Mandatory `google-adk` Extra**: ADK session, memory, and artifact stores across all eight engines (`adk.py`) carry no fallback implementations and load `sqlspec.extensions.adk` via `ensure_module(..., package="google-adk", extra="adk")` ([`postgres/adk.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py)[^src-sqlspec-postgres-adk]), raising `MissingDependencyError` when `google-adk` (`vertebra-core[adk]`) is absent.
 - **Oracle TxEventQ Acknowledgment & Cloud Tenant Guards**: [`OracleSyncEventsBackend`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/oracle/events.py)[^src-sqlspec-oracle-events] and `OracleAsyncEventsBackend` commit `DBMS_AQ.DEQUEUE` messages upon dequeue and re-publish on `nack()`. [`BigQuery`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py)[^src-sqlspec-bigquery-driver] and [`Spanner`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py)[^src-sqlspec-spanner-driver] configs and drivers reject `tenant_predicate` and `tenant_id` with `NotSupportedError` before base initialization or native calls.
+- **Cloud IAM `token_provider` & Root CA Replica Inheritance**: [`PostgresSyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py)[^src-sqlspec-postgres-config] / `PostgresAsyncConfig` and [`MySQLSyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py)[^src-sqlspec-mysql-config] / `MySQLAsyncConfig` carry `driver_config.token_provider` and Root CA bundles (`ca_pem` for PostgreSQL, `ssl_ca` for MySQL unless overridden explicitly or via replica URL `?ssl_ca=`) across `derive_pool` and `replicas` definitions. Because `AwsRdsIamTokenProvider` and `AwsAuroraDsqlIamTokenProvider` bind SigV4 presigned URLs to a single `endpoint_host:port`, replicas on separate AWS endpoints must pass an explicit replica `token_provider` override, whereas `AzureEntraTokenProvider` tokens are resource-scoped (`AZURE_POSTGRES_SCOPE` / `AZURE_MYSQL_SCOPE`) and share the cached provider instance across primary and replica pools.
 
 [^src-pyproject]: `pyproject.toml` — SQLSpec `>=0.72.2` PyPI dependency floor without upstream git pins.
 [^src-sqlspec-mysql-dict]: `src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py` — MySQL data dictionary subclassing `sqlspec.data_dictionary.dialects.mysql.dictionary`.
@@ -100,3 +111,6 @@ sources:
 [^src-sqlspec-postgres-adk]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/adk.py` — ADK memory and artifact store `google-adk` extra enforcement via `ensure_module`.
 [^src-sqlspec-bigquery-driver]: `src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py` — BigQuery tenant isolation rejection guard.
 [^src-sqlspec-spanner-driver]: `src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py` — Spanner tenant isolation rejection guard.
+[^src-sqlspec-postgres-config]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py` — `PostgresSyncConfig` and `PostgresAsyncConfig` `derive_pool` cloud auth preservation.
+[^src-sqlspec-mysql-config]: `src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py` — `MySQLSyncConfig` and `MySQLAsyncConfig` `derive_pool` cloud auth and `ssl_ca` preservation.
+[^src-dbapi-sync]: `src/py/vertebra/db/dbapi/_sync.py` — PEP 249 `connect_args` allowlists and `+vtb` scheme normalization.

@@ -1,4 +1,4 @@
-"""Database drivers, Cloud SQL and AlloyDB dialers, CDC, RLS, and Arrow IPC cursors."""
+"""Database drivers, Cloud SQL, AlloyDB, AWS, and Azure dialers, CDC, RLS, and Arrow IPC cursors."""
 
 from __future__ import annotations
 
@@ -22,11 +22,18 @@ if TYPE_CHECKING:
         AlloyDBClusterURI,
         AlloyDBConfig,
         AsyncAlloyDBDialer,
+        AsyncAwsAuroraDsqlDialer,
+        AsyncAwsRdsDialer,
+        AsyncAzureEntraDialer,
         AsyncCloudSQLDialer,
         CloudSQLConfig,
         CloudSQLInstanceURI,
         SyncAlloyDBDialer,
+        SyncAwsAuroraDsqlDialer,
+        SyncAwsRdsDialer,
+        SyncAzureEntraDialer,
         SyncCloudSQLDialer,
+        aws_rds_root_ca_pem,
     )
     from vertebra.db.driver import (
         AsyncChangeSource,
@@ -77,6 +84,9 @@ __all__ = (
     "AlloyDBConfig",
     "ArrowCursor",
     "AsyncAlloyDBDialer",
+    "AsyncAwsAuroraDsqlDialer",
+    "AsyncAwsRdsDialer",
+    "AsyncAzureEntraDialer",
     "AsyncChangeSource",
     "AsyncCloudSQLDialer",
     "AsyncDatabaseDriver",
@@ -109,6 +119,9 @@ __all__ = (
     "QueueEntry",
     "SerializationFailure",
     "SyncAlloyDBDialer",
+    "SyncAwsAuroraDsqlDialer",
+    "SyncAwsRdsDialer",
+    "SyncAzureEntraDialer",
     "SyncChangeSource",
     "SyncCloudSQLDialer",
     "SyncDatabaseDriver",
@@ -119,6 +132,7 @@ __all__ = (
     "TenantPredicate",
     "TenantScopeConfig",
     "ThreadOffloadAsyncDatabaseDriver",
+    "aws_rds_root_ca_pem",
     "dbapi",
     "provide_driver",
 )
@@ -140,6 +154,9 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "AlloyDBConfig": ("vertebra.db.dialer", "AlloyDBConfig"),
     "ArrowCursor": ("vertebra.db.arrow", "ArrowCursor"),
     "AsyncAlloyDBDialer": ("vertebra.db.dialer", "AsyncAlloyDBDialer"),
+    "AsyncAwsAuroraDsqlDialer": ("vertebra.db.dialer", "AsyncAwsAuroraDsqlDialer"),
+    "AsyncAwsRdsDialer": ("vertebra.db.dialer", "AsyncAwsRdsDialer"),
+    "AsyncAzureEntraDialer": ("vertebra.db.dialer", "AsyncAzureEntraDialer"),
     "AsyncChangeSource": ("vertebra.db.driver", "AsyncChangeSource"),
     "AsyncCloudSQLDialer": ("vertebra.db.dialer", "AsyncCloudSQLDialer"),
     "AsyncDatabaseDriver": ("vertebra.db.driver", "AsyncDatabaseDriver"),
@@ -172,6 +189,9 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "QueueEntry": ("vertebra.db.driver", "QueueEntry"),
     "SerializationFailure": ("vertebra.db.driver", "SerializationFailure"),
     "SyncAlloyDBDialer": ("vertebra.db.dialer", "SyncAlloyDBDialer"),
+    "SyncAwsAuroraDsqlDialer": ("vertebra.db.dialer", "SyncAwsAuroraDsqlDialer"),
+    "SyncAwsRdsDialer": ("vertebra.db.dialer", "SyncAwsRdsDialer"),
+    "SyncAzureEntraDialer": ("vertebra.db.dialer", "SyncAzureEntraDialer"),
     "SyncChangeSource": ("vertebra.db.driver", "SyncChangeSource"),
     "SyncCloudSQLDialer": ("vertebra.db.dialer", "SyncCloudSQLDialer"),
     "SyncDatabaseDriver": ("vertebra.db.driver", "SyncDatabaseDriver"),
@@ -182,6 +202,7 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "TenantPredicate": ("vertebra.db.rls", "TenantPredicate"),
     "TenantScopeConfig": ("vertebra.db.rls", "TenantScopeConfig"),
     "ThreadOffloadAsyncDatabaseDriver": ("vertebra.db.driver", "ThreadOffloadAsyncDatabaseDriver"),
+    "aws_rds_root_ca_pem": ("vertebra.db.dialer", "aws_rds_root_ca_pem"),
     "dbapi": ("vertebra.db.dbapi", ""),
     "provide_driver": ("vertebra.db.registry", "provide_driver"),
 }

@@ -5392,6 +5392,10 @@ async fn test_atomic_rename_support_and_atomic_only_guard() {
         container: "c".to_string(),
         account: Some("acct".to_string()),
         access_key: Some("Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".to_string()),
+        sas_token: None,
+        tenant_id: None,
+        client_id: None,
+        client_secret: None,
         endpoint: Some("http://127.0.0.1:9/acct".to_string()),
         allow_http: true,
     };
@@ -5776,4 +5780,190 @@ fn test_verify_gcs_azure_and_oci_presigned_urls() {
         !verify_oci_par_url("not-a-url", &oci_cfg, "reports/q4.parquet", None, now)
             .expect("malformed oci")
     );
+}
+
+#[tokio::test]
+async fn test_azure_sas_and_entra_credential_wiring_and_validation() {
+    use _storage::store::StorageError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock azure");
+    let addr = listener.local_addr().expect("mock azure addr");
+    let server = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.expect("read");
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let first_line = req.lines().next().unwrap_or_default().to_string();
+            seen.push(first_line);
+            let body = b"azure-sas-payload";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nx-ms-blob-type: BlockBlob\r\nETag: \"0x1\"\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(resp.as_bytes()).await.expect("write head");
+            socket.write_all(body).await.expect("write body");
+        }
+        seen
+    });
+
+    for sas_input in [
+        "?sv=2020-12-06&sp=r&sig=test%2Btoken%3D",
+        "sv=2020-12-06&sp=r&sig=test%2Btoken%3D",
+    ] {
+        let mut opts = HashMap::new();
+        opts.insert("account".to_string(), "devstoreaccount1".to_string());
+        opts.insert(
+            "endpoint".to_string(),
+            format!("http://{addr}/devstoreaccount1"),
+        );
+        opts.insert("sas_token".to_string(), sas_input.to_string());
+        let engine = ObjectStoreEngine::from_url("az://datasets", Some(&opts))
+            .expect("valid azure sas store");
+        let payload = engine.get("part.bin").await.expect("get via sas");
+        assert_eq!(&payload[..], b"azure-sas-payload");
+    }
+
+    let request_lines = server.await.expect("mock azure server");
+    for line in request_lines {
+        assert!(line.contains("sv=2020-12-06"), "missing sv in {line}");
+        assert!(line.contains("sp=r"), "missing sp in {line}");
+        assert!(
+            line.contains("sig=test%2Btoken%3D"),
+            "missing encoded sig in {line}"
+        );
+    }
+
+    for invalid_sas in [
+        "",
+        "?",
+        "   ",
+        "not-a-query-pair",
+        "sv=",
+        "=2020-12-06",
+        "sv=2020-12-06&&sig=abc",
+        "sv=2020-12-06&sig=has space",
+    ] {
+        let mut opts = HashMap::new();
+        opts.insert("account".to_string(), "devstoreaccount1".to_string());
+        opts.insert("sas_token".to_string(), invalid_sas.to_string());
+        let err = match ObjectStoreEngine::from_url("az://datasets", Some(&opts)) {
+            Ok(_) => panic!("invalid SAS '{invalid_sas}' must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, StorageError::InvalidInput(_)),
+            "expected InvalidInput for '{invalid_sas}', got {err:?}"
+        );
+    }
+
+    let mut valid_entra = HashMap::new();
+    valid_entra.insert("account".to_string(), "devstoreaccount1".to_string());
+    valid_entra.insert("tenant_id".to_string(), "tenant-123".to_string());
+    valid_entra.insert("client_id".to_string(), "client-456".to_string());
+    valid_entra.insert(
+        "client_secret".to_string(),
+        "test-token-placeholder".to_string(),
+    );
+    ObjectStoreEngine::from_url("az://datasets", Some(&valid_entra))
+        .expect("complete Azure Entra triple should construct store");
+
+    let incomplete_entra_cases: Vec<Vec<(&str, &str)>> = vec![
+        vec![("tenant_id", "tenant-123")],
+        vec![("client_id", "client-456")],
+        vec![("client_secret", "test-token-placeholder")],
+        vec![("tenant_id", "tenant-123"), ("client_id", "client-456")],
+        vec![
+            ("tenant_id", "tenant-123"),
+            ("client_secret", "test-token-placeholder"),
+        ],
+        vec![
+            ("client_id", "client-456"),
+            ("client_secret", "test-token-placeholder"),
+        ],
+        vec![
+            ("tenant_id", "tenant-123"),
+            ("client_id", "client-456"),
+            ("client_secret", "   "),
+        ],
+    ];
+    for pairs in incomplete_entra_cases {
+        let mut opts = HashMap::new();
+        opts.insert("account".to_string(), "devstoreaccount1".to_string());
+        for (k, v) in &pairs {
+            opts.insert((*k).to_string(), (*v).to_string());
+        }
+        let err = match ObjectStoreEngine::from_url("az://datasets", Some(&opts)) {
+            Ok(_) => panic!("incomplete Entra options {pairs:?} must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, StorageError::InvalidInput(_)),
+            "expected InvalidInput for {pairs:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn test_oci_cavage_partial_credentials_fail_closed() {
+    use _storage::store::StorageError;
+
+    ObjectStoreEngine::from_url("oci://warehouse@mytenancy", None)
+        .expect("unauthenticated OCI store with zero Cavage fields");
+
+    let mut full_opts = HashMap::new();
+    full_opts.insert(
+        "tenancy_ocid".to_string(),
+        "ocid1.tenancy.oc1..aaaa".to_string(),
+    );
+    full_opts.insert("user_ocid".to_string(), "ocid1.user.oc1..bbbb".to_string());
+    full_opts.insert(
+        "fingerprint".to_string(),
+        "12:34:56:78:90:ab:cd:ef".to_string(),
+    );
+    full_opts.insert("private_key_pem".to_string(), TEST_OCI_RSA_PEM.to_string());
+    ObjectStoreEngine::from_url("oci://warehouse@mytenancy", Some(&full_opts))
+        .expect("complete 4-field OCI Cavage store");
+
+    let partial_cases: Vec<Vec<(&str, &str)>> = vec![
+        vec![("tenancy_ocid", "ocid1.tenancy.oc1..aaaa")],
+        vec![
+            ("tenancy_ocid", "ocid1.tenancy.oc1..aaaa"),
+            ("user_ocid", "ocid1.user.oc1..bbbb"),
+        ],
+        vec![
+            ("tenancy_ocid", "ocid1.tenancy.oc1..aaaa"),
+            ("user_ocid", "ocid1.user.oc1..bbbb"),
+            ("fingerprint", "12:34:56:78:90:ab:cd:ef"),
+        ],
+        vec![
+            ("user_ocid", "ocid1.user.oc1..bbbb"),
+            ("fingerprint", "12:34:56:78:90:ab:cd:ef"),
+            ("private_key_pem", TEST_OCI_RSA_PEM),
+        ],
+        vec![
+            ("tenancy_ocid", "ocid1.tenancy.oc1..aaaa"),
+            ("user_ocid", "ocid1.user.oc1..bbbb"),
+            ("fingerprint", "   "),
+            ("private_key_pem", TEST_OCI_RSA_PEM),
+        ],
+    ];
+    for pairs in partial_cases {
+        let mut opts = HashMap::new();
+        for (k, v) in &pairs {
+            opts.insert((*k).to_string(), (*v).to_string());
+        }
+        let err = match ObjectStoreEngine::from_url("oci://warehouse@mytenancy", Some(&opts)) {
+            Ok(_) => panic!("partial OCI Cavage options must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, StorageError::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
 }

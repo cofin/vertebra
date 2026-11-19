@@ -438,33 +438,40 @@ def test_arrow_cursor_requires_optional_dependencies(missing: str, monkeypatch: 
 
 
 @pytest.mark.parametrize(
-    ("operation", "missing"),
+    ("operation", "missing_modules", "expected_match"),
     [
-        ("to_arrow_table", "pyarrow"),
-        ("to_polars", "polars"),
-        ("to_polars", "pyarrow"),
-        ("write_arrow_shm", "pyarrow"),
-        ("read_arrow_shm", "pyarrow"),
+        ("to_arrow_table", ("pyarrow",), "pyarrow"),
+        ("to_polars", ("polars",), "polars"),
+        ("to_polars", ("pyarrow", "vertebra._vertebra"), "vertebra._vertebra"),
+        ("write_arrow_shm", ("pyarrow",), "pyarrow"),
+        ("read_arrow_shm", ("pyarrow", "vertebra._vertebra"), "vertebra._vertebra"),
     ],
 )
 def test_arrow_helpers_require_optional_dependencies(
     operation: str,
-    missing: str,
+    missing_modules: tuple[str, ...],
+    expected_match: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Arrow conversion and SHM helpers fail loudly with MissingDependencyError when optional modules are absent."""
+    """Arrow conversion and SHM helpers fail loudly with MissingDependencyError when required backends are absent."""
     table = pa.Table.from_pydict({"id": [1], "name": ["alpha"]})
     ipc_bytes = arrow_module.write_arrow_shm(table)
     cursor = arrow_module.read_arrow_shm(ipc_bytes)
 
     original = module_loader_module.import_optional
+    missing_set = set(missing_modules)
     monkeypatch.setattr(
         module_loader_module,
         "import_optional",
-        lambda name: None if name == missing else original(name),
+        lambda name: None if name in missing_set else original(name),
+    )
+    monkeypatch.setattr(
+        arrow_module,
+        "import_optional",
+        lambda name: None if name in missing_set else original(name),
     )
 
-    with pytest.raises(MissingDependencyError, match=missing):
+    with pytest.raises(MissingDependencyError, match=expected_match):
         if operation == "to_arrow_table":
             cursor.to_arrow_table()
         elif operation == "to_polars":
@@ -473,6 +480,33 @@ def test_arrow_helpers_require_optional_dependencies(
             arrow_module.write_arrow_shm(table)
         else:
             arrow_module.read_arrow_shm(ipc_bytes)
+
+
+@pytest.mark.parametrize("source_kind", ["raw_ipc_cursor", "read_arrow_shm"])
+def test_arrow_helpers_succeed_without_pyarrow(
+    source_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ArrowCursor and read_arrow_shm decode schemas, streams, Polars frames, and dicts without pyarrow."""
+    table = pa.Table.from_pydict({"id": [1, 2], "name": ["alpha", "beta"]})
+    ipc_view = arrow_module.write_arrow_shm(table)
+    raw_bytes = bytes(ipc_view)
+    has_polars = importlib.util.find_spec("polars") is not None
+
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    reset_dependency_cache("pyarrow")
+    try:
+        cursor = ArrowCursor(raw_bytes) if source_kind == "raw_ipc_cursor" else arrow_module.read_arrow_shm(ipc_view)
+        assert len(cursor) == 2
+        assert cursor.columns == ["id", "name"]
+        assert cursor.to_pylist() == [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+        assert cursor.__arrow_c_schema__() is not None
+        assert cursor.__arrow_c_stream__() is not None
+        if has_polars:
+            assert cursor.to_polars().to_dicts() == [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+    finally:
+        monkeypatch.undo()
+        reset_dependency_cache("pyarrow")
 
 
 @pytest.mark.parametrize(

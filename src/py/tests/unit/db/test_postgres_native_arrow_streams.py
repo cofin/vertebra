@@ -5,8 +5,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import ctypes
+import datetime
+import decimal
 import inspect
 import select
+import struct
 import sys
 import threading
 from pathlib import Path
@@ -37,9 +41,10 @@ from vertebra._postgres import (
 )
 from vertebra.db import arrow as arrow_module
 from vertebra.db.adapters.postgres.types import PostgresArrowResult
-from vertebra.db.arrow import ArrowCursor
+from vertebra.db.arrow import ArrowCursor, read_arrow_shm
 from vertebra.db.driver import DataError, InterfaceError, OperationalError
 from vertebra.typing import reset_dependency_cache
+from vertebra.utils.module_loader import import_optional
 
 
 @pytest.mark.parametrize(
@@ -1557,3 +1562,299 @@ def test_async_arrow_stream_cancellation_open_execute_and_queued_drainer_zero_sh
     else:
         assert "Q:ROLLBACK" in state.events
         assert any(ev.startswith("Close(P:") for ev in state.events)
+
+
+def _capsule_name(capsule: object) -> bytes | None:
+    """Return the C name of a `PyCapsule` via `PyCapsule_GetName`."""
+    get_name = ctypes.pythonapi.PyCapsule_GetName
+    get_name.argtypes = [ctypes.py_object]
+    get_name.restype = ctypes.c_char_p
+    raw: bytes | None = get_name(capsule)
+    return raw
+
+
+def _serialize_multi_batch_ipc(batches: list[list[tuple[int, str]]]) -> bytes:
+    """Serialize zero or more `(id, label)` record batches into a single Arrow IPC stream."""
+    schema = pa.schema([("id", pa.int64()), ("label", pa.string())])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        for rows in batches:
+            batch = pa.record_batch(
+                {
+                    "id": pa.array([r[0] for r in rows], type=pa.int64()),
+                    "label": pa.array([r[1] for r in rows], type=pa.string()),
+                },
+                schema=schema,
+            )
+            writer.write_batch(batch)
+    return bytes(sink.getvalue().to_pybytes())
+
+
+@pytest.mark.parametrize(
+    "batch_groups",
+    [
+        [],
+        [[(1, "alpha")]],
+        [[(1, "alpha"), (2, "beta")], [(3, "gamma")]],
+    ],
+)
+@pytest.mark.parametrize(
+    "cursor_kind",
+    [
+        "native_shm",
+        "native_bytes",
+        "py_shm_wrapper",
+        "py_raw_bytes",
+        "read_arrow_shm_raw",
+        "read_arrow_shm_vtbarrow",
+    ],
+)
+def test_arrow_c_schema_and_stream_without_pyarrow(
+    batch_groups: list[list[tuple[int, str]]],
+    cursor_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SHM and raw-bytes cursors export Arrow C Schema/Stream capsules and decode via Polars, DuckDB, and dicts without pyarrow."""
+    ipc_bytes = _serialize_multi_batch_ipc(batch_groups)
+    flat_rows = [row for grp in batch_groups for row in grp]
+    expected_dicts = [{"id": r[0], "label": r[1]} for r in flat_rows]
+    vtbarrow_frame = b"VTBARROW" + struct.pack("<Q", len(ipc_bytes)) + ipc_bytes
+
+    duckdb_mod = import_optional("duckdb")
+    polars_mod = import_optional("polars")
+
+    native_shm: native_vertebra.ArrowCursor | None = None
+    if cursor_kind in ("native_shm", "py_shm_wrapper"):
+        native_shm = native_vertebra.ArrowCursor.write_ipc_to_shm(
+            ArrowCursor._next_shm_segment_name(),
+            ipc_bytes,
+            len(flat_rows),
+        )
+
+    cursor: Any = None
+    try:
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        reset_dependency_cache("pyarrow")
+        try:
+            if cursor_kind == "native_shm":
+                assert native_shm is not None
+                cursor = native_shm
+            elif cursor_kind == "native_bytes":
+                cursor = native_vertebra.ArrowCursor.from_ipc_bytes(memoryview(ipc_bytes))
+            elif cursor_kind == "py_shm_wrapper":
+                assert native_shm is not None
+                cursor = ArrowCursor(native_shm)
+            elif cursor_kind == "py_raw_bytes":
+                cursor = ArrowCursor(ipc_bytes)
+            elif cursor_kind == "read_arrow_shm_raw":
+                cursor = read_arrow_shm(ipc_bytes)
+            else:
+                cursor = read_arrow_shm(vtbarrow_frame)
+
+            assert cursor.row_count == len(flat_rows)
+            if isinstance(cursor, ArrowCursor):
+                assert len(cursor) == len(flat_rows)
+                assert arrow_module._table_to_rows_and_cols(cursor) == (flat_rows, ("id", "label"))
+            assert cursor.columns == ["id", "label"]
+
+            schema_cap = cursor.__arrow_c_schema__()
+            stream_cap = cursor.__arrow_c_stream__()
+            assert _capsule_name(schema_cap) == b"arrow_schema"
+            assert _capsule_name(stream_cap) == b"arrow_array_stream"
+            del schema_cap
+            del stream_cap
+
+            matching_schema_cap = cursor.__arrow_c_schema__()
+            matched_stream_cap = cursor.__arrow_c_stream__(matching_schema_cap)
+            assert _capsule_name(matched_stream_cap) == b"arrow_array_stream"
+            del matched_stream_cap
+            del matching_schema_cap
+
+            assert cursor.to_pylist() == expected_dicts
+
+            if polars_mod is not None:
+                df = cursor.to_polars()
+                assert df.columns == ["id", "label"]
+                assert df.to_dicts() == expected_dicts
+
+            if duckdb_mod is not None:
+                con = duckdb_mod.connect(":memory:")
+                try:
+                    assert con.from_arrow(cursor).fetchall() == flat_rows
+                finally:
+                    con.close()
+        finally:
+            monkeypatch.undo()
+            reset_dependency_cache("pyarrow")
+    finally:
+        if cursor is not None and hasattr(cursor, "release"):
+            cursor.release()
+        if native_shm is not None:
+            native_shm.release()
+
+
+def test_native_from_ipc_bytes_rich_types_schema_rejection_and_corrupt_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify from_ipc_bytes and pure-Rust to_pylist handle nested/temporal/decimal/dictionary types and reject bad schemas."""
+    dict_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, None], type=pa.int8()),
+        pa.array(["open", "closed"], type=pa.string()),
+    )
+    struct_arr = pa.StructArray.from_arrays(
+        [pa.array([10, 20, None], type=pa.int32()), pa.array(["x", "y", "z"], type=pa.string())],
+        names=["k", "v"],
+    )
+    table = pa.table(
+        {
+            "flag": pa.array([True, False, None], type=pa.bool_()),
+            "num": pa.array([100, -200, None], type=pa.int64()),
+            "ratio": pa.array([1.5, -2.25, None], type=pa.float64()),
+            "raw": pa.array([b"ab", b"", None], type=pa.binary()),
+            "amt": pa.array([decimal.Decimal("12.34"), decimal.Decimal("-0.05"), None], type=pa.decimal128(10, 2)),
+            "day": pa.array([datetime.date(2026, 5, 1), datetime.date(1970, 1, 1), None], type=pa.date32()),
+            "tod": pa.array([datetime.time(14, 30, 5, 123456), datetime.time(0, 0, 0), None], type=pa.time64("us")),
+            "ts": pa.array(
+                [
+                    datetime.datetime(2026, 5, 1, 12, 0, 0, tzinfo=datetime.UTC),
+                    datetime.datetime(1970, 1, 1, 0, 0, 0, tzinfo=datetime.UTC),
+                    None,
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "tags": pa.array([[1, 2], [], None], type=pa.list_(pa.int64())),
+            "meta": struct_arr,
+            "state": dict_arr,
+        }
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    ipc_bytes = bytes(sink.getvalue().to_pybytes())
+    expected = table.to_pylist()
+
+    other_schema = pa.schema([("flag", pa.int32())])
+    other_schema_cap = other_schema.__arrow_c_schema__()
+
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    reset_dependency_cache("pyarrow")
+    try:
+        native_cur = native_vertebra.ArrowCursor.from_ipc_bytes(bytearray(ipc_bytes))
+        assert native_cur.shm_name == ""
+        assert native_cur.byte_len == len(ipc_bytes)
+        assert native_cur.row_count == 3
+        assert native_cur.columns == list(table.column_names)
+        assert native_cur.read_bytes() == ipc_bytes
+        assert bytes(native_cur.buffer_view()) == ipc_bytes
+        assert native_cur.to_pylist() == expected
+
+        wrapper = ArrowCursor(ipc_bytes)
+        assert wrapper._native_ipc_cursor is None
+        assert wrapper.to_pylist() == expected
+        assert wrapper._native_ipc_cursor is not None
+
+        with pytest.raises(NotImplementedError):
+            native_cur.__arrow_c_stream__(other_schema_cap)
+        with pytest.raises(NotImplementedError):
+            wrapper.__arrow_c_stream__(other_schema_cap)
+        with pytest.raises(ValueError, match="arrow_schema"):
+            native_cur.__arrow_c_stream__("not-a-capsule")
+
+        from_ipc_any: Any = native_vertebra.ArrowCursor.from_ipc_bytes
+        with pytest.raises(TypeError):
+            from_ipc_any("not-a-buffer")
+        with pytest.raises(ValueError, match="Arrow IPC"):
+            native_vertebra.ArrowCursor.from_ipc_bytes(b"not-arrow")
+        with pytest.raises(ValueError, match="Arrow IPC"):
+            native_vertebra.ArrowCursor.from_ipc_bytes(ipc_bytes[: len(ipc_bytes) // 2])
+        with pytest.raises(DataError):
+            read_arrow_shm(b"not-arrow")
+        with pytest.raises(DataError):
+            read_arrow_shm(ipc_bytes[: len(ipc_bytes) // 2])
+    finally:
+        monkeypatch.undo()
+        reset_dependency_cache("pyarrow")
+
+
+@pytest.mark.parametrize(
+    "cursor_kind",
+    [
+        "native_shm",
+        "native_bytes",
+        "py_shm_wrapper",
+        "py_raw_bytes",
+        "read_arrow_shm",
+    ],
+)
+def test_arrow_cursor_lazy_zero_copy_and_post_release_errors(
+    cursor_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify lazy zero-copy buffer identity before release and ValueError/BufferError on operations after release()."""
+    ipc_bytes = _serialize_multi_batch_ipc([[(10, "x"), (20, "y")]])
+    if cursor_kind == "py_raw_bytes":
+        lazy_cur = ArrowCursor(ipc_bytes, rows=[(10, "x"), (20, "y")], columns=("id", "label"))
+        assert lazy_cur._native_ipc_cursor is None
+        assert pa.py_buffer(lazy_cur.buffer_view()).address == pa.py_buffer(ipc_bytes).address
+        assert lazy_cur.columns == ["id", "label"]
+        assert len(lazy_cur) == 2
+        assert lazy_cur._native_ipc_cursor is None
+
+    native_shm: native_vertebra.ArrowCursor | None = None
+    if cursor_kind in ("native_shm", "py_shm_wrapper"):
+        native_shm = native_vertebra.ArrowCursor.write_ipc_to_shm(
+            ArrowCursor._next_shm_segment_name(),
+            ipc_bytes,
+            2,
+        )
+
+    cursor: Any
+    if cursor_kind == "native_shm":
+        assert native_shm is not None
+        cursor = native_shm
+    elif cursor_kind == "native_bytes":
+        cursor = native_vertebra.ArrowCursor.from_ipc_bytes(ipc_bytes)
+    elif cursor_kind == "py_shm_wrapper":
+        assert native_shm is not None
+        cursor = ArrowCursor(native_shm)
+    elif cursor_kind == "py_raw_bytes":
+        cursor = ArrowCursor(ipc_bytes)
+    else:
+        cursor = read_arrow_shm(ipc_bytes)
+
+    retained_mv = cursor.buffer_view()
+    try:
+        first_release = cursor.release()
+        if cursor_kind in ("native_shm", "native_bytes", "py_shm_wrapper"):
+            assert first_release is True
+        assert cursor.release() is False
+        assert bytes(retained_mv) == ipc_bytes
+
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        reset_dependency_cache("pyarrow")
+        try:
+            with pytest.raises(BufferError, match="released"):
+                cursor.buffer_view()
+            with pytest.raises(BufferError, match="released"):
+                memoryview(cursor)
+            with pytest.raises(ValueError, match="released"):
+                cursor.__arrow_c_schema__()
+            with pytest.raises(ValueError, match="released"):
+                cursor.__arrow_c_stream__()
+            with pytest.raises(ValueError, match="released"):
+                _ = cursor.columns
+            with pytest.raises(ValueError, match="released"):
+                cursor.to_pylist()
+            if import_optional("polars") is not None:
+                with pytest.raises(ValueError, match="released"):
+                    cursor.to_polars()
+            if hasattr(cursor, "read_bytes"):
+                with pytest.raises(ValueError, match="released"):
+                    cursor.read_bytes()
+        finally:
+            monkeypatch.undo()
+            reset_dependency_cache("pyarrow")
+    finally:
+        retained_mv.release()
+        if native_shm is not None:
+            native_shm.release()

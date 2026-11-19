@@ -54,7 +54,9 @@ from vertebra.db.adapters.mysql import (
     compile_mysql_statement,
     map_mysql_exception,
 )
+from vertebra.db.adapters.mysql.config import build_mysql_client_kwargs
 from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
+from vertebra.db.dialer import aws_rds_root_ca_pem
 from vertebra.db.dialer.cloudsql import AsyncCloudSQLDialer, CloudSQLConfig, SyncCloudSQLDialer
 from vertebra.db.driver import AZURE_MYSQL_SCOPE, AwsRdsIamTokenProvider, AzureEntraTokenProvider
 from vertebra.db.driver._common import MYSQL_DIALECT_TAG
@@ -63,7 +65,7 @@ from vertebra.extensions.sqlalchemy import (
     SyncMySQLDialect,
     Vector,
 )
-from vertebra.typing import MissingDependencyError, reset_dependency_cache
+from vertebra.typing import ImproperConfigurationError, MissingDependencyError, reset_dependency_cache
 
 
 @pytest.fixture
@@ -905,7 +907,111 @@ def test_mysql_config_token_provider_redaction_and_ssl_defaults() -> None:
         secret_access_key="test-secret-key-placeholder",
         clock=lambda: 1_794_873_600.0,
     )
+    assert cfg.ssl_ca == aws_rds_root_ca_pem()
+    assert build_mysql_client_kwargs(cfg)["ssl_ca"] == aws_rds_root_ca_pem()
+    assert explicit_disable.ssl_ca is None
     assert cfg.pool_key() != MySQLConfig(dsn=cfg.dsn, token_provider=other_provider).pool_key()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("explicit_scope", "expected_scope"),
+    [
+        (None, AZURE_MYSQL_SCOPE),
+        ("https://custom.mysql.example/.default", "https://custom.mysql.example/.default"),
+    ],
+)
+async def test_mysql_config_azure_entra_default_scope_injection(
+    explicit_scope: str | None,
+    expected_scope: str,
+) -> None:
+    """Verify MySQLConfig auto-injects AZURE_MYSQL_SCOPE directly on unscoped AzureEntraTokenProvider."""
+    seen_scopes: list[str] = []
+
+    def _fetch(scope: str) -> dict[str, Any]:
+        seen_scopes.append(scope)
+        return {"access_token": f"test-token-placeholder-{scope}", "expires_in": 600}
+
+    provider = AzureEntraTokenProvider(
+        tenant_id="contoso.onmicrosoft.com",
+        client_id="mysql-client",
+        client_secret="test-token-placeholder-secret",
+        scope=explicit_scope,
+        fetcher=_fetch,
+        clock=lambda: 1000.0,
+    )
+    cfg = MySQLConfig(
+        dsn="mysql://entra_user@contoso.mysql.database.azure.com:3306/appdb",
+        token_provider=provider,
+    )
+    assert isinstance(cfg.token_provider, AzureEntraTokenProvider)
+    assert cfg.token_provider.scope == expected_scope
+    assert cfg.canonical_ssl_mode == "require"
+    assert cfg.resolve_iam_password_sync() == f"test-token-placeholder-{expected_scope}"
+    assert await cfg.resolve_iam_password_async(force_refresh=True) == f"test-token-placeholder-{expected_scope}"
+    assert cfg.parse_dsn_params()["password"] == f"test-token-placeholder-{expected_scope}"
+    assert seen_scopes == [expected_scope, expected_scope]
+
+
+@pytest.mark.parametrize("provider_kind", ["aws_rds", "azure_entra"])
+@pytest.mark.parametrize(
+    ("host_literal", "is_loopback"),
+    [
+        ("db.example.us-east-1.rds.amazonaws.com", False),
+        ("10.0.0.15", False),
+        ("127.0.0.1", True),
+        ("localhost", True),
+        ("[::1]", True),
+    ],
+)
+def test_mysql_cloud_auth_rds_ca_attachment_and_remote_tls_enforcement(
+    provider_kind: str,
+    host_literal: str,
+    is_loopback: bool,
+) -> None:
+    """Verify MySQLConfig blocks remote ssl_mode='disable', attaches RDS Root CAs, and allows loopback plaintext."""
+    provider: Any
+    if provider_kind == "aws_rds":
+        provider = AwsRdsIamTokenProvider(
+            endpoint_host="db.example.us-east-1.rds.amazonaws.com",
+            port=3306,
+            region="us-east-1",
+            username="iam_user",
+            access_key_id="test-token-placeholder-akid",
+            secret_access_key="test-token-placeholder-secret",
+            clock=lambda: 1_794_873_600.0,
+        )
+    else:
+        provider = AzureEntraTokenProvider(
+            fetcher=lambda scope: {"access_token": f"test-token-placeholder-{scope}", "expires_in": 600},
+            clock=lambda: 1000.0,
+        )
+
+    disabled_dsn = f"mysql://iam_user@{host_literal}:3306/appdb?ssl_mode=disable"
+    default_dsn = f"mysql://iam_user@{host_literal}:3306/appdb"
+
+    if not is_loopback:
+        with pytest.raises(ImproperConfigurationError, match="ssl_mode='disable'"):
+            MySQLConfig(dsn=disabled_dsn, token_provider=provider)
+        with pytest.raises(ImproperConfigurationError, match="ssl_mode='disable'"):
+            MySQLConfig(host=host_literal, ssl_mode="disable", token_provider=provider)
+        with pytest.raises(ImproperConfigurationError, match="ssl_mode='disable'"):
+            MySQLConfig.from_url(disabled_dsn, token_provider=provider)
+
+        remote_cfg = MySQLConfig(dsn=default_dsn, token_provider=provider)
+        assert remote_cfg.canonical_ssl_mode == "require"
+        if provider_kind == "aws_rds":
+            assert remote_cfg.ssl_ca == aws_rds_root_ca_pem()
+            assert build_mysql_connect_kwargs(remote_cfg)["ssl_ca"] == aws_rds_root_ca_pem()
+            custom_ca = "-----BEGIN CERTIFICATE-----\nMIIB+TCCAWACCQD=\n-----END CERTIFICATE-----\n"
+            custom_cfg = MySQLConfig(dsn=default_dsn, ssl_ca=custom_ca, token_provider=provider)
+            assert custom_cfg.ssl_ca == custom_ca
+        else:
+            assert remote_cfg.ssl_ca is None
+    else:
+        local_cfg = MySQLConfig(dsn=disabled_dsn, token_provider=provider)
+        assert local_cfg.parse_dsn_params()["ssl_mode"] == "disable"
+        assert local_cfg.ssl_ca is None
 
 
 @pytest.mark.anyio
