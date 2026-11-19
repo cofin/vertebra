@@ -46,6 +46,9 @@ SELECT
     COALESCE(c.transport, b.transport) AS transport,
     COALESCE(c.broker_mode, b.broker_mode) AS broker_mode,
     COALESCE(c.load_mode, b.load_mode) AS load_mode,
+    COALESCE(c.target_rps, b.target_rps) AS target_rps,
+    COALESCE(c.pool_size, b.pool_size) AS pool_size,
+    COALESCE(c.gil_enabled, b.gil_enabled) AS gil_enabled,
     c.rps AS current_rps,
     b.rps AS baseline_rps,
     CASE WHEN b.rps > 0 THEN ((c.rps - b.rps) / b.rps) * 100 ELSE NULL END AS rps_delta_pct,
@@ -62,6 +65,9 @@ FULL OUTER JOIN benchmark_results b
     AND c.transport = b.transport
     AND c.broker_mode = b.broker_mode
     AND c.load_mode = b.load_mode
+    AND c.target_rps IS NOT DISTINCT FROM b.target_rps
+    AND c.pool_size IS NOT DISTINCT FROM b.pool_size
+    AND c.gil_enabled IS NOT DISTINCT FROM b.gil_enabled
     AND b.run_id = $2
 WHERE c.run_id = $1
 ORDER BY target, scenario, protocol, adapter, broker_mode, load_mode, concurrency;

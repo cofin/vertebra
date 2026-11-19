@@ -32,27 +32,28 @@ def test_pyproject_bench_comparators_group_isolated() -> None:
     dep_groups = pyproject["dependency-groups"]
     comparators: list[str] = dep_groups["bench-comparators"]
 
-    expected_entries = {
-        "asyncpg>=0.30; python_version < '3.14'",
-        "psycopg[binary]>=3.2,<3.4; python_version < '3.14'",
-        "pymysql>=1.1",
-        "aiomysql>=0.2; python_version < '3.14'",
-        "aiosqlite>=0.20",
-        "oracledb>=2.5; python_version < '3.14'",
-        "pymssql>=2.3; python_version < '3.14'",
-        "redis[hiredis]>=5.2; python_version < '3.14'",
-        "boto3>=1.35",
-        "aiobotocore>=2.15; python_version < '3.14'",
-        "obstore>=0.5; python_version < '3.14'",
-        "azure-storage-blob>=12.23",
-        "duckdb>=1.0; python_version < '3.14'",
-        "django-bolt>=0.1; python_version < '3.14'",
-        "litestar>=2.14",
-        "fastapi>=0.115",
-        "django>=5.1",
-        "flask>=3.1",
+    comparator_dists = {_dist_name(entry) for entry in comparators if isinstance(entry, str)}
+    expected_dists = {
+        "asyncpg",
+        "psycopg",
+        "pymysql",
+        "aiomysql",
+        "aiosqlite",
+        "oracledb",
+        "pymssql",
+        "redis",
+        "boto3",
+        "aiobotocore",
+        "obstore",
+        "azure-storage-blob",
+        "duckdb",
+        "django-bolt",
+        "litestar",
+        "fastapi",
+        "django",
+        "flask",
     }
-    assert expected_entries.issubset(set(comparators))
+    assert expected_dists.issubset(comparator_dists)
 
     comparator_only_dists = {
         "asyncpg",

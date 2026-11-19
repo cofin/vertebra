@@ -694,3 +694,20 @@ def create_spikard_data_app(backend: DataBackend | None = None) -> Any:
     app.put("/object/{key}")(put_object_endpoint)
     app.get("/health")(health_endpoint)
     return app
+
+
+_LAZY_APP_FACTORIES: Final[dict[str, Any]] = {
+    "litestar_app": create_litestar_app,
+    "fastapi_app": create_fastapi_app,
+    "django_app": create_django_app,
+    "flask_app": create_flask_app,
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily build framework ASGI/WSGI app instances on attribute access."""
+    factory = _LAZY_APP_FACTORIES.get(name)
+    if factory is not None:
+        return factory()
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

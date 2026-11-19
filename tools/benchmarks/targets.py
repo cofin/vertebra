@@ -1108,7 +1108,7 @@ ALL_TARGETS: dict[str, Target] = {
         name="litestar-vtb-data",
         topology=Topology.EMBEDDED,
         cmd=_vertebra_run(
-            "tools.benchmarks.apps.data_frameworks:create_litestar_app",
+            "tools.benchmarks.apps.data_frameworks:litestar_app",
             "--asgi",
             "--host",
             "127.0.0.1",
@@ -1165,7 +1165,7 @@ ALL_TARGETS: dict[str, Target] = {
         name="fastapi-vtb-data",
         topology=Topology.EMBEDDED,
         cmd=_vertebra_run(
-            "tools.benchmarks.apps.data_frameworks:create_fastapi_app",
+            "tools.benchmarks.apps.data_frameworks:fastapi_app",
             "--asgi",
             "--host",
             "127.0.0.1",
@@ -1254,7 +1254,7 @@ ALL_TARGETS: dict[str, Target] = {
         name="django-vtb-data",
         topology=Topology.EMBEDDED,
         cmd=_vertebra_run(
-            "tools.benchmarks.apps.data_frameworks:create_django_app",
+            "tools.benchmarks.apps.data_frameworks:django_app",
             "--asgi",
             "--host",
             "127.0.0.1",
@@ -1281,7 +1281,7 @@ ALL_TARGETS: dict[str, Target] = {
         name="flask-vtb-data",
         topology=Topology.EMBEDDED,
         cmd=_vertebra_run(
-            "tools.benchmarks.apps.data_frameworks:create_flask_app",
+            "tools.benchmarks.apps.data_frameworks:flask_app",
             "--interface",
             "wsgi",
             "--host",

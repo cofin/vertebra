@@ -289,6 +289,99 @@ def test_installed_framework_factories_serve_standardized_routes(framework: str)
 
             _assert_standardized_responses(_invoke_spikard)
         else:
-            assert app is not None
+            pytest.skip("django_bolt routes are verified by test_django_bolt_routes_with_stub_api")
     finally:
         backend.close()
+
+
+def test_django_bolt_routes_with_stub_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_django_bolt_app registers all standardized routes and handlers."""
+    registered: dict[tuple[str, str], Any] = {}
+
+    class _FakeBoltAPI:
+        def get(self, path: str) -> Any:
+            def _decorator(fn: Any) -> Any:
+                registered[("GET", path)] = fn
+                return fn
+
+            return _decorator
+
+        def put(self, path: str) -> Any:
+            def _decorator(fn: Any) -> Any:
+                registered[("PUT", path)] = fn
+                return fn
+
+            return _decorator
+
+    class _FakeResponse:
+        def __init__(self, body: Any, *, status_code: int = 200, media_type: str = "application/json") -> None:
+            self.body = body
+            self.status_code = status_code
+            self.media_type = media_type
+
+    class _FakeRequest:
+        def __init__(self, raw_body: bytes) -> None:
+            self._body = raw_body
+
+        async def body(self) -> bytes:
+            return self._body
+
+    fake_bolt_mod = type("FakeBoltMod", (), {"BoltAPI": _FakeBoltAPI, "Response": _FakeResponse})()
+    monkeypatch.setattr(
+        "tools.benchmarks.apps.data_frameworks._require_framework",
+        lambda module_name, *_args: fake_bolt_mod if module_name == "django_bolt" else None,
+    )
+    monkeypatch.setattr("tools.benchmarks.apps.data_frameworks._ensure_django_settings", lambda **_kwargs: None)
+
+    backend = DataBackend(
+        DataBackendConfig(
+            db_backend="memory",
+            cache_backend="memory",
+            storage_backend="memory",
+            storage_bucket="vertebra-framework-test",
+        )
+    )
+    try:
+        app = create_django_bolt_app(backend)
+        assert isinstance(app, _FakeBoltAPI)
+        assert len(registered) == 8
+
+        async def _invoke_bolt_async(method: str, path: str, query: bytes, body: bytes) -> tuple[int, bytes]:
+            if path == "/json":
+                resp = await registered[("GET", "/json")]()
+            elif path == "/db":
+                resp = await registered[("GET", "/db")]()
+            elif path == "/queries":
+                q = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/queries")](queries=q)
+            elif path == "/updates":
+                q = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/updates")](queries=q)
+            elif path == "/cached-queries":
+                c = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/cached-queries")](count=c)
+            elif path.startswith("/object/") and method == "GET":
+                key = path.removeprefix("/object/")
+                resp = await registered[("GET", "/object/{key}")](key=key)
+            elif path.startswith("/object/") and method == "PUT":
+                key = path.removeprefix("/object/")
+                resp = await registered[("PUT", "/object/{key}")](key=key, request=_FakeRequest(body))
+            elif path == "/health":
+                resp = await registered[("GET", "/health")]()
+            else:
+                raise AssertionError(f"Unexpected route {method} {path}")
+            raw = resp.body if isinstance(resp.body, bytes) else str(resp.body).encode("latin1")
+            return int(resp.status_code), raw
+
+        _assert_standardized_responses(lambda m, p, q, b: asyncio.run(_invoke_bolt_async(m, p, q, b)))
+    finally:
+        backend.close()
+
+
+def test_lazy_module_app_attributes_resolve_and_reject_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify PEP 562 lazy attributes delegate to framework factories and reject unknown names."""
+    sentinel = object()
+    monkeypatch.setitem(data_frameworks._LAZY_APP_FACTORIES, "litestar_app", lambda: sentinel)
+    assert data_frameworks.litestar_app is sentinel
+    with pytest.raises(AttributeError):
+        _ = data_frameworks.nonexistent_app_attr

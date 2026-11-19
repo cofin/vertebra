@@ -460,16 +460,39 @@ def test_vertebra_gateway_wrappers_mount_protocols(
     assert protocol == expected_protocol
 
 
-def test_vertebra_gateway_factories_accept_custom_backend() -> None:
+@pytest.mark.parametrize(
+    ("factory", "expected_protocol"),
+    [
+        (create_vertebra_rsgi_app, "rsgi"),
+        (create_vertebra_asgi_app, "asgi"),
+        (create_vertebra_wsgi_app, "wsgi"),
+    ],
+)
+def test_vertebra_gateway_factories_accept_custom_backend(
+    factory: Any,
+    expected_protocol: str,
+) -> None:
     """Verify Vertebra gateway factories wire a custom DataBackend onto mounted apps."""
     backend = _make_memory_backend()
-    apps = [
-        (create_vertebra_rsgi_app(backend), "rsgi"),
-        (create_vertebra_asgi_app(backend), "asgi"),
-        (create_vertebra_wsgi_app(backend), "wsgi"),
-    ]
-    for app_instance, expected_protocol in apps:
+    try:
+        backend.put_object_sync("custom-key", b"injected-payload")
+        app_instance = factory(backend)
         assert isinstance(app_instance, App)
         assert len(app_instance.mounts) == 1
+        mounted_callable = app_instance.mounts[0][1]
         assert app_instance.mounts[0][2] == expected_protocol
-    backend.close()
+
+        if expected_protocol == "rsgi":
+            protocol_resp = asyncio.run(_call_rsgi(mounted_callable, "/object/custom-key"))
+            assert protocol_resp.status == 200
+            assert protocol_resp.body == b"injected-payload"
+        elif expected_protocol == "asgi":
+            status, _headers, body = asyncio.run(_call_asgi_http(mounted_callable, "/object/custom-key"))
+            assert status == 200
+            assert body == b"injected-payload"
+        else:
+            status_str, _headers, body = _call_wsgi(mounted_callable, "/object/custom-key")
+            assert status_str.startswith("200")
+            assert body == b"injected-payload"
+    finally:
+        backend.close()

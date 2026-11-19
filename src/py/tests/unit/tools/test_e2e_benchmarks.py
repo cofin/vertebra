@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -319,10 +320,14 @@ def test_server_runner_broker_hooks_run_and_teardown(tmp_path: Path) -> None:
         "encoding='utf-8'); "
         "sys.exit(7)"
     )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        ephemeral_port = int(sock.getsockname()[1])
+
     runner = ServerRunner(
         cmd=[sys.executable, "-c", child_script],
         host="127.0.0.1",
-        port=59994,
+        port=ephemeral_port,
         hooks=[hook],
     )
     with pytest.raises(RuntimeError, match="Server process exited with code 7"):

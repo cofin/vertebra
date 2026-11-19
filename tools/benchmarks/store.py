@@ -66,10 +66,6 @@ class BenchmarkStore:
             if col_name not in cols:
                 self._conn.execute(f"ALTER TABLE benchmark_results ADD COLUMN {col_name} {col_def}")
 
-    def _migrate_add_topology(self) -> None:
-        """Alias for _migrate_result_columns for backward compatibility."""
-        self._migrate_result_columns()
-
     def create_run(self, note: str = "") -> str:
         """Create a new benchmark run and return its run_id."""
         now = datetime.now(tz=UTC)

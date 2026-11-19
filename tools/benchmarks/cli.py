@@ -147,7 +147,7 @@ def _build_load_config(
 
 
 def _run_load(driver_name: str, config: LoadConfig) -> dict[str, Any]:
-    """Execute a load test using OhaRunner or the matching Chapter 1 load driver."""
+    """Execute a load test using OhaRunner or the matching load driver."""
     if driver_name == "oha":
         runner = OhaRunner(
             url=config.url,

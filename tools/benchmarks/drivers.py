@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -12,6 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
+
+from vertebra.utils.serializers import decode_json
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -210,7 +211,7 @@ class OhaDriver:
 
     def parse_output(self, stdout: str, config: LoadConfig) -> dict[str, Any]:
         """Parse `oha --output-format json` output into normalized benchmark metrics."""
-        raw = json.loads(stdout)
+        raw = decode_json(stdout)
         if not isinstance(raw, dict):
             msg = "Expected JSON object from oha output"
             raise ValueError(msg)
@@ -385,7 +386,7 @@ class GhzDriver:
 
     def parse_output(self, stdout: str, config: LoadConfig) -> dict[str, Any]:
         """Parse `ghz --format json` output and convert nanosecond latencies to seconds."""
-        raw = json.loads(stdout)
+        raw = decode_json(stdout)
         if not isinstance(raw, dict):
             msg = "Expected JSON object from ghz output"
             raise ValueError(msg)
@@ -472,7 +473,7 @@ class K6Driver:
 
     def parse_output(self, stdout: str, config: LoadConfig) -> dict[str, Any]:
         """Parse `k6 --summary-export` JSON and convert millisecond latencies to seconds."""
-        raw = json.loads(stdout)
+        raw = decode_json(stdout)
         if not isinstance(raw, dict):
             msg = "Expected JSON object from k6 summary"
             raise ValueError(msg)
