@@ -151,7 +151,7 @@ upload_url = SigningConfig.sign_azure_sas(
 )
 ```
 
-GET URLs grant read permission; PUT URLs grant create/write permission. `SigningConfig(provider="azure", account=..., container=..., azure_access_key=...)` configures the same operation on a store. SAS tokens and service-principal credentials also configure Azure object access; generating a new service SAS requires the shared signing key.
+GET URLs grant read permission; PUT URLs grant create/write permission. `SigningConfig(provider="azure", account=..., container=..., azure_access_key=...)` configures the same operation on a store. SAS tokens and service-principal credentials also configure Azure object access; generating a new service SAS requires the shared signing key. A service principal needs `tenant_id`, `client_id`, and `client_secret` together. A partial or blank set, or a blank `sas_token`, raises `ImproperConfigurationError` when the store is built.
 
 ## OCI pre-authenticated requests
 
@@ -168,6 +168,6 @@ store = SyncObjectStore(OCIConfig(
 download_url = store.presign_get("reports/latest.parquet", expires_in_secs=900)
 ```
 
-The prefix ends in `/o/`; generated URLs append the encoded object key. The PAR's granted access and provider expiry remain authoritative: `expires_in_secs` must be positive and does not extend an existing PAR. `OCIConfig` also accepts tenancy/user OCIDs, key fingerprint, and an RSA private key for native OCI API authentication. `SigningConfig.sign_oci_headers(...)` produces RSA-SHA256 Cavage request headers; PAR URL generation uses `par_token` or `par_url_prefix`.
+The prefix ends in `/o/`; generated URLs append the encoded object key. The PAR's granted access and provider expiry remain authoritative: `expires_in_secs` must be positive and does not extend an existing PAR. `OCIConfig` also accepts tenancy/user OCIDs, key fingerprint, and an RSA private key for native OCI API authentication. Supply all four together; a partial or blank set raises `ImproperConfigurationError` when the store is built. `SigningConfig.sign_oci_headers(...)` produces RSA-SHA256 Cavage request headers; PAR URL generation uses `par_token` or `par_url_prefix`.
 
 See [object storage](storage.md), [Parquet and framework adapters](storage-parquet-and-orm.md), and the [storage API reference](../reference/storage.md).

@@ -130,4 +130,16 @@ azure_mssql = SyncAzureEntraDialer(
 mssql_azure_config = MSSQLConfig(**azure_mssql.connection_kwargs())
 ```
 
-- **Automatic Scope & Engine Inference (`SyncAzureEntraDialer`, `AsyncAzureEntraDialer`)**: Infers `postgres` (`5432`), `mysql` (`3306`), or `mssql` (`1433` TDS `FEDAUTH` token authentication with `encryption="required"` and `trust_server_certificate=False`) from Azure commercial, Government, and China hostnames (or an explicit `engine=`), injecting the matching Entra OAuth2 scope automatically.
+- **Automatic Scope & Engine Inference (`SyncAzureEntraDialer`, `AsyncAzureEntraDialer`)**: Infers `postgres` (`5432`), `mysql` (`3306`), or `mssql` (`1433` TDS `FEDAUTH` token authentication with `encryption="required"` and `trust_server_certificate=False`) from Azure commercial, Government, and China hostnames (or an explicit `engine=`), injecting the matching Entra OAuth2 scope automatically. Government and China hostnames get that cloud's scope and Entra authority; `authority_host=` or `AZURE_AUTHORITY_HOST` overrides the authority.
+
+## TLS Defaults With Cloud Token Providers
+
+When a config carries an AWS or Azure token provider and the server is remote, Vertebra verifies the server before sending the token:
+
+| Config | No SSL mode set | Rejected on remote hosts | Allowed when set explicitly |
+| --- | --- | --- | --- |
+| `PostgreSQLConfig` | `sslmode=verify-full` | `disable`, `allow`, `prefer` | `require`, `verify-ca`, `verify-full` |
+| `MySQLConfig` | `ssl_mode=verify-full` | `disable`, `prefer` | `require`, `verify-ca`, `verify-full` |
+| `MSSQLConfig` | `encryption="required"` | unencrypted or login-only encryption, `trust_server_certificate=True` | `required`, `strict` |
+
+Rejected settings raise `ImproperConfigurationError`. Loopback hosts, Unix sockets, and Cloud SQL targets keep their usual defaults, so local test servers still work. RDS configs use the bundled RDS root CAs unless you pass your own CA; Aurora DSQL and Azure use public roots. `MySQLConfig.ssl_mode` holds only what you set, and `canonical_ssl_mode` reports the mode in effect.

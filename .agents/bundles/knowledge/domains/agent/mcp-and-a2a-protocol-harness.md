@@ -116,6 +116,7 @@ sources:
 - `A2AService.stream_message` cleans up broker subscriptions in `finally`, `PushNotificationDispatcher.validate_webhook_url` pins DNS-resolved public IPs against SSRF, and `MCPTaskStore` dispatches via `QueueService` and prunes TTL-expired records [^src-agent-a2a-service-py] [^mcp-tasks].
 - `vertebra.agent.okf` provides `OkfSource`, `OkfDocument`, `OkfBundle`, and `OkfValidationError` without `PyYAML`, enforcing OKF v0.2 reserved files, fence-aware truth/footnote scanning, `120,832`-byte ceilings, SHA-256 digests, and reproducible ZIP archives [^src-agent-okf-py].
 - `vertebra.agent.knowledge_catalog` provides `KnowledgeCatalogConfig`, `CatalogEntryRecord`, `CatalogSyncSummary`, `SyncKnowledgeCatalogClient`, and `AsyncKnowledgeCatalogClient` over `dataplex.googleapis.com/v1` with LRO `entryGroups` polling, `view="ALL"` reads, `<= 250`-entry digest sync, and `locations/global:searchEntries` [^src-agent-knowledge-catalog-py].
+- `sync_bundle(delete_stale=True)` deletes only entries marked `entrySource.system == "okf"` with `okf-format` and `okf-sha256` labels, and a failed sync raises `CatalogSyncError` with the completed `CatalogSyncSummary`. The marker check and the `parent=` search predicate are verified against in-memory transports, not a live Dataplex project. The client does not create the `okf-document` aspect type [^src-agent-knowledge-catalog-py].
 <!-- truth: end -->
 
 ## 1. Dual-Mode MCP (`MCPCore`, Sessions, SSE, Skills & UI)

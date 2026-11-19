@@ -37,7 +37,7 @@ Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`
 
 | Extra | Package Specifier | Included Capabilities |
 | --- | --- | --- |
-| `sqlspec` | `"vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.69.0`) driver adapters, configs, and PyArrow integration |
+| `sqlspec` | `"vertebra-core[sqlspec]"` | First-class `sqlspec` (`>=0.72.2`) driver adapters, configs, and PyArrow integration |
 | `alchemy` | `"vertebra-core[alchemy]"` | `advanced-alchemy` (1.12+), `sqlalchemy` (2.0.36+), and `alembic` (1.14+) |
 | `arrow` | `"vertebra-core[arrow]"` | Optional `pyarrow` (`>=18.0.0`) materialization (`to_arrow_table()`) and Parquet dataset staging |
 | `pydantic` | `"vertebra-core[pydantic]"` | Zero-copy `pydantic-core` (`validate_json` / `to_json`) schema integration |
@@ -58,6 +58,7 @@ Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`
 | `htmx` | `"vertebra-core[htmx]"` | `litestar-htmx` server-driven fragment and response helpers |
 | `embeddings` | `"vertebra-core[embeddings]"` | Local ONNX / `fastembed` embedding models via `1x` RAM `EmbeddingBroker` |
 | `iap` | `"vertebra-core[iap]"` | Google Cloud Identity-Aware Proxy / OIDC JWT signature verification (`pyjwt[crypto]`) |
+| `opentelemetry` | `"vertebra-core[opentelemetry]"` | Optional `opentelemetry-api` (`>=1.28.0`) event-loop lag and active-task metric instruments |
 | `bigquery` | `"vertebra-core[bigquery]"` | Standalone native Rust `vertebra-bigquery` (`vertebra._bigquery`) driver wheel |
 | `bundler` | `"vertebra-core[bundler]"` | Standalone native Rust `vertebra-bundler` (`vertebra._bundler`) Rolldown/Oxc & QuickJS SSR wheel |
 | `duckdb` | `"vertebra-core[duckdb]"` | Standalone native Rust `vertebra-duckdb` (`vertebra._duckdb`) DuckDB 2.0 & Arrow wheel |
@@ -72,7 +73,7 @@ Vertebra keeps its base dependency footprint minimal (`anyio`, `msgspec`, `rich`
 | `rloop` | `"vertebra-core[rloop]"` | Optional `rloop` asyncio event loop integration on POSIX hosts |
 | `zuvloop` | `"vertebra-core[zuvloop]"` | Optional Zig-backed `zuvloop` asyncio event loop integration on Python 3.14+ |
 
-Native database drivers produce `VTBARROW` Apache Arrow IPC buffers directly in shared memory (`ArrowCursor.buffer_view()`) without requiring any Python Arrow dependency. Install `[arrow]` for `pyarrow.Table` materialization and Parquet staging, or `[polars]` independently.
+Native database drivers produce `VTBARROW` Apache Arrow IPC buffers directly in shared memory (`ArrowCursor.buffer_view()`) and export Arrow C Schema and C Stream PyCapsules without requiring any Python Arrow dependency. Install `[arrow]` for `pyarrow.Table` materialization and Parquet staging, or `[polars]` independently.
 
 Install any extra with your preferred package manager (shown with `[postgres]`):
 

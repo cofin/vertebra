@@ -83,6 +83,11 @@ matches = await client.search_entries(
       heading_level: 4
       members: false
 
+::: vertebra.agent.knowledge_catalog.CatalogSyncError
+    options:
+      heading_level: 4
+      members: false
+
 ::: vertebra.agent.knowledge_catalog.SyncKnowledgeCatalogClient
     options:
       heading_level: 3

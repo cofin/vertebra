@@ -49,7 +49,7 @@ wsgi_adapter = WsgiAdapter(app=my_wsgi_app)
 
 ## Diagnostic Z-Pages & Graceful Drain (`vertebra.server.platform`)
 
-`ZPagesRegistry` and `LameDuckController` provide built-in operational endpoints (`/healthz`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`) and graceful connection draining during rollouts:
+`ZPagesRegistry` and `LameDuckController` provide built-in operational endpoints (`/healthz`, `/statusz`, `/varz`, `/rpcz`, `/brokerz`, `/taskz`) and graceful connection draining during rollouts:
 
 ```python
 from vertebra.server.platform import LameDuckController, ZPagesRegistry
@@ -63,6 +63,27 @@ status, body = zpages.handle_zpage("/healthz")
 ```
 
 When `lame_duck.enter_lame_duck()` is called on `SIGTERM`, `/healthz` immediately returns `503` so load balancers stop sending new traffic while in-flight requests finish draining.
+
+## Event Loops & Task Diagnostics
+
+`create_event_loop()` picks the loop backend from `--loop` or `VERTEBRA_LOOP` (`auto`, `uvloop`, `winloop`, `rloop`, `zuvloop`, `asyncio`) and turns on eager task execution for every backend. `vertebra.utils.sync_tools.run_()` uses the same loop selection.
+
+Tasks carry stable names: `vertebra.loop.shard.{idx}.task.{seq}` for `EventLoopPool` shards, and `vertebra.worker.runner` and `vertebra.worker.lane.{lane}.{seq}` for `WorkerRunner`. Register a pool to list its active tasks on `/taskz`:
+
+```python
+from vertebra.server._loops import EventLoopPool
+from vertebra.server.platform import ZPagesRegistry
+
+pool = EventLoopPool(size=2)
+zpages = ZPagesRegistry(service_name="orders-api")
+zpages.register_loop_pool("http", pool)
+
+status, body = zpages.handle_zpage("/taskz")
+```
+
+Each entry reports the task name, shard, coroutine, and call graph. Python 3.14 and later use `asyncio.capture_call_graph`; Python 3.12 and 3.13 report the task stack. Workers register their own loop pool as `worker`, and `vtb run --worker-only` serves `/taskz` from its `HealthProbeServer`.
+
+Set `VERTEBRA_LOOP_TELEMETRY=1` to sample scheduling lag and active-task counts on every worker loop. `VERTEBRA_LOOP_TELEMETRY_INTERVAL` sets the sampling period in seconds (default `1.0`). Samples go to an `EventLoopRecorder`, and to OpenTelemetry instruments when `[opentelemetry]` is installed. To use your own recorder, pass `loop_recorder=` to `run_worker` or call `EventLoopPool.attach_recorder(recorder)`. See the [telemetry reference](../reference/telemetry.md).
 
 ## ASGI Mount Timeouts
 
