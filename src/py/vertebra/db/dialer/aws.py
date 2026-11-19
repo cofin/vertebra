@@ -54,26 +54,6 @@ class _BaseAwsRdsDialer:
         "_token_provider",
     )
 
-    @staticmethod
-    def _normalize_rds_engine(engine: str | None, *, default_from_port: int | None = None) -> str:
-        """Normalize an AWS RDS engine identifier to `'postgres'` or `'mysql'`."""
-        if engine is None:
-            return "mysql" if default_from_port == 3306 else "postgres"
-        lowered = validate_dialer_non_empty(engine, field_name="engine").lower()
-        if lowered in _POSTGRES_ENGINE_ALIASES:
-            return "postgres"
-        if lowered in _MYSQL_ENGINE_ALIASES:
-            return "mysql"
-        msg = f"Unsupported AWS RDS engine {engine!r}; expected 'postgres' or 'mysql'"
-        raise ImproperConfigurationError(msg)
-
-    @staticmethod
-    def _has_embedded_port(endpoint_host: str) -> bool:
-        """Return True when an endpoint string explicitly embeds a `:port` suffix."""
-        if endpoint_host.startswith("["):
-            return "]:" in endpoint_host
-        return endpoint_host.count(":") == 1
-
     def __init__(
         self,
         endpoint_host: str | AwsRdsDialer,
@@ -294,6 +274,26 @@ class _BaseAwsRdsDialer:
             }
         kwargs.update(overrides)
         return kwargs
+
+    @staticmethod
+    def _normalize_rds_engine(engine: str | None, *, default_from_port: int | None = None) -> str:
+        """Normalize an AWS RDS engine identifier to `'postgres'` or `'mysql'`."""
+        if engine is None:
+            return "mysql" if default_from_port == 3306 else "postgres"
+        lowered = validate_dialer_non_empty(engine, field_name="engine").lower()
+        if lowered in _POSTGRES_ENGINE_ALIASES:
+            return "postgres"
+        if lowered in _MYSQL_ENGINE_ALIASES:
+            return "mysql"
+        msg = f"Unsupported AWS RDS engine {engine!r}; expected 'postgres' or 'mysql'"
+        raise ImproperConfigurationError(msg)
+
+    @staticmethod
+    def _has_embedded_port(endpoint_host: str) -> bool:
+        """Return True when an endpoint string explicitly embeds a `:port` suffix."""
+        if endpoint_host.startswith("["):
+            return "]:" in endpoint_host
+        return endpoint_host.count(":") == 1
 
 
 class SyncAwsRdsDialer(_BaseAwsRdsDialer):

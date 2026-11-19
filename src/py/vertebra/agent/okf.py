@@ -200,8 +200,9 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
         yaml_text = _dump_yaml_frontmatter(frontmatter)
         return f"---\n{yaml_text}\n---\n{body}"
 
-    @staticmethod
+    @classmethod
     def _scan_markdown_body(
+        cls,
         body: str,
         *,
         rel_path: str,
@@ -218,7 +219,7 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
         for line_no, line in enumerate(body.split("\n"), start=1):
             stripped = line.strip()
             if not in_fence:
-                opened = _fence_opening(stripped)
+                opened = cls._fence_opening(stripped)
                 if opened is not None:
                     in_fence = True
                     fence_char, fence_len = opened
@@ -226,7 +227,7 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
                         truth_lines.append(line)
                     continue
             else:
-                if _is_fence_closing(stripped, fence_char, fence_len):
+                if cls._is_fence_closing(stripped, fence_char, fence_len):
                     in_fence = False
                     fence_char = ""
                     fence_len = 0
@@ -356,6 +357,27 @@ class OkfDocument(msgspec.Struct, frozen=True, kw_only=True):
             if dangling_refs:
                 raise OkfValidationError(f"Dangling footnote references in '{rel_path}': {dangling_refs}")
 
+    @staticmethod
+    def _fence_opening(stripped: str) -> tuple[str, int] | None:
+        for fence_char in ("`", "~"):
+            if stripped.startswith(fence_char * 3):
+                count = 0
+                for ch in stripped:
+                    if ch == fence_char:
+                        count += 1
+                    else:
+                        break
+                if fence_char == "`" and "`" in stripped[count:]:
+                    return None
+                return fence_char, count
+        return None
+
+    @staticmethod
+    def _is_fence_closing(stripped: str, fence_char: str, fence_len: int) -> bool:
+        if not stripped or len(stripped) < fence_len:
+            return False
+        return all(ch == fence_char for ch in stripped)
+
 
 class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
     """Collection of validated OKF v0.2 documents with directory and ZIP serialization."""
@@ -476,15 +498,15 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                         )
 
                     with archive.open(info, "r") as member_stream:
-                        raw_bytes = _read_stream_bounded(
+                        raw_bytes = cls._read_stream_bounded(
                             member_stream,
                             rel_path=rel_path,
                             max_bytes=MAX_OKF_ENTRY_BYTES,
                         )
 
-                    if exclude_specs and _is_specs_path(rel_path):
+                    if exclude_specs and cls._is_specs_path(rel_path):
                         continue
-                    if exclude_log and _is_log_path(rel_path):
+                    if exclude_log and cls._is_log_path(rel_path):
                         continue
                     if not rel_path.endswith(".md"):
                         continue
@@ -542,7 +564,7 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                 raise OkfValidationError(f"Symlink is not allowed in OKF bundle: {entry}")
             rel_posix = entry.relative_to(root_path).as_posix()
             if entry.is_dir():
-                if exclude_specs and _is_specs_path(rel_posix):
+                if exclude_specs and cls._is_specs_path(rel_posix):
                     continue
                 cls._collect_directory_documents(
                     current_dir=entry,
@@ -559,16 +581,16 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                 continue
             if not entry.resolve().is_relative_to(resolved_root):
                 raise OkfValidationError(f"Entry escapes OKF bundle root: {entry}")
-            if exclude_specs and _is_specs_path(rel_posix):
+            if exclude_specs and cls._is_specs_path(rel_posix):
                 continue
-            if exclude_log and _is_log_path(rel_posix):
+            if exclude_log and cls._is_log_path(rel_posix):
                 continue
             if not rel_posix.endswith(".md"):
                 continue
 
             rel_path = _normalize_rel_path(rel_posix)
-            with _open_file_nofollow(entry) as handle:
-                raw_bytes = _read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
+            with cls._open_file_nofollow(entry) as handle:
+                raw_bytes = cls._read_stream_bounded(handle, rel_path=rel_path, max_bytes=MAX_OKF_ENTRY_BYTES)
             out.append(OkfDocument.parse(rel_path, raw_bytes, max_truth_lines=max_truth_lines))
 
     @staticmethod
@@ -581,8 +603,9 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
         if not target.resolve().is_relative_to(resolved_root):
             raise OkfValidationError(f"Export path escapes destination root: {target}")
 
-    @staticmethod
+    @classmethod
     def _open_zip_reader(
+        cls,
         source: str | Path | bytes | bytearray | memoryview | IO[bytes],
     ) -> zipfile.ZipFile:
         if isinstance(source, (str, Path)):
@@ -591,10 +614,47 @@ class OkfBundle(msgspec.Struct, frozen=True, kw_only=True):
                 raise OkfValidationError(f"OKF ZIP archive must not be a symlink: {zip_path}")
             if not zip_path.is_file():
                 raise OkfValidationError(f"OKF ZIP archive does not exist: {zip_path}")
-            return zipfile.ZipFile(_open_file_nofollow(zip_path), mode="r")
+            return zipfile.ZipFile(cls._open_file_nofollow(zip_path), mode="r")
         if isinstance(source, (bytes, bytearray, memoryview)):
             return zipfile.ZipFile(io.BytesIO(source), mode="r")
         return zipfile.ZipFile(source, mode="r")
+
+    @staticmethod
+    def _is_specs_path(rel_path: str) -> bool:
+        return rel_path == "specs" or rel_path.startswith("specs/")
+
+    @staticmethod
+    def _is_log_path(rel_path: str) -> bool:
+        return rel_path == "log.md" or rel_path.endswith("/log.md")
+
+    @staticmethod
+    def _read_stream_bounded(
+        stream: IO[bytes],
+        *,
+        rel_path: str,
+        max_bytes: int = MAX_OKF_ENTRY_BYTES,
+        chunk_size: int = _STREAM_CHUNK_BYTES,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {max_bytes} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _open_file_nofollow(path: Path) -> IO[bytes]:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise OkfValidationError(f"Unable to safely open OKF entry '{path}': {exc}") from exc
+        return os.fdopen(fd, "rb")
 
 
 def _normalize_rel_path(raw_path: str) -> str:
@@ -612,43 +672,6 @@ def _normalize_rel_path(raw_path: str) -> str:
         if segment in ("", ".", ".."):
             raise OkfValidationError(f"Unsafe or malformed path segment in OKF bundle: {raw_path!r}")
     return raw_path
-
-
-def _is_specs_path(rel_path: str) -> bool:
-    return rel_path == "specs" or rel_path.startswith("specs/")
-
-
-def _is_log_path(rel_path: str) -> bool:
-    return rel_path == "log.md" or rel_path.endswith("/log.md")
-
-
-def _read_stream_bounded(
-    stream: IO[bytes],
-    *,
-    rel_path: str,
-    max_bytes: int = MAX_OKF_ENTRY_BYTES,
-    chunk_size: int = _STREAM_CHUNK_BYTES,
-) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = stream.read(chunk_size)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise OkfValidationError(f"OKF entry '{rel_path}' exceeds maximum size of {max_bytes} bytes")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _open_file_nofollow(path: Path) -> IO[bytes]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        raise OkfValidationError(f"Unable to safely open OKF entry '{path}': {exc}") from exc
-    return os.fdopen(fd, "rb")
 
 
 def _parse_yaml_frontmatter(yaml_lines: list[str], *, rel_path: str) -> dict[str, Any]:
@@ -1112,24 +1135,3 @@ def _needs_yaml_quoting(value: str) -> bool:
     if _NUMERIC_OR_HEX_STR_RE.match(value):
         return True
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _YAML_SPECIAL_CHARS for ch in value)
-
-
-def _fence_opening(stripped: str) -> tuple[str, int] | None:
-    for fence_char in ("`", "~"):
-        if stripped.startswith(fence_char * 3):
-            count = 0
-            for ch in stripped:
-                if ch == fence_char:
-                    count += 1
-                else:
-                    break
-            if fence_char == "`" and "`" in stripped[count:]:
-                return None
-            return fence_char, count
-    return None
-
-
-def _is_fence_closing(stripped: str, fence_char: str, fence_len: int) -> bool:
-    if not stripped or len(stripped) < fence_len:
-        return False
-    return all(ch == fence_char for ch in stripped)

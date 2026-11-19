@@ -19,6 +19,16 @@ from vertebra.utils.module_loader import ensure_module, import_optional
 
 VALID_GCP_IP_TYPES: Final[frozenset[str]] = frozenset({"PUBLIC", "PRIVATE", "PSC"})
 
+__all__ = (
+    "VALID_GCP_IP_TYPES",
+    "EphemeralCertBundle",
+    "build_verify_full_tls_context",
+    "format_dialer_url_host",
+    "generate_ephemeral_keypair",
+    "validate_dialer_non_empty",
+    "validate_dialer_port",
+)
+
 
 def validate_dialer_port(port: int) -> int:
     """Validate that a TCP port is a non-boolean integer within 1..65535."""
@@ -59,13 +69,6 @@ def build_verify_full_tls_context(ca_pem: str | None = None) -> ssl.SSLContext:
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.check_hostname = True
     return ctx
-
-
-__all__ = (
-    "VALID_GCP_IP_TYPES",
-    "EphemeralCertBundle",
-    "generate_ephemeral_keypair",
-)
 
 
 class EphemeralCertBundle(FrozenBaseStruct, frozen=True, gc=False, kw_only=True):

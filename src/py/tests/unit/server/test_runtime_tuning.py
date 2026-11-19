@@ -282,21 +282,26 @@ def test_gil_audit_quarantine_forces_single_loop_shard(monkeypatch: pytest.Monke
         pool.stop()
 
 
-def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify LoopBackend resolution, create_event_loop backend selection, and CLI VERTEBRA_LOOP export."""
-    monkeypatch.delenv("VERTEBRA_LOOP", raising=False)
-    monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
-
-    expected_backends: list[tuple[str, str]] = [
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
         (LoopBackend.AUTO, "auto"),
         (LoopBackend.UVLOOP, "uvloop"),
         (LoopBackend.WINLOOP, "winloop"),
         (LoopBackend.RLOOP, "rloop"),
         (LoopBackend.ZUVLOOP, "zuvloop"),
         (LoopBackend.ASYNCIO, "asyncio"),
-    ]
-    for actual, expected in expected_backends:
-        assert actual == expected
+    ],
+)
+def test_loop_backend_enum_values(backend: LoopBackend, expected: str) -> None:
+    """Verify LoopBackend string enum values remain stable."""
+    assert backend == expected
+
+
+def test_loop_backend_resolution_and_cli_launch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify LoopBackend resolution, create_event_loop backend selection, and CLI VERTEBRA_LOOP export."""
+    monkeypatch.delenv("VERTEBRA_LOOP", raising=False)
+    monkeypatch.delenv("VERTEBRA_QUARANTINED_LOOPS", raising=False)
 
     assert resolve_loop_backend("asyncio") == LoopBackend.ASYNCIO
     assert resolve_loop_backend("uvloop", quarantined_modules=frozenset({"uvloop==0.21.0"})) == LoopBackend.ASYNCIO

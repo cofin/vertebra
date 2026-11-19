@@ -1096,24 +1096,37 @@ def test_azure_entra_token_provider_validation_errors(kwargs: dict[str, Any]) ->
         AzureEntraTokenProvider(**kwargs)
 
 
-@pytest.mark.anyio
-async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> None:
-    """Verify missing standalone scope and malformed token JSON fail loudly without leaking secrets."""
+def test_azure_entra_token_provider_missing_scope() -> None:
+    """Verify unscoped Entra provider raises ImproperConfigurationError for sync resolution."""
     unscoped = AzureEntraTokenProvider(fetcher=lambda scope: ("test-token-placeholder", 5000.0))
     with pytest.raises(ImproperConfigurationError, match="scope"):
         unscoped.resolve_sync()
+
+
+@pytest.mark.anyio
+async def test_azure_entra_token_provider_missing_scope_async() -> None:
+    """Verify unscoped Entra provider raises ImproperConfigurationError for async resolution."""
+    unscoped = AzureEntraTokenProvider(fetcher=lambda scope: ("test-token-placeholder", 5000.0))
     with pytest.raises(ImproperConfigurationError, match="scope"):
         await unscoped.resolve_async()
 
-    malformed_bodies: list[tuple[int, bytes]] = [
+
+@pytest.mark.parametrize(
+    ("status_code", "response_body"),
+    [
         (200, b"not-valid-json"),
         (200, encode_json_bytes(["unexpected-list"])),
         (200, encode_json_bytes({"expires_in": 300})),
         (200, encode_json_bytes({"access_token": "test-token-placeholder-secret", "expires_in": "bogus"})),
         (200, encode_json_bytes({"access_token": "test-token-placeholder-secret"})),
         (401, b'{"error":"invalid_client","secret":"test-client-secret-placeholder"}'),
-    ]
-    idx = [0]
+    ],
+)
+def test_azure_entra_token_provider_malformed_json_errors_redact_secrets(
+    status_code: int,
+    response_body: bytes,
+) -> None:
+    """Verify malformed and error token JSON payloads fail loudly without leaking client secrets."""
 
     class _MalformedHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -1122,13 +1135,11 @@ async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
-            status, body = malformed_bodies[idx[0]]
-            idx[0] += 1
-            self.send_response(status)
+            self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(response_body)))
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(response_body)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _MalformedHandler)
     port = server.server_address[1]
@@ -1142,13 +1153,11 @@ async def test_azure_entra_token_provider_missing_scope_and_malformed_json() -> 
             scope=AZURE_POSTGRES_SCOPE,
             token_endpoint=f"http://127.0.0.1:{port}/token",
         )
-        for _ in malformed_bodies:
-            with pytest.raises(ImproperConfigurationError) as exc_info:
-                provider.resolve_sync()
-            err_text = str(exc_info.value)
-            assert "test-client-secret-placeholder" not in err_text
-            assert "test-token-placeholder-secret" not in err_text
-        assert idx[0] == len(malformed_bodies)
+        with pytest.raises(ImproperConfigurationError) as exc_info:
+            provider.resolve_sync()
+        err_text = str(exc_info.value)
+        assert "test-client-secret-placeholder" not in err_text
+        assert "test-token-placeholder-secret" not in err_text
     finally:
         server.shutdown()
         server.server_close()
