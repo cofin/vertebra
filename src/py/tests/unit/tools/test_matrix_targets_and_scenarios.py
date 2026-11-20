@@ -305,6 +305,7 @@ def test_target_category_groups_do_not_pollute_static_groups() -> None:
         "spikard-data",
         "litestar-vtb-data",
         "litestar-granian-data",
+        "litestar-uvicorn-data",
         "fastapi-vtb-data",
         "fastapi-granian-data",
         "fastapi-uvicorn-data",
@@ -314,6 +315,10 @@ def test_target_category_groups_do_not_pollute_static_groups() -> None:
         "django-wsgi-vtb-data",
         "django-wsgi-granian-data",
         "flask-vtb-data",
+        "flask-granian-data",
+        "blacksheep-vtb-data",
+        "blacksheep-granian-data",
+        "blacksheep-uvicorn-data",
     }
     assert set(FRAMEWORK_TARGETS) == expected_frameworks
     assert ALL_TARGETS["django-bolt-data"].transport == "rust-actix"

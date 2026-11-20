@@ -52,6 +52,7 @@ def test_pyproject_bench_comparators_group_isolated() -> None:
         "fastapi",
         "django",
         "flask",
+        "blacksheep",
     }
     assert expected_dists.issubset(comparator_dists)
 

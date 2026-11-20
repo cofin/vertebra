@@ -19,6 +19,7 @@ from tools.benchmarks.apps._data_backend import (
 from tools.benchmarks.apps.data_frameworks import (
     SUPPORTED_FRAMEWORK_BASELINES,
     build_django_bolt_command,
+    create_blacksheep_app,
     create_django_app,
     create_django_bolt_app,
     create_django_wsgi_app,
@@ -39,6 +40,7 @@ _FRAMEWORK_FACTORIES: dict[str, Callable[[DataBackend | None], Any]] = {
     "django": create_django_app,
     "django_wsgi": create_django_wsgi_app,
     "flask": create_flask_app,
+    "blacksheep": create_blacksheep_app,
 }
 
 
@@ -169,6 +171,7 @@ def test_module_imports_cleanly_without_optional_frameworks() -> None:
         "django",
         "django_wsgi",
         "flask",
+        "blacksheep",
     )
     assert SUPPORTED_FRAMEWORK_BASELINES == reloaded.SUPPORTED_FRAMEWORK_BASELINES
     for name in SUPPORTED_FRAMEWORK_BASELINES:
@@ -185,6 +188,7 @@ def test_module_imports_cleanly_without_optional_frameworks() -> None:
         ("django", "django", "bench-comparators"),
         ("django_wsgi", "django", "bench-comparators"),
         ("flask", "flask", "bench-comparators"),
+        ("blacksheep", "blacksheep", "bench-comparators"),
     ],
 )
 def test_missing_framework_raises_actionable_import_error(
@@ -238,7 +242,7 @@ def test_installed_framework_factories_serve_standardized_routes(framework: str)
     backend = DataBackend(DataBackendConfig(db_backend="memory", storage_backend="memory"))
     try:
         app = _FRAMEWORK_FACTORIES[framework](backend)
-        if framework in {"litestar", "fastapi", "django"}:
+        if framework in {"litestar", "fastapi", "django", "blacksheep"}:
 
             def _invoke_asgi(method: str, path: str, query: bytes, body: bytes) -> tuple[int, bytes]:
                 return asyncio.run(_call_asgi(app, method, path, query_string=query, body=body))
@@ -419,3 +423,89 @@ def test_lazy_module_app_attributes_resolve_and_reject_unknown(monkeypatch: pyte
     assert data_frameworks.litestar_app is sentinel
     with pytest.raises(AttributeError):
         _ = data_frameworks.nonexistent_app_attr
+
+
+def test_blacksheep_routes_with_stub_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_blacksheep_app registers all standardized routes and handlers."""
+    registered: dict[tuple[str, str], Any] = {}
+
+    class _FakeRouter:
+        def add_get(self, path: str, fn: Any) -> None:
+            registered[("GET", path)] = fn
+
+        def add_put(self, path: str, fn: Any) -> None:
+            registered[("PUT", path)] = fn
+
+    class _FakeApp:
+        def __init__(self) -> None:
+            self.router = _FakeRouter()
+
+    class _FakeContent:
+        def __init__(self, content_type: bytes, data: bytes) -> None:
+            self.type = content_type
+            self.body = data
+
+    class _FakeResponse:
+        def __init__(self, status: int, *, content: _FakeContent) -> None:
+            self.status = status
+            self.content = content
+
+    class _FakeRequest:
+        def __init__(self, raw_body: bytes) -> None:
+            self._body = raw_body
+
+        async def read(self) -> bytes:
+            return self._body
+
+    fake_mod = type(
+        "FakeBlackSheepMod",
+        (),
+        {"Application": _FakeApp, "Response": _FakeResponse, "Content": _FakeContent, "Request": _FakeRequest},
+    )()
+    monkeypatch.setattr(
+        "tools.benchmarks.apps.data_frameworks._require_framework",
+        lambda module_name, *_args: fake_mod if module_name == "blacksheep" else None,
+    )
+
+    backend = DataBackend(
+        DataBackendConfig(
+            db_backend="memory",
+            cache_backend="memory",
+            storage_backend="memory",
+            storage_bucket="vertebra-framework-test",
+        )
+    )
+    try:
+        app = create_blacksheep_app(backend)
+        assert isinstance(app, _FakeApp)
+        assert len(registered) == 8
+
+        async def _invoke_bs_async(method: str, path: str, query: bytes, body: bytes) -> tuple[int, bytes]:
+            if path == "/json":
+                resp = await registered[("GET", "/json")]()
+            elif path == "/db":
+                resp = await registered[("GET", "/db")]()
+            elif path == "/queries":
+                q = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/queries")](queries=q)
+            elif path == "/updates":
+                q = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/updates")](queries=q)
+            elif path == "/cached-queries":
+                c = query.decode("ascii").split("=", 1)[1] if b"=" in query else None
+                resp = await registered[("GET", "/cached-queries")](count=c)
+            elif path.startswith("/object/") and method == "GET":
+                key = path.removeprefix("/object/")
+                resp = await registered[("GET", "/object/{key}")](key=key)
+            elif path.startswith("/object/") and method == "PUT":
+                key = path.removeprefix("/object/")
+                resp = await registered[("PUT", "/object/{key}")](key=key, request=_FakeRequest(body))
+            elif path == "/health":
+                resp = await registered[("GET", "/health")]()
+            else:
+                raise AssertionError(f"Unexpected route {method} {path}")
+            return int(resp.status), resp.content.body
+
+        _assert_standardized_responses(lambda m, p, q, b: asyncio.run(_invoke_bs_async(m, p, q, b)))
+    finally:
+        backend.close()

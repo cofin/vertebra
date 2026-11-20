@@ -28,6 +28,7 @@ from vertebra.utils.serializers import encode_json_bytes
 __all__ = (
     "SUPPORTED_FRAMEWORK_BASELINES",
     "build_django_bolt_command",
+    "create_blacksheep_app",
     "create_django_app",
     "create_django_bolt_app",
     "create_django_wsgi_app",
@@ -45,6 +46,7 @@ SUPPORTED_FRAMEWORK_BASELINES: Final[tuple[str, ...]] = (
     "django",
     "django_wsgi",
     "flask",
+    "blacksheep",
 )
 
 _JSON_MEDIA_TYPE: Final[str] = "application/json"
@@ -791,12 +793,92 @@ def create_spikard_data_app(backend: DataBackend | None = None) -> Any:
     return app
 
 
+def create_blacksheep_app(backend: DataBackend | None = None) -> Any:
+    """Create a BlackSheep ASGI application backed by ``DataBackend``.
+
+    Args:
+        backend: Optional ``DataBackend`` instance. Uses the process-local
+            default backend when omitted.
+
+    Returns:
+        Configured ``blacksheep.Application`` ASGI application.
+
+    Raises:
+        ImportError: If ``blacksheep`` is not installed.
+    """
+    blacksheep_mod = _require_framework("blacksheep", "blacksheep", "bench-comparators")
+    resolved_backend = _resolve_backend(backend)
+    app = blacksheep_mod.Application()
+    response_cls = blacksheep_mod.Response
+    content_cls = blacksheep_mod.Content
+    request_cls = blacksheep_mod.Request
+
+    async def json_endpoint() -> Any:
+        """Return the TechEmpower JSON hello payload."""
+        return response_cls(200, content=content_cls(b"application/json", JSON_HELLO_PAYLOAD))
+
+    async def db_endpoint() -> Any:
+        """Return a single randomly selected World row as JSON."""
+        row = await resolved_backend.get_world()
+        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(row)))
+
+    async def queries_endpoint(queries: str | None = None) -> Any:
+        """Return ``queries`` randomly selected World rows as JSON."""
+        count = clamp_query_count(queries)
+        rows = await resolved_backend.get_worlds(count)
+        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
+
+    async def updates_endpoint(queries: str | None = None) -> Any:
+        """Read and update ``queries`` random World rows and return them as JSON."""
+        count = clamp_query_count(queries)
+        rows = await resolved_backend.update_worlds(count)
+        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
+
+    async def cached_queries_endpoint(count: str | None = None) -> Any:
+        """Return ``count`` cached World rows as JSON."""
+        resolved_count = clamp_query_count(count)
+        rows = await resolved_backend.get_cached_worlds(resolved_count)
+        return response_cls(200, content=content_cls(b"application/json", encode_json_bytes(rows)))
+
+    async def get_object_endpoint(key: str) -> Any:
+        """Fetch an object payload by key or return HTTP 404 when absent."""
+        payload = await resolved_backend.get_object(key)
+        if payload is None:
+            return response_cls(404, content=content_cls(b"text/plain", b"Not Found"))
+        return response_cls(200, content=content_cls(b"application/octet-stream", payload))
+
+    async def put_object_endpoint(key: str, request: Any) -> Any:
+        """Store an object payload by key and return its persisted byte length."""
+        body = await request.read() or b""
+        size = await resolved_backend.put_object(key, body)
+        return response_cls(
+            200,
+            content=content_cls(b"application/json", encode_json_bytes({"key": key, "size": size})),
+        )
+
+    async def health_endpoint() -> Any:
+        """Return a lightweight readiness payload."""
+        return response_cls(200, content=content_cls(b"text/plain", b"ok"))
+
+    put_object_endpoint.__annotations__ = {"key": str, "request": request_cls, "return": Any}
+    app.router.add_get("/json", json_endpoint)
+    app.router.add_get("/db", db_endpoint)
+    app.router.add_get("/queries", queries_endpoint)
+    app.router.add_get("/updates", updates_endpoint)
+    app.router.add_get("/cached-queries", cached_queries_endpoint)
+    app.router.add_get("/object/{key}", get_object_endpoint)
+    app.router.add_put("/object/{key}", put_object_endpoint)
+    app.router.add_get("/health", health_endpoint)
+    return app
+
+
 _LAZY_APP_FACTORIES: Final[dict[str, Any]] = {
     "litestar_app": create_litestar_app,
     "fastapi_app": create_fastapi_app,
     "django_app": create_django_app,
     "django_wsgi_app": create_django_wsgi_app,
     "flask_app": create_flask_app,
+    "blacksheep_app": create_blacksheep_app,
 }
 
 

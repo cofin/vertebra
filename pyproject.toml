@@ -312,6 +312,7 @@ bench-comparators = [
     "fastapi>=0.115",
     "django>=5.1",
     "flask>=3.1",
+    "blacksheep>=2.0; python_version < '3.14'",
 ]
 
 [tool.uv.sources]
