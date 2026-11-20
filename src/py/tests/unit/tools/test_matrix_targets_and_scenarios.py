@@ -309,6 +309,10 @@ def test_target_category_groups_do_not_pollute_static_groups() -> None:
         "fastapi-granian-data",
         "fastapi-uvicorn-data",
         "django-vtb-data",
+        "django-granian-data",
+        "django-uvicorn-data",
+        "django-wsgi-vtb-data",
+        "django-wsgi-granian-data",
         "flask-vtb-data",
     }
     assert set(FRAMEWORK_TARGETS) == expected_frameworks

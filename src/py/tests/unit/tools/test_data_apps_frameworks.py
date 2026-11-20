@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +21,7 @@ from tools.benchmarks.apps.data_frameworks import (
     build_django_bolt_command,
     create_django_app,
     create_django_bolt_app,
+    create_django_wsgi_app,
     create_fastapi_app,
     create_flask_app,
     create_litestar_app,
@@ -35,6 +37,7 @@ _FRAMEWORK_FACTORIES: dict[str, Callable[[DataBackend | None], Any]] = {
     "litestar": create_litestar_app,
     "fastapi": create_fastapi_app,
     "django": create_django_app,
+    "django_wsgi": create_django_wsgi_app,
     "flask": create_flask_app,
 }
 
@@ -164,6 +167,7 @@ def test_module_imports_cleanly_without_optional_frameworks() -> None:
         "litestar",
         "fastapi",
         "django",
+        "django_wsgi",
         "flask",
     )
     assert SUPPORTED_FRAMEWORK_BASELINES == reloaded.SUPPORTED_FRAMEWORK_BASELINES
@@ -179,6 +183,7 @@ def test_module_imports_cleanly_without_optional_frameworks() -> None:
         ("litestar", "litestar", "bench-comparators"),
         ("fastapi", "fastapi", "bench-comparators"),
         ("django", "django", "bench-comparators"),
+        ("django_wsgi", "django", "bench-comparators"),
         ("flask", "flask", "bench-comparators"),
     ],
 )
@@ -226,7 +231,8 @@ def test_build_django_bolt_command_flags(
 @pytest.mark.parametrize("framework", SUPPORTED_FRAMEWORK_BASELINES)
 def test_installed_framework_factories_serve_standardized_routes(framework: str) -> None:
     """Verify every installed framework factory serves standardized benchmark routes offline."""
-    if import_optional(framework) is None:
+    module_name = "django" if framework == "django_wsgi" else framework
+    if import_optional(module_name) is None:
         pytest.skip(f"Optional framework {framework!r} is not installed in this environment")
 
     backend = DataBackend(DataBackendConfig(db_backend="memory", storage_backend="memory"))
@@ -238,6 +244,34 @@ def test_installed_framework_factories_serve_standardized_routes(framework: str)
                 return asyncio.run(_call_asgi(app, method, path, query_string=query, body=body))
 
             _assert_standardized_responses(_invoke_asgi)
+        elif framework == "django_wsgi":
+
+            def _invoke_django_wsgi(method: str, path: str, query: bytes, body: bytes) -> tuple[int, bytes]:
+                captured_status = "500 Error"
+
+                def _start_response(status: str, _headers: list[tuple[str, str]], _exc_info: Any = None) -> None:
+                    nonlocal captured_status
+                    captured_status = status
+
+                environ = {
+                    "REQUEST_METHOD": method,
+                    "PATH_INFO": path,
+                    "QUERY_STRING": query.decode("ascii"),
+                    "SERVER_NAME": "127.0.0.1",
+                    "SERVER_PORT": "8151",
+                    "wsgi.version": (1, 0),
+                    "wsgi.url_scheme": "http",
+                    "wsgi.input": io.BytesIO(body),
+                    "wsgi.errors": io.StringIO(),
+                    "wsgi.multithread": False,
+                    "wsgi.multiprocess": False,
+                    "wsgi.run_once": False,
+                    "CONTENT_LENGTH": str(len(body)),
+                }
+                chunks = list(app(environ, _start_response))
+                return int(captured_status.split(" ", 1)[0]), b"".join(chunks)
+
+            _assert_standardized_responses(_invoke_django_wsgi)
         elif framework == "flask":
             client = app.test_client()
 

@@ -30,6 +30,7 @@ __all__ = (
     "build_django_bolt_command",
     "create_django_app",
     "create_django_bolt_app",
+    "create_django_wsgi_app",
     "create_fastapi_app",
     "create_flask_app",
     "create_litestar_app",
@@ -42,6 +43,7 @@ SUPPORTED_FRAMEWORK_BASELINES: Final[tuple[str, ...]] = (
     "litestar",
     "fastapi",
     "django",
+    "django_wsgi",
     "flask",
 )
 
@@ -49,6 +51,7 @@ _JSON_MEDIA_TYPE: Final[str] = "application/json"
 _TEXT_MEDIA_TYPE: Final[str] = "text/plain"
 _BINARY_MEDIA_TYPE: Final[str] = "application/octet-stream"
 _DJANGO_URLCONF_NAME: Final[str] = "_vertebra_bench_django_urls"
+_DJANGO_WSGI_URLCONF_NAME: Final[str] = "_vertebra_bench_django_wsgi_urls"
 _DJANGO_BOLT_SETTINGS_KEY: Final[str] = "test-token-placeholder"
 
 
@@ -499,6 +502,98 @@ def create_django_app(backend: DataBackend | None = None) -> Any:
     return django_asgi.get_asgi_application()
 
 
+def create_django_wsgi_app(backend: DataBackend | None = None) -> Any:
+    """Create a standard sync Django WSGI application backed by ``DataBackend``.
+
+    Args:
+        backend: Optional ``DataBackend`` instance. Uses the process-local
+            default backend when omitted.
+
+    Returns:
+        Django WSGI application callable with identical benchmark routes.
+
+    Raises:
+        ImportError: If ``django`` is not installed.
+    """
+    django_mod = _require_framework("django", "django", "bench-comparators")
+    django_http = _require_framework("django.http", "django", "bench-comparators")
+    django_urls = _require_framework("django.urls", "django", "bench-comparators")
+    django_wsgi = _require_framework("django.core.wsgi", "django", "bench-comparators")
+    resolved_backend = _resolve_backend(backend)
+    http_response = django_http.HttpResponse
+
+    def json_view(_request: Any) -> Any:
+        """Return the TechEmpower JSON hello payload."""
+        return http_response(JSON_HELLO_PAYLOAD, status=200, content_type=_JSON_MEDIA_TYPE)
+
+    def db_view(_request: Any) -> Any:
+        """Return a single randomly selected World row as JSON."""
+        row = resolved_backend.get_world_sync()
+        return http_response(encode_json_bytes(row), status=200, content_type=_JSON_MEDIA_TYPE)
+
+    def queries_view(request: Any) -> Any:
+        """Return ``queries`` randomly selected World rows as JSON."""
+        count = clamp_query_count(request.GET.get("queries"))
+        rows = resolved_backend.get_worlds_sync(count)
+        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+    def updates_view(request: Any) -> Any:
+        """Read and update ``queries`` random World rows and return them as JSON."""
+        count = clamp_query_count(request.GET.get("queries"))
+        rows = resolved_backend.update_worlds_sync(count)
+        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+    def cached_queries_view(request: Any) -> Any:
+        """Return ``count`` cached World rows as JSON."""
+        resolved_count = clamp_query_count(request.GET.get("count"))
+        rows = resolved_backend.get_cached_worlds_sync(resolved_count)
+        return http_response(encode_json_bytes(rows), status=200, content_type=_JSON_MEDIA_TYPE)
+
+    def object_view(request: Any, key: str) -> Any:
+        """Handle ``GET`` and ``PUT`` object-storage operations for ``key``."""
+        if request.method == "PUT":
+            size = resolved_backend.put_object_sync(key, bytes(request.body))
+            return http_response(
+                encode_json_bytes({"key": key, "size": size}),
+                status=200,
+                content_type=_JSON_MEDIA_TYPE,
+            )
+        if request.method == "GET":
+            payload = resolved_backend.get_object_sync(key)
+            if payload is None:
+                return http_response(b"Not Found", status=404, content_type=_TEXT_MEDIA_TYPE)
+            return http_response(payload, status=200, content_type=_BINARY_MEDIA_TYPE)
+        return http_response(b"Method Not Allowed", status=405, content_type=_TEXT_MEDIA_TYPE)
+
+    def health_view(_request: Any) -> Any:
+        """Return a lightweight readiness payload."""
+        return http_response(b"ok", status=200, content_type=_TEXT_MEDIA_TYPE)
+
+    class _DjangoWsgiURLConfModule(types.ModuleType):
+        """Dynamic module carrying sync Django WSGI ``urlpatterns``."""
+
+        urlpatterns: list[Any]
+
+    urlconf_module = _DjangoWsgiURLConfModule(_DJANGO_WSGI_URLCONF_NAME)
+    urlconf_module.urlpatterns = [
+        django_urls.path("json", json_view),
+        django_urls.path("db", db_view),
+        django_urls.path("queries", queries_view),
+        django_urls.path("updates", updates_view),
+        django_urls.path("cached-queries", cached_queries_view),
+        django_urls.path("object/<str:key>", object_view),
+        django_urls.path("health", health_view),
+    ]
+    sys.modules[_DJANGO_WSGI_URLCONF_NAME] = urlconf_module
+
+    _ensure_django_settings(root_urlconf=_DJANGO_WSGI_URLCONF_NAME)
+    django_apps = _require_framework("django.apps", "django", "bench-comparators")
+    if not django_apps.apps.ready:
+        django_mod.setup()
+    django_urls.clear_url_caches()
+    return django_wsgi.get_wsgi_application()
+
+
 def create_flask_app(backend: DataBackend | None = None) -> Any:
     """Create a Flask WSGI application backed by ``DataBackend`` sync methods.
 
@@ -700,6 +795,7 @@ _LAZY_APP_FACTORIES: Final[dict[str, Any]] = {
     "litestar_app": create_litestar_app,
     "fastapi_app": create_fastapi_app,
     "django_app": create_django_app,
+    "django_wsgi_app": create_django_wsgi_app,
     "flask_app": create_flask_app,
 }
 
