@@ -1198,32 +1198,39 @@ class _BaseObjectStore:
         cls._validate_expected_hex("expected_crc32c", expected_crc32c, 8)
         cls._validate_expected_hex("expected_md5", expected_md5, 32)
 
-    @staticmethod
-    def _native_meta_fields(native_meta: Any, etag: str | None) -> dict[str, Any]:
-        raw_attrs = getattr(native_meta, "attributes", None)
-        return {
-            "path": str(native_meta.path),
-            "size": int(native_meta.size),
-            "last_modified": str(getattr(native_meta, "last_modified", "")),
-            "etag": etag,
-            "version": getattr(native_meta, "version", None),
-            "content_type": getattr(native_meta, "content_type", None),
-            "attributes": {str(k): str(v) for k, v in raw_attrs.items()} if isinstance(raw_attrs, Mapping) else {},
-            "sha256": getattr(native_meta, "sha256", None),
-            "crc32c": getattr(native_meta, "crc32c", None),
-            "md5": getattr(native_meta, "md5", None),
-        }
-
     @classmethod
     def _native_to_put_result(cls, native_meta: Any, fallback_etag: str = "") -> PutResult:
         """Convert a native ObjectMeta instance into a PutResult."""
-        etag = getattr(native_meta, "etag", None) or fallback_etag
-        return PutResult(**cls._native_meta_fields(native_meta, str(etag) if etag else None))
+        path, size, last_modified, etag, version, content_type, attributes, sha256, crc32c, md5 = native_meta.fields()
+        return PutResult(
+            path=path,
+            size=size,
+            last_modified=last_modified,
+            etag=(etag or fallback_etag) or None,
+            version=version,
+            content_type=content_type,
+            attributes=attributes,
+            sha256=sha256,
+            crc32c=crc32c,
+            md5=md5,
+        )
 
     @classmethod
     def _native_to_object_meta(cls, native_meta: Any) -> ObjectMeta:
         """Convert a native ObjectMeta instance into an ObjectMeta."""
-        return ObjectMeta(**cls._native_meta_fields(native_meta, getattr(native_meta, "etag", None)))
+        path, size, last_modified, etag, version, content_type, attributes, sha256, crc32c, md5 = native_meta.fields()
+        return ObjectMeta(
+            path=path,
+            size=size,
+            last_modified=last_modified,
+            etag=etag,
+            version=version,
+            content_type=content_type,
+            attributes=attributes,
+            sha256=sha256,
+            crc32c=crc32c,
+            md5=md5,
+        )
 
     def _presign(
         self,
@@ -1625,6 +1632,8 @@ class _BaseObjectStore:
             ValueError: If the key contains a `..` segment.
         """
         cleaned = path.strip()
+        if cleaned and cleaned[0] != "/" and cleaned[0] != "." and "//" not in cleaned and "/." not in cleaned:
+            return cleaned
         segments = cleaned.split("/")
         if ".." in segments:
             msg = f"Invalid relative parent segment in storage key: {path}"
@@ -1857,22 +1866,39 @@ class SyncObjectStore(_BaseObjectStore):
     ) -> PutResult:
         """Write any Buffer (bytes, bytearray, memoryview) to the given object key."""
         key = self._key(path)
-        norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
-        native = self._require_native()
-        native_meta = native.put(
-            key,
-            self._native_payload(data),
-            content_type=content_type,
-            attributes=norm_attrs,
-            if_not_exists=if_not_exists,
-            if_match=if_match,
-            if_none_match=if_none_match,
-            checksum=checksum,
-            expected_sha256=expected_sha256,
-            expected_crc32c=expected_crc32c,
-            expected_md5=expected_md5,
-        )
-        fallback_etag = "" if getattr(native_meta, "etag", None) else f"{int(native_meta.size):016x}"
+        native = self._native
+        if native is None:
+            native = self._require_native()
+        payload = data if type(data) is bytes or type(data) is bytearray else self._native_payload(data)
+        if (
+            content_type is None
+            and attributes is None
+            and not if_not_exists
+            and if_match is None
+            and if_none_match is None
+            and not checksum
+            and expected_sha256 is None
+            and expected_crc32c is None
+            and expected_md5 is None
+        ):
+            native_meta = native.put(key, payload)
+        else:
+            norm_attrs = {str(k): str(v) for k, v in attributes.items()} if attributes is not None else None
+            native_meta = native.put(
+                key,
+                payload,
+                content_type=content_type,
+                attributes=norm_attrs,
+                if_not_exists=if_not_exists,
+                if_match=if_match,
+                if_none_match=if_none_match,
+                checksum=checksum,
+                expected_sha256=expected_sha256,
+                expected_crc32c=expected_crc32c,
+                expected_md5=expected_md5,
+            )
+        etag = native_meta.etag
+        fallback_etag = "" if etag else f"{int(native_meta.size):016x}"
         return self._native_to_put_result(native_meta, fallback_etag)
 
     def put_file(
@@ -1998,7 +2024,11 @@ class SyncObjectStore(_BaseObjectStore):
     def get(self, path: str, *, expected_sha256: str | None = None) -> bytes:
         """Read full object bytes for the given key."""
         key = self._key(path)
-        return bytes(self._require_native().get(key, expected_sha256=expected_sha256))
+        native = self._native
+        if native is None:
+            native = self._require_native()
+        raw = native.get(key) if expected_sha256 is None else native.get(key, expected_sha256=expected_sha256)
+        return raw if type(raw) is bytes else bytes(raw)
 
     def get_file(
         self,

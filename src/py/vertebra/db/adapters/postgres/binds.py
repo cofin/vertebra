@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 from collections.abc import Buffer, Mapping, Sequence
 from typing import Any, Final
 
@@ -29,6 +30,18 @@ __all__ = (
 )
 
 PG_JSONB_TEXT: Final[int] = 3802
+_PRIMITIVE_PARAM_TYPES: Final[frozenset[type]] = frozenset((int, str, float, bool, bytes, type(None)))
+
+
+class _SqlBindPlan(msgspec.Struct, frozen=True, gc=False):
+    """Cached lexical bind rewrite plan for a SQL statement."""
+
+    compiled_sql: str
+    style: str
+    named_order: tuple[str, ...]
+    positional_count: int
+    max_numeric_idx: int
+    has_escaped_percent: bool
 
 
 class CompiledPostgresBinds(msgspec.Struct, frozen=True):
@@ -48,6 +61,8 @@ def normalize_postgres_parameter(value: Any) -> Any:
     ``PgArray``, ``PgComposite``, ``PgJson``, ``PgParameter``, lists, tuples,
     and dicts without mutating caller containers.
     """
+    if type(value) in _PRIMITIVE_PARAM_TYPES:
+        return value
     if isinstance(value, PgUnchangedToast):
         raise TypeError("PG_UNCHANGED_TOAST cannot be bound as a SQL parameter")
     if isinstance(value, bytes):
@@ -100,31 +115,14 @@ def normalize_postgres_parameters(parameters: Sequence[Any] | None) -> tuple[Any
     """Normalize a positional PostgreSQL parameter tuple into immutable owned values."""
     if not parameters:
         return ()
+    if all(type(item) in _PRIMITIVE_PARAM_TYPES for item in parameters):
+        return parameters if type(parameters) is tuple else tuple(parameters)
     return tuple(normalize_postgres_parameter(item) for item in parameters)
 
 
-def compile_postgres_binds(
-    sql: str,
-    parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-) -> CompiledPostgresBinds:
-    """Compile SQL placeholders (`%s`, `%(name)s`, or `$N`) and normalize parameters in one pass.
-
-    Preserves numeric ``$N`` queries and parameterless SQL byte-for-byte without
-    altering literals or comments, rejects mixed placeholder styles or ambiguous
-    ``\\'`` escapes in ordinary single-quoted literals when pyformat conversion is
-    active, deduplicates named ``%(name)s`` binds to shared ``$N`` slots, and
-    returns owned immutable parameter values.
-    """
-    if not isinstance(sql, str):
-        raise ProgrammingError("SQL query must be a str")
-
-    if parameters is not None and isinstance(parameters, (str, bytes, bytearray, memoryview)):
-        raise ProgrammingError("Query parameters must be a Sequence, Mapping, or None, not str or bytes")
-
-    is_mapping = isinstance(parameters, Mapping)
-    if parameters is not None and not is_mapping and not isinstance(parameters, Sequence):
-        raise ProgrammingError(f"Unsupported parameters container type: {type(parameters).__name__}")
-
+@functools.lru_cache(maxsize=2048)
+def _scan_sql_bind_plan(sql: str) -> _SqlBindPlan:
+    """Scan ``sql`` once and return its cached placeholder rewrite plan."""
     n = len(sql)
     i = 0
     last_emit = 0
@@ -221,45 +219,106 @@ def compile_postgres_binds(
         )
 
     if state.numeric_indices is not None:
+        if state.numeric_indices and any(idx < 1 for idx in state.numeric_indices):
+            raise ProgrammingError("PostgreSQL numeric bind placeholders must start at `$1`")
+        return _SqlBindPlan(
+            compiled_sql=sql,
+            style="numeric",
+            named_order=(),
+            positional_count=0,
+            max_numeric_idx=max(state.numeric_indices) if state.numeric_indices else 0,
+            has_escaped_percent=state.has_escaped_percent,
+        )
+
+    if state.named_order is not None:
+        assert state.out is not None
+        _emit_chunk(state, sql, last_emit, n)
+        return _SqlBindPlan(
+            compiled_sql="".join(state.out),
+            style="named",
+            named_order=tuple(state.named_order),
+            positional_count=0,
+            max_numeric_idx=0,
+            has_escaped_percent=state.has_escaped_percent,
+        )
+
+    if state.positional_count > 0:
+        assert state.out is not None
+        _emit_chunk(state, sql, last_emit, n)
+        return _SqlBindPlan(
+            compiled_sql="".join(state.out),
+            style="pyformat",
+            named_order=(),
+            positional_count=state.positional_count,
+            max_numeric_idx=0,
+            has_escaped_percent=state.has_escaped_percent,
+        )
+
+    return _SqlBindPlan(
+        compiled_sql=sql,
+        style="none",
+        named_order=(),
+        positional_count=0,
+        max_numeric_idx=0,
+        has_escaped_percent=state.has_escaped_percent,
+    )
+
+
+def compile_postgres_binds(
+    sql: str,
+    parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+) -> CompiledPostgresBinds:
+    """Compile SQL placeholders (`%s`, `%(name)s`, or `$N`) and normalize parameters in one pass.
+
+    Preserves numeric ``$N`` queries and parameterless SQL byte-for-byte without
+    altering literals or comments, rejects mixed placeholder styles or ambiguous
+    ``\\'`` escapes in ordinary single-quoted literals when pyformat conversion is
+    active, deduplicates named ``%(name)s`` binds to shared ``$N`` slots, and
+    returns owned immutable parameter values.
+    """
+    if not isinstance(sql, str):
+        raise ProgrammingError("SQL query must be a str")
+
+    if parameters is not None and isinstance(parameters, (str, bytes, bytearray, memoryview)):
+        raise ProgrammingError("Query parameters must be a Sequence, Mapping, or None, not str or bytes")
+
+    is_mapping = isinstance(parameters, Mapping)
+    if parameters is not None and not is_mapping and not isinstance(parameters, Sequence):
+        raise ProgrammingError(f"Unsupported parameters container type: {type(parameters).__name__}")
+
+    plan = _scan_sql_bind_plan(sql)
+
+    if plan.style == "numeric":
         if isinstance(parameters, Mapping):
             raise ProgrammingError(
                 "Numeric `$N` SQL placeholders require a positional Sequence of parameters, not a Mapping"
             )
-        if state.numeric_indices and any(idx < 1 for idx in state.numeric_indices):
-            raise ProgrammingError("PostgreSQL numeric bind placeholders must start at `$1`")
         seq_params = normalize_postgres_parameters(parameters)
-        max_idx = max(state.numeric_indices)
-        if len(seq_params) < max_idx:
+        if len(seq_params) < plan.max_numeric_idx:
             raise ProgrammingError(
-                f"SQL references `${max_idx}` but only {len(seq_params)} positional parameters were supplied"
+                f"SQL references `${plan.max_numeric_idx}` but only {len(seq_params)} positional parameters were supplied"
             )
-        return CompiledPostgresBinds(sql=sql, params=seq_params, style="numeric")
+        return CompiledPostgresBinds(sql=plan.compiled_sql, params=seq_params, style="numeric")
 
-    if state.named_order is not None:
+    if plan.style == "named":
         if not isinstance(parameters, Mapping):
             raise ProgrammingError("Named `%(name)s` SQL placeholders require a Mapping of parameters")
-        assert state.out is not None
-        _emit_chunk(state, sql, last_emit, n)
-        compiled_sql = "".join(state.out)
         bound: list[Any] = []
-        for name in state.named_order:
+        for name in plan.named_order:
             if name not in parameters:
                 raise ProgrammingError(f"Missing required named SQL parameter: {name!r}")
             bound.append(normalize_postgres_parameter(parameters[name]))
-        return CompiledPostgresBinds(sql=compiled_sql, params=tuple(bound), style="named")
+        return CompiledPostgresBinds(sql=plan.compiled_sql, params=tuple(bound), style="named")
 
-    if state.positional_count > 0:
+    if plan.style == "pyformat":
         if isinstance(parameters, Mapping):
             raise ProgrammingError("Positional `%s` SQL placeholders require a Sequence of parameters, not a Mapping")
         seq_params = normalize_postgres_parameters(parameters)
-        if len(seq_params) != state.positional_count:
+        if len(seq_params) != plan.positional_count:
             raise ProgrammingError(
-                f"SQL has {state.positional_count} `%s` placeholders but {len(seq_params)} parameters were supplied"
+                f"SQL has {plan.positional_count} `%s` placeholders but {len(seq_params)} parameters were supplied"
             )
-        assert state.out is not None
-        _emit_chunk(state, sql, last_emit, n)
-        compiled_sql = "".join(state.out)
-        return CompiledPostgresBinds(sql=compiled_sql, params=seq_params, style="pyformat")
+        return CompiledPostgresBinds(sql=plan.compiled_sql, params=seq_params, style="pyformat")
 
     if parameters is None or len(parameters) == 0:
         return CompiledPostgresBinds(sql=sql, params=(), style="none")

@@ -496,13 +496,23 @@ async def test_glob_strips_store_uri_prefix(tmp_path: Path, asynchronous: bool) 
     assert [meta.path for meta in literal] == ["logs/b.txt"]
 
 
+class _PlaceholderNativeMeta:
+    """Native-shaped directory placeholder exposing `path` and the single-call `fields()` tuple."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def fields(self) -> tuple[Any, ...]:
+        return (self.path, 0, "", None, None, None, {}, None, None, None)
+
+
 class _PlaceholderListingNative:
     """Delegate to a real native store while injecting a trailing-`/` directory placeholder into listings."""
 
     def __init__(self, native: Any, asynchronous: bool, placeholder: str) -> None:
         self.native = native
         self.asynchronous = asynchronous
-        self.placeholder = ObjectMeta(path=placeholder, size=0)
+        self.placeholder = _PlaceholderNativeMeta(placeholder)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.native, name)

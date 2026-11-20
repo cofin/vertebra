@@ -740,6 +740,32 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         self._owns_pool = True
         return self._pool
 
+    async def _query_on_pool(
+        self,
+        pool: Any,
+        sql: str,
+        params: Any,
+        *,
+        parameter_oids: Any,
+        timeout: Any,
+    ) -> PostgresQueryResult:
+        """Run one autocommit query on the pool, refreshing IAM tokens once on authentication rejection."""
+        try:
+            first: PostgresQueryResult = await pool.query(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+        except Exception as exc:
+            if self.config.token_provider is None or not is_postgres_auth_rejection(exc):
+                raise
+            invalidate_fn = getattr(self.config.token_provider, "invalidate", None)
+            if callable(invalidate_fn):
+                invalidate_fn()
+            if self._owns_pool:
+                pool = await self._ensure_pool_async(force_refresh=True)
+            else:
+                await self.config.resolve_iam_password_async(force_refresh=True)
+            retried: PostgresQueryResult = await pool.query(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+            return retried
+        return first
+
     async def _acquire_pool_client(self) -> Any:
         """Acquire a pooled async client, refreshing IAM tokens once on authentication rejection."""
         pool = await self._ensure_pool_async()
@@ -813,11 +839,31 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
         """Compile parameters, execute natively on ``AsyncPostgresClient``, and handle unwind safely."""
         timeout = kwargs.pop("timeout", None)
         parameter_oids = kwargs.pop("parameter_oids", None)
-        compiled_sql, compiled_params = PostgreSQLCore.prepare_query(sql, parameters)
+        compiled_sql, compiled_params = (
+            (sql, ()) if parameters is None else PostgreSQLCore.prepare_query(sql, parameters)
+        )
         annotated_sql = self._annotate_sql(compiled_sql, **kwargs)
-        if self.config.effective_statement_cache_size > 0:
+        if self._broker is not None and self.config.effective_statement_cache_size > 0:
             self._lookup_or_cache_statement(annotated_sql)
-        lease = self._acquire_broker_lease()
+        lease = self._acquire_broker_lease() if self._broker is not None else None
+        if self._tx_conn is None and self._tenant_conn is None and self._client_factory is None:
+            try:
+                self._ensure_open()
+                pool = await self._ensure_pool_async()
+            except BaseException:
+                self._release_broker_lease(lease)
+                raise
+            if callable(getattr(pool, "query", None)):
+                try:
+                    return await self._query_on_pool(
+                        pool,
+                        annotated_sql,
+                        compiled_params if compiled_params else None,
+                        parameter_oids=parameter_oids,
+                        timeout=timeout,
+                    )
+                finally:
+                    self._release_broker_lease(lease)
         client: Any = None
         owns_client = False
         try:
@@ -844,7 +890,8 @@ class AsyncPostgreSQLDriver(AsyncDatabaseDriver[PostgreSQLConfig]):
                     await self._release_pooled_client(client, evict=False)
             return result
         finally:
-            self._release_broker_lease(lease)
+            if lease is not None:
+                self._release_broker_lease(lease)
 
     async def _open_direct_async_client(self, *, feature: str) -> Any:
         """Dial a dedicated non-pooled ``AsyncPostgresClient`` for event streaming."""

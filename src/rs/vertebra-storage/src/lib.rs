@@ -318,6 +318,36 @@ impl PyObjectMeta {
     fn __repr__(&self) -> String {
         format!("ObjectMeta(path={:?}, size={})", self.path, self.size)
     }
+
+    /// Return every field in declaration order with a single call.
+    #[allow(clippy::type_complexity)]
+    fn fields(
+        &self,
+    ) -> (
+        &str,
+        u64,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        HashMap<String, String>,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ) {
+        (
+            self.path.as_str(),
+            self.size,
+            self.last_modified.as_str(),
+            self.etag.as_deref(),
+            self.version.as_deref(),
+            self.content_type.as_deref(),
+            self.attributes.clone(),
+            self.sha256.as_deref(),
+            self.crc32c.as_deref(),
+            self.md5.as_deref(),
+        )
+    }
 }
 
 struct SyncStreamState {
@@ -640,6 +670,20 @@ impl PySyncObjectStore {
         expected_md5: Option<String>,
     ) -> PyResult<PyObjectMeta> {
         let payload = extract_buffer_bytes(py, data)?;
+        if content_type.is_none()
+            && attributes.is_none()
+            && !if_not_exists
+            && if_match.is_none()
+            && if_none_match.is_none()
+            && !checksum
+            && expected_sha256.is_none()
+            && expected_crc32c.is_none()
+            && expected_md5.is_none()
+            && let Some(res) = self.engine.try_put_memory_sync(path, payload.clone())
+        {
+            let meta = res.map_err(to_py_err)?;
+            return Ok(PyObjectMeta::from(meta));
+        }
         let opts = PutConditionalOptions {
             if_not_exists,
             if_match,
@@ -815,6 +859,12 @@ impl PySyncObjectStore {
         path: &str,
         expected_sha256: Option<String>,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        if expected_sha256.is_none()
+            && let Some(res) = self.engine.try_get_memory_sync(path)
+        {
+            let data = res.map_err(to_py_err)?;
+            return Ok(PyBytes::new(py, &data));
+        }
         let engine = self.engine.clone();
         let data = py
             .detach(|| {
@@ -873,6 +923,10 @@ impl PySyncObjectStore {
         offset: u64,
         length: u64,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        if let Some(res) = self.engine.try_get_range_memory_sync(path, offset, length) {
+            let data = res.map_err(to_py_err)?;
+            return Ok(PyBytes::new(py, &data));
+        }
         let engine = self.engine.clone();
         let data = py
             .detach(|| {

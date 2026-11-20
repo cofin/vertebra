@@ -1107,6 +1107,7 @@ async def test_postgres_drivers_token_provider_refresh_and_auth_retry(mode: str)
                     conn.sendall(_pg_error_frame("28P01", "password authentication failed"))
                     return
                 conn.sendall(_pg_trust_greeting_frames("17.2"))
+                parse_pending = False
                 while True:
                     try:
                         msg_tag, _ = _read_pg_message(conn)
@@ -1114,11 +1115,15 @@ async def test_postgres_drivers_token_provider_refresh_and_auth_retry(mode: str)
                         break
                     if msg_tag == b"X":
                         break
-                    if msg_tag == b"Q":
+                    if msg_tag == b"P":
+                        parse_pending = True
+                    elif msg_tag == b"Q":
                         conn.sendall(_pg_frame(b"C", b"SELECT 1\x00") + _pg_frame(b"Z", b"I"))
                     elif msg_tag == b"S":
+                        parse_complete = _pg_frame(b"1", b"") if parse_pending else b""
+                        parse_pending = False
                         conn.sendall(
-                            _pg_frame(b"1", b"")
+                            parse_complete
                             + _pg_frame(b"2", b"")
                             + _pg_frame(b"C", b"SELECT 1\x00")
                             + _pg_frame(b"Z", b"I")

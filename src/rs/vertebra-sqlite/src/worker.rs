@@ -1,10 +1,9 @@
-//! Dedicated OS worker thread pool for SQLite with 1 writer and N readers.
+//! SQLite connection pool with 1 writer and N readers, executed on the calling thread.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -17,6 +16,7 @@ use crate::errors::SqliteClientError;
 use crate::value::{BoundParams, PipelineResultItem, QueryResult, SqliteValue};
 
 const MAX_CANCELLED_OP_IDS: usize = 4096;
+const STATEMENT_CACHE_CAPACITY: usize = 256;
 
 #[derive(Default)]
 struct InterruptState {
@@ -85,84 +85,85 @@ fn normalize_begin_sql(mode: &str) -> Result<&'static str, SqliteClientError> {
     }
 }
 
-/// Operation request dispatched to a dedicated SQLite worker thread.
+/// Operation request executed against one pooled SQLite connection.
 enum WorkerTask {
     Execute {
         sql: String,
         params: BoundParams,
         op_id: u64,
-        resp: Sender<Result<usize, SqliteClientError>>,
+        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
     },
     ExecuteMany {
         sql: String,
         params_seq: Vec<BoundParams>,
         op_id: u64,
-        resp: Sender<Result<usize, SqliteClientError>>,
+        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
     },
     ExecuteScript {
         sql_script: String,
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
     FetchAll {
         sql: String,
         params: BoundParams,
         op_id: u64,
-        resp: Sender<Result<QueryResult, SqliteClientError>>,
+        resp: mpsc::Sender<Result<QueryResult, SqliteClientError>>,
     },
     ExecutePipeline {
         operations: Vec<(bool, String, BoundParams)>,
         use_savepoint: bool,
         op_id: u64,
-        resp: Sender<Result<Vec<PipelineResultItem>, SqliteClientError>>,
+        resp: mpsc::Sender<Result<Vec<PipelineResultItem>, SqliteClientError>>,
     },
     SelectToArrow {
         sql: String,
         params: BoundParams,
         batch_size: usize,
         op_id: u64,
-        resp: Sender<Result<ArrowResultPayload, SqliteClientError>>,
+        resp: mpsc::Sender<Result<ArrowResultPayload, SqliteClientError>>,
     },
     LoadFromArrow {
         table_name: String,
         arrow_ipc_bytes: Vec<u8>,
         op_id: u64,
-        resp: Sender<Result<usize, SqliteClientError>>,
+        resp: mpsc::Sender<Result<usize, SqliteClientError>>,
     },
     BackupTo {
         target_path: String,
         pages_per_step: i32,
         sleep_ms: u64,
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
     RestoreFrom {
         source_path: String,
         pages_per_step: i32,
         sleep_ms: u64,
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
     Begin {
         begin_sql: &'static str,
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
     Commit {
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
     Rollback {
         op_id: u64,
-        resp: Sender<Result<(), SqliteClientError>>,
+        resp: mpsc::Sender<Result<(), SqliteClientError>>,
     },
-    Close,
 }
 
-/// Handle to an active worker thread.
+/// One pooled SQLite connection.
 struct WorkerSlot {
-    sender: Sender<WorkerTask>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+    conn: Mutex<Option<Connection>>,
+    interrupt_handle: Arc<InterruptHandle>,
+    interrupts: Arc<Mutex<InterruptState>>,
+    last_rowid: Option<Arc<AtomicI64>>,
 }
 
 impl WorkerSlot {
@@ -172,75 +173,35 @@ impl WorkerSlot {
         interrupts: Arc<Mutex<InterruptState>>,
         last_rowid: Option<Arc<AtomicI64>>,
     ) -> Result<Self, SqliteClientError> {
-        let (sender, receiver) = mpsc::channel();
-        let (init_tx, init_rx) = mpsc::channel();
+        let conn = open_worker_connection(&config, is_writer)?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+        let interrupt_handle = Arc::new(conn.get_interrupt_handle());
+        Ok(Self {
+            conn: Mutex::new(Some(conn)),
+            interrupt_handle,
+            interrupts,
+            last_rowid,
+        })
+    }
 
-        let join_handle = thread::Builder::new()
-            .name(if is_writer {
-                "sqlite-writer".to_string()
-            } else {
-                "sqlite-reader".to_string()
-            })
-            .spawn(move || {
-                let conn_res = open_worker_connection(&config, is_writer);
-                let mut conn = match conn_res {
-                    Ok(c) => {
-                        let _ = init_tx.send(Ok(()));
-                        c
-                    }
-                    Err(e) => {
-                        let _ = init_tx.send(Err(e));
-                        return;
-                    }
-                };
-
-                let interrupt_handle = Arc::new(conn.get_interrupt_handle());
-                run_worker_loop(
-                    &mut conn,
-                    interrupt_handle,
-                    receiver,
-                    interrupts,
-                    last_rowid,
-                );
-            })
-            .map_err(|e| SqliteClientError::Operational {
-                message: format!("failed to spawn SQLite worker thread: {e}"),
-                code: None,
-                sqlstate: Some("08000"),
-                is_transient: false,
-            })?;
-
-        match init_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                sender,
-                join_handle: Mutex::new(Some(join_handle)),
-            }),
-            Ok(Err(e)) => {
-                let _ = join_handle.join();
-                Err(e)
-            }
-            Err(_) => {
-                let _ = join_handle.join();
-                Err(SqliteClientError::Operational {
-                    message: "SQLite worker thread exited during initialization".to_string(),
-                    code: None,
-                    sqlstate: Some("08000"),
-                    is_transient: false,
-                })
-            }
-        }
+    /// Run `task` on the calling thread while holding this slot's connection lock.
+    fn send(&self, task: WorkerTask) -> Result<(), ()> {
+        let mut guard = self.conn.lock();
+        let Some(conn) = guard.as_mut() else {
+            return Err(());
+        };
+        run_worker_task(
+            conn,
+            &self.interrupt_handle,
+            &self.interrupts,
+            self.last_rowid.as_ref(),
+            task,
+        );
+        Ok(())
     }
 
     fn signal_close(&self) {
-        let _ = self.sender.send(WorkerTask::Close);
-    }
-
-    fn join(&self) {
-        if let Some(handle) = self.join_handle.lock().take()
-            && handle.thread().id() != thread::current().id()
-        {
-            let _ = handle.join();
-        }
+        drop(self.conn.lock().take());
     }
 }
 
@@ -288,14 +249,14 @@ fn run_flagged_op<T>(
     res
 }
 
-fn run_worker_loop(
+fn run_worker_task(
     conn: &mut Connection,
-    interrupt_handle: Arc<InterruptHandle>,
-    receiver: Receiver<WorkerTask>,
-    interrupts: Arc<Mutex<InterruptState>>,
-    last_rowid: Option<Arc<AtomicI64>>,
+    interrupt_handle: &Arc<InterruptHandle>,
+    interrupts: &Mutex<InterruptState>,
+    last_rowid: Option<&Arc<AtomicI64>>,
+    task: WorkerTask,
 ) {
-    while let Ok(task) = receiver.recv() {
+    {
         match task {
             WorkerTask::Execute {
                 sql,
@@ -303,10 +264,10 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     let res = execute_statement(conn, &sql, &params);
                     if res.is_ok()
-                        && let Some(ref lr) = last_rowid
+                        && let Some(lr) = last_rowid
                     {
                         lr.store(conn.last_insert_rowid(), Ordering::Relaxed);
                     }
@@ -320,7 +281,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_many_statement(conn, &sql, params_seq)
                 });
                 let _ = resp.send(result);
@@ -330,7 +291,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     conn.execute_batch(&sql_script)
                         .map_err(SqliteClientError::from_rusqlite)
                 });
@@ -342,10 +303,10 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     let res = fetch_all_query(conn, &sql, &params);
                     if res.is_ok()
-                        && let Some(ref lr) = last_rowid
+                        && let Some(lr) = last_rowid
                     {
                         let id = conn.last_insert_rowid();
                         if id > 0 {
@@ -362,7 +323,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_pipeline_internal(conn, operations, use_savepoint, op_id)
                 });
                 let _ = resp.send(result);
@@ -374,7 +335,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_select_to_arrow(conn, &sql, &params, batch_size)
                 });
                 let _ = resp.send(result);
@@ -385,7 +346,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_load_from_arrow(conn, &table_name, &arrow_ipc_bytes)
                 });
                 let _ = resp.send(result);
@@ -397,7 +358,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_backup_to(conn, &target_path, pages_per_step, sleep_ms)
                 });
                 let _ = resp.send(result);
@@ -409,7 +370,7 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     execute_restore_from(conn, &source_path, pages_per_step, sleep_ms)
                 });
                 let _ = resp.send(result);
@@ -419,27 +380,26 @@ fn run_worker_loop(
                 op_id,
                 resp,
             } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     conn.execute_batch(begin_sql)
                         .map_err(SqliteClientError::from_rusqlite)
                 });
                 let _ = resp.send(result);
             }
             WorkerTask::Commit { op_id, resp } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     conn.execute_batch("COMMIT")
                         .map_err(SqliteClientError::from_rusqlite)
                 });
                 let _ = resp.send(result);
             }
             WorkerTask::Rollback { op_id, resp } => {
-                let result = run_flagged_op(&interrupts, op_id, &interrupt_handle, || {
+                let result = run_flagged_op(interrupts, op_id, interrupt_handle, || {
                     conn.execute_batch("ROLLBACK")
                         .map_err(SqliteClientError::from_rusqlite)
                 });
                 let _ = resp.send(result);
             }
-            WorkerTask::Close => break,
         }
     }
 }
@@ -450,7 +410,7 @@ fn execute_statement(
     params: &BoundParams,
 ) -> Result<usize, SqliteClientError> {
     let mut stmt = conn
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(SqliteClientError::from_rusqlite)?;
     params.bind_to_stmt(&mut stmt)?;
 
@@ -540,7 +500,7 @@ fn fetch_all_query(
     params: &BoundParams,
 ) -> Result<QueryResult, SqliteClientError> {
     let mut stmt = conn
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(SqliteClientError::from_rusqlite)?;
     params.bind_to_stmt(&mut stmt)?;
 
@@ -720,10 +680,6 @@ impl SqlitePool {
                         for r in &readers {
                             r.signal_close();
                         }
-                        writer.join();
-                        for r in &readers {
-                            r.join();
-                        }
                         return Err(err);
                     }
                 }
@@ -794,16 +750,14 @@ impl SqlitePool {
     fn dispatch_read(
         &self,
         op_id: u64,
-        task_maker: impl FnOnce(Sender<WorkerTask>) -> Result<(), SqliteClientError>,
+        task_maker: impl FnOnce(&WorkerSlot) -> Result<(), SqliteClientError>,
     ) -> Result<(), SqliteClientError> {
         self.ensure_open_and_not_cancelled(op_id)?;
         if !self.in_transaction.load(Ordering::Acquire) && !self.readers.is_empty() {
             let idx = self.reader_cursor.fetch_add(1, Ordering::Relaxed) % self.readers.len();
-            let sender = self.readers[idx].sender.clone();
-            task_maker(sender)
+            task_maker(&self.readers[idx])
         } else {
-            let sender = self.writer.sender.clone();
-            task_maker(sender)
+            task_maker(&self.writer)
         }
     }
 
@@ -811,11 +765,10 @@ impl SqlitePool {
     fn dispatch_write(
         &self,
         op_id: u64,
-        task_maker: impl FnOnce(Sender<WorkerTask>) -> Result<(), SqliteClientError>,
+        task_maker: impl FnOnce(&WorkerSlot) -> Result<(), SqliteClientError>,
     ) -> Result<(), SqliteClientError> {
         self.ensure_open_and_not_cancelled(op_id)?;
-        let sender = self.writer.sender.clone();
-        task_maker(sender)
+        task_maker(&self.writer)
     }
 
     /// Execute a DDL or DML statement.
@@ -840,7 +793,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -880,7 +833,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -914,7 +867,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -958,7 +911,7 @@ impl SqlitePool {
                 sender
                     .send(task)
                     .map_err(|_| SqliteClientError::Operational {
-                        message: "worker thread disconnected".to_string(),
+                        message: "SQLite connection is closed".to_string(),
                         code: None,
                         sqlstate: Some("08000"),
                         is_transient: false,
@@ -969,7 +922,7 @@ impl SqlitePool {
                 sender
                     .send(task)
                     .map_err(|_| SqliteClientError::Operational {
-                        message: "worker thread disconnected".to_string(),
+                        message: "SQLite connection is closed".to_string(),
                         code: None,
                         sqlstate: Some("08000"),
                         is_transient: false,
@@ -1011,7 +964,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1058,7 +1011,7 @@ impl SqlitePool {
                 sender
                     .send(task)
                     .map_err(|_| SqliteClientError::Operational {
-                        message: "worker thread disconnected".to_string(),
+                        message: "SQLite connection is closed".to_string(),
                         code: None,
                         sqlstate: Some("08000"),
                         is_transient: false,
@@ -1069,7 +1022,7 @@ impl SqlitePool {
                 sender
                     .send(task)
                     .map_err(|_| SqliteClientError::Operational {
-                        message: "worker thread disconnected".to_string(),
+                        message: "SQLite connection is closed".to_string(),
                         code: None,
                         sqlstate: Some("08000"),
                         is_transient: false,
@@ -1111,7 +1064,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1154,7 +1107,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1197,7 +1150,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1234,7 +1187,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1267,7 +1220,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1298,7 +1251,7 @@ impl SqlitePool {
                     resp: resp_tx,
                 })
                 .map_err(|_| SqliteClientError::Operational {
-                    message: "worker thread disconnected".to_string(),
+                    message: "SQLite connection is closed".to_string(),
                     code: None,
                     sqlstate: Some("08000"),
                     is_transient: false,
@@ -1324,7 +1277,7 @@ impl SqlitePool {
         self.interrupts.lock().cancel_op(op_id)
     }
 
-    /// Shut down the worker pool and join all dedicated worker OS threads.
+    /// Close every pooled connection after interrupting in-flight operations.
     pub fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -1333,10 +1286,6 @@ impl SqlitePool {
         self.writer.signal_close();
         for reader in &self.readers {
             reader.signal_close();
-        }
-        self.writer.join();
-        for reader in &self.readers {
-            reader.join();
         }
     }
 }

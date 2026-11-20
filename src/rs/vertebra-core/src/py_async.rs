@@ -10,16 +10,45 @@
 use std::any::Any;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
 
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyType, PyWeakref, PyWeakrefMethods, PyWeakrefReference};
 use tokio::runtime::{Builder, Handle, Runtime};
-use tokio::task::{AbortHandle, JoinHandle};
+use tokio::task::AbortHandle;
 
 use crate::notify::{AsyncCompletionQueue, Notifier};
+
+static GET_RUNNING_LOOP: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+fn get_running_loop<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let getter = GET_RUNNING_LOOP.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("asyncio")?.getattr("get_running_loop")?.unbind())
+    })?;
+    getter.bind(py).call0()
+}
+
+struct CatchUnwindFuture<F>(F);
+
+impl<F: Future> Future for CatchUnwindFuture<F> {
+    type Output = Result<F::Output, Box<dyn Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `CatchUnwindFuture` only projects a structural pin to its single field `0`.
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.0) };
+        match catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(Poll::Ready(val)) => Poll::Ready(Ok(val)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
 
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
@@ -41,8 +70,8 @@ fn make_task_panic_err(py: Python<'_>, message: String) -> PyErr {
     PyRuntimeError::new_err(message)
 }
 
-fn is_future_cancelled(fut: &Bound<'_, PyAny>) -> bool {
-    fut.call_method0("cancelled")
+fn is_future_cancelled(py: Python<'_>, fut: &Bound<'_, PyAny>) -> bool {
+    fut.call_method0(intern!(py, "cancelled"))
         .and_then(|v| v.extract())
         .unwrap_or(false)
 }
@@ -60,8 +89,11 @@ struct TaskCanceller {
 
 #[pymethods]
 impl TaskCanceller {
-    fn __call__(&self, future: &Bound<'_, PyAny>) -> PyResult<()> {
-        if future.call_method0("cancelled")?.extract::<bool>()? {
+    fn __call__(&self, py: Python<'_>, future: &Bound<'_, PyAny>) -> PyResult<()> {
+        if future
+            .call_method0(intern!(py, "cancelled"))?
+            .extract::<bool>()?
+        {
             let handle = {
                 let guard = self.abort.lock().unwrap_or_else(|e| e.into_inner());
                 self.cancelled_early.store(true, Ordering::Release);
@@ -90,8 +122,11 @@ struct CustomTaskCanceller {
 
 #[pymethods]
 impl CustomTaskCanceller {
-    fn __call__(&self, future: &Bound<'_, PyAny>) -> PyResult<()> {
-        if future.call_method0("cancelled")?.extract::<bool>()? {
+    fn __call__(&self, py: Python<'_>, future: &Bound<'_, PyAny>) -> PyResult<()> {
+        if future
+            .call_method0(intern!(py, "cancelled"))?
+            .extract::<bool>()?
+        {
             let callback = {
                 let mut guard = self.on_cancel.lock().unwrap_or_else(|e| e.into_inner());
                 self.cancelled_early.store(true, Ordering::Release);
@@ -117,13 +152,18 @@ pub struct CompletedTask {
 
 static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Return a handle to the shared multi-threaded Tokio runtime.
+/// Return a handle to the shared multi-threaded Tokio runtime (`VERTEBRA_IO_THREADS` overrides the worker count).
 pub fn runtime_handle() -> &'static Handle {
     SHARED_RUNTIME
         .get_or_init(|| {
-            let worker_threads = std::thread::available_parallelism()
+            let default_threads = std::thread::available_parallelism()
                 .map(|n| n.get().clamp(2, 16))
                 .unwrap_or(4);
+            let worker_threads = std::env::var("VERTEBRA_IO_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|n| n.clamp(1, 64))
+                .unwrap_or(default_threads);
             Builder::new_multi_thread()
                 .worker_threads(worker_threads)
                 .enable_all()
@@ -195,36 +235,47 @@ impl CompletionRing {
 )]
 pub struct CompletionDrainer {
     ring: Arc<CompletionRing>,
+    batch: Mutex<Vec<CompletedTask>>,
 }
 
 #[pymethods]
 impl CompletionDrainer {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
         self.ring.completion.clear_notifier();
-        let mut batch = Vec::new();
+        let mut batch = {
+            let mut guard = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        let set_result_name = intern!(py, "set_result");
+        let set_exception_name = intern!(py, "set_exception");
         while self.ring.completion.drain_into(&mut batch) {
             for item in batch.drain(..) {
                 let fut = item.future.bind(py);
-                if is_future_cancelled(fut) {
+                if is_future_cancelled(py, fut) {
                     continue;
                 }
                 let res = catch_unwind(AssertUnwindSafe(|| (item.produce)(py, fut.clone())));
-                if is_future_cancelled(fut) {
+                if is_future_cancelled(py, fut) {
                     continue;
                 }
                 match res {
                     Ok(Ok(val)) => {
-                        let _ = fut.call_method1("set_result", (val,));
+                        let _ = fut.call_method1(set_result_name, (val,));
                     }
                     Ok(Err(err)) => {
-                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
+                        let _ = fut.call_method1(set_exception_name, (err.into_value(py),));
                     }
                     Err(payload) => {
                         let err = make_task_panic_err(py, panic_message(payload));
-                        let _ = fut.call_method1("set_exception", (err.into_value(py),));
+                        let _ = fut.call_method1(set_exception_name, (err.into_value(py),));
                     }
                 }
             }
+        }
+        batch.clear();
+        let mut guard = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.capacity() < batch.capacity() {
+            *guard = batch;
         }
         Ok(())
     }
@@ -252,6 +303,7 @@ fn ensure_completion_ring(
             py,
             CompletionDrainer {
                 ring: Arc::clone(&temp_ring),
+                batch: Mutex::new(Vec::with_capacity(16)),
             },
         )?;
         if loop_obj
@@ -278,6 +330,7 @@ fn ensure_completion_ring(
         py,
         CompletionDrainer {
             ring: Arc::clone(&ring),
+            batch: Mutex::new(Vec::with_capacity(16)),
         },
     )?;
     loop_obj.setattr(attr_name, drainer_py.bind(py))?;
@@ -308,7 +361,10 @@ impl RustTaskAwaitable {
 impl RustTaskAwaitable {
     fn __await__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.awaited.store(true, Ordering::Release);
-        let iter = self.future.bind(py).call_method0("__await__")?;
+        let iter = self
+            .future
+            .bind(py)
+            .call_method0(intern!(py, "__await__"))?;
         Ok(iter.unbind())
     }
 }
@@ -326,48 +382,15 @@ impl Drop for RustTaskAwaitable {
             }
             let _ = Python::try_attach(|py| {
                 let fut = self.future.bind(py);
-                if let Ok(false) = fut.call_method0("done").and_then(|v| v.extract::<bool>()) {
-                    let _ = fut.call_method0("cancel");
+                if let Ok(false) = fut
+                    .call_method0(intern!(py, "done"))
+                    .and_then(|v| v.extract::<bool>())
+                {
+                    let _ = fut.call_method0(intern!(py, "cancel"));
                 }
             });
         }
     }
-}
-
-fn spawn_completion_forwarder<T, E, M, EMap>(
-    ring: Arc<CompletionRing>,
-    fut_for_cb: Py<PyAny>,
-    worker: JoinHandle<Result<T, E>>,
-    map_ok: M,
-    map_err: EMap,
-) where
-    T: Send + 'static,
-    E: Send + 'static,
-    M: for<'py> FnOnce(Python<'py>, Bound<'py, PyAny>, T) -> PyResult<Py<PyAny>> + Send + 'static,
-    EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static,
-{
-    runtime_handle().spawn(async move {
-        let produce: OutcomeProducer = match worker.await {
-            Ok(Ok(value)) => Box::new(move |py, fut| map_ok(py, fut, value)),
-            Ok(Err(err)) => Box::new(move |py, _fut| Err(map_err(py, err))),
-            Err(join) if join.is_panic() => {
-                let message = panic_message(join.into_panic());
-                Box::new(move |py, _fut| Err(make_task_panic_err(py, message)))
-            }
-            Err(_) => Box::new(|_, _fut| {
-                Err(pyo3::exceptions::asyncio::CancelledError::new_err(
-                    "Rust task was cancelled",
-                ))
-            }),
-        };
-        let should_signal = ring.completion.push(CompletedTask {
-            future: fut_for_cb,
-            produce,
-        });
-        if should_signal {
-            ring.signal_fallback();
-        }
-    });
 }
 
 /// Spawn a background Tokio task and resolve its Python `asyncio.Future` via an `attr_name`-keyed
@@ -387,9 +410,8 @@ where
     M: for<'py> FnOnce(Python<'py>, Bound<'py, PyAny>, T) -> PyResult<Py<PyAny>> + Send + 'static,
     EMap: FnOnce(Python<'_>, E) -> PyErr + Send + 'static,
 {
-    let asyncio = py.import("asyncio")?;
-    let loop_obj = asyncio.call_method0("get_running_loop")?;
-    let py_fut = loop_obj.call_method0("create_future")?;
+    let loop_obj = get_running_loop(py)?;
+    let py_fut = loop_obj.call_method0(intern!(py, "create_future"))?;
     let ring = ensure_completion_ring(py, &loop_obj, attr_name)?;
     let canceller = Py::new(
         py,
@@ -398,11 +420,27 @@ where
             cancelled_early: AtomicBool::new(false),
         },
     )?;
-    py_fut.call_method1("add_done_callback", (canceller.bind(py),))?;
+    py_fut.call_method1(intern!(py, "add_done_callback"), (canceller.bind(py),))?;
     let fut_for_cb = py_fut.clone().unbind();
     let fut_for_await = py_fut.unbind();
 
-    let worker = runtime_handle().spawn(fut);
+    let worker = runtime_handle().spawn(async move {
+        let produce: OutcomeProducer = match CatchUnwindFuture(fut).await {
+            Ok(Ok(value)) => Box::new(move |py, fut| map_ok(py, fut, value)),
+            Ok(Err(err)) => Box::new(move |py, _fut| Err(map_err(py, err))),
+            Err(payload) => {
+                let message = panic_message(payload);
+                Box::new(move |py, _fut| Err(make_task_panic_err(py, message)))
+            }
+        };
+        let should_signal = ring.completion.push(CompletedTask {
+            future: fut_for_cb,
+            produce,
+        });
+        if should_signal {
+            ring.signal_fallback();
+        }
+    });
     let abort = worker.abort_handle();
     let abort_for_drop = abort.clone();
     let abort_immediately = {
@@ -421,8 +459,6 @@ where
     if abort_immediately {
         abort_for_drop.abort();
     }
-
-    spawn_completion_forwarder(ring, fut_for_cb, worker, map_ok, map_err);
 
     Ok(RustTaskAwaitable {
         future: fut_for_await,
@@ -474,9 +510,8 @@ where
     MapErr: FnOnce(Python<'_>, E) -> PyErr + Send + 'static,
     OnCancel: FnOnce() + Send + 'static,
 {
-    let asyncio = py.import("asyncio")?;
-    let loop_obj = asyncio.call_method0("get_running_loop")?;
-    let py_fut = loop_obj.call_method0("create_future")?;
+    let loop_obj = get_running_loop(py)?;
+    let py_fut = loop_obj.call_method0(intern!(py, "create_future"))?;
     let ring = ensure_completion_ring(py, &loop_obj, attr_name)?;
     let cancel_slot: Arc<Mutex<Option<BoxedCancelCallback>>> = Arc::new(Mutex::new(None));
     let cancelled_early = Arc::new(AtomicBool::new(false));
@@ -487,7 +522,7 @@ where
             cancelled_early: Arc::clone(&cancelled_early),
         },
     )?;
-    py_fut.call_method1("add_done_callback", (canceller,))?;
+    py_fut.call_method1(intern!(py, "add_done_callback"), (canceller,))?;
     let fut_for_cb = py_fut.clone().unbind();
     let awaitable = Bound::new(
         py,
@@ -498,7 +533,6 @@ where
         },
     )?;
 
-    let worker = runtime_handle().spawn(fut);
     let immediate_cancel = {
         let mut guard = cancel_slot.lock().unwrap_or_else(|e| e.into_inner());
         if cancelled_early.load(Ordering::Acquire) {
@@ -512,13 +546,23 @@ where
         cancel_fn();
     }
 
-    spawn_completion_forwarder(
-        ring,
-        fut_for_cb,
-        worker,
-        move |py, _fut, value| map_ok(py, value),
-        map_err,
-    );
+    runtime_handle().spawn(async move {
+        let produce: OutcomeProducer = match CatchUnwindFuture(fut).await {
+            Ok(Ok(value)) => Box::new(move |py, _fut| map_ok(py, value)),
+            Ok(Err(err)) => Box::new(move |py, _fut| Err(map_err(py, err))),
+            Err(payload) => {
+                let message = panic_message(payload);
+                Box::new(move |py, _fut| Err(make_task_panic_err(py, message)))
+            }
+        };
+        let should_signal = ring.completion.push(CompletedTask {
+            future: fut_for_cb,
+            produce,
+        });
+        if should_signal {
+            ring.signal_fallback();
+        }
+    });
 
     Ok(awaitable)
 }

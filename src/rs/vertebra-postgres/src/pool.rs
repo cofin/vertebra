@@ -293,6 +293,47 @@ impl PostgresPool {
         Ok(lease)
     }
 
+    /// Execute a single extended query directly on a pooled connection, returning it straight to
+    /// the idle queue without `DISCARD ALL` when it completes cleanly in `Idle` state with a
+    /// non-session-mutating command tag.
+    pub async fn query_oneshot(
+        self: &Arc<Self>,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+        parameter_oids: Option<&[u32]>,
+        budget: crate::session::CommandBudget,
+    ) -> Result<crate::result::QueryResult, PostgresError> {
+        let mut lease = self.acquire().await?;
+        let (res, timed_out) = {
+            let mut dl_guard = lease.enter_session_command_deadline(budget.deadline());
+            let res = dl_guard.query(sql, parameters, parameter_oids).await;
+            (res, dl_guard.timed_out())
+        };
+        match res {
+            Ok(query_result) => {
+                let is_clean = !timed_out
+                    && !lease.is_closed()
+                    && lease.exchange_state == ExchangeState::Idle
+                    && lease.transaction_status == crate::session::TransactionStatus::Idle
+                    && lease.open_portals.is_empty()
+                    && is_clean_oneshot_query(sql, &query_result.command_tag);
+                if is_clean {
+                    lease.return_clean();
+                } else {
+                    let _ = lease.release().await;
+                }
+                Ok(query_result)
+            }
+            Err(err) => {
+                if timed_out || lease.is_closed() {
+                    lease.mark_retire();
+                }
+                let _ = lease.release().await;
+                Err(err)
+            }
+        }
+    }
+
     async fn warm_to_min_size(self: &Arc<Self>, deadline: Instant) {
         let mut handles = Vec::new();
         loop {
@@ -361,14 +402,64 @@ impl PostgresPool {
         self: &Arc<Self>,
         acquire_deadline: Instant,
     ) -> Result<PooledConnection, PostgresError> {
+        let mut first_attempt = true;
         loop {
-            let notified = self.slot_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
             let mut expired_to_close: Vec<PostgresConnection> = Vec::new();
             let mut dial_generation: Option<u64> = None;
             let mut acquired_idle: Option<(PostgresConnection, Instant)> = None;
+
+            if first_attempt {
+                first_attempt = false;
+                {
+                    let mut guard = self.inner.lock().expect("PostgresPool lock poisoned");
+                    if guard.closed {
+                        return Err(PostgresError::Interface(
+                            "cannot acquire connection from a closed PostgresPool".to_string(),
+                        ));
+                    }
+                    let now = Instant::now();
+                    while let Some(mut entry) = guard.idle.pop_back() {
+                        let lifetime_expired = self
+                            .options
+                            .max_lifetime
+                            .is_some_and(|max_lt| now.duration_since(entry.created_at) >= max_lt);
+                        let idle_expired = self.options.max_idle_lifetime.is_some_and(|max_idle| {
+                            now.duration_since(entry.idle_since) >= max_idle
+                        });
+                        let recently_used =
+                            now.duration_since(entry.idle_since) < Duration::from_secs(1);
+                        let broken = entry.conn.is_closed()
+                            || (!recently_used && !check_connection_idle_alive(&mut entry.conn));
+
+                        if lifetime_expired || idle_expired || broken {
+                            guard.retired += 1;
+                            expired_to_close.push(entry.conn);
+                            continue;
+                        }
+
+                        guard.borrowed += 1;
+                        acquired_idle = Some((entry.conn, entry.created_at));
+                        break;
+                    }
+                }
+                for mut stale in expired_to_close.drain(..) {
+                    tokio::spawn(async move {
+                        let _ = stale.close().await;
+                    });
+                }
+                if let Some((conn, created_at)) = acquired_idle {
+                    return Ok(PooledConnection {
+                        pool: Arc::clone(self),
+                        conn: Some(conn),
+                        created_at,
+                        retire: false,
+                    });
+                }
+            }
+
+            let notified = self.slot_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
 
             {
                 let mut guard = self.inner.lock().expect("PostgresPool lock poisoned");
@@ -379,7 +470,7 @@ impl PostgresPool {
                 }
 
                 let now = Instant::now();
-                while let Some(mut entry) = guard.idle.pop_front() {
+                while let Some(mut entry) = guard.idle.pop_back() {
                     let lifetime_expired = self
                         .options
                         .max_lifetime
@@ -388,8 +479,10 @@ impl PostgresPool {
                         .options
                         .max_idle_lifetime
                         .is_some_and(|max_idle| now.duration_since(entry.idle_since) >= max_idle);
-                    let broken =
-                        entry.conn.is_closed() || !check_connection_idle_alive(&mut entry.conn);
+                    let recently_used =
+                        now.duration_since(entry.idle_since) < Duration::from_secs(1);
+                    let broken = entry.conn.is_closed()
+                        || (!recently_used && !check_connection_idle_alive(&mut entry.conn));
 
                     if lifetime_expired || idle_expired || broken {
                         guard.retired += 1;
@@ -738,6 +831,51 @@ impl PooledConnection {
         }
         pool.reset_and_return_slot(conn, created_at, retire).await
     }
+
+    /// Return a verified-clean `Idle` connection straight to the idle queue without `DISCARD ALL`.
+    pub(crate) fn return_clean(mut self) {
+        let Some(conn) = self.conn.take() else {
+            return;
+        };
+        let pool = Arc::clone(&self.pool);
+        let created_at = self.created_at;
+        let now = Instant::now();
+        let lifetime_expired = pool
+            .options
+            .max_lifetime
+            .is_some_and(|max_lt| now.duration_since(created_at) >= max_lt);
+        let mut to_close: Option<PostgresConnection> = None;
+        {
+            let mut guard = pool.inner.lock().expect("PostgresPool lock poisoned");
+            guard.borrowed = guard.borrowed.saturating_sub(1);
+            if guard.closed || guard.retire_all_borrowed || lifetime_expired || self.retire {
+                guard.retired += 1;
+                to_close = Some(conn);
+            } else {
+                guard.idle.push_back(IdleEntry {
+                    conn,
+                    created_at,
+                    idle_since: now,
+                });
+            }
+        }
+        if let Some(mut c) = to_close {
+            let close_timeout = pool.options.reset_timeout;
+            let pool_for_close = Arc::clone(&pool);
+            let task = async move {
+                let _ = tokio::time::timeout(close_timeout, c.close()).await;
+                pool_for_close.drain_notify.notify_waiters();
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(task);
+            } else {
+                vertebra_db::py_async::db_runtime_handle().spawn(task);
+            }
+        } else {
+            pool.slot_notify.notify_one();
+            pool.drain_notify.notify_waiters();
+        }
+    }
 }
 
 impl Deref for PooledConnection {
@@ -780,6 +918,26 @@ impl Drop for PooledConnection {
             vertebra_db::py_async::db_runtime_handle().spawn(task);
         }
     }
+}
+
+fn is_clean_oneshot_query(sql: &str, command_tag: &str) -> bool {
+    let verb = command_tag.split_whitespace().next().unwrap_or("");
+    let safe_tag = verb.eq_ignore_ascii_case("SELECT")
+        || verb.eq_ignore_ascii_case("INSERT")
+        || verb.eq_ignore_ascii_case("UPDATE")
+        || verb.eq_ignore_ascii_case("DELETE")
+        || verb.eq_ignore_ascii_case("MERGE")
+        || verb.eq_ignore_ascii_case("VALUES")
+        || verb.eq_ignore_ascii_case("SHOW")
+        || verb.eq_ignore_ascii_case("EXPLAIN");
+    if !safe_tag {
+        return false;
+    }
+    let lower = sql.to_ascii_lowercase();
+    !lower.contains("set_config")
+        && !lower.contains("advisory")
+        && !lower.contains("temp")
+        && !lower.contains("unlogged")
 }
 
 fn check_connection_idle_alive(conn: &mut PostgresConnection) -> bool {

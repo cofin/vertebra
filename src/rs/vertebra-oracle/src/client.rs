@@ -1566,10 +1566,12 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Handle to a dedicated `"vtb-ora-worker"` OS thread owning a single `oracledb::Connection`.
+/// Handle to one `oracledb::Connection` session shared between synchronous callers, which run commands
+/// on their own thread, and a dedicated `"vtb-ora-worker"` OS thread that serves asynchronous callers.
 pub struct OracleWorkerHandle {
     id: u64,
     config: Arc<NativeOracleConfig>,
+    session: Arc<Mutex<WorkerSession>>,
     sender: Mutex<Option<mpsc::Sender<WorkerEnvelope>>>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
     break_handle: Arc<OracleBreakHandle>,
@@ -1624,25 +1626,31 @@ impl OracleWorkerHandle {
         let active_clone = Arc::clone(&active_session_attrs);
         let last_frame_clone = Arc::clone(&last_piggyback_frame);
 
+        let session = Arc::new(Mutex::new(WorkerSession {
+            config: cfg_clone,
+            conn: None,
+            upstream_socket: None,
+            savepoints: Vec::new(),
+            in_transaction: in_tx_clone,
+            closed: closed_clone,
+            break_handle: break_clone,
+            pending_session_attrs: pending_clone,
+            active_session_attrs: active_clone,
+            last_piggyback_frame: last_frame_clone,
+        }));
+        let worker_session = Arc::clone(&session);
+        let worker_break = Arc::clone(&break_handle);
+
         let join_handle = thread::Builder::new()
             .name("vtb-ora-worker".to_owned())
             .spawn(move || {
-                let mut session = WorkerSession {
-                    config: cfg_clone,
-                    conn: None,
-                    upstream_socket: None,
-                    savepoints: Vec::new(),
-                    in_transaction: in_tx_clone,
-                    closed: closed_clone,
-                    break_handle: break_clone,
-                    pending_session_attrs: pending_clone,
-                    active_session_attrs: active_clone,
-                    last_piggyback_frame: last_frame_clone,
-                };
                 while let Ok(envelope) = rx.recv() {
                     let is_close = matches!(envelope.cmd, WorkerCommand::Close);
-                    let outcome = session.handle_command(envelope.cmd);
-                    session.break_handle.end_operation();
+                    let outcome = worker_session
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .handle_command(envelope.cmd);
+                    worker_break.end_operation();
                     envelope.reply.send(outcome);
                     if is_close {
                         break;
@@ -1656,6 +1664,7 @@ impl OracleWorkerHandle {
         Ok(Self {
             id,
             config: cfg,
+            session,
             sender: Mutex::new(Some(tx)),
             join_handle: Mutex::new(Some(join_handle)),
             break_handle,
@@ -1975,6 +1984,18 @@ impl OracleWorkerHandle {
             }
             return Err(OracleError::Interface("Oracle client is closed".to_owned()));
         };
+
+        if !matches!(cmd, WorkerCommand::Close) {
+            drop(sender);
+            self.break_handle.begin_operation();
+            let outcome = self
+                .session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .handle_command(cmd);
+            self.break_handle.end_operation();
+            return outcome;
+        }
 
         let queue = Arc::new(SyncCompletionQueue::new());
         self.break_handle.begin_operation();

@@ -487,6 +487,17 @@ class SyncPostgresPool:
         """Acquire a concrete pooled physical connection lease."""
         ...
 
+    def query(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> PostgresQueryResult:
+        """Execute a single extended query directly on the pool without per-query DISCARD ALL."""
+        ...
+
     def close(self) -> None:
         """Drain and close the connection pool under close_timeout."""
         ...
@@ -584,6 +595,17 @@ class AsyncPostgresPool:
 
     def acquire(self) -> Awaitable[AsyncPostgresClient]:
         """Acquire a concrete pooled physical connection lease asynchronously."""
+        ...
+
+    def query(
+        self,
+        sql: str,
+        parameters: Sequence[PostgresValue | PgParameter] | None = None,
+        *,
+        parameter_oids: Sequence[int] | None = None,
+        timeout: float | None = None,
+    ) -> Awaitable[PostgresQueryResult]:
+        """Execute a single extended query asynchronously on the pool without per-query DISCARD ALL."""
         ...
 
     def close(self) -> Awaitable[None]:

@@ -31,6 +31,8 @@ __all__ = ("SyncSQLiteDriver",)
 
 def _sqlite_param_count(parameters: Any) -> int:
     """Return parameter count for sequence or mapping bind payloads."""
+    if parameters is None:
+        return 0
     if isinstance(parameters, (Sequence, Mapping)) and not isinstance(parameters, (str, bytes)):
         return len(parameters)
     return 0
@@ -218,16 +220,25 @@ class SyncSQLiteDriver(SyncDatabaseDriver[SQLiteConfig]):
         """Execute a query and return (tuple_rows, column_names)."""
         _ = kwargs
         _, is_insert, _ = classify_sql_statement(sql)
-        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameters))
-        lease = self._acquire_broker_lease()
-        try:
-            cols, rows = self._require_client().fetch_all(sql, parameters)
+        client = self._require_client()
+        if self._broker is None:
+            cols, rows = client.fetch_all(sql, parameters)
             if is_insert:
-                raw_id = self._require_client().last_insert_rowid
+                raw_id = client.last_insert_rowid
                 self._lastrowid = int(raw_id) if raw_id > 0 else None
             else:
                 self._lastrowid = None
-            return list(rows), tuple(str(c) for c in cols)
+            return (rows if type(rows) is list else list(rows)), tuple(cols)
+        self._lookup_or_cache_statement(sql, param_count=_sqlite_param_count(parameters))
+        lease = self._acquire_broker_lease()
+        try:
+            cols, rows = client.fetch_all(sql, parameters)
+            if is_insert:
+                raw_id = client.last_insert_rowid
+                self._lastrowid = int(raw_id) if raw_id > 0 else None
+            else:
+                self._lastrowid = None
+            return (rows if type(rows) is list else list(rows)), tuple(cols)
         finally:
             self._release_broker_lease(lease)
 

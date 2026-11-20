@@ -1,6 +1,6 @@
 //! Native DuckDB 2.0 client extension for Vertebra (`vertebra._duckdb`).
 //!
-//! Provides [`SyncDuckDBClient`] (bridged through [`SyncCompletionQueue`]) and
+//! Provides [`SyncDuckDBClient`] (executed on the calling thread with the GIL released) and
 //! [`AsyncDuckDBClient`] (bridged through [`AsyncCompletionQueue`] + [`Notifier`]
 //! via `vertebra_db::py_async::spawn_rust_db_task_with_attr` with
 //! `"_vertebra_duckdb_completion_drainer"`), zero-copy `VTBARROW` shared-memory
@@ -11,8 +11,7 @@ pub mod errors;
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::{FileReader, StreamReader};
@@ -27,7 +26,6 @@ use pyo3::types::{
 };
 use vertebra_core::broker::DIALECT_TAG_DUCKDB;
 use vertebra_core::dbrpc::DbRpcOp;
-use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_core::shm::ShmRegion;
 use vertebra_core::text::classify_sql_statement;
 use vertebra_db::arrow_shm::{
@@ -125,40 +123,21 @@ pub enum BulkLoadSource {
     },
 }
 
-enum WorkerTask {
-    Run(Box<dyn FnOnce(&mut Connection) + Send + 'static>),
-    Shutdown,
-}
-
 struct WorkerSlot {
-    sender: mpsc::Sender<WorkerTask>,
+    conn: Mutex<Option<Connection>>,
     interrupt_handle: Arc<InterruptHandle>,
     busy: AtomicBool,
     active_cancel: Mutex<Option<Arc<AtomicBool>>>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl WorkerSlot {
-    fn spawn(mut conn: Connection) -> Self {
+    fn spawn(conn: Connection) -> Self {
         let interrupt_handle = conn.interrupt_handle();
-        let (tx, rx) = mpsc::channel::<WorkerTask>();
-        let join_handle = thread::Builder::new()
-            .name("vtb-duckdb-worker".to_string())
-            .spawn(move || {
-                while let Ok(task) = rx.recv() {
-                    match task {
-                        WorkerTask::Run(job) => job(&mut conn),
-                        WorkerTask::Shutdown => break,
-                    }
-                }
-            })
-            .expect("failed to spawn vtb-duckdb-worker thread");
         Self {
-            sender: tx,
+            conn: Mutex::new(Some(conn)),
             interrupt_handle,
             busy: AtomicBool::new(false),
             active_cancel: Mutex::new(None),
-            join_handle: Mutex::new(Some(join_handle)),
         }
     }
 
@@ -190,40 +169,33 @@ impl WorkerSlot {
 
     fn execute<T, F>(&self, cancel_flag: &Arc<AtomicBool>, f: F) -> Result<T, DuckDBClientError>
     where
-        T: Send + 'static,
-        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DuckDBClientError>,
     {
         if cancel_flag.load(Ordering::Acquire) {
             return Err(DuckDBClientError::QueryTimeout(
                 "DuckDB query cancelled before execution".to_string(),
             ));
         }
-        let completion = Arc::new(SyncCompletionQueue::<Result<T, DuckDBClientError>>::new());
-        let completion_writer = Arc::clone(&completion);
-        let flag_clone = Arc::clone(cancel_flag);
+        let mut conn_guard = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(conn) = conn_guard.as_mut() else {
+            return Err(DuckDBClientError::Operational(
+                "DuckDB worker connection is closed".to_string(),
+            ));
+        };
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(DuckDBClientError::QueryTimeout(
+                "DuckDB query interrupted".to_string(),
+            ));
+        }
         self.busy.store(true, Ordering::Release);
         *self
             .active_cancel
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(cancel_flag));
-        let send_res = self.sender.send(WorkerTask::Run(Box::new(move |conn| {
-            let outcome = if flag_clone.load(Ordering::Acquire) {
-                Err(DuckDBClientError::QueryTimeout(
-                    "DuckDB query interrupted".to_string(),
-                ))
-            } else {
-                f(conn)
-            };
-            completion_writer.push(outcome);
-        })));
-        if send_res.is_err() {
-            self.clear_active_cancel(cancel_flag);
-            self.busy.store(false, Ordering::Release);
-            return Err(DuckDBClientError::Operational(
-                "DuckDB worker thread is closed".to_string(),
-            ));
-        }
-        let outcome = completion.pop_blocking();
+        let outcome = f(conn);
         self.clear_active_cancel(cancel_flag);
         self.busy.store(false, Ordering::Release);
         if outcome.is_err() && cancel_flag.load(Ordering::Acquire) {
@@ -236,15 +208,11 @@ impl WorkerSlot {
 
     fn shutdown(&self) {
         self.interrupt_handle.interrupt();
-        let _ = self.sender.send(WorkerTask::Shutdown);
-        if let Some(handle) = self
-            .join_handle
+        let _ = self
+            .conn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            let _ = handle.join();
-        }
+            .take();
     }
 }
 
@@ -634,12 +602,16 @@ impl DuckDBInner {
 
         let is_read = is_read_only_sql(&sql);
         let is_mut = is_mutating_sql(&sql);
-        let log_sql = sql.clone();
-        let log_params = params.clone();
+        let needs_tx_log = (is_mut || !is_read) && self.in_transaction.load(Ordering::Acquire);
+        let log_payload = if needs_tx_log {
+            Some((sql.clone(), params.clone()))
+        } else {
+            None
+        };
         let changed = self.run_on_pool(is_read, cancel_flag, move |conn| {
             execute_statement_on_conn(conn, &sql, &params)
         })?;
-        if is_mut || !is_read {
+        if let Some((log_sql, log_params)) = log_payload {
             self.record_tx_op(TxLogOp::Execute {
                 sql: log_sql,
                 params: log_params,
@@ -709,13 +681,17 @@ impl DuckDBInner {
         }
         let is_read = is_read_only_sql(&sql);
         let is_mut = is_mutating_sql(&sql);
-        let log_sql = sql.clone();
-        let log_params = params.clone();
+        let needs_tx_log = is_mut && self.in_transaction.load(Ordering::Acquire);
+        let log_payload = if needs_tx_log {
+            Some((sql.clone(), params.clone()))
+        } else {
+            None
+        };
         let flag_for_worker = Arc::clone(cancel_flag);
         let res = self.run_on_pool(is_read, cancel_flag, move |conn| {
             query_rows_on_conn(conn, &sql, &params, &flag_for_worker)
         })?;
-        if is_mut {
+        if let Some((log_sql, log_params)) = log_payload {
             self.record_tx_op(TxLogOp::Execute {
                 sql: log_sql,
                 params: log_params,
@@ -2475,7 +2451,7 @@ impl Drop for CancelOnDropGuard {
     }
 }
 
-/// Native synchronous DuckDB 2.0 client bridged via [`SyncCompletionQueue`].
+/// Native synchronous DuckDB 2.0 client executed on the calling thread.
 #[pyclass(frozen, immutable_type)]
 pub struct SyncDuckDBClient {
     inner: Arc<DuckDBInner>,

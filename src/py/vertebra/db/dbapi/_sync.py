@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import sqlite3
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any, Final, Protocol, Self, cast
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Final, Literal, Protocol, Self, cast
 from urllib.parse import urlparse
 
 import msgspec
@@ -605,19 +604,32 @@ def _translate_vertebra_error(exc: VertebraError) -> Error:
     return DatabaseError(str(exc))
 
 
-@contextlib.contextmanager
-def _translate_errors() -> Iterator[None]:
-    """Context manager catching driver and config exceptions and re-raising PEP 249 errors."""
-    try:
-        yield
-    except (Error, Warning):
-        raise
-    except _native.DatabaseError as exc:
-        raise _translate_native_error(exc) from exc
-    except VertebraError as exc:
-        raise _translate_vertebra_error(exc) from exc
-    except (ValueError, TypeError) as exc:
-        raise InterfaceError(str(exc)) from exc
+class _ErrorTranslator:
+    """Reusable context manager re-raising driver and config exceptions as PEP 249 errors."""
+
+    __slots__ = ()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> Literal[False]:
+        if exc is None or isinstance(exc, (Error, Warning)):
+            return False
+        if isinstance(exc, _native.DatabaseError):
+            raise _translate_native_error(exc) from exc
+        if isinstance(exc, VertebraError):
+            raise _translate_vertebra_error(exc) from exc
+        if isinstance(exc, (ValueError, TypeError)):
+            raise InterfaceError(str(exc)) from exc
+        return False
+
+
+_TRANSLATE_ERRORS: Final[_ErrorTranslator] = _ErrorTranslator()
+
+
+def _translate_errors() -> _ErrorTranslator:
+    """Return the shared PEP 249 error-translating context manager."""
+    return _TRANSLATE_ERRORS
 
 
 def is_insert_sql(operation: str) -> bool:
@@ -830,11 +842,15 @@ def is_row_returning_sql(operation: str) -> bool:
     """Return True when operation starts with a query keyword, RETURNING, or T-SQL OUTPUT clause."""
     if classify_sql_statement(operation)[0]:
         return True
+    if "output" not in operation.lower():
+        return False
     return _has_tsql_output_clause(operation)
 
 
 def _extract_out_bind_vars(parameters: Any) -> dict[Any, _DBAPIOutBindVar]:
     """Return mapping of parameter keys or positions to _DBAPIOutBindVar placeholders."""
+    if not parameters:
+        return {}
     if isinstance(parameters, Mapping):
         return {k: v for k, v in parameters.items() if isinstance(v, _DBAPIOutBindVar)}
     if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray)):

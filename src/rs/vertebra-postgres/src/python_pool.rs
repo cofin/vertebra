@@ -12,12 +12,13 @@ use crate::async_client::{POSTGRES_COMPLETION_DRAINER_ATTR, PyAsyncPostgresClien
 use crate::config::PostgresConfig;
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::pool::{PooledConnection, PostgresPool, PostgresPoolOptions};
-use crate::session::SessionHandle;
+use crate::python_values::{extract_parameters, query_result_to_python};
 use crate::session::statements::PoolerMode;
+use crate::session::{CommandBudget, SessionHandle};
 use crate::sync_client::{
     PySyncPostgresClient, build_validated_config, extract_cloud_auth_options,
     extract_iam_auth_options, extract_session_gucs, extract_strict_f64, extract_strict_i64,
-    extract_strict_opt_i64,
+    extract_strict_opt_f64, extract_strict_opt_i64,
 };
 
 fn validate_positive_duration(value: f64, field_name: &str) -> Result<Duration, PostgresError> {
@@ -327,6 +328,38 @@ impl PySyncPostgresPool {
         )))
     }
 
+    /// Execute a single extended query directly on the pool without per-query `DISCARD ALL`.
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
+    pub fn query(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        parameters: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let budget = CommandBudget::start_from_duration(timeout_dur)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let pool = Arc::clone(&self.pool);
+        let sql_owned = sql.to_owned();
+        let res = py
+            .detach(move || {
+                block_on_db(async move {
+                    pool.query_oneshot(&sql_owned, &params, oids.as_deref(), budget)
+                        .await
+                })
+            })
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        query_result_to_python(py, &res)
+    }
+
     /// Drain and close the connection pool under configured `close_timeout`.
     pub fn close(&self, py: Python<'_>) -> PyResult<()> {
         let pool = Arc::clone(&self.pool);
@@ -632,6 +665,39 @@ impl PyAsyncPostgresPool {
                 ));
                 Ok(Py::new(py, client)?.into_any())
             },
+            postgres_error_to_py,
+            POSTGRES_COMPLETION_DRAINER_ATTR,
+        )
+    }
+
+    /// Execute a single extended query asynchronously on the pool without per-query `DISCARD ALL`.
+    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
+    pub fn query<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        parameters: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let timeout_secs = extract_strict_opt_f64(timeout)?;
+        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let none_bound = py.None().into_bound(py);
+        let params_ref = parameters.unwrap_or(&none_bound);
+        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let budget = CommandBudget::start_from_duration(timeout_dur)
+            .map_err(|e| postgres_error_to_py(py, e))?;
+        let pool = Arc::clone(&self.pool);
+        let sql_owned = sql.to_owned();
+        spawn_rust_db_task_with_attr(
+            py,
+            async move {
+                pool.query_oneshot(&sql_owned, &params, oids.as_deref(), budget)
+                    .await
+            },
+            |py, res| query_result_to_python(py, &res),
             postgres_error_to_py,
             POSTGRES_COMPLETION_DRAINER_ATTR,
         )
