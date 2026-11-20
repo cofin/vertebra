@@ -142,6 +142,28 @@ uv run --no-sync python -m tools.benchmarks.micro --arrow-ipc-only --json
 | `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Open (`__arrow_c_stream__`) | 0.082 | 0.086 | 12,232.27 |
 | `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Full iteration (`RecordBatchReader`) | 469.724 | 475.618 | 2.13 |
 
+## Adapter Throughput Gaps Against Third-Party Drivers
+
+Median latency on release builds (Python 3.12, loopback, tmpfs containers), from `tools/benchmarks/adapters` on 2026-11-20. Run-to-run variation on the network cases is roughly 15 percent.
+
+| Adapter and case | Vertebra | Comparator | Cause of the gap |
+| --- | --- | --- | --- |
+| DuckDB sync `SELECT 1` | 426 us | `duckdb` 245 us | The bundled `libduckdb-sys` `cc` build has no jemalloc (`LD_PRELOAD` of jemalloc cut 314 us to 250 us); the rest sits in the `duckdb` crate prepare and execute path. The `bundled-cmake` feature enables jemalloc and needs `cmake` plus the `which` 8 crate. |
+| SQLite sync point select | 3.3 us | `sqlite3` 1.5 us | The native call takes 1.1 us; the remainder is `select_one` building a `dict` row in Python. |
+| SQLSpec SQLite sync | 15 us | `sqlspec` 2.9 us | The upstream driver is compiled and runs a cache-hit path straight into `sqlite3`; the Vertebra adapter stacks interpreted layers and a broker lease per query. |
+| SQLAlchemy `sqlite+vtb` | 43 us | `sqlite3` dialect 27 us | The PEP 249 cursor is written in Python; the upstream cursor is C. |
+| Storage `file://` sync get | 98 us | `obstore` 35 us | `LocalFileSystem` reads go through the Tokio blocking pool; `memory://` has a synchronous fast path, `file://` does not. |
+| Storage `memory://` sync put | 2.1 us | `obstore` 1.4 us | The native call takes 0.8 us; `PutResult` construction and key normalization add the rest. |
+| PostgreSQL async pooled | 111 us | `asyncpg` pinned 91 us | The native async client measures 87 to 93 us pinned; the driver adds bind compilation, result validation, and pool hand-off. |
+| Oracle sync `SELECT 1 FROM DUAL` | 111 us | `oracledb` 68 us | Every session dials through an in-process TNS relay (`relay_tns_connection` in `vertebra-oracle/src/dialer.rs`) that keeps a handle on the upstream socket for break fallback and repeats unsolicited `RESET` markers. Each query crosses two extra threads and three `sendto` calls where `oracledb` makes one. With the relay bypassed the native query measures 74 us, equal to `oracledb`, and `select_one` measures 89 us. |
+| Oracle async `SELECT 1 FROM DUAL` | 231 us | `oracledb` async 109 us | The relay cost above plus the hand-off to the `vtb-ora-worker` thread and the completion drainer. With the relay bypassed it measures 127 us against 95 us. |
+| SQL Server sync `SELECT 1` | 249 to 283 us | `pymssql` 260 to 284 us | Parity within run-to-run variation; nearly all time is inside the native `fetch_one` round trip. |
+| BigQuery emulator `SELECT 1` | 146 ms | `google-cloud-bigquery` `query_and_wait` 142 ms | The emulator dominates and slows as its job history grows (24 ms on a fresh container, 268 ms after a few hundred jobs), so the harness alternates drivers one query at a time. Back-to-back blocks produce misleading ratios in either direction. |
+
+Spanner emulator `SELECT 1` measures 2.5 ms sync and async against 3.0 ms for `google-cloud-spanner` snapshots. No asynchronous official client exists for Spanner, BigQuery, or `pymssql`, so those async cases have no comparator.
+
+Synchronous Oracle calls run on the calling thread under the session mutex; asynchronous calls and `Close` still go through the `vtb-ora-worker` thread. A client that mixes both styles on one session no longer gets strict first-in-first-out ordering between a queued asynchronous command and a later synchronous one.
+
 ## Related Context
 
 - PostgreSQL operational caveats: [PostgreSQL Native Driver Limitations](postgres-limitations.md).
