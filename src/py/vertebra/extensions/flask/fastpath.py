@@ -348,6 +348,12 @@ def _serialize_flask_result(
             elif isinstance(headers_raw, list):
                 headers = [(str(k).lower(), str(v)) for k, v in headers_raw]
 
+    if hasattr(payload, "get_data") and hasattr(payload, "status_code") and hasattr(payload, "headers"):
+        resp_status = int(payload.status_code)
+        resp_headers = [(str(k).lower(), str(v)) for k, v in payload.headers.items()]
+        resp_body = payload.get_data(as_text=False)
+        return Response(status=resp_status, body=resp_body, headers=resp_headers, request_id=request_id)
+
     has_ct = any(k == "content-type" for k, _ in headers)
     if isinstance(payload, bytes):
         if not has_ct:

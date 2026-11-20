@@ -558,6 +558,15 @@ async def _measure_vertebra_async_pubsub(
             await driver.unsubscribe(channel)
 
 
+def _normalize_redis_py_url(url: str) -> str:
+    """Normalize ``valkey://`` and ``valkeys://`` URLs to schemes accepted by ``redis-py``."""
+    if url.startswith("valkeys://"):
+        return f"rediss://{url[len('valkeys://') :]}"
+    if url.startswith("valkey://"):
+        return f"redis://{url[len('valkey://') :]}"
+    return url
+
+
 def _measure_redis_py_sync(
     redis_mod: Any,
     url: str,
@@ -571,7 +580,7 @@ def _measure_redis_py_sync(
     gil_enabled: bool,
 ) -> list[AdapterBenchmarkCase]:
     driver_label = resolve_redis_py_driver_label(is_async=False, hiredis_installed=hiredis_installed)
-    client = redis_mod.Redis.from_url(url)
+    client = redis_mod.Redis.from_url(_normalize_redis_py_url(url))
     results: list[AdapterBenchmarkCase] = []
     try:
         single_key = build_cache_keys(spec.key_prefix, 1)[0]
@@ -668,7 +677,7 @@ async def _measure_redis_py_async(
     gil_enabled: bool,
 ) -> list[AdapterBenchmarkCase]:
     driver_label = resolve_redis_py_driver_label(is_async=True, hiredis_installed=hiredis_installed)
-    client = redis_asyncio_mod.Redis.from_url(url)
+    client = redis_asyncio_mod.Redis.from_url(_normalize_redis_py_url(url))
     results: list[AdapterBenchmarkCase] = []
     try:
         single_key = build_cache_keys(spec.key_prefix, 1)[0]

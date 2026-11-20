@@ -294,8 +294,6 @@ postgres-bench = [
     "psycopg[binary]>=3.2,<3.4; python_version < '3.14'",
 ]
 bench-comparators = [
-    "asyncpg>=0.30; python_version < '3.14'",
-    "psycopg[binary]>=3.2,<3.4; python_version < '3.14'",
     "pymysql>=1.1",
     "aiomysql>=0.2; python_version < '3.14'",
     "aiosqlite>=0.20",
@@ -306,7 +304,6 @@ bench-comparators = [
     "aiobotocore>=2.15; python_version < '3.14'",
     "obstore>=0.5; python_version < '3.14'",
     "azure-storage-blob>=12.23",
-    "duckdb>=1.0; python_version < '3.14'",
     "django-bolt>=0.1; python_version < '3.14'",
     "litestar>=2.14",
     "fastapi>=0.115",

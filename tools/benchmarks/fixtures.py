@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import shutil
 import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
+
+from vertebra.utils.module_loader import import_optional
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -21,6 +26,10 @@ _AZURITE_EMULATOR_ACCOUNT = "devstoreaccount1"
 _AZURITE_EMULATOR_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 
 STORAGE_LOCAL_BACKENDS: tuple[str, str] = ("local", "memory")
+EMULATOR_PROJECT_ID = "emulator-test-project"
+SPANNER_EMULATOR_INSTANCE = "emulator-test-instance"
+SPANNER_EMULATOR_DATABASE = "vertebra-bench"
+BIGQUERY_EMULATOR_DATASET = "test-dataset"
 
 
 class ContainerFixtureSpec(msgspec.Struct, frozen=True, gc=False):
@@ -37,6 +46,7 @@ class ContainerFixtureSpec(msgspec.Struct, frozen=True, gc=False):
     env: tuple[tuple[str, str], ...] = ()
     command: tuple[str, ...] = ()
     health_path: str | None = None
+    extra_container_ports: tuple[int, ...] = ()
 
 
 FIXTURE_SPECS: dict[str, ContainerFixtureSpec] = {
@@ -74,7 +84,7 @@ FIXTURE_SPECS: dict[str, ContainerFixtureSpec] = {
         plugin_module="pytest_databases.docker.oracle",
         image="gvenzl/oracle-free:23-slim-faststart",
         container_port=1521,
-        mem_limit="1g",
+        mem_limit="4g",
         env=(("ORACLE_PASSWORD", "bench"),),
     ),
     "mssql": ContainerFixtureSpec(
@@ -83,8 +93,25 @@ FIXTURE_SPECS: dict[str, ContainerFixtureSpec] = {
         plugin_module="pytest_databases.docker.mssql",
         image="mcr.microsoft.com/mssql/server:2022-latest",
         container_port=1433,
-        mem_limit="1g",
+        mem_limit="3g",
         env=(("ACCEPT_EULA", "Y"), ("MSSQL_SA_PASSWORD", "BenchPass123!")),
+    ),
+    "spanner": ContainerFixtureSpec(
+        name="spanner",
+        category="sql",
+        plugin_module="pytest_databases.docker.spanner",
+        image="gcr.io/cloud-spanner-emulator/emulator:latest",
+        container_port=9010,
+        extra_container_ports=(9020,),
+    ),
+    "bigquery": ContainerFixtureSpec(
+        name="bigquery",
+        category="sql",
+        plugin_module="pytest_databases.docker.bigquery",
+        image="ghcr.io/goccy/bigquery-emulator:0.8.1",
+        container_port=9050,
+        env=(("PROJECT_ID", EMULATOR_PROJECT_ID), ("DATASET_NAME", BIGQUERY_EMULATOR_DATASET)),
+        command=(f"--project={EMULATOR_PROJECT_ID}", f"--dataset={BIGQUERY_EMULATOR_DATASET}"),
     ),
     "redis": ContainerFixtureSpec(
         name="redis",
@@ -108,7 +135,8 @@ FIXTURE_SPECS: dict[str, ContainerFixtureSpec] = {
         plugin_module="pytest_databases.docker.rustfs",
         image="rustfs/rustfs:latest",
         container_port=9000,
-        tmpfs_mounts=("/data:rw,noexec,nosuid",),
+        tmpfs_mounts=("/data:rw,noexec,nosuid,mode=1777",),
+        env=(("RUSTFS_ROOT_USER", "rustfsadmin"), ("RUSTFS_ROOT_PASSWORD", "rustfsadmin")),
         health_path="/health",
     ),
     "floci_aws": ContainerFixtureSpec(
@@ -182,6 +210,7 @@ def build_docker_run_command(
     host_port: int,
     container_name: str,
     extra_env: dict[str, str] | None = None,
+    extra_host_ports: dict[int, int] | None = None,
 ) -> list[str]:
     """Build a ``docker run`` argument vector for a container fixture specification.
 
@@ -190,6 +219,7 @@ def build_docker_run_command(
         host_port: Loopback host port mapped to ``spec.container_port``.
         container_name: Docker container name.
         extra_env: Optional environment variable overrides merged on top of ``spec.env``.
+        extra_host_ports: Loopback host ports keyed by each entry of ``spec.extra_container_ports``.
 
     Returns:
         List of command-line arguments suitable for ``subprocess.run``.
@@ -210,6 +240,8 @@ def build_docker_run_command(
         "-p",
         f"127.0.0.1:{host_port}:{spec.container_port}",
     ]
+    for container_port, extra_host_port in (extra_host_ports or {}).items():
+        command.extend(["-p", f"127.0.0.1:{extra_host_port}:{container_port}"])
     for mount in spec.tmpfs_mounts:
         command.extend(["--tmpfs", mount])
     if spec.mem_limit is not None:
@@ -363,6 +395,84 @@ def _wait_for_tcp_port(host: str, port: int, timeout: float) -> None:
             time.sleep(0.1)
 
 
+def _wait_for_http_health(url: str, timeout: float) -> None:
+    """Block until ``url`` returns HTTP 200 bypassing ambient HTTP proxies."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(0.05, deadline - time.monotonic())
+        try:
+            with opener.open(url, timeout=min(1.0, remaining)) as resp:
+                if resp.status == 200:
+                    return
+        except (OSError, urllib.error.URLError, ValueError):
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting {timeout:.1f}s for HTTP 200 from {url}")
+        time.sleep(0.1)
+
+
+def _wait_for_resp_pong(host: str, port: int, timeout: float) -> None:
+    """Block until a Redis/Valkey server responds ``+PONG`` to ``PING``."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(0.05, deadline - time.monotonic())
+        try:
+            with socket.create_connection((host, port), timeout=min(0.5, remaining)) as sock:
+                sock.settimeout(min(0.5, remaining))
+                sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+                if sock.recv(64).startswith(b"+PONG"):
+                    return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting {timeout:.1f}s for RESP PONG on {host}:{port}")
+        time.sleep(0.1)
+
+
+def _ensure_rustfs_bucket(endpoint_url: str, bucket: str = "vertebra-bench") -> None:
+    """Provision the default RustFS S3 bucket when ``pytest_databases`` helpers are available."""
+    helpers = import_optional("pytest_databases.helpers")
+    create_s3_bucket = getattr(helpers, "create_s3_bucket", None) if helpers is not None else None
+    if callable(create_s3_bucket):
+        create_s3_bucket(endpoint_url, bucket, access_key="rustfsadmin", secret_key="rustfsadmin")
+
+
+def _bootstrap_spanner_emulator(rest_port: int) -> None:
+    """Create the benchmark instance and database on a Spanner emulator through its REST port."""
+    spanner_mod = import_optional("pytest_databases.docker.spanner")
+    bootstrap = getattr(spanner_mod, "bootstrap_spanner_emulator", None) if spanner_mod is not None else None
+    if not callable(bootstrap):
+        raise RuntimeError("pytest-databases is required to bootstrap the Spanner emulator fixture")
+    bootstrap(
+        "127.0.0.1",
+        rest_port,
+        project=EMULATOR_PROJECT_ID,
+        instance_name=SPANNER_EMULATOR_INSTANCE,
+        database_name=SPANNER_EMULATOR_DATABASE,
+    )
+
+
+def _wait_for_bigquery_emulator(port: int, timeout: float) -> None:
+    """Block until the BigQuery emulator answers a ``SELECT 1`` query."""
+    bigquery_mod = import_optional("pytest_databases.docker.bigquery")
+    query = getattr(bigquery_mod, "query_bigquery_emulator", None) if bigquery_mod is not None else None
+    if not callable(query):
+        raise RuntimeError("pytest-databases is required to probe the BigQuery emulator fixture")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            query("127.0.0.1", port, EMULATOR_PROJECT_ID, "SELECT 1", timeout=2.0)
+        except (RuntimeError, OSError, ValueError, http.client.HTTPException):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting {timeout:.1f}s for the BigQuery emulator on port {port}"
+                ) from None
+            time.sleep(0.2)
+        else:
+            return
+
+
 class FixtureLauncher:
     """Context manager that launches and cleans up a local Docker benchmark fixture."""
 
@@ -380,6 +490,7 @@ class FixtureLauncher:
         self.container_name = container_name or f"vertebra-bench-{spec.name}-{uuid.uuid4().hex[:8]}"
         self.timeout = timeout
         self.extra_env = extra_env
+        self.extra_host_ports: dict[int, int] = {}
         self._started = False
 
     @property
@@ -397,16 +508,30 @@ class FixtureLauncher:
         if self.host_port is None:
             self.host_port = _allocate_ephemeral_port()
 
+        self.extra_host_ports = {port: _allocate_ephemeral_port() for port in self.spec.extra_container_ports}
         command = build_docker_run_command(
             self.spec,
             host_port=self.host_port,
             container_name=self.container_name,
             extra_env=self.extra_env,
+            extra_host_ports=self.extra_host_ports,
         )
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=self.timeout)
         self._started = True
         try:
             _wait_for_tcp_port("127.0.0.1", self.host_port, self.timeout)
+            if self.spec.health_path is not None:
+                _wait_for_http_health(f"{self.endpoint_url}{self.spec.health_path}", self.timeout)
+            elif self.spec.category == "cache":
+                _wait_for_resp_pong("127.0.0.1", self.host_port, self.timeout)
+            if self.spec.name == "rustfs":
+                _ensure_rustfs_bucket(self.endpoint_url)
+            elif self.spec.name == "spanner":
+                rest_port = self.extra_host_ports[9020]
+                _wait_for_tcp_port("127.0.0.1", rest_port, self.timeout)
+                _bootstrap_spanner_emulator(rest_port)
+            elif self.spec.name == "bigquery":
+                _wait_for_bigquery_emulator(self.host_port, self.timeout)
         except Exception:
             self.stop()
             raise

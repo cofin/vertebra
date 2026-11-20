@@ -858,6 +858,9 @@ async def _execute_direct_signature_plan(
     special = serialize_fastpath_special_result(out, default_status=plan.status_code)
     if special is not None:
         return special
+    litestar_resp = _serialize_litestar_response(out, default_status=plan.status_code)
+    if litestar_resp is not None:
+        return litestar_resp
     if isinstance(out, bytes):
         return (plan.status_code, list(plan.raw_bytes_headers), out)
     if isinstance(out, bytearray | memoryview):
@@ -865,6 +868,48 @@ async def _execute_direct_signature_plan(
     if isinstance(out, str) and plan.media_type.startswith("text/"):
         return (plan.status_code, list(plan.text_headers), out.encode("utf-8"))
     return (plan.status_code, list(plan.json_headers), encode_json_bytes(out))
+
+
+def _serialize_litestar_response(
+    out: Any,
+    *,
+    default_status: int,
+) -> tuple[int, list[tuple[bytes, bytes]], bytes] | None:
+    """Serialize a ``litestar.Response`` instance directly for the ASGI fastpath."""
+    out_type = type(out)
+    if not out_type.__module__.startswith("litestar.response"):
+        return None
+    if not (hasattr(out, "content") and hasattr(out, "status_code")):
+        return None
+    if getattr(out, "background", None) is not None or getattr(out, "cookies", None):
+        return None
+    status_code = int(getattr(out, "status_code", default_status))
+    raw_content = out.content
+    if raw_content is None:
+        body = b""
+    elif isinstance(raw_content, bytes):
+        body = raw_content
+    elif isinstance(raw_content, bytearray | memoryview):
+        body = bytes(raw_content)
+    elif isinstance(raw_content, str):
+        body = raw_content.encode("utf-8")
+    else:
+        body = encode_json_bytes(raw_content)
+    raw_headers = getattr(out, "headers", None)
+    headers: list[tuple[bytes, bytes]] = []
+    has_ct = False
+    if raw_headers:
+        for k, v in raw_headers.items():
+            key_bytes = str(k).lower().encode("latin-1")
+            if key_bytes == b"content-type":
+                has_ct = True
+            headers.append((key_bytes, str(v).encode("latin-1")))
+    if not has_ct:
+        media_type = getattr(out, "media_type", None) or "application/json"
+        if isinstance(media_type, enum.Enum):
+            media_type = media_type.value
+        headers.append((b"content-type", str(media_type).encode("latin-1")))
+    return (status_code, headers, body)
 
 
 async def _close_scope_upload_files(scope: Any) -> None:

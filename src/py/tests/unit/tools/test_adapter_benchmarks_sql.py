@@ -266,9 +266,9 @@ def test_sql_comparator_rejects_invalid_iterations_and_unknown_engine(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Verify `ValueError` on invalid sampling parameters and non-zero exit on unsupported engines."""
-    assert "mariadb" in SUPPORTED_SQL_ENGINES
-    assert "sqlalchemy" in SUPPORTED_SQL_ENGINES
-    assert "sqlspec" in SUPPORTED_SQL_ENGINES
+    assert {"mariadb", "sqlalchemy", "sqlspec", "oracle", "mssql", "spanner", "bigquery"}.issubset(
+        SUPPORTED_SQL_ENGINES
+    )
 
     with pytest.raises(ValueError, match="iterations"):
         asyncio.run(capture_sqlite_report(":memory:", iterations=iterations, warmup=warmup))

@@ -808,7 +808,8 @@ def create_blacksheep_app(backend: DataBackend | None = None) -> Any:
     """
     blacksheep_mod = _require_framework("blacksheep", "blacksheep", "bench-comparators")
     resolved_backend = _resolve_backend(backend)
-    app = blacksheep_mod.Application()
+    router_cls = getattr(blacksheep_mod, "Router", None)
+    app = blacksheep_mod.Application(router=router_cls()) if router_cls is not None else blacksheep_mod.Application()
     response_cls = blacksheep_mod.Response
     content_cls = blacksheep_mod.Content
     request_cls = blacksheep_mod.Request

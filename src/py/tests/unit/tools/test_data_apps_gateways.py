@@ -491,7 +491,7 @@ def test_vertebra_gateway_factories_accept_custom_backend(
             assert status == 200
             assert body == b"injected-payload"
         else:
-            status_str, _headers, body = _call_wsgi(mounted_callable, "/object/custom-key")
+            status_str, _wsgi_headers, body = _call_wsgi(mounted_callable, "/object/custom-key")
             assert status_str.startswith("200")
             assert body == b"injected-payload"
     finally:

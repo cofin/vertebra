@@ -545,8 +545,6 @@ def test_bench_comparators_group_isolation() -> None:
     dev_direct_deps = {_extract_package_name(entry) for entry in dev_entries if isinstance(entry, str)}
 
     comparator_exclusive_packages = {
-        "asyncpg",
-        "psycopg",
         "pymysql",
         "aiomysql",
         "aiosqlite",
@@ -557,7 +555,6 @@ def test_bench_comparators_group_isolation() -> None:
         "aiobotocore",
         "obstore",
         "azure-storage-blob",
-        "duckdb",
         "django-bolt",
     }
     comparator_names = {_extract_package_name(entry) for entry in comparators}

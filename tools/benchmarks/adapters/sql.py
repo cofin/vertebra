@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sqlite3
 import sys
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -29,10 +32,12 @@ from tools.benchmarks.adapters.base import (
     sample_sync,
 )
 from tools.benchmarks.postgres import capture_live_report as capture_postgres_live_report
+from vertebra.db.adapters.bigquery import AsyncBigQueryDriver, BigQueryConfig, SyncBigQueryDriver
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.mssql import AsyncMSSQLDriver, MSSQLConfig, SyncMSSQLDriver
 from vertebra.db.adapters.mysql import AsyncMySQLDriver, MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
+from vertebra.db.adapters.spanner import AsyncSpannerDriver, SpannerConfig, SyncSpannerDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.module_loader import import_optional
@@ -48,6 +53,8 @@ SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
     "duckdb",
     "oracle",
     "mssql",
+    "spanner",
+    "bigquery",
     "sqlalchemy",
     "sqlspec",
 )
@@ -70,11 +77,13 @@ __all__ = (
     "SUPPORTED_SQL_ENGINES",
     "MySQLEngine",
     "SqlSpecEngine",
+    "capture_bigquery_report",
     "capture_duckdb_report",
     "capture_mssql_report",
     "capture_mysql_report",
     "capture_oracle_report",
     "capture_postgres_adapter_report",
+    "capture_spanner_report",
     "capture_sqlalchemy_report",
     "capture_sqlite_report",
     "capture_sqlspec_report",
@@ -841,6 +850,164 @@ async def capture_mssql_report(
     )
 
 
+async def _capture_emulated_cloud_report(
+    engine: str,
+    dsn: str,
+    sync_driver: Any,
+    async_driver: Any,
+    external_driver_label: str,
+    external_query: Callable[[], Any] | None,
+    *,
+    iterations: int,
+    warmup: int,
+    strict_free_threading: bool,
+) -> AdapterBenchmarkReport:
+    """Measure `SELECT 1` on Vertebra sync and async drivers plus an optional official client.
+
+    Emulator latency drifts as its job history grows, so the drivers take turns one query at a
+    time instead of running back-to-back blocks; every driver then sees the same emulator state.
+    """
+    gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
+    sync_samples: list[int] = []
+    async_samples: list[int] = []
+    external_samples: list[int] = []
+
+    with sync_driver as sync_drv:
+        async with async_driver as async_drv:
+            for _ in range(warmup):
+                sync_drv.select_one("SELECT 1")
+                await async_drv.select_one("SELECT 1")
+                if external_query is not None:
+                    external_query()
+            for _ in range(iterations):
+                started = time.perf_counter_ns()
+                sync_drv.select_one("SELECT 1")
+                sync_samples.append(max(1, time.perf_counter_ns() - started))
+                started = time.perf_counter_ns()
+                await async_drv.select_one("SELECT 1")
+                async_samples.append(max(1, time.perf_counter_ns() - started))
+                if external_query is not None:
+                    started = time.perf_counter_ns()
+                    external_query()
+                    external_samples.append(max(1, time.perf_counter_ns() - started))
+
+    measured: list[tuple[str, DriverMode, list[int]]] = [
+        (f"vertebra-{engine}-sync", "sync_blocking", sync_samples),
+        (f"vertebra-{engine}-async", "async_native", async_samples),
+    ]
+    if external_samples:
+        measured.append((external_driver_label, "sync_blocking", external_samples))
+    cases = [
+        compute_adapter_case_stats(
+            case="point_select_1",
+            driver=driver,
+            category="sql",
+            driver_mode=driver_mode,
+            latencies_ns=samples,
+            gil_enabled=gil_enabled,
+        )
+        for driver, driver_mode, samples in measured
+    ]
+
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine=engine,
+        generated_at=_utc_now_iso(),
+        target_redacted=redact_target_uri(dsn),
+        gil_enabled=gil_enabled,
+        cases=tuple(cases),
+    )
+
+
+async def capture_spanner_report(
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra Spanner drivers on `SELECT 1` against optional `google-cloud-spanner`.
+
+    The official client only speaks plaintext gRPC when `SPANNER_EMULATOR_HOST` is set, so an
+    `http://` endpoint in `dsn` is exported under that variable for the duration of the comparison.
+    """
+    _validate_sampling(iterations, warmup)
+    cfg = SpannerConfig.from_url(dsn)
+    external_query: Callable[[], Any] | None = None
+    previous_emulator_host = os.environ.get("SPANNER_EMULATOR_HOST")
+    spanner_mod = import_optional("google.cloud.spanner") if include_external else None
+    credentials_mod = import_optional("google.auth.credentials") if include_external else None
+    try:
+        if spanner_mod is not None and credentials_mod is not None:
+            if cfg.endpoint.startswith("http://"):
+                os.environ["SPANNER_EMULATOR_HOST"] = urlsplit(cfg.endpoint).netloc
+            client = spanner_mod.Client(project=cfg.project_id, credentials=credentials_mod.AnonymousCredentials())
+            database = client.instance(cfg.instance_id).database(cfg.database_id)
+
+            def _official_select() -> Any:
+                with database.snapshot() as snapshot:
+                    return list(snapshot.execute_sql("SELECT 1"))
+
+            external_query = _official_select
+        return await _capture_emulated_cloud_report(
+            "spanner",
+            dsn,
+            SyncSpannerDriver(cfg),
+            AsyncSpannerDriver(cfg),
+            "google-cloud-spanner-sync",
+            external_query,
+            iterations=iterations,
+            warmup=warmup,
+            strict_free_threading=strict_free_threading,
+        )
+    finally:
+        if previous_emulator_host is None:
+            os.environ.pop("SPANNER_EMULATOR_HOST", None)
+        else:
+            os.environ["SPANNER_EMULATOR_HOST"] = previous_emulator_host
+
+
+async def capture_bigquery_report(
+    dsn: str,
+    *,
+    iterations: int = 100,
+    warmup: int = 10,
+    include_external: bool = True,
+    strict_free_threading: bool = False,
+) -> AdapterBenchmarkReport:
+    """Measure Vertebra BigQuery drivers on `SELECT 1` against optional `google-cloud-bigquery`."""
+    _validate_sampling(iterations, warmup)
+    cfg = BigQueryConfig.from_url(dsn)
+    external_query: Callable[[], Any] | None = None
+    bigquery_mod = import_optional("google.cloud.bigquery") if include_external else None
+    credentials_mod = import_optional("google.auth.credentials") if include_external else None
+    options_mod = import_optional("google.api_core.client_options") if include_external else None
+    if bigquery_mod is not None and credentials_mod is not None and options_mod is not None:
+        client = bigquery_mod.Client(
+            project=cfg.effective_project_id(),
+            credentials=credentials_mod.AnonymousCredentials(),
+            client_options=options_mod.ClientOptions(api_endpoint=cfg.rest_endpoint),
+        )
+
+        def _official_select() -> Any:
+            return list(client.query_and_wait("SELECT 1"))
+
+        external_query = _official_select
+    return await _capture_emulated_cloud_report(
+        "bigquery",
+        dsn,
+        SyncBigQueryDriver(cfg),
+        AsyncBigQueryDriver(cfg),
+        "google-cloud-bigquery-sync",
+        external_query,
+        iterations=iterations,
+        warmup=warmup,
+        strict_free_threading=strict_free_threading,
+    )
+
+
 async def capture_sqlalchemy_report(
     url: str,
     *,
@@ -1123,6 +1290,10 @@ async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
         return await capture_oracle_report(args.dsn, **common_kwargs)
     if engine == "mssql":
         return await capture_mssql_report(args.dsn, **common_kwargs)
+    if engine == "spanner":
+        return await capture_spanner_report(args.dsn, **common_kwargs)
+    if engine == "bigquery":
+        return await capture_bigquery_report(args.dsn, **common_kwargs)
     if engine == "sqlalchemy":
         return await capture_sqlalchemy_report(
             args.dsn,

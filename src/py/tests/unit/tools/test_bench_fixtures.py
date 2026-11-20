@@ -34,8 +34,6 @@ def test_pyproject_bench_comparators_group_isolated() -> None:
 
     comparator_dists = {_dist_name(entry) for entry in comparators if isinstance(entry, str)}
     expected_dists = {
-        "asyncpg",
-        "psycopg",
         "pymysql",
         "aiomysql",
         "aiosqlite",
@@ -46,7 +44,6 @@ def test_pyproject_bench_comparators_group_isolated() -> None:
         "aiobotocore",
         "obstore",
         "azure-storage-blob",
-        "duckdb",
         "django-bolt",
         "litestar",
         "fastapi",
@@ -131,9 +128,9 @@ def test_fixture_specs_forbid_minio_and_include_rustfs_floci_azurite() -> None:
         ("postgres", ("--tmpfs", "/var/lib/postgresql/data:rw,noexec,nosuid", "--shm-size", "128m")),
         ("mysql", ("--tmpfs", "/var/lib/mysql:rw,noexec,nosuid")),
         ("mariadb", ("--tmpfs", "/var/lib/mysql:rw,noexec,nosuid")),
-        ("oracle", ("--memory", "1g")),
-        ("mssql", ("--memory", "1g")),
-        ("rustfs", ("--tmpfs", "/data:rw,noexec,nosuid")),
+        ("oracle", ("--memory", "4g")),
+        ("mssql", ("--memory", "3g")),
+        ("rustfs", ("--tmpfs", "/data:rw,noexec,nosuid,mode=1777")),
         ("azurite", ("--inMemoryPersistence",)),
     ],
 )
@@ -186,6 +183,41 @@ def test_build_storage_config_covers_all_cloud_and_local_backends(
 
     with pytest.raises(ValueError, match="root_dir is required for local storage backend"):
         build_storage_config("local", root_dir=None)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "plugin_module", "container_port", "extra_ports"),
+    [
+        ("spanner", "pytest_databases.docker.spanner", 9010, (9020,)),
+        ("bigquery", "pytest_databases.docker.bigquery", 9050, ()),
+    ],
+)
+def test_cloud_emulator_fixtures_publish_every_required_port(
+    fixture_name: str,
+    plugin_module: str,
+    container_port: int,
+    extra_ports: tuple[int, ...],
+) -> None:
+    """Verify Spanner and BigQuery emulator specs map their primary and secondary ports to loopback."""
+    spec = get_fixture_spec(fixture_name)
+    assert spec.category == "sql"
+    assert spec.plugin_module == plugin_module
+    assert spec.container_port == container_port
+    assert spec.extra_container_ports == extra_ports
+
+    extra_host_ports = {port: 26000 + index for index, port in enumerate(extra_ports)}
+    cmd = build_docker_run_command(
+        spec,
+        host_port=25000,
+        container_name=f"bench-{fixture_name}",
+        extra_host_ports=extra_host_ports,
+    )
+    published = [cmd[index + 1] for index, token in enumerate(cmd) if token == "-p"]
+    assert published == [
+        f"127.0.0.1:25000:{container_port}",
+        *(f"127.0.0.1:{host}:{port}" for port, host in extra_host_ports.items()),
+    ]
+    assert cmd.index(spec.image) > max(index for index, token in enumerate(cmd) if token == "-p")
 
 
 def test_fixture_launcher_fails_loud_without_docker(monkeypatch: pytest.MonkeyPatch) -> None:
