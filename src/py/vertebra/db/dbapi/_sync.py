@@ -25,6 +25,7 @@ from vertebra.typing import (
     UnsupportedBackendError,
     VertebraError,
 )
+from vertebra.utils.module_loader import import_optional
 
 __all__ = (
     "BFILE",
@@ -224,6 +225,7 @@ _SUPPORTED_CONNECT_ARGS_BY_DIALECT: Final[dict[str, frozenset[str]]] = {
             "pool_min_size",
             "pool_max_size",
             "statement_cache_size",
+            "enable_reset_relay",
         }
     ),
     "mssql": frozenset(
@@ -631,11 +633,10 @@ def _apply_dialect_metadata(module_obj: Any, dialect: str | None) -> None:
         module_obj.sqlite_version = sqlite3.sqlite_version
         module_obj.sqlite_version_info = sqlite3.sqlite_version_info
     elif lowered == "oracle":
-        try:
-            from vertebra._oracle import OracleOutBindVar
-        except ImportError:
-            return
-        module_obj.Var = OracleOutBindVar
+        oracle_mod = import_optional("vertebra._oracle")
+        out_bind_var = getattr(oracle_mod, "OracleOutBindVar", None) if oracle_mod is not None else None
+        if out_bind_var is not None:
+            module_obj.Var = out_bind_var
 
 
 _POOL_ROUTED_DIALECTS: Final[frozenset[str]] = frozenset({"postgres"})

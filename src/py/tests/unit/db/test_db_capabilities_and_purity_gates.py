@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Any, Self, cast
 import pytest
 
 import vertebra
+import vertebra._vertebra as vertebra_native
 import vertebra.db as vertebra_db
+import vertebra.db.dbapi as vertebra_dbapi
 import vertebra.db.driver as vertebra_db_driver
 from vertebra._vertebra import VectorBatchView, VectorView
 from vertebra.db import (
@@ -875,10 +877,7 @@ async def test_sqlspec_bases_reuse_one_exception_handler() -> None:
 )
 def test_dbapi_exception_names_are_native_classes_after_cleanup(dbapi_name: str, native_name: str) -> None:
     """Verify each PEP 249 error name on vertebra.db.dbapi binds directly to the native vertebra._vertebra class."""
-    import vertebra._vertebra as native_mod
-    import vertebra.db.dbapi as dbapi_mod
-
-    assert getattr(dbapi_mod, dbapi_name) is getattr(native_mod, native_name)
+    assert getattr(vertebra_dbapi, dbapi_name) is getattr(vertebra_native, native_name)
 
 
 @pytest.mark.anyio

@@ -41,10 +41,10 @@ class DuckDBCore:
         exc: BaseException,
         dynamic_secrets: Sequence[Any],
         secret_generations: dict[str, int],
-    ) -> None:
+    ) -> bool:
         """Invalidate tracked dynamic secret generations on HTTP 401/403 httpfs rejections."""
         if not _CREDENTIAL_REJECTION_PATTERN.search(str(exc)):
-            return
+            return False
         for secret in dynamic_secrets:
             provider = secret.value_provider
             if provider is None:
@@ -58,6 +58,7 @@ class DuckDBCore:
             if callable(invalidate_fn):
                 invalidate_fn(applied_gen)
                 secret_generations.pop(key, None)
+        return True
 
     @staticmethod
     def probe_provider_generation(provider: Any) -> int | None:

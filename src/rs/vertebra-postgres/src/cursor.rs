@@ -82,17 +82,6 @@ impl CursorState {
         Ok(())
     }
 
-    fn ensure_result_set(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open(py)?;
-        if !self.executed || self.description.is_none() {
-            return Err(cursor_programming_err(
-                py,
-                "no result set available to fetch from",
-            ));
-        }
-        Ok(())
-    }
-
     /// Replace the buffered statement result and discard any previously unread rows.
     pub(crate) fn store(
         &mut self,
@@ -118,10 +107,10 @@ impl CursorState {
         self.lastrowid = None;
     }
 
-    /// Return the next row tuple, or `None` when the buffered result set is exhausted.
+    /// Return the next row tuple, or `None` when no result set is active or rows are exhausted.
     pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
-        if self.pos >= self.rows.len() {
+        self.ensure_open(py)?;
+        if self.description.is_none() || self.pos >= self.rows.len() {
             return Ok(None);
         }
         let row = self.rows[self.pos].clone_ref(py);
@@ -135,9 +124,9 @@ impl CursorState {
         py: Python<'_>,
         size: Option<usize>,
     ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
+        self.ensure_open(py)?;
         let limit = size.unwrap_or(self.arraysize);
-        if limit == 0 || self.pos >= self.rows.len() {
+        if self.description.is_none() || limit == 0 || self.pos >= self.rows.len() {
             return Ok(Vec::new());
         }
         let end = self.pos.saturating_add(limit).min(self.rows.len());
@@ -151,8 +140,8 @@ impl CursorState {
 
     /// Return all remaining row tuples and mark the result set exhausted.
     pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
-        if self.pos >= self.rows.len() {
+        self.ensure_open(py)?;
+        if self.description.is_none() || self.pos >= self.rows.len() {
             return Ok(Vec::new());
         }
         let out = self.rows[self.pos..]
@@ -1128,9 +1117,58 @@ impl Drop for PersistentLoopReader {
 }
 
 #[cfg(unix)]
+#[pyclass(frozen, immutable_type)]
+struct PgLoopDetachSignal {
+    loop_weakref: Py<PyWeakrefReference>,
+    fd: i32,
+    tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[cfg(unix)]
+#[pymethods]
+impl PgLoopDetachSignal {
+    fn __call__(&self, py: Python<'_>) {
+        if let Some(loop_obj) = self.loop_weakref.bind(py).upgrade() {
+            let _ = loop_obj.call_method1(intern!(py, "remove_reader"), (self.fd,));
+        }
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+#[cfg(unix)]
 impl LoopReaderSlot for PersistentLoopReader {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn detach_async(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        if !self.registered.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let fd = self.fd;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let scheduled = Python::try_attach(|py| {
+            let Some(loop_obj) = self.loop_weakref.bind(py).upgrade() else {
+                return false;
+            };
+            let Ok(signal) = Py::new(
+                py,
+                PgLoopDetachSignal {
+                    loop_weakref: self.loop_weakref.clone_ref(py),
+                    fd,
+                    tx: Mutex::new(Some(tx)),
+                },
+            ) else {
+                return false;
+            };
+            loop_obj
+                .call_method1(intern!(py, "call_soon_threadsafe"), (signal,))
+                .is_ok()
+        })
+        .unwrap_or(false);
+        scheduled.then_some(rx)
     }
 }
 
@@ -2080,27 +2118,49 @@ mod tests {
     }
 
     #[test]
-    fn cursor_fetch_before_execute_raises_programming_error() {
+    fn cursor_fetch_before_execute_returns_empty() {
         Python::attach(|py| {
             let mut state = CursorState::new();
-            let err = state
-                .fetchone(py)
-                .expect_err("fetchone before execute must fail");
-            assert_eq!(err_type_name(py, &err), "ProgrammingError");
+            assert!(
+                state
+                    .fetchone(py)
+                    .expect("fetchone before execute")
+                    .is_none()
+            );
+            assert!(
+                state
+                    .fetchmany(py, None)
+                    .expect("fetchmany before execute")
+                    .is_empty()
+            );
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall before execute")
+                    .is_empty()
+            );
         });
     }
 
     #[test]
-    fn cursor_fetch_after_command_raises_programming_error_and_preserves_rowcount() {
+    fn cursor_fetch_after_command_returns_empty_and_preserves_rowcount() {
         Python::attach(|py| {
             let mut state = CursorState::new();
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
             assert!(state.description.is_none());
-            let err = state
-                .fetchall(py)
-                .expect_err("fetchall after command must fail");
-            assert_eq!(err_type_name(py, &err), "ProgrammingError");
+            assert!(
+                state
+                    .fetchone(py)
+                    .expect("fetchone after command")
+                    .is_none()
+            );
+            assert!(
+                state
+                    .fetchall(py)
+                    .expect("fetchall after command")
+                    .is_empty()
+            );
             assert_eq!(state.rowcount, 3);
         });
     }

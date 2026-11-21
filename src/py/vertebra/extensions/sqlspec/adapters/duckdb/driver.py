@@ -72,6 +72,8 @@ class DuckDBSyncDriver(BaseSyncDriver):
         """Return the client-bound callables the native driver holds, or `None` to register no executor."""
         if not cache_hit_hooks_unchanged(type(self), DuckDBSyncDriver):
             return None
+        if getattr(self.native_driver, "_dynamic_secrets", ()):
+            return self._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
         return self._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")
 
     def _map_exception(self, exc: BaseException) -> Exception | None:
@@ -188,6 +190,8 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         """Return the client-bound callables the native async driver holds, or `None` to register no executor."""
         if not cache_hit_hooks_unchanged(type(self), DuckDBAsyncDriver):
             return None
+        if getattr(self.native_driver, "_dynamic_secrets", ()):
+            return BaseSyncDriver._single_call_pair(self.native_driver, "execute_with_description", "execute_dml")
         return BaseSyncDriver._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")
 
     def _map_exception(self, exc: BaseException) -> Exception | None:

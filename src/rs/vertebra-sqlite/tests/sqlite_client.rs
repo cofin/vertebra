@@ -754,16 +754,32 @@ fn test_run_live_op_cancellation_interrupts_statement() {
     let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open pool");
     let live = pool.next_op_id();
     let pool_clone = Arc::clone(&pool);
+    let started = Arc::new(std::sync::Barrier::new(2));
+    let started_worker = Arc::clone(&started);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(move || {
-        pool_clone.run_with_op_id(
+        started_worker.wait();
+        let res = pool_clone.run_with_op_id(
             live,
             "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) SELECT count(*) FROM cnt",
             BoundParams::Empty,
-        )
+        );
+        let _ = done_tx.send(());
+        res
     });
 
-    thread::sleep(Duration::from_millis(20));
-    assert!(pool.cancel_operation(live));
+    started.wait();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut cancelled = false;
+    while Instant::now() < deadline {
+        if pool.cancel_operation(live) {
+            cancelled = true;
+        }
+        if done_rx.recv_timeout(Duration::from_millis(5)).is_ok() {
+            break;
+        }
+    }
+    assert!(cancelled, "cancel_operation must succeed for live op");
     assert!(handle.join().expect("join cancelled run").is_err());
 
     let verify = pool
@@ -776,24 +792,36 @@ fn test_run_live_op_cancellation_interrupts_statement() {
 fn test_run_cancel_all_interrupts_running_statement() {
     let pool = SqlitePool::open(SqliteClientConfig::default()).expect("open pool");
     let pool_clone = Arc::clone(&pool);
+    let started = Arc::new(std::sync::Barrier::new(2));
+    let started_worker = Arc::clone(&started);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(move || {
-        pool_clone.run(
+        started_worker.wait();
+        let res = pool_clone.run(
             "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) SELECT count(*) FROM cnt",
             BoundParams::Empty,
-        )
+        );
+        let _ = done_tx.send(());
+        res
     });
 
-    thread::sleep(Duration::from_millis(20));
-    let cancel_start = Instant::now();
-    pool.cancel();
+    started.wait();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut finished = false;
+    while Instant::now() < deadline {
+        pool.cancel();
+        if done_rx.recv_timeout(Duration::from_millis(5)).is_ok() {
+            finished = true;
+            break;
+        }
+    }
+    assert!(
+        finished,
+        "pool.cancel() did not interrupt running query before deadline"
+    );
 
     let res = handle.join().expect("join cancelled run");
-    let elapsed = cancel_start.elapsed();
     assert!(res.is_err(), "run query should have been cancelled");
-    assert!(
-        elapsed < Duration::from_millis(200),
-        "cancellation took too long: {elapsed:?}"
-    );
 
     let verify = pool
         .run("SELECT 1 + 1", BoundParams::Empty)

@@ -64,7 +64,9 @@ from vertebra._vertebra import (
 )
 from vertebra._vertebra import DataError as NativeDataError
 from vertebra._vertebra import IntegrityError as NativeIntegrityError
+from vertebra._vertebra import InterfaceError as NativeInterfaceError
 from vertebra._vertebra import OperationalError as NativeOperationalError
+from vertebra.db import dbapi
 from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig, SyncDuckDBDriver
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SyncSQLiteDriver
 from vertebra.db.adapters.sqlite.config import SQLiteConfig
@@ -2169,12 +2171,6 @@ def test_native_sync_cache_hit_opens_no_cursor() -> None:
 @pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
 def test_native_sync_with_cursor_yields_closed_on_exit_native_cursor(engine: str) -> None:
     """with_cursor yields a native cursor distinct from connection and closes it on block exit."""
-    from vertebra._vertebra import InterfaceError as NativeInterfaceError
-    from vertebra.db import dbapi
-    from vertebra.db.adapters.duckdb import DuckDBConfig, SyncDuckDBDriver
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBSyncDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     assert dbapi.InterfaceError is NativeInterfaceError
     native: Any
@@ -2196,8 +2192,6 @@ def test_native_sync_with_cursor_yields_closed_on_exit_native_cursor(engine: str
 
 def test_native_sync_dispatch_reads_description_rowcount_and_lastrowid() -> None:
     """Native sync dispatch populates rows_affected, RETURNING data, and zero-row column_names from cursor state."""
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteSyncDriver(native)
@@ -2219,10 +2213,6 @@ def test_native_sync_dispatch_reads_description_rowcount_and_lastrowid() -> None
 @pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
 def test_native_sync_execute_many_reports_engine_rowcount(engine: str) -> None:
     """Native sync execute_many reports affected row counts for non-empty batches and skips native calls on empty."""
-    from vertebra.db.adapters.duckdb import DuckDBConfig, SyncDuckDBDriver
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBSyncDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     native: Any
     adapter: BaseSyncDriver
@@ -2252,8 +2242,6 @@ def test_native_sync_execute_many_reports_engine_rowcount(engine: str) -> None:
 
 def test_native_sync_cursor_errors_map_to_sqlspec_exceptions() -> None:
     """Native cursor errors map to sqlspec.exceptions preserving the native exception as __cause__."""
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteSyncDriver(native)
@@ -2273,8 +2261,6 @@ def test_native_sync_cursor_errors_map_to_sqlspec_exceptions() -> None:
 
 def test_native_sync_driver_reuses_one_exception_handler() -> None:
     """Every BaseSyncDriver reuses one exception handler clearing pending errors across calls."""
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteSyncDriver(native)
@@ -2308,7 +2294,6 @@ def test_map_native_database_exception_matches_cursor_error_classes(
     expected_type: type[Exception],
 ) -> None:
     """_map_native_database_exception maps DB-API native cursor errors and QueryCancelledError to SQLSpec types."""
-    from vertebra.db import dbapi
 
     mapped = BaseSyncDriver._map_native_database_exception(exc_factory(dbapi))
     assert isinstance(mapped, expected_type)
@@ -2414,12 +2399,6 @@ async def test_native_async_cache_hit_opens_no_cursor() -> None:
 @pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
 async def test_native_async_with_cursor_yields_closed_on_exit_native_cursor(engine: str) -> None:
     """with_cursor yields a native async cursor distinct from connection and closes it on block exit."""
-    from vertebra._vertebra import InterfaceError as NativeInterfaceError
-    from vertebra.db import dbapi
-    from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig
-    from vertebra.db.adapters.sqlite import AsyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBAsyncDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver
 
     assert dbapi.InterfaceError is NativeInterfaceError
     native: Any
@@ -2442,8 +2421,6 @@ async def test_native_async_with_cursor_yields_closed_on_exit_native_cursor(engi
 @pytest.mark.anyio
 async def test_native_async_dispatch_reads_description_rowcount_and_lastrowid() -> None:
     """Native async dispatch populates rows_affected, RETURNING data, and zero-row column_names from cursor state."""
-    from vertebra.db.adapters.sqlite import AsyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver
 
     native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteAsyncDriver(native)
@@ -2466,10 +2443,6 @@ async def test_native_async_dispatch_reads_description_rowcount_and_lastrowid() 
 @pytest.mark.parametrize("engine", ["sqlite", "duckdb"])
 async def test_native_async_execute_many_reports_engine_rowcount(engine: str) -> None:
     """Native async execute_many reports affected row counts for non-empty batches and skips native calls on empty."""
-    from vertebra.db.adapters.duckdb import AsyncDuckDBDriver, DuckDBConfig
-    from vertebra.db.adapters.sqlite import AsyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.duckdb.driver import DuckDBAsyncDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver
 
     native: Any
     adapter: BaseAsyncDriver
@@ -2500,8 +2473,6 @@ async def test_native_async_execute_many_reports_engine_rowcount(engine: str) ->
 @pytest.mark.anyio
 async def test_native_async_cursor_errors_map_to_sqlspec_exceptions() -> None:
     """Native async cursor errors map to sqlspec.exceptions preserving the native exception as __cause__."""
-    from vertebra.db.adapters.sqlite import AsyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver
 
     native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteAsyncDriver(native)
@@ -2522,8 +2493,6 @@ async def test_native_async_cursor_errors_map_to_sqlspec_exceptions() -> None:
 @pytest.mark.anyio
 async def test_native_async_driver_reuses_one_exception_handler() -> None:
     """Every BaseAsyncDriver reuses one exception handler clearing pending errors across calls."""
-    from vertebra.db.adapters.sqlite import AsyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteAsyncDriver
 
     native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteAsyncDriver(native)
@@ -2542,8 +2511,6 @@ async def test_native_async_driver_reuses_one_exception_handler() -> None:
 
 def test_sqlite_select_stream_yields_expected_chunks() -> None:
     """select_stream on SQLite with chunk_size=2 over five rows yields chunks of two, two, and one."""
-    from vertebra.db.adapters.sqlite import SyncSQLiteDriver
-    from vertebra.extensions.sqlspec.adapters.sqlite.driver import SQLiteSyncDriver
 
     native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
     adapter = SQLiteSyncDriver(native)

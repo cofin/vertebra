@@ -1,5 +1,7 @@
 # Bundle Activity Log
 
+- **2026-11-21 `archive` (`native-cursor-data-path`)**: Completed, reviewed, and archived `native-cursor-data-path` (6 chapters, 119 completed tasks + 1 user-deferred task `embedded:t11` across unified native PyO3 cursors, single-call `execute_fetch*`/`execute_dml` paths, PostgreSQL persistent asyncio loop reader and binary wire codecs, Oracle reset-relay opt-in and `OracleOutBindVar`, MySQL/MSSQL/SQLite/DuckDB/Spanner/BigQuery cursor and SQLSpec/DB-API/SQLAlchemy fastpaths, 8-engine empty-fetch parity, and all 13 release acceptance benchmark reports passing `tools.benchmarks.adapters.sql check`), recorded ADR-006 and updated knowledge chapters (`database-drivers-and-dialers.md`, `database-driver-limitations.md`, `postgres-native-driver.md`, `sqlspec-alchemy-and-dialects.md`, `sqlspec-limitations.md`, `benchmarks-and-free-threaded.md`, `polyglot-test-matrix.md`), and contracted `.agents/bundles/specs/` back to lazy mode.
+
 - 2026-11-21 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 1 file(s).
 
 - 2026-11-21 `sync`: Closed 0 task(s), recorded 0 commit(s), freed 0 claim(s), updated 3 file(s).

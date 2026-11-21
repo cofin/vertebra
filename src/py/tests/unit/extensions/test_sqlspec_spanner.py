@@ -65,10 +65,6 @@ from vertebra.extensions.sqlspec.adapters.spanner.core import (
     farm_fingerprint_shard,
     farmhash_fingerprint64,
 )
-from vertebra.extensions.sqlspec.adapters.spanner.driver import (
-    _execute_async_select,
-    _execute_sync_select,
-)
 from vertebra.extensions.sqlspec.adapters.sqlite import SQLiteSyncConfig
 from vertebra.typing import ImproperConfigurationError
 
@@ -927,39 +923,6 @@ async def test_spanner_provide_session_rw_transactions_autocommit_and_snapshot_p
             assert ro_async.is_read_only is True
             arows = await ro_async.select("SELECT id, amount FROM ledger ORDER BY id")
             assert [r["id"] for r in arows] == ["row-0", "row-1", "row-2"]
-
-        cursor_called = False
-
-        class _CursorStub:
-            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
-                nonlocal cursor_called
-                _ = (sql, params)
-                cursor_called = True
-                return [(999,)], ["val"]
-
-        class _SyncSnapshotStub:
-            def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
-                _ = (sql, params)
-                return [(42,)], ["snap_val"]
-
-        class _AsyncSnapshotStub:
-            async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], list[str]]:
-                _ = (sql, params)
-                return [(84,)], ["async_snap_val"]
-
-        sync_rows, sync_cols = _execute_sync_select(
-            _CursorStub(), "SELECT 1", None, active_snapshot=_SyncSnapshotStub()
-        )
-        assert cursor_called is False
-        assert sync_rows == [{"snap_val": 42}]
-        assert sync_cols == ["snap_val"]
-
-        async_rows, async_cols = await _execute_async_select(
-            _CursorStub(), "SELECT 1", None, active_snapshot=_AsyncSnapshotStub()
-        )
-        assert cursor_called is False
-        assert async_rows == [{"async_snap_val": 84}]
-        assert async_cols == ["async_snap_val"]
     finally:
         sync_cfg.close()
         await async_cfg.close()

@@ -662,6 +662,18 @@ def test_dbapi_native_classes_keep_hierarchy_and_remove_old_translators() -> Non
         assert not hasattr(dbapi_sync, removed_name)
 
 
+def test_dbapi_oracle_connect_args_allow_enable_reset_relay() -> None:
+    """Verify Oracle DB-API connect_args accept enable_reset_relay and forward it to OracleConfig."""
+    assert "enable_reset_relay" in dbapi_sync._SUPPORTED_CONNECT_ARGS_BY_DIALECT["oracle"]
+    _, cfg = dbapi_sync._resolve_dbapi_config(
+        "oracle://system:bench@127.0.0.1:1521/FREEPDB1",
+        driver=None,
+        driver_broker=None,
+        connect_kwargs={"enable_reset_relay": False},
+    )
+    assert getattr(cfg, "enable_reset_relay", None) is False
+
+
 @pytest.mark.anyio
 async def test_dbapi_executemany_returning_and_negative_fetchmany() -> None:
     """Verify executemany accumulates RETURNING rows across batches and fetchmany(-1) preserves cursor state."""

@@ -110,18 +110,10 @@ impl CursorState {
         self.executed = false;
     }
 
-    fn ensure_result_set(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open(py)?;
-        if !self.executed || self.description.is_none() {
-            return Err(cursor_programming_err(py, "no result set available"));
-        }
-        Ok(())
-    }
-
-    /// Fetch the next buffered row, or `None` when exhausted.
+    /// Fetch the next buffered row, or `None` when no result set is active or rows are exhausted.
     pub(crate) fn fetchone(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
-        if self.pos >= self.rows.len() {
+        self.ensure_open(py)?;
+        if self.description.is_none() || self.pos >= self.rows.len() {
             return Ok(None);
         }
         let row = self.rows[self.pos].clone_ref(py);
@@ -135,9 +127,9 @@ impl CursorState {
         py: Python<'_>,
         size: Option<usize>,
     ) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
+        self.ensure_open(py)?;
         let count = size.unwrap_or(self.arraysize);
-        if count == 0 || self.pos >= self.rows.len() {
+        if self.description.is_none() || count == 0 || self.pos >= self.rows.len() {
             return Ok(Vec::new());
         }
         let end = self.pos.saturating_add(count).min(self.rows.len());
@@ -151,8 +143,8 @@ impl CursorState {
 
     /// Fetch all remaining buffered rows and leave the cursor exhausted.
     pub(crate) fn fetchall(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
-        self.ensure_result_set(py)?;
-        if self.pos >= self.rows.len() {
+        self.ensure_open(py)?;
+        if self.description.is_none() || self.pos >= self.rows.len() {
             return Ok(Vec::new());
         }
         let rows = self.rows[self.pos..]
@@ -1264,8 +1256,9 @@ mod tests {
             assert!(!state.executed);
             assert!(!state.closed);
 
-            let err = state.fetchone(py).unwrap_err();
-            assert_eq!(err_type_name(py, &err), "ProgrammingError");
+            assert!(state.fetchone(py).unwrap().is_none());
+            assert!(state.fetchmany(py, None).unwrap().is_empty());
+            assert!(state.fetchall(py).unwrap().is_empty());
         });
     }
 
@@ -1275,8 +1268,8 @@ mod tests {
             let mut state = CursorState::new();
             state.store(None, Vec::new(), 3, None);
             assert_eq!(state.rowcount, 3);
-            let err = state.fetchall(py).unwrap_err();
-            assert_eq!(err_type_name(py, &err), "ProgrammingError");
+            assert!(state.fetchone(py).unwrap().is_none());
+            assert!(state.fetchall(py).unwrap().is_empty());
 
             let desc = describe_columns(py, &[("id".to_string(), 3)]).unwrap();
             state.store(Some(desc), Vec::new(), 0, None);

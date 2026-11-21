@@ -85,19 +85,23 @@ pub(crate) fn cursor_not_supported_err(py: Python<'_>, message: &str) -> PyErr {
     }
 }
 
+struct OracleOutBindVarState {
+    type_code: Py<PyAny>,
+    size: i64,
+    arraysize: i64,
+    outconverter: Option<Py<PyAny>>,
+    values: Py<PyList>,
+}
+
 /// Mutable PEP 249 output bind variable returned by `cursor.var()`.
-#[pyclass(name = "OracleOutBindVar", module = "vertebra._oracle")]
+#[pyclass(
+    name = "OracleOutBindVar",
+    module = "vertebra._oracle",
+    frozen,
+    immutable_type
+)]
 pub struct OracleOutBindVar {
-    #[pyo3(get, set)]
-    pub type_code: Py<PyAny>,
-    #[pyo3(get, set)]
-    pub size: i64,
-    #[pyo3(get, set)]
-    pub arraysize: i64,
-    #[pyo3(get, set)]
-    pub outconverter: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
-    pub values: Py<PyList>,
+    state: Mutex<OracleOutBindVarState>,
 }
 
 #[pymethods]
@@ -117,20 +121,104 @@ impl OracleOutBindVar {
         let items: Vec<Py<PyAny>> = (0..count).map(|_| none.clone_ref(py)).collect();
         let values = PyList::new(py, items)?.unbind();
         Ok(Self {
-            type_code,
-            size,
-            arraysize: effective_arraysize,
-            outconverter,
-            values,
+            state: Mutex::new(OracleOutBindVarState {
+                type_code,
+                size,
+                arraysize: effective_arraysize,
+                outconverter,
+                values,
+            }),
         })
+    }
+
+    #[getter]
+    pub fn type_code(&self, py: Python<'_>) -> Py<PyAny> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .type_code
+            .clone_ref(py)
+    }
+
+    #[setter]
+    pub fn set_type_code(&self, value: Py<PyAny>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .type_code = value;
+    }
+
+    #[getter]
+    pub fn size(&self) -> i64 {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).size
+    }
+
+    #[setter]
+    pub fn set_size(&self, value: i64) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).size = value;
+    }
+
+    #[getter]
+    pub fn arraysize(&self) -> i64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .arraysize
+    }
+
+    #[setter]
+    pub fn set_arraysize(&self, value: i64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .arraysize = value;
+    }
+
+    #[getter]
+    pub fn outconverter(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .outconverter
+            .as_ref()
+            .map(|cb| cb.clone_ref(py))
+    }
+
+    #[setter]
+    pub fn set_outconverter(&self, value: Option<Py<PyAny>>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .outconverter = value;
+    }
+
+    #[getter]
+    pub fn values(&self, py: Python<'_>) -> Py<PyList> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values
+            .clone_ref(py)
+    }
+
+    #[setter]
+    pub fn set_values(&self, value: Py<PyList>) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).values = value;
     }
 
     #[pyo3(signature = (pos = 0))]
     pub fn getvalue(&self, py: Python<'_>, pos: isize) -> PyResult<Py<PyAny>> {
-        let list = self.values.bind(py);
+        let (values, outconverter) = {
+            let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                guard.values.clone_ref(py),
+                guard.outconverter.as_ref().map(|cb| cb.clone_ref(py)),
+            )
+        };
+        let list = values.bind(py);
         let val = list.as_any().get_item(pos)?;
         if !val.is_none()
-            && let Some(ref conv) = self.outconverter
+            && let Some(conv) = outconverter
         {
             return Ok(conv.bind(py).call1((val,))?.unbind());
         }
@@ -138,7 +226,13 @@ impl OracleOutBindVar {
     }
 
     pub fn setvalue(&self, py: Python<'_>, pos: isize, value: Py<PyAny>) -> PyResult<()> {
-        let list = self.values.bind(py);
+        let values = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values
+            .clone_ref(py);
+        let list = values.bind(py);
         if pos >= 0 {
             let idx = pos as usize;
             let current_len = list.len();

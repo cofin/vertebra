@@ -920,12 +920,9 @@ def test_sync_cursor_lifecycle_and_constructor_guard() -> None:
     assert cur.lastrowid is None
     assert cur.arraysize == 1
 
-    with pytest.raises(ProgrammingError):
-        cur.fetchone()
-    with pytest.raises(ProgrammingError):
-        cur.fetchmany()
-    with pytest.raises(ProgrammingError):
-        cur.fetchall()
+    assert cur.fetchone() is None
+    assert cur.fetchmany() == []
+    assert cur.fetchall() == []
     with pytest.raises(ProgrammingError):
         cur.arraysize = 0
     with pytest.raises(ProgrammingError):
@@ -1068,8 +1065,7 @@ def test_sync_cursor_command_dml_returning_and_empty_set(
             assert cur.fetchall() == expected_rows
         else:
             assert cur.description is None
-            with pytest.raises(ProgrammingError):
-                cur.fetchall()
+            assert cur.fetchall() == []
     finally:
         client.close()
         thread.join(timeout=5.0)
@@ -1120,8 +1116,7 @@ def test_sync_cursor_named_format_and_normalized_parameters() -> None:
             cur.execute("SELECT %s", (PG_UNCHANGED_TOAST,))
         assert cur.description is None
         assert cur.rowcount == -1
-        with pytest.raises(ProgrammingError):
-            cur.fetchone()
+        assert cur.fetchone() is None
     finally:
         client.close()
         thread.join(timeout=5.0)
@@ -1164,8 +1159,7 @@ def test_sync_cursor_executemany_counts_and_empty() -> None:
         assert ret is cur
         assert cur.rowcount == 3
         assert cur.description is None
-        with pytest.raises(ProgrammingError):
-            cur.fetchall()
+        assert cur.fetchall() == []
 
         cur.executemany("INSERT INTO t VALUES (%s)", [])
         assert cur.rowcount == 0
@@ -1213,8 +1207,7 @@ def test_sync_cursor_server_errors_and_result_clearing() -> None:
         assert type(exc_info.value) is dbapi.IntegrityError
         assert cur.description is None
         assert cur.rowcount == -1
-        with pytest.raises(ProgrammingError):
-            cur.fetchone()
+        assert cur.fetchone() is None
 
         cur.execute("SELECT 2 AS a")
         assert cur.description is not None
@@ -1222,8 +1215,7 @@ def test_sync_cursor_server_errors_and_result_clearing() -> None:
             cur.execute("SELEC 1")
         assert cur.description is None
         assert cur.rowcount == -1
-        with pytest.raises(ProgrammingError):
-            cur.fetchone()
+        assert cur.fetchone() is None
     finally:
         client.close()
         thread.join(timeout=5.0)
@@ -1503,12 +1495,9 @@ async def test_async_cursor_lifecycle_and_constructor_guard() -> None:
     assert cur.lastrowid is None
     assert cur.arraysize == 1
 
-    with pytest.raises(ProgrammingError):
-        await cur.fetchone()
-    with pytest.raises(ProgrammingError):
-        await cur.fetchmany()
-    with pytest.raises(ProgrammingError):
-        await cur.fetchall()
+    assert await cur.fetchone() is None
+    assert await cur.fetchmany() == []
+    assert await cur.fetchall() == []
     with pytest.raises(ProgrammingError):
         cur.arraysize = 0
     with pytest.raises(ProgrammingError):
@@ -1635,8 +1624,7 @@ async def test_async_cursor_command_ddl_and_empty_set(
             assert await cur.fetchall() == expected_rows
         else:
             assert cur.description is None
-            with pytest.raises(ProgrammingError):
-                await cur.fetchall()
+            assert await cur.fetchall() == []
             assert cur.rowcount == expected_rowcount
     finally:
         await client.close()

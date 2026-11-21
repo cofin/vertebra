@@ -2192,8 +2192,7 @@ async def test_async_cursor_session_params_encoder_options_errors_and_concurrenc
 
         conc_cur = client.cursor()
         first_awaitable = conc_cur.execute("SELECT HOLD_IN_FLIGHT")
-        while not server.in_flight_started.is_set():
-            await asyncio.sleep(0.01)
+        assert await asyncio.to_thread(server.in_flight_started.wait, 5.0)
         with pytest.raises(InterfaceError, match="cursor is already executing"):
             conc_cur.execute("SELECT 1 AS a, 'x' AS b")
         server.release_in_flight.set()

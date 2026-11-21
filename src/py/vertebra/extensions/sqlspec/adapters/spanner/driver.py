@@ -83,29 +83,6 @@ def _infer_spanner_dialect(
     return "googlesql"
 
 
-def _normalize_row_dicts(
-    raw_rows: Any,
-    column_names: Sequence[str] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    rows_list = list(raw_rows) if raw_rows is not None else []
-    names = list(column_names) if column_names else []
-    if not rows_list:
-        return [], names
-    first = rows_list[0]
-    if isinstance(first, Mapping):
-        if not names:
-            names = [str(key) for key in first]
-        return [dict(row) for row in rows_list], names
-    if isinstance(first, (tuple, list)):
-        if not names:
-            names = [f"col_{idx}" for idx in range(len(first))]
-        dict_rows = [{names[idx]: val for idx, val in enumerate(row)} for row in rows_list]
-        return dict_rows, names
-    if not names:
-        names = ["value"]
-    return [{names[0]: row} for row in rows_list], names
-
-
 def _arrow_cursor_to_pyarrow(arrow_cursor: Any, return_format: str) -> tuple[Any, int]:
     pa = ensure_pyarrow()
     table = arrow_cursor.to_arrow_table() if hasattr(arrow_cursor, "to_arrow_table") else arrow_cursor
@@ -192,90 +169,6 @@ class _ThreadedAsyncCursor:
 
     async def close(self) -> None:
         await asyncio.to_thread(self._cursor.close)
-
-
-def _execute_sync_select(
-    cursor: Any,
-    sql: str,
-    params: Any,
-    *,
-    staleness: StalenessBound | None = None,
-    active_snapshot: Any | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    if active_snapshot is not None:
-        snap_desc = getattr(active_snapshot, "execute_with_description", None)
-        if callable(snap_desc):
-            raw_rows, col_names = cast("Any", snap_desc)(sql, params)
-            return _normalize_row_dicts(raw_rows, col_names)
-        snap_query = getattr(active_snapshot, "query", None)
-        if callable(snap_query):
-            raw_rows = snap_query(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-        snap_select = getattr(active_snapshot, "select", None)
-        if callable(snap_select):
-            raw_rows = snap_select(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-    desc_fn = getattr(cursor, "execute_with_description", None)
-    if callable(desc_fn):
-        if staleness is not None:
-            raw_rows, col_names = cast("Any", desc_fn)(sql, params, staleness=staleness)
-        else:
-            raw_rows, col_names = cast("Any", desc_fn)(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        if staleness is not None:
-            raw_rows = cursor.select(sql, params, staleness=staleness)
-        else:
-            raw_rows = cursor.select(sql, params)
-        return _normalize_row_dicts(raw_rows, getattr(cursor, "last_column_names", None))
-    cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = fetchall() if callable(fetchall) else []
-    return _normalize_row_dicts(raw_rows, col_names)
-
-
-async def _execute_async_select(
-    cursor: Any,
-    sql: str,
-    params: Any,
-    *,
-    staleness: StalenessBound | None = None,
-    active_snapshot: Any | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    if active_snapshot is not None:
-        snap_desc = getattr(active_snapshot, "execute_with_description", None)
-        if callable(snap_desc):
-            raw_rows, col_names = await cast("Any", snap_desc)(sql, params)
-            return _normalize_row_dicts(raw_rows, col_names)
-        snap_query = getattr(active_snapshot, "query", None)
-        if callable(snap_query):
-            raw_rows = await cast("Any", snap_query)(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-        snap_select = getattr(active_snapshot, "select", None)
-        if callable(snap_select):
-            raw_rows = await cast("Any", snap_select)(sql, params)
-            return _normalize_row_dicts(raw_rows, getattr(active_snapshot, "last_column_names", None))
-    desc_fn = getattr(cursor, "execute_with_description", None)
-    if callable(desc_fn):
-        if staleness is not None:
-            raw_rows, col_names = await cast("Any", desc_fn)(sql, params, staleness=staleness)
-        else:
-            raw_rows, col_names = await cast("Any", desc_fn)(sql, params)
-        return _normalize_row_dicts(raw_rows, col_names)
-    if callable(getattr(cursor, "select", None)):
-        if staleness is not None:
-            raw_rows = await cursor.select(sql, params, staleness=staleness)
-        else:
-            raw_rows = await cursor.select(sql, params)
-        return _normalize_row_dicts(raw_rows, getattr(cursor, "last_column_names", None))
-    await cursor.execute(sql, params)
-    description = getattr(cursor, "description", None)
-    col_names = [str(col[0]) for col in description] if description else None
-    fetchall = getattr(cursor, "fetchall", None)
-    raw_rows = await cast("Any", fetchall)() if callable(fetchall) else []
-    return _normalize_row_dicts(raw_rows, col_names)
 
 
 class _DriverDialectDescriptor:

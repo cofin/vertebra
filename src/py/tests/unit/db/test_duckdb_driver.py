@@ -866,6 +866,57 @@ async def test_duckdb_driver_invalidates_only_401_and_403_errors_and_rotates_nex
 
 
 @pytest.mark.anyio
+async def test_duckdb_driver_refreshes_plain_callable_secret_without_generation_on_401() -> None:
+    """Verify HTTP 401 triggers forced refresh even when the sole dynamic provider has no generation attribute."""
+    sync_calls = 0
+
+    def plain_sync_provider() -> dict[str, str]:
+        nonlocal sync_calls
+        sync_calls += 1
+        return {"bearer_token": f"sync-tok-{sync_calls}"}
+
+    sync_proxy = _FaultInjectingSyncClient(
+        SyncDuckDBClient(":memory:"), query_error=RuntimeError("HTTP Error: unauthorized (HTTP 401)")
+    )
+    sync_driver = SyncDuckDBDriver(
+        DuckDBConfig(
+            secrets=(DuckDBSecretConfig(name="plain_only", secret_type="http", value_provider=plain_sync_provider),)
+        ),
+        _client=cast("SyncDuckDBClient", sync_proxy),
+    )
+    try:
+        assert sync_calls == 1
+        with pytest.raises(RuntimeError, match="HTTP 401"):
+            sync_driver.select("SELECT 1")
+        assert sync_calls == 2
+    finally:
+        sync_driver.close()
+
+    async_calls = 0
+
+    def plain_async_provider() -> dict[str, str]:
+        nonlocal async_calls
+        async_calls += 1
+        return {"bearer_token": f"async-tok-{async_calls}"}
+
+    async_proxy = _FaultInjectingAsyncClient(
+        AsyncDuckDBClient(":memory:"), query_error=RuntimeError("HTTP Error: forbidden (HTTP 403)")
+    )
+    async_driver = AsyncDuckDBDriver(
+        DuckDBConfig(
+            secrets=(DuckDBSecretConfig(name="plain_async", secret_type="http", value_provider=plain_async_provider),)
+        ),
+        _client=cast("AsyncDuckDBClient", async_proxy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="HTTP 403"):
+            await async_driver.select("SELECT 1")
+        assert async_calls == 2
+    finally:
+        await async_driver.close()
+
+
+@pytest.mark.anyio
 async def test_duckdb_driver_closes_client_when_initial_required_secret_refresh_fails() -> None:
     """Verify failed initial required=True secret refresh closes and clears _client across sync and async drivers."""
 

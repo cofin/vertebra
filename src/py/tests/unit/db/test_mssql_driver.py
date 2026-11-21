@@ -1647,8 +1647,7 @@ def test_async_cursor_matrix_and_concurrent_guard() -> None:
             assert cur.rowcount == -1
 
             inflight_task = cur.execute("SLOW_CURSOR_HOLD")
-            while not server.slow_started.is_set():
-                await asyncio.sleep(0.005)
+            assert await asyncio.to_thread(server.slow_started.wait, 5.0)
             with pytest.raises(InterfaceError, match="cursor is already executing"):
                 await cur.execute("SELECT 1")
             with pytest.raises(InterfaceError, match="cursor is already executing"):

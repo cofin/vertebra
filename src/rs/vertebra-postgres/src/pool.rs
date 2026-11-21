@@ -125,9 +125,23 @@ pub struct PoolStats {
 
 /// Opaque handle to an event-loop socket reader registered for a pooled connection.
 ///
-/// Dropping this handle detaches any still-registered reader from its owning event loop.
+/// Callers must detach via [`LoopReaderSlot::detach_async`] outside any pool lock before
+/// closing or reusing the underlying socket on Tokio.
 pub(crate) trait LoopReaderSlot: std::any::Any + Send + Sync + std::fmt::Debug {
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Schedule detaching this reader from its Python event loop and return a oneshot receiver
+    /// that completes once `remove_reader(fd)` has run (or `None` if already detached or closed).
+    fn detach_async(&self) -> Option<tokio::sync::oneshot::Receiver<()>>;
+}
+
+async fn detach_reader_slot(slot: Option<Box<dyn LoopReaderSlot>>) {
+    if let Some(reader) = slot {
+        if let Some(rx) = reader.detach_async() {
+            let _ = rx.await;
+        }
+        drop(reader);
+    }
 }
 
 #[derive(Debug)]
@@ -291,7 +305,7 @@ impl PostgresPool {
     pub(crate) fn try_acquire_idle(
         self: &Arc<Self>,
     ) -> Result<Option<PooledConnection>, PostgresError> {
-        let mut expired_to_close: Vec<PostgresConnection> = Vec::new();
+        let mut expired_to_close: Vec<IdleEntry> = Vec::new();
         let mut acquired_idle: Option<IdleEntry> = None;
         {
             let mut guard = self.inner.lock().expect("PostgresPool lock poisoned");
@@ -312,8 +326,7 @@ impl PostgresPool {
                     .is_some_and(|max_idle| now.duration_since(entry.idle_since) >= max_idle);
                 if lifetime_expired || idle_expired || entry.conn.is_closed() {
                     guard.retired += 1;
-                    drop(entry.loop_reader);
-                    expired_to_close.push(entry.conn);
+                    expired_to_close.push(entry);
                     continue;
                 }
                 let recently_used = now.duration_since(entry.idle_since) < Duration::from_secs(1);
@@ -328,7 +341,8 @@ impl PostgresPool {
         }
         for mut stale in expired_to_close {
             vertebra_db::py_async::db_runtime_handle().spawn(async move {
-                let _ = stale.close().await;
+                detach_reader_slot(stale.loop_reader.take()).await;
+                let _ = stale.conn.close().await;
             });
         }
         Ok(acquired_idle.map(|entry| PooledConnection {
@@ -469,9 +483,9 @@ impl PostgresPool {
     ) -> Result<PooledConnection, PostgresError> {
         let mut first_attempt = true;
         loop {
-            let mut expired_to_close: Vec<PostgresConnection> = Vec::new();
+            let mut expired_to_close: Vec<IdleEntry> = Vec::new();
             let mut dial_generation: Option<u64> = None;
-            let mut acquired_idle: Option<(PostgresConnection, Instant)> = None;
+            let mut acquired_idle: Option<IdleEntry> = None;
 
             if first_attempt {
                 first_attempt = false;
@@ -498,25 +512,27 @@ impl PostgresPool {
 
                         if lifetime_expired || idle_expired || broken {
                             guard.retired += 1;
-                            expired_to_close.push(entry.conn);
+                            expired_to_close.push(entry);
                             continue;
                         }
 
                         guard.borrowed += 1;
-                        acquired_idle = Some((entry.conn, entry.created_at));
+                        acquired_idle = Some(entry);
                         break;
                     }
                 }
                 for mut stale in expired_to_close.drain(..) {
                     tokio::spawn(async move {
-                        let _ = stale.close().await;
+                        detach_reader_slot(stale.loop_reader.take()).await;
+                        let _ = stale.conn.close().await;
                     });
                 }
-                if let Some((conn, created_at)) = acquired_idle {
+                if let Some(mut entry) = acquired_idle {
+                    detach_reader_slot(entry.loop_reader.take()).await;
                     return Ok(PooledConnection {
                         pool: Arc::clone(self),
-                        conn: Some(conn),
-                        created_at,
+                        conn: Some(entry.conn),
+                        created_at: entry.created_at,
                         retire: false,
                         loop_reader: None,
                     });
@@ -552,12 +568,12 @@ impl PostgresPool {
 
                     if lifetime_expired || idle_expired || broken {
                         guard.retired += 1;
-                        expired_to_close.push(entry.conn);
+                        expired_to_close.push(entry);
                         continue;
                     }
 
                     guard.borrowed += 1;
-                    acquired_idle = Some((entry.conn, entry.created_at));
+                    acquired_idle = Some(entry);
                     break;
                 }
 
@@ -570,15 +586,17 @@ impl PostgresPool {
 
             for mut stale in expired_to_close {
                 tokio::spawn(async move {
-                    let _ = stale.close().await;
+                    detach_reader_slot(stale.loop_reader.take()).await;
+                    let _ = stale.conn.close().await;
                 });
             }
 
-            if let Some((conn, created_at)) = acquired_idle {
+            if let Some(mut entry) = acquired_idle {
+                detach_reader_slot(entry.loop_reader.take()).await;
                 return Ok(PooledConnection {
                     pool: Arc::clone(self),
-                    conn: Some(conn),
-                    created_at,
+                    conn: Some(entry.conn),
+                    created_at: entry.created_at,
                     retire: false,
                     loop_reader: None,
                 });
@@ -680,6 +698,11 @@ impl PostgresPool {
         self.slot_notify.notify_waiters();
 
         for mut entry in drained_idle {
+            let _ = tokio::time::timeout_at(
+                close_deadline,
+                detach_reader_slot(entry.loop_reader.take()),
+            )
+            .await;
             let _ = tokio::time::timeout_at(close_deadline, entry.conn.close()).await;
         }
 
@@ -704,6 +727,11 @@ impl PostgresPool {
             };
 
             for mut entry in extra_idle {
+                let _ = tokio::time::timeout_at(
+                    close_deadline,
+                    detach_reader_slot(entry.loop_reader.take()),
+                )
+                .await;
                 let _ = tokio::time::timeout_at(close_deadline, entry.conn.close()).await;
             }
 
@@ -903,8 +931,9 @@ impl PooledConnection {
 
     /// Explicitly reset and return this lease to the pool under `options.reset_timeout`.
     pub async fn release(mut self) -> Result<(), PostgresError> {
-        drop(self.loop_reader.take());
+        let loop_reader = self.loop_reader.take();
         let Some(conn) = self.conn.take() else {
+            detach_reader_slot(loop_reader).await;
             return Ok(());
         };
         let pool = Arc::clone(&self.pool);
@@ -915,6 +944,7 @@ impl PooledConnection {
             guard.borrowed = guard.borrowed.saturating_sub(1);
             guard.resetting += 1;
         }
+        detach_reader_slot(loop_reader).await;
         pool.reset_and_return_slot(conn, created_at, retire).await
     }
 
@@ -932,14 +962,13 @@ impl PooledConnection {
             .options
             .max_lifetime
             .is_some_and(|max_lt| now.duration_since(created_at) >= max_lt);
-        let mut to_close: Option<PostgresConnection> = None;
+        let mut to_close: Option<(PostgresConnection, Option<Box<dyn LoopReaderSlot>>)> = None;
         {
             let mut guard = pool.inner.lock().expect("PostgresPool lock poisoned");
             guard.borrowed = guard.borrowed.saturating_sub(1);
             if guard.closed || guard.retire_all_borrowed || lifetime_expired || self.retire {
                 guard.retired += 1;
-                drop(loop_reader);
-                to_close = Some(conn);
+                to_close = Some((conn, loop_reader));
             } else {
                 guard.idle.push_back(IdleEntry {
                     conn,
@@ -949,10 +978,11 @@ impl PooledConnection {
                 });
             }
         }
-        if let Some(mut c) = to_close {
+        if let Some((mut c, reader)) = to_close {
             let close_timeout = pool.options.reset_timeout;
             let pool_for_close = Arc::clone(&pool);
             let task = async move {
+                let _ = tokio::time::timeout(close_timeout, detach_reader_slot(reader)).await;
                 let _ = tokio::time::timeout(close_timeout, c.close()).await;
                 pool_for_close.drain_notify.notify_waiters();
             };
@@ -988,8 +1018,9 @@ impl DerefMut for PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        drop(self.loop_reader.take());
+        let loop_reader = self.loop_reader.take();
         let Some(conn) = self.conn.take() else {
+            drop(loop_reader);
             return;
         };
         let pool = Arc::clone(&self.pool);
@@ -1001,6 +1032,7 @@ impl Drop for PooledConnection {
             guard.resetting += 1;
         }
         let task = async move {
+            detach_reader_slot(loop_reader).await;
             let _ = pool.reset_and_return_slot(conn, created_at, retire).await;
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

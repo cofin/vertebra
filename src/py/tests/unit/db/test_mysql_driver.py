@@ -2350,8 +2350,7 @@ def test_sync_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTestServer
         assert cur.lastrowid is None
         assert cur.arraysize == 1
 
-        with pytest.raises(ProgrammingError):
-            cur.fetchone()
+        assert cur.fetchone() is None
 
         assert cur.execute("SELECT 2 AS a, 'x' AS b") is cur
         assert cur.fetchall() == [(2, "x")]
@@ -2362,8 +2361,7 @@ def test_sync_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTestServer
 
         cur.execute("CREATE TEMPORARY TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
         assert cur.description is None
-        with pytest.raises(ProgrammingError):
-            cur.fetchall()
+        assert cur.fetchall() == []
 
         cur.execute("INSERT INTO t (v) VALUES (?)", (10,))
         assert cur.rowcount == 1
@@ -2531,8 +2529,7 @@ async def test_async_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTes
         assert cur.lastrowid is None
         assert cur.arraysize == 1
 
-        with pytest.raises(ProgrammingError):
-            await cur.fetchone()
+        assert await cur.fetchone() is None
 
         assert await cur.execute("SELECT 2 AS a, 'x' AS b") is cur
         assert await cur.fetchall() == [(2, "x")]
@@ -2543,8 +2540,7 @@ async def test_async_cursor_matrix_and_fetch_controls(mysql_server: MySQLWireTes
 
         await cur.execute("CREATE TEMPORARY TABLE at_t (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
         assert cur.description is None
-        with pytest.raises(ProgrammingError):
-            await cur.fetchall()
+        assert await cur.fetchall() == []
 
         await cur.execute("INSERT INTO at_t (v) VALUES (?)", (10,))
         assert cur.rowcount == 1
@@ -2684,8 +2680,7 @@ async def test_async_cursor_state_errors_raise_at_call(mysql_server: MySQLWireTe
     client = AsyncMySQLClient(mysql_server.dsn)
     try:
         cur = client.cursor()
-        with pytest.raises(ProgrammingError):
-            cur.fetchall()
+        assert await cur.fetchall() == []
 
         await cur.execute("SELECT 1 AS a")
         with pytest.raises(ProgrammingError):

@@ -580,9 +580,7 @@ class AsyncDuckDBDriver(AsyncDatabaseDriver[DuckDBConfig]):
         """Invalidate rejected dynamic secrets and refresh them before the error propagates."""
         if not self._dynamic_secrets:
             return
-        tracked = len(self._secret_generations)
-        DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations)
-        if len(self._secret_generations) >= tracked:
+        if not DuckDBCore.invalidate_rejected_credentials(exc, self._dynamic_secrets, self._secret_generations):
             return
         try:
             await self._refresh_dynamic_secrets_async(force=True)

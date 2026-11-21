@@ -9,6 +9,8 @@ from contextvars import ContextVar
 from operator import attrgetter
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+from anyio import CancelScope
+
 from vertebra.db.adapters.oracle.config import OracleConfig, OracleSessionAttrs
 from vertebra.db.adapters.oracle.core import ORACLE_DIALECT_TAG, OracleCore
 from vertebra.db.adapters.oracle.notify import (
@@ -913,14 +915,15 @@ class AsyncOracleDriver(AsyncDatabaseDriver[OracleConfig]):
     async def _release_pool_client(self, lease: Any, *, discard: bool = False) -> None:
         if self._pool is None:
             return
-        self._capture_piggyback(lease)
-        if self._lease_at_checkout:
-            with suppress(Exception):
-                lease.release_lease()
-        if hasattr(self._pool, "release_to_pool"):
-            await self._pool.release_to_pool(lease, discard=discard)
-        else:
-            await self._pool.release(lease, discard=discard)
+        with CancelScope(shield=True):
+            self._capture_piggyback(lease)
+            if self._lease_at_checkout:
+                with suppress(Exception):
+                    lease.release_lease()
+            if hasattr(self._pool, "release_to_pool"):
+                await self._pool.release_to_pool(lease, discard=discard)
+            else:
+                await self._pool.release(lease, discard=discard)
 
     @asynccontextmanager
     async def _checkout_client(self) -> AsyncIterator[Any]:

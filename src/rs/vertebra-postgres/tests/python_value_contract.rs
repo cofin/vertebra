@@ -19,31 +19,32 @@ use vertebra_postgres::result::{
     TransactionStatus, VectorKind,
 };
 
+fn ensure_repo_python_paths<'py>(py: Python<'py>) -> Bound<'py, PyModule> {
+    let sys = py.import("sys").expect("import sys");
+    let path_any = sys.getattr("path").expect("sys.path");
+    let path_list = path_any.cast::<PyList>().expect("sys.path list");
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let py_ver = py.version_info();
+    let venv_unix = repo_root.join(".venv/lib").join(format!(
+        "python{}.{}/site-packages",
+        py_ver.major, py_ver.minor
+    ));
+    if venv_unix.is_dir() {
+        let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
+    }
+    let src_py = repo_root.join("src/py");
+    if src_py.is_dir() {
+        let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
+    }
+    py.import("vertebra.db.adapters.postgres.types")
+        .expect("import vertebra.db.adapters.postgres.types")
+}
+
 #[test]
 fn extract_and_project_parameters_and_query_result_across_lossless_wrappers() {
     Python::initialize();
     Python::attach(|py| {
-        if let Ok(sys) = py.import("sys")
-            && let Ok(path_any) = sys.getattr("path")
-            && let Ok(path_list) = path_any.cast::<PyList>()
-        {
-            let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let py_ver = py.version_info();
-            let venv_unix = repo_root.join(".venv/lib").join(format!(
-                "python{}.{}/site-packages",
-                py_ver.major, py_ver.minor
-            ));
-            if venv_unix.is_dir() {
-                let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
-            }
-            let src_py = repo_root.join("src/py");
-            if src_py.is_dir() {
-                let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
-            }
-        }
-        let Ok(types_mod) = py.import("vertebra.db.adapters.postgres.types") else {
-            return;
-        };
+        let types_mod = ensure_repo_python_paths(py);
         let decimal_cls = py.import("decimal").unwrap().getattr("Decimal").unwrap();
         let uuid_cls = py.import("uuid").unwrap().getattr("UUID").unwrap();
 
@@ -183,27 +184,7 @@ fn extract_and_project_parameters_and_query_result_across_lossless_wrappers() {
 fn extract_parameters_and_order_parameters_container_fast_path_matrix() {
     Python::initialize();
     Python::attach(|py| {
-        if let Ok(sys) = py.import("sys")
-            && let Ok(path_any) = sys.getattr("path")
-            && let Ok(path_list) = path_any.cast::<PyList>()
-        {
-            let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let py_ver = py.version_info();
-            let venv_unix = repo_root.join(".venv/lib").join(format!(
-                "python{}.{}/site-packages",
-                py_ver.major, py_ver.minor
-            ));
-            if venv_unix.is_dir() {
-                let _ = path_list.insert(0, venv_unix.to_string_lossy().as_ref());
-            }
-            let src_py = repo_root.join("src/py");
-            if src_py.is_dir() {
-                let _ = path_list.insert(0, src_py.to_string_lossy().as_ref());
-            }
-        }
-        if py.import("vertebra.db.adapters.postgres.types").is_err() {
-            return;
-        }
+        let _types_mod = ensure_repo_python_paths(py);
 
         // Exact containers: (1,) and [1] produce equal parameter lists
         let tup = PyTuple::new(py, [1_i32]).unwrap();

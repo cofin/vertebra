@@ -217,56 +217,45 @@ A pooled Oracle release dispatches `WorkerCommand::ResetIfDirty`, which sends no
 - When that cleanup runs on a Tokio thread, a cached `description` tuple is released through PyO3's deferred reference pool instead of under an attached interpreter.
 - `executemany` with an empty sequence resolves with `rowcount == 0` without calling the engine and does not open a lazy-begin transaction.
 
-## DuckDB Sync Driver on the Native Cursor
+## DuckDB Sync and Async Drivers
 
-`SyncDuckDBDriver` (`_sync.py`) and `AsyncDuckDBDriver` (`_async.py`) run `execute`, `execute_many`, and `execute_with_description` on native `SyncDuckDBCursor` / `AsyncDuckDBCursor`. `cursor()` returns the native cursor class.
+`SyncDuckDBDriver` (`_sync.py`) and `AsyncDuckDBDriver` (`_async.py`) bind `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml` directly on the client via `_bind_client` (rebound to `_raise_closed` when `_client` is `None`). `cursor()` returns the native `SyncDuckDBCursor` or `AsyncDuckDBCursor`.
 
 - Query methods take no broker lease and register no statement plan. The `broker` argument is accepted and unused by queries.
-- Dynamic secrets are refreshed at open (`__init__` for sync; `connect()` or first use for async), by `refresh_secrets()`, and after an HTTP 401 or 403 rejection. A query no longer picks up an elapsed `refresh_interval_seconds` or a changed provider generation; call `refresh_secrets(force=False)` for that.
-- After a rejection the driver refreshes every dynamic secret, including ones whose provider has no `invalidate` method, and re-raises the original error. A failed refresh is attached as a note.
+- Dynamic secrets are refreshed at open (`__init__` for sync; `connect()` or first use for async), by `refresh_secrets()`, and after an HTTP 401 or 403 rejection. A query does not pick up an elapsed `refresh_interval_seconds` or a changed provider generation; call `refresh_secrets(force=False)` for that.
+- After a 401 or 403 rejection, the driver refreshes every dynamic secret, including ones whose provider has no `invalidate` method or `generation` attribute, and re-raises the original error. A failed refresh is attached as a note.
 - `execute` returns `0` for a statement that returns rows without changing any. `execute_many` returns the cursor `rowcount` as reported.
-- The native cursors have no context-manager protocol. Close them with `try/finally`.
-- `DuckDBCore.normalize_param` remains in `core.py` because `load_from_arrow` still calls it for row-sequence ingestion (`_sync.py:385`, `_async.py:401`); `is_write_statement`, `normalize_parameters`, `param_len`, `_scan_sql_keywords_outside_literals`, and `_MUTATING_SQL_VERBS` are deleted.
-- Release benchmark medians (3 runs, `iterations=2000`, `warmup=200`, `bundled` glibc allocator with t11 deferred): `point_select_1` sync `377.71 us` / async `501.33 us` vs PyPI `duckdb` (jemalloc) `255.00 us`; `analytical_scan_1000` sync `540.90 us` / async `661.02 us` vs PyPI `duckdb` `451.53 us`.
-- Tests outside the DuckDB driver suite still assert the earlier behavior and fail until `cleanup-and-checks`: `test_gcs_token_refresh.py` (DuckDB client proxies without `cursor()`, per-query rotation) and `test_enterprise_olap_drivers.py` (`test_sqlalchemy_dbapi_broker_forwarding[duckdb+vtb:///:memory:]`, `test_sync_duckdb_driver_uses_real_lease_broker_and_releases_on_error`). `integration/db/test_duckdb_native.py` was updated in t10.
+- Native cursors have no context-manager protocol. Close them with `try/finally`.
+- `DuckDBCore.normalize_param` remains in `core.py` for `load_from_arrow` row-sequence ingestion.
+- Custom `_client=` test doubles passed to `SyncDuckDBDriver` or `AsyncDuckDBDriver` must expose `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml`.
 
 ## SQL Server Drivers on the Native Cursor
 
 `SyncMSSQLDriver` (`_sync.py`) and `AsyncMSSQLDriver` (`_async.py`) run `execute`, `execute_many`, `execute_tuples`, `execute_with_description`, and the `select` family on native `SyncMSSQLCursor` / `AsyncMSSQLCursor`. `cursor(*, lazy_begin: bool = False)` returns the native cursor class.
 
-- Broker leases are acquired once in `connect()` and attached to the native client's Rust lease guard, released on `close()` or client GC drop. Query methods take no broker lease and register no statement plans; `last_rewritten_sql` and `_prepare_sql` are removed.
-- `MSSQLCore.rewrite_placeholders` and `rewrite_mssql_placeholders` stay in `src/py/vertebra/db/adapters/mssql/core.py` because non-test callers remain under `src/py` (`db/adapters/mssql/config.py`, `db/adapters/mssql/__init__.py`, and `extensions/sqlspec/adapters/mssql/core.py`).
-- `src/py/tests/unit/db/test_enterprise_olap_drivers.py` (outside `t17` scope) still asserts `driver.last_rewritten_sql` on `SyncMSSQLDriver` / `AsyncMSSQLDriver` until `cleanup-and-checks`.
+- Broker leases are acquired once in `connect()` and attached to the native client's Rust lease guard, released on `close()` or client GC drop. Query methods take no broker lease and register no statement plans.
+- `MSSQLCore.rewrite_placeholders` and `rewrite_mssql_placeholders` remain in `src/py/vertebra/db/adapters/mssql/core.py` for config and SQLSpec callers.
 
 ## Spanner Drivers on the Native Cursor
 
-`SyncSpannerDriver` (`_sync.py`), `AsyncSpannerDriver` (`_async.py`), and `SyncSpannerTransaction` / `AsyncSpannerTransaction` (`transactions.py`) run `execute`, `execute_with_description`, `select`, `select_one`, `select_one_or_none`, `select_value`, `query`, and `query_one` on native `SyncSpannerCursor` / `AsyncSpannerCursor`.
+`SyncSpannerDriver` (`_sync.py`), `AsyncSpannerDriver` (`_async.py`), and `SyncSpannerTransaction` / `AsyncSpannerTransaction` (`transactions.py`) run queries and DML on native `SyncSpannerCursor` / `AsyncSpannerCursor`.
 
-- Per-statement shared-memory statement-cache lookups (`_statement_cache`, `_dialect_tag`, `_prepare_sql_and_params`), `_run_query_sync`, `_run_query_async`, and `_query_raw` are removed. `SpannerCore.is_ddl_statement` remains for `execute_script` until `cleanup-and-checks`.
 - `cursor(*, staleness=None, request_tag=None, transaction_tag=None, lazy_begin=False)` delegates to the active transaction when `staleness is None` and rejects `lazy_begin=True` with `NotSupportedError`.
-- `_InMemorySpannerQueueWire` in `src/py/tests/unit/db/test_spanner_queue_and_cdc.py` required `.cursor()` on its in-memory client and transaction test doubles to conform to the updated Spanner client/transaction protocols (queue and CDC test assertions remained unchanged).
-- `_ContractSpannerClient` and `_ContractBigQueryClient` in `src/py/tests/unit/db/test_db_unified_driver_contracts.py` now implement `.cursor()` (updated in `t40`).
+- `SpannerCore.is_ddl_statement` remains for `execute_script`.
 
 ### BigQuery Native Cursor Driver Path
 
-`SyncBigQueryDriver` (`_sync.py`) and `AsyncBigQueryDriver` (`_async.py`) run `execute`, `execute_with_description`, `execute_script`, `select`, `select_one`, `select_one_or_none`, `query`, `query_one`, `select_value`, `commit`, `rollback`, and existing-session `begin` on native `SyncBigQueryCursor` / `AsyncBigQueryCursor`.
+`SyncBigQueryDriver` (`_sync.py`) and `AsyncBigQueryDriver` (`_async.py`) run queries, DML, `execute_script`, `commit`, `rollback`, and existing-session `begin` on native `SyncBigQueryCursor` / `AsyncBigQueryCursor`.
 
-- Initial session creation in `begin()` when `self._session_id is None` still calls `client.query("BEGIN TRANSACTION", None, None, True)` followed by `_after_query(res)` because `SyncBigQueryClient.cursor()` / `AsyncBigQueryClient.cursor()` (`vertebra-bigquery/src/cursor.rs::CursorQueryOptions`) currently hardcode `create_session: false` and do not accept a `create_session` flag. Subsequent `begin()` calls on an existing session, all in-transaction queries, `commit()`, and `rollback()` run through `_execute_cursor`.
-- `_run_query_sync` and `_run_query_async` are retained for the out-of-scope REST fallback in `select_to_arrow` and now delegate session, metadata, and FinOps updates to `_after_query`.
-- `_BigQueryToolClient` and `_AsyncBigQueryToolClient` in `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` (outside `t35` scope) do not yet implement `.cursor()` until updated in `t36` or cleanup.
+- Initial session creation in `begin()` when `self._session_id is None` calls `client.query("BEGIN TRANSACTION", None, None, True)` followed by `_after_query(res)` because `CursorQueryOptions` does not accept `create_session`. Subsequent `begin()` calls on an existing session, in-transaction queries, `commit()`, and `rollback()` run through `_execute_cursor`.
+- `_run_query_sync` and `_run_query_async` are retained for the REST fallback in `select_to_arrow` and delegate session, metadata, and FinOps updates to `_after_query`.
 
 ## Spanner SQLSpec Native Cursor
 
-`SpannerSyncDriver` and `SpannerAsyncDriver` (`src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`) compile statements once via `compile_spanner_statement` and execute queries, DML, and `execute_many` through native cursors.
+`SpannerSyncDriver` and `SpannerAsyncDriver` (`src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`) compile statements once via `compile_spanner_statement` and execute queries, DML, and `execute_many` through native cursors and cache-hit executors.
 
 - `_SyncSpannerAsyncProxy` in `adapters/spanner/config.py` does not expose `cursor()`, so `SpannerAsyncDriver.with_cursor` wraps `connection._sync.cursor(...)` in `_ThreadedAsyncCursor` (`asyncio.to_thread`) when a sync driver is injected into `SpannerAsyncConfig`.
 - Offline adapter tests verify cursor execution, `TypedParameter` encoding, `ALREADY_EXISTS` mapping, and `SyncSpannerCursor` DB-API instantiation without a live Spanner emulator.
-
-## DuckDB Single-Call Driver Paths
-
-`SyncDuckDBDriver` (`src/py/vertebra/db/adapters/duckdb/_sync.py`) and `AsyncDuckDBDriver` (`src/py/vertebra/db/adapters/duckdb/_async.py`) bind `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml` directly on the client via `_bind_client` (rebound to `_raise_closed` when `_client` is `None`).
-
-- Any custom `_client=` test double passed to `SyncDuckDBDriver` or `AsyncDuckDBDriver` must expose `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml`. All in-repo doubles (`_FaultInjectingSyncClient`/`_FaultInjectingAsyncClient` in `test_duckdb_driver.py`, `_SyncFaultInjectingDuckDBClient`/`_AsyncFaultInjectingDuckDBClient` in `test_duckdb_native.py`, and `_SyncClientFaultProxy`/`_AsyncClientFaultProxy` in `test_gcs_token_refresh.py`) implement these four methods.
 
 ## Related Context
 
