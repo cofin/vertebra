@@ -192,16 +192,40 @@ async fn named_statement_cache_hit_skips_parse_and_evicts_lru_with_close_frame()
         r1.extend_from_slice(&frame(b'Z', b"I"));
         sock.write_all(&r1).await.unwrap();
 
-        // 2. Warm query 1 -> Bind("vtb_s_1") + Describe(P) + Execute + Close(P) + Sync (NO Parse!)
+        // 2. Warm query 1 -> Bind("vtb_s_1") + Execute + Sync (NO Parse, Describe, or Close!)
         let f2 = read_until_sync(&mut sock).await;
         let tags2: Vec<u8> = f2.iter().map(|f| f.0).collect();
-        assert_eq!(tags2, vec![b'B', b'D', b'E', b'C', b'S']);
+        assert_eq!(tags2, vec![b'B', b'E', b'S']);
+        let bind_body = &f2[0].1;
+        let stmt_end = 1 + bind_body[1..].iter().position(|&b| b == 0).unwrap() + 1;
+        let param_fmt_count = i16::from_be_bytes([bind_body[stmt_end], bind_body[stmt_end + 1]]);
+        assert_eq!(param_fmt_count, 1);
+        let first_param_fmt =
+            i16::from_be_bytes([bind_body[stmt_end + 2], bind_body[stmt_end + 3]]);
+        assert_eq!(first_param_fmt, 1);
+        let param_val_count_pos = stmt_end + 4;
+        let param_val_count = i16::from_be_bytes([
+            bind_body[param_val_count_pos],
+            bind_body[param_val_count_pos + 1],
+        ]);
+        assert_eq!(param_val_count, 1);
+        let param_len = i32::from_be_bytes([
+            bind_body[param_val_count_pos + 2],
+            bind_body[param_val_count_pos + 3],
+            bind_body[param_val_count_pos + 4],
+            bind_body[param_val_count_pos + 5],
+        ]) as usize;
+        let res_fmt_pos = param_val_count_pos + 6 + param_len;
+        let res_fmt_count =
+            i16::from_be_bytes([bind_body[res_fmt_pos], bind_body[res_fmt_pos + 1]]);
+        assert_eq!(res_fmt_count, 1);
+        let first_res_fmt =
+            i16::from_be_bytes([bind_body[res_fmt_pos + 2], bind_body[res_fmt_pos + 3]]);
+        assert_eq!(first_res_fmt, 1);
         let mut r2 = Vec::new();
         r2.extend_from_slice(&frame(b'2', &[]));
-        r2.extend_from_slice(&row_desc(&[("v", INT4_OID, 1)]));
         r2.extend_from_slice(&data_row_int4_bin(42));
         r2.extend_from_slice(&cmd_complete("SELECT 1"));
-        r2.extend_from_slice(&frame(b'3', &[]));
         r2.extend_from_slice(&frame(b'Z', b"I"));
         sock.write_all(&r2).await.unwrap();
 
@@ -226,15 +250,13 @@ async fn named_statement_cache_hit_skips_parse_and_evicts_lru_with_close_frame()
         // 4. Warm query 2 piggybacks Close('S', "vtb_s_1") before Bind("vtb_s_2")!
         let f4 = read_until_sync(&mut sock).await;
         let tags4: Vec<u8> = f4.iter().map(|f| f.0).collect();
-        assert_eq!(tags4, vec![b'C', b'B', b'D', b'E', b'C', b'S']);
+        assert_eq!(tags4, vec![b'C', b'B', b'E', b'S']);
         assert_eq!(&f4[0].1, b"Svtb_s_1\0");
         let mut r4 = Vec::new();
         r4.extend_from_slice(&frame(b'3', &[]));
         r4.extend_from_slice(&frame(b'2', &[]));
-        r4.extend_from_slice(&row_desc(&[("v", INT4_OID, 1)]));
         r4.extend_from_slice(&data_row_int4_bin(100));
         r4.extend_from_slice(&cmd_complete("SELECT 1"));
-        r4.extend_from_slice(&frame(b'3', &[]));
         r4.extend_from_slice(&frame(b'Z', b"I"));
         sock.write_all(&r4).await.unwrap();
     });
@@ -420,4 +442,241 @@ fn statement_cache_unlink_head_middle_tail_and_clear() {
     );
     assert!(cache.get("Q5", &[]).is_none());
     let _ = s5;
+}
+
+fn error_response(sqlstate: &str, message: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(b'S');
+    body.extend_from_slice(b"ERROR\0");
+    body.push(b'V');
+    body.extend_from_slice(b"ERROR\0");
+    body.push(b'C');
+    body.extend_from_slice(sqlstate.as_bytes());
+    body.push(0);
+    body.push(b'M');
+    body.extend_from_slice(message.as_bytes());
+    body.push(0);
+    body.push(0);
+    frame(b'E', &body)
+}
+
+#[tokio::test]
+async fn cached_statement_without_result_set_sends_bes_and_has_no_columns() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup(&mut sock).await;
+        sock.write_all(&auth_ok_and_ready(&[])).await.unwrap();
+
+        let f1 = read_until_sync(&mut sock).await;
+        let tags1: Vec<u8> = f1.iter().map(|f| f.0).collect();
+        assert_eq!(tags1, vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']);
+        let mut r1 = Vec::new();
+        r1.extend_from_slice(&frame(b'1', &[]));
+        r1.extend_from_slice(&param_desc(&[INT4_OID]));
+        r1.extend_from_slice(&frame(b'n', &[]));
+        r1.extend_from_slice(&frame(b'2', &[]));
+        r1.extend_from_slice(&frame(b'n', &[]));
+        r1.extend_from_slice(&cmd_complete("INSERT 0 1"));
+        r1.extend_from_slice(&frame(b'3', &[]));
+        r1.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r1).await.unwrap();
+
+        let f2 = read_until_sync(&mut sock).await;
+        let tags2: Vec<u8> = f2.iter().map(|f| f.0).collect();
+        assert_eq!(tags2, vec![b'B', b'E', b'S']);
+        let mut r2 = Vec::new();
+        r2.extend_from_slice(&frame(b'2', &[]));
+        r2.extend_from_slice(&cmd_complete("INSERT 0 1"));
+        r2.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r2).await.unwrap();
+    });
+
+    let mut handle = loopback_handle(port, 4, "session");
+    handle.connect().await.unwrap();
+
+    let res1 = handle
+        .query_shared(
+            "INSERT INTO t(x) VALUES ($1)",
+            &[Parameter::new(PgValue::Int4(1))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.affected_rows, 1);
+    assert!(res1.columns.is_empty());
+
+    let res2 = handle
+        .query_shared(
+            "INSERT INTO t(x) VALUES ($1)",
+            &[Parameter::new(PgValue::Int4(2))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.affected_rows, 1);
+    assert!(res2.columns.is_empty());
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cached_statement_rejects_unrequested_description_no_data_and_uncounted_close_complete() {
+    for (case_name, unexpected_frame) in [
+        ("RowDescription", row_desc(&[("v", INT4_OID, 1)])),
+        ("NoData", frame(b'n', &[])),
+        ("CloseComplete", frame(b'3', &[])),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            read_startup(&mut sock).await;
+            sock.write_all(&auth_ok_and_ready(&[])).await.unwrap();
+
+            let f1 = read_until_sync(&mut sock).await;
+            let tags1: Vec<u8> = f1.iter().map(|f| f.0).collect();
+            assert_eq!(tags1, vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']);
+            let mut r1 = Vec::new();
+            r1.extend_from_slice(&frame(b'1', &[]));
+            r1.extend_from_slice(&param_desc(&[INT4_OID]));
+            r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+            r1.extend_from_slice(&frame(b'2', &[]));
+            r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+            r1.extend_from_slice(&data_row_text("7"));
+            r1.extend_from_slice(&cmd_complete("SELECT 1"));
+            r1.extend_from_slice(&frame(b'3', &[]));
+            r1.extend_from_slice(&frame(b'Z', b"I"));
+            sock.write_all(&r1).await.unwrap();
+
+            let f2 = read_until_sync(&mut sock).await;
+            let tags2: Vec<u8> = f2.iter().map(|f| f.0).collect();
+            assert_eq!(tags2, vec![b'B', b'E', b'S']);
+            let mut r2 = Vec::new();
+            r2.extend_from_slice(&frame(b'2', &[]));
+            r2.extend_from_slice(&unexpected_frame);
+            r2.extend_from_slice(&data_row_int4_bin(42));
+            r2.extend_from_slice(&cmd_complete("SELECT 1"));
+            r2.extend_from_slice(&frame(b'Z', b"I"));
+            let _ = sock.write_all(&r2).await;
+        });
+
+        let mut handle = loopback_handle(port, 4, "session");
+        handle.connect().await.unwrap();
+
+        handle
+            .query_shared("SELECT $1::int4", &[Parameter::new(PgValue::Int4(7))], None)
+            .await
+            .unwrap();
+
+        let err = handle
+            .query_shared(
+                "SELECT $1::int4",
+                &[Parameter::new(PgValue::Int4(42))],
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, vertebra_postgres::errors::PostgresError::Protocol(_)),
+            "expected Protocol error for {case_name}, got {err:?}"
+        );
+
+        let closed_err = handle
+            .query_shared("SELECT 1", &[], None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                closed_err,
+                vertebra_postgres::errors::PostgresError::Interface(_)
+            ),
+            "connection must be closed after {case_name}, got {closed_err:?}"
+        );
+
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cached_statement_stale_description_0a000_invalidates_and_reparses() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup(&mut sock).await;
+        sock.write_all(&auth_ok_and_ready(&[])).await.unwrap();
+
+        let f1 = read_until_sync(&mut sock).await;
+        assert_eq!(
+            f1.iter().map(|f| f.0).collect::<Vec<u8>>(),
+            vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']
+        );
+        let mut r1 = Vec::new();
+        r1.extend_from_slice(&frame(b'1', &[]));
+        r1.extend_from_slice(&param_desc(&[]));
+        r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r1.extend_from_slice(&frame(b'2', &[]));
+        r1.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r1.extend_from_slice(&data_row_text("1"));
+        r1.extend_from_slice(&cmd_complete("SELECT 1"));
+        r1.extend_from_slice(&frame(b'3', &[]));
+        r1.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r1).await.unwrap();
+
+        let f2 = read_until_sync(&mut sock).await;
+        assert_eq!(
+            f2.iter().map(|f| f.0).collect::<Vec<u8>>(),
+            vec![b'B', b'E', b'S']
+        );
+        let mut r2 = Vec::new();
+        r2.extend_from_slice(&error_response(
+            "0A000",
+            "cached plan must not change result type",
+        ));
+        r2.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r2).await.unwrap();
+
+        let f3 = read_until_sync(&mut sock).await;
+        let tags3: Vec<u8> = f3.iter().map(|f| f.0).collect();
+        assert_eq!(tags3, vec![b'P', b'D', b'B', b'D', b'E', b'C', b'S']);
+        let mut r3 = Vec::new();
+        r3.extend_from_slice(&frame(b'1', &[]));
+        r3.extend_from_slice(&param_desc(&[]));
+        r3.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r3.extend_from_slice(&frame(b'2', &[]));
+        r3.extend_from_slice(&row_desc(&[("v", INT4_OID, 0)]));
+        r3.extend_from_slice(&data_row_text("2"));
+        r3.extend_from_slice(&cmd_complete("SELECT 1"));
+        r3.extend_from_slice(&frame(b'3', &[]));
+        r3.extend_from_slice(&frame(b'Z', b"I"));
+        sock.write_all(&r3).await.unwrap();
+    });
+
+    let mut handle = loopback_handle(port, 4, "session");
+    handle.connect().await.unwrap();
+
+    let res1 = handle
+        .query_shared("SELECT v FROM t", &[], None)
+        .await
+        .unwrap();
+    assert_eq!(res1.rows[0][0], PgValue::Int4(1));
+
+    let err = handle
+        .query_shared("SELECT v FROM t", &[], None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), Some("0A000"));
+
+    let res3 = handle
+        .query_shared("SELECT v FROM t", &[], None)
+        .await
+        .unwrap();
+    assert_eq!(res3.rows[0][0], PgValue::Int4(2));
+
+    server.await.unwrap();
 }

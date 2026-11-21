@@ -10,7 +10,7 @@ import io
 import json
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -33,7 +33,7 @@ import vertebra.extensions.fastapi as fastapi_ext
 import vertebra.extensions.flask as flask_ext
 import vertebra.extensions.litestar as litestar_ext
 import vertebra.extensions.starlette as starlette_ext
-from tests.unit.db.test_spanner import FakeAsyncReadWriteTransaction, FakeSpannerClient
+from tests.unit.db.test_spanner import FakeAsyncReadWriteTransaction, FakeAsyncSpannerCursor, FakeSpannerClient
 from vertebra._vertebra import ArrowCursor as RustArrowCursor
 from vertebra._vertebra import Request, Response
 from vertebra.agent.core import PermissionDeniedError, Tool
@@ -523,9 +523,180 @@ class _BigQueryToolClient:
         _ = (parent_table, arrow_ipc_bytes, mode)
         raise NotImplementedError
 
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+    ) -> _BigQueryToolCursor:
+        """Create a synchronous cursor backed by this tool client double."""
+        return _BigQueryToolCursor(
+            self,
+            session_id=session_id,
+            destination_table=destination_table,
+            write_disposition=write_disposition,
+            maximum_bytes_billed=maximum_bytes_billed,
+            job_timeout_ms=job_timeout_ms,
+            priority=priority,
+            labels=dict(labels) if labels is not None else None,
+            param_encoder=param_encoder,
+            lazy_begin=lazy_begin,
+        )
+
     def close(self) -> None:
         """Close the wire double."""
         return None
+
+
+class _BigQueryToolCursor:
+    """Synchronous PEP 249 cursor backed by `_BigQueryToolClient`."""
+
+    def __init__(
+        self,
+        client: _BigQueryToolClient,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: dict[str, str] | None = None,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+    ) -> None:
+        self._client = client
+        self._session_id = session_id
+        self._destination_table = destination_table
+        self._write_disposition = write_disposition
+        self._maximum_bytes_billed = maximum_bytes_billed
+        self._job_timeout_ms = job_timeout_ms
+        self._priority = priority
+        self._labels = labels
+        self._param_encoder = param_encoder
+        self._lazy_begin = lazy_begin
+        self.arraysize: int = 1
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount: int = -1
+        self.lastrowid: int | None = None
+        self.query_metadata: dict[str, Any] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, params: Any = ()) -> None:
+        """Execute a statement through the backing tool client."""
+        effective_sql = sql
+        params_json: str | None = None
+        if self._param_encoder is not None:
+            effective_sql, params_json = self._param_encoder(sql, params)
+        raw = self._client.query(
+            effective_sql,
+            params_json,
+            session_id=self._session_id,
+            destination_table=self._destination_table,
+            write_disposition=self._write_disposition,
+            maximum_bytes_billed=self._maximum_bytes_billed,
+            job_timeout_ms=self._job_timeout_ms,
+            priority=self._priority,
+            labels=self._labels,
+        )
+        self.query_metadata = dict(raw)
+        columns = raw.get("columns")
+        if columns:
+            self.description = tuple((str(col), None, None, None, None, None, None) for col in columns)
+            self._rows = [tuple(row) for row in raw.get("rows", [])]
+            self.rowcount = len(self._rows)
+        else:
+            self.description = None
+            self._rows = []
+            affected = raw.get("num_dml_affected_rows")
+            self.rowcount = int(affected) if affected is not None else 0
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> None:
+        """Execute a batch of statements through the backing tool client."""
+        total = 0
+        for params in seq_of_params:
+            self.execute(sql, params)
+            total += max(self.rowcount, 0)
+        self.description = None
+        self._rows = []
+        self.rowcount = total
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return and remove the next buffered row, or ``None`` when empty."""
+        if not self._rows:
+            return None
+        return self._rows.pop(0)
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return and remove up to ``size`` buffered rows."""
+        count = self.arraysize if size is None else size
+        if count <= 0:
+            return []
+        rows = self._rows[:count]
+        del self._rows[:count]
+        return rows
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return and drain all buffered rows."""
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    def close(self) -> None:
+        """Close the cursor."""
+        self._rows.clear()
+
+
+class _AsyncBigQueryToolCursor:
+    """Asynchronous PEP 249 cursor backed by `_BigQueryToolCursor`."""
+
+    def __init__(self, inner: _BigQueryToolCursor) -> None:
+        self._inner = inner
+        self.arraysize: int = 1
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        return self._inner.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._inner.rowcount
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the inner cursor's last row identifier."""
+        return self._inner.lastrowid
+
+    @property
+    def query_metadata(self) -> dict[str, Any] | None:
+        return self._inner.query_metadata
+
+    async def execute(self, sql: str, params: Any = ()) -> None:
+        self._inner.execute(sql, params)
+
+    async def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> None:
+        self._inner.executemany(sql, seq_of_params)
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        """Return and remove the next buffered row from the inner cursor."""
+        return self._inner.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return and remove up to ``size`` buffered rows from the inner cursor."""
+        return self._inner.fetchmany(self.arraysize if size is None else size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._inner.fetchall()
+
+    async def close(self) -> None:
+        self._inner.close()
 
 
 class _AsyncBigQueryToolClient:
@@ -589,6 +760,34 @@ class _AsyncBigQueryToolClient:
         """Unsupported stub satisfying AsyncBigQueryClientProtocol."""
         return self.client.append_arrow(parent_table, arrow_ipc_bytes, mode)
 
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+    ) -> _AsyncBigQueryToolCursor:
+        """Create an asynchronous cursor backed by the sync tool client double."""
+        return _AsyncBigQueryToolCursor(
+            self.client.cursor(
+                session_id=session_id,
+                destination_table=destination_table,
+                write_disposition=write_disposition,
+                maximum_bytes_billed=maximum_bytes_billed,
+                job_timeout_ms=job_timeout_ms,
+                priority=priority,
+                labels=labels,
+                param_encoder=param_encoder,
+                lazy_begin=lazy_begin,
+            )
+        )
+
     def close(self) -> None:
         """Close the async wire double."""
         self.client.close()
@@ -614,6 +813,28 @@ class _AsyncSpannerToolClient:
 
     def __init__(self, client: _SpannerToolClient) -> None:
         self.client = client
+
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+    ) -> FakeAsyncSpannerCursor:
+        """Create an asynchronous cursor backed by the sync tool client double."""
+        return FakeAsyncSpannerCursor(
+            self.client.cursor(
+                staleness_mode=staleness_mode,
+                staleness_value=staleness_value,
+                request_tag=request_tag,
+                transaction_tag=transaction_tag,
+                param_encoder=param_encoder,
+                lazy_begin=lazy_begin,
+            )
+        )
 
     async def query(
         self, sql: str, params_json: str | None = None, staleness_mode: str = "strong", staleness_ms: int = 0
@@ -1645,6 +1866,113 @@ async def test_gcp_alchemy_configs_use_broker_pool_and_stripped_dialects_module(
         await async_broker.close()
 
 
+class _ProtocolFakeGCPCursor:
+    """PEP 249 cursor backed by `_ProtocolFakeGCPDriver`."""
+
+    def __init__(self, driver: _ProtocolFakeGCPDriver) -> None:
+        self._driver = driver
+        self.description: Any = None
+        self.rowcount: int = -1
+        self.lastrowid: Any = None
+        self.arraysize: int = 1
+        self._rows: list[tuple[Any, ...]] = []
+        self._idx: int = 0
+
+    def execute(self, sql: str, parameters: Any = ()) -> Any:
+        stripped = sql.lstrip().upper()
+        if stripped.startswith(("SELECT", "WITH", "SHOW")):
+            rows, desc = self._driver.execute_with_description(sql, parameters)
+            self._rows = list(rows)
+            self._idx = 0
+            self.description = desc
+            self.rowcount = len(self._rows)
+            return self
+        self._rows = []
+        self._idx = 0
+        self.description = None
+        self.rowcount = self._driver.execute(sql, parameters)
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> Any:
+        total = 0
+        for params in seq_of_params:
+            total += self._driver.execute(sql, params)
+        self._rows = []
+        self._idx = 0
+        self.description = None
+        self.rowcount = total
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        if self._idx >= len(self._rows):
+            return None
+        row = self._rows[self._idx]
+        self._idx += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        count = self.arraysize if size is None else size
+        out = self._rows[self._idx : self._idx + count]
+        self._idx += len(out)
+        return out
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        out = self._rows[self._idx :]
+        self._idx = len(self._rows)
+        return out
+
+    def close(self) -> None:
+        self._rows = []
+        self.description = None
+
+
+class _AsyncProtocolFakeGCPCursor:
+    """Async PEP 249 cursor backed by `_ProtocolFakeGCPCursor`."""
+
+    def __init__(self, cursor: _ProtocolFakeGCPCursor) -> None:
+        self._cursor = cursor
+
+    @property
+    def description(self) -> Any:
+        return self._cursor.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self) -> Any:
+        return self._cursor.lastrowid
+
+    @property
+    def arraysize(self) -> int:
+        return self._cursor.arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        self._cursor.arraysize = value
+
+    async def execute(self, sql: str, parameters: Any = ()) -> Any:
+        self._cursor.execute(sql, parameters)
+        return self
+
+    async def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> Any:
+        self._cursor.executemany(sql, seq_of_params)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._cursor.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        return self._cursor.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._cursor.fetchall()
+
+    async def close(self) -> None:
+        self._cursor.close()
+
+
 class _ProtocolFakeGCPDriver:
     """Protocol-fake synchronous SQL driver for BigQuery, Spanner, and Spangres SQLAlchemy tests."""
 
@@ -1652,6 +1980,10 @@ class _ProtocolFakeGCPDriver:
         self.queries: list[tuple[str, Any]] = []
         self.version_string = version_string
         self.rows: list[tuple[Any, ...]] = [(1, "alpha")]
+
+    def cursor(self, **kwargs: Any) -> _ProtocolFakeGCPCursor:
+        _ = kwargs
+        return _ProtocolFakeGCPCursor(self)
 
     def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
         self.queries.append((sql, parameters))
@@ -1688,6 +2020,10 @@ class _AsyncProtocolFakeGCPDriver:
 
     def __init__(self, *, version_string: str = "PostgreSQL 14.1 on spangres") -> None:
         self.sync_delegate = _ProtocolFakeGCPDriver(version_string=version_string)
+
+    def cursor(self, **kwargs: Any) -> _AsyncProtocolFakeGCPCursor:
+        _ = kwargs
+        return _AsyncProtocolFakeGCPCursor(self.sync_delegate.cursor())
 
     @property
     def queries(self) -> list[tuple[str, Any]]:

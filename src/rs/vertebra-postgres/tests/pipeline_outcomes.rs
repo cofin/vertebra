@@ -147,9 +147,8 @@ async fn demultiplexes_heterogeneous_4op_result_batch_in_open_transaction() {
         resp.extend_from_slice(&frame(b'n', b""));
         resp.extend_from_slice(&cmd_complete("INSERT 0 2"));
 
-        // Op 1 (warm SELECT): 2, T(INT4 bin, 99999 text), D, D, C("SELECT 2")
+        // Op 1 (warm SELECT): 2, D, D, C("SELECT 2")
         resp.extend_from_slice(&frame(b'2', b""));
-        resp.extend_from_slice(&row_desc(&[("id", INT4_OID, 1), ("lbl", 99999, 0)]));
         resp.extend_from_slice(&data_row(&[Some(&10_i32.to_be_bytes()), Some(b"alpha")]));
         resp.extend_from_slice(&data_row(&[Some(&20_i32.to_be_bytes()), None]));
         resp.extend_from_slice(&cmd_complete("SELECT 2"));
@@ -524,6 +523,51 @@ async fn client_decode_error_retains_data_error_drains_ready_for_query_without_f
     assert_eq!(fail.outcomes.len(), 1);
     assert!(matches!(&fail.outcomes[0], PipelineOutcome::Result(_)));
     assert!(!conn.is_broken());
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cached_pipeline_op_rejects_unrequested_row_description() {
+    let (mut conn, mut srv) = make_conn("UTC");
+
+    let server = tokio::spawn(async move {
+        let _ = drain_until_sync_or_query(&mut srv).await;
+        let mut warm = Vec::new();
+        warm.extend_from_slice(&frame(b'1', b""));
+        warm.extend_from_slice(&param_desc(&[]));
+        warm.extend_from_slice(&row_desc(&[("id", INT4_OID, 0)]));
+        warm.extend_from_slice(&frame(b'2', b""));
+        warm.extend_from_slice(&row_desc(&[("id", INT4_OID, 0)]));
+        warm.extend_from_slice(&cmd_complete("SELECT 0"));
+        warm.extend_from_slice(&frame(b'Z', b"I"));
+        srv.write_all(&warm).await.unwrap();
+
+        let tags = drain_until_sync_or_query(&mut srv).await;
+        assert_eq!(tags, vec![b'B', b'E', b'S']);
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&frame(b'2', b""));
+        resp.extend_from_slice(&row_desc(&[("id", INT4_OID, 1)]));
+        resp.extend_from_slice(&data_row(&[Some(&10_i32.to_be_bytes())]));
+        resp.extend_from_slice(&cmd_complete("SELECT 1"));
+        resp.extend_from_slice(&frame(b'Z', b"I"));
+        let _ = srv.write_all(&resp).await;
+    });
+
+    conn.pipeline_results(&PipelineBatch::new(vec![PipelineOperation::new(
+        "SELECT id FROM items",
+    )]))
+    .await
+    .unwrap();
+
+    let fail = conn
+        .pipeline_results(&PipelineBatch::new(vec![PipelineOperation::new(
+            "SELECT id FROM items",
+        )]))
+        .await
+        .unwrap_err();
+    assert!(matches!(fail.first_error, PostgresError::Protocol(_)));
+    assert!(conn.is_broken());
 
     server.await.unwrap();
 }

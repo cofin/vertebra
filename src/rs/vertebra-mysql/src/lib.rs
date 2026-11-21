@@ -4,6 +4,7 @@ pub mod arrow_ipc;
 pub mod client;
 pub mod codecs;
 pub mod config;
+mod cursor;
 pub mod errors;
 pub mod loopback;
 pub mod protocol;
@@ -321,5 +322,6 @@ fn _mysql(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encrypt_caching_sha2_rsa_password, m)?)?;
     m.add_function(wrap_pyfunction!(map_mysql_error, m)?)?;
     m.add_function(wrap_pyfunction!(next_mysql_shm_name, m)?)?;
+    cursor::register(m)?;
     Ok(())
 }

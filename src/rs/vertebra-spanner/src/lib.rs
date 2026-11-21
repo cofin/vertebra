@@ -3,6 +3,7 @@
 pub mod arrow_ipc;
 pub mod client;
 pub mod codec;
+pub mod cursor;
 pub mod errors;
 pub mod rw_tx;
 
@@ -22,9 +23,13 @@ use crate::codec::{
     SpannerStaleness, SpannerStructField, SpannerValue, parse_batch_dml_statements_json,
     parse_mutation_groups_json, parse_mutations_json, parse_spanner_parameters_json,
 };
+use crate::cursor::{
+    CursorRpcOptions, CursorSource, PyAsyncSpannerCursor, PySyncSpannerCursor,
+    cursor_not_supported_err,
+};
 use crate::errors::spanner_error_to_py;
 
-const SPANNER_COMPLETION_DRAINER_ATTR: &str = "_vertebra_spanner_completion_drainer";
+pub(crate) const SPANNER_COMPLETION_DRAINER_ATTR: &str = "_vertebra_spanner_completion_drainer";
 
 /// Whether this build targets free-threaded Python (3.14t+).
 #[cfg(Py_GIL_DISABLED)]
@@ -50,7 +55,7 @@ fn parse_staleness(mode: &str, ms_or_micros: i64) -> SpannerStaleness {
     }
 }
 
-fn spanner_val_to_py(py: Python<'_>, val: &SpannerValue) -> PyResult<Py<PyAny>> {
+pub(crate) fn spanner_val_to_py(py: Python<'_>, val: &SpannerValue) -> PyResult<Py<PyAny>> {
     match val {
         SpannerValue::Null => Ok(py.None()),
         SpannerValue::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -497,6 +502,44 @@ impl PySyncSpannerClient {
             .map_err(|e| spanner_error_to_py(py, e))?;
         Ok(PySyncSpannerReadWriteTransaction { inner: tx })
     }
+
+    #[pyo3(signature = (
+        *,
+        staleness_mode="strong",
+        staleness_value=0,
+        request_tag=None,
+        transaction_tag=None,
+        param_encoder=None,
+        lazy_begin=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn cursor(
+        &self,
+        py: Python<'_>,
+        staleness_mode: &str,
+        staleness_value: i64,
+        request_tag: Option<String>,
+        transaction_tag: Option<String>,
+        param_encoder: Option<Py<PyAny>>,
+        lazy_begin: bool,
+    ) -> PyResult<PySyncSpannerCursor> {
+        if lazy_begin {
+            return Err(cursor_not_supported_err(
+                py,
+                "Spanner client cursors require autocommit and do not support lazy_begin",
+            ));
+        }
+        let options = CursorRpcOptions {
+            staleness: parse_staleness(staleness_mode, staleness_value),
+            request_tag,
+            transaction_tag,
+        };
+        Ok(PySyncSpannerCursor::new(
+            CursorSource::Client(Arc::clone(&self.inner)),
+            options,
+            param_encoder,
+        ))
+    }
 }
 
 /// Asynchronous pure-Rust Google Cloud Spanner v1 client exposed to Python (`vertebra._spanner.AsyncSpannerClient`).
@@ -883,6 +926,44 @@ impl PyAsyncSpannerClient {
             SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
+
+    #[pyo3(signature = (
+        *,
+        staleness_mode="strong",
+        staleness_value=0,
+        request_tag=None,
+        transaction_tag=None,
+        param_encoder=None,
+        lazy_begin=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn cursor(
+        &self,
+        py: Python<'_>,
+        staleness_mode: &str,
+        staleness_value: i64,
+        request_tag: Option<String>,
+        transaction_tag: Option<String>,
+        param_encoder: Option<Py<PyAny>>,
+        lazy_begin: bool,
+    ) -> PyResult<PyAsyncSpannerCursor> {
+        if lazy_begin {
+            return Err(cursor_not_supported_err(
+                py,
+                "Spanner client cursors require autocommit and do not support lazy_begin",
+            ));
+        }
+        let options = CursorRpcOptions {
+            staleness: parse_staleness(staleness_mode, staleness_value),
+            request_tag,
+            transaction_tag,
+        };
+        Ok(PyAsyncSpannerCursor::new(
+            CursorSource::Client(Arc::clone(&self.inner)),
+            options,
+            param_encoder,
+        ))
+    }
 }
 
 /// Stateful synchronous interactive Cloud Spanner `ReadWrite` transaction handle.
@@ -961,6 +1042,24 @@ impl PySyncSpannerReadWriteTransaction {
     fn rollback(&self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| block_on_db(self.inner.rollback()))
             .map_err(|e| spanner_error_to_py(py, e))
+    }
+
+    #[pyo3(signature = (*, request_tag=None, param_encoder=None))]
+    fn cursor(
+        &self,
+        request_tag: Option<String>,
+        param_encoder: Option<Py<PyAny>>,
+    ) -> PySyncSpannerCursor {
+        let options = CursorRpcOptions {
+            staleness: SpannerStaleness::Strong,
+            request_tag,
+            transaction_tag: None,
+        };
+        PySyncSpannerCursor::new(
+            CursorSource::ReadWriteTx(Box::new(self.inner.clone())),
+            options,
+            param_encoder,
+        )
     }
 }
 
@@ -1071,6 +1170,24 @@ impl PyAsyncSpannerReadWriteTransaction {
             SPANNER_COMPLETION_DRAINER_ATTR,
         )
     }
+
+    #[pyo3(signature = (*, request_tag=None, param_encoder=None))]
+    fn cursor(
+        &self,
+        request_tag: Option<String>,
+        param_encoder: Option<Py<PyAny>>,
+    ) -> PyAsyncSpannerCursor {
+        let options = CursorRpcOptions {
+            staleness: SpannerStaleness::Strong,
+            request_tag,
+            transaction_tag: None,
+        };
+        PyAsyncSpannerCursor::new(
+            CursorSource::ReadWriteTx(Box::new(self.inner.clone())),
+            options,
+            param_encoder,
+        )
+    }
 }
 
 #[pymodule(gil_used = false)]
@@ -1082,5 +1199,6 @@ pub fn _spanner(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAsyncSpannerClient>()?;
     m.add_class::<PySyncSpannerReadWriteTransaction>()?;
     m.add_class::<PyAsyncSpannerReadWriteTransaction>()?;
+    cursor::register(m)?;
     Ok(())
 }

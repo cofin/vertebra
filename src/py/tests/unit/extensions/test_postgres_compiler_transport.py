@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 import pytest
@@ -13,8 +14,10 @@ from sqlspec import StatementStack
 from sqlspec.core.filters import LimitOffsetFilter, NullFilter
 from sqlspec.core.parameters import ParameterStyle, TypedParameter
 from sqlspec.core.statement import SQL
+from sqlspec.exceptions import UniqueViolationError
 
 from tests.unit.db.postgres_ports import FakeAsyncPostgresPool, FakePostgresCluster, FakeSyncPostgresPool
+from vertebra._vertebra import IntegrityError as NativeIntegrityError
 from vertebra.db.adapters.postgres import AsyncPostgreSQLDriver, PostgreSQLConfig, SyncPostgreSQLDriver
 from vertebra.db.dbapi import AsyncDBAPIConnection, SyncDBAPIConnection
 from vertebra.db.rls import TenantPredicate
@@ -460,9 +463,77 @@ async def test_postgres_autocommit_isolation_and_bind_casts(asynchronous: bool) 
     assert "INSERT INTO records" in ins_sql
     assert "RETURNING records.id" in ins_sql
 
+    class _SyncFakeCursor:
+        def __init__(self, driver: Any) -> None:
+            self._driver = driver
+            self._rows: list[tuple[Any, ...]] = []
+            self.description: tuple[tuple[Any, ...], ...] | None = None
+            self.rowcount: int = -1
+            self.arraysize: int = 1
+            self.lastrowid: Any = None
+
+        def execute(self, sql: str, parameters: Any = ()) -> None:
+            rows, cols = self._driver.execute_with_description(sql, parameters)
+            if cols is not None:
+                self._rows = list(rows)
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = 0
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            out = list(self._rows)
+            self._rows.clear()
+            return out
+
+        def close(self) -> None:
+            self._rows.clear()
+
+    class _AsyncFakeCursor:
+        def __init__(self, driver: Any) -> None:
+            self._driver = driver
+            self._rows: list[tuple[Any, ...]] = []
+            self.description: tuple[tuple[Any, ...], ...] | None = None
+            self.rowcount: int = -1
+            self.arraysize: int = 1
+            self.lastrowid: Any = None
+
+        async def execute(self, sql: str, parameters: Any = ()) -> None:
+            rows, cols = await self._driver.execute_with_description(sql, parameters)
+            if cols is not None:
+                self._rows = list(rows)
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = 0
+
+        async def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            out = list(self._rows)
+            self._rows.clear()
+            return out
+
+        async def close(self) -> None:
+            self._rows.clear()
+
     class _SyncFakePGDriver:
+        in_transaction: bool = False
+
         def __init__(self) -> None:
             self.queries: list[str] = []
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncFakeCursor:
+            _ = lazy_begin
+            return _SyncFakeCursor(self)
 
         def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
@@ -493,8 +564,14 @@ async def test_postgres_autocommit_isolation_and_bind_casts(asynchronous: bool) 
             return None
 
     class _AsyncFakePGDriver:
+        in_transaction: bool = False
+
         def __init__(self) -> None:
             self.queries: list[str] = []
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncFakeCursor:
+            _ = lazy_begin
+            return _AsyncFakeCursor(self)
 
         async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
@@ -611,7 +688,75 @@ async def test_postgres_server_version_and_is_disconnect(asynchronous: bool) -> 
 
     assert dialect.is_disconnect(_BrokenStrErr()) is False
 
+    class _SyncVersionCursor:
+        def __init__(self, driver: Any) -> None:
+            self._driver = driver
+            self._rows: list[tuple[Any, ...]] = []
+            self.description: tuple[tuple[Any, ...], ...] | None = None
+            self.rowcount: int = -1
+            self.arraysize: int = 1
+            self.lastrowid: Any = None
+
+        def execute(self, sql: str, parameters: Any = ()) -> None:
+            rows, cols = self._driver.execute_with_description(sql, parameters)
+            if cols is not None:
+                self._rows = list(rows)
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = 0
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            out = list(self._rows)
+            self._rows.clear()
+            return out
+
+        def close(self) -> None:
+            self._rows.clear()
+
+    class _AsyncVersionCursor:
+        def __init__(self, driver: Any) -> None:
+            self._driver = driver
+            self._rows: list[tuple[Any, ...]] = []
+            self.description: tuple[tuple[Any, ...], ...] | None = None
+            self.rowcount: int = -1
+            self.arraysize: int = 1
+            self.lastrowid: Any = None
+
+        async def execute(self, sql: str, parameters: Any = ()) -> None:
+            rows, cols = await self._driver.execute_with_description(sql, parameters)
+            if cols is not None:
+                self._rows = list(rows)
+                self.description = tuple((str(col), None, None, None, None, None, None) for col in cols)
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self.description = None
+                self.rowcount = 0
+
+        async def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            out = list(self._rows)
+            self._rows.clear()
+            return out
+
+        async def close(self) -> None:
+            self._rows.clear()
+
     class _SyncVersionDriver:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncVersionCursor:
+            _ = lazy_begin
+            return _SyncVersionCursor(self)
+
         def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
             lowered = sql.lower()
@@ -635,6 +780,12 @@ async def test_postgres_server_version_and_is_disconnect(asynchronous: bool) -> 
             return None
 
     class _AsyncVersionDriver:
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncVersionCursor:
+            _ = lazy_begin
+            return _AsyncVersionCursor(self)
+
         async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
             lowered = sql.lower()
@@ -682,3 +833,212 @@ async def test_postgres_server_version_and_is_disconnect(asynchronous: bool) -> 
             assert sync_engine.dialect.insert_executemany_returning is True
     finally:
         sync_engine.dispose()
+
+
+def test_postgres_adapter_holds_no_parameter_normalizers() -> None:
+    """Verify PostgreSQL SQLSpec core removes parameter normalizers and drivers omit _prepare_native_parameters."""
+    pg_core = importlib.import_module("vertebra.extensions.sqlspec.adapters.postgres.core")
+    deleted_names = (
+        "unwrap_typed_parameters",
+        "_normalize_bound_params",
+        "_unwrap_scalar",
+        "normalize_pg_parameters",
+        "normalize_pg_many_parameters",
+    )
+    for name in deleted_names:
+        assert not hasattr(pg_core, name)
+        assert name not in pg_core.__all__
+
+    for driver_cls in (PostgresSyncDriver, PostgresAsyncDriver):
+        assert "_prepare_native_parameters" not in driver_cls.__dict__
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_postgres_native_cursor_cache_hit_crud_typed_param_and_dbapi(asynchronous: bool) -> None:
+    """Verify PostgreSQL SQLSpec cache hit performs one native execute, CRUD/many/TypedParameter/errors, and DB-API cursor."""
+    cluster = FakePostgresCluster()
+    cluster._conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, payload TEXT)")
+    cluster._conn.execute("INSERT INTO items (id, name, payload) VALUES (7, 'alpha', '{\"k\": 1}')")
+    cfg = PostgreSQLConfig(dsn="postgresql://localhost:5432/app")
+
+    counts = {"execute": 0, "fetchall": 0}
+
+    class _SyncCountingCursor:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        @property
+        def description(self) -> Any:
+            return self._inner.description
+
+        @property
+        def rowcount(self) -> int:
+            return int(self._inner.rowcount)
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._inner.lastrowid
+
+        def execute(
+            self,
+            sql: str,
+            params: Any = None,
+            *,
+            parameter_oids: Any = None,
+            timeout: Any = None,
+        ) -> None:
+            counts["execute"] += 1
+            if "DUPLICATE_TRIGGER" in sql:
+                err = NativeIntegrityError("duplicate key value violates unique constraint")
+                err.sqlstate = "23505"
+                raise err
+            self._inner.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+
+        def executemany(self, sql: str, param_sets: Any) -> None:
+            self._inner.executemany(sql, param_sets)
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            counts["fetchall"] += 1
+            return list(self._inner.fetchall())
+
+        def close(self) -> None:
+            self._inner.close()
+
+    class _AsyncCountingCursor:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        @property
+        def description(self) -> Any:
+            return self._inner.description
+
+        @property
+        def rowcount(self) -> int:
+            return int(self._inner.rowcount)
+
+        @property
+        def lastrowid(self) -> Any:
+            return self._inner.lastrowid
+
+        async def execute(
+            self,
+            sql: str,
+            params: Any = None,
+            *,
+            parameter_oids: Any = None,
+            timeout: Any = None,
+        ) -> None:
+            counts["execute"] += 1
+            if "DUPLICATE_TRIGGER" in sql:
+                err = NativeIntegrityError("duplicate key value violates unique constraint")
+                err.sqlstate = "23505"
+                raise err
+            await self._inner.execute(sql, params, parameter_oids=parameter_oids, timeout=timeout)
+
+        async def executemany(self, sql: str, param_sets: Any) -> None:
+            await self._inner.executemany(sql, param_sets)
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            counts["fetchall"] += 1
+            return list(await self._inner.fetchall())
+
+        async def close(self) -> None:
+            await self._inner.close()
+
+    if asynchronous:
+
+        class _CountingAsyncPool(FakeAsyncPostgresPool):
+            def cursor(self, *, lazy_begin: bool = False) -> Any:
+                return _AsyncCountingCursor(super().cursor(lazy_begin=lazy_begin))
+
+        native_async = AsyncPostgreSQLDriver(cfg, pool=_CountingAsyncPool(cluster))
+        adapter_async = PostgresAsyncDriver(
+            native_async,
+            statement_config=PostgresAsyncConfig(cfg).statement_config,
+        )
+        try:
+            assert await adapter_async.select("SELECT 1 AS a") == [{"a": 1}]
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            counts["execute"] = 0
+            counts["fetchall"] = 0
+            assert await adapter_async.select("SELECT id, name FROM items WHERE id = ?", 7) == [
+                {"id": 7, "name": "alpha"}
+            ]
+            assert counts == {"execute": 1, "fetchall": 1}
+
+            upd = await adapter_async.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+            assert upd.rows_affected == 1
+
+            many = await adapter_async.execute_many(
+                "INSERT INTO items (id, name, payload) VALUES (?, ?, ?)",
+                [(10, "x", "{}"), (11, "y", "{}"), (12, "z", "{}")],
+            )
+            assert many.rows_affected == 3
+
+            await adapter_async.execute(
+                "INSERT INTO items (id, name, payload) VALUES (?, ?, ?)",
+                (20, "json-row", TypedParameter('{"nested": true}', str, "payload")),
+            )
+            assert await adapter_async.select_value("SELECT payload FROM items WHERE id = ?", 20) == '{"nested": true}'
+
+            with pytest.raises(UniqueViolationError):
+                await adapter_async.execute("INSERT INTO items (id) VALUES (7) /* DUPLICATE_TRIGGER */")
+
+            dbapi_async = AsyncDBAPIConnection(
+                "postgres+vtb_async://localhost/app", driver=native_async, share_pool=False
+            )
+            try:
+                cur = dbapi_async.cursor()
+                assert isinstance(cur, _AsyncCountingCursor)
+            finally:
+                await dbapi_async.close()
+        finally:
+            await native_async.close()
+        return
+
+    class _CountingSyncPool(FakeSyncPostgresPool):
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            return _SyncCountingCursor(super().cursor(lazy_begin=lazy_begin))
+
+    native_sync = SyncPostgreSQLDriver(cfg, pool=_CountingSyncPool(cluster))
+    adapter_sync = PostgresSyncDriver(
+        native_sync,
+        statement_config=PostgresSyncConfig(cfg).statement_config,
+    )
+    try:
+        assert adapter_sync.select("SELECT 1 AS a") == [{"a": 1}]
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        counts["execute"] = 0
+        counts["fetchall"] = 0
+        assert adapter_sync.select("SELECT id, name FROM items WHERE id = ?", 7) == [{"id": 7, "name": "alpha"}]
+        assert counts == {"execute": 1, "fetchall": 1}
+
+        upd = adapter_sync.execute("UPDATE items SET name = ? WHERE id = ?", ("beta", 7))
+        assert upd.rows_affected == 1
+
+        many = adapter_sync.execute_many(
+            "INSERT INTO items (id, name, payload) VALUES (?, ?, ?)",
+            [(10, "x", "{}"), (11, "y", "{}"), (12, "z", "{}")],
+        )
+        assert many.rows_affected == 3
+
+        adapter_sync.execute(
+            "INSERT INTO items (id, name, payload) VALUES (?, ?, ?)",
+            (20, "json-row", TypedParameter('{"nested": true}', str, "payload")),
+        )
+        assert adapter_sync.select_value("SELECT payload FROM items WHERE id = ?", 20) == '{"nested": true}'
+
+        with pytest.raises(UniqueViolationError):
+            adapter_sync.execute("INSERT INTO items (id) VALUES (7) /* DUPLICATE_TRIGGER */")
+
+        dbapi_sync = SyncDBAPIConnection("postgres+vtb://localhost/app", driver=native_sync, share_pool=False)
+        try:
+            cur = dbapi_sync.cursor()
+            assert isinstance(cur, _SyncCountingCursor)
+        finally:
+            dbapi_sync.close()
+    finally:
+        native_sync.close()

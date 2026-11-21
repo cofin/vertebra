@@ -12,7 +12,6 @@ from sqlspec.core import (
     DriverParameterProfile,
     ParameterStyle,
     StatementConfig,
-    TypedParameter,
     build_statement_config_from_profile,
 )
 from sqlspec.exceptions import (
@@ -61,12 +60,9 @@ __all__ = (
     "mssql_json_dict",
     "mssql_row_value",
     "mssql_table_ref",
-    "normalize_mssql_many_parameters",
-    "normalize_mssql_parameters",
     "quote_bracket_identifier",
     "rewrite_mssql_placeholders",
     "split_schema_and_table",
-    "unwrap_typed_parameters",
 )
 
 MSSQL_TABLE_NOT_FOUND_ERROR: Final[int] = 208
@@ -173,49 +169,6 @@ def default_statement_config() -> StatementConfig:
 def rewrite_mssql_placeholders(sql: str) -> tuple[str, int]:
     """Rewrite `?` and `$1..$n` placeholders into T-SQL `@P1..@Pn` via `MSSQLCore`."""
     return MSSQLCore.rewrite_placeholders(sql)
-
-
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
-
-
-def normalize_mssql_parameters(params: Any) -> Any:
-    """Unwrap `TypedParameter` nodes and convert positional parameter lists to native tuples."""
-    if params is None:
-        return None
-    unwrapped = unwrap_typed_parameters(params)
-    if isinstance(unwrapped, list):
-        return tuple(unwrapped) if unwrapped else None
-    if isinstance(unwrapped, tuple):
-        return unwrapped if unwrapped else None
-    if isinstance(unwrapped, Mapping):
-        return dict(unwrapped) if unwrapped else None
-    return unwrapped
-
-
-def normalize_mssql_many_parameters(prepared: Any) -> list[tuple[Any, ...]]:
-    """Normalize `execute_many` compiled parameter batches into `list[tuple[Any, ...]]`."""
-    if not prepared:
-        return []
-    unwrapped = unwrap_typed_parameters(prepared)
-    rows: list[tuple[Any, ...]] = []
-    for item in unwrapped:
-        if isinstance(item, tuple):
-            rows.append(item)
-        elif isinstance(item, list):
-            rows.append(tuple(item))
-        else:
-            rows.append((item,))
-    return rows
 
 
 def quote_bracket_identifier(identifier: str) -> str:

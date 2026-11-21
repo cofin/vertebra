@@ -9,22 +9,30 @@ from typing import Any
 import pytest
 from tools.benchmarks.adapters import (
     ADAPTER_SCHEMA_VERSION,
+    AdapterBenchmarkCase,
+    AdapterBenchmarkReport,
     format_adapter_report_bytes,
     parse_adapter_report_bytes,
 )
 from tools.benchmarks.adapters import sql as sql_bench
 from tools.benchmarks.adapters.sql import (
+    COMPARATOR_ALLOW_LIST,
+    COMPARATOR_PAIRS,
+    COMPARATORLESS_CASES,
     SUPPORTED_SQL_ENGINES,
     capture_duckdb_report,
+    capture_oracle_report,
     capture_postgres_adapter_report,
     capture_sqlalchemy_report,
     capture_sqlite_report,
     capture_sqlspec_report,
+    check_report_against_comparators,
     main,
 )
 from tools.benchmarks.postgres import SCHEMA_VERSION, PostgresBenchmarkCase, PostgresBenchmarkReport
 
 from vertebra.db.adapters.duckdb import DuckDBConfig
+from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.adapters.sqlite import SQLiteConfig
 from vertebra.db.registry import DatabaseRegistry
 from vertebra.utils.module_loader import import_optional
@@ -73,10 +81,12 @@ def test_capture_sqlite_report_runs_offline_and_preserves_memory_isolation() -> 
     expected_modes = {
         ("point_select_1", "vertebra-sqlite-sync"): "sync_blocking",
         ("multi_row_select_10", "vertebra-sqlite-sync"): "sync_blocking",
+        ("cursor_point_select_1", "vertebra-sqlite-sync"): "sync_blocking",
         ("point_select_1", "vertebra-sqlite-async"): "async_native",
         ("multi_row_select_10", "vertebra-sqlite-async"): "async_native",
         ("point_select_1", "sqlite3"): "sync_blocking",
         ("multi_row_select_10", "sqlite3"): "sync_blocking",
+        ("cursor_point_select_1", "sqlite3"): "sync_blocking",
     }
     for key, mode in expected_modes.items():
         assert key in by_key
@@ -335,3 +345,466 @@ def test_capture_postgres_adapter_report_delegates_and_converts(monkeypatch: pyt
     assert report.engine == "postgres"
     assert "test-token-placeholder" not in report.target_redacted
     assert len(report.cases) == 2
+
+
+def _report(engine: str, cases: list[tuple[str, str, float]]) -> AdapterBenchmarkReport:
+    return AdapterBenchmarkReport(
+        schema_version=ADAPTER_SCHEMA_VERSION,
+        category="sql",
+        engine=engine,
+        generated_at="2026-11-21T00:00:00Z",
+        target_redacted=f"{engine}://localhost",
+        gil_enabled=None,
+        cases=tuple(
+            AdapterBenchmarkCase(
+                case=case_name,
+                driver=driver,
+                category="sql",
+                driver_mode="async_native" if "async" in driver else "sync_blocking",
+                iterations=10,
+                median_ms=median_ms,
+                p99_ms=median_ms,
+                ops_per_sec=1000.0 / median_ms,
+            )
+            for case_name, driver, median_ms in cases
+        ),
+    )
+
+
+def test_comparator_check_passes_when_vertebra_is_not_slower() -> None:
+    """Verify comparator check passes when Vertebra median is lower than or equal to comparator."""
+    report = _report(
+        "sqlite",
+        [
+            ("point_select_1", "vertebra-sqlite-sync", 0.0010),
+            ("point_select_1", "sqlite3", 0.0013),
+            ("equal_case", "vertebra-sqlite-sync", 0.0020),
+            ("equal_case", "sqlite3", 0.0020),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 2
+    assert outcomes[0].status == "pass"
+    assert outcomes[0].reason is None
+    assert outcomes[0].median_ratio == pytest.approx(0.769, abs=1e-3)
+    assert outcomes[1].status == "pass"
+    assert outcomes[1].reason is None
+    assert outcomes[1].median_ratio == 1.0
+
+
+def test_comparator_check_fails_slower_case_outside_allow_list() -> None:
+    """Verify comparator check fails when an unallow-listed Vertebra driver is slower."""
+    report = _report(
+        "mysql",
+        [
+            ("point_select_1", "vertebra-mysql-sync", 0.089),
+            ("point_select_1", "pymysql", 0.074),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].engine == "mysql"
+    assert outcomes[0].status == "fail"
+    assert outcomes[0].reason is not None
+    assert "> 1.000" in outcomes[0].reason
+
+
+def test_comparator_check_allows_listed_driver_with_reason() -> None:
+    """Verify comparator check marks slower allow-listed drivers as allowed with their reason."""
+    report = _report(
+        "mssql",
+        [
+            ("point_select_1", "vertebra-mssql-sync", 0.500),
+            ("point_select_1", "pymssql", 0.480),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "allowed"
+    assert outcomes[0].reason == COMPARATOR_ALLOW_LIST["vertebra-mssql-sync"]
+
+
+def test_comparator_check_allows_slower_duckdb_case() -> None:
+    """Verify comparator check marks slower DuckDB cases as allowed with the allow-list reason."""
+    report = _report(
+        "duckdb",
+        [
+            ("point_select_1", "vertebra-duckdb-sync", 0.426),
+            ("point_select_1", "duckdb", 0.245),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "allowed"
+    assert outcomes[0].reason == COMPARATOR_ALLOW_LIST["vertebra-duckdb-sync"]
+
+
+@pytest.mark.parametrize(
+    ("vertebra_driver", "comparator_driver"),
+    [
+        ("vertebra-oracle-sync", "oracledb-sync"),
+        ("vertebra-oracle-async", "oracledb-async"),
+    ],
+)
+def test_comparator_check_allows_slower_oracle_case(
+    vertebra_driver: str,
+    comparator_driver: str,
+) -> None:
+    """Verify comparator check marks slower Oracle cases as allowed with the upstream issue reason."""
+    report = _report(
+        "oracle",
+        [
+            ("point_select_1", vertebra_driver, 0.089),
+            ("point_select_1", comparator_driver, 0.074),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "allowed"
+    assert outcomes[0].reason == COMPARATOR_ALLOW_LIST[vertebra_driver]
+
+
+def test_comparator_check_reports_each_present_comparator() -> None:
+    """Verify comparator check emits outcomes only for comparators present in the report."""
+    report = _report(
+        "mysql",
+        [
+            ("point_select_1", "vertebra-mysql-sync", 0.120),
+            ("point_select_1", "pymysql", 0.150),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].comparator_driver == "pymysql"
+    assert outcomes[0].status == "pass"
+
+
+def test_comparator_check_marks_missing_comparator() -> None:
+    """Verify missing comparators emit `missing` and unpaired drivers emit no outcome."""
+    report = _report(
+        "sqlite",
+        [
+            ("point_select_1", "vertebra-sqlite-sync", 0.0010),
+            ("point_select_1", "vertebra-duckdb-async", 0.0500),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].vertebra_driver == "vertebra-sqlite-sync"
+    assert outcomes[0].comparator_driver is None
+    assert outcomes[0].comparator_median_ms is None
+    assert outcomes[0].median_ratio is None
+    assert outcomes[0].status == "missing"
+    assert outcomes[0].reason == "no comparator case in report"
+
+
+def test_comparator_check_skips_listed_comparatorless_case() -> None:
+    """Verify listed comparator-less cases emit `skipped` with their listed reason while paired cases still pass."""
+    report = _report(
+        "postgres",
+        [
+            ("pipeline_select_16", "vertebra-async", 0.50),
+            ("point_select_1", "vertebra-async", 0.07),
+            ("point_select_1", "asyncpg", 0.08),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 2
+    assert outcomes[0].case == "pipeline_select_16"
+    assert outcomes[0].vertebra_driver == "vertebra-async"
+    assert outcomes[0].status == "skipped"
+    assert outcomes[0].reason == COMPARATORLESS_CASES[("vertebra-async", "pipeline_select_16")]
+    assert outcomes[0].comparator_driver is None
+    assert outcomes[0].comparator_median_ms is None
+    assert outcomes[0].median_ratio is None
+    assert outcomes[1].case == "point_select_1"
+    assert outcomes[1].status == "pass"
+
+
+@pytest.mark.parametrize(("vertebra_ms", "expected_status"), [(1.0, "pass"), (3.0, "fail")])
+def test_comparator_check_compares_listed_case_when_comparator_present(
+    vertebra_ms: float,
+    expected_status: str,
+) -> None:
+    """Verify listed comparator-less cases are compared normally when a comparator case is present."""
+    report = _report(
+        "postgres",
+        [
+            ("pipeline_select_16", "vertebra-async", vertebra_ms),
+            ("pipeline_select_16", "asyncpg", 2.0),
+        ],
+    )
+    outcomes = check_report_against_comparators(report)
+    assert len(outcomes) == 1
+    assert outcomes[0].status == expected_status
+    assert outcomes[0].comparator_driver == "asyncpg"
+
+
+@pytest.mark.parametrize(("driver_case", "reason"), sorted(COMPARATORLESS_CASES.items()))
+def test_comparatorless_entries_are_paired_and_explained(
+    driver_case: tuple[str, str],
+    reason: str,
+) -> None:
+    """Verify every comparator-less entry targets a paired driver, non-empty case, and single-line reason."""
+    driver, case = driver_case
+    assert driver in COMPARATOR_PAIRS
+    assert case.strip() != ""
+    assert reason.strip() != ""
+    assert "\n" not in reason
+
+
+@pytest.mark.parametrize("bad_ratio", [0.0, -1.0, float("nan"), float("inf")])
+def test_comparator_check_rejects_invalid_ratio(bad_ratio: float) -> None:
+    """Verify non-positive or non-finite max_median_ratio raises ValueError."""
+    report = _report("sqlite", [("point_select_1", "vertebra-sqlite-sync", 0.0010)])
+    with pytest.raises(ValueError, match="max_median_ratio"):
+        check_report_against_comparators(report, max_median_ratio=bad_ratio)
+
+
+def test_allow_list_entries_are_paired_and_explained() -> None:
+    """Verify every allow-list entry belongs to COMPARATOR_PAIRS with a single-line reason."""
+    assert COMPARATOR_ALLOW_LIST
+    for driver, reason in COMPARATOR_ALLOW_LIST.items():
+        assert driver in COMPARATOR_PAIRS
+        assert reason.strip() != ""
+        assert "\n" not in reason
+
+
+def test_sql_cli_check_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify CLI `check` exit codes across pass, fail, missing, allow-missing, and empty reports."""
+    pass_path = tmp_path / "pass.json"
+    fail_path = tmp_path / "fail.json"
+    missing_path = tmp_path / "missing.json"
+    empty_path = tmp_path / "empty.json"
+
+    pass_path.write_bytes(
+        format_adapter_report_bytes(
+            _report(
+                "sqlite",
+                [
+                    ("point_select_1", "vertebra-sqlite-sync", 0.0010),
+                    ("point_select_1", "sqlite3", 0.0013),
+                ],
+            )
+        )
+    )
+    fail_path.write_bytes(
+        format_adapter_report_bytes(
+            _report(
+                "mysql",
+                [
+                    ("point_select_1", "vertebra-mysql-sync", 0.089),
+                    ("point_select_1", "pymysql", 0.074),
+                ],
+            )
+        )
+    )
+    missing_path.write_bytes(
+        format_adapter_report_bytes(
+            _report(
+                "sqlite",
+                [
+                    ("point_select_1", "vertebra-sqlite-sync", 0.0010),
+                ],
+            )
+        )
+    )
+    empty_path.write_bytes(
+        format_adapter_report_bytes(
+            _report(
+                "duckdb",
+                [
+                    ("point_select_1", "vertebra-duckdb-async", 0.0500),
+                ],
+            )
+        )
+    )
+
+    assert main(["check", "--report", str(pass_path)]) == 0
+    capsys.readouterr()
+
+    assert main(["check", "--report", str(pass_path), "--report", str(fail_path)]) == 1
+    captured_fail = capsys.readouterr()
+    assert "[FAIL] mysql point_select_1 (vertebra-mysql-sync vs pymysql):" in captured_fail.out
+
+    assert main(["check", "--report", str(missing_path)]) == 1
+    capsys.readouterr()
+
+    assert main(["check", "--report", str(missing_path), "--allow-missing"]) == 0
+    capsys.readouterr()
+
+    assert main(["check", "--report", str(empty_path)]) == 2
+    captured_empty = capsys.readouterr()
+    assert "No Vertebra case with a known comparator found" in captured_empty.err
+
+
+@pytest.mark.parametrize(
+    ("cases", "extra_args", "expected_exit", "expected_line_prefix", "expected_extra_prefix"),
+    [
+        (
+            [("pipeline_select_16", "vertebra-async", 0.50)],
+            [],
+            0,
+            f"[SKIP] postgres pipeline_select_16 (vertebra-async): {COMPARATORLESS_CASES[('vertebra-async', 'pipeline_select_16')]}",
+            None,
+        ),
+        (
+            [("other_case", "vertebra-async", 0.50)],
+            [],
+            1,
+            "[MISSING] postgres other_case (vertebra-async): no comparator case in report",
+            None,
+        ),
+        (
+            [("other_case", "vertebra-async", 0.50)],
+            ["--allow-missing"],
+            0,
+            "[MISSING] postgres other_case (vertebra-async): no comparator case in report",
+            None,
+        ),
+        (
+            [
+                ("pipeline_select_16", "vertebra-async", 0.50),
+                ("point_select_1", "vertebra-async", 0.09),
+                ("point_select_1", "asyncpg", 0.07),
+            ],
+            [],
+            1,
+            f"[SKIP] postgres pipeline_select_16 (vertebra-async): {COMPARATORLESS_CASES[('vertebra-async', 'pipeline_select_16')]}",
+            "[FAIL] postgres point_select_1 (vertebra-async vs asyncpg):",
+        ),
+    ],
+)
+def test_sql_cli_check_skip_exit_codes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    cases: list[tuple[str, str, float]],
+    extra_args: list[str],
+    expected_exit: int,
+    expected_line_prefix: str,
+    expected_extra_prefix: str | None,
+) -> None:
+    """Verify CLI `check` exit codes and formatted lines for skipped, missing, allow-missing, and failing reports."""
+    report_path = tmp_path / "pg.json"
+    report_path.write_bytes(format_adapter_report_bytes(_report("postgres", cases)))
+
+    rc = main(["check", "--report", str(report_path), *extra_args])
+    captured = capsys.readouterr()
+    assert rc == expected_exit
+    assert expected_line_prefix in captured.out
+    if expected_extra_prefix is not None:
+        assert expected_extra_prefix in captured.out
+
+
+def _install_oracle_recording_drivers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[OracleConfig], list[OracleConfig]]:
+    sync_configs: list[OracleConfig] = []
+    async_configs: list[OracleConfig] = []
+
+    class _RecordingSyncOracleDriver:
+        def __init__(self, config: OracleConfig) -> None:
+            sync_configs.append(config)
+
+        def __enter__(self) -> _RecordingSyncOracleDriver:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def select_one(self, query: str) -> dict[str, int]:
+            return {"1": 1}
+
+    class _RecordingAsyncOracleDriver:
+        def __init__(self, config: OracleConfig) -> None:
+            async_configs.append(config)
+
+        async def __aenter__(self) -> _RecordingAsyncOracleDriver:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def select_one(self, query: str) -> dict[str, int]:
+            return {"1": 1}
+
+    monkeypatch.setattr(sql_bench, "SyncOracleDriver", _RecordingSyncOracleDriver)
+    monkeypatch.setattr(sql_bench, "AsyncOracleDriver", _RecordingAsyncOracleDriver)
+    return sync_configs, async_configs
+
+
+def test_capture_oracle_report_passes_relay_switch_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify `capture_oracle_report` forwards `enable_reset_relay=False` to both Oracle drivers."""
+    sync_configs, async_configs = _install_oracle_recording_drivers(monkeypatch)
+
+    report = asyncio.run(
+        capture_oracle_report(
+            "oracle://u:test-token-placeholder@127.0.0.1:1521/FREEPDB1",
+            iterations=2,
+            warmup=0,
+            include_external=False,
+            enable_reset_relay=False,
+        )
+    )
+
+    assert len(sync_configs) == 1
+    assert len(async_configs) == 1
+    assert sync_configs[0].enable_reset_relay is False
+    assert async_configs[0].enable_reset_relay is False
+    assert report.engine == "oracle"
+    assert {item.driver for item in report.cases} == {"vertebra-oracle-sync", "vertebra-oracle-async"}
+
+
+def test_capture_oracle_report_keeps_relay_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify `capture_oracle_report` keeps `enable_reset_relay=True` when omitted."""
+    sync_configs, async_configs = _install_oracle_recording_drivers(monkeypatch)
+
+    report = asyncio.run(
+        capture_oracle_report(
+            "oracle://u:test-token-placeholder@127.0.0.1:1521/FREEPDB1",
+            iterations=2,
+            warmup=0,
+            include_external=False,
+        )
+    )
+
+    assert len(sync_configs) == 1
+    assert len(async_configs) == 1
+    assert sync_configs[0].enable_reset_relay is True
+    assert async_configs[0].enable_reset_relay is True
+    assert report.engine == "oracle"
+    assert {item.driver for item in report.cases} == {"vertebra-oracle-sync", "vertebra-oracle-async"}
+
+
+def test_sql_cli_oracle_reset_relay_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify CLI `capture --engine oracle --oracle-reset-relay off` disables the relay and writes JSON."""
+    sync_configs, async_configs = _install_oracle_recording_drivers(monkeypatch)
+    out_file = tmp_path / "oracle-relay-off.json"
+
+    rc = main(
+        [
+            "capture",
+            "--engine",
+            "oracle",
+            "--dsn",
+            "oracle://u:test-token-placeholder@127.0.0.1:1521/FREEPDB1",
+            "--iterations",
+            "2",
+            "--warmup",
+            "0",
+            "--no-external",
+            "--oracle-reset-relay",
+            "off",
+            "--output",
+            str(out_file),
+        ]
+    )
+
+    assert rc == 0
+    assert len(sync_configs) == 1
+    assert len(async_configs) == 1
+    assert sync_configs[0].enable_reset_relay is False
+    assert async_configs[0].enable_reset_relay is False
+    parsed = parse_adapter_report_bytes(out_file.read_bytes())
+    assert parsed.engine == "oracle"
+    assert {item.driver for item in parsed.cases} == {"vertebra-oracle-sync", "vertebra-oracle-async"}

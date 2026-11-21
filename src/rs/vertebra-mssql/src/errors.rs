@@ -374,7 +374,7 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<MssqlExceptionTypes> {
     })
 }
 
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static MssqlExceptionTypes> {
+pub(crate) fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static MssqlExceptionTypes> {
     MSSQL_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
         Ok(core_mod) => {
             let get = |name: &str| -> PyResult<Py<PyType>> {

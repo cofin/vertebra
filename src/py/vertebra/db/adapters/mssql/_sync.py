@@ -15,14 +15,13 @@ from vertebra.db.adapters.mssql.pipeline import SyncMSSQLPipeline
 from vertebra.db.arrow import (
     ARROW_SHM_THRESHOLD_ROWS,
     ArrowCursor,
-    _hydrate_rows_with_schema,
 )
 from vertebra.db.driver._sync import SyncDatabaseDriver
 from vertebra.utils.schema import to_value_type
 from vertebra.utils.text import validate_identifier
 
 if TYPE_CHECKING:
-    from vertebra._mssql import SyncMSSQLClient
+    from vertebra._mssql import SyncMSSQLClient, SyncMSSQLCursor
     from vertebra.db.dialer.cloudsql import SyncCloudSQLDialer
 
 __all__ = ("SyncMSSQLDriver",)
@@ -39,7 +38,6 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         "_client_token",
         "_dialer",
         "_in_transaction",
-        "_last_rewritten_sql",
     )
 
     def __init__(
@@ -62,17 +60,11 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
             self._client = MSSQLCore.create_sync_rust_client(resolved, dialer=dialer, aad_token=token)
             self._client_token = token
         self._in_transaction: bool = False
-        self._last_rewritten_sql: str = ""
 
     @property
     def dialer(self) -> SyncCloudSQLDialer | None:
         """Return the attached Cloud SQL dialer if present."""
         return self._dialer
-
-    @property
-    def last_rewritten_sql(self) -> str:
-        """Return the most recently rewritten `@P1` T-SQL statement."""
-        return self._last_rewritten_sql
 
     @property
     def in_transaction(self) -> bool:
@@ -91,6 +83,12 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
             return str(dest[0]), int(dest[1])
         return None
 
+    def cursor(self, *, lazy_begin: bool = False) -> SyncMSSQLCursor:
+        """Return a native `SyncMSSQLCursor` bound to this driver's client."""
+        self._ensure_open()
+        cur: SyncMSSQLCursor = self._client.cursor(lazy_begin=lazy_begin)
+        return cur
+
     def pipeline(self) -> SyncMSSQLPipeline:
         """Create a synchronous transactional query pipeline bound to this driver."""
         return SyncMSSQLPipeline(self)
@@ -103,12 +101,14 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
             self._client_token = token
         else:
             self._refresh_aad_token_sync()
+        if self._broker is not None:
+            self._attach_checkout_lease(self._client)
         self._closed = False
         return self
 
     def ping(self) -> bool:
         """Execute a lightweight health check against the SQL Server session."""
-        return bool(self._run_with_client(lambda client: client.ping(), use_broker_lease=False))
+        return bool(self._run_with_client(lambda client: client.ping()))
 
     def begin(self, isolation_level: str | None = None) -> None:
         """Begin an explicit SQL Server transaction."""
@@ -119,7 +119,7 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
             else:
                 client.begin()
 
-        self._run_with_client(_op, use_broker_lease=False)
+        self._run_with_client(_op)
         self._in_transaction = True
 
     def commit(self) -> None:
@@ -160,7 +160,26 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         """Close the pooled TDS sessions and release driver resources."""
         self._closed = True
         self._in_transaction = False
+        if self._broker is not None:
+            release_fn = getattr(self._client, "release_lease", None)
+            if callable(release_fn):
+                release_fn()
         self._client.close()
+
+    def _ensure_open(self) -> None:
+        if self._closed or self._client is None or bool(getattr(self._client, "closed", False)):
+            msg = "SyncMSSQLDriver is closed"
+            raise OperationalError(msg)
+
+    def _execute_cursor(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> SyncMSSQLCursor:
+        self._ensure_open()
+        bound = parameters or ()
+        cur: SyncMSSQLCursor = self._run_with_client(lambda client: client.cursor().execute(sql, bound))
+        return cur
 
     def execute(
         self,
@@ -170,8 +189,8 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> int:
         """Execute a DML or DDL statement and return affected row count."""
         _ = kwargs
-        rewritten = self._prepare_sql(sql)
-        return int(self._run_with_client(lambda client: client.execute(rewritten, parameters), use_broker_lease=True))
+        cur = self._execute_cursor(sql, parameters)
+        return max(int(cur.rowcount), 0)
 
     def execute_many(
         self,
@@ -181,16 +200,12 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> int:
         """Execute a statement across multiple parameter sets and return total affected rows."""
         _ = kwargs
+        self._ensure_open()
         if not parameter_sets:
             return 0
-        rewritten = self._prepare_sql(sql)
         param_list = list(parameter_sets)
-        return int(
-            self._run_with_client(
-                lambda client: client.execute_many(rewritten, param_list),
-                use_broker_lease=True,
-            )
-        )
+        cur = self._run_with_client(lambda client: client.cursor().executemany(sql, param_list))
+        return max(int(cur.rowcount), 0)
 
     def execute_tuples(
         self,
@@ -199,7 +214,11 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         **kwargs: Any,
     ) -> list[tuple[Any, ...]]:
         """Execute a query and return positional tuples."""
-        rows, _ = self.execute_with_description(sql, parameters, **kwargs)
+        _ = kwargs
+        cur = self._execute_cursor(sql, parameters)
+        if cur.description is None:
+            return []
+        rows: list[tuple[Any, ...]] = cur.fetchall()
         return rows
 
     def execute_with_description(
@@ -210,18 +229,13 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute SQL and return `(rows, column_names)`."""
         _ = kwargs
-        rewritten = self._prepare_sql(sql)
-
-        def _op(client: Any) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-            if hasattr(client, "execute_with_description"):
-                rows, cols = client.execute_with_description(rewritten, parameters)
-                return list(rows), tuple(cols)
-            raw = client.query(rewritten, parameters)
-            cols = tuple(str(c) for c in raw.get("columns", ()))
-            rows = [tuple(r) for r in raw.get("rows", ())]
-            return rows, cols
-
-        return self._run_with_client(_op, use_broker_lease=True)
+        cur = self._execute_cursor(sql, parameters)
+        description = cur.description
+        if description is None:
+            return [], ()
+        names = tuple(col[0] for col in description)
+        rows: list[tuple[Any, ...]] = cur.fetchall()
+        return rows, names
 
     def select(
         self,
@@ -233,16 +247,13 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> list[Any]:
         """Execute a `SELECT` query and return rows as dictionaries or hydrated `schema_type` instances."""
         _ = kwargs
-        if schema_type is None or schema_type is dict:
-            rewritten = self._prepare_sql(sql)
-            return list(
-                self._run_with_client(
-                    lambda client: client.fetch_all(rewritten, parameters),
-                    use_broker_lease=True,
-                )
-            )
-        rows, cols = self.execute_with_description(sql, parameters)
-        return _hydrate_rows_with_schema(rows, cols, schema_type)
+        cur = self._execute_cursor(sql, parameters)
+        description = cur.description
+        if description is None:
+            return []
+        names = tuple(col[0] for col in description)
+        rows = cur.fetchall()
+        return self.hydrate_rows(rows, names, schema_type)
 
     def select_one(
         self,
@@ -254,17 +265,14 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> Any:
         """Execute a query and return the first row, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
-        if schema_type is None or schema_type is dict:
-            rewritten = self._prepare_sql(sql)
-            return self._run_with_client(
-                lambda client: client.fetch_one(rewritten, parameters),
-                use_broker_lease=True,
-            )
-        rows = self.select(sql, parameters, schema_type=schema_type)
-        if not rows:
+        cur = self._execute_cursor(sql, parameters)
+        description = cur.description
+        row = cur.fetchone() if description is not None else None
+        if row is None or description is None:
             msg = "Query returned no rows"
             raise NotFoundError(msg)
-        return rows[0]
+        names = tuple(col[0] for col in description)
+        return self.hydrate_rows((row,), names, schema_type)[0]
 
     def select_one_or_none(
         self,
@@ -276,14 +284,13 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> Any | None:
         """Execute a query and return the first row or `None` when empty."""
         _ = kwargs
-        if schema_type is None or schema_type is dict:
-            rewritten = self._prepare_sql(sql)
-            return self._run_with_client(
-                lambda client: client.fetch_optional(rewritten, parameters),
-                use_broker_lease=True,
-            )
-        rows = self.select(sql, parameters, schema_type=schema_type)
-        return rows[0] if rows else None
+        cur = self._execute_cursor(sql, parameters)
+        description = cur.description
+        row = cur.fetchone() if description is not None else None
+        if row is None or description is None:
+            return None
+        names = tuple(col[0] for col in description)
+        return self.hydrate_rows((row,), names, schema_type)[0]
 
     def select_value(
         self,
@@ -295,11 +302,12 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> Any:
         """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
         _ = kwargs
-        rewritten = self._prepare_sql(sql)
-        val = self._run_with_client(
-            lambda client: client.select_value(rewritten, parameters),
-            use_broker_lease=True,
-        )
+        cur = self._execute_cursor(sql, parameters)
+        row = cur.fetchone() if cur.description is not None else None
+        if row is None:
+            msg = "Query returned no rows"
+            raise NotFoundError(msg)
+        val = row[0] if row else None
         if value_type is not None and val is not None:
             return to_value_type(val, value_type)
         return val
@@ -326,11 +334,7 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
     ) -> ArrowCursor:
         """Execute a query and materialize the result set as a zero-copy `VTBARROW` `ArrowCursor`."""
         _ = (threshold_rows, kwargs)
-        rewritten = self._prepare_sql(sql)
-        raw_cursor = self._run_with_client(
-            lambda client: client.select_to_arrow(rewritten, parameters),
-            use_broker_lease=True,
-        )
+        raw_cursor = self._run_with_client(lambda client: client.select_to_arrow(sql, parameters))
         if isinstance(raw_cursor, ArrowCursor):
             return raw_cursor
         return ArrowCursor(raw_cursor)
@@ -346,11 +350,7 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         """Execute a query and yield `VTBARROW` `ArrowCursor` chunks of at most `batch_size` rows."""
         _ = kwargs
         chunk = max(1, int(batch_size))
-        rewritten = self._prepare_sql(sql)
-        raw_batches = self._run_with_client(
-            lambda client: client.stream_arrow_batches(rewritten, parameters, chunk),
-            use_broker_lease=True,
-        )
+        raw_batches = self._run_with_client(lambda client: client.stream_arrow_batches(sql, parameters, chunk))
         for item in raw_batches:
             yield item if isinstance(item, ArrowCursor) else ArrowCursor(item)
 
@@ -371,13 +371,7 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
         source, col_list = MSSQLCore.coerce_arrow_source(data, columns)
         if source is None:
             return 0
-        self._prepare_sql(f"INSERT BULK {table_name}")
-        return int(
-            self._run_with_client(
-                lambda client: client.load_from_arrow(table_name, source, col_list),
-                use_broker_lease=True,
-            )
-        )
+        return int(self._run_with_client(lambda client: client.load_from_arrow(table_name, source, col_list)))
 
     def lease_stats(self) -> dict[str, int]:
         """Return broker connection lease telemetry counters."""
@@ -398,11 +392,10 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
                 set_fn(token)
             self._client_token = token
 
-    def _run_with_client[T](self, op: Callable[[Any], T], *, use_broker_lease: bool = False) -> T:
+    def _run_with_client[T](self, op: Callable[[Any], T]) -> T:
         for attempt in (0, 1):
             if self.config.token_provider is not None and not self.in_transaction:
                 self._refresh_aad_token_sync()
-            grant = self._acquire_broker_lease() if use_broker_lease else None
             try:
                 return op(self._client)
             except Exception as exc:
@@ -418,20 +411,5 @@ class SyncMSSQLDriver(SyncDatabaseDriver[MSSQLConfig]):
                     self._refresh_aad_token_sync(force_refresh=True)
                     continue
                 raise
-            finally:
-                if use_broker_lease:
-                    self._release_broker_lease(grant)
         msg = "MSSQL authentication retry exhausted"
         raise OperationalError(msg)
-
-    def _prepare_sql(self, sql: str) -> str:
-        rewritten, param_count = MSSQLCore.rewrite_placeholders(sql)
-        plan = self._lookup_or_cache_statement(
-            sql,
-            param_count=param_count,
-            compiled_sql=rewritten.encode("utf-8"),
-        )
-        if plan is not None and plan.compiled_sql:
-            rewritten = plan.compiled_sql.decode("utf-8")
-        self._last_rewritten_sql = rewritten
-        return rewritten

@@ -6,7 +6,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
 
-from vertebra._vertebra import NotFoundError, NotSupportedError
+from vertebra._vertebra import NotFoundError
 from vertebra.db.adapters.spanner.core import SpannerCore
 from vertebra.db.adapters.spanner.mutations import Mutation, StalenessBound
 from vertebra.db.arrow import ARROW_SHM_THRESHOLD_ROWS, ArrowCursor
@@ -15,10 +15,12 @@ from vertebra.utils.serializers import encode_json
 
 if TYPE_CHECKING:
     from vertebra.db.adapters.spanner._async import (
+        AsyncSpannerCursorProtocol,
         AsyncSpannerDriver,
         AsyncSpannerReadWriteTxProtocol,
     )
     from vertebra.db.adapters.spanner._sync import (
+        SyncSpannerCursorProtocol,
         SyncSpannerDriver,
         SyncSpannerReadWriteTxProtocol,
     )
@@ -42,38 +44,13 @@ def compute_abort_backoff_seconds(exc: BaseException, attempt: int) -> float:
     return float(base + jitter)
 
 
-def _prepare_tx_dml(
-    driver: SyncSpannerDriver | AsyncSpannerDriver,
-    sql: str,
-    parameters: Mapping[str, Any] | Sequence[Any] | None,
-) -> tuple[str, str | None]:
-    stripped = sql.strip()
-    if SpannerCore.is_ddl_statement(stripped):
-        msg = "DDL statements cannot be executed inside a Spanner ReadWrite transaction"
-        raise NotSupportedError(msg)
-    rewritten_sql, params_json = driver._prepare_sql_and_params(stripped, parameters)
-    annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, driver._propagator)
-    return annotated_sql, params_json
-
-
-def _prepare_tx_query(
-    driver: SyncSpannerDriver | AsyncSpannerDriver,
-    sql: str,
-    parameters: Mapping[str, Any] | Sequence[Any] | None,
-) -> tuple[str, str | None]:
-    rewritten_sql, params_json = driver._prepare_sql_and_params(sql, parameters)
-    annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, driver._propagator)
-    return annotated_sql, params_json
-
-
 def _encode_tx_mutations(mutations: Sequence[Mutation]) -> str | None:
     if not mutations:
         return None
     return encode_json([m.to_dict() for m in mutations])
 
 
-def _extract_scalar_value(raw: Mapping[str, Any], value_type: type[Any] | None) -> Any:
-    rows = raw.get("rows", ())
+def _extract_scalar_value(rows: Sequence[Sequence[Any]], value_type: type[Any] | None) -> Any:
     if not rows:
         msg = "Spanner query returned no rows"
         raise NotFoundError(msg)
@@ -362,6 +339,13 @@ class SyncSpannerTransaction:
         """Return mutations buffered for atomic commit when this transaction completes."""
         return tuple(self._mutations)
 
+    def cursor(self, *, request_tag: str | None = None) -> SyncSpannerCursorProtocol:
+        """Create a PEP 249 cursor bound to this interactive read-write transaction."""
+        return self._handle.cursor(
+            request_tag=request_tag,
+            param_encoder=self._driver._encode_parameters,
+        )
+
     def execute(
         self,
         sql: str,
@@ -370,12 +354,13 @@ class SyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> int:
         """Execute a DML statement inside this interactive read-write transaction."""
-        annotated_sql, params_json = _prepare_tx_dml(self._driver, sql, parameters)
-        lease = self._driver._acquire_pid_lease()
+        cursor = self.cursor(request_tag=request_tag)
         try:
-            return int(self._handle.execute_dml(annotated_sql, params_json, request_tag))
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            cursor.execute(annotated, parameters or ())
+            return max(cursor.rowcount, 0)
         finally:
-            self._driver._release_pid_lease(lease)
+            cursor.close()
 
     def execute_batch_dml(
         self,
@@ -393,16 +378,6 @@ class SyncSpannerTransaction:
         finally:
             self._driver._release_pid_lease(lease)
 
-    def _query_raw(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        request_tag: str | None = None,
-    ) -> dict[str, Any]:
-        annotated_sql, params_json = _prepare_tx_query(self._driver, sql, parameters)
-        return dict(self._handle.query(annotated_sql, params_json, request_tag))
-
     def select(
         self,
         sql: str,
@@ -412,12 +387,21 @@ class SyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> list[Any]:
         """Execute a `SELECT` statement inside this interactive read-write transaction."""
-        raw = self._query_raw(sql, parameters, request_tag=request_tag)
-        return SpannerCore.hydrate_query_rows(
-            raw.get("columns", ()),
-            raw.get("rows", ()),
-            schema_type=schema_type,
-        )
+        cursor = self.cursor(request_tag=request_tag)
+        try:
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            cursor.execute(annotated, parameters or ())
+            description = cursor.description
+            if description is None:
+                return []
+            cols = tuple(str(col[0]) for col in description)
+            return SpannerCore.hydrate_query_rows(
+                cols,
+                cursor.fetchall(),
+                schema_type=schema_type,
+            )
+        finally:
+            cursor.close()
 
     def query(
         self,
@@ -477,8 +461,13 @@ class SyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> Any:
         """Return the first scalar column of the first row of `sql`."""
-        raw = self._query_raw(sql, parameters, request_tag=request_tag)
-        return _extract_scalar_value(raw, value_type)
+        cursor = self.cursor(request_tag=request_tag)
+        try:
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            cursor.execute(annotated, parameters or ())
+            return _extract_scalar_value(cursor.fetchall(), value_type)
+        finally:
+            cursor.close()
 
     def buffer_mutation(self, mutation: Mutation) -> None:
         """Buffer a `Mutation` to be applied when the transaction commits."""
@@ -602,6 +591,13 @@ class AsyncSpannerTransaction:
         """Return mutations buffered for atomic commit when this transaction completes."""
         return tuple(self._mutations)
 
+    def cursor(self, *, request_tag: str | None = None) -> AsyncSpannerCursorProtocol:
+        """Create an asynchronous PEP 249 cursor bound to this interactive read-write transaction."""
+        return self._handle.cursor(
+            request_tag=request_tag,
+            param_encoder=self._driver._encode_parameters,
+        )
+
     async def execute(
         self,
         sql: str,
@@ -610,13 +606,13 @@ class AsyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> int:
         """Execute a DML statement asynchronously inside this interactive read-write transaction."""
-        annotated_sql, params_json = _prepare_tx_dml(self._driver, sql, parameters)
-        lease = self._driver._acquire_pid_lease()
+        cursor = self.cursor(request_tag=request_tag)
         try:
-            res = await self._handle.execute_dml(annotated_sql, params_json, request_tag)
-            return int(res)
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            await cursor.execute(annotated, parameters or ())
+            return max(cursor.rowcount, 0)
         finally:
-            self._driver._release_pid_lease(lease)
+            await cursor.close()
 
     async def execute_batch_dml(
         self,
@@ -635,16 +631,6 @@ class AsyncSpannerTransaction:
         finally:
             self._driver._release_pid_lease(lease)
 
-    async def _query_raw(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        *,
-        request_tag: str | None = None,
-    ) -> dict[str, Any]:
-        annotated_sql, params_json = _prepare_tx_query(self._driver, sql, parameters)
-        return dict(await self._handle.query(annotated_sql, params_json, request_tag))
-
     async def select(
         self,
         sql: str,
@@ -654,12 +640,21 @@ class AsyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> list[Any]:
         """Execute a `SELECT` statement asynchronously inside this interactive transaction."""
-        raw = await self._query_raw(sql, parameters, request_tag=request_tag)
-        return SpannerCore.hydrate_query_rows(
-            raw.get("columns", ()),
-            raw.get("rows", ()),
-            schema_type=schema_type,
-        )
+        cursor = self.cursor(request_tag=request_tag)
+        try:
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            await cursor.execute(annotated, parameters or ())
+            description = cursor.description
+            if description is None:
+                return []
+            cols = tuple(str(col[0]) for col in description)
+            return SpannerCore.hydrate_query_rows(
+                cols,
+                await cursor.fetchall(),
+                schema_type=schema_type,
+            )
+        finally:
+            await cursor.close()
 
     async def query(
         self,
@@ -719,8 +714,13 @@ class AsyncSpannerTransaction:
         request_tag: str | None = None,
     ) -> Any:
         """Return the first scalar column of the first row of `sql`."""
-        raw = await self._query_raw(sql, parameters, request_tag=request_tag)
-        return _extract_scalar_value(raw, value_type)
+        cursor = self.cursor(request_tag=request_tag)
+        try:
+            annotated = SpannerCore.annotate_sql_with_trace(sql, self._driver._propagator)
+            await cursor.execute(annotated, parameters or ())
+            return _extract_scalar_value(await cursor.fetchall(), value_type)
+        finally:
+            await cursor.close()
 
     def buffer_mutation(self, mutation: Mutation) -> None:
         """Buffer a `Mutation` to be applied when the transaction commits."""

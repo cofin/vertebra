@@ -1,6 +1,6 @@
 """Type stubs for the vertebra._spanner native extension module."""
 
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, TypedDict, final, type_check_only
 
 @type_check_only
@@ -59,11 +59,126 @@ __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncSpannerClient",
+    "AsyncSpannerCursor",
     "AsyncSpannerReadWriteTransaction",
     "SyncSpannerClient",
+    "SyncSpannerCursor",
     "SyncSpannerReadWriteTransaction",
     "__version__",
 ]
+
+@final
+class SyncSpannerCursor:
+    """Synchronous PEP 249 cursor backed by a Cloud Spanner client or transaction."""
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        """Return PEP 249 column metadata tuples, or `None` when no result set is active."""
+        ...
+    @property
+    def rowcount(self) -> int:
+        """Return the affected or buffered row count, or `-1` when unavailable."""
+        ...
+    @property
+    def lastrowid(self) -> Any | None:
+        """Return the last inserted row identifier, or `None` for Spanner."""
+        ...
+    @property
+    def arraysize(self) -> int:
+        """Return the default row batch size used by `fetchmany()`."""
+        ...
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        """Set the default row batch size used by `fetchmany()`."""
+        ...
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> SyncSpannerCursor:
+        """Execute a query, DML, or DDL statement and buffer its result on this cursor."""
+        ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> SyncSpannerCursor:
+        """Execute a DML statement for each parameter set as one batch-DML call."""
+        ...
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row tuple, or `None` when exhausted."""
+        ...
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered row tuples, defaulting to `arraysize`."""
+        ...
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return all remaining buffered row tuples."""
+        ...
+    def close(self) -> None:
+        """Close the cursor idempotently and release buffered rows."""
+        ...
+    def __enter__(self) -> SyncSpannerCursor:
+        """Enter a context manager block returning this cursor."""
+        ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_value: BaseException | None = None,
+        traceback: Any | None = None,
+    ) -> bool:
+        """Exit a context manager block and close this cursor."""
+        ...
+
+@final
+class AsyncSpannerCursor:
+    """Asynchronous PEP 249 cursor backed by a Cloud Spanner client or transaction."""
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        """Return PEP 249 column metadata tuples, or `None` when no result set is active."""
+        ...
+    @property
+    def rowcount(self) -> int:
+        """Return the affected or buffered row count, or `-1` when unavailable."""
+        ...
+    @property
+    def lastrowid(self) -> Any | None:
+        """Return the last inserted row identifier, or `None` for Spanner."""
+        ...
+    @property
+    def arraysize(self) -> int:
+        """Return the default row batch size used by `fetchmany()`."""
+        ...
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        """Set the default row batch size used by `fetchmany()`."""
+        ...
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> Awaitable[AsyncSpannerCursor]:
+        """Execute a query, DML, or DDL statement asynchronously and buffer its result."""
+        ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[AsyncSpannerCursor]:
+        """Execute a DML statement for each parameter set asynchronously as one batch-DML call."""
+        ...
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row tuple asynchronously, or `None` when exhausted."""
+        ...
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to `size` buffered row tuples asynchronously, defaulting to `arraysize`."""
+        ...
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return all remaining buffered row tuples asynchronously."""
+        ...
+    def close(self) -> Awaitable[None]:
+        """Close the cursor idempotently and release buffered rows asynchronously."""
+        ...
 
 @final
 class SyncSpannerReadWriteTransaction:
@@ -105,6 +220,14 @@ class SyncSpannerReadWriteTransaction:
     def rollback(self) -> None:
         """Explicitly roll back this transaction."""
         ...
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> SyncSpannerCursor:
+        """Create a synchronous PEP 249 cursor bound to this transaction."""
+        ...
 
 @final
 class AsyncSpannerReadWriteTransaction:
@@ -145,6 +268,14 @@ class AsyncSpannerReadWriteTransaction:
         ...
     def rollback(self) -> Awaitable[None]:
         """Explicitly roll back this transaction asynchronously."""
+        ...
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> AsyncSpannerCursor:
+        """Create an asynchronous PEP 249 cursor bound to this transaction."""
         ...
 
 @final
@@ -279,6 +410,18 @@ class SyncSpannerClient:
         max_commit_delay_ms: int | None = None,
     ) -> SyncSpannerReadWriteTransaction:
         """Open a stateful synchronous interactive ReadWrite transaction handle."""
+        ...
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+        lazy_begin: bool = False,
+    ) -> SyncSpannerCursor:
+        """Create a synchronous PEP 249 cursor backed by this client."""
         ...
     def close(self) -> None:
         """Close the client handle."""
@@ -416,6 +559,18 @@ class AsyncSpannerClient:
         max_commit_delay_ms: int | None = None,
     ) -> Awaitable[AsyncSpannerReadWriteTransaction]:
         """Open a stateful asynchronous interactive ReadWrite transaction handle."""
+        ...
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+        lazy_begin: bool = False,
+    ) -> AsyncSpannerCursor:
+        """Create an asynchronous PEP 249 cursor backed by this client."""
         ...
     def close(self) -> None:
         """Close the client handle."""

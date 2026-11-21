@@ -41,6 +41,7 @@ import vertebra.extensions.sqlalchemy.types as sqlalchemy_types_mod
 from tests.unit.db.oracle_test_doubles import _StubAsyncOracleClient, _StubSyncOracleClient
 from tests.unit.db.postgres_ports import FakePostgresCluster, FakeSyncPostgresPool
 from tests.unit.extensions.test_sqlspec_vtb_stacks import _NativeBindConnection
+from vertebra._sqlite import AsyncSQLiteCursor, SyncSQLiteCursor
 from vertebra.db import DatabaseRegistry
 from vertebra.db.adapters.mysql import MySQLConfig, SyncMySQLDriver
 from vertebra.db.adapters.oracle import AsyncOracleDriver, OracleConfig, SyncOracleDriver
@@ -52,6 +53,7 @@ from vertebra.db.dbapi import (
     CLOB,
     FIXED_CHAR,
     NCLOB,
+    NUMBER,
     AsyncDBAPIConnection,
     AsyncDBAPIModule,
     InterfaceError,
@@ -336,6 +338,78 @@ async def test_sqlite_vtb_async_engine_ddl_dml_and_rollback() -> None:
         await session.commit()
 
     await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_async_adapter_never_calls_cursor_aenter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AsyncAdapt_vertebra_cursor executes statements without awaiting cursor.__aenter__."""
+    orig_cursor = AsyncSQLiteDriver.cursor
+
+    class _NoAenterCursorProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        async def __aenter__(self) -> Any:
+            msg = "cursor.__aenter__ must not be called"
+            raise AssertionError(msg)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(
+        AsyncSQLiteDriver,
+        "cursor",
+        lambda self, *args, **kwargs: _NoAenterCursorProxy(orig_cursor(self, *args, **kwargs)),
+    )
+    engine = create_async_engine("sqlite+vtb_async:///:memory:")
+    try:
+        async with engine.connect() as conn:
+            row = (await conn.execute(text("SELECT 1"))).one()
+            assert row == (1,)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_async_adapter_transaction_opens_on_first_statement() -> None:
+    """Driver reports in_transaction after the first statement and rollback discards uncommitted rows."""
+    engine = create_async_engine("sqlite+vtb_async:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE tx_items (id INTEGER)"))
+
+        async with engine.connect() as conn:
+            raw_conn = await conn.get_raw_connection()
+            driver = cast("Any", raw_conn.driver_connection).driver
+            await conn.execute(text("INSERT INTO tx_items VALUES (1)"))
+            assert driver.in_transaction is True
+            await conn.rollback()
+            count = (await conn.execute(text("SELECT COUNT(*) FROM tx_items"))).scalar_one()
+            assert count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_async_adapter_autocommit_isolation_level_opens_no_transaction(tmp_path: Path) -> None:
+    """Autocommit mode leaves driver.in_transaction False and exposes writes immediately."""
+    db_path = tmp_path / "autocommit.db"
+    url = f"sqlite+vtb_async:///{db_path}"
+    engine_a = create_async_engine(url, connect_args={"autocommit": True})
+    engine_b = create_async_engine(url)
+    try:
+        async with engine_a.connect() as conn_a:
+            raw_conn = await conn_a.get_raw_connection()
+            driver = cast("Any", raw_conn.driver_connection).driver
+            await conn_a.execute(text("CREATE TABLE ac_items (id INTEGER)"))
+            await conn_a.execute(text("INSERT INTO ac_items VALUES (42)"))
+            assert driver.in_transaction is False
+            async with engine_b.connect() as conn_b:
+                visible = (await conn_b.execute(text("SELECT id FROM ac_items"))).scalars().all()
+                assert visible == [42]
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
 
 
 def test_vector_and_msgspec_json_types_across_dialects() -> None:
@@ -765,152 +839,31 @@ def test_alchemy_sync_config_factory() -> None:
 
 
 @pytest.mark.anyio
-async def test_pep249_sync_and_async_dbapi_cursor_seven_element_descriptions() -> None:
-    """Verify SyncDBAPICursor and AsyncDBAPICursor synthesize 7-item PEP 249 descriptions from column names."""
-
-    class _TupleColSyncDriver:
-        def execute_with_description(
-            self, sql: str, parameters: object = None
-        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return [(1, "alpha")], ("id", "name")
-
-        def commit(self) -> None:
-            return None
-
-        def rollback(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    class _TupleColAsyncDriver:
-        async def execute_with_description(
-            self,
-            sql: str,
-            parameters: object = None,
-        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return [(2, "beta")], ("id", "name")
-
-        async def commit(self) -> None:
-            return None
-
-        async def rollback(self) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", driver=_TupleColSyncDriver())
-    sync_cur = sync_conn.cursor()
-    sync_cur.execute("SELECT id, name FROM items")
-    assert sync_cur.description == (
-        ("id", None, None, None, None, None, None),
-        ("name", None, None, None, None, None, None),
-    )
-    assert sync_cur.fetchall() == [(1, "alpha")]
-    sync_conn.close()
-
-    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", driver=_TupleColAsyncDriver())
-    async_cur = async_conn.cursor()
-    await async_cur.execute("SELECT id, name FROM items")
-    assert async_cur.description == (
-        ("id", None, None, None, None, None, None),
-        ("name", None, None, None, None, None, None),
-    )
-    assert await async_cur.fetchall() == [(2, "beta")]
-    await async_conn.close()
-
-
-@pytest.mark.anyio
 async def test_pep249_sync_and_async_dbapi_dml_rowcount_routing() -> None:
     """Verify non-row-returning UPDATE and DELETE statements report affected rowcount == 1 across sync and async cursors."""
-
-    class _DmlTrackingSyncDriver:
-        def __init__(self) -> None:
-            self.executed: list[str] = []
-
-        def execute(self, sql: str, parameters: object = None) -> int:
-            _ = parameters
-            self.executed.append(sql)
-            return 1
-
-        def execute_many(self, sql: str, seq_of_parameters: object) -> int:
-            self.executed.append(sql)
-            return len(list(seq_of_parameters)) if isinstance(seq_of_parameters, (list, tuple)) else 0
-
-        def execute_with_description(
-            self,
-            sql: str,
-            parameters: object = None,
-        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return [(1,)], ("id",)
-
-        def close(self) -> None:
-            return None
-
-    class _DmlTrackingAsyncDriver:
-        def __init__(self) -> None:
-            self.executed: list[str] = []
-
-        async def execute(self, sql: str, parameters: object = None) -> int:
-            _ = parameters
-            self.executed.append(sql)
-            return 1
-
-        async def execute_many(self, sql: str, seq_of_parameters: object) -> int:
-            self.executed.append(sql)
-            return len(list(seq_of_parameters)) if isinstance(seq_of_parameters, (list, tuple)) else 0
-
-        async def execute_with_description(
-            self,
-            sql: str,
-            parameters: object = None,
-        ) -> tuple[list[tuple[object, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return [(1,)], ("id",)
-
-        async def close(self) -> None:
-            return None
-
     raw_sync = SyncDBAPIConnection("sqlite+vtb:///:memory:")
-    raw_cur = raw_sync.cursor()
-    raw_cur.execute("CREATE TABLE dml_items (id INTEGER PRIMARY KEY, label TEXT)")
-    raw_cur.execute("INSERT INTO dml_items (id, label) VALUES (?, ?)", (1, "v1"))
-    raw_cur.execute("UPDATE dml_items SET label = 'RETURNING' WHERE id = ?", (1,))
-    assert raw_cur.rowcount == 1
-    raw_cur.execute("DELETE FROM dml_items WHERE id = ?", (1,))
-    assert raw_cur.rowcount == 1
-    raw_sync.close()
+    try:
+        raw_cur = raw_sync.cursor()
+        raw_cur.execute("CREATE TABLE dml_items (id INTEGER PRIMARY KEY, label TEXT)")
+        raw_cur.execute("INSERT INTO dml_items (id, label) VALUES (?, ?)", (1, "v1"))
+        raw_cur.execute("UPDATE dml_items SET label = 'RETURNING' WHERE id = ?", (1,))
+        assert raw_cur.rowcount == 1
+        raw_cur.execute("DELETE FROM dml_items WHERE id = ?", (1,))
+        assert raw_cur.rowcount == 1
+    finally:
+        raw_sync.close()
 
-    sync_drv = _DmlTrackingSyncDriver()
-    drv_sync_conn = SyncDBAPIConnection("postgresql+vtb://localhost:5432/app", driver=sync_drv)
-    drv_sync_cur = drv_sync_conn.cursor()
-    drv_sync_cur.execute("UPDATE items SET name = 'RETURNING' WHERE id = 1")
-    assert drv_sync_cur.rowcount == 1
-    assert drv_sync_cur.description is None
-    drv_sync_cur.execute("DELETE FROM items WHERE id = 1")
-    assert drv_sync_cur.rowcount == 1
-    drv_sync_cur.execute("INSERT INTO items (name) VALUES ('a') RETURNING id")
-    assert drv_sync_cur.rowcount == 1
-    assert drv_sync_cur.fetchall() == [(1,)]
-    assert len(sync_drv.executed) == 2
-    drv_sync_conn.close()
-
-    async_drv = _DmlTrackingAsyncDriver()
-    drv_async_conn = AsyncDBAPIConnection("postgresql+vtb_async://localhost:5432/app", driver=async_drv)
-    drv_async_cur = drv_async_conn.cursor()
-    await drv_async_cur.execute("UPDATE items SET name = 'RETURNING' WHERE id = 1")
-    assert drv_async_cur.rowcount == 1
-    assert drv_async_cur.description is None
-    await drv_async_cur.execute("DELETE FROM items WHERE id = 1")
-    assert drv_async_cur.rowcount == 1
-    await drv_async_cur.executemany("UPDATE items SET name = ? WHERE id = ?", [("a", 1), ("b", 2)])
-    assert drv_async_cur.rowcount == 2
-    assert len(async_drv.executed) == 3
-    await drv_async_conn.close()
+    raw_async = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:")
+    try:
+        async_cur = raw_async.cursor()
+        await async_cur.execute("CREATE TABLE dml_items (id INTEGER PRIMARY KEY, label TEXT)")
+        await async_cur.execute("INSERT INTO dml_items (id, label) VALUES (?, ?)", (1, "v1"))
+        await async_cur.execute("UPDATE dml_items SET label = 'RETURNING' WHERE id = ?", (1,))
+        assert async_cur.rowcount == 1
+        await async_cur.execute("DELETE FROM dml_items WHERE id = ?", (1,))
+        assert async_cur.rowcount == 1
+    finally:
+        await raw_async.close()
 
 
 @pytest.mark.parametrize(
@@ -1321,10 +1274,45 @@ async def test_oracle_get_server_version_info_queries_and_initializes_capabiliti
 ) -> None:
     """Verify sync and async Oracle dialects query product_component_version and initialize capabilities."""
 
+    class _SyncOracleVersionCursor:
+        _rows: list[tuple[Any, ...]]
+        description: tuple[tuple[Any, ...], ...] | None
+        rowcount: int
+
+        def __init__(self, driver: _SyncOracleVersionDriver) -> None:
+            self._driver = driver
+            self._rows = []
+            self.description = None
+            self.rowcount = -1
+
+        def execute(self, sql: str, parameters: Any = ()) -> _SyncOracleVersionCursor:
+            rows, cols = self._driver.execute_with_description(sql, parameters)
+            self._rows = list(rows)
+            self.description = tuple((c, None, None, None, None, None, None) for c in cols) if cols else None
+            self.rowcount = len(self._rows)
+            return self
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            rows, self._rows = self._rows, []
+            return rows
+
+        def setinputsizes(self, *sizes: Any, **kw: Any) -> None:
+            _ = (sizes, kw)
+
+        def close(self) -> None:
+            self._rows.clear()
+
     class _SyncOracleVersionDriver:
         def __init__(self, version_value: str | None) -> None:
             self._version_value = version_value
             self.queries: list[str] = []
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncOracleVersionCursor:
+            _ = lazy_begin
+            return _SyncOracleVersionCursor(self)
 
         def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
@@ -1348,10 +1336,45 @@ async def test_oracle_get_server_version_info_queries_and_initializes_capabiliti
         def close(self) -> None:
             return None
 
+    class _AsyncOracleVersionCursor:
+        _rows: list[tuple[Any, ...]]
+        description: tuple[tuple[Any, ...], ...] | None
+        rowcount: int
+
+        def __init__(self, driver: _AsyncOracleVersionDriver) -> None:
+            self._driver = driver
+            self._rows = []
+            self.description = None
+            self.rowcount = -1
+
+        async def execute(self, sql: str, parameters: Any = ()) -> _AsyncOracleVersionCursor:
+            rows, cols = await self._driver.execute_with_description(sql, parameters)
+            self._rows = list(rows)
+            self.description = tuple((c, None, None, None, None, None, None) for c in cols) if cols else None
+            self.rowcount = len(self._rows)
+            return self
+
+        async def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            rows, self._rows = self._rows, []
+            return rows
+
+        def setinputsizes(self, *sizes: Any, **kw: Any) -> None:
+            _ = (sizes, kw)
+
+        async def close(self) -> None:
+            self._rows.clear()
+
     class _AsyncOracleVersionDriver:
         def __init__(self, version_value: str | None) -> None:
             self._version_value = version_value
             self.queries: list[str] = []
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncOracleVersionCursor:
+            _ = lazy_begin
+            return _AsyncOracleVersionCursor(self)
 
         async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
             _ = parameters
@@ -1459,6 +1482,40 @@ async def test_oracle_execution_context_returning_into_cursor_var(asynchronous: 
                 return self.outconverter(raw)
             return raw
 
+    class _SyncOracleReturningCursor:
+        _rows: list[tuple[Any, ...]]
+        description: tuple[tuple[Any, ...], ...] | None
+        rowcount: int
+
+        def __init__(self, driver: _SyncOracleReturningDriver) -> None:
+            self._driver = driver
+            self._rows = []
+            self.description = None
+            self.rowcount = -1
+
+        def var(self, type_code: Any, size: int = 0, arraysize: int = 1, outconverter: Any = None) -> _FakeOutVar:
+            return self._driver.var(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+
+        def execute(self, sql: str, parameters: Any = ()) -> _SyncOracleReturningCursor:
+            rows, cols = self._driver.execute_with_description(sql, parameters)
+            self._rows = list(rows)
+            self.description = tuple((c, None, None, None, None, None, None) for c in cols) if cols else None
+            self.rowcount = len(self._rows)
+            return self
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            rows, self._rows = self._rows, []
+            return rows
+
+        def setinputsizes(self, *sizes: Any, **kw: Any) -> None:
+            _ = (sizes, kw)
+
+        def close(self) -> None:
+            self._rows.clear()
+
     class _SyncOracleReturningDriver:
         server_version_info = (23, 4, 0, 0, 0)
 
@@ -1466,6 +1523,10 @@ async def test_oracle_execution_context_returning_into_cursor_var(asynchronous: 
             self.executed: list[tuple[str, Any]] = []
             self.var_calls: list[tuple[Any, int]] = []
             self.out_binds: dict[str, Any] = {}
+
+        def cursor(self, *, lazy_begin: bool = False) -> _SyncOracleReturningCursor:
+            _ = lazy_begin
+            return _SyncOracleReturningCursor(self)
 
         def var(self, type_code: Any, size: int = 0, arraysize: int = 1, outconverter: Any = None) -> _FakeOutVar:
             self.var_calls.append((type_code, arraysize))
@@ -1493,6 +1554,40 @@ async def test_oracle_execution_context_returning_into_cursor_var(asynchronous: 
         def close(self) -> None:
             return None
 
+    class _AsyncOracleReturningCursor:
+        _rows: list[tuple[Any, ...]]
+        description: tuple[tuple[Any, ...], ...] | None
+        rowcount: int
+
+        def __init__(self, driver: _AsyncOracleReturningDriver) -> None:
+            self._driver = driver
+            self._rows = []
+            self.description = None
+            self.rowcount = -1
+
+        def var(self, type_code: Any, size: int = 0, arraysize: int = 1, outconverter: Any = None) -> _FakeOutVar:
+            return self._driver.var(type_code, size=size, arraysize=arraysize, outconverter=outconverter)
+
+        async def execute(self, sql: str, parameters: Any = ()) -> _AsyncOracleReturningCursor:
+            rows, cols = await self._driver.execute_with_description(sql, parameters)
+            self._rows = list(rows)
+            self.description = tuple((c, None, None, None, None, None, None) for c in cols) if cols else None
+            self.rowcount = len(self._rows)
+            return self
+
+        async def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows.pop(0) if self._rows else None
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            rows, self._rows = self._rows, []
+            return rows
+
+        def setinputsizes(self, *sizes: Any, **kw: Any) -> None:
+            _ = (sizes, kw)
+
+        async def close(self) -> None:
+            self._rows.clear()
+
     class _AsyncOracleReturningDriver:
         server_version_info = (23, 4, 0, 0, 0)
 
@@ -1500,6 +1595,10 @@ async def test_oracle_execution_context_returning_into_cursor_var(asynchronous: 
             self.executed: list[tuple[str, Any]] = []
             self.var_calls: list[tuple[Any, int]] = []
             self.out_binds: dict[str, Any] = {}
+
+        def cursor(self, *, lazy_begin: bool = False) -> _AsyncOracleReturningCursor:
+            _ = lazy_begin
+            return _AsyncOracleReturningCursor(self)
 
         def var(self, type_code: Any, size: int = 0, arraysize: int = 1, outconverter: Any = None) -> _FakeOutVar:
             self.var_calls.append((type_code, arraysize))
@@ -1924,3 +2023,196 @@ async def test_advanced_alchemy_1130b2_oracle_jsonb_blob_transport_and_returning
         assert aexec_calls[0]["out_binds"] == {"ret_0": "BLOB", "ret_1": "BLOB"}
     finally:
         await async_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb:///:memory:", "duckdb+vtb:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+def test_sqlalchemy_sync_engines_run_on_native_cursor(url: str) -> None:
+    """Verify sync sqlite+vtb and duckdb+vtb engines execute on native cursors with rollback support."""
+    engine = create_engine(url)
+    try:
+        raw_conn = engine.raw_connection()
+        try:
+            raw_cursor = raw_conn.cursor()
+            raw_cursor.close()
+        finally:
+            raw_conn.close()
+
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE native_items (id INTEGER, name VARCHAR(64))"))
+            conn.execute(text("INSERT INTO native_items (id, name) VALUES (1, 'alpha')"))
+            conn.execute(text("INSERT INTO native_items (id, name) VALUES (2, 'beta')"))
+
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT id, name FROM native_items ORDER BY id")).fetchall()
+            assert rows == [(1, "alpha"), (2, "beta")]
+
+            conn.execute(text("INSERT INTO native_items (id, name) VALUES (3, 'rolled_back')"))
+            conn.rollback()
+
+            after_rollback = conn.execute(text("SELECT id, name FROM native_items ORDER BY id")).fetchall()
+            assert after_rollback == [(1, "alpha"), (2, "beta")]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb_async:///:memory:", "duckdb+vtb_async:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+async def test_sqlalchemy_async_engines_run_on_native_cursor(url: str) -> None:
+    """Verify asyncio sqlite+vtb_async and duckdb+vtb_async engines execute on native cursors with rollback support."""
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            raw_conn = await conn.get_raw_connection()
+            driver_conn: Any = raw_conn.driver_connection
+            assert driver_conn is not None
+            native_cursor = driver_conn.cursor()
+            assert type(native_cursor).__name__ in {"AsyncSQLiteCursor", "AsyncDuckDBCursor"}
+            await native_cursor.close()
+
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE native_async_items (id INTEGER, name VARCHAR(64))"))
+            await conn.execute(text("INSERT INTO native_async_items (id, name) VALUES (1, 'alpha')"))
+            await conn.execute(text("INSERT INTO native_async_items (id, name) VALUES (2, 'beta')"))
+
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SELECT id, name FROM native_async_items ORDER BY id"))).fetchall()
+            assert rows == [(1, "alpha"), (2, "beta")]
+
+            await conn.execute(text("INSERT INTO native_async_items (id, name) VALUES (3, 'rolled_back')"))
+            await conn.rollback()
+
+            after_rollback = (
+                await conn.execute(text("SELECT id, name FROM native_async_items ORDER BY id"))
+            ).fetchall()
+            assert after_rollback == [(1, "alpha"), (2, "beta")]
+    finally:
+        await engine.dispose()
+
+
+def test_sqlalchemy_native_cursor_integrity_error_and_lastrowid() -> None:
+    """Verify sqlite+vtb surfaces sqlalchemy.exc.IntegrityError and populated inserted_primary_key."""
+    metadata = MetaData()
+    items = Table(
+        "native_pk_items",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("name", String(64), nullable=False),
+    )
+
+    engine = create_engine("sqlite+vtb:///:memory:")
+    try:
+        with engine.begin() as conn:
+            metadata.create_all(conn)
+
+        with engine.begin() as conn:
+            first_res = conn.execute(items.insert().values(name="alpha"))
+            assert first_res.inserted_primary_key == (1,)
+            second_res = conn.execute(items.insert().values(name="beta"))
+            assert second_res.inserted_primary_key == (2,)
+
+        with engine.connect() as conn:
+            with pytest.raises(sa_exc.IntegrityError):
+                conn.execute(items.insert().values(id=1, name="duplicate"))
+            conn.rollback()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_oracle_dbapi_native_cursor_type_and_out_bind_var(asynchronous: bool) -> None:
+    """Verify Oracle DB-API connections return native cursors and cursor.var(NUMBER) yields OracleOutBindVar."""
+
+    class _OutBindBlockClient(_StubSyncOracleClient):
+        def execute(
+            self,
+            sql: str,
+            params: Any = None,
+            *,
+            out_binds: Any = None,
+            fetch_decimals: bool = False,
+            enable_lowercase_column_names: bool | None = None,
+        ) -> _oracle_native.OracleQueryResult:
+            _ = (fetch_decimals, enable_lowercase_column_names)
+            self.calls.append(("execute", {"sql": sql, "params": params, "out_binds": out_binds}))
+            return _oracle_native.OracleQueryResult([], [], rowcount=1, out_binds={"out_val": 99})
+
+    if not asynchronous:
+        sync_driver = SyncOracleDriver(OracleConfig(), client=_OutBindBlockClient())
+        conn = SyncDBAPIConnection(
+            "oracle+vtb://scott:test-token-placeholder@localhost:1521/freepdb1",
+            driver=sync_driver,
+            share_pool=False,
+        )
+        try:
+            cur = conn.cursor()
+            out_var = cur.var(NUMBER)
+            assert isinstance(out_var, _oracle_native.OracleOutBindVar)
+            cur.execute("BEGIN :out_val := 99; END;", {"out_val": out_var})
+            assert out_var.getvalue() == 99
+        finally:
+            conn.close()
+        return
+
+    async_stub = _StubAsyncOracleClient()
+    async_stub._sync = _OutBindBlockClient()
+    async_driver = AsyncOracleDriver(OracleConfig(), client=async_stub)
+    async_conn = AsyncDBAPIConnection(
+        "oracle+vtb_async://scott:test-token-placeholder@localhost:1521/freepdb1",
+        driver=async_driver,
+        share_pool=False,
+    )
+    try:
+        acur = async_conn.cursor()
+        aout_var = acur.var(NUMBER)
+        assert isinstance(aout_var, _oracle_native.OracleOutBindVar)
+        await acur.execute("BEGIN :out_val := 99; END;", {"out_val": aout_var})
+        assert aout_var.getvalue() == 99
+    finally:
+        await async_conn.close()
+
+
+def test_sqlite_vtb_engine_cursor_is_native_cursor() -> None:
+    """Verify sqlite+vtb raw_connection().cursor() returns SyncSQLiteCursor and execute scalar works."""
+    engine = create_engine("sqlite+vtb:///:memory:")
+    try:
+        raw_conn = engine.raw_connection()
+        try:
+            raw_cur = raw_conn.cursor()
+            try:
+                assert isinstance(raw_cur, SyncSQLiteCursor)
+            finally:
+                raw_cur.close()
+        finally:
+            raw_conn.close()
+
+        with engine.connect() as connection:
+            assert connection.execute(text("select 1")).scalar() == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_asyncio_adapter_receives_native_async_cursor() -> None:
+    """Verify SQLAlchemy asyncio adapter holds an exact AsyncSQLiteCursor and executes queries."""
+    driver = AsyncSQLiteDriver()
+    module = SQLAlchemyAsyncDBAPI(dialect="sqlite")
+    adapted = await greenlet_spawn(module.connect, driver=driver, share_pool=False)
+    try:
+        cursor = await greenlet_spawn(adapted.cursor)
+        try:
+            assert type(cast("Any", cursor._cursor)) is AsyncSQLiteCursor
+            await greenlet_spawn(cursor.execute, "select 1")
+            assert await greenlet_spawn(cursor.fetchall) == [(1,)]
+        finally:
+            await greenlet_spawn(cursor.close)
+    finally:
+        await greenlet_spawn(adapted.close)

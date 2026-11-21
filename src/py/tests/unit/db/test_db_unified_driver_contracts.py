@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import gc
 import importlib.util
 import re
 import sqlite3
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -43,7 +45,13 @@ from vertebra.db.adapters.spanner import (
 from vertebra.db.adapters.spanner.change_stream import AsyncSpannerChangeStreamSource, SyncSpannerChangeStreamSource
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.dbapi import AsyncDBAPIConnection, NotSupportedError, SyncDBAPIConnection
-from vertebra.db.driver._common import SPANGRES_DIALECT_TAG
+from vertebra.db.driver._common import (
+    SPANGRES_DIALECT_TAG,
+    BaseDatabaseConfig,
+    CommonDriverMixin,
+    _BrokerLeasePlan,
+    _lease_releaser,
+)
 from vertebra.db.driver.capabilities import AsyncChangeSource, SyncChangeSource
 from vertebra.db.registry import REGISTERED_CONFIG_TYPES
 from vertebra.extensions.sqlalchemy import dialects
@@ -123,7 +131,7 @@ class _ContractDBAPICursor:
         return None
 
 
-class _ContractAsyncDBAPICursor:
+class _ContractAsyncCursor:
     """Async SQLite-backed DB-API cursor double for PostgreSQL and MySQL contract tests."""
 
     __slots__ = ("_sync", "description", "rowcount")
@@ -144,7 +152,7 @@ class _ContractAsyncDBAPICursor:
     async def close(self) -> None:
         return None
 
-    async def __aenter__(self) -> _ContractAsyncDBAPICursor:
+    async def __aenter__(self) -> _ContractAsyncCursor:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -162,7 +170,7 @@ class _ContractDBAPIConnection:
 
     def cursor(self) -> Any:
         if self._async_mode:
-            return _ContractAsyncDBAPICursor(self._conn)
+            return _ContractAsyncCursor(self._conn)
         return _ContractDBAPICursor(self._conn)
 
     def commit(self) -> Any:
@@ -327,6 +335,24 @@ class _ContractBigQueryClient:
             return _coro()
         return result
 
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+        **_kwargs: Any,
+    ) -> _ContractBigQueryCursor:
+        if lazy_begin:
+            msg = "BigQuery cursors do not support lazy_begin"
+            raise NotSupportedError(msg)
+        return _ContractBigQueryCursor(
+            self,
+            session_id=session_id,
+            param_encoder=param_encoder,
+            async_mode=self._async_mode,
+        )
+
     def close(self) -> Any:
         if self._async_mode:
 
@@ -335,6 +361,116 @@ class _ContractBigQueryClient:
 
             return _coro()
         return None
+
+
+class _ContractBigQueryCursor:
+    """In-memory cursor double for `_ContractBigQueryClient`."""
+
+    __slots__ = (
+        "_async_mode",
+        "_client",
+        "_param_encoder",
+        "_pos",
+        "_rows",
+        "_session_id",
+        "arraysize",
+        "description",
+        "query_metadata",
+        "rowcount",
+    )
+
+    def __init__(
+        self,
+        client: _ContractBigQueryClient,
+        *,
+        session_id: str | None = None,
+        param_encoder: Any = None,
+        async_mode: bool = False,
+    ) -> None:
+        self._client = client
+        self._session_id = session_id
+        self._param_encoder = param_encoder
+        self._async_mode = async_mode
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self.arraysize = 1
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.query_metadata: dict[str, Any] = {}
+        self.rowcount = -1
+
+    def _wrap(self, value: Any) -> Any:
+        if self._async_mode:
+
+            async def _coro() -> Any:
+                return value
+
+            return _coro()
+        return value
+
+    def _run_one(self, sql: str, params: Any = None) -> int:
+        exec_sql = sql
+        params_json: str | None = None
+        if params:
+            if callable(self._param_encoder):
+                encoded = self._param_encoder(sql, params)
+                if isinstance(encoded, tuple):
+                    exec_sql, params_json = encoded[0], encoded[1]
+                else:
+                    params_json = encoded if isinstance(encoded, str) else encode_json(encoded)
+            elif isinstance(params, str):
+                params_json = params
+        result = self._client._query_sync(exec_sql, params_json, self._session_id)
+        self.query_metadata = dict(result)
+        cols = result.get("columns") or []
+        if cols:
+            self.description = tuple((str(c), None, None, None, None, None, None) for c in cols)
+            self._rows = [tuple(r) for r in result.get("rows", ())]
+            self._pos = 0
+            self.rowcount = len(self._rows)
+            return self.rowcount
+        self.description = None
+        self._rows = []
+        self._pos = 0
+        affected = int(result.get("num_dml_affected_rows", 0))
+        self.rowcount = affected
+        return affected
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        self._run_one(sql, params)
+        return self._wrap(None)
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> Any:
+        total = 0
+        for params in seq_of_params:
+            total += max(0, self._run_one(sql, params))
+        self.description = None
+        self._rows = []
+        self._pos = 0
+        self.rowcount = total
+        return self._wrap(None)
+
+    def fetchone(self) -> Any:
+        if self._pos >= len(self._rows):
+            return self._wrap(None)
+        row = self._rows[self._pos]
+        self._pos += 1
+        return self._wrap(row)
+
+    def fetchmany(self, size: int | None = None) -> Any:
+        limit = self.arraysize if size is None else size
+        batch = self._rows[self._pos : self._pos + limit]
+        self._pos += len(batch)
+        return self._wrap(batch)
+
+    def fetchall(self) -> Any:
+        batch = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return self._wrap(batch)
+
+    def close(self) -> Any:
+        self._rows = []
+        self._pos = 0
+        return self._wrap(None)
 
 
 class _ContractSpannerRwTx:
@@ -392,6 +528,23 @@ class _ContractSpannerRwTx:
             self._client._conn.rollback()
             self._closed = True
         return self._client._wrap(None)
+
+    def cursor(
+        self,
+        *,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+        **_kwargs: Any,
+    ) -> _ContractSpannerCursor:
+        if lazy_begin:
+            msg = "Spanner cursors do not support lazy_begin"
+            raise NotSupportedError(msg)
+        return _ContractSpannerCursor(
+            self._client,
+            in_tx=True,
+            param_encoder=param_encoder,
+            async_mode=self._async_mode,
+        )
 
 
 class _ContractSpannerClient:
@@ -496,6 +649,119 @@ class _ContractSpannerClient:
     def read_arrow(self, *_args: Any) -> Any:
         msg = "UNIMPLEMENTED: fallback to query"
         raise RuntimeError(msg)
+
+    def cursor(
+        self,
+        *,
+        param_encoder: Any = None,
+        lazy_begin: bool = False,
+        **_kwargs: Any,
+    ) -> _ContractSpannerCursor:
+        if lazy_begin:
+            msg = "Spanner cursors do not support lazy_begin"
+            raise NotSupportedError(msg)
+        return _ContractSpannerCursor(
+            self,
+            in_tx=False,
+            param_encoder=param_encoder,
+            async_mode=self._async_mode,
+        )
+
+
+class _ContractSpannerCursor:
+    """In-memory cursor double for `_ContractSpannerClient` and `_ContractSpannerRwTx`."""
+
+    __slots__ = (
+        "_async_mode",
+        "_client",
+        "_in_tx",
+        "_param_encoder",
+        "_pos",
+        "_rows",
+        "arraysize",
+        "description",
+        "rowcount",
+    )
+
+    def __init__(
+        self,
+        client: _ContractSpannerClient,
+        *,
+        in_tx: bool = False,
+        param_encoder: Any = None,
+        async_mode: bool = False,
+    ) -> None:
+        self._client = client
+        self._in_tx = in_tx
+        self._param_encoder = param_encoder
+        self._async_mode = async_mode
+        self._rows: list[tuple[Any, ...]] = []
+        self._pos = 0
+        self.arraysize = 1
+        self.description: tuple[tuple[Any, ...], ...] | None = None
+        self.rowcount = -1
+
+    def _run_one(self, sql: str, params: Any = None) -> int:
+        params_json: str | None = None
+        if params:
+            if callable(self._param_encoder):
+                encoded = self._param_encoder(params)
+                params_json = encoded if isinstance(encoded, str) else encode_json(encoded)
+            elif isinstance(params, str):
+                params_json = params
+        adapted, bound = self._client._adapt_sql(sql, params_json)
+        cur = self._client._conn.execute(adapted, bound)
+        if cur.description:
+            self.description = tuple((str(d[0]), None, None, None, None, None, None) for d in cur.description)
+            self._rows = [tuple(r) for r in cur.fetchall()]
+            self._pos = 0
+            self.rowcount = len(self._rows)
+            return self.rowcount
+        affected = max(0, int(cur.rowcount or 0))
+        if not self._in_tx:
+            self._client._conn.commit()
+        self.description = None
+        self._rows = []
+        self._pos = 0
+        self.rowcount = affected
+        return affected
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        self._run_one(sql, params)
+        return self._client._wrap(None)
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> Any:
+        total = 0
+        for params in seq_of_params:
+            total += max(0, self._run_one(sql, params))
+        self.description = None
+        self._rows = []
+        self._pos = 0
+        self.rowcount = total
+        return self._client._wrap(None)
+
+    def fetchone(self) -> Any:
+        if self._pos >= len(self._rows):
+            return self._client._wrap(None)
+        row = self._rows[self._pos]
+        self._pos += 1
+        return self._client._wrap(row)
+
+    def fetchmany(self, size: int | None = None) -> Any:
+        limit = self.arraysize if size is None else size
+        batch = self._rows[self._pos : self._pos + limit]
+        self._pos += len(batch)
+        return self._client._wrap(batch)
+
+    def fetchall(self) -> Any:
+        batch = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return self._client._wrap(batch)
+
+    def close(self) -> Any:
+        self._rows = []
+        self._pos = 0
+        return self._client._wrap(None)
 
 
 class _ContractMSSQLClient:
@@ -1073,43 +1339,6 @@ def test_zero_type_ignore_override_annotations_in_db_drivers() -> None:
     assert offenders == []
 
 
-@pytest.mark.parametrize(
-    ("query", "params", "expected_rows", "expected_cols"),
-    [
-        ("SELECT id, label FROM items ORDER BY id", None, [{"id": 1, "label": "alpha"}], ["id", "label"]),
-        ("SELECT id, label FROM items WHERE id = ?", (999,), [], ["id", "label"]),
-        (
-            "INSERT INTO items (label) VALUES (?) RETURNING id, label",
-            ("beta",),
-            [{"id": 2, "label": "beta"}],
-            ["id", "label"],
-        ),
-        ("UPDATE items SET label = ? WHERE id = ? RETURNING id, label", ("gamma", 999), [], ["id", "label"]),
-    ],
-)
-@pytest.mark.anyio
-async def test_driver_query_with_columns_preserves_zero_row_columns(
-    query: str,
-    params: tuple[Any, ...] | None,
-    expected_rows: list[dict[str, Any]],
-    expected_cols: list[str],
-) -> None:
-    """Both sync and async drivers preserve ordered column names on empty and populated results."""
-    with SyncSQLiteDriver(SQLiteConfig(path=":memory:")) as sync_driver:
-        sync_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
-        sync_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
-        rows, cols = sync_driver.query_with_columns(query, params)
-        assert rows == expected_rows
-        assert cols == expected_cols
-
-    async with AsyncSQLiteDriver(SQLiteConfig(path=":memory:")) as async_driver:
-        await async_driver.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)")
-        await async_driver.execute("INSERT INTO items (label) VALUES (?)", ("alpha",))
-        rows_async, cols_async = await async_driver.query_with_columns(query, params)
-        assert rows_async == expected_rows
-        assert cols_async == expected_cols
-
-
 @pytest.mark.anyio
 async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_protocol() -> None:
     """Verify non-overlapping dialect_tag values, deterministic SQLite/DuckDB from_url paths, and Spanner CDC protocols."""
@@ -1151,3 +1380,194 @@ async def test_dialect_tag_uniqueness_deterministic_file_urls_and_spanner_cdc_pr
     assert isinstance(async_source, AsyncChangeSource)
     assert list(sync_source.stream()) == []
     assert [ev async for ev in async_source.stream()] == []
+
+
+class _LeaseTestConfig(BaseDatabaseConfig, frozen=True, gc=False):
+    """Minimal database config struct for lease helper contract tests."""
+
+
+class _LeaseTestDriver(CommonDriverMixin[_LeaseTestConfig]):
+    """Minimal driver subclass exposing CommonDriverMixin lease helpers."""
+
+    __slots__ = ("__weakref__",)
+
+
+class _RecordingSlotLease:
+    """Lease double identified by slot_index and generation."""
+
+    __slots__ = ("generation", "slot_index")
+
+    def __init__(self, slot_index: int = 7, generation: int = 3) -> None:
+        self.slot_index = slot_index
+        self.generation = generation
+
+
+class _SelfReleasingLease:
+    """Lease double exposing a synchronous release() method."""
+
+    __slots__ = ("releases",)
+
+    def __init__(self) -> None:
+        self.releases = 0
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+class _RecordingBroker:
+    """Broker double recording acquire and release calls."""
+
+    def __init__(self, *, fail_acquire: bool = False, lease: Any = None) -> None:
+        self.fail_acquire = fail_acquire
+        self.lease = lease if lease is not None else _RecordingSlotLease()
+        self.acquired: list[tuple[int, int]] = []
+        self.released: list[tuple[int, int]] = []
+
+    def acquire(self, pid: int, timeout_ms: int = 5000) -> Any:
+        self.acquired.append((pid, timeout_ms))
+        if self.fail_acquire:
+            msg = "broker saturated"
+            raise RuntimeError(msg)
+        return self.lease
+
+    def release(self, slot_index: int, generation: int) -> None:
+        self.released.append((slot_index, generation))
+
+
+class _RecordingLeaseTable:
+    """Lease table double for brokers exposing broker.lease_table."""
+
+    def __init__(self, lease: _RecordingSlotLease) -> None:
+        self.lease = lease
+        self.released: list[tuple[int, int]] = []
+
+    def acquire(self, pid: int) -> _RecordingSlotLease:
+        _ = pid
+        return self.lease
+
+    def release(self, slot_index: int, generation: int) -> None:
+        self.released.append((slot_index, generation))
+
+
+class _TableBackedBroker:
+    """Broker double delegating acquire and release to lease_table."""
+
+    def __init__(self, lease: _RecordingSlotLease) -> None:
+        self.lease_table = _RecordingLeaseTable(lease)
+
+
+class _RecordingLeaseClient:
+    """Native client double recording attach_lease calls."""
+
+    def __init__(self) -> None:
+        self.attached: list[Any] = []
+
+    def attach_lease(self, releaser: Any) -> None:
+        self.attached.append(releaser)
+
+
+def _direct_and_arg_referents(obj: Any) -> list[Any]:
+    """Return direct gc referents and elements of any referent tuples."""
+    referents = gc.get_referents(obj)
+    expanded: list[Any] = list(referents)
+    for item in referents:
+        if isinstance(item, tuple):
+            expanded.extend(item)
+    return expanded
+
+
+@pytest.mark.parametrize("shape", ["broker_release", "self_releasing", "lease_table"])
+def test_lease_releaser_invokes_expected_broker_release_shape(shape: str) -> None:
+    """_lease_releaser invokes the matching release path for every broker shape."""
+    if shape == "broker_release":
+        lease = _RecordingSlotLease(slot_index=4, generation=9)
+        broker = _RecordingBroker(lease=lease)
+        plan = _BrokerLeasePlan(broker)
+        _lease_releaser(broker, plan, lease)()
+        assert broker.released == [(4, 9)]
+    elif shape == "self_releasing":
+        self_lease = _SelfReleasingLease()
+        broker = _RecordingBroker(lease=self_lease)
+        plan = _BrokerLeasePlan(broker)
+        _lease_releaser(broker, plan, self_lease)()
+        assert self_lease.releases == 1
+        assert broker.released == []
+    else:
+        lease = _RecordingSlotLease(slot_index=11, generation=2)
+        table_broker = _TableBackedBroker(lease)
+        plan = _BrokerLeasePlan(table_broker)
+        _lease_releaser(table_broker, plan, lease)()
+        assert table_broker.lease_table.released == [(11, 2)]
+
+
+def test_lease_releaser_holds_no_driver_reference() -> None:
+    """_lease_releaser references only the broker, plan, and lease, allowing driver collection."""
+    lease = _RecordingSlotLease(slot_index=5, generation=1)
+    broker = _RecordingBroker(lease=lease)
+    driver = _LeaseTestDriver(_LeaseTestConfig(), broker=broker)
+    plan = driver._lease_plan()
+    client = _RecordingLeaseClient()
+    assert driver._attach_checkout_lease(client) is True
+    assert len(client.attached) == 1
+    releaser = client.attached[0]
+
+    referents = _direct_and_arg_referents(releaser)
+    assert any(ref is broker for ref in referents)
+    assert any(ref is plan for ref in referents)
+    assert any(ref is lease for ref in referents)
+    assert all(ref is not driver for ref in referents)
+
+    driver_ref = weakref.ref(driver)
+    del driver
+    gc.collect()
+    assert driver_ref() is None
+
+    releaser()
+    assert broker.released == [(5, 1)]
+
+
+@pytest.mark.parametrize(
+    ("broker_mode", "expected_attached"),
+    [
+        ("refused", False),
+        ("none", False),
+        ("granted", True),
+    ],
+)
+def test_attach_checkout_lease_behavior(broker_mode: str, expected_attached: bool) -> None:
+    """_attach_checkout_lease attaches a callable on granted acquire and skips on refusal or no broker."""
+    client = _RecordingLeaseClient()
+    broker: _RecordingBroker | None
+    if broker_mode == "refused":
+        broker = _RecordingBroker(fail_acquire=True)
+    elif broker_mode == "none":
+        broker = None
+    else:
+        broker = _RecordingBroker(lease=_RecordingSlotLease(slot_index=8, generation=6))
+
+    driver = _LeaseTestDriver(_LeaseTestConfig(), broker=broker)
+    attached = driver._attach_checkout_lease(client, timeout_ms=250)
+    assert attached is expected_attached
+
+    if expected_attached:
+        assert broker is not None
+        assert len(broker.acquired) == 1
+        assert broker.acquired[0][1] == 250
+        assert len(client.attached) == 1
+        assert callable(client.attached[0])
+        client.attached[0]()
+        assert broker.released == [(8, 6)]
+    else:
+        assert client.attached == []
+
+
+def test_acquire_broker_lease_calls_recording_broker() -> None:
+    """_acquire_broker_lease acquires a lease on a recording broker with the requested timeout."""
+    lease = _RecordingSlotLease(slot_index=3, generation=7)
+    broker = _RecordingBroker(lease=lease)
+    driver = _LeaseTestDriver(_LeaseTestConfig(), broker=broker)
+
+    acquired = driver._acquire_broker_lease(timeout_ms=125)
+    assert acquired is lease
+    assert len(broker.acquired) == 1
+    assert broker.acquired[0][1] == 125

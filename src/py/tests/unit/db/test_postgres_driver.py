@@ -968,35 +968,73 @@ def test_native_constructor_unix_socket_reachability() -> None:
 
 
 @pytest.mark.anyio
-async def test_postgres_drivers_discard_statement_plan_and_release_real_broker_leases() -> None:
-    """Sync and Async PostgreSQL drivers use CommonDriverMixin LeaseBroker and bytes StatementCache cleanly."""
+async def test_postgres_drivers_take_one_lease_per_checkout_and_cache_no_statement_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync and async PostgreSQL drivers take one broker lease per checkout and use the pool single-call path."""
     cluster = FakePostgresCluster()
     sync_broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    sync_driver = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=FakeSyncPostgresPool(cluster), broker=sync_broker)
+    sync_pool = FakeSyncPostgresPool(cluster)
+    sync_dml_calls = 0
+    real_sync_dml = sync_pool.execute_dml
+
+    def _spy_sync_dml(*args: Any, **kwargs: Any) -> Any:
+        nonlocal sync_dml_calls
+        sync_dml_calls += 1
+        return real_sync_dml(*args, **kwargs)
+
+    monkeypatch.setattr(sync_pool, "execute_dml", _spy_sync_dml)
+    sync_driver = SyncPostgreSQLDriver(PostgreSQLConfig(), pool=sync_pool, broker=sync_broker)
+
+    def _forbid_sync_session_client(self: SyncPostgreSQLDriver) -> Any:
+        msg = "driver must use pool single-call path"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(SyncPostgreSQLDriver, "_acquire_session_client", _forbid_sync_session_client)
     try:
         assert sync_driver.execute("CREATE TABLE pg_lease_items (id INTEGER)") == 0
         assert sync_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (1,)) == 1
         assert sync_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (2,)) == 1
         sc = sync_broker.statement_cache()
         assert sc is not None
-        assert sc.stats().hits == 1
+        assert sc.stats().hits == 0
+        assert sc.stats().inserts == 0
         assert sync_broker.stats().active_leases == 0
         assert sync_broker.stats().total_acquired == 3
         assert sync_broker.stats().total_released == 3
+        assert sync_dml_calls == 3
     finally:
         sync_driver.close()
 
     async_broker = LeaseBroker(pool_size=2, max_overflow=0, stmt_capacity=16)
-    async_driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=FakeAsyncPostgresPool(cluster), broker=async_broker)
+    async_pool = FakeAsyncPostgresPool(cluster)
+    async_dml_calls = 0
+    real_async_dml = async_pool.execute_dml
+
+    async def _spy_async_dml(*args: Any, **kwargs: Any) -> Any:
+        nonlocal async_dml_calls
+        async_dml_calls += 1
+        return await real_async_dml(*args, **kwargs)
+
+    monkeypatch.setattr(async_pool, "execute_dml", _spy_async_dml)
+    async_driver = AsyncPostgreSQLDriver(PostgreSQLConfig(), pool=async_pool, broker=async_broker)
+
+    async def _forbid_async_session_client(self: AsyncPostgreSQLDriver) -> Any:
+        msg = "driver must use pool single-call path"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(AsyncPostgreSQLDriver, "_acquire_session_client", _forbid_async_session_client)
     try:
         assert await async_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (3,)) == 1
         assert await async_driver.execute("INSERT INTO pg_lease_items VALUES ($1)", (4,)) == 1
         async_sc = async_broker.statement_cache()
         assert async_sc is not None
-        assert async_sc.stats().hits == 1
+        assert async_sc.stats().hits == 0
+        assert async_sc.stats().inserts == 0
         assert async_broker.stats().active_leases == 0
         assert async_broker.stats().total_acquired == 2
         assert async_broker.stats().total_released == 2
+        assert async_dml_calls == 2
     finally:
         await async_driver.close()
 

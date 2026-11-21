@@ -123,11 +123,19 @@ pub struct PoolStats {
     pub retired: u64,
 }
 
+/// Opaque handle to an event-loop socket reader registered for a pooled connection.
+///
+/// Dropping this handle detaches any still-registered reader from its owning event loop.
+pub(crate) trait LoopReaderSlot: std::any::Any + Send + Sync + std::fmt::Debug {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
 #[derive(Debug)]
 struct IdleEntry {
     conn: PostgresConnection,
     created_at: Instant,
     idle_since: Instant,
+    loop_reader: Option<Box<dyn LoopReaderSlot>>,
 }
 
 #[derive(Debug)]
@@ -276,6 +284,62 @@ impl PostgresPool {
         Ok(())
     }
 
+    /// Synchronously pop a recently-used idle [`PooledConnection`] without entering Tokio.
+    ///
+    /// Returns `Ok(None)` when no fresh idle connection is available so the caller can fall back
+    /// to [`PostgresPool::acquire`].
+    pub(crate) fn try_acquire_idle(
+        self: &Arc<Self>,
+    ) -> Result<Option<PooledConnection>, PostgresError> {
+        let mut expired_to_close: Vec<PostgresConnection> = Vec::new();
+        let mut acquired_idle: Option<IdleEntry> = None;
+        {
+            let mut guard = self.inner.lock().expect("PostgresPool lock poisoned");
+            if guard.closed {
+                return Err(PostgresError::Interface(
+                    "cannot acquire connection from a closed PostgresPool".to_string(),
+                ));
+            }
+            let now = Instant::now();
+            while let Some(entry) = guard.idle.pop_back() {
+                let lifetime_expired = self
+                    .options
+                    .max_lifetime
+                    .is_some_and(|max_lt| now.duration_since(entry.created_at) >= max_lt);
+                let idle_expired = self
+                    .options
+                    .max_idle_lifetime
+                    .is_some_and(|max_idle| now.duration_since(entry.idle_since) >= max_idle);
+                if lifetime_expired || idle_expired || entry.conn.is_closed() {
+                    guard.retired += 1;
+                    drop(entry.loop_reader);
+                    expired_to_close.push(entry.conn);
+                    continue;
+                }
+                let recently_used = now.duration_since(entry.idle_since) < Duration::from_secs(1);
+                if !recently_used {
+                    guard.idle.push_back(entry);
+                    break;
+                }
+                guard.borrowed += 1;
+                acquired_idle = Some(entry);
+                break;
+            }
+        }
+        for mut stale in expired_to_close {
+            vertebra_db::py_async::db_runtime_handle().spawn(async move {
+                let _ = stale.close().await;
+            });
+        }
+        Ok(acquired_idle.map(|entry| PooledConnection {
+            pool: Arc::clone(self),
+            conn: Some(entry.conn),
+            created_at: entry.created_at,
+            retire: false,
+            loop_reader: entry.loop_reader,
+        }))
+    }
+
     /// Acquire a physical [`PooledConnection`] lease within `options.acquire_timeout`.
     pub async fn acquire(self: &Arc<Self>) -> Result<PooledConnection, PostgresError> {
         let acquire_deadline = Instant::now() + self.options.acquire_timeout;
@@ -381,6 +445,7 @@ impl PostgresPool {
                                 conn,
                                 created_at: now,
                                 idle_since: now,
+                                loop_reader: None,
                             });
                         }
                     }
@@ -453,6 +518,7 @@ impl PostgresPool {
                         conn: Some(conn),
                         created_at,
                         retire: false,
+                        loop_reader: None,
                     });
                 }
             }
@@ -514,6 +580,7 @@ impl PostgresPool {
                     conn: Some(conn),
                     created_at,
                     retire: false,
+                    loop_reader: None,
                 });
             }
 
@@ -566,6 +633,7 @@ impl PostgresPool {
                             conn: Some(conn),
                             created_at,
                             retire: false,
+                            loop_reader: None,
                         });
                     }
                     Err(err) => {
@@ -703,6 +771,7 @@ impl PostgresPool {
                             conn,
                             created_at,
                             idle_since: Instant::now(),
+                            loop_reader: None,
                         });
                     }
                 }
@@ -798,9 +867,25 @@ pub struct PooledConnection {
     conn: Option<PostgresConnection>,
     created_at: Instant,
     retire: bool,
+    loop_reader: Option<Box<dyn LoopReaderSlot>>,
 }
 
 impl PooledConnection {
+    /// Borrow the optional event-loop reader slot attached to this pooled connection.
+    pub(crate) fn loop_reader(&self) -> Option<&dyn LoopReaderSlot> {
+        self.loop_reader.as_deref()
+    }
+
+    /// Take the optional event-loop reader slot off this pooled connection.
+    pub(crate) fn take_loop_reader(&mut self) -> Option<Box<dyn LoopReaderSlot>> {
+        self.loop_reader.take()
+    }
+
+    /// Attach an event-loop reader slot to this pooled connection (detaching any previous one).
+    pub(crate) fn set_loop_reader(&mut self, slot: Box<dyn LoopReaderSlot>) {
+        self.loop_reader = Some(slot);
+    }
+
     /// Mark this lease to close and retire on return rather than re-entering the idle queue.
     pub fn mark_retire(&mut self) {
         self.retire = true;
@@ -818,6 +903,7 @@ impl PooledConnection {
 
     /// Explicitly reset and return this lease to the pool under `options.reset_timeout`.
     pub async fn release(mut self) -> Result<(), PostgresError> {
+        drop(self.loop_reader.take());
         let Some(conn) = self.conn.take() else {
             return Ok(());
         };
@@ -835,8 +921,10 @@ impl PooledConnection {
     /// Return a verified-clean `Idle` connection straight to the idle queue without `DISCARD ALL`.
     pub(crate) fn return_clean(mut self) {
         let Some(conn) = self.conn.take() else {
+            drop(self.loop_reader.take());
             return;
         };
+        let loop_reader = self.loop_reader.take();
         let pool = Arc::clone(&self.pool);
         let created_at = self.created_at;
         let now = Instant::now();
@@ -850,12 +938,14 @@ impl PooledConnection {
             guard.borrowed = guard.borrowed.saturating_sub(1);
             if guard.closed || guard.retire_all_borrowed || lifetime_expired || self.retire {
                 guard.retired += 1;
+                drop(loop_reader);
                 to_close = Some(conn);
             } else {
                 guard.idle.push_back(IdleEntry {
                     conn,
                     created_at,
                     idle_since: now,
+                    loop_reader,
                 });
             }
         }
@@ -898,6 +988,7 @@ impl DerefMut for PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
+        drop(self.loop_reader.take());
         let Some(conn) = self.conn.take() else {
             return;
         };
@@ -920,7 +1011,16 @@ impl Drop for PooledConnection {
     }
 }
 
-fn is_clean_oneshot_query(sql: &str, command_tag: &str) -> bool {
+fn contains_ascii_icase(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+pub(crate) fn is_clean_oneshot_query(sql: &str, command_tag: &str) -> bool {
     let verb = command_tag.split_whitespace().next().unwrap_or("");
     let safe_tag = verb.eq_ignore_ascii_case("SELECT")
         || verb.eq_ignore_ascii_case("INSERT")
@@ -933,11 +1033,11 @@ fn is_clean_oneshot_query(sql: &str, command_tag: &str) -> bool {
     if !safe_tag {
         return false;
     }
-    let lower = sql.to_ascii_lowercase();
-    !lower.contains("set_config")
-        && !lower.contains("advisory")
-        && !lower.contains("temp")
-        && !lower.contains("unlogged")
+    let bytes = sql.as_bytes();
+    !contains_ascii_icase(bytes, b"set_config")
+        && !contains_ascii_icase(bytes, b"advisory")
+        && !contains_ascii_icase(bytes, b"temp")
+        && !contains_ascii_icase(bytes, b"unlogged")
 }
 
 fn check_connection_idle_alive(conn: &mut PostgresConnection) -> bool {

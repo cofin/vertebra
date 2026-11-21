@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use chrono::{Datelike, Timelike};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
 };
@@ -1190,9 +1191,370 @@ pub fn normalize_named_bind_map(
     pairs
 }
 
+/// Return format for decoded Oracle 26ai `VECTOR` cells.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VectorReturnFormat {
+    #[default]
+    List,
+    VectorView,
+    Bytes,
+}
+
+impl VectorReturnFormat {
+    /// Parse a string option (`"list"`, `"vector_view"`, or `"bytes"`).
+    #[allow(dead_code)]
+    pub fn parse(raw: &str) -> Result<Self, OracleError> {
+        match raw {
+            "list" => Ok(Self::List),
+            "vector_view" => Ok(Self::VectorView),
+            "bytes" => Ok(Self::Bytes),
+            other => Err(OracleError::Interface(format!(
+                "Unsupported vector_return_format: {other:?}; expected 'list', 'vector_view', or 'bytes'"
+            ))),
+        }
+    }
+
+    /// Return the canonical string name for Python codec interop.
+    #[allow(dead_code)]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::VectorView => "vector_view",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
+/// Per-cursor/driver options governing Oracle value coercion on the worker boundary.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OracleValueOptions {
+    pub enable_uuid_binary: bool,
+    pub fetch_decimals: bool,
+    pub vector_return_format: VectorReturnFormat,
+}
+
+impl Default for OracleValueOptions {
+    fn default() -> Self {
+        Self {
+            enable_uuid_binary: true,
+            fetch_decimals: false,
+            vector_return_format: VectorReturnFormat::List,
+        }
+    }
+}
+
+#[allow(dead_code)]
+static DECODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static ENCODE_OSON_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static DECODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static ENCODE_VECTOR_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static DECIMAL_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static VECTOR_VIEW_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+#[allow(dead_code)]
+static MSGSPEC_STRUCT_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+#[allow(dead_code)]
+fn cached_oracle_core_callable<'py>(
+    py: Python<'py>,
+    slot: &'static PyOnceLock<Py<PyAny>>,
+    attr: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let obj = slot.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let core_mod = py.import("vertebra.db.adapters.oracle.core")?;
+        let core_cls = core_mod.getattr("OracleCore")?;
+        Ok(core_cls.getattr(attr)?.unbind())
+    })?;
+    Ok(obj.bind(py).clone())
+}
+
+#[allow(dead_code)]
+fn cached_decode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    cached_oracle_core_callable(py, &DECODE_OSON_FN, "decode_oson")
+}
+
+#[allow(dead_code)]
+fn cached_encode_oson_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    cached_oracle_core_callable(py, &ENCODE_OSON_FN, "encode_oson")
+}
+
+#[allow(dead_code)]
+fn cached_decode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    cached_oracle_core_callable(py, &DECODE_VECTOR_FN, "decode_vector")
+}
+
+#[allow(dead_code)]
+fn cached_encode_vector_fn<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    cached_oracle_core_callable(py, &ENCODE_VECTOR_FN, "encode_vector")
+}
+
+#[allow(dead_code)]
+fn cached_uuid_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let obj = UUID_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("uuid")?.getattr("UUID")?.unbind())
+    })?;
+    Ok(obj.bind(py).clone())
+}
+
+#[allow(dead_code)]
+fn cached_decimal_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let obj = DECIMAL_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("decimal")?.getattr("Decimal")?.unbind())
+    })?;
+    Ok(obj.bind(py).clone())
+}
+
+#[allow(dead_code)]
+fn cached_vector_view_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let obj = VECTOR_VIEW_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py
+            .import("vertebra._vertebra")?
+            .getattr("VectorView")?
+            .unbind())
+    })?;
+    Ok(obj.bind(py).clone())
+}
+
+#[allow(dead_code)]
+fn cached_msgspec_struct_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let obj = MSGSPEC_STRUCT_CLS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("msgspec")?.getattr("Struct")?.unbind())
+    })?;
+    Ok(obj.bind(py).clone())
+}
+
+#[allow(dead_code)]
+fn column_is_raw_or_unknown(column_type: Option<&str>) -> bool {
+    match column_type {
+        None => true,
+        Some(ct) => ct.is_empty() || ct.to_ascii_uppercase().contains("RAW"),
+    }
+}
+
+/// Coerce an [`OracleCellValue`] into a Python object matching `OracleCore.coerce_row_cell`.
+#[allow(dead_code)]
+pub fn coerce_cell_to_py(
+    py: Python<'_>,
+    cell: OracleCellValue,
+    column_type: Option<&str>,
+    opts: OracleValueOptions,
+) -> PyResult<Py<PyAny>> {
+    match cell {
+        OracleCellValue::Null => Ok(py.None()),
+        OracleCellValue::Bool(b) => Ok(PyBool::new(py, b).to_owned().into_any().unbind()),
+        OracleCellValue::Int(v) => {
+            if opts.fetch_decimals {
+                let dec_cls = cached_decimal_cls(py)?;
+                Ok(dec_cls.call1((v.to_string(),))?.unbind())
+            } else {
+                Ok(PyInt::new(py, v).into_any().unbind())
+            }
+        }
+        OracleCellValue::Float(f) => {
+            if opts.fetch_decimals {
+                let dec_cls = cached_decimal_cls(py)?;
+                let py_str = PyFloat::new(py, f).str()?;
+                Ok(dec_cls.call1((py_str,))?.unbind())
+            } else {
+                Ok(PyFloat::new(py, f).into_any().unbind())
+            }
+        }
+        OracleCellValue::DecimalStr(s) => {
+            if !opts.fetch_decimals
+                && !s.contains('.')
+                && !s.contains('e')
+                && !s.contains('E')
+                && let Ok(iv) = s.parse::<i64>()
+            {
+                return Ok(PyInt::new(py, iv).into_any().unbind());
+            }
+            let dec_cls = cached_decimal_cls(py)?;
+            let dec = dec_cls.call1((&s,))?;
+            if !opts.fetch_decimals && dec.call_method0("is_finite")?.is_truthy()? {
+                let integral = dec.call_method0("to_integral_value")?;
+                if dec.eq(&integral)? {
+                    return Ok(py.get_type::<PyInt>().call1((dec,))?.unbind());
+                }
+            }
+            Ok(dec.unbind())
+        }
+        OracleCellValue::Str(s) => Ok(PyString::new(py, &s).into_any().unbind()),
+        OracleCellValue::Bytes(raw) => {
+            if raw.len() >= 8 && &raw[..3] == OSON_MAGIC && raw[3] == 0x01 {
+                let decode_oson = cached_decode_oson_fn(py)?;
+                return Ok(decode_oson.call1((PyBytes::new(py, &raw),))?.unbind());
+            }
+            if raw.len() >= 8 && raw[0] == ORACLE_VECTOR_MAGIC && raw[1] == ORACLE_VECTOR_VERSION {
+                let decode_vec = cached_decode_vector_fn(py)?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("return_format", opts.vector_return_format.as_str())?;
+                return Ok(decode_vec
+                    .call((PyBytes::new(py, &raw),), Some(&kwargs))?
+                    .unbind());
+            }
+            if opts.enable_uuid_binary && raw.len() == 16 && column_is_raw_or_unknown(column_type) {
+                let uuid_cls = cached_uuid_cls(py)?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("bytes", PyBytes::new(py, &raw))?;
+                return Ok(uuid_cls.call((), Some(&kwargs))?.unbind());
+            }
+            Ok(PyBytes::new(py, &raw).into_any().unbind())
+        }
+        OracleCellValue::Vector(vec_data) => {
+            let vv = vec_data
+                .into_py_vector_view(py)
+                .map_err(|e| e.to_py_err(py))?;
+            match opts.vector_return_format {
+                VectorReturnFormat::VectorView => Ok(vv.unbind()),
+                VectorReturnFormat::List => {
+                    let decode_vec = cached_decode_vector_fn(py)?;
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("return_format", "list")?;
+                    Ok(decode_vec.call((vv,), Some(&kwargs))?.unbind())
+                }
+                VectorReturnFormat::Bytes => Ok(vv.call_method0("to_bytes")?.unbind()),
+            }
+        }
+        other @ (OracleCellValue::Date { .. }
+        | OracleCellValue::Timestamp { .. }
+        | OracleCellValue::Oson(_)) => other
+            .into_py_object(py, opts.fetch_decimals)
+            .map(Bound::unbind)
+            .map_err(|e| e.to_py_err(py)),
+    }
+}
+
+/// Coerce and extract a Python bind parameter matching `OracleCore.coerce_bind_parameter` followed by [`extract_bind_value`].
+#[allow(dead_code)]
+pub fn coerce_bind_from_py(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    opts: OracleValueOptions,
+) -> Result<OracleCellValue, OracleError> {
+    if value.is_none() {
+        return Ok(OracleCellValue::Null);
+    }
+    if value.is_exact_instance_of::<PyBool>() {
+        let b = value
+            .extract::<bool>()
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::Bool(b));
+    }
+    if value.is_exact_instance_of::<PyInt>() {
+        if let Ok(iv) = value.extract::<i64>() {
+            return Ok(OracleCellValue::Int(iv));
+        }
+        let text = value
+            .str()
+            .and_then(|s| Ok(s.to_str()?.to_owned()))
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::DecimalStr(text));
+    }
+    if value.is_exact_instance_of::<PyFloat>() {
+        let fv = value
+            .extract::<f64>()
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::Float(fv));
+    }
+    if value.is_exact_instance_of::<PyString>() {
+        let sv = value
+            .extract::<String>()
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::Str(sv));
+    }
+    if value.is_exact_instance_of::<PyBytes>() {
+        return extract_bind_value(value);
+    }
+
+    let uuid_cls = cached_uuid_cls(py).map_err(|e| OracleError::data_error(e.to_string()))?;
+    if value
+        .is_instance(&uuid_cls)
+        .map_err(|e| OracleError::data_error(e.to_string()))?
+    {
+        if opts.enable_uuid_binary {
+            let raw_bytes = value
+                .getattr("bytes")
+                .and_then(|b| b.extract::<Vec<u8>>())
+                .map_err(|e| OracleError::data_error(e.to_string()))?;
+            return Ok(OracleCellValue::Bytes(raw_bytes));
+        }
+        let text = value
+            .str()
+            .and_then(|s| Ok(s.to_str()?.to_owned()))
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return Ok(OracleCellValue::Str(text));
+    }
+
+    if let Ok(vv_cls) = cached_vector_view_cls(py)
+        && value
+            .is_instance(&vv_cls)
+            .map_err(|e| OracleError::data_error(e.to_string()))?
+    {
+        let encode_vec =
+            cached_encode_vector_fn(py).map_err(|e| OracleError::data_error(e.to_string()))?;
+        let encoded = encode_vec
+            .call1((value,))
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return extract_bind_value(&encoded);
+    }
+
+    let is_dict_or_struct = value.is_instance_of::<PyDict>()
+        || cached_msgspec_struct_cls(py)
+            .is_ok_and(|struct_cls| value.is_instance(&struct_cls).unwrap_or(false));
+    if is_dict_or_struct {
+        let encode_oson =
+            cached_encode_oson_fn(py).map_err(|e| OracleError::data_error(e.to_string()))?;
+        let encoded = encode_oson
+            .call1((value,))
+            .map_err(|e| OracleError::data_error(e.to_string()))?;
+        return extract_bind_value(&encoded);
+    }
+
+    extract_bind_value(value)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    fn ensure_test_python_path(py: Python<'_>) {
+        let sys = py.import("sys").unwrap();
+        let sys_path = sys.getattr("path").unwrap();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut candidates = vec![repo_root.join("src/py")];
+        if let Ok(entries) = std::fs::read_dir(repo_root.join(".venv/lib")) {
+            for entry in entries.flatten() {
+                let site_packages = entry.path().join("site-packages");
+                if site_packages.is_dir() {
+                    candidates.push(site_packages);
+                }
+            }
+        }
+        for path in candidates {
+            if let Ok(canonical) = path.canonicalize()
+                && let Some(text) = canonical.to_str()
+            {
+                let contains: bool = sys_path
+                    .call_method1("__contains__", (text,))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                if !contains {
+                    sys_path.call_method1("insert", (0, text)).unwrap();
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_vector_wire_roundtrip_and_invalid_magic() {
@@ -1228,5 +1590,229 @@ mod tests {
         let bad_err =
             OracleVectorData::decode_wire_bytes(b"\x00\x01\x02\x00\x00\x00\x00\x01").unwrap_err();
         assert_eq!(bad_err.classify().sqlstate, "22000");
+    }
+
+    #[test]
+    fn test_vector_return_format_parse_and_options_default() {
+        assert_eq!(
+            VectorReturnFormat::parse("list").unwrap(),
+            VectorReturnFormat::List
+        );
+        assert_eq!(
+            VectorReturnFormat::parse("vector_view").unwrap(),
+            VectorReturnFormat::VectorView
+        );
+        assert_eq!(
+            VectorReturnFormat::parse("bytes").unwrap(),
+            VectorReturnFormat::Bytes
+        );
+        assert!(matches!(
+            VectorReturnFormat::parse("numpy"),
+            Err(OracleError::Interface(_))
+        ));
+
+        let opts = OracleValueOptions::default();
+        assert!(opts.enable_uuid_binary);
+        assert!(!opts.fetch_decimals);
+        assert_eq!(opts.vector_return_format, VectorReturnFormat::List);
+    }
+
+    #[test]
+    fn test_coerce_cell_to_py_uuid_and_binary_rules() {
+        Python::attach(|py| {
+            let uuid_bytes: Vec<u8> = (0u8..16).collect();
+            let uuid_cls = py.import("uuid").unwrap().getattr("UUID").unwrap();
+
+            let out_raw = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bytes(uuid_bytes.clone()),
+                Some("RAW"),
+                OracleValueOptions::default(),
+            )
+            .unwrap();
+            assert!(out_raw.bind(py).is_instance(&uuid_cls).unwrap());
+            assert_eq!(
+                out_raw
+                    .bind(py)
+                    .getattr("bytes")
+                    .unwrap()
+                    .extract::<Vec<u8>>()
+                    .unwrap(),
+                uuid_bytes
+            );
+
+            let out_unknown = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bytes(uuid_bytes.clone()),
+                None,
+                OracleValueOptions::default(),
+            )
+            .unwrap();
+            assert!(out_unknown.bind(py).is_instance(&uuid_cls).unwrap());
+
+            let out_disabled = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bytes(uuid_bytes.clone()),
+                Some("RAW"),
+                OracleValueOptions {
+                    enable_uuid_binary: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(out_disabled.bind(py).is_exact_instance_of::<PyBytes>());
+            assert_eq!(out_disabled.extract::<Vec<u8>>(py).unwrap(), uuid_bytes);
+
+            let out_blob = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bytes(uuid_bytes.clone()),
+                Some("BLOB"),
+                OracleValueOptions::default(),
+            )
+            .unwrap();
+            assert!(out_blob.bind(py).is_exact_instance_of::<PyBytes>());
+            assert_eq!(out_blob.extract::<Vec<u8>>(py).unwrap(), uuid_bytes);
+        });
+    }
+
+    #[test]
+    fn test_coerce_cell_to_py_numbers_bool_and_null() {
+        Python::attach(|py| {
+            let dec_cls = py.import("decimal").unwrap().getattr("Decimal").unwrap();
+            let default_opts = OracleValueOptions::default();
+            let decimal_opts = OracleValueOptions {
+                fetch_decimals: true,
+                ..Default::default()
+            };
+
+            let int_dec = coerce_cell_to_py(
+                py,
+                OracleCellValue::DecimalStr("5".to_owned()),
+                Some("NUMBER"),
+                default_opts,
+            )
+            .unwrap();
+            assert!(int_dec.bind(py).is_exact_instance_of::<PyInt>());
+            assert_eq!(int_dec.extract::<i64>(py).unwrap(), 5);
+
+            let int_dec_trailing = coerce_cell_to_py(
+                py,
+                OracleCellValue::DecimalStr("5.0".to_owned()),
+                Some("NUMBER"),
+                default_opts,
+            )
+            .unwrap();
+            assert!(int_dec_trailing.bind(py).is_exact_instance_of::<PyInt>());
+            assert_eq!(int_dec_trailing.extract::<i64>(py).unwrap(), 5);
+
+            let frac_dec = coerce_cell_to_py(
+                py,
+                OracleCellValue::DecimalStr("5.5".to_owned()),
+                Some("NUMBER"),
+                default_opts,
+            )
+            .unwrap();
+            assert!(frac_dec.bind(py).is_instance(&dec_cls).unwrap());
+            assert_eq!(frac_dec.bind(py).str().unwrap().to_str().unwrap(), "5.5");
+
+            let float_to_dec = coerce_cell_to_py(
+                py,
+                OracleCellValue::Float(2.5),
+                Some("BINARY_DOUBLE"),
+                decimal_opts,
+            )
+            .unwrap();
+            assert!(float_to_dec.bind(py).is_instance(&dec_cls).unwrap());
+            assert_eq!(
+                float_to_dec.bind(py).str().unwrap().to_str().unwrap(),
+                "2.5"
+            );
+
+            let bool_untouched = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bool(true),
+                Some("BOOLEAN"),
+                decimal_opts,
+            )
+            .unwrap();
+            assert!(bool_untouched.bind(py).is_exact_instance_of::<PyBool>());
+            assert!(bool_untouched.extract::<bool>(py).unwrap());
+
+            let null_val =
+                coerce_cell_to_py(py, OracleCellValue::Null, None, default_opts).unwrap();
+            assert!(null_val.is_none(py));
+        });
+    }
+
+    #[test]
+    fn test_coerce_bind_from_py_uuid_and_dict() {
+        Python::attach(|py| {
+            ensure_test_python_path(py);
+            let uuid_cls = py.import("uuid").unwrap().getattr("UUID").unwrap();
+            let uuid_str = "00010203-0405-0607-0809-0a0b0c0d0e0f";
+            let uuid_obj = uuid_cls.call1((uuid_str,)).unwrap();
+
+            let bound_uuid =
+                coerce_bind_from_py(py, &uuid_obj, OracleValueOptions::default()).unwrap();
+            assert_eq!(
+                bound_uuid,
+                OracleCellValue::Bytes((0u8..16).collect::<Vec<u8>>())
+            );
+
+            let bound_uuid_str = coerce_bind_from_py(
+                py,
+                &uuid_obj,
+                OracleValueOptions {
+                    enable_uuid_binary: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(bound_uuid_str, OracleCellValue::Str(uuid_str.to_owned()));
+
+            let dict = PyDict::new(py);
+            dict.set_item("a", 1i64).unwrap();
+            let bound_dict =
+                coerce_bind_from_py(py, dict.as_any(), OracleValueOptions::default()).unwrap();
+            match bound_dict {
+                OracleCellValue::Oson(bytes) => {
+                    assert!(bytes.len() >= 8);
+                    assert_eq!(&bytes[..3], OSON_MAGIC);
+                    assert_eq!(bytes[3], 0x01);
+
+                    let decoded = coerce_cell_to_py(
+                        py,
+                        OracleCellValue::Bytes(bytes),
+                        Some("JSON"),
+                        OracleValueOptions::default(),
+                    )
+                    .unwrap();
+                    let decoded_dict = decoded.bind(py).cast::<PyDict>().unwrap();
+                    assert_eq!(
+                        decoded_dict
+                            .get_item("a")
+                            .unwrap()
+                            .unwrap()
+                            .extract::<i64>()
+                            .unwrap(),
+                        1
+                    );
+                }
+                other => panic!("expected Oson bind value, got {other:?}"),
+            }
+
+            let vec_bytes = OracleVectorData::Float32(vec![1.5, -2.25]).encode_wire_bytes();
+            let decoded_vec = coerce_cell_to_py(
+                py,
+                OracleCellValue::Bytes(vec_bytes),
+                Some("VECTOR"),
+                OracleValueOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                decoded_vec.extract::<Vec<f32>>(py).unwrap(),
+                vec![1.5f32, -2.25f32]
+            );
+        });
     }
 }

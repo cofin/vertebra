@@ -13,6 +13,9 @@ generated:
   by: flow/0.28.0
   at: "2026-11-12T01:15:00Z"
 verified:
+- by: agent:bb-executor
+  at: "2026-11-21T21:30:00Z"
+  commit: 06e99fbf
 - by: agent:flow-executor
   at: "2026-11-19T03:10:00Z"
   commit: 6f76f8a7
@@ -40,7 +43,7 @@ sources:
   title: Native vertebra._postgres client, pool, COPY, Arrow, and listener stubs
 - id: duckdb-core
   resource: src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore
-  title: DuckDBCore write-statement detection
+  title: DuckDBCore parameter normalization for Arrow row ingestion
 - id: duckdb-secret
   resource: src/py/vertebra/db/adapters/duckdb/config.py::DuckDBSecretConfig
   title: Cloud-agnostic DuckDB CREATE SECRET declaration
@@ -98,6 +101,9 @@ sources:
 - id: bench-arrow-ipc
   resource: tools/benchmarks/micro.py::benchmark_arrow_ipc_stream
   title: Arrow IPC stream open and single-pass iteration microbenchmark
+- id: bench-sql-check
+  resource: tools/benchmarks/adapters/sql.py::check_report_against_comparators
+  title: Adapter benchmark comparator check and allow-list enforcement
 ---
 
 # Database Driver Limitations
@@ -108,8 +114,8 @@ sources:
 - Optional companion driver wheels (`vertebra-postgres`, `vertebra-mysql`, `vertebra-oracle`, `vertebra-mssql`, `vertebra-duckdb`, `vertebra-sqlite`, `vertebra-redis`, `vertebra-valkey`, `vertebra-bigquery`, `vertebra-spanner`) load dynamically via `ensure_module` and fail loud with `MissingDependencyError(install_package="vertebra-core[<extra>]")` when omitted from the active environment; upstream PyPI `duckdb` publishes no free-threaded wheel and is isolated to `[dependency-groups].bench` (`python_version < '3.14'`) for `tools.benchmarks.store` result persistence while `vertebra._duckdb` builds across all supported CPython ABIs. All adapters live under `src/py/vertebra/db/adapters/<engine>/` (`src/py/vertebra/drivers/` is removed).
 - **SQLAlchemy, Alembic & Django Dialect Boundaries**: BigQuery, DuckDB, and SQL Server have no Vertebra Django `DATABASES` backend (`VertebraPlugin` raises `ImproperConfigurationError` if configured; use SQLAlchemy or SQLSpec instead). `duckdb-engine`, `sqlalchemy-bigquery`, `sqlalchemy-spanner`, `django-google-spanner`, and `dogpile.cache` (`vertebra-core[dogpile]`) are optional upstream packages required only when instantiating those specific SQLAlchemy/Django dialect bases or `use_dogpile=True` cache regions, and BigQuery/Spanner execute non-transactional DDL (`autocommit=False` raises PEP 249 `NotSupportedError`). Because `django-google-spanner 5.0.0` raises `ImproperlyConfigured` on import against Django 6.1.x, `vertebra.extensions.django.db.backends.spanner.base.DatabaseWrapper` subclasses `django.db.backends.base.base.BaseDatabaseWrapper` directly and probes `django_spanner.base` via `ensure_module` inside `__init__`.
 - **DuckDB In-Memory Catalog Isolation**: DuckDB isolates plain `:memory:` instances per config whereas `:memory:<name>` shares named in-memory catalogs across drivers [^duckdb-driver].
-- `DuckDBCore` provides only `is_write_statement`; `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}` supply GCS OAuth2 bearer-token rotation for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)` (`persistent=True` with `value_provider` or non-positive/boolean `refresh_interval_seconds` fails validation) [^duckdb-core] [^duckdb-secret] [^gcs-secrets].
-- DuckDB `httpfs` `(HTTP 401)` / `(HTTP 403)` reactive invalidation relies on regex matching (`\(HTTP (?:401|403)\)`) because `vertebra._duckdb` surfaces HTTP status codes inside the exception string. Invalidation marks the provider generation stale for the next statement without implicitly retrying the failed query [^duckdb-driver].
+- `DuckDBCore` provides `normalize_param` for `load_from_arrow` row-sequence ingestion. `vertebra.storage.{SyncGcsBearerSecretProvider,AsyncGcsBearerSecretProvider}` supply GCS OAuth2 bearer-token rotation for `DuckDBSecretConfig(secret_type="gcs", value_provider=...)`, and `persistent=True` with `value_provider` or non-positive/boolean `refresh_interval_seconds` fails validation [^duckdb-core] [^duckdb-secret] [^gcs-secrets].
+- DuckDB `httpfs` `(HTTP 401)` / `(HTTP 403)` reactive invalidation relies on regex matching (`\(HTTP (?:401|403)\)`) because `vertebra._duckdb` surfaces HTTP status codes inside the exception string. On a match, `_on_native_error` invalidates tracked generations, runs a forced refresh, and re-raises the original error without retrying the failed query [^duckdb-driver].
 - Live DuckDB `httpfs` extension tests are gated behind `VERTEBRA_CONFORMANCE_DUCKDB_HTTPFS=1` when `httpfs` is not pre-cached because `INSTALL httpfs` requires outbound network access, and the CI `conformance-oracle` job runs with `continue-on-error: true` in `.github/workflows/ci.yml` to isolate `gvenzl/oracle-free:23-slim-faststart` container startup variance on shared `ubuntu-latest` runners [^duckdb-driver] [^ci-workflow].
 - `DataFusionEngine` / `DataFusionCore` require the optional `datafusion` wheel for live `SessionContext` execution; when `datafusion` is absent and no `ctx` is injected (`self._ctx is None`), `register_table` defers source registration until `_ensure_context()` and `explain_plan` returns metadata-only table references without invoking the planner, while `execute_arrow` and `execute_dicts` fail closed with `MissingDependencyError` [^datafusion-core].
 - `AzureEntraTokenProvider` (`db/driver/_cloud_auth.py`) supports explicit client credentials, ambient `AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`, Workload Identity Federation (`AZURE_FEDERATED_TOKEN_FILE` + `AZURE_AUTHORITY_HOST`), App Service / Container Apps Managed Identity (`IDENTITY_ENDPOINT` + `IDENTITY_HEADER`), and VM IMDS (`169.254.169.254`). Adapter configs and drivers inject `AZURE_{POSTGRES,MYSQL,MSSQL,REDIS}_SCOPE`, while direct calls on an unscoped provider raise `ImproperConfigurationError`. Loopback, link-local, and `IDENTITY_ENDPOINT` requests bypass HTTP proxies via `ProxyHandler({})`, whereas remote HTTPS authority hosts honor configured proxies [^entra-auth].
@@ -142,27 +148,125 @@ uv run --no-sync python -m tools.benchmarks.micro --arrow-ipc-only --json
 | `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Open (`__arrow_c_stream__`) | 0.082 | 0.086 | 12,232.27 |
 | `20 x (50,000 rows x 20 cols)` (`large_20x50000x20`) | 171,901,184 B (163.94 MiB) | Full iteration (`RecordBatchReader`) | 469.724 | 475.618 | 2.13 |
 
-## Adapter Throughput Gaps Against Third-Party Drivers
+## Adapter Results Against Third-Party Drivers
 
-Median latency on release builds (Python 3.12, loopback, tmpfs containers), from `tools/benchmarks/adapters` on 2026-11-20. Run-to-run variation on the network cases is roughly 15 percent.
+Measured on 2026-11-21 on 64-bit glibc Linux with release builds, Python 3.12, loopback connections, and `tmpfs` containers from `FIXTURE_SPECS`. Embedded captures used `--iterations 2000 --warmup 200`, network captures used `--iterations 500 --warmup 50`, and the BigQuery emulator used `--iterations 100 --warmup 10` because its job history slows linearly per call. All 13 captured reports pass `python -m tools.benchmarks.adapters.sql check` with exit code `0` [^bench-sql-check].
 
-| Adapter and case | Vertebra | Comparator | Cause of the gap |
-| --- | --- | --- | --- |
-| DuckDB sync `SELECT 1` | 426 us | `duckdb` 245 us | The bundled `libduckdb-sys` `cc` build has no jemalloc (`LD_PRELOAD` of jemalloc cut 314 us to 250 us); the rest sits in the `duckdb` crate prepare and execute path. The `bundled-cmake` feature enables jemalloc and needs `cmake` plus the `which` 8 crate. |
-| SQLite sync point select | 3.3 us | `sqlite3` 1.5 us | The native call takes 1.1 us; the remainder is `select_one` building a `dict` row in Python. |
-| SQLSpec SQLite sync | 15 us | `sqlspec` 2.9 us | The upstream driver is compiled and runs a cache-hit path straight into `sqlite3`; the Vertebra adapter stacks interpreted layers and a broker lease per query. |
-| SQLAlchemy `sqlite+vtb` | 43 us | `sqlite3` dialect 27 us | The PEP 249 cursor is written in Python; the upstream cursor is C. |
-| Storage `file://` sync get | 98 us | `obstore` 35 us | `LocalFileSystem` reads go through the Tokio blocking pool; `memory://` has a synchronous fast path, `file://` does not. |
-| Storage `memory://` sync put | 2.1 us | `obstore` 1.4 us | The native call takes 0.8 us; `PutResult` construction and key normalization add the rest. |
-| PostgreSQL async pooled | 111 us | `asyncpg` pinned 91 us | The native async client measures 87 to 93 us pinned; the driver adds bind compilation, result validation, and pool hand-off. |
-| Oracle sync `SELECT 1 FROM DUAL` | 111 us | `oracledb` 68 us | Every session dials through an in-process TNS relay (`relay_tns_connection` in `vertebra-oracle/src/dialer.rs`) that keeps a handle on the upstream socket for break fallback and repeats unsolicited `RESET` markers. Each query crosses two extra threads and three `sendto` calls where `oracledb` makes one. With the relay bypassed the native query measures 74 us, equal to `oracledb`, and `select_one` measures 89 us. |
-| Oracle async `SELECT 1 FROM DUAL` | 231 us | `oracledb` async 109 us | The relay cost above plus the hand-off to the `vtb-ora-worker` thread and the completion drainer. With the relay bypassed it measures 127 us against 95 us. |
-| SQL Server sync `SELECT 1` | 249 to 283 us | `pymssql` 260 to 284 us | Parity within run-to-run variation; nearly all time is inside the native `fetch_one` round trip. |
-| BigQuery emulator `SELECT 1` | 146 ms | `google-cloud-bigquery` `query_and_wait` 142 ms | The emulator dominates and slows as its job history grows (24 ms on a fresh container, 268 ms after a few hundred jobs), so the harness alternates drivers one query at a time. Back-to-back blocks produce misleading ratios in either direction. |
+| Adapter and case | Vertebra | Comparator | Status | Cause of any gap |
+| --- | --- | --- | --- | --- |
+| SQLite sync `point_select_1` | 0.93 us | `sqlite3` 1.57 us | at or ahead | — |
+| SQLite reused cursor `cursor_point_select_1` | 0.75 us | `sqlite3` 1.37 us | at or ahead | — |
+| SQLite async `point_select_1` | 38.79 us | `aiosqlite` 84.75 us | at or ahead | — |
+| SQLSpec SQLite sync `point_select_1` | 2.19 us | `sqlspec-sqlite-sync` 2.97 us | at or ahead | — |
+| SQLAlchemy `sqlite+vtb` `sa_point_select_1` | 26.87 us | `sqlalchemy-vanilla-sync` 26.93 us | at or ahead | — |
+| DuckDB sync `point_select_1` | 361.96 us | `duckdb` 256.33 us | allowed | `vertebra-duckdb` keeps the `bundled` build, which has no jemalloc, because the published `libduckdb-sys` package ships no CMake tree. |
+| SQLSpec DuckDB sync `point_select_1` | 351.87 us | `sqlspec-duckdb-sync` 254.25 us | allowed | Same bundled `libduckdb-sys` build without jemalloc. |
+| PostgreSQL sync `point_select_1` | 67.51 us | `psycopg-sync` 71.34 us | at or ahead | — |
+| PostgreSQL async pooled `point_select_1` | 71.55 us | `asyncpg` 71.96 us | at or ahead | — |
+| SQLSpec PostgreSQL async `point_select_1` | 71.81 us | `sqlspec-asyncpg` 84.64 us | at or ahead | — |
+| MySQL sync `point_select_1` | 117.51 us | `pymysql` 122.27 us | at or ahead | — |
+| MySQL async `point_select_1` | 94.48 us | `aiomysql` 144.99 us | at or ahead | — |
+| SQL Server sync `point_select_1` | 354.46 us | `pymssql` 287.92 us | allowed | Nearly all time is inside the engine round trip, and results sit within run-to-run variation. |
+| Oracle sync `point_select_1` (relay on) | 99.94 us | `oracledb-sync` 72.17 us | allowed | In-process TNS reset relay plus upstream `oracle/rust-oracledb#101` clearing the statement cache when `AUTH_MAX_OPEN_CURSORS` is absent. |
+| Oracle sync `point_select_1` (relay off) | 92.64 us | `oracledb-sync` 71.56 us | allowed | Upstream `oracle/rust-oracledb#101` clears the statement cache when `AUTH_MAX_OPEN_CURSORS` is absent. |
+| Oracle async `point_select_1` (relay on) | 164.73 us | `oracledb-async` 100.27 us | allowed | TNS reset relay, `vtb-ora-worker` hand-off, and upstream `oracle/rust-oracledb#101`. |
+| Oracle async `point_select_1` (relay off) | 152.53 us | `oracledb-async` 104.67 us | allowed | `vtb-ora-worker` hand-off plus upstream `oracle/rust-oracledb#101`. |
+| Spanner emulator sync `point_select_1` | 2.54 ms | `google-cloud-spanner-sync` 3.21 ms | at or ahead | — |
+| BigQuery emulator sync `point_select_1` | 54.57 ms | `google-cloud-bigquery-sync` 56.45 ms | at or ahead | — |
+| Storage `file://` sync get | 98 us | `obstore` 35 us | behind | `LocalFileSystem` reads go through the Tokio blocking pool; `memory://` has a synchronous fast path, `file://` does not. |
+| Storage `memory://` sync put | 2.1 us | `obstore` 1.4 us | behind | The native call takes 0.8 us; `PutResult` construction and key normalization add the rest. |
 
-Spanner emulator `SELECT 1` measures 2.5 ms sync and async against 3.0 ms for `google-cloud-spanner` snapshots. No asynchronous official client exists for Spanner, BigQuery, or `pymssql`, so those async cases have no comparator.
+Spanner async measures `2.52 ms`, BigQuery async measures `54.34 ms`, and PostgreSQL async `pipeline_select_16` measures `1.07 ms` (`[SKIP]` in `COMPARATORLESS_CASES`). No asynchronous official comparator exists for Spanner, BigQuery, or `pymssql`, so those async cases have no comparator. The BigQuery emulator slows as its job history grows, so the harness alternates drivers one query at a time.
 
-Synchronous Oracle calls run on the calling thread under the session mutex; asynchronous calls and `Close` still go through the `vtb-ora-worker` thread. A client that mixes both styles on one session no longer gets strict first-in-first-out ordering between a queued asynchronous command and a later synchronous one.
+Native SQLite, DuckDB, PostgreSQL, and Oracle drivers route direct query and DML calls through native single-call methods (`fetch_rows`, `fetch_dicts`, `fetch_value`, `execute_dml`). SQLAlchemy `+vtb` binds the native cursor factory directly on the DB-API connection, and SQLSpec adapters register native cache-hit executors. Pooled async PostgreSQL runs clean cached one-shot queries directly on the Python event loop via a persistent per-connection loop reader (`PersistentLoopReader`) to avoid Tokio cross-thread wakeups.
+
+Synchronous Oracle calls run on the calling thread under the session mutex, while asynchronous calls and `Close` still go through the `vtb-ora-worker` thread. A client that mixes both styles on one session does not get strict first-in-first-out ordering between a queued asynchronous command and a later synchronous one.
+
+On the Oracle driver, out-bind values and session-context tracking come back only from `execute` and `execute_dml`, not from the fetch methods (`execute_tuples`, `execute_with_description`, `select`, `select_value` reset `out_binds` to `None`). A statement that needs both rows and out-binds runs on the cursor (`cursor()` or `checkout_cursor()`).
+
+A pooled Oracle release dispatches `WorkerCommand::ResetIfDirty`, which sends no rollback round trip when the connection has no open transaction (`!in_transaction && !may_have_open_txn`). It sends a rollback whenever a transaction may be open, which includes every release after a query because `Query`, `Execute`, `ExecuteMany`, `QueryArrow`, and `PipelineBatch` mark `may_have_open_txn`.
+
+## DuckDB Statement Outcome and Facts Cache
+
+`DuckDBInner::run_statement` and `run_statement_many` in `src/rs/vertebra-duckdb/src/lib.rs` report columns, rows, and the changed-row count in one call.
+
+- `rowcount` is `-1` for a result set from a non-mutating statement, and the returned row count for a mutating one (`INSERT ... RETURNING`). `run_statement_many` reports the summed count only, with no columns or rows.
+- Whether a statement returns rows is decided from the SQL text (`sql_returns_rows`), not from the prepared statement. A statement the scan classifies as not returning rows goes through `execute_sql` and its result set, if any, is dropped.
+- The per-pool statement facts cache holds 256 SQL texts and is emptied in full when a new text arrives at capacity. Statements that inline literal values produce one entry each and trigger that clear repeatedly.
+- The cache uses `std::sync::RwLock`. `parking_lot` is not a dependency of `vertebra-duckdb`.
+- `query_sql` still scans the SQL text once more when a statement yields zero columns (the Arrow-schema fallback in `query_rows_on_conn`). The Arrow entry points (`query_arrow_payload`, `stream_arrow_shm_batches`) still scan on every call.
+
+## DuckDB Native Sync Cursor
+
+`SyncDuckDBCursor` in `src/rs/vertebra-duckdb/src/cursor.rs` is the PEP 249 cursor returned by `SyncDuckDBClient.cursor()`.
+
+- `lastrowid` is always `None`.
+- The cursor uses `std::sync::Mutex` for its state and execute lock. The execute lock is held inside `py.detach` until the result is installed, and the cached `description` tuple is moved out of the state there and dropped after the interpreter is attached again.
+- Row values keep the conversions of `duck_value_to_py`: a `TIMESTAMP` column reads back as a UTC-aware `datetime`, and a `UUID` column reads back as `str`. A naive `datetime` or a `uuid.UUID` parameter does not compare equal to the value fetched back.
+- `executemany` with an empty sequence reports `rowcount == 0` without calling the engine and does not open a lazy-begin transaction.
+- The two-thread test checks that both `execute` calls return and that the cursor holds one whole result. It does not observe the lock wait itself.
+
+## DuckDB Native Async Cursor
+
+`AsyncDuckDBCursor` in `src/rs/vertebra-duckdb/src/cursor.rs` is the awaitable cursor returned by `AsyncDuckDBClient.cursor()`.
+
+- A second `execute` or `executemany` before the first awaitable settles raises `InterfaceError` (`cursor is already executing`). The fetch methods and `close` are not blocked by an in-flight statement.
+- State errors and parameter conversion errors are raised by the method call. Engine errors are raised when the awaitable is awaited. A parameter conversion error also clears the buffered result.
+- The outcome is installed when the completion drainer runs the success mapper, so `description` and `rowcount` change at the `await`, not when the engine finishes.
+- Cancelling an in-flight awaitable interrupts the statement through `CancelOnDropGuard`, clears the result, and releases the in-flight flag while the worker may still be unwinding the interrupted call. No test covers cancellation.
+- When that cleanup runs on a Tokio thread, a cached `description` tuple is released through PyO3's deferred reference pool instead of under an attached interpreter.
+- `executemany` with an empty sequence resolves with `rowcount == 0` without calling the engine and does not open a lazy-begin transaction.
+
+## DuckDB Sync Driver on the Native Cursor
+
+`SyncDuckDBDriver` (`_sync.py`) and `AsyncDuckDBDriver` (`_async.py`) run `execute`, `execute_many`, and `execute_with_description` on native `SyncDuckDBCursor` / `AsyncDuckDBCursor`. `cursor()` returns the native cursor class.
+
+- Query methods take no broker lease and register no statement plan. The `broker` argument is accepted and unused by queries.
+- Dynamic secrets are refreshed at open (`__init__` for sync; `connect()` or first use for async), by `refresh_secrets()`, and after an HTTP 401 or 403 rejection. A query no longer picks up an elapsed `refresh_interval_seconds` or a changed provider generation; call `refresh_secrets(force=False)` for that.
+- After a rejection the driver refreshes every dynamic secret, including ones whose provider has no `invalidate` method, and re-raises the original error. A failed refresh is attached as a note.
+- `execute` returns `0` for a statement that returns rows without changing any. `execute_many` returns the cursor `rowcount` as reported.
+- The native cursors have no context-manager protocol. Close them with `try/finally`.
+- `DuckDBCore.normalize_param` remains in `core.py` because `load_from_arrow` still calls it for row-sequence ingestion (`_sync.py:385`, `_async.py:401`); `is_write_statement`, `normalize_parameters`, `param_len`, `_scan_sql_keywords_outside_literals`, and `_MUTATING_SQL_VERBS` are deleted.
+- Release benchmark medians (3 runs, `iterations=2000`, `warmup=200`, `bundled` glibc allocator with t11 deferred): `point_select_1` sync `377.71 us` / async `501.33 us` vs PyPI `duckdb` (jemalloc) `255.00 us`; `analytical_scan_1000` sync `540.90 us` / async `661.02 us` vs PyPI `duckdb` `451.53 us`.
+- Tests outside the DuckDB driver suite still assert the earlier behavior and fail until `cleanup-and-checks`: `test_gcs_token_refresh.py` (DuckDB client proxies without `cursor()`, per-query rotation) and `test_enterprise_olap_drivers.py` (`test_sqlalchemy_dbapi_broker_forwarding[duckdb+vtb:///:memory:]`, `test_sync_duckdb_driver_uses_real_lease_broker_and_releases_on_error`). `integration/db/test_duckdb_native.py` was updated in t10.
+
+## SQL Server Drivers on the Native Cursor
+
+`SyncMSSQLDriver` (`_sync.py`) and `AsyncMSSQLDriver` (`_async.py`) run `execute`, `execute_many`, `execute_tuples`, `execute_with_description`, and the `select` family on native `SyncMSSQLCursor` / `AsyncMSSQLCursor`. `cursor(*, lazy_begin: bool = False)` returns the native cursor class.
+
+- Broker leases are acquired once in `connect()` and attached to the native client's Rust lease guard, released on `close()` or client GC drop. Query methods take no broker lease and register no statement plans; `last_rewritten_sql` and `_prepare_sql` are removed.
+- `MSSQLCore.rewrite_placeholders` and `rewrite_mssql_placeholders` stay in `src/py/vertebra/db/adapters/mssql/core.py` because non-test callers remain under `src/py` (`db/adapters/mssql/config.py`, `db/adapters/mssql/__init__.py`, and `extensions/sqlspec/adapters/mssql/core.py`).
+- `src/py/tests/unit/db/test_enterprise_olap_drivers.py` (outside `t17` scope) still asserts `driver.last_rewritten_sql` on `SyncMSSQLDriver` / `AsyncMSSQLDriver` until `cleanup-and-checks`.
+
+## Spanner Drivers on the Native Cursor
+
+`SyncSpannerDriver` (`_sync.py`), `AsyncSpannerDriver` (`_async.py`), and `SyncSpannerTransaction` / `AsyncSpannerTransaction` (`transactions.py`) run `execute`, `execute_with_description`, `select`, `select_one`, `select_one_or_none`, `select_value`, `query`, and `query_one` on native `SyncSpannerCursor` / `AsyncSpannerCursor`.
+
+- Per-statement shared-memory statement-cache lookups (`_statement_cache`, `_dialect_tag`, `_prepare_sql_and_params`), `_run_query_sync`, `_run_query_async`, and `_query_raw` are removed. `SpannerCore.is_ddl_statement` remains for `execute_script` until `cleanup-and-checks`.
+- `cursor(*, staleness=None, request_tag=None, transaction_tag=None, lazy_begin=False)` delegates to the active transaction when `staleness is None` and rejects `lazy_begin=True` with `NotSupportedError`.
+- `_InMemorySpannerQueueWire` in `src/py/tests/unit/db/test_spanner_queue_and_cdc.py` required `.cursor()` on its in-memory client and transaction test doubles to conform to the updated Spanner client/transaction protocols (queue and CDC test assertions remained unchanged).
+- `_ContractSpannerClient` and `_ContractBigQueryClient` in `src/py/tests/unit/db/test_db_unified_driver_contracts.py` now implement `.cursor()` (updated in `t40`).
+
+### BigQuery Native Cursor Driver Path
+
+`SyncBigQueryDriver` (`_sync.py`) and `AsyncBigQueryDriver` (`_async.py`) run `execute`, `execute_with_description`, `execute_script`, `select`, `select_one`, `select_one_or_none`, `query`, `query_one`, `select_value`, `commit`, `rollback`, and existing-session `begin` on native `SyncBigQueryCursor` / `AsyncBigQueryCursor`.
+
+- Initial session creation in `begin()` when `self._session_id is None` still calls `client.query("BEGIN TRANSACTION", None, None, True)` followed by `_after_query(res)` because `SyncBigQueryClient.cursor()` / `AsyncBigQueryClient.cursor()` (`vertebra-bigquery/src/cursor.rs::CursorQueryOptions`) currently hardcode `create_session: false` and do not accept a `create_session` flag. Subsequent `begin()` calls on an existing session, all in-transaction queries, `commit()`, and `rollback()` run through `_execute_cursor`.
+- `_run_query_sync` and `_run_query_async` are retained for the out-of-scope REST fallback in `select_to_arrow` and now delegate session, metadata, and FinOps updates to `_after_query`.
+- `_BigQueryToolClient` and `_AsyncBigQueryToolClient` in `src/py/tests/unit/extensions/test_gcp_adapters_and_sqlalchemy.py` (outside `t35` scope) do not yet implement `.cursor()` until updated in `t36` or cleanup.
+
+## Spanner SQLSpec Native Cursor
+
+`SpannerSyncDriver` and `SpannerAsyncDriver` (`src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py`) compile statements once via `compile_spanner_statement` and execute queries, DML, and `execute_many` through native cursors.
+
+- `_SyncSpannerAsyncProxy` in `adapters/spanner/config.py` does not expose `cursor()`, so `SpannerAsyncDriver.with_cursor` wraps `connection._sync.cursor(...)` in `_ThreadedAsyncCursor` (`asyncio.to_thread`) when a sync driver is injected into `SpannerAsyncConfig`.
+- Offline adapter tests verify cursor execution, `TypedParameter` encoding, `ALREADY_EXISTS` mapping, and `SyncSpannerCursor` DB-API instantiation without a live Spanner emulator.
+
+## DuckDB Single-Call Driver Paths
+
+`SyncDuckDBDriver` (`src/py/vertebra/db/adapters/duckdb/_sync.py`) and `AsyncDuckDBDriver` (`src/py/vertebra/db/adapters/duckdb/_async.py`) bind `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml` directly on the client via `_bind_client` (rebound to `_raise_closed` when `_client` is `None`).
+
+- Any custom `_client=` test double passed to `SyncDuckDBDriver` or `AsyncDuckDBDriver` must expose `fetch_rows`, `fetch_dicts`, `fetch_value`, and `execute_dml`. All in-repo doubles (`_FaultInjectingSyncClient`/`_FaultInjectingAsyncClient` in `test_duckdb_driver.py`, `_SyncFaultInjectingDuckDBClient`/`_AsyncFaultInjectingDuckDBClient` in `test_duckdb_native.py`, and `_SyncClientFaultProxy`/`_AsyncClientFaultProxy` in `test_gcs_token_refresh.py`) implement these four methods.
 
 ## Related Context
 
@@ -172,7 +276,7 @@ Synchronous Oracle calls run on the calling thread under the session mutex; asyn
 [^pg-driver]: `src/py/vertebra/db/adapters/postgres/driver.py::SyncPostgreSQLDriver` — Native PostgreSQL drivers over `vertebra._postgres`.
 [^pg-queue]: `src/py/vertebra/framework/queues/postgres.py::PostgreSQLQueueBackend` — PostgreSQL queue backend native queue stores and optional executor.
 [^pg-stub]: `src/py/vertebra/_postgres.pyi` — Native `vertebra._postgres` client, pool, COPY, Arrow, and listener stubs.
-[^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — `DuckDBCore` write-statement detection.
+[^duckdb-core]: `src/py/vertebra/db/adapters/duckdb/core.py::DuckDBCore` — `DuckDBCore` parameter normalization for Arrow row ingestion.
 [^duckdb-secret]: `src/py/vertebra/db/adapters/duckdb/config.py::DuckDBSecretConfig` — Cloud-agnostic DuckDB `CREATE SECRET` declaration.
 [^gcs-secrets]: `src/py/vertebra/storage/_secrets.py::SyncGcsBearerSecretProvider` — Shipped DuckDB GCS OAuth2 bearer secret providers in `vertebra.storage`.
 [^duckdb-driver]: `src/py/vertebra/db/adapters/duckdb/driver.py::SyncDuckDBDriver` — DuckDB driver HTTP 401/403 regex invalidation and startup cleanup.
@@ -193,3 +297,4 @@ Synchronous Oracle calls run on the calling thread under the session mutex; asyn
 [^cargo-release-profile]: `src/rs/Cargo.toml` — Rust workspace `[profile.release]` `panic = "unwind"` policy.
 [^arrow-cursor-ipc]: `src/rs/vertebra-py/src/db.rs::ArrowCursor` — Single-pass `CompiledIpcLayout` validation, overflow guards, cached `validated` flag, and `to_pylist` signal and row-ceiling checks.
 [^bench-arrow-ipc]: `tools/benchmarks/micro.py::benchmark_arrow_ipc_stream` — Release Arrow IPC stream open and iteration microbenchmark.
+[^bench-sql-check]: `tools/benchmarks/adapters/sql.py::check_report_against_comparators` — Adapter benchmark comparator check and allow-list enforcement.

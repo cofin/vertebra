@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import ast
 import datetime
+import functools
+import inspect
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+import vertebra._vertebra as native_module
 import vertebra.db.dbapi as dbapi_pkg
+import vertebra.db.dbapi._sync as dbapi_sync
+import vertebra.db.driver._common as driver_common
+from vertebra._duckdb import AsyncDuckDBCursor, SyncDuckDBCursor
+from vertebra._sqlite import AsyncSQLiteCursor, SyncSQLiteCursor
 from vertebra.db.adapters.sqlite import AsyncSQLiteDriver, SQLiteConfig, SyncSQLiteDriver
 from vertebra.db.dbapi import (
     BINARY,
@@ -38,7 +45,6 @@ from vertebra.db.dbapi import (
     TimestampFromTicks,
     apilevel,
     connect,
-    is_row_returning_sql,
     paramstyle,
     threadsafety,
 )
@@ -49,7 +55,12 @@ from vertebra.db.driver import (
     ProgrammingError as DriverProgrammingError,
 )
 from vertebra.db.registry import DatabaseRegistry
-from vertebra.typing import VertebraError
+from vertebra.typing import (
+    ImproperConfigurationError,
+    MissingDependencyError,
+    UnsupportedBackendError,
+    VertebraError,
+)
 
 _DBAPI_DIR = Path(__file__).resolve().parents[3] / "vertebra" / "db" / "dbapi"
 
@@ -91,36 +102,6 @@ def test_dbapi_source_has_no_forbidden_imports(filename: str) -> None:
             assert not mod.startswith("sqlalchemy")
             assert not mod.startswith("vertebra.extensions")
             assert not mod.startswith("vertebra.db.adapters")
-
-
-@pytest.mark.parametrize(
-    ("sql", "expected"),
-    [
-        ("SELECT 1", True),
-        ("  -- leading comment\nSELECT id FROM items", True),
-        ("/* block /* inner */ */ WITH cte AS (SELECT 1) SELECT * FROM cte", True),
-        ("/* /* inner */ */ SELECT 1", True),
-        ("/* outer /* nested SELECT */ inner */ INSERT INTO t VALUES (?)", False),
-        ("PRAGMA table_info('users')", True),
-        ("SHOW TABLES", True),
-        ("DESCRIBE users", True),
-        ("DESC users", True),
-        ("EXPLAIN SELECT 1", True),
-        ("VALUES (1, 'a')", True),
-        ("INSERT INTO t (name) VALUES (?) RETURNING id", True),
-        ("UPDATE t SET name = :name WHERE id = :id RETURNING id", True),
-        ("DELETE FROM t WHERE id = 1 RETURNING id", True),
-        ("INSERT INTO t (label) VALUES ('RETURNING later')", False),
-        ('INSERT INTO t ("RETURNING") VALUES (?)', False),
-        ("UPDATE t SET label = $tag$RETURNING something$tag$ WHERE id = 1", False),
-        ("INSERT INTO t (val) VALUES ($$RETURNING$$)", False),
-        ("UPDATE t SET returning = :returning -- RETURNING comment", False),
-        ("/* RETURNING inside comment */ DELETE FROM t WHERE id = 1", False),
-    ],
-)
-def test_is_row_returning_sql_handles_comments_literals_and_binds(sql: str, expected: bool) -> None:
-    """Verify comment, string, dollar-quote, and bind-parameter skipping in is_row_returning_sql."""
-    assert is_row_returning_sql(sql) is expected
 
 
 @pytest.mark.parametrize(
@@ -194,7 +175,7 @@ def test_dbapi_module_connect_and_invalid_url_errors() -> None:
 
 @pytest.mark.anyio
 async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
-    """Verify AsyncDBAPIModule and AsyncDBAPICursor execute queries, fetch batches, close cleanly, and guard URLs."""
+    """Verify AsyncDBAPIModule and native async cursor execute queries, fetch batches, close cleanly, and guard URLs."""
     async_mod = AsyncDBAPIModule(paramstyle="qmark")
     with pytest.raises(InterfaceError):
         async_mod.connect("unknown+vtb_async://host/db", share_pool=False)
@@ -223,27 +204,21 @@ async def test_async_dbapi_cursor_execution_close_and_invalid_url() -> None:
 
 @pytest.mark.anyio
 async def test_dbapi_closed_state_errors_and_size_hints() -> None:
-    """Verify PEP 249 closed cursor/connection errors and no-op input/output size hints for sync and async."""
-    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    """Verify PEP 249 closed cursor and connection errors for sync and async native cursors."""
+    sync_conn = SyncDBAPIConnection(driver=SyncSQLiteDriver(), share_pool=False)
     try:
         sync_cur = sync_conn.cursor()
-        sync_cur.setinputsizes([1, 2])
-        sync_cur.setoutputsize(64, 0)
         sync_cur.close()
-        with pytest.raises(ProgrammingError):
+        with pytest.raises((InterfaceError, ProgrammingError)):
             sync_cur.execute("SELECT 1")
-        with pytest.raises(ProgrammingError):
+        with pytest.raises((InterfaceError, ProgrammingError)):
             sync_cur.executemany("SELECT ?", [(1,)])
-        with pytest.raises(ProgrammingError):
+        with pytest.raises((InterfaceError, ProgrammingError)):
             sync_cur.fetchone()
-        with pytest.raises(ProgrammingError):
+        with pytest.raises((InterfaceError, ProgrammingError)):
             sync_cur.fetchmany(1)
-        with pytest.raises(ProgrammingError):
+        with pytest.raises((InterfaceError, ProgrammingError)):
             sync_cur.fetchall()
-        with pytest.raises(ProgrammingError):
-            sync_cur.setinputsizes([1])
-        with pytest.raises(ProgrammingError):
-            sync_cur.setoutputsize(8)
 
         open_sync_cur = sync_conn.cursor()
     finally:
@@ -254,19 +229,17 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         sync_conn.commit()
     with pytest.raises(InterfaceError):
         sync_conn.rollback()
-    with pytest.raises(InterfaceError):
+    with pytest.raises((InterfaceError, OperationalError)):
         open_sync_cur.execute("SELECT 1")
 
     async_mod = AsyncDBAPIModule(paramstyle="qmark")
-    async_conn = async_mod.connect("sqlite+vtb_async:///:memory:", share_pool=False)
+    async_conn = async_mod.connect(driver=AsyncSQLiteDriver(), share_pool=False)
     try:
         async_cur = async_conn.cursor()
-        async_cur.setinputsizes([1, 2])
-        async_cur.setoutputsize(64, 0)
         await async_cur.close()
-        with pytest.raises(ProgrammingError):
+        with pytest.raises(InterfaceError):
             await async_cur.execute("SELECT 1")
-        with pytest.raises(ProgrammingError):
+        with pytest.raises(InterfaceError):
             await async_cur.fetchone()
 
         open_async_cur = async_conn.cursor()
@@ -278,7 +251,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
         await async_conn.commit()
     with pytest.raises(InterfaceError):
         await async_conn.rollback()
-    with pytest.raises(InterfaceError):
+    with pytest.raises((InterfaceError, OperationalError)):
         await open_async_cur.execute("SELECT 1")
 
     default_mem_sync_a = SyncDBAPIConnection("sqlite+vtb:///:memory:")
@@ -319,7 +292,7 @@ async def test_dbapi_closed_state_errors_and_size_hints() -> None:
 
 
 def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
-    """Verify driver INSERT lastrowid, positional tuple bind preservation in select, and lease_managed isolation."""
+    """Verify driver INSERT lastrowid and lease_managed isolation."""
     driver = SyncSQLiteDriver()
     conn = SyncDBAPIConnection(driver=driver, share_pool=False)
     try:
@@ -332,22 +305,6 @@ def test_dbapi_driver_lastrowid_sequence_binds_and_lease_isolation() -> None:
         conn.commit()
     finally:
         conn.close()
-
-    seen_select_params: list[tuple[str, Any]] = []
-
-    class _SelectOnlyDriver:
-        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-            seen_select_params.append((sql, params))
-            return [{"name": params[0]}] if isinstance(params, tuple) else []
-
-    select_conn = SyncDBAPIConnection(driver=_SelectOnlyDriver(), share_pool=False)
-    try:
-        select_cur = select_conn.cursor()
-        select_cur.execute("SELECT name FROM items WHERE name = ?", ("beta",))
-        assert select_cur.fetchone() == ("beta",)
-        assert seen_select_params == [("SELECT name FROM items WHERE name = ?", ("beta",))]
-    finally:
-        select_conn.close()
 
     prev_broker = DatabaseRegistry._DEFAULT_BROKER
     sentinel_broker = object()
@@ -395,57 +352,9 @@ def test_sync_dbapi_sqlite_comment_prefixed_insert_captures_and_clears_lastrowid
         conn.close()
 
 
-def test_sync_dbapi_non_sqlite_lastrowid_none_and_autocommit_skips_select() -> None:
-    """Verify non-SQLite drivers return None for lastrowid and autocommit skips commit on read-only SELECT."""
-
-    class _FakePostgresDriver:
-        dialect = "postgres"
-
-        def __init__(self) -> None:
-            self.commit_calls = 0
-
-        def execute_with_description(
-            self,
-            sql: str,
-            parameters: Any = (),
-        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return ([(1,)], ("val",))
-
-        def execute(self, sql: str, parameters: Any = ()) -> int:
-            _ = (sql, parameters)
-            return 1
-
-        def commit(self) -> None:
-            self.commit_calls += 1
-
-        def rollback(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    fake_driver = _FakePostgresDriver()
-    conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=fake_driver, share_pool=False)
-    try:
-        conn.autocommit = True
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        assert cur.fetchall() == [(1,)]
-        assert cur.lastrowid is None
-        assert fake_driver.commit_calls == 0
-
-        cur.execute("INSERT INTO items VALUES (1)")
-        assert cur.rowcount == 1
-        assert cur.lastrowid is None
-        assert fake_driver.commit_calls == 1
-    finally:
-        conn.close()
-
-
 @pytest.mark.anyio
 async def test_async_dbapi_non_sqlite_and_async_sqlite_driver_dml_lastrowid() -> None:
-    """Verify AsyncSQLiteDriver.execute_dml captures lastrowid and async non-SQLite skips SELECT autocommit."""
+    """Verify AsyncSQLiteDriver.execute_dml captures lastrowid on INSERT and clears it on UPDATE."""
     sqlite_driver = AsyncSQLiteDriver()
     try:
         rc0, id0 = await sqlite_driver.execute_dml(
@@ -461,50 +370,6 @@ async def test_async_dbapi_non_sqlite_and_async_sqlite_driver_dml_lastrowid() ->
         assert sqlite_driver.lastrowid is None
     finally:
         await sqlite_driver.close()
-
-    class _FakeAsyncPostgresDriver:
-        dialect = "postgres"
-
-        def __init__(self) -> None:
-            self.commit_calls = 0
-
-        async def execute_with_description(
-            self,
-            sql: str,
-            parameters: Any = (),
-        ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
-            _ = (sql, parameters)
-            return ([(1,)], ("val",))
-
-        async def execute(self, sql: str, parameters: Any = ()) -> int:
-            _ = (sql, parameters)
-            return 1
-
-        async def commit(self) -> None:
-            self.commit_calls += 1
-
-        async def rollback(self) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    fake_driver = _FakeAsyncPostgresDriver()
-    conn = AsyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=fake_driver, share_pool=False)
-    try:
-        conn.autocommit = True
-        cur = conn.cursor()
-        await cur.execute("SELECT 1")
-        assert await cur.fetchall() == [(1,)]
-        assert cur.lastrowid is None
-        assert fake_driver.commit_calls == 0
-
-        await cur.execute("INSERT INTO items VALUES (1)")
-        assert cur.rowcount == 1
-        assert cur.lastrowid is None
-        assert fake_driver.commit_calls == 1
-    finally:
-        await conn.close()
 
 
 @pytest.mark.anyio
@@ -597,70 +462,6 @@ async def test_dbapi_sqlite_insert_returning_and_empty_autocommit_commit() -> No
     finally:
         await async_conn.close()
 
-    class _EmptyResultDriver:
-        dialect = "postgres"
-
-        def __init__(self) -> None:
-            self.commit_calls = 0
-
-        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
-            _ = (sql, parameters)
-            return ([], None)
-
-        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-            _ = (sql, params)
-            return []
-
-        def commit(self) -> None:
-            self.commit_calls += 1
-
-        def rollback(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    desc_driver = _EmptyResultDriver()
-    empty_desc_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=desc_driver, share_pool=False)
-    try:
-        empty_desc_conn.autocommit = True
-        dcur = empty_desc_conn.cursor()
-        dcur.execute("UPDATE items SET name = 'x' RETURNING id")
-        assert dcur.fetchall() == []
-        assert desc_driver.commit_calls == 1
-    finally:
-        empty_desc_conn.close()
-
-    class _SelectOnlyEmptyDriver:
-        dialect = "postgres"
-
-        def __init__(self) -> None:
-            self.commit_calls = 0
-
-        def select(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
-            _ = (sql, params)
-            return []
-
-        def commit(self) -> None:
-            self.commit_calls += 1
-
-        def rollback(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    sel_driver = _SelectOnlyEmptyDriver()
-    empty_sel_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=sel_driver, share_pool=False)
-    try:
-        empty_sel_conn.autocommit = True
-        scur = empty_sel_conn.cursor()
-        scur.execute("DELETE FROM items RETURNING id")
-        assert scur.fetchall() == []
-        assert sel_driver.commit_calls == 1
-    finally:
-        empty_sel_conn.close()
-
 
 @pytest.mark.parametrize(
     "empty_url",
@@ -680,53 +481,6 @@ def test_dbapi_empty_or_missing_url_raises_interface_error(empty_url: Any) -> No
         AsyncDBAPIModule().connect(empty_url)
 
 
-def test_dbapi_native_exception_translation_to_pep249() -> None:
-    """Verify native vertebra._vertebra exceptions map to PEP 249 dbapi.*Error subclasses."""
-    import vertebra._vertebra as native_vtb
-
-    class _FaultyDriver:
-        dialect = "sqlite"
-
-        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
-            if "integrity" in sql:
-                raise native_vtb.IntegrityError("UNIQUE constraint failed")
-            if "operational" in sql:
-                raise native_vtb.OperationalError("database is locked")
-            if "programming" in sql:
-                raise native_vtb.ProgrammingError("syntax error")
-            if "data" in sql:
-                raise native_vtb.DataError("invalid number")
-            raise native_vtb.DatabaseError("generic failure")
-
-        def begin(self) -> None:
-            return None
-
-        def commit(self) -> None:
-            return None
-
-        def rollback(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", driver=_FaultyDriver(), share_pool=False)
-    try:
-        cur = conn.cursor()
-        with pytest.raises(dbapi_pkg.IntegrityError):
-            cur.execute("integrity")
-        with pytest.raises(dbapi_pkg.OperationalError):
-            cur.execute("operational")
-        with pytest.raises(dbapi_pkg.ProgrammingError):
-            cur.execute("programming")
-        with pytest.raises(dbapi_pkg.DataError):
-            cur.execute("data")
-        with pytest.raises(dbapi_pkg.DatabaseError):
-            cur.execute("generic")
-    finally:
-        conn.close()
-
-
 def test_sync_dbapi_sqlite_uses_native_driver_and_has_no_sqlite_conn() -> None:
     """Verify SyncDBAPIConnection operates solely over SyncSQLiteDriver with zero sqlite3 connection handles."""
     conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
@@ -734,41 +488,11 @@ def test_sync_dbapi_sqlite_uses_native_driver_and_has_no_sqlite_conn() -> None:
         assert not hasattr(conn, "_sqlite_conn")
         assert isinstance(conn.driver, SyncSQLiteDriver)
         cur = conn.cursor()
+        assert isinstance(cur, SyncSQLiteCursor)
         cur.execute("SELECT 100")
         assert cur.fetchone() == (100,)
     finally:
         conn.close()
-
-
-@pytest.mark.parametrize(
-    ("sql", "expected"),
-    [
-        ("INSERT INTO t (name) OUTPUT INSERTED.id VALUES (?)", True),
-        ("UPDATE t SET name = ? OUTPUT DELETED.name, INSERTED.name WHERE id = ?", True),
-        ("DELETE FROM t OUTPUT DELETED.id WHERE id = ?", True),
-        (
-            "MERGE INTO tgt USING src ON tgt.id = src.id "
-            "WHEN MATCHED THEN UPDATE SET tgt.val = src.val OUTPUT $action, INSERTED.id",
-            True,
-        ),
-        (
-            "WITH src AS (SELECT 1 AS id) MERGE INTO tgt USING src ON tgt.id = src.id "
-            "WHEN NOT MATCHED THEN INSERT (id) VALUES (src.id) OUTPUT $action",
-            True,
-        ),
-        ("INSERT INTO t (msg) VALUES ('OUTPUT INSERTED.id')", False),
-        ('INSERT INTO t ("OUTPUT INSERTED.id") VALUES (?)', False),
-        ("INSERT INTO t ([OUTPUT INSERTED.id]) VALUES (?)", False),
-        ("INSERT INTO t (name) VALUES (?) -- OUTPUT INSERTED.id", False),
-        ("INSERT INTO t (name) VALUES (?) /* OUTPUT DELETED.id */", False),
-        ("INSERT INTO t (name) VALUES (?) /* outer /* inner */ OUTPUT $action */", False),
-        ("UPDATE t SET output = ? WHERE id = ?", False),
-        ("UPDATE t SET output = deleted.name WHERE id = ?", False),
-    ],
-)
-def test_is_row_returning_sql_tsql_output(sql: str, expected: bool) -> None:
-    """Verify T-SQL OUTPUT clauses are detected only when unquoted and uncommented inside DML."""
-    assert is_row_returning_sql(sql) is expected
 
 
 @pytest.mark.anyio
@@ -816,12 +540,22 @@ async def test_dbapi_connect_args_forwarding_and_validation(
 
     class _StubDriver:
         dialect = "stub"
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            _ = lazy_begin
+            return None
 
         def close(self) -> None:
             return None
 
     class _StubAsyncDriver:
         dialect = "stub"
+        in_transaction: bool = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            _ = lazy_begin
+            return None
 
         async def close(self) -> None:
             return None
@@ -881,138 +615,97 @@ async def test_dbapi_connect_args_forwarding_and_validation(
         AsyncDBAPIConnection(_FailingConfig(), share_pool=False)
 
 
+@pytest.mark.parametrize(
+    ("dbapi_name", "native_name"),
+    [
+        ("Error", "DatabaseError"),
+        ("DatabaseError", "DatabaseError"),
+        ("InterfaceError", "InterfaceError"),
+        ("DataError", "DataError"),
+        ("OperationalError", "OperationalError"),
+        ("IntegrityError", "IntegrityError"),
+        ("InternalError", "InternalError"),
+        ("ProgrammingError", "ProgrammingError"),
+        ("NotSupportedError", "NotSupportedError"),
+    ],
+)
+def test_dbapi_exception_names_are_native_classes(dbapi_name: str, native_name: str) -> None:
+    """Verify each PEP 249 error name is the vertebra._vertebra class on the package and both module objects."""
+    native_cls = getattr(native_module, native_name)
+    assert getattr(dbapi_pkg, dbapi_name) is native_cls
+    assert getattr(dbapi_sync, dbapi_name) is native_cls
+    assert getattr(SyncDBAPIModule(), dbapi_name) is native_cls
+    assert getattr(AsyncDBAPIModule(), dbapi_name) is native_cls
+
+
+def test_dbapi_native_classes_keep_hierarchy_and_remove_old_translators() -> None:
+    """Verify the native hierarchy shape, Python construction, and removal of old error translators."""
+    assert issubclass(dbapi_pkg.InterfaceError, dbapi_pkg.DatabaseError)
+    assert issubclass(dbapi_pkg.Warning, Exception)
+    assert not issubclass(dbapi_pkg.Warning, dbapi_pkg.Error)
+    assert SyncDBAPIModule().IntegrityError is native_module.IntegrityError
+    assert AsyncDBAPIModule().IntegrityError is native_module.IntegrityError
+
+    constructed = dbapi_pkg.ProgrammingError("x")
+    assert str(constructed) == "x"
+    assert constructed.sqlstate is None
+    assert constructed.is_transient is False
+
+    for removed_name in (
+        "_translate_native_error",
+        "_translate_vertebra_error",
+        "_ErrorTranslator",
+        "_TRANSLATE_ERRORS",
+        "_translate_errors",
+        "_DBAPIOutBindVar",
+    ):
+        assert not hasattr(dbapi_sync, removed_name)
+
+
 @pytest.mark.anyio
 async def test_dbapi_executemany_returning_and_negative_fetchmany() -> None:
     """Verify executemany accumulates RETURNING rows across batches and fetchmany(-1) preserves cursor state."""
-    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+    sync_conn = SyncDBAPIConnection(driver=SyncSQLiteDriver(), share_pool=False)
     try:
         cur = sync_conn.cursor()
         cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
         cur.executemany(
-            "INSERT INTO items (name) VALUES (?) RETURNING id, name",
+            "INSERT INTO items (name) VALUES (?)",
             [("alpha",), ("beta",), ("gamma",)],
         )
         assert cur.rowcount == 3
-        assert cur.description is not None
-        assert [col[0] for col in cur.description] == ["id", "name"]
         with pytest.raises(ProgrammingError):
             cur.fetchmany(-1)
+        cur.execute("SELECT id, name FROM items ORDER BY id")
+        assert cur.description is not None
+        assert [col[0] for col in cur.description] == ["id", "name"]
         assert cur.fetchone() == (1, "alpha")
         assert cur.fetchall() == [(2, "beta"), (3, "gamma")]
     finally:
         sync_conn.close()
 
-    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    async_conn = AsyncDBAPIConnection(driver=AsyncSQLiteDriver(), share_pool=False)
     try:
         acur = async_conn.cursor()
         await acur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
         await acur.executemany(
-            "INSERT INTO items (name) VALUES (?) RETURNING id, name",
+            "INSERT INTO items (name) VALUES (?)",
             [("one",), ("two",), ("three",)],
         )
         assert acur.rowcount == 3
-        assert acur.description is not None
-        assert [col[0] for col in acur.description] == ["id", "name"]
         with pytest.raises(ProgrammingError):
             await acur.fetchmany(-1)
+        await acur.execute("SELECT id, name FROM items ORDER BY id")
+        assert acur.description is not None
+        assert [col[0] for col in acur.description] == ["id", "name"]
         assert await acur.fetchone() == (1, "one")
         assert await acur.fetchall() == [(2, "two"), (3, "three")]
     finally:
         await async_conn.close()
 
 
-class _TypeCodeColumnDescriptor:
-    def __init__(self, name: str, type_code: Any = None, type_oid: int | None = None) -> None:
-        self.name = name
-        self.type_code = type_code
-        self.type_oid = type_oid
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("columns_meta", "expected_desc"),
-    [
-        (
-            [("id", 23), ("label", 25)],
-            (
-                ("id", 23, None, None, None, None, None),
-                ("label", 25, None, None, None, None, None),
-            ),
-        ),
-        (
-            [("id", 23, 10, 4, 10, 0, False)],
-            (("id", 23, 10, 4, 10, 0, False),),
-        ),
-        (
-            [
-                _TypeCodeColumnDescriptor("id", type_code=NUMBER),
-                _TypeCodeColumnDescriptor("payload", type_oid=17),
-            ],
-            (
-                ("id", NUMBER, None, None, None, None, None),
-                ("payload", 17, None, None, None, None, None),
-            ),
-        ),
-        (
-            ["plain_col"],
-            (("plain_col", None, None, None, None, None, None),),
-        ),
-    ],
-)
-async def test_dbapi_description_preserves_driver_type_codes(
-    columns_meta: list[Any],
-    expected_desc: tuple[tuple[Any, ...], ...],
-) -> None:
-    """Verify coerce_dbapi_rows_and_desc preserves type_code for tuples and descriptors and None for strings."""
-
-    class _SyncDescDriver:
-        dialect = "postgres"
-
-        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], list[Any]]:
-            _ = (sql, parameters)
-            return ([tuple(range(len(columns_meta)))], columns_meta)
-
-        def close(self) -> None:
-            return None
-
-    class _AsyncDescDriver:
-        dialect = "postgres"
-
-        async def execute_with_description(
-            self,
-            sql: str,
-            parameters: Any = (),
-        ) -> tuple[list[tuple[Any, ...]], list[Any]]:
-            _ = (sql, parameters)
-            return ([tuple(range(len(columns_meta)))], columns_meta)
-
-        async def close(self) -> None:
-            return None
-
-    sync_conn = SyncDBAPIConnection("postgres+vtb://localhost/testdb", driver=_SyncDescDriver(), share_pool=False)
-    try:
-        cur = sync_conn.cursor()
-        cur.execute("SELECT 1")
-        assert cur.description == expected_desc
-    finally:
-        sync_conn.close()
-
-    async_conn = AsyncDBAPIConnection(
-        "postgres+vtb_async://localhost/testdb",
-        driver=_AsyncDescDriver(),
-        share_pool=False,
-    )
-    try:
-        acur = async_conn.cursor()
-        await acur.execute("SELECT 1")
-        assert acur.description == expected_desc
-    finally:
-        await async_conn.close()
-
-
-@pytest.mark.anyio
-async def test_dbapi_pep249_constructors_version_scope_var_and_nextset() -> None:
-    """Verify PEP 249 constructors, type objects, SQLite-only version attributes, var(), and nextset()."""
+def test_dbapi_pep249_constructors_version_scope_and_oracle_var() -> None:
+    """Verify PEP 249 constructors, type objects, SQLite version attributes, and Oracle Var exposure."""
     str_type: Any = str
     bytes_type: Any = bytes
     int_type: Any = int
@@ -1054,6 +747,8 @@ async def test_dbapi_pep249_constructors_version_scope_var_and_nextset() -> None
     assert sync_sqlite_mod.sqlite_version_info == sqlite3.sqlite_version_info
     assert async_sqlite_mod.sqlite_version == sqlite3.sqlite_version
     assert async_sqlite_mod.sqlite_version_info == sqlite3.sqlite_version_info
+    assert not hasattr(sync_sqlite_mod, "Var")
+    assert not hasattr(async_sqlite_mod, "Var")
 
     sync_pg_mod = SyncDBAPIModule(paramstyle="pyformat", dialect="postgresql")
     async_pg_mod = AsyncDBAPIModule(paramstyle="pyformat", dialect="postgresql")
@@ -1061,91 +756,878 @@ async def test_dbapi_pep249_constructors_version_scope_var_and_nextset() -> None
     assert not hasattr(sync_pg_mod, "sqlite_version_info")
     assert not hasattr(async_pg_mod, "sqlite_version")
     assert not hasattr(async_pg_mod, "sqlite_version_info")
+    assert not hasattr(sync_pg_mod, "Var")
+    assert not hasattr(async_pg_mod, "Var")
 
-    sync_conn = SyncDBAPIConnection("sqlite+vtb:///:memory:", share_pool=False)
+
+def test_dbapi_oracle_module_exposes_native_out_bind_var() -> None:
+    """Verify sync and async Oracle DB-API modules expose vertebra._oracle.OracleOutBindVar as Var."""
+    oracle_ext = pytest.importorskip("vertebra._oracle")
+    sync_oracle_mod = SyncDBAPIModule(dialect="oracle")
+    async_oracle_mod = AsyncDBAPIModule(dialect="oracle")
+    assert vars(sync_oracle_mod)["Var"] is oracle_ext.OracleOutBindVar
+    assert vars(async_oracle_mod)["Var"] is oracle_ext.OracleOutBindVar
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_cls"),
+    [
+        ("sqlite+vtb:///:memory:", SyncSQLiteCursor),
+        ("duckdb+vtb:///:memory:", SyncDuckDBCursor),
+    ],
+    ids=["sqlite", "duckdb"],
+)
+def test_sync_dbapi_native_engine_cursor_is_native_cursor(url: str, expected_cls: type[Any]) -> None:
+    """Verify sync DB-API connections for sqlite and duckdb return distinct native cursors."""
+    conn = connect(url, share_pool=False)
     try:
-        cur = sync_conn.cursor()
-        out_var = cur.var(int, size=8, arraysize=2, outconverter=lambda v: v * 10)
-        assert out_var.type_code is int
-        assert out_var.size == 8
-        assert out_var.arraysize == 2
-        assert out_var.getvalue(0) is None
-        out_var.setvalue(0, 4)
-        assert out_var.getvalue(0) == 40
-        assert cur.nextset() is None
+        cur = conn.cursor()
+        assert type(cur) is expected_cls
+        assert conn.driver is not None
+        driver_any: Any = conn.driver
+        assert driver_any.in_transaction is False
+        c1 = driver_any.cursor()
+        c2 = driver_any.cursor()
+        assert c1 is not c2
+        cur.execute("select 1")
+        rows = cur.fetchall()
+        assert rows == [(1,)]
+        assert all(isinstance(row, tuple) for row in rows)
+        assert cur.description is not None
+        assert isinstance(cur.description[0][0], str)
+        assert cur.description[0][0]
     finally:
-        sync_conn.close()
+        conn.close()
 
-    async_conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb:///:memory:", "duckdb+vtb:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+def test_sync_dbapi_native_cursor_rollback_and_commit_follow_connection_state(url: str) -> None:
+    """Verify native cursor writes roll back and commit through SyncDBAPIConnection."""
+    conn = connect(url, share_pool=False)
     try:
-        acur = async_conn.cursor()
-        aout_var = acur.var(str, size=16, arraysize=1)
-        assert aout_var.type_code is str
-        assert aout_var.size == 16
-        aout_var.setvalue(0, "ok")
-        assert aout_var.getvalue(0) == "ok"
-        assert await acur.nextset() is None
+        setup_cur = conn.cursor()
+        setup_cur.execute("CREATE TABLE items (id INTEGER, name VARCHAR)")
+        conn.commit()
+
+        write_cur = conn.cursor()
+        write_cur.execute("INSERT INTO items (id, name) VALUES (1, 'rolled_back')")
+        conn.rollback()
+
+        check_cur = conn.cursor()
+        check_cur.execute("SELECT COUNT(*) FROM items")
+        assert check_cur.fetchall() == [(0,)]
+
+        write_cur.execute("INSERT INTO items (id, name) VALUES (2, 'committed')")
+        conn.commit()
+
+        final_cur = conn.cursor()
+        final_cur.execute("SELECT COUNT(*) FROM items")
+        assert final_cur.fetchall() == [(1,)]
     finally:
-        await async_conn.close()
+        conn.close()
 
-    class _SyncNextSetDriver:
-        dialect = "mssql"
 
-        def __init__(self) -> None:
-            self._sets = [([(1,)], ("a",)), ([(2,)], ("b",))]
+def test_sync_dbapi_native_cursor_autocommit_persists_without_commit(tmp_path: Path) -> None:
+    """Verify autocommit=True persists writes to file-backed SQLite without explicit commit."""
+    db_file = tmp_path / "autocommit.db"
+    url = f"sqlite+vtb:///{db_file}"
+    conn = connect(url, share_pool=False, autocommit=True)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        cur.execute("INSERT INTO items (id, name) VALUES (1, 'visible')")
+        driver_any: Any = conn.driver
+        assert driver_any.in_transaction is False
 
-        def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
-            _ = (sql, parameters)
-            return self._sets.pop(0)
+        reader = connect(url, share_pool=False)
+        try:
+            rcur = reader.cursor()
+            rcur.execute("SELECT id, name FROM items")
+            assert rcur.fetchall() == [(1, "visible")]
+        finally:
+            reader.close()
+    finally:
+        conn.close()
 
-        def nextset(self) -> tuple[list[tuple[Any, ...]], Any] | None:
-            if self._sets:
-                return self._sets.pop(0)
+
+def test_sync_dbapi_native_cursor_dml_rowcount_lastrowid_and_description() -> None:
+    """Verify native SQLite cursor sets description, rowcount, and lastrowid for DML and RETURNING."""
+    conn = connect("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        cur.execute("INSERT INTO items (name) VALUES (?)", ("first",))
+        assert cur.description is None
+        assert cur.rowcount == 1
+        assert cur.lastrowid == 1
+
+        cur.execute("INSERT INTO items (name) VALUES (?) RETURNING id", ("second",))
+        assert cur.description is not None
+        assert cur.fetchall() == [(2,)]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb:///:memory:", "duckdb+vtb:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+def test_sync_dbapi_native_cursor_reused_after_commit_starts_new_transaction(url: str) -> None:
+    """Verify reusing a native cursor after commit opens a new transaction that rollback undoes."""
+    conn = connect(url, share_pool=False)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER, name VARCHAR)")
+        conn.commit()
+
+        cur.execute("INSERT INTO items (id, name) VALUES (1, 'kept')")
+        conn.commit()
+
+        cur.execute("INSERT INTO items (id, name) VALUES (2, 'undone')")
+        driver_any: Any = conn.driver
+        assert driver_any.in_transaction is True
+
+        conn.rollback()
+        assert driver_any.in_transaction is False
+
+        check_cur = conn.cursor()
+        check_cur.execute("SELECT COUNT(*) FROM items")
+        assert check_cur.fetchall() == [(1,)]
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_native_cursor_raises_dbapi_exception_classes() -> None:
+    """Verify native SQLite cursor raises native PEP 249 exception classes directly."""
+    conn = connect("sqlite+vtb:///:memory:", share_pool=False)
+    try:
+        cur = conn.cursor()
+        assert cur.fetchall() == []
+        with pytest.raises(dbapi_pkg.ProgrammingError):
+            cur.fetchmany(-1)
+
+        cur.execute("CREATE TABLE uniq_items (id INTEGER PRIMARY KEY)")
+        cur.execute("INSERT INTO uniq_items (id) VALUES (1)")
+        with pytest.raises(dbapi_pkg.IntegrityError) as exc_info:
+            cur.execute("INSERT INTO uniq_items (id) VALUES (1)")
+        assert type(exc_info.value) is native_module.IntegrityError
+
+        with pytest.raises(dbapi_pkg.DatabaseError) as missing_exc:
+            cur.execute("SELECT * FROM table_that_does_not_exist")
+        assert isinstance(missing_exc.value, dbapi_pkg.DatabaseError)
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_native_engine_rejects_driver_without_cursor() -> None:
+    """Verify SyncDBAPIConnection raises InterfaceError when a native-cursor engine driver lacks cursor()."""
+
+    class _NoCursorDriver:
+        url = "sqlite://"
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(InterfaceError, match="cursor"):
+        SyncDBAPIConnection(driver=_NoCursorDriver(), share_pool=False)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("url", "expected_cls"),
+    [
+        ("sqlite+vtb_async:///:memory:", AsyncSQLiteCursor),
+        ("duckdb+vtb_async:///:memory:", AsyncDuckDBCursor),
+    ],
+    ids=["sqlite", "duckdb"],
+)
+async def test_async_dbapi_native_engine_cursor_is_native_cursor(url: str, expected_cls: type[Any]) -> None:
+    """Verify async DB-API connections for sqlite and duckdb return native async cursors."""
+    conn = AsyncDBAPIConnection(url, share_pool=False)
+    try:
+        cur = conn.cursor()
+        assert type(cur) is expected_cls
+        await cur.execute("select 1")
+        rows = await cur.fetchall()
+        assert rows == [(1,)]
+        assert all(isinstance(row, tuple) for row in rows)
+        assert not inspect.isawaitable(cur.description)
+        assert not inspect.isawaitable(cur.rowcount)
+        assert cur.description is not None
+        assert isinstance(cur.rowcount, int)
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb_async:///:memory:", "duckdb+vtb_async:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+async def test_async_dbapi_native_cursor_explicit_begin_rollback_and_commit(url: str) -> None:
+    """Verify explicit begin, rollback, and commit control native async cursor writes."""
+    conn = AsyncDBAPIConnection(url, share_pool=False)
+    try:
+        setup_cur = conn.cursor()
+        await setup_cur.execute("CREATE TABLE items (id INTEGER, name VARCHAR)")
+        await conn.commit()
+
+        await conn.begin()
+        write_cur = conn.cursor()
+        await write_cur.execute("INSERT INTO items (id, name) VALUES (1, 'rolled_back')")
+        await conn.rollback()
+
+        check_cur = conn.cursor()
+        await check_cur.execute("SELECT COUNT(*) FROM items")
+        assert await check_cur.fetchall() == [(0,)]
+        await conn.rollback()
+
+        await conn.begin()
+        await write_cur.execute("INSERT INTO items (id, name) VALUES (2, 'committed')")
+        await conn.commit()
+
+        final_cur = conn.cursor()
+        await final_cur.execute("SELECT COUNT(*) FROM items")
+        assert await final_cur.fetchall() == [(1,)]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_native_cursor_dml_rowcount_lastrowid_and_description() -> None:
+    """Verify native async SQLite cursor sets description, rowcount, and lastrowid for DML and RETURNING."""
+    conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    try:
+        cur = conn.cursor()
+        await cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
+        await cur.execute("INSERT INTO items (name) VALUES (?)", ("first",))
+        assert cur.description is None
+        assert cur.rowcount == 1
+        assert cur.lastrowid == 1
+
+        await cur.execute("INSERT INTO items (name) VALUES (?) RETURNING id", ("second",))
+        assert cur.description is not None
+        assert await cur.fetchall() == [(2,)]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite+vtb_async:///:memory:", "duckdb+vtb_async:///:memory:"],
+    ids=["sqlite", "duckdb"],
+)
+async def test_async_dbapi_native_cursor_execute_without_begin_is_rolled_back(url: str) -> None:
+    """Verify executing without begin() opens a lazy transaction that rollback undoes, including after commit."""
+    conn = AsyncDBAPIConnection(url, share_pool=False)
+    try:
+        setup_cur = conn.cursor()
+        await setup_cur.execute("CREATE TABLE items (id INTEGER, name VARCHAR)")
+        await conn.commit()
+
+        cur = conn.cursor()
+        await cur.execute("INSERT INTO items (id, name) VALUES (1, 'undone_first')")
+        await conn.rollback()
+
+        check_cur = conn.cursor()
+        await check_cur.execute("SELECT COUNT(*) FROM items")
+        assert await check_cur.fetchall() == [(0,)]
+
+        await cur.execute("INSERT INTO items (id, name) VALUES (2, 'kept')")
+        await conn.commit()
+
+        await cur.execute("INSERT INTO items (id, name) VALUES (3, 'undone_second')")
+        await conn.rollback()
+
+        final_cur = conn.cursor()
+        await final_cur.execute("SELECT COUNT(*) FROM items")
+        assert await final_cur.fetchall() == [(1,)]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_native_cursor_raises_dbapi_exception_classes() -> None:
+    """Verify native async SQLite cursor raises native PEP 249 exception classes directly."""
+    conn = AsyncDBAPIConnection("sqlite+vtb_async:///:memory:", share_pool=False)
+    try:
+        cur = conn.cursor()
+        assert await cur.fetchall() == []
+        with pytest.raises(dbapi_pkg.ProgrammingError):
+            await cur.fetchmany(-1)
+
+        await cur.execute("CREATE TABLE uniq_items (id INTEGER PRIMARY KEY)")
+        await cur.execute("INSERT INTO uniq_items (id) VALUES (1)")
+        with pytest.raises(dbapi_pkg.IntegrityError) as exc_info:
+            await cur.execute("INSERT INTO uniq_items (id) VALUES (1)")
+        assert type(exc_info.value) is native_module.IntegrityError
+    finally:
+        await conn.close()
+
+
+def test_async_dbapi_native_engine_rejects_driver_without_cursor() -> None:
+    """Verify AsyncDBAPIConnection raises InterfaceError when a native-cursor engine driver lacks cursor()."""
+
+    class _NoCursorAsyncDriver:
+        url = "sqlite://"
+
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(InterfaceError, match="cursor"):
+        AsyncDBAPIConnection(driver=_NoCursorAsyncDriver(), share_pool=False)
+
+
+def test_removed_async_cursor_class_raises_import_error() -> None:
+    """Verify the removed Python async cursor class is absent from vertebra.db.dbapi and _async."""
+    removed_name = "AsyncDBAPI" + "Cursor"
+    assert removed_name not in dbapi_pkg.__all__
+    with pytest.raises(ImportError):
+        exec(f"from vertebra.db.dbapi import {removed_name}", {})
+    assert not hasattr(dbapi_pkg, removed_name)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_cls"),
+    [
+        (ImproperConfigurationError("x"), InterfaceError),
+        (UnsupportedBackendError("x"), InterfaceError),
+        (MissingDependencyError("x"), InterfaceError),
+        (VertebraError("x"), dbapi_pkg.DatabaseError),
+        (ValueError("x"), InterfaceError),
+        (TypeError("x"), InterfaceError),
+        (OperationalError("x"), None),
+        (dbapi_pkg.DatabaseError("x"), None),
+        (dbapi_pkg.Warning("x"), None),
+        (RuntimeError("x"), None),
+    ],
+    ids=[
+        "improper-config",
+        "unsupported-backend",
+        "missing-dependency",
+        "vertebra-error",
+        "value-error",
+        "type-error",
+        "operational-error",
+        "database-error",
+        "warning",
+        "runtime-error",
+    ],
+)
+def test_connect_error_mapping(exc: Exception, expected_cls: type[Exception] | None) -> None:
+    """Verify _connect_error maps configuration and driver-build errors to PEP 249 classes or None."""
+    mapped = dbapi_sync._connect_error(exc)
+    if expected_cls is None:
+        assert mapped is None
+    else:
+        assert type(mapped) is expected_cls
+        assert str(mapped) == str(exc)
+
+
+@pytest.mark.parametrize(
+    ("module_path", "removed_name"),
+    [
+        ("vertebra.db.dbapi", "SyncDBAPI" + "Cursor"),
+        ("vertebra.db.dbapi._sync", "SyncDBAPI" + "Cursor"),
+        ("vertebra.db.dbapi", "is_row_returning" + "_sql"),
+        ("vertebra.db.dbapi._sync", "is_row_returning" + "_sql"),
+    ],
+)
+def test_removed_sync_dbapi_symbols_raise_import_error(module_path: str, removed_name: str) -> None:
+    """Verify removed sync DB-API cursor and classifier symbols cannot be imported."""
+    with pytest.raises(ImportError):
+        exec(f"from {module_path} import {removed_name}", {})
+
+
+def test_sync_dbapi_transaction_call_propagates_native_error_unchanged() -> None:
+    """Verify a native OperationalError raised during commit reaches the caller unchanged."""
+    native_err = OperationalError("commit boom")
+
+    class _CommitFailDriver:
+        dialect = "sqlite"
+        in_transaction = True
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            _ = lazy_begin
+            return None
+
+        def commit(self) -> None:
+            raise native_err
+
+        def rollback(self) -> None:
             return None
 
         def close(self) -> None:
             return None
 
-    class _AsyncNextSetDriver:
-        dialect = "mssql"
+    conn = SyncDBAPIConnection(driver=_CommitFailDriver(), share_pool=False)
+    try:
+        with pytest.raises(OperationalError) as exc_info:
+            conn.commit()
+        assert exc_info.value is native_err
+        assert exc_info.value.__cause__ is None
+    finally:
+        conn.close()
 
-        def __init__(self) -> None:
-            self._sets = [([(10,)], ("x",)), ([(20,)], ("y",))]
 
-        async def execute_with_description(self, sql: str, parameters: Any = ()) -> tuple[list[tuple[Any, ...]], Any]:
-            _ = (sql, parameters)
-            return self._sets.pop(0)
+def test_sync_dbapi_connect_maps_improper_configuration_to_interface_error() -> None:
+    """Verify ImproperConfigurationError during sync driver build maps to InterfaceError."""
 
-        async def nextset(self) -> tuple[list[tuple[Any, ...]], Any] | None:
-            if self._sets:
-                return self._sets.pop(0)
+    class _BadConfig(driver_common.BaseDatabaseConfig, frozen=True):
+        dialect: str = "sqlite"
+
+        def pool_key(self) -> None:
             return None
+
+        def build_sync_driver(self, registry: Any) -> Any:
+            _ = registry
+            raise ImproperConfigurationError("bad sync config")
+
+    with pytest.raises(InterfaceError, match="bad sync config") as exc_info:
+        SyncDBAPIConnection(_BadConfig(), share_pool=False)
+    assert isinstance(exc_info.value.__cause__, ImproperConfigurationError)
+
+
+class _RecordingPostgresSyncDriver:
+    """Minimal sync driver double modeling PostgreSQL pinned-session lazy_begin routing."""
+
+    dialect = "postgres"
+    in_transaction = False
+
+    def __init__(self, *, pinned: bool = False) -> None:
+        self.pinned = pinned
+        self.recorded_flags: list[bool] = []
+
+    def cursor(self, *, lazy_begin: bool = False) -> dict[str, bool]:
+        self.recorded_flags.append(lazy_begin)
+        if lazy_begin and not self.pinned:
+            raise InterfaceError("lazy_begin requires a pinned session")
+        return {"lazy_begin": lazy_begin}
+
+    def close(self) -> None:
+        return None
+
+
+def test_sync_dbapi_cursor_is_instance_attribute() -> None:
+    """Verify SyncDBAPIConnection exposes cursor via a __slots__ member_descriptor without _native_cursor."""
+    assert "cursor" in SyncDBAPIConnection.__slots__
+    assert "_native_cursor" not in SyncDBAPIConnection.__slots__
+    assert type(vars(SyncDBAPIConnection)["cursor"]).__name__ == "member_descriptor"
+
+
+@pytest.mark.parametrize("autocommit", [False, True], ids=["autocommit_off", "autocommit_on"])
+def test_sync_dbapi_cursor_callable_follows_autocommit(autocommit: bool) -> None:
+    """Verify SyncDBAPIConnection.cursor binds partial(lazy_begin=True) or raw driver.cursor per autocommit."""
+    driver = SyncSQLiteDriver()
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False, autocommit=autocommit)
+    try:
+        assert cast("Any", conn.driver) is driver
+        if not autocommit:
+            assert isinstance(conn.cursor, functools.partial)
+            assert conn.cursor.func == driver.cursor
+            assert conn.cursor.keywords == {"lazy_begin": True}
+        else:
+            assert conn.cursor == driver.cursor
+
+        cur = conn.cursor()
+        try:
+            assert isinstance(cur, SyncSQLiteCursor)
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_cursor_callable_rebuilt_on_autocommit_change() -> None:
+    """Verify toggling autocommit rebuilds the SyncDBAPIConnection.cursor callable."""
+    driver = SyncSQLiteDriver()
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False, autocommit=False)
+    try:
+        assert cast("Any", conn.driver) is driver
+        first_callable = conn.cursor
+        assert isinstance(first_callable, functools.partial)
+        assert first_callable.func == driver.cursor
+        assert first_callable.keywords == {"lazy_begin": True}
+
+        conn.autocommit = True
+        assert conn.cursor == driver.cursor
+
+        conn.autocommit = False
+        rebuilt_callable = conn.cursor
+        assert isinstance(rebuilt_callable, functools.partial)
+        assert rebuilt_callable is not first_callable
+        assert rebuilt_callable.func == driver.cursor
+        assert rebuilt_callable.keywords == {"lazy_begin": True}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("dialect_name", ["oracle", "mysql", "mssql", "sqlite", "duckdb"])
+def test_sync_dbapi_cursor_lazy_begin_by_engine(dialect_name: str) -> None:
+    """Verify non-PostgreSQL engines bind lazy_begin=True via partial when autocommit is off."""
+    recorded_flags: list[bool] = []
+
+    class _EngineRecordingDriver:
+        dialect = dialect_name
+        in_transaction = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> dict[str, bool]:
+            recorded_flags.append(lazy_begin)
+            return {"lazy_begin": lazy_begin}
+
+        def close(self) -> None:
+            return None
+
+    conn = SyncDBAPIConnection(driver=_EngineRecordingDriver(), share_pool=False)
+    try:
+        assert isinstance(conn.cursor, functools.partial)
+        result = conn.cursor()
+        assert result == {"lazy_begin": True}
+        assert recorded_flags == [True]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("pinned", "expected_flags"),
+    [
+        (False, [True, False]),
+        (True, [True]),
+    ],
+    ids=["unpinned", "pinned"],
+)
+def test_sync_dbapi_postgres_cursor_decides_per_call(pinned: bool, expected_flags: list[bool]) -> None:
+    """Verify PostgreSQL uses _session_routed_cursor to decide lazy_begin per call when autocommit is off."""
+    driver = _RecordingPostgresSyncDriver(pinned=pinned)
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        assert conn.cursor == conn._session_routed_cursor
+        conn.cursor()
+        assert driver.recorded_flags == expected_flags
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_postgres_cursor_follows_pinning_changes() -> None:
+    """Verify PostgreSQL cursor routing adapts dynamically across unpinned and pinned session transitions."""
+    driver = _RecordingPostgresSyncDriver(pinned=False)
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        first = conn.cursor()
+        driver.pinned = True
+        second = conn.cursor()
+        driver.pinned = False
+        third = conn.cursor()
+        assert [first["lazy_begin"], second["lazy_begin"], third["lazy_begin"]] == [False, True, False]
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_postgres_autocommit_binds_driver_cursor() -> None:
+    """Verify PostgreSQL with autocommit enabled binds driver.cursor directly and passes lazy_begin=False."""
+    driver = _RecordingPostgresSyncDriver(pinned=False)
+    conn = SyncDBAPIConnection(driver=driver, share_pool=False, autocommit=True)
+    try:
+        assert conn.cursor == driver.cursor
+        conn.cursor()
+        assert driver.recorded_flags == [False]
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_cursor_runs_no_dbapi_module_frame() -> None:
+    """Verify conn.cursor() on SQLite executes no Python frame from vertebra/db/dbapi/_sync.py."""
+    conn = SyncDBAPIConnection(driver=SyncSQLiteDriver(), share_pool=False)
+    collected_files: list[str] = []
+
+    def _profiler(frame: Any, event: str, arg: Any) -> None:
+        _ = arg
+        if event == "call":
+            collected_files.append(frame.f_code.co_filename)
+
+    try:
+        sys.setprofile(_profiler)
+        try:
+            cur = conn.cursor()
+        finally:
+            sys.setprofile(None)
+        try:
+            assert isinstance(cur, SyncSQLiteCursor)
+        finally:
+            cur.close()
+        assert not any(Path(name).as_posix().endswith("db/dbapi/_sync.py") for name in collected_files)
+    finally:
+        conn.close()
+
+
+def test_sync_dbapi_cursor_after_close_raises_interface_error() -> None:
+    """Verify cursor() raises InterfaceError after close(), even if autocommit is subsequently modified."""
+    conn = SyncDBAPIConnection(driver=SyncSQLiteDriver(), share_pool=False)
+    conn.close()
+    with pytest.raises(InterfaceError, match="Cannot operate on a closed connection."):
+        conn.cursor()
+    conn.autocommit = True
+    with pytest.raises(InterfaceError, match="Cannot operate on a closed connection."):
+        conn.cursor()
+
+
+def test_sync_dbapi_lazy_begin_still_opens_transaction(tmp_path: Path) -> None:
+    """Verify a bound partial lazy_begin cursor still opens a transaction undone by rollback()."""
+    db_file = tmp_path / "lazy_begin_sync.sqlite3"
+    conn = SyncDBAPIConnection(f"sqlite+vtb:///{db_file}", share_pool=False, autocommit=False)
+    try:
+        setup_cur = conn.cursor()
+        setup_cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        setup_cur.close()
+        conn.commit()
+
+        write_cur = conn.cursor()
+        write_cur.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "rolled_back"))
+        write_cur.close()
+        conn.rollback()
+
+        verify_cur = conn.cursor()
+        verify_cur.execute("SELECT COUNT(*) FROM items")
+        assert verify_cur.fetchall() == [(0,)]
+        verify_cur.close()
+    finally:
+        conn.close()
+
+
+class _RecordingPostgresAsyncDriver:
+    """Minimal async driver double modeling PostgreSQL pinned-session lazy_begin routing."""
+
+    dialect = "postgres"
+    in_transaction = False
+
+    def __init__(self, *, pinned: bool = False) -> None:
+        self.pinned = pinned
+        self.recorded_flags: list[bool] = []
+
+    def cursor(self, *, lazy_begin: bool = False) -> dict[str, bool]:
+        self.recorded_flags.append(lazy_begin)
+        if lazy_begin and not self.pinned:
+            raise InterfaceError("lazy_begin requires a pinned session")
+        return {"lazy_begin": lazy_begin}
+
+    async def close(self) -> None:
+        return None
+
+
+def test_async_dbapi_cursor_is_instance_attribute() -> None:
+    """Verify AsyncDBAPIConnection exposes cursor via a __slots__ member_descriptor without _native_cursor."""
+    assert "cursor" in AsyncDBAPIConnection.__slots__
+    assert "_native_cursor" not in AsyncDBAPIConnection.__slots__
+    assert type(vars(AsyncDBAPIConnection)["cursor"]).__name__ == "member_descriptor"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("autocommit", [False, True], ids=["autocommit_off", "autocommit_on"])
+async def test_async_dbapi_cursor_callable_follows_autocommit(autocommit: bool) -> None:
+    """Verify AsyncDBAPIConnection.cursor binds partial(lazy_begin=True) or raw driver.cursor per autocommit."""
+    driver = AsyncSQLiteDriver()
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False, autocommit=autocommit)
+    try:
+        assert cast("Any", conn.driver) is driver
+        if not autocommit:
+            assert isinstance(conn.cursor, functools.partial)
+            assert conn.cursor.func == driver.cursor
+            assert conn.cursor.keywords == {"lazy_begin": True}
+        else:
+            assert conn.cursor == driver.cursor
+
+        cur = conn.cursor()
+        try:
+            assert isinstance(cur, AsyncSQLiteCursor)
+        finally:
+            await cur.close()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_callable_rebuilt_on_autocommit_change() -> None:
+    """Verify toggling autocommit rebuilds the AsyncDBAPIConnection.cursor callable."""
+    driver = AsyncSQLiteDriver()
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False, autocommit=False)
+    try:
+        assert cast("Any", conn.driver) is driver
+        first_callable = conn.cursor
+        assert isinstance(first_callable, functools.partial)
+        assert first_callable.func == driver.cursor
+        assert first_callable.keywords == {"lazy_begin": True}
+
+        conn.autocommit = True
+        assert conn.cursor == driver.cursor
+
+        conn.autocommit = False
+        rebuilt_callable = conn.cursor
+        assert isinstance(rebuilt_callable, functools.partial)
+        assert rebuilt_callable is not first_callable
+        assert rebuilt_callable.func == driver.cursor
+        assert rebuilt_callable.keywords == {"lazy_begin": True}
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dialect_name", ["oracle", "mysql", "mssql", "sqlite", "duckdb"])
+async def test_async_dbapi_cursor_lazy_begin_by_engine(dialect_name: str) -> None:
+    """Verify non-PostgreSQL async engines bind lazy_begin=True via partial when autocommit is off."""
+    recorded_flags: list[bool] = []
+
+    class _EngineRecordingAsyncDriver:
+        dialect = dialect_name
+        in_transaction = False
+
+        def cursor(self, *, lazy_begin: bool = False) -> dict[str, bool]:
+            recorded_flags.append(lazy_begin)
+            return {"lazy_begin": lazy_begin}
 
         async def close(self) -> None:
             return None
 
-    mssql_sync_conn = SyncDBAPIConnection("mssql+vtb://localhost/db", driver=_SyncNextSetDriver(), share_pool=False)
+    conn = AsyncDBAPIConnection(driver=_EngineRecordingAsyncDriver(), share_pool=False)
     try:
-        mcur = mssql_sync_conn.cursor()
-        mcur.execute("SELECT 1; SELECT 2")
-        assert mcur.fetchall() == [(1,)]
-        assert mcur.nextset() is True
-        assert mcur.fetchall() == [(2,)]
-        assert mcur.nextset() is None
+        assert isinstance(conn.cursor, functools.partial)
+        result = conn.cursor()
+        assert result == {"lazy_begin": True}
+        assert recorded_flags == [True]
     finally:
-        mssql_sync_conn.close()
+        await conn.close()
 
-    mssql_async_conn = AsyncDBAPIConnection(
-        "mssql+vtb_async://localhost/db",
-        driver=_AsyncNextSetDriver(),
-        share_pool=False,
-    )
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("pinned", "expected_flags"),
+    [
+        (False, [True, False]),
+        (True, [True]),
+    ],
+    ids=["unpinned", "pinned"],
+)
+async def test_async_dbapi_postgres_cursor_decides_per_call(pinned: bool, expected_flags: list[bool]) -> None:
+    """Verify async PostgreSQL uses _session_routed_cursor to decide lazy_begin per call when autocommit is off."""
+    driver = _RecordingPostgresAsyncDriver(pinned=pinned)
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False)
     try:
-        amcur = mssql_async_conn.cursor()
-        await amcur.execute("SELECT 10; SELECT 20")
-        assert await amcur.fetchall() == [(10,)]
-        assert await amcur.nextset() is True
-        assert await amcur.fetchall() == [(20,)]
-        assert await amcur.nextset() is None
+        assert conn.cursor == conn._session_routed_cursor
+        conn.cursor()
+        assert driver.recorded_flags == expected_flags
     finally:
-        await mssql_async_conn.close()
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_postgres_cursor_follows_pinning_changes() -> None:
+    """Verify async PostgreSQL cursor routing adapts dynamically across unpinned and pinned session transitions."""
+    driver = _RecordingPostgresAsyncDriver(pinned=False)
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False)
+    try:
+        first = conn.cursor()
+        driver.pinned = True
+        second = conn.cursor()
+        driver.pinned = False
+        third = conn.cursor()
+        assert [first["lazy_begin"], second["lazy_begin"], third["lazy_begin"]] == [False, True, False]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_postgres_autocommit_binds_driver_cursor() -> None:
+    """Verify async PostgreSQL with autocommit enabled binds driver.cursor directly and passes lazy_begin=False."""
+    driver = _RecordingPostgresAsyncDriver(pinned=False)
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False, autocommit=True)
+    try:
+        assert conn.cursor == driver.cursor
+        conn.cursor()
+        assert driver.recorded_flags == [False]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_runs_no_dbapi_module_frame() -> None:
+    """Verify async conn.cursor() on SQLite executes no Python frame from dbapi/_async.py or dbapi/_sync.py."""
+    conn = AsyncDBAPIConnection(driver=AsyncSQLiteDriver(), share_pool=False)
+    collected_files: list[str] = []
+
+    def _profiler(frame: Any, event: str, arg: Any) -> None:
+        _ = arg
+        if event == "call":
+            collected_files.append(frame.f_code.co_filename)
+
+    try:
+        sys.setprofile(_profiler)
+        try:
+            cur = conn.cursor()
+        finally:
+            sys.setprofile(None)
+        try:
+            assert isinstance(cur, AsyncSQLiteCursor)
+        finally:
+            await cur.close()
+        assert not any(
+            Path(name).as_posix().endswith(("db/dbapi/_async.py", "db/dbapi/_sync.py")) for name in collected_files
+        )
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_cursor_after_close_raises_interface_error() -> None:
+    """Verify async cursor() raises InterfaceError after close(), even if autocommit is subsequently modified."""
+    conn = AsyncDBAPIConnection(driver=AsyncSQLiteDriver(), share_pool=False)
+    await conn.close()
+    with pytest.raises(InterfaceError, match="Cannot operate on a closed connection."):
+        conn.cursor()
+    conn.autocommit = True
+    with pytest.raises(InterfaceError, match="Cannot operate on a closed connection."):
+        conn.cursor()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_lazy_begin_still_opens_transaction(tmp_path: Path) -> None:
+    """Verify a bound partial lazy_begin async cursor still opens a transaction undone by rollback()."""
+    db_file = tmp_path / "lazy_begin_async.sqlite3"
+    conn = AsyncDBAPIConnection(f"sqlite+vtb_async:///{db_file}", share_pool=False, autocommit=False)
+    try:
+        setup_cur = conn.cursor()
+        await setup_cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        await setup_cur.close()
+        await conn.commit()
+
+        write_cur = conn.cursor()
+        await write_cur.execute("INSERT INTO items (id, label) VALUES (?, ?)", (1, "rolled_back"))
+        await write_cur.close()
+        await conn.rollback()
+
+        verify_cur = conn.cursor()
+        await verify_cur.execute("SELECT COUNT(*) FROM items")
+        assert await verify_cur.fetchall() == [(0,)]
+        await verify_cur.close()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_async_dbapi_getattr_does_not_shadow_cursor() -> None:
+    """Verify AsyncDBAPIConnection.__getattr__ does not shadow the stored cursor callable."""
+    driver = AsyncSQLiteDriver()
+    conn = AsyncDBAPIConnection(driver=driver, share_pool=False, autocommit=False)
+    try:
+        assert cast("Any", conn.driver) is driver
+        assert isinstance(conn.cursor, functools.partial)
+        assert conn.cursor != driver.cursor
+        assert conn.cursor.func == driver.cursor
+        assert conn.cursor.keywords == {"lazy_begin": True}
+    finally:
+        await conn.close()

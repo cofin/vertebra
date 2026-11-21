@@ -7,12 +7,14 @@ from typing import Any
 
 import pytest
 
+import vertebra.db.adapters.postgres.binds as postgres_binds_module
 from vertebra._vertebra import VectorBatchView
 from vertebra.db.adapters.postgres import PostgresClientOptions, PostgresTarget
 from vertebra.db.adapters.postgres.binds import (
     PG_JSONB_TEXT,
     compile_postgres_binds,
     normalize_postgres_parameter,
+    normalize_postgres_parameters,
 )
 from vertebra.db.adapters.postgres.config import PostgreSQLConfig
 from vertebra.db.adapters.postgres.core import PostgreSQLCore
@@ -291,6 +293,27 @@ def test_cloud_sql_and_alloydb_invalid_combinations_rejected(
             (99,),
             "pyformat",
         ),
+        (
+            "SELECT %(a)s, %(b)s, %(a)s",
+            {"a": 1, "b": 2},
+            "SELECT $1, $2, $1",
+            (1, 2),
+            "named",
+        ),
+        (
+            "SELECT %s",
+            [bytearray(b"buf")],
+            "SELECT $1",
+            (b"buf",),
+            "pyformat",
+        ),
+        (
+            "SELECT 1",
+            None,
+            "SELECT 1",
+            (),
+            "none",
+        ),
     ],
 )
 def test_compile_postgres_binds_valid_cases(
@@ -305,6 +328,21 @@ def test_compile_postgres_binds_valid_cases(
     assert compiled.sql == expected_sql
     assert compiled.params == expected_params
     assert compiled.style == expected_style
+    for param, expected in zip(compiled.params, expected_params, strict=True):
+        if type(expected) is bytes:
+            assert type(param) is bytes
+
+
+def test_postgres_binds_omits_removed_python_scanner_helpers() -> None:
+    """Verify the Python placeholder scanner helpers have been deleted from binds.py."""
+    removed_prefix_names = [
+        name
+        for name in vars(postgres_binds_module)
+        if name.startswith(("_scan_", "_is_ident", "_is_dollar", "_match_dollar", "_emit_", "_activate_"))
+        or name in {"_Sql" + "BindPlan", "_Scan" + "State"}
+    ]
+    assert removed_prefix_names == []
+    assert not hasattr(postgres_binds_module, "_scan_" + "sql_bind_plan")
 
 
 @pytest.mark.parametrize(
@@ -377,7 +415,7 @@ def test_parameter_normalization_copies_mutable_buffers_and_ffi_views() -> None:
     raw_mv.obj[:] = b"YYYYY"
     json_payload["nested"].append(999)
 
-    out = PostgreSQLCore.normalize_parameters(compiled.params)
+    out = normalize_postgres_parameters(compiled.params)
     assert type(out[0]) is bytes and out[0] == b"hello"
     assert type(out[1]) is bytes and out[1] == b"world"
     assert isinstance(out[2], PgJson) and out[2].value == {"nested": [1, 2]}

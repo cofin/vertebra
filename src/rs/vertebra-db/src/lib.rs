@@ -23,6 +23,8 @@ pub mod dialer;
 pub mod duckdb;
 #[cfg(feature = "gcp")]
 pub mod gcp;
+#[cfg(feature = "pyo3")]
+pub mod lease_guard;
 pub mod mssql;
 pub mod oracle;
 pub mod postgres;
@@ -60,6 +62,8 @@ pub use gcp::{
     GcpErrorInfo, GcpTokenCredentials, code_name, code_number, gax_error_info, http_code,
     official_credentials,
 };
+#[cfg(feature = "pyo3")]
+pub use lease_guard::LeaseGuard;
 pub use mssql::rewrite_mssql_placeholders;
 pub use oracle::{
     OSON_MAGIC, OracleSessionAttrs, OracleVectorFormat, decode_oracle_vector_binary,

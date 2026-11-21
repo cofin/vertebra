@@ -10,6 +10,7 @@ from typing import Any, Final, Self, cast
 from urllib.parse import urlparse
 
 from sqlspec.core import (
+    SQL,
     DriverParameterProfile,
     ParameterStyle,
     ParameterStyleConfig,
@@ -55,6 +56,7 @@ __all__ = (
     "bigquery_partition_clauses",
     "build_profile",
     "build_statement_config",
+    "compile_bigquery_statement",
     "default_statement_config",
     "driver_profile",
     "encode_typed_bigquery_many",
@@ -250,6 +252,16 @@ def encode_typed_bigquery_many(parameter_sets: Any) -> list[Any]:
     if isinstance(parameter_sets, Sequence) and not isinstance(parameter_sets, (str, bytes, bytearray)):
         return [encode_typed_bigquery_parameters(item) for item in parameter_sets]
     return [encode_typed_bigquery_parameters(parameter_sets)]
+
+
+def compile_bigquery_statement(statement: SQL) -> tuple[str, Any]:
+    """Compile a SQLSpec ``SQL`` statement once and encode BigQuery typed parameters."""
+    sql, prepared = statement.compile()
+    if prepared is None:
+        return sql, None
+    if isinstance(prepared, (dict, list, tuple)) and len(prepared) == 0:
+        return sql, None
+    return sql, encode_typed_bigquery_parameters(prepared)
 
 
 def _strip_sql_noise(sql: str) -> str:
@@ -772,6 +784,16 @@ class BigQueryConnectionShim:
         )
         metadata = getattr(self.driver, "last_query_metadata", {}) or {}
         return BigQueryConnectionQueryJob(list(rows), metadata)
+
+    def cursor(self, **kwargs: Any) -> Any:
+        """Delegate PEP 249 cursor creation to the underlying driver."""
+        return self.driver.cursor(**kwargs)
+
+    def _after_query(self, metadata: Mapping[str, Any]) -> None:
+        """Delegate post-query metadata recording to the underlying driver."""
+        after_query = getattr(self.driver, "_after_query", None)
+        if callable(after_query):
+            after_query(metadata)
 
     def execute(
         self,

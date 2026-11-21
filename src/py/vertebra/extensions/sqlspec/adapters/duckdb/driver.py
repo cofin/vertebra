@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlspec.core import SQL, ParameterStyle, StatementConfig
-from sqlspec.driver import ExecutionResult, validate_savepoint_name
+from sqlspec.core import ParameterStyle, StatementConfig
+from sqlspec.driver import validate_savepoint_name
+from sqlspec.driver._common import cache_hit_hooks_unchanged
 
 from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
 from vertebra.extensions.sqlspec.adapters.duckdb.core import (
@@ -15,8 +16,6 @@ from vertebra.extensions.sqlspec.adapters.duckdb.core import (
     description_has_arrow_divergent_types,
     duckdb_copy_filename_follows_query,
     map_duckdb_exception,
-    normalize_duckdb_many_parameters,
-    normalize_duckdb_parameters,
     order_duckdb_copy_parameters,
 )
 from vertebra.extensions.sqlspec.adapters.duckdb.data_dictionary import (
@@ -69,12 +68,14 @@ class DuckDBSyncDriver(BaseSyncDriver):
         """Build default DuckDB `StatementConfig` supporting `?` and `$1` placeholders."""
         return default_statement_config()
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the client-bound callables the native driver holds, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), DuckDBSyncDriver):
+            return None
+        return self._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_duckdb_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = (sql, statement)
-        return sql, normalize_duckdb_parameters(params)
 
     def create_savepoint(self, name: str) -> None:
         """Create a DuckDB transactional savepoint."""
@@ -103,15 +104,6 @@ class DuckDBSyncDriver(BaseSyncDriver):
             return
         self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
-    def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a parameterized batch write against DuckDB using normalized tuples."""
-        sql, prepared = self._compile_for_native(statement)
-        bound_sets = normalize_duckdb_many_parameters(prepared)
-        if not bound_sets:
-            return self.create_execution_result(cursor, rowcount_override=0)
-        affected = int(cursor.execute_many(sql, bound_sets))
-        return self.create_execution_result(cursor, rowcount_override=affected)
-
     def prepare_copy_to_query(
         self,
         statement: Any,
@@ -125,7 +117,7 @@ class DuckDBSyncDriver(BaseSyncDriver):
         """Compile `statement` into DuckDB `COPY (<query>) TO ?` with DuckDB 2.0+ lexical bind ordering."""
         cfg = statement_config or self.statement_config
         prepared = self.prepare_statement(statement, parameters, statement_config=cfg, kwargs=kwargs)
-        compiled_sql, compiled_params = self._compile_for_native(prepared)
+        compiled_sql, compiled_params = self._compiled_sql(prepared, cfg)
         copy_sql = build_duckdb_copy_sql(compiled_sql, file_format)
         if copy_sql is None:
             msg = f"Cannot wrap DuckDB COPY statement for format={file_format!r}: {compiled_sql!r}"
@@ -192,12 +184,14 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         """Build default DuckDB `StatementConfig` supporting `?` and `$1` placeholders."""
         return default_statement_config()
 
+    def _cache_hit_callables(self) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+        """Return the client-bound callables the native async driver holds, or `None` to register no executor."""
+        if not cache_hit_hooks_unchanged(type(self), DuckDBAsyncDriver):
+            return None
+        return BaseSyncDriver._single_call_pair(self.native_driver, "_fetch_rows", "_run_dml")
+
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_duckdb_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = (sql, statement)
-        return sql, normalize_duckdb_parameters(params)
 
     async def create_savepoint(self, name: str) -> None:
         """Create a DuckDB transactional savepoint asynchronously."""
@@ -226,15 +220,6 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
             return
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
-    async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> ExecutionResult:
-        """Execute a parameterized batch write asynchronously against DuckDB using normalized tuples."""
-        sql, prepared = self._compile_for_native(statement)
-        bound_sets = normalize_duckdb_many_parameters(prepared)
-        if not bound_sets:
-            return self.create_execution_result(cursor, rowcount_override=0)
-        affected = int(await cursor.execute_many(sql, bound_sets))
-        return self.create_execution_result(cursor, rowcount_override=affected)
-
     def prepare_copy_to_query(
         self,
         statement: Any,
@@ -248,7 +233,7 @@ class DuckDBAsyncDriver(BaseAsyncDriver):
         """Compile `statement` into DuckDB `COPY (<query>) TO ?` with DuckDB 2.0+ lexical bind ordering."""
         cfg = statement_config or self.statement_config
         prepared = self.prepare_statement(statement, parameters, statement_config=cfg, kwargs=kwargs)
-        compiled_sql, compiled_params = self._compile_for_native(prepared)
+        compiled_sql, compiled_params = self._compiled_sql(prepared, cfg)
         copy_sql = build_duckdb_copy_sql(compiled_sql, file_format)
         if copy_sql is None:
             msg = f"Cannot wrap DuckDB COPY statement for format={file_format!r}: {compiled_sql!r}"

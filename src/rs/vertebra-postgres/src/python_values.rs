@@ -96,25 +96,121 @@ fn resolve_python_types(py: Python<'_>) -> Result<&'static CachedPythonTypes, Po
         .map_err(|e| PostgresError::Interface(format!("failed to load Python types: {e}")))
 }
 
+fn no_parameters(
+    parameter_oids: Option<&Bound<'_, PyAny>>,
+) -> Result<(Vec<Parameter>, Option<Vec<u32>>), PostgresError> {
+    if let Some(oids_obj) = parameter_oids.filter(|o| !o.is_none()) {
+        let oids = extract_oid_sequence(oids_obj)?;
+        if !oids.is_empty() {
+            return Err(PostgresError::Data(format!(
+                "parameter_oids length {} does not match parameters length 0",
+                oids.len()
+            )));
+        }
+        return Ok((Vec::new(), Some(oids)));
+    }
+    Ok((Vec::new(), None))
+}
+
+fn extract_parameter_items<'a, I>(
+    py: Python<'_>,
+    items: I,
+    len: usize,
+    parameter_oids: Option<&Bound<'_, PyAny>>,
+) -> Result<(Vec<Parameter>, Option<Vec<u32>>), PostgresError>
+where
+    I: IntoIterator<Item = Bound<'a, PyAny>>,
+{
+    let explicit_oids = match parameter_oids.filter(|o| !o.is_none()) {
+        Some(oids_obj) => {
+            let oids = extract_oid_sequence(oids_obj)?;
+            if oids.len() != len {
+                return Err(PostgresError::Data(format!(
+                    "parameter_oids length {} does not match parameters length {len}",
+                    oids.len()
+                )));
+            }
+            Some(oids)
+        }
+        None => None,
+    };
+
+    let types = resolve_python_types(py)?;
+    let pg_param_type = types.pg_parameter.bind(py);
+    let mut out_params = Vec::with_capacity(len);
+    for (idx, item) in items.into_iter().enumerate() {
+        let vec_oid = explicit_oids.as_ref().and_then(|v| v.get(idx).copied());
+        if item
+            .is_instance(pg_param_type)
+            .map_err(|e| PostgresError::Data(e.to_string()))?
+        {
+            let wrapper_oid = extract_positive_u32_attr(&item, "type_oid")?;
+            if let Some(v_oid) = vec_oid
+                && v_oid != 0
+                && v_oid != wrapper_oid
+            {
+                return Err(PostgresError::Data(format!(
+                    "parameter_oids[{idx}] = {v_oid} conflicts with PgParameter.type_oid = {wrapper_oid}"
+                )));
+            }
+            let inner = item
+                .getattr("value")
+                .map_err(|e| PostgresError::Data(e.to_string()))?;
+            let val = extract_pg_value(py, &inner, Some(wrapper_oid))?;
+            out_params.push(Parameter {
+                value: val,
+                type_oid: Some(wrapper_oid),
+            });
+        } else {
+            let target = vec_oid.filter(|&o| o != 0);
+            let val = extract_pg_value(py, &item, target)?;
+            out_params.push(Parameter {
+                value: val,
+                type_oid: target,
+            });
+        }
+    }
+
+    Ok((out_params, explicit_oids))
+}
+
 /// Extract ordered query parameters and optional `parameter_oids` into owned Rust [`Parameter`] records before releasing the GIL.
 pub fn extract_parameters(
     py: Python<'_>,
     parameters: &Bound<'_, PyAny>,
     parameter_oids: Option<&Bound<'_, PyAny>>,
 ) -> Result<(Vec<Parameter>, Option<Vec<u32>>), PostgresError> {
-    let types = resolve_python_types(py)?;
     if parameters.is_none() {
-        if let Some(oids_obj) = parameter_oids.filter(|o| !o.is_none()) {
-            let oids = extract_oid_sequence(oids_obj)?;
-            if !oids.is_empty() {
-                return Err(PostgresError::Data(format!(
-                    "parameter_oids length {} does not match parameters length 0",
-                    oids.len()
-                )));
-            }
-            return Ok((Vec::new(), Some(oids)));
+        return no_parameters(parameter_oids);
+    }
+
+    if parameters.is_exact_instance_of::<PyTuple>() {
+        let tuple = parameters
+            .cast::<PyTuple>()
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        let len = tuple.len();
+        if len == 0 {
+            return no_parameters(parameter_oids);
         }
-        return Ok((Vec::new(), None));
+        return extract_parameter_items(py, tuple.iter(), len, parameter_oids);
+    }
+
+    if parameters.is_exact_instance_of::<PyList>() {
+        let list = parameters
+            .cast::<PyList>()
+            .map_err(|e| PostgresError::Interface(e.to_string()))?;
+        let len = list.len();
+        if len == 0 {
+            return no_parameters(parameter_oids);
+        }
+        return extract_parameter_items(py, list.iter(), len, parameter_oids);
+    }
+
+    if parameters.is_exact_instance_of::<PyDict>() {
+        return Err(PostgresError::Interface(
+            "parameters must be an ordered sequence (tuple or list), not str/bytes/dict"
+                .to_string(),
+        ));
     }
 
     if parameters.is_instance_of::<PyString>()
@@ -136,56 +232,11 @@ pub fn extract_parameters(
         .collect::<PyResult<Vec<_>>>()
         .map_err(|e| PostgresError::Interface(format!("failed to iterate parameters: {e}")))?;
 
-    let explicit_oids = match parameter_oids.filter(|o| !o.is_none()) {
-        Some(oids_obj) => {
-            let oids = extract_oid_sequence(oids_obj)?;
-            if oids.len() != items.len() {
-                return Err(PostgresError::Data(format!(
-                    "parameter_oids length {} does not match parameters length {}",
-                    oids.len(),
-                    items.len()
-                )));
-            }
-            Some(oids)
-        }
-        None => None,
-    };
-
-    let mut out_params = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
-        let vec_oid = explicit_oids.as_ref().and_then(|v| v.get(idx).copied());
-        if item
-            .is_instance(types.pg_parameter.bind(py))
-            .map_err(|e| PostgresError::Data(e.to_string()))?
-        {
-            let wrapper_oid = extract_positive_u32_attr(item, "type_oid")?;
-            if let Some(v_oid) = vec_oid
-                && v_oid != 0
-                && v_oid != wrapper_oid
-            {
-                return Err(PostgresError::Data(format!(
-                    "parameter_oids[{idx}] = {v_oid} conflicts with PgParameter.type_oid = {wrapper_oid}"
-                )));
-            }
-            let inner = item
-                .getattr("value")
-                .map_err(|e| PostgresError::Data(e.to_string()))?;
-            let val = extract_pg_value(py, &inner, Some(wrapper_oid))?;
-            out_params.push(Parameter {
-                value: val,
-                type_oid: Some(wrapper_oid),
-            });
-        } else {
-            let target = vec_oid.filter(|&o| o != 0);
-            let val = extract_pg_value(py, item, target)?;
-            out_params.push(Parameter {
-                value: val,
-                type_oid: target,
-            });
-        }
+    if items.is_empty() {
+        return no_parameters(parameter_oids);
     }
-
-    Ok((out_params, explicit_oids))
+    let len = items.len();
+    extract_parameter_items(py, items, len, parameter_oids)
 }
 
 fn extract_oid_sequence(obj: &Bound<'_, PyAny>) -> Result<Vec<u32>, PostgresError> {

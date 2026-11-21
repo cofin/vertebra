@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -12,20 +12,26 @@ use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList, PyString, PyTuple
 use tokio::sync::oneshot;
 use vertebra_core::notify::SyncCompletionQueue;
 use vertebra_db::arrow_shm::write_shm_arrow_region_unregistered;
+use vertebra_db::lease_guard::LeaseGuard;
 use vertebra_db::oracle::OracleSessionAttrs;
 use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, spawn_rust_db_task_with_attr,
 };
 
 use crate::config::{NativeOracleConfig, RawOracleOptions};
+use crate::cursor::{
+    AsyncOracleCursor, BuiltReply, SyncOracleCursor, prepare_execute, reply_dicts, reply_dml,
+    reply_first_value, reply_rows_and_names, run_single_call_sync, spawn_single_call,
+};
 use crate::dialer::{connect_oracledb, connect_oracledb_session};
 use crate::errors::OracleError;
 use crate::notify::{
     AsyncOracleListener, SyncOracleListener, enqueue_notification_sync, validate_aq_identifier,
 };
 use crate::types::{
-    OracleCellValue, OracleColumn, OracleQueryResult, cell_to_oracledb_bind, decode_oracledb_row,
-    extract_bind_value, normalize_named_bind_map, out_bind_type_placeholder,
+    OracleCellValue, OracleColumn, OracleQueryResult, OracleValueOptions, VectorReturnFormat,
+    cell_to_oracledb_bind, decode_oracledb_row, extract_bind_value, normalize_named_bind_map,
+    out_bind_type_placeholder,
 };
 
 /// Attribute name used to attach `vertebra._oracle`'s `AsyncCompletionQueue` drainer to an `asyncio` event loop.
@@ -308,22 +314,6 @@ impl WorkerQueryOutcome {
             lastrowid: self.lastrowid,
             out_binds,
         })
-    }
-
-    fn into_py_first_row_or_none(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let mut rows_iter = self.rows.into_iter();
-        let Some(first_row) = rows_iter.next() else {
-            return Ok(py.None());
-        };
-        let mut cells = Vec::with_capacity(first_row.len());
-        for cell in first_row {
-            cells.push(
-                cell.into_py_object(py, self.fetch_decimals)
-                    .map_err(|e| e.to_py_err(py))?,
-            );
-        }
-        let tup = PyTuple::new(py, cells)?;
-        Ok(tup.into_any().unbind())
     }
 }
 
@@ -655,6 +645,7 @@ pub(crate) enum WorkerCommand {
     Begin,
     Commit,
     Rollback,
+    ResetIfDirty,
     Savepoint(String),
     RollbackToSavepoint(String),
     Query {
@@ -852,17 +843,133 @@ fn strip_leading_sql_comments(sql: &str) -> &str {
     s
 }
 
+/// High-level Oracle statement kind used by the worker and native cursor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StatementKind {
+    Query,
+    DmlOrPlsql,
+}
+
+/// Cached per-SQL-text classification facts computed without Python scanning.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct StatementFacts {
+    pub kind: StatementKind,
+    pub touches_session_context: bool,
+}
+
+const STATEMENT_FACTS_CACHE_CAPACITY: usize = 512;
+
+struct StatementFactsLru {
+    entries: HashMap<String, (StatementFacts, u64)>,
+    clock: u64,
+    capacity: usize,
+    #[cfg(test)]
+    scan_count: usize,
+}
+
+impl StatementFactsLru {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity.min(64)),
+            clock: 0,
+            capacity: capacity.max(1),
+            #[cfg(test)]
+            scan_count: 0,
+        }
+    }
+
+    fn get_or_insert(&mut self, sql: &str) -> StatementFacts {
+        self.clock = self.clock.wrapping_add(1);
+        let tick = self.clock;
+        if let Some((facts, last_used)) = self.entries.get_mut(sql) {
+            *last_used = tick;
+            return *facts;
+        }
+        #[cfg(test)]
+        {
+            self.scan_count += 1;
+        }
+        let facts = compute_statement_facts(sql);
+        if self.entries.len() >= self.capacity
+            && let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used_at))| *used_at)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&oldest_key);
+        }
+        self.entries.insert(sql.to_owned(), (facts, tick));
+        facts
+    }
+}
+
+fn starts_with_ascii_ci(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn compute_statement_facts(sql: &str) -> StatementFacts {
+    let trimmed = strip_leading_sql_comments(sql);
+    let kind = if starts_with_ascii_ci(trimmed, "SELECT") || starts_with_ascii_ci(trimmed, "WITH") {
+        StatementKind::Query
+    } else {
+        StatementKind::DmlOrPlsql
+    };
+    let upper = sql.to_ascii_uppercase();
+    let touches_session_context = upper.contains("DBMS_SESSION")
+        || upper.contains("SET_IDENTIFIER")
+        || upper.contains("CLEAR_IDENTIFIER");
+    StatementFacts {
+        kind,
+        touches_session_context,
+    }
+}
+
+static STATEMENT_FACTS_CACHE: LazyLock<Mutex<StatementFactsLru>> =
+    LazyLock::new(|| Mutex::new(StatementFactsLru::new(STATEMENT_FACTS_CACHE_CAPACITY)));
+
+/// Return cached [`StatementFacts`] for `sql`, computing and caching on a miss (LRU capacity 512).
+pub(crate) fn statement_facts(sql: &str) -> StatementFacts {
+    let mut cache = STATEMENT_FACTS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.get_or_insert(sql)
+}
+
+fn command_may_open_txn(cmd: &WorkerCommand) -> bool {
+    match cmd {
+        WorkerCommand::Connect
+        | WorkerCommand::Ping
+        | WorkerCommand::Commit
+        | WorkerCommand::Rollback
+        | WorkerCommand::ResetIfDirty
+        | WorkerCommand::Close => false,
+        WorkerCommand::Begin
+        | WorkerCommand::Savepoint(_)
+        | WorkerCommand::RollbackToSavepoint(_)
+        | WorkerCommand::Query { .. }
+        | WorkerCommand::Execute { .. }
+        | WorkerCommand::ExecuteMany { .. }
+        | WorkerCommand::QueryArrow { .. }
+        | WorkerCommand::PipelineBatch { .. } => true,
+    }
+}
+
 struct WorkerSession {
     config: Arc<NativeOracleConfig>,
     conn: Option<oracledb::Connection>,
     upstream_socket: Option<Arc<TcpStream>>,
     savepoints: Vec<String>,
     in_transaction: Arc<AtomicBool>,
+    may_have_open_txn: bool,
     closed: Arc<AtomicBool>,
     break_handle: Arc<OracleBreakHandle>,
     pending_session_attrs: Arc<Mutex<Option<OracleSessionAttrs>>>,
     active_session_attrs: Arc<Mutex<OracleSessionAttrs>>,
     last_piggyback_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    #[cfg(test)]
+    reset_rollbacks: usize,
 }
 
 impl Drop for WorkerSession {
@@ -898,7 +1005,25 @@ impl WorkerSession {
             self.upstream_socket = None;
             self.savepoints.clear();
             self.in_transaction.store(false, Ordering::Release);
+            self.may_have_open_txn = false;
         }
+    }
+
+    fn note_autocommit(&mut self, statement_ok: bool, commit_ok: bool) {
+        if statement_ok && commit_ok {
+            self.may_have_open_txn = false;
+        }
+    }
+
+    fn run_rollback(&mut self) -> Result<WorkerReply, OracleError> {
+        let res = self.conn.as_ref().map(|conn| conn.rollback());
+        if let Some(Err(e)) = res {
+            return Err(self.map_call_err(&e));
+        }
+        self.savepoints.clear();
+        self.in_transaction.store(false, Ordering::Release);
+        self.may_have_open_txn = false;
+        Ok(WorkerReply::Unit)
     }
 
     fn map_call_err(&mut self, err: &oracledb::Error) -> OracleError {
@@ -993,6 +1118,9 @@ impl WorkerSession {
 
     fn handle_command(&mut self, cmd: WorkerCommand) -> Result<WorkerReply, OracleError> {
         self.break_handle.check_cancelled()?;
+        if command_may_open_txn(&cmd) {
+            self.may_have_open_txn = true;
+        }
         match cmd {
             WorkerCommand::Connect => {
                 let _ = self.ensure_connected()?;
@@ -1019,16 +1147,20 @@ impl WorkerSession {
                 }
                 self.savepoints.clear();
                 self.in_transaction.store(false, Ordering::Release);
+                self.may_have_open_txn = false;
                 Ok(WorkerReply::Unit)
             }
-            WorkerCommand::Rollback => {
-                let res = self.conn.as_ref().map(|conn| conn.rollback());
-                if let Some(Err(e)) = res {
-                    return Err(self.map_call_err(&e));
+            WorkerCommand::Rollback => self.run_rollback(),
+            WorkerCommand::ResetIfDirty => {
+                if self.in_transaction.load(Ordering::Acquire) || self.may_have_open_txn {
+                    #[cfg(test)]
+                    {
+                        self.reset_rollbacks += 1;
+                    }
+                    self.run_rollback()
+                } else {
+                    Ok(WorkerReply::Unit)
                 }
-                self.savepoints.clear();
-                self.in_transaction.store(false, Ordering::Release);
-                Ok(WorkerReply::Unit)
             }
             WorkerCommand::Savepoint(name) => {
                 validate_savepoint_identifier(&name)?;
@@ -1130,6 +1262,7 @@ impl WorkerSession {
                     )?;
                     total = total.saturating_add(outcome.rowcount);
                 }
+                self.may_have_open_txn = true;
                 Ok(WorkerReply::RowCount(total))
             }
             WorkerCommand::QueryArrow {
@@ -1211,6 +1344,7 @@ impl WorkerSession {
                     lowercase_column_names,
                     batch_size,
                 )?;
+                self.may_have_open_txn = true;
                 Ok(WorkerReply::ArrowIpc {
                     ipc_bytes,
                     row_count,
@@ -1248,6 +1382,7 @@ impl WorkerSession {
                         }
                     }
                 }
+                self.may_have_open_txn = true;
                 Ok(WorkerReply::PipelineOutcomes(outcomes))
             }
             WorkerCommand::Close => {
@@ -1258,6 +1393,7 @@ impl WorkerSession {
                 }
                 self.savepoints.clear();
                 self.in_transaction.store(false, Ordering::Release);
+                self.may_have_open_txn = false;
                 self.closed.store(true, Ordering::Release);
                 Ok(WorkerReply::Unit)
             }
@@ -1275,6 +1411,7 @@ impl WorkerSession {
         max_rows: Option<usize>,
         is_query: bool,
     ) -> Result<WorkerQueryOutcome, OracleError> {
+        self.may_have_open_txn = true;
         let auto_commit = !self.in_transaction.load(Ordering::Acquire);
         let break_handle = Arc::clone(&self.break_handle);
         let clean = strip_leading_sql_comments(sql);
@@ -1373,7 +1510,7 @@ impl WorkerSession {
         }
 
         let returning = parse_returning_clause(clean);
-        let exec_attempt = {
+        let (exec_attempt, autocommit_ok) = {
             let conn = self.ensure_connected_and_flush_attrs()?;
             let res = match params {
                 BindArgs::Positional(vals) => {
@@ -1429,11 +1566,16 @@ impl WorkerSession {
                     conn.execute_named(sql, &refs)
                 }
             };
-            if res.is_ok() && auto_commit {
-                let _ = conn.commit();
-            }
-            res
+            let commit_ok = if res.is_ok() && auto_commit {
+                conn.commit().is_ok()
+            } else {
+                false
+            };
+            (res, commit_ok)
         };
+        if auto_commit {
+            self.note_autocommit(exec_attempt.is_ok(), autocommit_ok);
+        }
         let mut exec_res = match exec_attempt {
             Ok(r) => r,
             Err(e) => return Err(self.map_call_err(&e)),
@@ -1632,11 +1774,14 @@ impl OracleWorkerHandle {
             upstream_socket: None,
             savepoints: Vec::new(),
             in_transaction: in_tx_clone,
+            may_have_open_txn: false,
             closed: closed_clone,
             break_handle: break_clone,
             pending_session_attrs: pending_clone,
             active_session_attrs: active_clone,
             last_piggyback_frame: last_frame_clone,
+            #[cfg(test)]
+            reset_rollbacks: 0,
         }));
         let worker_session = Arc::clone(&session);
         let worker_break = Arc::clone(&break_handle);
@@ -2090,8 +2235,86 @@ impl OracleWorkerHandle {
         )
     }
 
+    pub(crate) async fn dispatch_async_raw(
+        &self,
+        cmd: WorkerCommand,
+    ) -> Result<WorkerReply, OracleError> {
+        let is_close = matches!(cmd, WorkerCommand::Close);
+        if !is_close {
+            self.ensure_open()?;
+        }
+
+        let tx_opt = {
+            let mut guard = self.sender.lock().unwrap_or_else(|e| e.into_inner());
+            if is_close {
+                self.closed.store(true, Ordering::Release);
+                self.in_transaction.store(false, Ordering::Release);
+                guard.take()
+            } else {
+                guard.clone()
+            }
+        };
+
+        let Some(sender) = tx_opt else {
+            if is_close {
+                return Ok(WorkerReply::Unit);
+            }
+            return Err(OracleError::Interface("Oracle client is closed".to_owned()));
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.break_handle.begin_operation();
+        if sender
+            .send(WorkerEnvelope {
+                cmd,
+                reply: ReplyChannel::Async(reply_tx),
+            })
+            .is_err()
+        {
+            self.break_handle.end_operation();
+            return Err(OracleError::Interface(
+                "Oracle worker thread terminated".to_owned(),
+            ));
+        }
+
+        let mut cancel_guard = CancelOnDrop {
+            break_handle: Arc::clone(&self.break_handle),
+            armed: true,
+        };
+        let res = match reply_rx.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(OracleError::Interface(
+                "Oracle worker channel closed before reply".to_owned(),
+            )),
+        };
+        cancel_guard.armed = false;
+        res
+    }
+
     /// Roll back any uncommitted transaction state within `timeout`, or close the worker if it times out.
     pub fn rollback_with_timeout(&self, timeout: Duration) -> Result<(), OracleError> {
+        self.dispatch_channel_with_timeout(WorkerCommand::Rollback, timeout)
+    }
+
+    /// Roll back uncommitted or potentially open transaction state within `timeout`, skipping the
+    /// server round trip when the session is provably clean.
+    pub fn reset_with_timeout(&self, timeout: Duration) -> Result<(), OracleError> {
+        self.dispatch_channel_with_timeout(WorkerCommand::ResetIfDirty, timeout)
+    }
+
+    #[cfg(test)]
+    fn reset_rollbacks(&self) -> usize {
+        self.session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset_rollbacks
+    }
+
+    fn dispatch_channel_with_timeout(
+        &self,
+        cmd: WorkerCommand,
+        timeout: Duration,
+    ) -> Result<(), OracleError> {
         self.ensure_open()?;
         let tx = {
             let guard = self.sender.lock().unwrap_or_else(|e| e.into_inner());
@@ -2104,7 +2327,7 @@ impl OracleWorkerHandle {
         self.break_handle.begin_operation();
         if sender
             .send(WorkerEnvelope {
-                cmd: WorkerCommand::Rollback,
+                cmd,
                 reply: ReplyChannel::Sync(Arc::clone(&queue)),
             })
             .is_err()
@@ -2259,19 +2482,54 @@ fn session_attrs_to_py_dict(py: Python<'_>, attrs: &OracleSessionAttrs) -> PyRes
 )]
 pub struct SyncOracleClient {
     worker: Arc<OracleWorkerHandle>,
+    lease: Arc<Mutex<Option<LeaseGuard>>>,
 }
 
 impl SyncOracleClient {
     /// Construct a [`SyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
     #[must_use]
     pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
-        Self { worker }
+        Self {
+            worker,
+            lease: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Return a reference to the underlying [`OracleWorkerHandle`].
     #[must_use]
     pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
         &self.worker
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn single_call(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        let prepared = prepare_execute(
+            py,
+            sql,
+            params,
+            out_binds,
+            options,
+            enable_lowercase_column_names,
+        )?;
+        run_single_call_sync(py, &self.worker, prepared, shape)
     }
 }
 
@@ -2312,6 +2570,7 @@ impl SyncOracleClient {
         module=None,
         action=None,
         ecid=None,
+        enable_reset_relay=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2348,6 +2607,7 @@ impl SyncOracleClient {
         module: Option<String>,
         action: Option<String>,
         ecid: Option<String>,
+        enable_reset_relay: bool,
     ) -> PyResult<Self> {
         let raw = build_raw_oracle_options(
             user,
@@ -2383,10 +2643,12 @@ impl SyncOracleClient {
             action,
             ecid,
         );
-        let cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
+        let mut cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
+        cfg.enable_reset_relay = enable_reset_relay;
         let worker = OracleWorkerHandle::spawn(cfg).map_err(|e| e.to_py_err(py))?;
         Ok(Self {
             worker: Arc::new(worker),
+            lease: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -2468,8 +2730,215 @@ impl SyncOracleClient {
 
     pub fn close(&self, py: Python<'_>) -> PyResult<()> {
         let worker = Arc::clone(&self.worker);
-        py.detach(|| worker.close_sync())
-            .map_err(|e| e.to_py_err(py))
+        let res = py
+            .detach(|| worker.close_sync())
+            .map_err(|e| e.to_py_err(py));
+        self.release_lease(py);
+        res
+    }
+
+    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+        let previous = {
+            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+            slot.replace(LeaseGuard::new(release))
+        };
+        if let Some(mut guard) = previous {
+            guard.release(py);
+        }
+    }
+
+    pub fn release_lease(&self, py: Python<'_>) {
+        let previous = {
+            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        if let Some(mut guard) = previous {
+            guard.release(py);
+        }
+    }
+
+    #[pyo3(signature = (
+        *,
+        enable_uuid_binary = true,
+        fetch_decimals = false,
+        vector_return_format = "list",
+        enable_lowercase_column_names = true,
+        lazy_begin = false,
+    ))]
+    pub fn cursor(
+        &self,
+        py: Python<'_>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        lazy_begin: bool,
+    ) -> PyResult<SyncOracleCursor> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        Ok(SyncOracleCursor::new(
+            Arc::clone(&self.worker),
+            options,
+            enable_lowercase_column_names,
+            lazy_begin,
+        ))
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_rows_and_names,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dicts,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_first_value,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dml,
+        )
     }
 
     pub fn ping(&self, py: Python<'_>) -> PyResult<()> {
@@ -2518,90 +2987,6 @@ impl SyncOracleClient {
         py.detach(|| worker.dispatch_sync(WorkerCommand::RollbackToSavepoint(name)))
             .map(|_| ())
             .map_err(|e| e.to_py_err(py))
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        out_binds=None,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<OracleQueryResult> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::Query {
-                    sql,
-                    params: bind_args,
-                    out_binds: out_spec,
-                    fetch_decimals,
-                    lowercase_column_names: lowercase,
-                    max_rows: None,
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::QueryOutcome(outcome) => outcome.into_py_query_result(py),
-            _ => Ok(OracleQueryResult::new(
-                py,
-                Vec::new(),
-                Vec::new(),
-                0,
-                None,
-                None,
-            )),
-        }
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query_one(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<Py<PyAny>> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        let worker = Arc::clone(&self.worker);
-        let reply = py
-            .detach(|| {
-                worker.dispatch_sync(WorkerCommand::Query {
-                    sql,
-                    params: bind_args,
-                    out_binds: OutBindSpec::None,
-                    fetch_decimals,
-                    lowercase_column_names: lowercase,
-                    max_rows: Some(1),
-                })
-            })
-            .map_err(|e| e.to_py_err(py))?;
-        match reply {
-            WorkerReply::QueryOutcome(outcome) => outcome.into_py_first_row_or_none(py),
-            _ => Ok(py.None()),
-        }
     }
 
     #[pyo3(signature = (
@@ -2847,19 +3232,54 @@ impl SyncOracleClient {
 )]
 pub struct AsyncOracleClient {
     worker: Arc<OracleWorkerHandle>,
+    lease: Arc<Mutex<Option<LeaseGuard>>>,
 }
 
 impl AsyncOracleClient {
     /// Construct an [`AsyncOracleClient`] wrapping an existing [`OracleWorkerHandle`].
     #[must_use]
     pub fn from_worker(worker: Arc<OracleWorkerHandle>) -> Self {
-        Self { worker }
+        Self {
+            worker,
+            lease: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Return a reference to the underlying [`OracleWorkerHandle`].
     #[must_use]
     pub fn worker(&self) -> &Arc<OracleWorkerHandle> {
         &self.worker
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn single_call(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        shape: fn(Python<'_>, BuiltReply) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        let prepared = prepare_execute(
+            py,
+            sql,
+            params,
+            out_binds,
+            options,
+            enable_lowercase_column_names,
+        )?;
+        spawn_single_call(py, Arc::clone(&self.worker), prepared, shape)
     }
 }
 
@@ -2900,6 +3320,7 @@ impl AsyncOracleClient {
         module=None,
         action=None,
         ecid=None,
+        enable_reset_relay=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2936,6 +3357,7 @@ impl AsyncOracleClient {
         module: Option<String>,
         action: Option<String>,
         ecid: Option<String>,
+        enable_reset_relay: bool,
     ) -> PyResult<Self> {
         let raw = build_raw_oracle_options(
             user,
@@ -2971,10 +3393,12 @@ impl AsyncOracleClient {
             action,
             ecid,
         );
-        let cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
+        let mut cfg = NativeOracleConfig::validate(raw).map_err(|e| e.to_py_err(py))?;
+        cfg.enable_reset_relay = enable_reset_relay;
         let worker = OracleWorkerHandle::spawn(cfg).map_err(|e| e.to_py_err(py))?;
         Ok(Self {
             worker: Arc::new(worker),
+            lease: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -3053,8 +3477,221 @@ impl AsyncOracleClient {
     }
 
     pub fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
+        let previous = {
+            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
         self.worker
-            .dispatch_async(py, WorkerCommand::Close, |py, _| Ok(py.None()))
+            .dispatch_async(py, WorkerCommand::Close, move |py, _| {
+                if let Some(mut guard) = previous {
+                    guard.release(py);
+                }
+                Ok(py.None())
+            })
+    }
+
+    pub fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+        let previous = {
+            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+            slot.replace(LeaseGuard::new(release))
+        };
+        if let Some(mut guard) = previous {
+            guard.release(py);
+        }
+    }
+
+    pub fn release_lease(&self, py: Python<'_>) {
+        let previous = {
+            let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        if let Some(mut guard) = previous {
+            guard.release(py);
+        }
+    }
+
+    #[pyo3(signature = (
+        *,
+        enable_uuid_binary = true,
+        fetch_decimals = false,
+        vector_return_format = "list",
+        enable_lowercase_column_names = true,
+        lazy_begin = false,
+    ))]
+    pub fn cursor(
+        &self,
+        py: Python<'_>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+        lazy_begin: bool,
+    ) -> PyResult<AsyncOracleCursor> {
+        let parsed_format =
+            VectorReturnFormat::parse(vector_return_format).map_err(|e| e.to_py_err(py))?;
+        let options = OracleValueOptions {
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format: parsed_format,
+        };
+        Ok(AsyncOracleCursor::new(
+            Arc::clone(&self.worker),
+            options,
+            enable_lowercase_column_names,
+            lazy_begin,
+        ))
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_rows(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_rows_and_names,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dicts,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_first_value,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            sql,
+            params = None,
+            *,
+            out_binds = None,
+            enable_uuid_binary = true,
+            fetch_decimals = false,
+            vector_return_format = "list",
+            enable_lowercase_column_names = true,
+        ),
+        text_signature = "($self, sql, params=(), *, out_binds=None, enable_uuid_binary=True, fetch_decimals=False, vector_return_format='list', enable_lowercase_column_names=True)"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        out_binds: Option<&Bound<'_, PyAny>>,
+        enable_uuid_binary: bool,
+        fetch_decimals: bool,
+        vector_return_format: &str,
+        enable_lowercase_column_names: bool,
+    ) -> PyResult<RustDbTaskAwaitable> {
+        self.single_call(
+            py,
+            sql,
+            params,
+            out_binds,
+            enable_uuid_binary,
+            fetch_decimals,
+            vector_return_format,
+            enable_lowercase_column_names,
+            reply_dml,
+        )
     }
 
     pub fn ping(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
@@ -3097,85 +3734,6 @@ impl AsyncOracleClient {
             .dispatch_async(py, WorkerCommand::RollbackToSavepoint(name), |py, _| {
                 Ok(py.None())
             })
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        out_binds=None,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        out_binds: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let out_spec = extract_out_bind_spec(out_binds).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::Query {
-                sql,
-                params: bind_args,
-                out_binds: out_spec,
-                fetch_decimals,
-                lowercase_column_names: lowercase,
-                max_rows: None,
-            },
-            |py, reply| match reply {
-                WorkerReply::QueryOutcome(outcome) => {
-                    let qres = outcome.into_py_query_result(py)?;
-                    Ok(Py::new(py, qres)?.into_any())
-                }
-                _ => {
-                    let qres = OracleQueryResult::new(py, Vec::new(), Vec::new(), 0, None, None);
-                    Ok(Py::new(py, qres)?.into_any())
-                }
-            },
-        )
-    }
-
-    #[pyo3(signature = (
-        sql,
-        params=None,
-        *,
-        fetch_decimals=false,
-        enable_lowercase_column_names=None,
-    ))]
-    pub fn query_one(
-        &self,
-        py: Python<'_>,
-        sql: String,
-        params: Option<&Bound<'_, PyAny>>,
-        fetch_decimals: bool,
-        enable_lowercase_column_names: Option<bool>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let bind_args = extract_bind_args(params).map_err(|e| e.to_py_err(py))?;
-        let lowercase = enable_lowercase_column_names
-            .unwrap_or(self.worker.config().enable_lowercase_column_names);
-        self.worker.dispatch_async(
-            py,
-            WorkerCommand::Query {
-                sql,
-                params: bind_args,
-                out_binds: OutBindSpec::None,
-                fetch_decimals,
-                lowercase_column_names: lowercase,
-                max_rows: Some(1),
-            },
-            |py, reply| match reply {
-                WorkerReply::QueryOutcome(outcome) => outcome.into_py_first_row_or_none(py),
-                _ => Ok(py.None()),
-            },
-        )
     }
 
     #[pyo3(signature = (
@@ -3438,8 +3996,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use tokio::sync::oneshot;
+
     use super::{
-        OracleBreakHandle, OracleWorkerHandle, WorkerCommand, validate_savepoint_identifier,
+        BindArgs, OracleBreakHandle, OracleWorkerHandle, OutBindSpec, ReplyChannel,
+        STATEMENT_FACTS_CACHE_CAPACITY, StatementFacts, StatementFactsLru, StatementKind,
+        WorkerCommand, WorkerEnvelope, command_may_open_txn, statement_facts,
+        validate_savepoint_identifier,
     };
     use crate::config::{NativeOracleConfig, RawOracleOptions};
     use crate::errors::OracleError;
@@ -3509,5 +4072,324 @@ mod tests {
         assert!(matches!(res, Err(OracleError::Server { code: 1013, .. })));
         break_handle.end_operation();
         assert!(!break_handle.is_cancelled());
+    }
+
+    #[test]
+    fn statement_facts_classifies_queries_dml_plsql_and_session_context() {
+        let select_facts = statement_facts("  /* c */ select 1 from dual");
+        assert_eq!(
+            select_facts,
+            StatementFacts {
+                kind: StatementKind::Query,
+                touches_session_context: false,
+            }
+        );
+
+        let with_facts = statement_facts("WITH x AS (SELECT 1 FROM dual) SELECT * FROM x");
+        assert_eq!(
+            with_facts,
+            StatementFacts {
+                kind: StatementKind::Query,
+                touches_session_context: false,
+            }
+        );
+
+        let plsql_facts = statement_facts("BEGIN NULL; END;");
+        assert_eq!(
+            plsql_facts,
+            StatementFacts {
+                kind: StatementKind::DmlOrPlsql,
+                touches_session_context: false,
+            }
+        );
+
+        let dml_facts = statement_facts("insert into t values (1)");
+        assert_eq!(
+            dml_facts,
+            StatementFacts {
+                kind: StatementKind::DmlOrPlsql,
+                touches_session_context: false,
+            }
+        );
+
+        let session_facts = statement_facts("BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;");
+        assert_eq!(
+            session_facts,
+            StatementFacts {
+                kind: StatementKind::DmlOrPlsql,
+                touches_session_context: true,
+            }
+        );
+
+        let clear_facts = statement_facts("BEGIN clear_identifier; END;");
+        assert!(clear_facts.touches_session_context);
+    }
+
+    #[test]
+    fn statement_facts_lru_caches_without_rescan_and_evicts_at_capacity() {
+        let mut lru = StatementFactsLru::new(STATEMENT_FACTS_CACHE_CAPACITY);
+        let sql = "SELECT 42 FROM dual";
+        let first = lru.get_or_insert(sql);
+        let second = lru.get_or_insert(sql);
+        assert_eq!(first, second);
+        assert_eq!(first.kind, StatementKind::Query);
+        assert_eq!(lru.scan_count, 1);
+        assert_eq!(lru.entries.len(), 1);
+
+        let mut small = StatementFactsLru::new(2);
+        small.get_or_insert("SELECT 1 FROM dual");
+        small.get_or_insert("SELECT 2 FROM dual");
+        small.get_or_insert("SELECT 1 FROM dual");
+        small.get_or_insert("SELECT 3 FROM dual");
+        assert_eq!(small.entries.len(), 2);
+        assert!(small.entries.contains_key("SELECT 1 FROM dual"));
+        assert!(!small.entries.contains_key("SELECT 2 FROM dual"));
+        assert!(small.entries.contains_key("SELECT 3 FROM dual"));
+    }
+
+    fn spawn_unconnected_worker() -> OracleWorkerHandle {
+        let cfg = NativeOracleConfig::validate(RawOracleOptions {
+            host: "localhost".to_owned(),
+            ..Default::default()
+        })
+        .expect("valid oracle config");
+        OracleWorkerHandle::spawn(cfg).expect("zero-I/O worker spawn")
+    }
+
+    #[test]
+    fn reset_with_timeout_skips_rollback_on_clean_worker() {
+        let worker = spawn_unconnected_worker();
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset on fresh worker succeeds without round trip");
+        assert_eq!(worker.reset_rollbacks(), 0);
+        assert!(!worker.is_in_transaction());
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn reset_with_timeout_rolls_back_abandoned_transaction_and_clears_dirty_state() {
+        let worker = spawn_unconnected_worker();
+        worker
+            .dispatch_sync(WorkerCommand::Begin)
+            .expect("begin marks worker in transaction");
+        assert!(worker.is_in_transaction());
+
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset rolls back abandoned transaction");
+        assert_eq!(worker.reset_rollbacks(), 1);
+        assert!(!worker.is_in_transaction());
+
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("subsequent reset on now-clean worker skips rollback");
+        assert_eq!(worker.reset_rollbacks(), 1);
+
+        worker
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .may_have_open_txn = true;
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset rolls back when may_have_open_txn is set without explicit begin");
+        assert_eq!(worker.reset_rollbacks(), 2);
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn reset_with_timeout_skips_rollback_after_commit_or_rollback() {
+        let worker = spawn_unconnected_worker();
+        worker
+            .dispatch_sync(WorkerCommand::Begin)
+            .expect("begin transaction");
+        worker
+            .dispatch_sync(WorkerCommand::Commit)
+            .expect("commit clears dirty transaction state");
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset after commit skips rollback");
+        assert_eq!(worker.reset_rollbacks(), 0);
+        assert!(!worker.is_in_transaction());
+
+        worker
+            .dispatch_sync(WorkerCommand::Begin)
+            .expect("begin second transaction");
+        worker
+            .dispatch_sync(WorkerCommand::Rollback)
+            .expect("rollback clears dirty transaction state");
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset after rollback skips rollback");
+        assert_eq!(worker.reset_rollbacks(), 0);
+        assert!(!worker.is_in_transaction());
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn reset_with_timeout_runs_through_worker_channel_after_queued_commands() {
+        let worker = spawn_unconnected_worker();
+        let tx = worker
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("worker sender");
+        let (reply_tx, reply_rx) = oneshot::channel();
+        worker.break_handle.begin_operation();
+        tx.send(WorkerEnvelope {
+            cmd: WorkerCommand::Begin,
+            reply: ReplyChannel::Async(reply_tx),
+        })
+        .expect("enqueue begin on worker channel");
+
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset drains behind queued begin");
+        assert!(reply_rx.blocking_recv().expect("begin reply").is_ok());
+        assert_eq!(worker.reset_rollbacks(), 1);
+        assert!(!worker.is_in_transaction());
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn note_autocommit_clears_dirty_flag_only_when_statement_and_commit_succeed() {
+        let worker = spawn_unconnected_worker();
+        let cases = [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ];
+        let mut expected_rollbacks = 0usize;
+        for (statement_ok, commit_ok, expected_dirty) in cases {
+            {
+                let mut session = worker.session.lock().unwrap_or_else(|e| e.into_inner());
+                session.may_have_open_txn = true;
+                session.note_autocommit(statement_ok, commit_ok);
+                assert_eq!(
+                    session.may_have_open_txn, expected_dirty,
+                    "unexpected dirty state for statement_ok={statement_ok}, commit_ok={commit_ok}"
+                );
+            }
+            worker
+                .reset_with_timeout(Duration::from_secs(2))
+                .expect("reset after note_autocommit");
+            if expected_dirty {
+                expected_rollbacks += 1;
+            }
+            assert_eq!(worker.reset_rollbacks(), expected_rollbacks);
+        }
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn command_may_open_txn_classifies_every_worker_command() {
+        assert!(!command_may_open_txn(&WorkerCommand::Connect));
+        assert!(!command_may_open_txn(&WorkerCommand::Ping));
+        assert!(!command_may_open_txn(&WorkerCommand::Commit));
+        assert!(!command_may_open_txn(&WorkerCommand::Rollback));
+        assert!(!command_may_open_txn(&WorkerCommand::Close));
+        assert!(!command_may_open_txn(&WorkerCommand::ResetIfDirty));
+
+        assert!(command_may_open_txn(&WorkerCommand::Begin));
+        assert!(command_may_open_txn(&WorkerCommand::Savepoint(
+            "sp1".to_owned()
+        )));
+        assert!(command_may_open_txn(&WorkerCommand::RollbackToSavepoint(
+            "sp1".to_owned()
+        )));
+        assert!(command_may_open_txn(&WorkerCommand::Query {
+            sql: "SELECT 1 FROM dual".to_owned(),
+            params: BindArgs::Positional(Vec::new()),
+            out_binds: OutBindSpec::None,
+            fetch_decimals: false,
+            lowercase_column_names: true,
+            max_rows: None,
+        }));
+        assert!(command_may_open_txn(&WorkerCommand::Execute {
+            sql: "INSERT INTO t VALUES (1)".to_owned(),
+            params: BindArgs::Positional(Vec::new()),
+            out_binds: OutBindSpec::None,
+            fetch_decimals: false,
+            lowercase_column_names: true,
+        }));
+        assert!(command_may_open_txn(&WorkerCommand::ExecuteMany {
+            sql: "INSERT INTO t VALUES (:1)".to_owned(),
+            params_seq: Vec::new(),
+        }));
+        assert!(command_may_open_txn(&WorkerCommand::QueryArrow {
+            sql: "SELECT 1 FROM dual".to_owned(),
+            params: BindArgs::Positional(Vec::new()),
+            batch_size: 1024,
+            lowercase_column_names: true,
+        }));
+        assert!(command_may_open_txn(&WorkerCommand::PipelineBatch {
+            ops: Vec::new(),
+            continue_on_error: false,
+        }));
+    }
+
+    #[test]
+    fn reset_with_timeout_rolls_back_after_async_begin() {
+        let worker = Arc::new(spawn_unconnected_worker());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            worker
+                .dispatch_async_raw(WorkerCommand::Begin)
+                .await
+                .expect("async begin succeeds");
+        });
+        assert!(worker.is_in_transaction());
+
+        worker
+            .reset_with_timeout(Duration::from_secs(2))
+            .expect("reset rolls back after async begin");
+        assert_eq!(worker.reset_rollbacks(), 1);
+        assert!(!worker.is_in_transaction());
+
+        worker.close_sync().expect("close worker");
+    }
+
+    #[test]
+    fn reset_with_timeout_rolls_back_behind_queued_async_command() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let worker = Arc::new(spawn_unconnected_worker());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let mut begin_fut = Box::pin(worker.dispatch_async_raw(WorkerCommand::Begin));
+            let mut cx = Context::from_waker(Waker::noop());
+            let initial_poll = begin_fut.as_mut().poll(&mut cx);
+
+            let worker_for_reset = Arc::clone(&worker);
+            tokio::task::spawn_blocking(move || {
+                worker_for_reset.reset_with_timeout(Duration::from_secs(2))
+            })
+            .await
+            .expect("blocking reset task joined")
+            .expect("reset drains behind queued async begin");
+
+            assert_eq!(worker.reset_rollbacks(), 1);
+            assert!(!worker.is_in_transaction());
+
+            if matches!(initial_poll, Poll::Pending) {
+                begin_fut.await.expect("queued async begin completed");
+            }
+        });
+
+        worker.close_sync().expect("close worker");
     }
 }

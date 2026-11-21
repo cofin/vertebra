@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -9,6 +10,7 @@ import threading
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import msgspec
@@ -21,9 +23,16 @@ import vertebra.db.adapters.bigquery.config as bq_config_mod
 import vertebra.db.adapters.bigquery.object_tables as bq_object_tables_mod
 from vertebra._bigquery import (
     AsyncBigQueryClient,
+    AsyncBigQueryCursor,
     SyncBigQueryClient,
+    SyncBigQueryCursor,
 )
-from vertebra._vertebra import BigQueryError
+from vertebra._vertebra import (
+    BigQueryError,
+    InterfaceError,
+    NotSupportedError,
+    ProgrammingError,
+)
 from vertebra.agent import ConfirmationGate, PermissionDeniedError, build_tools
 from vertebra.db import (
     ArrowCursor,
@@ -1219,33 +1228,60 @@ def test_bigquery_select_one_forwards_maximum_bytes_billed() -> None:
     """Verify select_one and select_one_or_none forward kwargs and preserve explicit zero billing cap."""
     captured_caps: list[int | None] = []
 
+    class _RecordingBqCursor:
+        arraysize: int = 1
+        description: tuple[tuple[Any, ...], ...] | None = (("id", "INT64", None, None, None, None, False),)
+        rowcount: int = 1
+        lastrowid: int | None = None
+        query_metadata: dict[str, Any] | None = {"job_id": "rec-job", "total_rows": 1}
+
+        def execute(self, sql: str, params: Any = ()) -> Any:
+            _ = (sql, params)
+            return self
+
+        def executemany(self, sql: str, seq_of_params: Sequence[Any]) -> Any:
+            _ = (sql, seq_of_params)
+            return self
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return (1,)
+
+        def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+            _ = size
+            return [(1,)]
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return [(1,)]
+
+        def close(self) -> None:
+            return None
+
     class _RecordingBqClient:
-        def query(
+        def cursor(
             self,
-            sql: str,
-            params_json: str | None = None,
+            *,
             session_id: str | None = None,
-            create_session: bool = False,
             destination_table: str | None = None,
             write_disposition: str | None = None,
             maximum_bytes_billed: int | None = None,
             job_timeout_ms: int | None = None,
             priority: str | None = None,
-            labels: dict[str, str] | None = None,
-        ) -> dict[str, Any]:
+            labels: Any = None,
+            param_encoder: Any = None,
+            lazy_begin: bool = False,
+        ) -> _RecordingBqCursor:
             _ = (
-                sql,
-                params_json,
                 session_id,
-                create_session,
                 destination_table,
                 write_disposition,
                 job_timeout_ms,
                 priority,
                 labels,
+                param_encoder,
+                lazy_begin,
             )
             captured_caps.append(maximum_bytes_billed)
-            return {"columns": ["id"], "rows": [[1]], "total_rows": 1}
+            return _RecordingBqCursor()
 
     cfg = BigQueryConfig(project_id="test-proj", maximum_bytes_billed=10_000)
     driver = SyncBigQueryDriver(cfg)
@@ -1337,6 +1373,31 @@ def test_sync_bigquery_driver_close_invokes_client_close_and_clears_state(
         ) -> dict[str, Any]:
             _ = (parent_table, arrow_ipc_bytes, mode)
             return {}
+
+        def cursor(self, **kwargs: Any) -> Any:
+            _ = kwargs
+            client = self
+
+            class _SpyCursor:
+                arraysize: int = 1
+                description: tuple[tuple[Any, ...], ...] | None = None
+                rowcount: int = 0
+                lastrowid: int | None = None
+                query_metadata: dict[str, Any] | None = None
+
+                def execute(self, sql: str, params: Any = ()) -> Any:
+                    _ = params
+                    res = client.query(sql)
+                    self.query_metadata = res
+                    return self
+
+                def fetchall(self) -> list[tuple[Any, ...]]:
+                    return []
+
+                def close(self) -> None:
+                    return None
+
+            return _SpyCursor()
 
         def close(self) -> None:
             events.append(("close", driver_ref[0]._client is not None))
@@ -1452,6 +1513,31 @@ async def test_async_bigquery_driver_close_invokes_and_awaits_client_close(
             _ = (parent_table, arrow_ipc_bytes, mode)
             return {}
 
+        def cursor(self, **kwargs: Any) -> Any:
+            _ = kwargs
+            client = self
+
+            class _SpyAsyncCursor:
+                arraysize: int = 1
+                description: tuple[tuple[Any, ...], ...] | None = None
+                rowcount: int = 0
+                lastrowid: int | None = None
+                query_metadata: dict[str, Any] | None = None
+
+                async def execute(self, sql: str, params: Any = ()) -> Any:
+                    _ = params
+                    res = await client.query(sql)
+                    self.query_metadata = res
+                    return self
+
+                async def fetchall(self) -> list[tuple[Any, ...]]:
+                    return []
+
+                async def close(self) -> None:
+                    return None
+
+            return _SpyAsyncCursor()
+
         def close(self) -> Any:
             if awaitable_close:
 
@@ -1537,3 +1623,850 @@ async def test_async_bigquery_native_client_close_is_idempotent_and_rejects_oper
             await client.append_arrow("projects/p1/datasets/ds/tables/tbl", b"")
     assert excinfo.value.code == 3
     assert "BigQuery client is closed" in str(excinfo.value)
+
+
+class _CursorBigQueryRestServer:
+    """Local HTTP/1.1 BigQuery REST v2 server tailored for native cursor contract tests."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.job_counter: int = 0
+        self.in_flight_started = threading.Event()
+        self.release_in_flight = threading.Event()
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                _ = (format, args)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+                body = json.loads(raw_body) if raw_body else {}
+                parent.requests.append({"method": "POST", "path": self.path, "body": body})
+
+                if self.path.endswith("/jobs"):
+                    query_cfg = body.get("configuration", {}).get("query", {})
+                    sql = str(query_cfg.get("query", ""))
+                    self._handle_sql(sql, body, query_cfg)
+                    return
+
+                if self.path.endswith("/queries"):
+                    sql = str(body.get("query", ""))
+                    self._handle_sql(sql, body, body)
+                    return
+
+                self._send_json(404, {"error": {"code": 404, "message": "Not found"}})
+
+            def _handle_sql(self, sql: str, body: dict[str, Any], query_cfg: dict[str, Any]) -> None:
+                upper = sql.strip().upper()
+                if upper.startswith("SELEC "):
+                    self._send_json(
+                        400,
+                        {
+                            "error": {
+                                "code": 400,
+                                "message": 'Syntax error: Unexpected identifier "SELEC"',
+                                "status": "INVALID_ARGUMENT",
+                                "errors": [{"reason": "invalidQuery"}],
+                            }
+                        },
+                    )
+                    return
+
+                if "FAIL_SECOND" in upper and len(parent.requests) >= 2:
+                    self._send_json(
+                        400,
+                        {
+                            "error": {
+                                "code": 400,
+                                "message": "Simulated second-statement failure",
+                                "status": "INVALID_ARGUMENT",
+                            }
+                        },
+                    )
+                    return
+
+                if "HOLD_IN_FLIGHT" in upper:
+                    parent.in_flight_started.set()
+                    parent.release_in_flight.wait(timeout=5.0)
+
+                parent.job_counter += 1
+                job_id = f"bq-cursor-job-{parent.job_counter}"
+                conn_props = query_cfg.get("connectionProperties") or body.get("connectionProperties") or []
+                session_id = None
+                for prop in conn_props:
+                    if prop.get("key") == "session_id":
+                        session_id = prop.get("value")
+                if "ASSIGN_SESSION" in upper:
+                    session_id = "bq-reply-session-99"
+
+                resp: dict[str, Any] = {
+                    "jobComplete": True,
+                    "jobReference": {"projectId": "test-proj", "jobId": job_id, "location": "US"},
+                    "totalBytesProcessed": "2048",
+                    "totalBytesBilled": "10485760",
+                    "cacheHit": False,
+                }
+                if session_id:
+                    resp["sessionInfo"] = {"sessionId": session_id}
+
+                if "UNNEST([])" in upper:
+                    resp["schema"] = {
+                        "fields": [{"name": "a", "type": "INT64", "mode": "REQUIRED"}],
+                    }
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                elif upper.startswith("UPDATE "):
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                    resp["numDmlAffectedRows"] = "2"
+                elif upper.startswith("CREATE TABLE"):
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                elif "SELECT 1 AS A, 'X' AS B" in upper:
+                    resp["schema"] = {
+                        "fields": [
+                            {"name": "a", "type": "INT64", "mode": "REQUIRED"},
+                            {"name": "b", "type": "STRING", "mode": "NULLABLE"},
+                        ],
+                    }
+                    resp["rows"] = [{"f": [{"v": "1"}, {"v": "x"}]}]
+                    resp["totalRows"] = "1"
+                else:
+                    resp["schema"] = {
+                        "fields": [
+                            {"name": "id", "type": "INT64", "mode": "REQUIRED"},
+                            {"name": "val", "type": "STRING", "mode": "NULLABLE"},
+                        ],
+                    }
+                    resp["rows"] = [
+                        {"f": [{"v": "1"}, {"v": "one"}]},
+                        {"f": [{"v": "2"}, {"v": "two"}]},
+                        {"f": [{"v": "3"}, {"v": "three"}]},
+                    ]
+                    resp["totalRows"] = "3"
+
+                self._send_json(200, resp)
+
+            def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.rest_endpoint = f"http://127.0.0.1:{self._server.server_port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self.release_in_flight.set()
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _extract_request_session_id(req: dict[str, Any]) -> str | None:
+    """Return the session_id carried in a BigQuery REST query or job request body."""
+    body = req["body"]
+    props = body.get("connectionProperties") or body.get("configuration", {}).get("query", {}).get(
+        "connectionProperties", []
+    )
+    for prop in props:
+        if prop.get("key") == "session_id":
+            return str(prop.get("value"))
+    return None
+
+
+def test_sync_cursor_select_dml_ddl_empty_and_metadata() -> None:
+    """Verify SyncBigQueryCursor select, DML, DDL, empty set, fetch, metadata, and context manager."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = SyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        with client.cursor() as cur:
+            assert isinstance(cur, SyncBigQueryCursor)
+            initial_desc = cur.description
+            assert initial_desc is None
+            assert cur.rowcount == -1
+            assert cur.lastrowid is None
+            initial_meta = cur.query_metadata
+            assert initial_meta is None
+            assert cur.arraysize == 1
+            assert cur.fetchone() is None
+            assert cur.fetchmany() == []
+            assert cur.fetchall() == []
+
+            ret = cur.execute("SELECT 1 AS a, 'x' AS b")
+            assert ret is cur
+            select_desc = cur.description
+            assert select_desc is not None
+            assert [col[0] for col in select_desc] == ["a", "b"]
+            assert select_desc[0] == ("a", "INT64", None, None, None, None, False)
+            assert select_desc[1] == ("b", "STRING", None, None, None, None, True)
+            assert cur.rowcount == 1
+            assert cur.lastrowid is None
+            assert cur.fetchall() == [(1, "x")]
+            assert cur.fetchone() is None
+            meta = cur.query_metadata
+            assert meta is not None
+            assert isinstance(meta["job_id"], str)
+            assert meta["job_id"].startswith("bq-cursor-job-")
+
+            cur.execute("SELECT id, val FROM items")
+            cur.arraysize = 2
+            assert cur.fetchmany(0) == []
+            assert cur.fetchmany() == [(1, "one"), (2, "two")]
+            assert cur.fetchone() == (3, "three")
+            assert cur.fetchone() is None
+
+            with pytest.raises(ProgrammingError):
+                cur.arraysize = 0
+            with pytest.raises(ProgrammingError):
+                cur.fetchmany(-1)
+
+            cur.execute("UPDATE items SET val = 'z' WHERE id IN (1, 2)")
+            assert cur.rowcount == 2
+            dml_desc = cur.description
+            assert dml_desc is None
+            assert cur.fetchall() == []
+
+            cur.execute("CREATE TABLE items (id INT64)")
+            assert cur.rowcount == -1
+            ddl_desc = cur.description
+            assert ddl_desc is None
+
+            cur.execute("SELECT 1 AS a FROM UNNEST([]) AS x")
+            empty_desc = cur.description
+            assert empty_desc is not None
+            assert [col[0] for col in empty_desc] == ["a"]
+            assert cur.fetchall() == []
+
+        cur.close()
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT 1 AS a, 'x' AS b")
+        with pytest.raises(InterfaceError):
+            cur.fetchone()
+    finally:
+        server.close()
+
+
+def test_sync_cursor_session_params_encoder_options_errors_and_executemany() -> None:
+    """Verify SyncBigQueryCursor session reuse, parameters, encoder, labels, limits, errors, and executemany."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = SyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+
+        with pytest.raises(NotSupportedError):
+            client.cursor(lazy_begin=True)
+        assert server.requests == []
+
+        sess_cur = client.cursor(session_id="sess-initial-1")
+        sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert _extract_request_session_id(server.requests[-2]) == "sess-initial-1"
+        assert _extract_request_session_id(server.requests[-1]) == "sess-initial-1"
+
+        reply_sess_cur = client.cursor()
+        reply_sess_cur.execute("SELECT ASSIGN_SESSION")
+        reply_sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert _extract_request_session_id(server.requests[-1]) == "bq-reply-session-99"
+
+        encoded_json = json.dumps([{"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "7"}}])
+        param_cur = client.cursor()
+        param_cur.execute("SELECT @a", encoded_json)
+        last_body = server.requests[-1]["body"]
+        assert last_body.get("queryParameters") == [
+            {"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "7"}}
+        ]
+
+        with pytest.raises(InterfaceError, match="BigQuery cursor needs encoded parameters or a param_encoder"):
+            param_cur.execute("SELECT @a", {"a": 1})
+
+        calls: list[tuple[str, Any]] = []
+
+        def encoder(sql: str, params: Any) -> tuple[str, str | None]:
+            calls.append((sql, params))
+            return (
+                sql,
+                json.dumps(
+                    [{"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": str(params["a"])}}]
+                ),
+            )
+
+        enc_cur = client.cursor(
+            labels=MappingProxyType({"team": "data"}),
+            maximum_bytes_billed=1048576,
+            param_encoder=encoder,
+        )
+        enc_cur.execute("SELECT @a", {"a": 1})
+        assert calls == [("SELECT @a", {"a": 1})]
+        job_req = server.requests[-1]["body"]
+        assert job_req.get("labels") == {"team": "data"}
+        assert str(job_req.get("maximumBytesBilled")) == "1048576"
+        assert job_req.get("dryRun", False) is False
+
+        def failing_encoder(_sql: str, _params: Any) -> tuple[str, str | None]:
+            raise RuntimeError("encoder boom")
+
+        fail_enc_cur = client.cursor(param_encoder=failing_encoder)
+        with pytest.raises(RuntimeError, match="encoder boom"):
+            fail_enc_cur.execute("SELECT @a", {"a": 1})
+
+        err_cur = client.cursor()
+        err_cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert err_cur.description is not None
+        with pytest.raises(BigQueryError) as excinfo:
+            err_cur.execute("SELEC 1")
+        assert excinfo.value.code == 3
+        assert err_cur.description is None
+        assert err_cur.rowcount == -1
+        assert err_cur.query_metadata is None
+
+        many_cur = client.cursor(param_encoder=encoder)
+        many_cur.executemany("UPDATE items SET a = @a", [{"a": 1}, {"a": 2}, {"a": 3}])
+        assert many_cur.rowcount == 6
+        assert many_cur.description is None
+
+        server.requests.clear()
+        with pytest.raises(BigQueryError) as many_exc:
+            many_cur.executemany("UPDATE FAIL_SECOND SET a = @a", [{"a": 1}, {"a": 2}, {"a": 3}])
+        assert many_exc.value.code == 3
+        assert len(server.requests) == 2
+        assert many_cur.rowcount == -1
+        assert many_cur.description is None
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_select_dml_ddl_empty_and_metadata() -> None:
+    """Verify AsyncBigQueryCursor select, DML, DDL, empty set, fetch, metadata, and close."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        cur = client.cursor()
+        assert isinstance(cur, AsyncBigQueryCursor)
+        initial_desc = cur.description
+        assert initial_desc is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        initial_meta = cur.query_metadata
+        assert initial_meta is None
+        assert cur.arraysize == 1
+        assert await cur.fetchone() is None
+        assert await cur.fetchmany() == []
+        assert await cur.fetchall() == []
+
+        ret = await cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert ret is cur
+        select_desc = cur.description
+        assert select_desc is not None
+        assert [col[0] for col in select_desc] == ["a", "b"]
+        assert cur.rowcount == 1
+        assert cur.lastrowid is None
+        assert await cur.fetchall() == [(1, "x")]
+        assert await cur.fetchone() is None
+        meta = cur.query_metadata
+        assert meta is not None
+        assert isinstance(meta["job_id"], str)
+
+        await cur.execute("SELECT id, val FROM items")
+        cur.arraysize = 2
+        assert await cur.fetchmany(0) == []
+        assert await cur.fetchmany() == [(1, "one"), (2, "two")]
+        assert await cur.fetchone() == (3, "three")
+
+        with pytest.raises(ProgrammingError):
+            cur.arraysize = 0
+        with pytest.raises(ProgrammingError):
+            await cur.fetchmany(-1)
+
+        await cur.execute("UPDATE items SET val = 'z' WHERE id IN (1, 2)")
+        assert cur.rowcount == 2
+        dml_desc = cur.description
+        assert dml_desc is None
+
+        await cur.execute("CREATE TABLE items (id INT64)")
+        assert cur.rowcount == -1
+        ddl_desc = cur.description
+        assert ddl_desc is None
+
+        await cur.execute("SELECT 1 AS a FROM UNNEST([]) AS x")
+        empty_desc = cur.description
+        assert empty_desc is not None
+        assert [col[0] for col in empty_desc] == ["a"]
+        assert await cur.fetchall() == []
+
+        await cur.close()
+        await cur.close()
+        with pytest.raises(InterfaceError):
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+        with pytest.raises(InterfaceError):
+            await cur.fetchone()
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_fetch_returns_completed_awaitable() -> None:
+    """Verify AsyncBigQueryCursor.fetchall returns a completed awaitable with buffered rows."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        cur = client.cursor()
+        await cur.execute("SELECT 1 AS a, 'x' AS b")
+        expected = await cur.fetchall()
+        assert expected
+
+        await cur.execute("SELECT 1 AS a, 'x' AS b")
+        step = cur.fetchall().__await__()
+        with pytest.raises(StopIteration) as exc_info:
+            next(step)
+        assert exc_info.value.value == expected
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("method", ["fetchone", "fetchmany", "close"])
+def test_async_cursor_ready_methods_complete_without_loop(method: str) -> None:
+    """Verify AsyncBigQueryCursor ready methods finish on the first __await__ step without a running loop."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        cur = client.cursor()
+
+        async def _execute() -> None:
+            await cur.execute("SELECT 1 AS a, 'x' AS b")
+
+        asyncio.run(_execute())
+        step = getattr(cur, method)().__await__()
+        with pytest.raises(StopIteration):
+            next(step)
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_state_errors_raise_at_call() -> None:
+    """Verify AsyncBigQueryCursor state errors are raised when calling fetch methods before awaiting."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        cur = client.cursor()
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+        await cur.close()
+        with pytest.raises(InterfaceError):
+            cur.fetchone()
+        with pytest.raises(InterfaceError):
+            cur.fetchmany()
+        with pytest.raises(InterfaceError):
+            cur.fetchall()
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("params", [(), [], {}])
+async def test_async_cursor_empty_container_matches_no_parameters(
+    params: tuple[Any, ...] | list[Any] | dict[str, Any],
+) -> None:
+    """Verify empty exact parameter containers bypass param_encoder and match no-parameter execution."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+        cur = client.cursor()
+        await cur.execute("SELECT 1 AS a, 'x' AS b")
+        expected = await cur.fetchall()
+
+        await cur.execute("SELECT 1 AS a, 'x' AS b", params)
+        assert await cur.fetchall() == expected
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_session_params_encoder_options_errors_and_concurrency() -> None:
+    """Verify AsyncBigQueryCursor session reuse, parameters, encoder, labels, limits, errors, executemany, and concurrency."""
+    server = _CursorBigQueryRestServer()
+    try:
+        client = AsyncBigQueryClient(
+            project_id="test-proj",
+            rest_endpoint=server.rest_endpoint,
+            storage_endpoint="http://127.0.0.1:9",
+        )
+
+        with pytest.raises(NotSupportedError):
+            client.cursor(lazy_begin=True)
+        assert server.requests == []
+
+        sess_cur = client.cursor(session_id="async-sess-1")
+        await sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        await sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert _extract_request_session_id(server.requests[-2]) == "async-sess-1"
+        assert _extract_request_session_id(server.requests[-1]) == "async-sess-1"
+
+        reply_sess_cur = client.cursor()
+        await reply_sess_cur.execute("SELECT ASSIGN_SESSION")
+        await reply_sess_cur.execute("SELECT 1 AS a, 'x' AS b")
+        assert _extract_request_session_id(server.requests[-1]) == "bq-reply-session-99"
+
+        encoded_json = json.dumps([{"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "9"}}])
+        param_cur = client.cursor()
+        await param_cur.execute("SELECT @a", encoded_json)
+        assert server.requests[-1]["body"].get("queryParameters") == [
+            {"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": "9"}}
+        ]
+
+        with pytest.raises(InterfaceError, match="BigQuery cursor needs encoded parameters or a param_encoder"):
+            await param_cur.execute("SELECT @a", {"a": 1})
+
+        calls: list[tuple[str, Any]] = []
+
+        def encoder(sql: str, params: Any) -> tuple[str, str | None]:
+            calls.append((sql, params))
+            return (
+                sql,
+                json.dumps(
+                    [{"name": "a", "parameterType": {"type": "INT64"}, "parameterValue": {"value": str(params["a"])}}]
+                ),
+            )
+
+        enc_cur = client.cursor(
+            labels={"env": "test"},
+            maximum_bytes_billed=2097152,
+            param_encoder=encoder,
+        )
+        await enc_cur.execute("SELECT @a", {"a": 1})
+        assert calls == [("SELECT @a", {"a": 1})]
+        job_req = server.requests[-1]["body"]
+        assert job_req.get("labels") == {"env": "test"}
+        assert str(job_req.get("maximumBytesBilled")) == "2097152"
+        assert job_req.get("dryRun", False) is False
+
+        err_cur = client.cursor()
+        await err_cur.execute("SELECT 1 AS a, 'x' AS b")
+        with pytest.raises(BigQueryError) as excinfo:
+            await err_cur.execute("SELEC 1")
+        assert excinfo.value.code == 3
+        assert err_cur.description is None
+        assert err_cur.rowcount == -1
+        assert err_cur.query_metadata is None
+
+        many_cur = client.cursor(param_encoder=encoder)
+        await many_cur.executemany("UPDATE items SET a = @a", [{"a": 1}, {"a": 2}])
+        assert many_cur.rowcount == 4
+        assert many_cur.description is None
+
+        conc_cur = client.cursor()
+        first_awaitable = conc_cur.execute("SELECT HOLD_IN_FLIGHT")
+        while not server.in_flight_started.is_set():
+            await asyncio.sleep(0.01)
+        with pytest.raises(InterfaceError, match="cursor is already executing"):
+            conc_cur.execute("SELECT 1 AS a, 'x' AS b")
+        server.release_in_flight.set()
+        await first_awaitable
+    finally:
+        server.close()
+
+
+class _DriverCursorMockServer:
+    """Local HTTP/1.1 BigQuery REST server exercising Sync/AsyncBigQueryDriver native cursor paths."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.job_counter: int = 0
+        self.session_counter: int = 0
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                _ = (format, args)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+                body = json.loads(raw_body) if raw_body else {}
+                parent.requests.append({"method": "POST", "path": self.path, "body": body})
+
+                query_cfg = body.get("configuration", {}).get("query", {})
+                sql = str(query_cfg.get("query") or body.get("query") or "")
+                upper = sql.strip().upper()
+
+                if upper.startswith("SELEC "):
+                    self._send_json(
+                        400,
+                        {
+                            "error": {
+                                "code": 400,
+                                "message": 'Syntax error: Unexpected identifier "SELEC"',
+                                "status": "INVALID_ARGUMENT",
+                                "errors": [{"reason": "invalidQuery"}],
+                            }
+                        },
+                    )
+                    return
+
+                parent.job_counter += 1
+                job_id = f"bq-drv-job-{parent.job_counter}"
+                create_session = bool(query_cfg.get("createSession") or body.get("createSession"))
+                conn_props = query_cfg.get("connectionProperties") or body.get("connectionProperties") or []
+                session_id = None
+                for prop in conn_props:
+                    if prop.get("key") == "session_id":
+                        session_id = prop.get("value")
+                if create_session and not session_id:
+                    parent.session_counter += 1
+                    session_id = f"bq-drv-session-{parent.session_counter}"
+
+                resp: dict[str, Any] = {
+                    "jobComplete": True,
+                    "jobReference": {"projectId": "test-proj", "jobId": job_id, "location": "US"},
+                    "totalBytesProcessed": "4096",
+                    "totalBytesBilled": "10485760",
+                    "cacheHit": False,
+                }
+                if session_id:
+                    resp["sessionInfo"] = {"sessionId": session_id}
+
+                if upper.startswith(("BEGIN TRANSACTION", "COMMIT TRANSACTION", "ROLLBACK TRANSACTION")):
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                elif upper.startswith("UPDATE "):
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                    resp["numDmlAffectedRows"] = "2"
+                elif upper.startswith("CREATE TABLE"):
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+                elif "SELECT 1 AS A, 2 AS B" in upper:
+                    resp["schema"] = {
+                        "fields": [
+                            {"name": "a", "type": "INT64", "mode": "REQUIRED"},
+                            {"name": "b", "type": "INT64", "mode": "REQUIRED"},
+                        ],
+                    }
+                    resp["rows"] = [{"f": [{"v": "1"}, {"v": "2"}]}]
+                    resp["totalRows"] = "1"
+                elif "SELECT @A AS A" in upper:
+                    params = query_cfg.get("queryParameters") or body.get("queryParameters") or []
+                    val = "0"
+                    for p in params:
+                        if p.get("name") == "a":
+                            val = str(p.get("parameterValue", {}).get("value", "0"))
+                    resp["schema"] = {
+                        "fields": [{"name": "a", "type": "INT64", "mode": "REQUIRED"}],
+                    }
+                    resp["rows"] = [{"f": [{"v": val}]}]
+                    resp["totalRows"] = "1"
+                elif "UNION ALL SELECT 2" in upper:
+                    resp["schema"] = {
+                        "fields": [{"name": "f0_", "type": "INT64", "mode": "REQUIRED"}],
+                    }
+                    resp["rows"] = [{"f": [{"v": "1"}]}, {"f": [{"v": "2"}]}]
+                    resp["totalRows"] = "2"
+                elif "SELECT 1 AS A" in upper:
+                    resp["schema"] = {
+                        "fields": [{"name": "a", "type": "INT64", "mode": "REQUIRED"}],
+                    }
+                    resp["rows"] = [{"f": [{"v": "1"}]}]
+                    resp["totalRows"] = "1"
+                else:
+                    resp["schema"] = {"fields": []}
+                    resp["rows"] = []
+                    resp["totalRows"] = "0"
+
+                self._send_json(200, resp)
+
+            def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.rest_endpoint = f"http://127.0.0.1:{self._server.server_port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def test_sync_bigquery_driver_native_cursor_matrix() -> None:
+    """Verify SyncBigQueryDriver native cursor query, DML, metadata, session, options, and error matrix."""
+    server = _DriverCursorMockServer()
+    try:
+        cfg = BigQueryConfig(project_id="test-proj", rest_endpoint=server.rest_endpoint)
+        with SyncBigQueryDriver(cfg) as driver:
+            with pytest.raises(NotSupportedError):
+                driver.cursor(lazy_begin=True)
+
+            assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+            meta = driver.last_query_metadata
+            assert meta["job_id"] == "bq-drv-job-1"
+            assert set(meta.keys()) == {
+                "job_id",
+                "session_id",
+                "total_rows",
+                "total_bytes_processed",
+                "total_bytes_billed",
+                "slot_ms",
+                "cache_hit",
+                "num_dml_affected_rows",
+            }
+
+            rows, names = driver.execute_with_description("SELECT 1 AS a, 2 AS b")
+            assert rows == [(1, 2)]
+            assert isinstance(rows[0], tuple)
+            assert names == ("a", "b")
+
+            assert driver.execute("UPDATE t SET a = 1") == 2
+            assert driver.execute("CREATE TABLE t (a INT64)") == 0
+            assert driver.execute("SELECT 1 UNION ALL SELECT 2") == 2
+            assert driver.select("SELECT @a AS a", {"a": 5}) == [{"a": 5}]
+            assert driver.select_one("SELECT 1 AS a") == {"a": 1}
+            assert driver.select_one_or_none("SELECT 1 AS a") == {"a": 1}
+            assert driver.query("SELECT 1 AS a") == [{"a": 1}]
+            assert driver.query_one("SELECT 1 AS a") == {"a": 1}
+            assert driver.select_value("SELECT 1 AS a") == 1
+            assert driver.execute_script("SELECT 1 AS a") == [{"a": 1}]
+
+            driver.execute("SELECT 1 AS a", job_labels={"team": "x"}, maximum_bytes_billed=10)
+            opt_body = server.requests[-1]["body"]
+            assert opt_body.get("labels") == {"team": "x"}
+            assert str(opt_body.get("maximumBytesBilled")) == "10"
+
+            assert driver.in_transaction is False
+            driver.begin()
+            assert driver.in_transaction is True
+            session_id = driver.session_id
+            assert session_id == "bq-drv-session-1"
+            req_start = len(server.requests)
+            driver.execute("UPDATE t SET a = 2")
+            driver.commit()
+            assert driver.in_transaction is False
+            assert _extract_request_session_id(server.requests[req_start]) == session_id
+            assert _extract_request_session_id(server.requests[req_start + 1]) == session_id
+
+            driver.begin()
+            assert driver.in_transaction is True
+            driver.rollback()
+            assert driver.in_transaction is False
+            assert _extract_request_session_id(server.requests[-2]) == session_id
+            assert _extract_request_session_id(server.requests[-1]) == session_id
+
+            with pytest.raises(BigQueryError) as excinfo:
+                driver.execute("SELEC 1")
+            assert excinfo.value.code == 3
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_bigquery_driver_native_cursor_matrix() -> None:
+    """Verify AsyncBigQueryDriver native cursor query, DML, metadata, session, options, and error matrix."""
+    server = _DriverCursorMockServer()
+    try:
+        cfg = BigQueryConfig(project_id="test-proj", rest_endpoint=server.rest_endpoint)
+        async with AsyncBigQueryDriver(cfg) as driver:
+            with pytest.raises(NotSupportedError):
+                driver.cursor(lazy_begin=True)
+
+            assert await driver.select("SELECT 1 AS a") == [{"a": 1}]
+            meta = driver.last_query_metadata
+            assert meta["job_id"] == "bq-drv-job-1"
+            assert set(meta.keys()) == {
+                "job_id",
+                "session_id",
+                "total_rows",
+                "total_bytes_processed",
+                "total_bytes_billed",
+                "slot_ms",
+                "cache_hit",
+                "num_dml_affected_rows",
+            }
+
+            rows, names = await driver.execute_with_description("SELECT 1 AS a, 2 AS b")
+            assert rows == [(1, 2)]
+            assert isinstance(rows[0], tuple)
+            assert names == ("a", "b")
+
+            assert await driver.execute("UPDATE t SET a = 1") == 2
+            assert await driver.execute("CREATE TABLE t (a INT64)") == 0
+            assert await driver.execute("SELECT 1 UNION ALL SELECT 2") == 2
+            assert await driver.select("SELECT @a AS a", {"a": 5}) == [{"a": 5}]
+            assert await driver.select_one("SELECT 1 AS a") == {"a": 1}
+            assert await driver.select_one_or_none("SELECT 1 AS a") == {"a": 1}
+            assert await driver.query("SELECT 1 AS a") == [{"a": 1}]
+            assert await driver.query_one("SELECT 1 AS a") == {"a": 1}
+            assert await driver.select_value("SELECT 1 AS a") == 1
+            assert await driver.execute_script("SELECT 1 AS a") == [{"a": 1}]
+
+            await driver.execute("SELECT 1 AS a", job_labels={"team": "x"}, maximum_bytes_billed=10)
+            opt_body = server.requests[-1]["body"]
+            assert opt_body.get("labels") == {"team": "x"}
+            assert str(opt_body.get("maximumBytesBilled")) == "10"
+
+            assert driver.in_transaction is False
+            await driver.begin()
+            assert driver.in_transaction is True
+            session_id = driver.session_id
+            assert session_id == "bq-drv-session-1"
+            req_start = len(server.requests)
+            await driver.execute("UPDATE t SET a = 2")
+            await driver.commit()
+            assert driver.in_transaction is False
+            assert _extract_request_session_id(server.requests[req_start]) == session_id
+            assert _extract_request_session_id(server.requests[req_start + 1]) == session_id
+
+            await driver.begin()
+            assert driver.in_transaction is True
+            await driver.rollback()
+            assert driver.in_transaction is False
+            assert _extract_request_session_id(server.requests[-2]) == session_id
+            assert _extract_request_session_id(server.requests[-1]) == session_id
+
+            with pytest.raises(BigQueryError) as excinfo:
+                await driver.execute("SELEC 1")
+            assert excinfo.value.code == 3
+    finally:
+        server.close()

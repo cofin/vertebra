@@ -10,15 +10,15 @@ use vertebra_db::py_async::{RustDbTaskAwaitable, block_on_db, spawn_rust_db_task
 
 use crate::async_client::{POSTGRES_COMPLETION_DRAINER_ATTR, PyAsyncPostgresClient};
 use crate::config::PostgresConfig;
+use crate::cursor::{PyAsyncPostgresCursor, PySyncPostgresCursor, cursor_interface_err};
 use crate::errors::{PostgresError, postgres_error_to_py};
 use crate::pool::{PooledConnection, PostgresPool, PostgresPoolOptions};
-use crate::python_values::{extract_parameters, query_result_to_python};
+use crate::session::SessionHandle;
 use crate::session::statements::PoolerMode;
-use crate::session::{CommandBudget, SessionHandle};
 use crate::sync_client::{
     PySyncPostgresClient, build_validated_config, extract_cloud_auth_options,
     extract_iam_auth_options, extract_session_gucs, extract_strict_f64, extract_strict_i64,
-    extract_strict_opt_f64, extract_strict_opt_i64,
+    extract_strict_opt_i64,
 };
 
 fn validate_positive_duration(value: f64, field_name: &str) -> Result<Duration, PostgresError> {
@@ -328,36 +328,116 @@ impl PySyncPostgresPool {
         )))
     }
 
-    /// Execute a single extended query directly on the pool without per-query `DISCARD ALL`.
-    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
-    pub fn query(
+    /// Create a synchronous PEP 249 cursor backed by this pool's one-shot path without I/O.
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, py: Python<'_>, lazy_begin: bool) -> PyResult<PySyncPostgresCursor> {
+        if lazy_begin {
+            return Err(cursor_interface_err(
+                py,
+                "a pool cursor has no session; lazy_begin needs a client cursor",
+            ));
+        }
+        Ok(PySyncPostgresCursor::from_pool(Arc::clone(&self.pool)))
+    }
+
+    /// Run one statement and return its rows and column names.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_rows(
         &self,
         py: Python<'_>,
         sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
+        params: Option<&Bound<'_, PyAny>>,
         parameter_oids: Option<&Bound<'_, PyAny>>,
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let timeout_secs = extract_strict_opt_f64(timeout)?;
-        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let none_bound = py.None().into_bound(py);
-        let params_ref = parameters.unwrap_or(&none_bound);
-        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let budget = CommandBudget::start_from_duration(timeout_dur)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let pool = Arc::clone(&self.pool);
-        let sql_owned = sql.to_owned();
-        let res = py
-            .detach(move || {
-                block_on_db(async move {
-                    pool.query_oneshot(&sql_owned, &params, oids.as_deref(), budget)
-                        .await
-                })
-            })
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        query_result_to_python(py, &res)
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Pool(Arc::clone(self.pool())),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::rows_and_names,
+        )
+    }
+
+    /// Run one statement and return one dictionary per row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_dicts(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Pool(Arc::clone(self.pool())),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::row_dicts,
+        )
+    }
+
+    /// Run one statement and return the first column of the first row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_value(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Pool(Arc::clone(self.pool())),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::first_value,
+        )
+    }
+
+    /// Run one statement and return its row count and no last row id.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn execute_dml(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Option<&Bound<'_, PyAny>>,
+        parameter_oids: Option<&Bound<'_, PyAny>>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::run_single_call(
+            py,
+            crate::cursor::CursorSource::Pool(Arc::clone(self.pool())),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::dml_outcome,
+        )
     }
 
     /// Drain and close the connection pool under configured `close_timeout`.
@@ -670,36 +750,115 @@ impl PyAsyncPostgresPool {
         )
     }
 
-    /// Execute a single extended query asynchronously on the pool without per-query `DISCARD ALL`.
-    #[pyo3(signature = (sql, parameters = None, *, parameter_oids = None, timeout = None))]
-    pub fn query<'py>(
+    /// Create an asynchronous PEP 249 cursor backed by this pool's one-shot path without I/O.
+    #[pyo3(signature = (*, lazy_begin = false))]
+    pub fn cursor(&self, py: Python<'_>, lazy_begin: bool) -> PyResult<PyAsyncPostgresCursor> {
+        if lazy_begin {
+            return Err(cursor_interface_err(
+                py,
+                "a pool cursor has no session; lazy_begin needs a client cursor",
+            ));
+        }
+        Ok(PyAsyncPostgresCursor::from_pool(Arc::clone(&self.pool)))
+    }
+
+    /// Run one statement asynchronously and return its rows and column names.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_rows<'py>(
         &self,
         py: Python<'py>,
         sql: &str,
-        parameters: Option<&Bound<'py, PyAny>>,
+        params: Option<&Bound<'py, PyAny>>,
         parameter_oids: Option<&Bound<'py, PyAny>>,
         timeout: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let timeout_secs = extract_strict_opt_f64(timeout)?;
-        let timeout_dur = CommandBudget::validate_optional_seconds(timeout_secs)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let none_bound = py.None().into_bound(py);
-        let params_ref = parameters.unwrap_or(&none_bound);
-        let (params, oids) = extract_parameters(py, params_ref, parameter_oids)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let budget = CommandBudget::start_from_duration(timeout_dur)
-            .map_err(|e| postgres_error_to_py(py, e))?;
-        let pool = Arc::clone(&self.pool);
-        let sql_owned = sql.to_owned();
-        spawn_rust_db_task_with_attr(
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::spawn_pool_single_call(
             py,
-            async move {
-                pool.query_oneshot(&sql_owned, &params, oids.as_deref(), budget)
-                    .await
-            },
-            |py, res| query_result_to_python(py, &res),
-            postgres_error_to_py,
-            POSTGRES_COMPLETION_DRAINER_ATTR,
+            Arc::clone(self.pool()),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::rows_and_names,
+        )
+    }
+
+    /// Run one statement asynchronously and return one dictionary per row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_dicts<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::spawn_pool_single_call(
+            py,
+            Arc::clone(self.pool()),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::row_dicts,
+        )
+    }
+
+    /// Run one statement asynchronously and return the first column of the first row.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn fetch_value<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::spawn_pool_single_call(
+            py,
+            Arc::clone(self.pool()),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::first_value,
+        )
+    }
+
+    /// Run one statement asynchronously and return its row count and no last row id.
+    #[pyo3(
+        signature = (sql, params = None, *, parameter_oids = None, timeout = None),
+        text_signature = "($self, sql, params=(), *, parameter_oids=None, timeout=None)"
+    )]
+    pub fn execute_dml<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+        parameter_oids: Option<&Bound<'py, PyAny>>,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::cursor::spawn_pool_single_call(
+            py,
+            Arc::clone(self.pool()),
+            "cannot run a statement on a closed pool",
+            sql,
+            params,
+            parameter_oids,
+            timeout,
+            crate::cursor::dml_outcome,
         )
     }
 

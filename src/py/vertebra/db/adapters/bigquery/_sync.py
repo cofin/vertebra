@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, Self
 
@@ -41,8 +41,67 @@ if TYPE_CHECKING:
 
 __all__ = (
     "SyncBigQueryClientProtocol",
+    "SyncBigQueryCursorProtocol",
     "SyncBigQueryDriver",
 )
+
+
+class SyncBigQueryCursorProtocol(Protocol):
+    """Structural protocol for synchronous BigQuery PEP 249 cursors."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[Any, ...], ...] | None:
+        """Return column descriptions for the current result set, or ``None``."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the row or DML count of the last statement, or ``-1``."""
+        ...
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return ``None`` (BigQuery does not report last insert rowids)."""
+        ...
+
+    @property
+    def query_metadata(self) -> Mapping[str, Any] | None:
+        """Return job metadata for the last executed query, or ``None``."""
+        ...
+
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Any:
+        """Execute one query job and buffer its rows, description, and metadata."""
+        ...
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> Any:
+        """Execute one query job per parameter set and sum DML row counts."""
+        ...
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row, or ``None`` when exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to ``size`` buffered rows."""
+        ...
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return every remaining buffered row."""
+        ...
+
+    def close(self) -> None:
+        """Close the cursor and drop its buffered rows."""
+        ...
 
 
 class SyncBigQueryClientProtocol(Protocol):
@@ -92,6 +151,22 @@ class SyncBigQueryClientProtocol(Protocol):
         mode: str = "_default",
     ) -> Mapping[str, Any]:
         """Append an Arrow IPC stream via the Storage Write API."""
+        ...
+
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Callable[[str, Any], tuple[str, str | None]] | None = None,
+        lazy_begin: bool = False,
+    ) -> SyncBigQueryCursorProtocol:
+        """Create a synchronous PEP 249 cursor backed by this client."""
         ...
 
     def close(self) -> None:
@@ -195,6 +270,32 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             self._client = None
             self._closed = True
 
+    def cursor(
+        self,
+        *,
+        job_labels: Mapping[str, str] | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        lazy_begin: bool = False,
+    ) -> SyncBigQueryCursorProtocol:
+        """Create a synchronous PEP 249 cursor bound to this driver's client and session."""
+        merged_labels = BigQueryCore.sanitize_labels(self.config.labels, job_labels)
+        effective_max_bytes = (
+            maximum_bytes_billed if maximum_bytes_billed is not None else self.config.maximum_bytes_billed
+        )
+        return self._ensure_client().cursor(
+            session_id=self._session_id,
+            destination_table=destination_table,
+            write_disposition=write_disposition,
+            maximum_bytes_billed=effective_max_bytes,
+            job_timeout_ms=self.config.job_timeout_ms,
+            priority=self.config.priority,
+            labels=merged_labels or None,
+            param_encoder=self._encode_for_cursor,
+            lazy_begin=lazy_begin,
+        )
+
     def execute(
         self,
         sql: str,
@@ -208,7 +309,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
     ) -> int:
         """Execute a DML, DDL, or query statement and return affected or produced row count."""
         _ = kwargs
-        raw = self._run_query_sync(
+        cur = self._execute_cursor(
             sql,
             parameters,
             job_labels=job_labels,
@@ -216,23 +317,42 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             write_disposition=write_disposition,
             maximum_bytes_billed=maximum_bytes_billed,
         )
-        affected = raw.get("num_dml_affected_rows")
-        if affected is not None:
-            return int(affected)
-        return int(raw.get("total_rows", len(raw.get("rows", ()))))
+        try:
+            if cur.description is None:
+                return max(cur.rowcount, 0)
+            return len(cur.fetchall())
+        finally:
+            cur.close()
 
     def execute_with_description(
         self,
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        job_labels: Mapping[str, str] | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute a query and return `(tuple_rows, column_names)`."""
         _ = kwargs
-        raw = self._run_query_sync(sql, parameters)
-        cols = tuple(str(c) for c in raw.get("columns", ()))
-        rows = [tuple(r) for r in raw.get("rows", ())]
-        return rows, cols
+        cur = self._execute_cursor(
+            sql,
+            parameters,
+            job_labels=job_labels,
+            destination_table=destination_table,
+            write_disposition=write_disposition,
+            maximum_bytes_billed=maximum_bytes_billed,
+        )
+        try:
+            description = cur.description
+            if not description:
+                return [], ()
+            names = tuple(str(col[0]) for col in description)
+            return cur.fetchall(), names
+        finally:
+            cur.close()
 
     def execute_script(
         self,
@@ -240,8 +360,8 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute a GoogleSQL procedural script or multi-statement batch."""
-        raw = self._run_query_sync(sql, parameters)
-        return BigQueryCore.rows_to_dicts(raw.get("columns", ()), raw.get("rows", ()))
+        rows, cols = self.execute_with_description(sql, parameters)
+        return BigQueryCore.rows_to_dicts(cols, rows)
 
     def select(
         self,
@@ -253,11 +373,15 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query and return rows as dictionaries or `schema_type` instances."""
-        _ = kwargs
-        raw = self._run_query_sync(sql, parameters, maximum_bytes_billed=maximum_bytes_billed)
+        rows, cols = self.execute_with_description(
+            sql,
+            parameters,
+            maximum_bytes_billed=maximum_bytes_billed,
+            **kwargs,
+        )
         return BigQueryCore.hydrate_query_rows(
-            raw.get("columns", ()),
-            raw.get("rows", ()),
+            cols,
+            rows,
             schema_type=schema_type,
         )
 
@@ -322,9 +446,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         **kwargs: Any,
     ) -> Any:
         """Execute a query and return the first scalar column, raising `NotFoundError` when 0 rows match."""
-        _ = kwargs
-        raw = self._run_query_sync(sql, parameters)
-        rows = raw.get("rows", ())
+        rows, _ = self.execute_with_description(sql, parameters, **kwargs)
         if not rows:
             msg = "Query returned no rows"
             raise NotFoundError(msg)
@@ -433,26 +555,27 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
 
     def begin(self) -> None:
         """Start a BigQuery multi-statement transaction session."""
-        client = self._ensure_client()
-        create_session = self._session_id is None
-        res = client.query(
-            "BEGIN TRANSACTION",
-            None,
-            self._session_id,
-            create_session,
-        )
-        sid = res.get("session_id") or self._session_id
-        if sid:
-            self._session_id = str(sid)
+        if self._session_id is None:
+            client = self._ensure_client()
+            res = client.query(
+                BigQueryCore.annotate_sql_with_trace("BEGIN TRANSACTION", self._propagator),
+                None,
+                None,
+                True,
+            )
+            self._after_query(res)
+        else:
+            cur = self._execute_cursor("BEGIN TRANSACTION", None)
+            cur.close()
         self._in_transaction = True
 
     def commit(self) -> None:
         """Commit the active BigQuery session transaction."""
         if not self._in_transaction:
             return
-        client = self._ensure_client()
         try:
-            client.query("COMMIT TRANSACTION", None, self._session_id, False)
+            cur = self._execute_cursor("COMMIT TRANSACTION", None)
+            cur.close()
         finally:
             self._in_transaction = False
 
@@ -460,9 +583,9 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         """Roll back the active BigQuery session transaction."""
         if not self._in_transaction:
             return
-        client = self._ensure_client()
         try:
-            client.query("ROLLBACK TRANSACTION", None, self._session_id, False)
+            cur = self._execute_cursor("ROLLBACK TRANSACTION", None)
+            cur.close()
         finally:
             self._in_transaction = False
 
@@ -598,6 +721,56 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
         params_json = BigQueryCore.encode_parameters_json(parameters)
         return rewritten, params_json
 
+    def _encode_for_cursor(
+        self,
+        sql: str,
+        parameters: Any,
+    ) -> tuple[str, str | None]:
+        return self._prepare_sql_and_params(sql, parameters)
+
+    def _after_query(self, metadata: Mapping[str, Any]) -> None:
+        session_id = metadata.get("session_id")
+        if session_id:
+            self._session_id = str(session_id)
+        self._last_query_metadata = {
+            "job_id": metadata.get("job_id"),
+            "session_id": self._session_id,
+            "total_rows": metadata.get("total_rows", 0),
+            "total_bytes_processed": metadata.get("total_bytes_processed", 0),
+            "total_bytes_billed": metadata.get("total_bytes_billed", 0),
+            "slot_ms": metadata.get("slot_ms", 0),
+            "cache_hit": metadata.get("cache_hit", False),
+            "num_dml_affected_rows": metadata.get("num_dml_affected_rows"),
+        }
+        BigQueryCore.record_finops_metrics(self.project_id, self.config.location, metadata)
+
+    def _execute_cursor(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        job_labels: Mapping[str, str] | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+    ) -> SyncBigQueryCursorProtocol:
+        annotated_sql = BigQueryCore.annotate_sql_with_trace(sql, self._propagator)
+        cur = self.cursor(
+            job_labels=job_labels,
+            destination_table=destination_table,
+            write_disposition=write_disposition,
+            maximum_bytes_billed=maximum_bytes_billed,
+        )
+        try:
+            cur.execute(annotated_sql, parameters or ())
+        except Exception:
+            cur.close()
+            raise
+        metadata = cur.query_metadata
+        if metadata is not None:
+            self._after_query(metadata)
+        return cur
+
     def _run_query_sync(
         self,
         sql: str,
@@ -624,19 +797,7 @@ class SyncBigQueryDriver(SyncDatabaseDriver[BigQueryConfig]):
             self.config.priority,
             merged_labels or None,
         )
-        if raw.get("session_id"):
-            self._session_id = str(raw["session_id"])
-        self._last_query_metadata = {
-            "job_id": raw.get("job_id"),
-            "session_id": self._session_id,
-            "total_rows": raw.get("total_rows", 0),
-            "total_bytes_processed": raw.get("total_bytes_processed", 0),
-            "total_bytes_billed": raw.get("total_bytes_billed", 0),
-            "slot_ms": raw.get("slot_ms", 0),
-            "cache_hit": raw.get("cache_hit", False),
-            "num_dml_affected_rows": raw.get("num_dml_affected_rows"),
-        }
-        BigQueryCore.record_finops_metrics(self.project_id, self.config.location, raw)
+        self._after_query(raw)
         return dict(raw)
 
     def _fallback_insert_arrow_via_rest(

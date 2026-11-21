@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from vertebra.db.adapters.oracle import OracleConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from django.db.backends.oracle.schema import DatabaseSchemaEditor as OracleDatabaseSchemaEditor
     from django.db.backends.oracle.validation import DatabaseValidation as OracleDatabaseValidation
     from django.db.backends.utils import strip_quotes, truncate_name
-
-    from vertebra.db.dbapi import SyncDBAPICursor
 else:
     BaseDatabaseWrapper = ensure_module(
         "django.db.backends.base.base", package="django", extra="django"
@@ -264,10 +262,10 @@ class DatabaseWrapper(DatabaseWrapperMixin, BaseDatabaseWrapper):
         conn.autocommit = True
         return conn
 
-    def create_cursor(self, name: str | None = None) -> SyncDBAPICursor:
+    def create_cursor(self, name: str | None = None) -> Any:
         """Create and return a DBAPI cursor adapting Django :arg0 and out-binds."""
         _ = name
-        return cast("SyncDBAPICursor", self.connection.cursor())
+        return self.connection.cursor()
 
     def _set_autocommit(self, autocommit: bool) -> None:
         """Set autocommit on the underlying connection."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import sqlite3
 import sys
@@ -13,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 from urllib.parse import unquote, urlsplit
+
+import msgspec
 
 from tools.benchmarks.adapters.base import (
     ADAPTER_SCHEMA_VERSION,
@@ -44,6 +47,7 @@ from vertebra.utils.module_loader import import_optional
 
 type MySQLEngine = Literal["mysql", "mariadb"]
 type SqlSpecEngine = Literal["sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql"]
+type ComparatorStatus = Literal["pass", "fail", "allowed", "missing", "skipped"]
 
 SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
     "postgres",
@@ -58,6 +62,62 @@ SUPPORTED_SQL_ENGINES: Final[tuple[str, ...]] = (
     "sqlalchemy",
     "sqlspec",
 )
+
+COMPARATOR_PAIRS: Final[dict[str, tuple[str, ...]]] = {
+    "vertebra-sqlite-sync": ("sqlite3",),
+    "vertebra-sqlite-async": ("aiosqlite",),
+    "vertebra-duckdb-sync": ("duckdb",),
+    "vertebra-mysql-sync": ("pymysql", "MySQLdb"),
+    "vertebra-mariadb-sync": ("pymysql", "MySQLdb"),
+    "vertebra-mysql-async": ("aiomysql",),
+    "vertebra-mariadb-async": ("aiomysql",),
+    "vertebra-oracle-sync": ("oracledb-sync",),
+    "vertebra-oracle-async": ("oracledb-async",),
+    "vertebra-mssql-sync": ("pymssql", "pyodbc"),
+    "vertebra-spanner-sync": ("google-cloud-spanner-sync",),
+    "vertebra-bigquery-sync": ("google-cloud-bigquery-sync",),
+    "sqlalchemy-vtb-sync": ("sqlalchemy-vanilla-sync",),
+    "vertebra-sqlspec-sqlite-sync": ("sqlspec-sqlite-sync",),
+    "vertebra-sqlspec-duckdb-sync": ("sqlspec-duckdb-sync",),
+    "vertebra-sqlspec-postgres-async": ("sqlspec-asyncpg",),
+    "vertebra-sync": ("psycopg-sync",),
+    "vertebra-async": ("asyncpg",),
+}
+
+COMPARATOR_ALLOW_LIST: Final[dict[str, str]] = {
+    "vertebra-bigquery-sync": "Emulator round trip dominates and drifts with job history.",
+    "vertebra-spanner-sync": "Emulator round trip dominates the measurement.",
+    "vertebra-mssql-sync": "Nearly all time is inside the engine round trip; results sit within run-to-run variation.",
+    "vertebra-duckdb-sync": "Bundled libduckdb-sys cc build omits DuckDB jemalloc until upstream ships it on crates.io.",
+    "vertebra-sqlspec-duckdb-sync": (
+        "Bundled libduckdb-sys cc build omits DuckDB jemalloc until upstream ships it on crates.io."
+    ),
+    "vertebra-oracle-sync": (
+        "Upstream oracle/rust-oracledb#101 clears the statement cache when AUTH_MAX_OPEN_CURSORS is absent."
+    ),
+    "vertebra-oracle-async": (
+        "Upstream oracle/rust-oracledb#101 clears the statement cache when AUTH_MAX_OPEN_CURSORS is absent."
+    ),
+}
+
+COMPARATORLESS_CASES: Final[dict[tuple[str, str], str]] = {
+    ("vertebra-async", "pipeline_select_16"): "No comparator driver runs a pipelined statement case.",
+}
+
+
+class ComparatorCheckOutcome(msgspec.Struct, frozen=True, gc=False):
+    """Comparison outcome between one Vertebra case and its comparator driver."""
+
+    engine: str
+    case: str
+    vertebra_driver: str
+    comparator_driver: str | None
+    vertebra_median_ms: float
+    comparator_median_ms: float | None
+    median_ratio: float | None
+    status: ComparatorStatus
+    reason: str | None = None
+
 
 _SQLSPEC_ENGINES: Final[tuple[SqlSpecEngine, ...]] = (
     "sqlite",
@@ -74,7 +134,12 @@ _SQLITE_MULTI_ROW_QUERY: Final[str] = (
 _DUCKDB_SCAN_QUERY: Final[str] = "SELECT sum(i) FROM range(1000) t(i)"
 
 __all__ = (
+    "COMPARATORLESS_CASES",
+    "COMPARATOR_ALLOW_LIST",
+    "COMPARATOR_PAIRS",
     "SUPPORTED_SQL_ENGINES",
+    "ComparatorCheckOutcome",
+    "ComparatorStatus",
     "MySQLEngine",
     "SqlSpecEngine",
     "capture_bigquery_report",
@@ -87,6 +152,7 @@ __all__ = (
     "capture_sqlalchemy_report",
     "capture_sqlite_report",
     "capture_sqlspec_report",
+    "check_report_against_comparators",
     "main",
 )
 
@@ -203,7 +269,7 @@ async def capture_sqlite_report(
     include_external: bool = True,
     strict_free_threading: bool = False,
 ) -> AdapterBenchmarkReport:
-    """Measure Vertebra SQLite drivers against stdlib `sqlite3` and optional `aiosqlite`."""
+    """Measure Vertebra SQLite drivers and a reused native cursor against stdlib sqlite3 and optional aiosqlite."""
     _validate_sampling(iterations, warmup)
     gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
     cfg = _resolve_sqlite_config(database)
@@ -213,6 +279,15 @@ async def capture_sqlite_report(
     with SyncSQLiteDriver(cfg) as sync_drv:
         sync_point = sample_sync(lambda: sync_drv.select_one("SELECT ?", (1,)), iterations=iterations, warmup=warmup)
         sync_multi = sample_sync(lambda: sync_drv.select(_SQLITE_MULTI_ROW_QUERY), iterations=iterations, warmup=warmup)
+        native_cursor = sync_drv.cursor()
+        try:
+            sync_cursor_point = sample_sync(
+                lambda: native_cursor.execute("SELECT ?", (1,)).fetchone(),
+                iterations=iterations,
+                warmup=warmup,
+            )
+        finally:
+            native_cursor.close()
     cases.append(
         compute_adapter_case_stats(
             case="point_select_1",
@@ -230,6 +305,16 @@ async def capture_sqlite_report(
             category="sql",
             driver_mode="sync_blocking",
             latencies_ns=sync_multi,
+            gil_enabled=gil_enabled,
+        )
+    )
+    cases.append(
+        compute_adapter_case_stats(
+            case="cursor_point_select_1",
+            driver="vertebra-sqlite-sync",
+            category="sql",
+            driver_mode="sync_blocking",
+            latencies_ns=sync_cursor_point,
             gil_enabled=gil_enabled,
         )
     )
@@ -268,6 +353,7 @@ async def capture_sqlite_report(
 
     if include_external:
         conn = sqlite3.connect(db_path)
+        stdlib_cursor = conn.cursor()
         try:
             stdlib_point = sample_sync(
                 lambda: conn.execute("SELECT ?", (1,)).fetchone(),
@@ -279,7 +365,13 @@ async def capture_sqlite_report(
                 iterations=iterations,
                 warmup=warmup,
             )
+            stdlib_cursor_point = sample_sync(
+                lambda: stdlib_cursor.execute("SELECT ?", (1,)).fetchone(),
+                iterations=iterations,
+                warmup=warmup,
+            )
         finally:
+            stdlib_cursor.close()
             conn.close()
         cases.append(
             compute_adapter_case_stats(
@@ -298,6 +390,16 @@ async def capture_sqlite_report(
                 category="sql",
                 driver_mode="sync_blocking",
                 latencies_ns=stdlib_multi,
+                gil_enabled=gil_enabled,
+            )
+        )
+        cases.append(
+            compute_adapter_case_stats(
+                case="cursor_point_select_1",
+                driver="sqlite3",
+                category="sql",
+                driver_mode="sync_blocking",
+                latencies_ns=stdlib_cursor_point,
                 gil_enabled=gil_enabled,
             )
         )
@@ -624,11 +726,15 @@ async def capture_oracle_report(
     warmup: int = 10,
     include_external: bool = True,
     strict_free_threading: bool = False,
+    enable_reset_relay: bool = True,
 ) -> AdapterBenchmarkReport:
-    """Measure Vertebra Oracle drivers on `SELECT 1 FROM DUAL` against optional `oracledb`."""
+    """Measure Vertebra Oracle drivers on `SELECT 1 FROM DUAL` against optional `oracledb`.
+
+    Set `enable_reset_relay=False` to disable the in-process TNS relay on both Vertebra Oracle drivers.
+    """
     _validate_sampling(iterations, warmup)
     gil_enabled = assert_free_threaded_gil_disabled(strict=strict_free_threading)
-    cfg = OracleConfig.from_url(dsn)
+    cfg = msgspec.structs.replace(OracleConfig.from_url(dsn), enable_reset_relay=enable_reset_relay)
     cases: list[AdapterBenchmarkCase] = []
 
     with SyncOracleDriver(cfg) as sync_drv:
@@ -1287,7 +1393,11 @@ async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
         mysql_variant: MySQLEngine = "mariadb" if engine == "mariadb" else "mysql"
         return await capture_mysql_report(args.dsn, engine=mysql_variant, **common_kwargs)
     if engine == "oracle":
-        return await capture_oracle_report(args.dsn, **common_kwargs)
+        return await capture_oracle_report(
+            args.dsn,
+            enable_reset_relay=args.oracle_reset_relay == "on",
+            **common_kwargs,
+        )
     if engine == "mssql":
         return await capture_mssql_report(args.dsn, **common_kwargs)
     if engine == "spanner":
@@ -1305,6 +1415,97 @@ async def _dispatch_capture(args: argparse.Namespace) -> AdapterBenchmarkReport:
         return await capture_sqlspec_report(sqlspec_engine, args.dsn, **common_kwargs)
     msg = f"Unsupported SQL benchmark engine: {engine!r}"
     raise ValueError(msg)
+
+
+def check_report_against_comparators(
+    report: AdapterBenchmarkReport,
+    *,
+    max_median_ratio: float = 1.0,
+) -> tuple[ComparatorCheckOutcome, ...]:
+    """Compare each paired Vertebra case in a captured report against its comparator driver(s)."""
+    if not math.isfinite(max_median_ratio) or max_median_ratio <= 0.0:
+        msg = f"max_median_ratio must be finite and > 0 (got {max_median_ratio!r})"
+        raise ValueError(msg)
+
+    cases_by_key: dict[tuple[str, str], AdapterBenchmarkCase] = {
+        (item.case, item.driver): item for item in report.cases
+    }
+    outcomes: list[ComparatorCheckOutcome] = []
+
+    for item in report.cases:
+        comparator_labels = COMPARATOR_PAIRS.get(item.driver)
+        if comparator_labels is None:
+            continue
+
+        matched = [
+            cases_by_key[(item.case, label)] for label in comparator_labels if (item.case, label) in cases_by_key
+        ]
+        if not matched:
+            skip_reason = COMPARATORLESS_CASES.get((item.driver, item.case))
+            if skip_reason is not None:
+                missing_status: ComparatorStatus = "skipped"
+                missing_reason = skip_reason
+            else:
+                missing_status = "missing"
+                missing_reason = "no comparator case in report"
+            outcomes.append(
+                ComparatorCheckOutcome(
+                    engine=report.engine,
+                    case=item.case,
+                    vertebra_driver=item.driver,
+                    comparator_driver=None,
+                    vertebra_median_ms=item.median_ms,
+                    comparator_median_ms=None,
+                    median_ratio=None,
+                    status=missing_status,
+                    reason=missing_reason,
+                )
+            )
+            continue
+
+        for comparator in matched:
+            ratio = item.median_ms / comparator.median_ms
+            if ratio <= max_median_ratio:
+                status: ComparatorStatus = "pass"
+                reason: str | None = None
+            elif item.driver in COMPARATOR_ALLOW_LIST:
+                status = "allowed"
+                reason = COMPARATOR_ALLOW_LIST[item.driver]
+            else:
+                status = "fail"
+                reason = f"median_ratio {ratio:.3f} > {max_median_ratio:.3f}"
+            outcomes.append(
+                ComparatorCheckOutcome(
+                    engine=report.engine,
+                    case=item.case,
+                    vertebra_driver=item.driver,
+                    comparator_driver=comparator.driver,
+                    vertebra_median_ms=item.median_ms,
+                    comparator_median_ms=comparator.median_ms,
+                    median_ratio=ratio,
+                    status=status,
+                    reason=reason,
+                )
+            )
+
+    return tuple(outcomes)
+
+
+def _format_comparator_outcome(outcome: ComparatorCheckOutcome) -> str:
+    if outcome.status == "missing":
+        return f"[MISSING] {outcome.engine} {outcome.case} ({outcome.vertebra_driver}): {outcome.reason}"
+    if outcome.status == "skipped":
+        return f"[SKIP] {outcome.engine} {outcome.case} ({outcome.vertebra_driver}): {outcome.reason}"
+
+    tag = {"pass": "PASS", "allowed": "ALLOW", "fail": "FAIL"}[outcome.status]
+    ratio = outcome.median_ratio if outcome.median_ratio is not None else 0.0
+    line = (
+        f"[{tag}] {outcome.engine} {outcome.case} "
+        f"({outcome.vertebra_driver} vs {outcome.comparator_driver}): median_ratio={ratio:.3f}"
+    )
+    if outcome.reason:
+        line += f" ({outcome.reason})"
+    return line
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1328,6 +1529,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Bind SQLAlchemy BrokerPool when --engine=sqlalchemy.",
     )
     capture_cmd.add_argument(
+        "--oracle-reset-relay",
+        choices=("on", "off"),
+        default="on",
+        help="In-process TNS relay for Vertebra Oracle drivers when --engine=oracle.",
+    )
+    capture_cmd.add_argument(
         "--no-external",
         action="store_true",
         help="Benchmark Vertebra drivers only without optional third-party comparators.",
@@ -1338,6 +1545,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fail if the Python GIL is enabled or re-enabled during capture.",
     )
     capture_cmd.add_argument("--output", type=Path, default=None, help="Optional output file path.")
+
+    check_cmd = subparsers.add_parser(
+        "check",
+        help="Check Vertebra cases in captured reports against their comparator drivers.",
+    )
+    check_cmd.add_argument(
+        "--report",
+        action="append",
+        type=Path,
+        required=True,
+        help="Captured adapter benchmark JSON report path (repeatable).",
+    )
+    check_cmd.add_argument(
+        "--max-median-ratio",
+        type=float,
+        default=1.0,
+        help="Maximum allowed Vertebra/comparator median latency ratio.",
+    )
+    check_cmd.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Do not fail when a Vertebra case has no comparator case in the report.",
+    )
 
     compare_cmd = subparsers.add_parser("compare", help="Compare candidate and baseline adapter benchmark reports.")
     compare_cmd.add_argument("--candidate", type=Path, required=True, help="Candidate JSON report path.")
@@ -1366,7 +1596,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run CLI `capture` or `compare` commands returning exit status `0` (pass) or non-zero (failure)."""
+    """Run CLI `capture`, `check`, or `compare` commands returning exit status `0` (pass) or non-zero (failure)."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -1384,6 +1614,26 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.write(encoded.decode("utf-8") + "\n")
         return 0
+
+    if args.command == "check":
+        check_outcomes: list[ComparatorCheckOutcome] = []
+        for report_path in args.report:
+            report = parse_adapter_report_bytes(report_path.read_bytes())
+            check_outcomes.extend(
+                check_report_against_comparators(
+                    report,
+                    max_median_ratio=args.max_median_ratio,
+                )
+            )
+        if not check_outcomes:
+            sys.stderr.write("No Vertebra case with a known comparator found\n")
+            return 2
+        has_failure = False
+        for check_outcome in check_outcomes:
+            sys.stdout.write(_format_comparator_outcome(check_outcome) + "\n")
+            if check_outcome.status == "fail" or (check_outcome.status == "missing" and not args.allow_missing):
+                has_failure = True
+        return 1 if has_failure else 0
 
     candidate_report = parse_adapter_report_bytes(args.candidate.read_bytes())
     baseline_report = parse_adapter_report_bytes(args.baseline.read_bytes())

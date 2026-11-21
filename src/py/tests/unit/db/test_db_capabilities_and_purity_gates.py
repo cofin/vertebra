@@ -781,6 +781,106 @@ def test_queue_store_and_claimed_job_legacy_symbols_cleanly_removed() -> None:
     assert not hasattr(cap_mod, "ClaimedJob")
 
 
+_NATIVE_CURSOR_REMOVED_SYMBOLS: tuple[tuple[str, str], ...] = (
+    ("vertebra.db.dbapi", "is_row_returning_sql"),
+    ("vertebra.db.dbapi", "is_read_only_sql"),
+    ("vertebra.db.dbapi", "is_insert_sql"),
+    ("vertebra.db.dbapi", "coerce_dbapi_rows_and_desc"),
+    ("vertebra.db.dbapi._sync", "is_row_returning_sql"),
+    ("vertebra.db.dbapi._sync", "is_read_only_sql"),
+    ("vertebra.db.dbapi._sync", "is_insert_sql"),
+    ("vertebra.db.dbapi._sync", "_scan_unquoted_sql_tokens"),
+    ("vertebra.db.dbapi._sync", "_match_dollar_quote_tag"),
+    ("vertebra.db.dbapi._sync", "_has_tsql_output_clause"),
+    ("vertebra.db.dbapi._sync", "coerce_dbapi_rows_and_desc"),
+    ("vertebra.db.dbapi._sync", "_coerce_column_description"),
+    ("vertebra.db.dbapi._sync", "_ErrorTranslator"),
+    ("vertebra.db.dbapi._sync", "_translate_errors"),
+    ("vertebra.db.dbapi._sync", "_TRANSLATE_ERRORS"),
+    ("vertebra.db.dbapi._sync", "_translate_native_error"),
+    ("vertebra.db.dbapi._sync", "_translate_vertebra_error"),
+    ("vertebra.db.dbapi._sync", "_extract_out_bind_vars"),
+    ("vertebra.db.dbapi._sync", "_populate_out_bind_vars"),
+    ("vertebra.db.dbapi._sync", "_DBAPIOutBindVar"),
+    ("vertebra.db.dbapi._sync", "SyncSQLDriverProtocol.execute_with_description"),
+    ("vertebra.db.dbapi._sync", "SyncSQLDriverProtocol.execute_tuples"),
+    ("vertebra.db.dbapi._sync", "SyncSQLDriverProtocol.select"),
+    ("vertebra.db.dbapi._async", "AsyncSQLDriverProtocol.execute_with_description"),
+    ("vertebra.db.dbapi._async", "AsyncSQLDriverProtocol.execute_tuples"),
+    ("vertebra.db.dbapi._async", "AsyncSQLDriverProtocol.select"),
+    ("vertebra.db.driver._common", "NATIVE_CURSOR_ENGINES"),
+    ("vertebra.db.driver._common", "CommonDriverMixin._release_broker_lease"),
+    ("vertebra.db.driver._common", "CommonDriverMixin._extract_column_names"),
+    ("vertebra.db.driver._sync", "SyncDatabaseDriver.query_with_columns"),
+    ("vertebra.db.driver._async", "AsyncDatabaseDriver.query_with_columns"),
+    ("vertebra.db.driver._async", "ThreadOffloadAsyncDatabaseDriver.query_with_columns"),
+    ("vertebra.db.adapters.postgres.core", "PostgreSQLCore.normalize_parameters"),
+    ("vertebra.db.adapters.postgres._sync", "SyncPostgreSQLDriver._execute_cursor"),
+    ("vertebra.db.adapters.postgres._sync", "SyncPostgreSQLDriver._execute_on_pool"),
+    ("vertebra.db.adapters.postgres._async", "AsyncPostgreSQLDriver._execute_cursor"),
+    ("vertebra.db.adapters.postgres._async", "AsyncPostgreSQLDriver._execute_on_pool"),
+    ("vertebra.db.adapters.oracle._sync", "SyncOracleDriver._execute_cursor"),
+    ("vertebra.db.adapters.oracle._async", "AsyncOracleDriver._execute_cursor"),
+    ("vertebra.db.dbapi._sync", "SyncDBAPIConnection._native_cursor"),
+    ("vertebra.db.dbapi._async", "AsyncDBAPIConnection._native_cursor"),
+    ("vertebra.extensions.sqlspec._driver", "_unwrap_typed_parameters"),
+    ("vertebra.extensions.sqlspec._driver", "_normalize_bound_params"),
+)
+
+
+@pytest.mark.parametrize(("module_name", "symbol_name"), _NATIVE_CURSOR_REMOVED_SYMBOLS)
+def test_native_cursor_superseded_symbols_removed(module_name: str, symbol_name: str) -> None:
+    """Verify superseded native-cursor helpers and protocol members stay removed."""
+    if module_name.startswith("vertebra.extensions.sqlspec"):
+        pytest.importorskip("sqlspec")
+    module = importlib.import_module(module_name)
+    if "." in symbol_name:
+        owner_name, attr_name = symbol_name.split(".", 1)
+        assert not hasattr(getattr(module, owner_name), attr_name)
+    else:
+        assert not hasattr(module, symbol_name)
+
+
+@pytest.mark.anyio
+async def test_sqlspec_bases_reuse_one_exception_handler() -> None:
+    """Verify BaseSyncDriver and BaseAsyncDriver reuse a single exception handler instance across calls."""
+    pytest.importorskip("sqlspec")
+    from vertebra.extensions.sqlspec._driver import BaseAsyncDriver, BaseSyncDriver
+
+    sync_native = SyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    async_native = AsyncSQLiteDriver(SQLiteConfig(path=":memory:"))
+    try:
+        sync_driver = BaseSyncDriver(sync_native)
+        async_driver = BaseAsyncDriver(async_native)
+        assert sync_driver.handle_database_exceptions() is sync_driver.handle_database_exceptions()
+        assert async_driver.handle_database_exceptions() is async_driver.handle_database_exceptions()
+    finally:
+        sync_native.close()
+        await async_native.close()
+
+
+@pytest.mark.parametrize(
+    ("dbapi_name", "native_name"),
+    [
+        ("Error", "DatabaseError"),
+        ("DatabaseError", "DatabaseError"),
+        ("InterfaceError", "InterfaceError"),
+        ("DataError", "DataError"),
+        ("OperationalError", "OperationalError"),
+        ("IntegrityError", "IntegrityError"),
+        ("InternalError", "InternalError"),
+        ("ProgrammingError", "ProgrammingError"),
+        ("NotSupportedError", "NotSupportedError"),
+    ],
+)
+def test_dbapi_exception_names_are_native_classes_after_cleanup(dbapi_name: str, native_name: str) -> None:
+    """Verify each PEP 249 error name on vertebra.db.dbapi binds directly to the native vertebra._vertebra class."""
+    import vertebra._vertebra as native_mod
+    import vertebra.db.dbapi as dbapi_mod
+
+    assert getattr(dbapi_mod, dbapi_name) is getattr(native_mod, native_name)
+
+
 @pytest.mark.anyio
 async def test_capability_protocols_static_subtyping_and_end_to_end_behavior() -> None:
     """Verify static structural typing and end-to-end execution across all capability protocols."""

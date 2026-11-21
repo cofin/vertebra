@@ -597,7 +597,7 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify multiple DuckDB sessions rotate shipped SyncGcsBearerSecretProvider secrets on generation advance."""
+    """Verify DuckDB sessions keep an applied secret across queries and rotate it on refresh_secrets after the provider asks for a refresh."""
     pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
@@ -641,12 +641,17 @@ def test_duckdb_multi_session_token_generation_secret_rotation(
         assert provider_a.needs_refresh() is True
         assert provider_b.needs_refresh() is True
 
-        driver_a.select("SELECT 2 AS v")
+        assert driver_a.select("SELECT 2 AS v") == [{"v": 2}]
+        assert provider_a.generation == 1
+        assert provider_a.needs_refresh() is True
+        assert token_server.oauth_calls == 1
+
+        driver_a.refresh_secrets(force=False)
         assert provider_a.generation == 2
         assert provider_a.needs_refresh() is False
         assert token_server.oauth_calls == 2
 
-        driver_b.select("SELECT 2 AS v")
+        driver_b.refresh_secrets(force=False)
         assert provider_b.generation == 2
         assert token_server.oauth_calls == 2
         assert provider_b()["bearer_token"] == "mock-oauth-token-user-2"
@@ -660,7 +665,7 @@ async def test_async_duckdb_driver_token_generation_rotation(
     token_server: _MockTokenServer,
     tmp_path: Path,
 ) -> None:
-    """Verify AsyncDuckDBDriver rotates shipped sync and async GCS bearer providers on generation advance."""
+    """Verify AsyncDuckDBDriver keeps an applied secret across queries and rotates it on refresh_secrets for sync and async providers."""
     pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc.json"
     adc_path.write_text(
@@ -695,7 +700,7 @@ async def test_async_duckdb_driver_token_generation_rotation(
         assert visible_sync == {"name": "lake_sync_bearer", "type": "http"}
 
         sync_provider.token_cache.get_token(force_refresh=True)
-        await drv.select("SELECT 1 AS ok")
+        await drv.refresh_secrets(force=False)
         assert sync_provider.generation == 2
         assert sync_provider()["bearer_token"] == "mock-oauth-token-user-2"
     finally:
@@ -717,7 +722,10 @@ async def test_async_duckdb_driver_token_generation_rotation(
 
         async_provider.invalidate(1)
         assert async_provider.needs_refresh() is True
-        await async_drv.select("SELECT 1 AS ok")
+        assert await async_drv.select("SELECT 1 AS ok") == [{"ok": 1}]
+        assert async_provider.generation == 1
+        assert async_provider.needs_refresh() is True
+        await async_drv.refresh_secrets(force=False)
         assert async_provider.generation == 2
         assert async_provider.needs_refresh() is False
         assert (await async_provider())["bearer_token"] == "mock-oauth-token-user-4"
@@ -1477,7 +1485,7 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
     tmp_path: Path,
     http_code: int,
 ) -> None:
-    """Verify SyncDuckDBDriver and AsyncDuckDBDriver invalidate GCS bearer secret providers on HTTP 401/403."""
+    """Verify a 401 or 403 rejection invalidates the applied secret and leaves a fresh one applied before the error propagates."""
     native_duckdb = pytest.importorskip("vertebra._duckdb", reason=_DUCKDB_SKIP_REASON)
     adc_path = tmp_path / "adc_401.json"
     adc_path.write_text(
@@ -1499,6 +1507,11 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
             self._inner = inner
             self.fail_select = True
 
+        def _maybe_raise_fault(self) -> None:
+            if self.fail_select:
+                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
+                raise RuntimeError(msg)
+
         @property
         def in_transaction(self) -> bool:
             return bool(self._inner.in_transaction)
@@ -1506,12 +1519,39 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
         def execute(self, sql: str, params: Any = None) -> int:
             return int(self._inner.execute(sql, params))
 
-        def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], tuple[str, ...]]:
-            if self.fail_select:
-                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
-                raise RuntimeError(msg)
-            rows, cols = self._inner.execute_with_description(sql, params)
-            return list(rows), tuple(str(c) for c in cols)
+        def fetch_rows(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            self._maybe_raise_fault()
+            result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = self._inner.fetch_rows(sql, params)
+            return result
+
+        def fetch_dicts(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            self._maybe_raise_fault()
+            result: list[dict[str, Any]] = self._inner.fetch_dicts(sql, params)
+            return result
+
+        def fetch_value(self, sql: str, params: Any = None) -> Any:
+            self._maybe_raise_fault()
+            return self._inner.fetch_value(sql, params)
+
+        def execute_dml(self, sql: str, params: Any = None) -> tuple[int, int | None]:
+            self._maybe_raise_fault()
+            result: tuple[int, int | None] = self._inner.execute_dml(sql, params)
+            return result
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            proxy = self
+            inner_cur = self._inner.cursor(lazy_begin=lazy_begin)
+
+            class _FaultSyncCursor:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner_cur, name)
+
+                def execute(self, sql: str, params: Any = None) -> Any:
+                    proxy._maybe_raise_fault()
+                    inner_cur.execute(sql, params)
+                    return self
+
+            return _FaultSyncCursor()
 
         def close(self) -> None:
             self._inner.close()
@@ -1521,6 +1561,11 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
             self._inner = inner
             self.fail_select = True
 
+        def _maybe_raise_fault(self) -> None:
+            if self.fail_select:
+                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
+                raise RuntimeError(msg)
+
         @property
         def in_transaction(self) -> bool:
             return bool(self._inner.in_transaction)
@@ -1528,12 +1573,39 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
         async def execute(self, sql: str, params: Any = None) -> int:
             return int(await self._inner.execute(sql, params))
 
-        async def execute_with_description(self, sql: str, params: Any = None) -> tuple[list[Any], tuple[str, ...]]:
-            if self.fail_select:
-                msg = f"HTTP Error: GCS request rejected (HTTP {http_code})"
-                raise RuntimeError(msg)
-            rows, cols = await self._inner.execute_with_description(sql, params)
-            return list(rows), tuple(str(c) for c in cols)
+        async def fetch_rows(self, sql: str, params: Any = None) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+            self._maybe_raise_fault()
+            result: tuple[list[tuple[Any, ...]], tuple[str, ...]] = await self._inner.fetch_rows(sql, params)
+            return result
+
+        async def fetch_dicts(self, sql: str, params: Any = None) -> list[dict[str, Any]]:
+            self._maybe_raise_fault()
+            result: list[dict[str, Any]] = await self._inner.fetch_dicts(sql, params)
+            return result
+
+        async def fetch_value(self, sql: str, params: Any = None) -> Any:
+            self._maybe_raise_fault()
+            return await self._inner.fetch_value(sql, params)
+
+        async def execute_dml(self, sql: str, params: Any = None) -> tuple[int, int | None]:
+            self._maybe_raise_fault()
+            result: tuple[int, int | None] = await self._inner.execute_dml(sql, params)
+            return result
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            proxy = self
+            inner_cur = self._inner.cursor(lazy_begin=lazy_begin)
+
+            class _FaultAsyncCursor:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner_cur, name)
+
+                async def execute(self, sql: str, params: Any = None) -> Any:
+                    proxy._maybe_raise_fault()
+                    await inner_cur.execute(sql, params)
+                    return self
+
+            return _FaultAsyncCursor()
 
         async def close(self) -> None:
             await self._inner.close()
@@ -1549,7 +1621,8 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
         assert sync_provider.needs_refresh() is False
         with pytest.raises(RuntimeError, match=f"HTTP {http_code}"):
             sync_driver.select("SELECT 1 AS v")
-        assert sync_provider.needs_refresh() is True
+        assert sync_provider.needs_refresh() is False
+        assert sync_provider.generation == 2
         sync_proxy.fail_select = False
         assert sync_driver.select("SELECT 1 AS v") == [{"v": 1}]
         assert sync_provider.generation == 2
@@ -1566,8 +1639,8 @@ async def test_duckdb_driver_401_and_403_invalidates_gcs_bearer_secret_providers
     try:
         with pytest.raises(RuntimeError, match=f"HTTP {http_code}"):
             await async_driver.select("SELECT 1 AS v")
-        assert async_provider.generation == 1
-        assert async_provider.needs_refresh() is True
+        assert async_provider.generation == 2
+        assert async_provider.needs_refresh() is False
         async_proxy.fail_select = False
         assert await async_driver.select("SELECT 1 AS v") == [{"v": 1}]
         assert async_provider.generation == 2

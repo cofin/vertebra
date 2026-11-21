@@ -18,12 +18,8 @@ from vertebra._vertebra import (
     NotSupportedError,
     SpannerAbortedError,
 )
-from vertebra._vertebra import (
-    StatementCache as _RustStatementCache,
-)
 from vertebra.db._staging import ObjectStoreStaging
 from vertebra.db.adapters.spanner.config import (
-    SPANGRES_DIALECT_TAG,
     SPANNER_GOOGLESQL_DIALECT_TAG,
     SpannerConfig,
 )
@@ -47,9 +43,66 @@ from vertebra.utils.text import validate_identifier
 
 __all__ = (
     "AsyncSpannerClientProtocol",
+    "AsyncSpannerCursorProtocol",
     "AsyncSpannerDriver",
     "AsyncSpannerReadWriteTxProtocol",
 )
+
+
+class AsyncSpannerCursorProtocol(Protocol):
+    """Structural protocol for asynchronous PEP 249 Spanner cursors and test doubles."""
+
+    @property
+    def description(self) -> Sequence[Sequence[Any]] | None:
+        """Return PEP 249 column metadata tuples, or `None` when no result set is active."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the affected or buffered row count, or `-1` when unavailable."""
+        ...
+
+    @property
+    def lastrowid(self) -> Any | None:
+        """Return the last inserted row identifier, or `None`."""
+        ...
+
+    @property
+    def arraysize(self) -> int:
+        """Return the default row batch size used by `fetchmany()`."""
+        ...
+
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> Awaitable[Any]:
+        """Execute a query, DML, or DDL statement asynchronously and buffer its result."""
+        ...
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[Any]:
+        """Execute a DML statement for each parameter set asynchronously as one batch-DML call."""
+        ...
+
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row tuple asynchronously, or `None` when exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to `size` buffered row tuples asynchronously."""
+        ...
+
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return all remaining buffered row tuples asynchronously."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Close the cursor idempotently and release buffered rows asynchronously."""
+        ...
 
 
 class AsyncSpannerReadWriteTxProtocol(Protocol):
@@ -92,6 +145,15 @@ class AsyncSpannerReadWriteTxProtocol(Protocol):
 
     def rollback(self) -> Awaitable[None]:
         """Roll back this transaction asynchronously."""
+        ...
+
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> AsyncSpannerCursorProtocol:
+        """Create an asynchronous PEP 249 cursor bound to this transaction."""
         ...
 
 
@@ -180,6 +242,19 @@ class AsyncSpannerClientProtocol(Protocol):
         """Open a stateful asynchronous interactive ``ReadWrite`` transaction handle."""
         ...
 
+    def cursor(
+        self,
+        *,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+        lazy_begin: bool = False,
+    ) -> AsyncSpannerCursorProtocol:
+        """Create an asynchronous PEP 249 cursor backed by this client."""
+        ...
+
     def close(self) -> Any:
         """Close the client handle."""
         ...
@@ -193,10 +268,8 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     __slots__ = (
         "_active_transaction",
         "_client",
-        "_dialect_tag",
         "_last_commit_stats",
         "_propagator",
-        "_statement_cache",
         "dialect",
     )
 
@@ -205,11 +278,12 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         config: SpannerConfig | str | None = None,
         *,
         broker: LeaseBroker | None = None,
-        statement_cache: _RustStatementCache | None = None,
+        statement_cache: Any | None = None,
         propagator: SqlTracePropagator | None = None,
         client: AsyncSpannerClientProtocol | None = None,
         **overrides: Any,
     ) -> None:
+        _ = statement_cache
         if isinstance(config, str):
             resolved = SpannerConfig.from_dsn(config, **overrides)
         elif isinstance(config, SpannerConfig):
@@ -224,14 +298,6 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         resolved_broker = broker or resolved.broker or LeaseBroker(max(1, resolved.pool_size * 4))
         super().__init__(resolved, broker=resolved_broker)
         self.dialect: Literal["googlesql", "spangres"] = resolved.dialect
-        self._dialect_tag: int = (
-            SPANGRES_DIALECT_TAG if resolved.dialect == "spangres" else SPANNER_GOOGLESQL_DIALECT_TAG
-        )
-        self._statement_cache: _RustStatementCache | None = (
-            statement_cache
-            if statement_cache is not None
-            else (_RustStatementCache(max(16, resolved.statement_cache_capacity)) if resolved.use_shm_cache else None)
-        )
         self._propagator: SqlTracePropagator = propagator or SqlTracePropagator()
         self._client: AsyncSpannerClientProtocol | None = client
         self._last_commit_stats: dict[str, Any] = {}
@@ -388,6 +454,51 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         _ = multi_use
         return AsyncSpannerSnapshot(self, staleness or StalenessBound.strong())
 
+    def cursor(
+        self,
+        *,
+        staleness: StalenessBound | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+        lazy_begin: bool = False,
+    ) -> AsyncSpannerCursorProtocol:
+        """Create an asynchronous PEP 249 cursor backed by the active transaction or Spanner client."""
+        if self._active_transaction is not None and staleness is None:
+            if lazy_begin:
+                msg = "Spanner cursors do not support lazy_begin"
+                raise NotSupportedError(msg)
+            return self._active_transaction.cursor(request_tag=request_tag)
+        bound = staleness or StalenessBound.strong()
+        return self._ensure_client().cursor(
+            staleness_mode=bound.mode,
+            staleness_value=bound.effective_value(),
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+            param_encoder=self._encode_parameters,
+            lazy_begin=lazy_begin,
+        )
+
+    def _encode_parameters(self, parameters: Any) -> str | None:
+        return SpannerCore.encode_parameters_json(parameters, dialect=self.dialect)
+
+    async def _execute_cursor(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        staleness: StalenessBound | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
+    ) -> AsyncSpannerCursorProtocol:
+        cursor = self.cursor(
+            staleness=staleness,
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+        )
+        annotated = SpannerCore.annotate_sql_with_trace(sql, self._propagator)
+        await cursor.execute(annotated, parameters or ())
+        return cursor
+
     async def execute(
         self,
         sql: str,
@@ -399,30 +510,16 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     ) -> int:
         """Execute a DML or DDL statement asynchronously and return the affected row count."""
         _ = kwargs
-        stripped = sql.strip()
-        if SpannerCore.is_ddl_statement(stripped):
-            if self._active_transaction is not None:
-                msg = "DDL statements cannot be executed inside a Spanner ReadWrite transaction"
-                raise NotSupportedError(msg)
-            await self.update_ddl([stripped])
-            return 0
-        if self._active_transaction is not None:
-            return await self._active_transaction.execute(stripped, parameters, request_tag=request_tag)
-
-        client = self._ensure_client()
-        rewritten_sql, params_json = self._prepare_sql_and_params(stripped, parameters)
-        annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
-        lease = self._acquire_pid_lease()
+        cursor = await self._execute_cursor(
+            sql,
+            parameters,
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+        )
         try:
-            res = await client.execute_dml(
-                annotated_sql,
-                params_json,
-                request_tag,
-                transaction_tag,
-            )
-            return int(res)
+            return max(cursor.rowcount, 0)
         finally:
-            self._release_pid_lease(lease)
+            await cursor.close()
 
     async def execute_many(
         self,
@@ -482,8 +579,8 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
     ) -> int:
         """Execute a large-scale Partitioned DML statement asynchronously."""
         client = self._ensure_client()
-        rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
-        annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
+        params_json = self._encode_parameters(parameters)
+        annotated_sql = SpannerCore.annotate_sql_with_trace(sql, self._propagator)
         res = await client.execute_partitioned_dml(
             annotated_sql,
             params_json,
@@ -515,14 +612,27 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         parameters: Sequence[Any] | Mapping[str, Any] | None = None,
         *,
         staleness: StalenessBound | None = None,
+        request_tag: str | None = None,
+        transaction_tag: str | None = None,
         **kwargs: Any,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute a query asynchronously and return `(tuple_rows, column_names)`."""
         _ = kwargs
-        raw = await self._run_query_async(sql, parameters, staleness=staleness)
-        cols = tuple(str(c) for c in raw.get("columns", ()))
-        rows = [tuple(r) for r in raw.get("rows", ())]
-        return rows, cols
+        cursor = await self._execute_cursor(
+            sql,
+            parameters,
+            staleness=staleness,
+            request_tag=request_tag,
+            transaction_tag=transaction_tag,
+        )
+        try:
+            description = cursor.description
+            if description is None:
+                return [], ()
+            names = tuple(str(col[0]) for col in description)
+            return await cursor.fetchall(), names
+        finally:
+            await cursor.close()
 
     async def select(
         self,
@@ -534,11 +644,10 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         **kwargs: Any,
     ) -> list[Any]:
         """Execute a `SELECT` query asynchronously and hydrate rows."""
-        _ = kwargs
-        raw = await self._run_query_async(sql, parameters, staleness=staleness)
+        rows, cols = await self.execute_with_description(sql, parameters, staleness=staleness, **kwargs)
         return SpannerCore.hydrate_query_rows(
-            raw.get("columns", ()),
-            raw.get("rows", ()),
+            cols,
+            rows,
             schema_type=schema_type,
         )
 
@@ -581,9 +690,7 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         **kwargs: Any,
     ) -> Any:
         """Execute a query asynchronously and return the first scalar column, raising `NotFoundError` when 0 rows match."""
-        _ = kwargs
-        raw = await self._run_query_async(sql, parameters, staleness=staleness)
-        rows = raw.get("rows", ())
+        rows, _ = await self.execute_with_description(sql, parameters, staleness=staleness, **kwargs)
         if not rows:
             msg = "Spanner query returned no rows"
             raise NotFoundError(msg)
@@ -785,28 +892,31 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
         query_sql = SpannerCore.build_select_sql_if_table(sql)
         bound = staleness or StalenessBound.strong()
         client = self._ensure_client()
-        rewritten_sql, params_json = self._prepare_sql_and_params(query_sql, parameters)
+        params_json = self._encode_parameters(parameters)
         partitions = max_partitions if max_partitions is not None else self.config.max_partitions
         boost = data_boost_enabled if data_boost_enabled is not None else self.config.data_boost_enabled
         if hasattr(client, "partitioned_query"):
             try:
                 raw = await client.partitioned_query(
-                    rewritten_sql,
+                    query_sql,
                     params_json,
                     max(1, int(partitions)),
                     bool(boost),
                     bound.mode,
                     bound.effective_value(),
                 )
+                return ArrowCursor.from_rows(
+                    raw.get("rows", ()),
+                    columns=[str(c) for c in raw.get("columns", ())],
+                    threshold_rows=threshold_rows,
+                )
             except Exception as exc:
                 if not SpannerCore.is_partitioned_query_fallback_error(exc):
                     raise
-                raw = await self._run_query_async(query_sql, parameters, staleness=bound)
-        else:
-            raw = await self._run_query_async(query_sql, parameters, staleness=bound)
+        rows, cols = await self.execute_with_description(query_sql, parameters, staleness=bound)
         return ArrowCursor.from_rows(
-            raw.get("rows", ()),
-            columns=[str(c) for c in raw.get("columns", ())],
+            rows,
+            columns=list(cols),
             threshold_rows=threshold_rows,
         )
 
@@ -910,47 +1020,3 @@ class AsyncSpannerDriver(AsyncDatabaseDriver[SpannerConfig]):
             self._client = created
             return created
         return self._client
-
-    def _prepare_sql_and_params(
-        self,
-        sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None,
-    ) -> tuple[str, str | None]:
-        rewritten = sql
-        if self._statement_cache is not None:
-            raw_bytes = sql.encode("utf-8")
-            plan = self._statement_cache.lookup(self._dialect_tag, raw_bytes)
-            if plan is not None and plan.compiled_sql:
-                rewritten = plan.compiled_sql.decode("utf-8", errors="replace")
-            else:
-                param_count = len(parameters) if parameters is not None else 0
-                self._statement_cache.insert(
-                    self._dialect_tag,
-                    raw_bytes,
-                    param_count,
-                    raw_bytes,
-                    b"",
-                )
-        params_json = SpannerCore.encode_parameters_json(parameters, dialect=self.dialect)
-        return rewritten, params_json
-
-    async def _run_query_async(
-        self,
-        sql: str,
-        parameters: Mapping[str, Any] | Sequence[Any] | None = None,
-        *,
-        staleness: StalenessBound | None = None,
-    ) -> dict[str, Any]:
-        if self._active_transaction is not None and staleness is None:
-            return await self._active_transaction._query_raw(sql, parameters)
-        client = self._ensure_client()
-        bound = staleness or StalenessBound.strong()
-        rewritten_sql, params_json = self._prepare_sql_and_params(sql, parameters)
-        annotated_sql = SpannerCore.annotate_sql_with_trace(rewritten_sql, self._propagator)
-        raw = await client.query(
-            annotated_sql,
-            params_json,
-            bound.mode,
-            bound.effective_value(),
-        )
-        return dict(raw)

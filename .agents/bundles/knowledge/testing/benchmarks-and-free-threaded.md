@@ -14,6 +14,9 @@ generated:
   at: "2026-11-04T04:33:00Z"
 verified:
   - by: agent:bb-executor
+    at: "2026-11-21T21:30:00Z"
+    commit: 06e99fbf
+  - by: agent:bb-executor
     at: "2026-11-19T23:05:00Z"
     commit: a2da3e9f
   - by: agent:flow-executor
@@ -112,6 +115,7 @@ sources:
 - Third-party `duckdb>=1.0; python_version < '3.14'` lives in `[dependency-groups].duckdb` and `bench` solely for `tools.benchmarks.store`, third-party comparative SQL/cache/storage/framework drivers live in `[dependency-groups].bench-comparators` (and `psycopg[binary]`/`asyncpg` in `postgres-bench`), and `uvicorn`/`granian`/`spikard` live in `bench`; `make install`, `make upgrade`, `make py-test`, and `make coverage` never sync `--group duckdb` or `bench-comparators`.
 - `tools.benchmarks` stores 8 matrix columns (`adapter`, `protocol`, `transport`, `broker_mode`, `load_mode`, `target_rps`, `pool_size`, `gil_enabled`) in DuckDB with idempotent legacy migration, dispatches closed-loop and open-loop load via `oha`, `h2load`, `ghz`, and `k6` (failing loud with install hints when absent), supervises SHM `BrokerHostHook` lifecycles, and forbids MinIO in favor of `rustfs`, `floci_*`, `azurite`, `local`, and `memory`.
 - Run `make bench`, `make bench-ft`, `make rs-bench`, `make bench-micro`, `make bench-check`, and `make postgres-bench` against release/PGO builds; run `make postgres-bench-check` and `src/py/tests/unit/tools/test_e2e_benchmarks.py` offline for Criterion test execution, lint/type validation, standalone SQLite/Memory comparators, and full matrix contract checks.
+- `python -m tools.benchmarks.adapters.sql check` pairs Vertebra cases against comparators through `COMPARATOR_PAIRS`, defaults to `--max-median-ratio 1.0`, prints `[ALLOW]` for `COMPARATOR_ALLOW_LIST` drivers and `[SKIP]` for `COMPARATORLESS_CASES`, and exits non-zero on any slower unlisted case or missing comparator unless `--allow-missing` is set.
 <!-- truth: end -->
 
 Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `src/rs/vertebra-http/benches/`, `src/rs/vertebra-postgres/benches/`), standalone adapter comparators in [`tools/benchmarks/adapters/`](../../../../tools/benchmarks/adapters/base.py)[^src-tools-benchmarks-adapters-base-py] and [`tools/benchmarks/postgres.py`](../../../../tools/benchmarks/postgres.py)[^src-tools-benchmarks-postgres-py], and a full-stack HTTP/1.1, HTTP/2, HTTP/3, and gRPC harness in [`tools/benchmarks/`](../../../../tools/benchmarks/cli.py)[^src-tools-benchmarks-cli-py]. No throughput figures are recorded in the repository outside `tools/benchmarks/results/`.
@@ -145,6 +149,22 @@ Vertebra has Rust Criterion microbenchmarks (`src/rs/vertebra-core/benches/`, `s
 
 - [`adapters/base.py`](../../../../tools/benchmarks/adapters/base.py)[^src-tools-benchmarks-adapters-base-py]: Defines `AdapterBenchmarkCase`, `AdapterBenchmarkReport` (`ADAPTER_SCHEMA_VERSION = 1`), `from_postgres_report()` for backward-compatible `postgres.py` conversion, `detect_gil_enabled()`, and `compare_adapter_reports()` with `driver_mode` (`async_native` vs `sync_blocking`) stratification so sync and async drivers are never compared across modes by accident.
 - [`adapters/sql.py`](../../../../tools/benchmarks/adapters/sql.py)[^src-tools-benchmarks-adapters-sql-py]: Measures Vertebra SQL drivers against external comparators (`psycopg`, `asyncpg`, `sqlite3`/`aiosqlite`, `duckdb`, `pymysql`/`aiomysql`, `oracledb`, `pymssql`, SQLAlchemy, and upstream SQLSpec); SQLite (`:memory:`) runs completely offline.
+  - The `check` subcommand reads one or more captured reports and pairs each Vertebra driver with its comparators through `COMPARATOR_PAIRS`. It exits non-zero when a Vertebra median exceeds a comparator median outside `COMPARATOR_ALLOW_LIST`.
+  - Flags: `--max-median-ratio` sets the allowed ratio ceiling (default `1.0`), `--allow-missing` suppresses failure on missing comparators, and `capture --oracle-reset-relay {on,off}` controls the Oracle TNS reset relay during capture.
+  - `COMPARATOR_ALLOW_LIST` holds seven user-approved drivers that are still measured and print `[ALLOW]` when slower or `[PASS]` when at or ahead:
+    - `vertebra-bigquery-sync`: emulator round trip dominates and drifts with job history.
+    - `vertebra-spanner-sync`: emulator round trip dominates the measurement.
+    - `vertebra-mssql-sync`: nearly all time is inside the engine round trip, and results sit within run-to-run variation.
+    - `vertebra-duckdb-sync`: user decision; the bundled `libduckdb-sys` `cc` build omits DuckDB jemalloc until upstream ships it on crates.io.
+    - `vertebra-sqlspec-duckdb-sync`: user decision; the bundled `libduckdb-sys` `cc` build omits DuckDB jemalloc until upstream ships it on crates.io.
+    - `vertebra-oracle-sync`: user decision; upstream `oracle/rust-oracledb#101` clears the statement cache when `AUTH_MAX_OPEN_CURSORS` is absent.
+    - `vertebra-oracle-async`: user decision; upstream `oracle/rust-oracledb#101` clears the statement cache when `AUTH_MAX_OPEN_CURSORS` is absent.
+  - `COMPARATORLESS_CASES` maps `(driver, case)` to a reason; a listed case with no comparator prints `[SKIP]` and does not fail `check`, whereas an unlisted one prints `[MISSING]` and fails. It currently lists `("vertebra-async", "pipeline_select_16")`.
+  - The SQLite capture includes `cursor_point_select_1`, where `vertebra-sqlite-sync` and `sqlite3` each run `execute` plus `fetchone` on one reused cursor. That case compares native statement cost like for like, whereas `point_select_1` includes each driver's convenience layer.
+
+```bash
+uv run python -m tools.benchmarks.adapters.sql check --report sqlite.json --report oracle.json
+```
 - [`adapters/cache.py`](../../../../tools/benchmarks/adapters/cache.py)[^src-tools-benchmarks-adapters-cache-py]: Measures Vertebra Redis/Valkey sync and async drivers (point ops, pipelines, PubSub) against `redis-py` / `hiredis`.
 - [`adapters/storage.py`](../../../../tools/benchmarks/adapters/storage.py)[^src-tools-benchmarks-adapters-storage-py]: Measures `SyncObjectStore` and `AsyncObjectStore` PUT/GET/range reads against `obstore`, `boto3`, `aiobotocore`, and `azure-storage-blob`; `memory` and `local` backends run completely offline.
 - [`fixtures.py`](../../../../tools/benchmarks/fixtures.py)[^src-tools-benchmarks-fixtures-py]: Defines `tmpfs`-backed `ContainerFixtureSpec` entries (`postgres`, `mysql`, `mariadb`, `oracle`, `mssql`, `redis`, `valkey`, `rustfs`, `floci_aws`, `floci_gcp`, `floci_azure`, `floci_oci`, `azurite`), `STORAGE_LOCAL_BACKENDS = ("local", "memory")`, `build_docker_run_command()`, `build_storage_config()`, and `FixtureLauncher`. MinIO is explicitly forbidden across `FIXTURE_SPECS`, `build_storage_config()`, and `load_backend_config()`.

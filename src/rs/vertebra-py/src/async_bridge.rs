@@ -11,8 +11,8 @@ use pyo3::prelude::*;
 
 pub use vertebra_core::py_async::{
     CompletedTask as CompletedDbTask, CompletionDrainer as DbCompletionDrainer,
-    OutcomeProducer as DbOutcomeProducer, RustTaskAwaitable as RustDbTaskAwaitable,
-    block_on_runtime as block_on_db, runtime_handle as db_runtime_handle,
+    OutcomeProducer as DbOutcomeProducer, ReadyAwaitable, RustTaskAwaitable as RustDbTaskAwaitable,
+    block_on_runtime as block_on_db, ready_err, ready_ok, runtime_handle as db_runtime_handle,
     spawn_rust_task_with_attr as spawn_rust_db_task_with_attr,
 };
 
@@ -44,6 +44,7 @@ where
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("ReadyAwaitable", m.py().get_type::<ReadyAwaitable>())?;
     m.add(
         "RustDbTaskAwaitable",
         m.py().get_type::<RustDbTaskAwaitable>(),

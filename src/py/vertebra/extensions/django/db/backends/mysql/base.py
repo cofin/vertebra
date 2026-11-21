@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from django.db.backends.mysql.operations import DatabaseOperations as MySQLDatabaseOperations
     from django.db.backends.mysql.schema import DatabaseSchemaEditor as MySQLDatabaseSchemaEditor
     from django.db.backends.mysql.validation import DatabaseValidation as MySQLDatabaseValidation
-
-    from vertebra.db.dbapi import SyncDBAPICursor
 else:
     BaseDatabaseWrapper = ensure_module(
         "django.db.backends.base.base", package="django", extra="django"
@@ -114,8 +112,8 @@ def _format_to_qmark(sql: str) -> str:
 class MySQLCursorWrapper:
     """Cursor wrapper translating Django %s placeholders to ? outside string literals."""
 
-    def __init__(self, cursor: SyncDBAPICursor) -> None:
-        """Initialize cursor wrapper with underlying SyncDBAPICursor."""
+    def __init__(self, cursor: Any) -> None:
+        """Initialize cursor wrapper with underlying DBAPI cursor."""
         self.cursor = cursor
 
     def execute(self, query: str, args: Any = None) -> Any:

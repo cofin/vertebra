@@ -229,6 +229,41 @@ pub struct NotificationEvent {
     pub payload: String,
 }
 
+/// State of a cached extended query driven directly from the Python event-loop thread.
+#[cfg(unix)]
+pub(crate) struct LoopCachedExchange {
+    pub(crate) sql: String,
+    collector: Option<crate::extended::ExtendedQueryCollector>,
+    ctx: crate::codecs::CodecContext,
+    pub(crate) saw_session_change: bool,
+}
+
+/// Outcome of preparing a cached named-statement exchange for loop-driven non-blocking I/O.
+#[cfg(unix)]
+pub(crate) enum LoopPrepareOutcome {
+    Ready {
+        fd: std::os::fd::RawFd,
+        exchange: Box<LoopCachedExchange>,
+    },
+    Fallback,
+}
+
+/// Outcome of attempting a single non-blocking write for a prepared loop-driven query.
+#[cfg(unix)]
+pub(crate) enum LoopWriteOutcome {
+    SentAll,
+    WouldBlock,
+    PartialWrite,
+    IoError(PostgresError),
+}
+
+/// Step result from draining socket reads inside an `asyncio` reader callback.
+#[cfg(unix)]
+pub(crate) enum LoopReadStep {
+    Pending,
+    Done(Result<crate::result::QueryResult, PostgresError>),
+}
+
 /// Active protocol exchange state on a [`PostgresConnection`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExchangeState {
@@ -260,6 +295,30 @@ impl<T> AsyncConnectionIo for T where
 pub(crate) enum ConnectionStream {
     Transport(TransportStream),
     Custom(Box<dyn AsyncConnectionIo>),
+}
+
+impl ConnectionStream {
+    #[cfg(unix)]
+    pub(crate) fn raw_fd_if_plain(&self) -> Option<std::os::fd::RawFd> {
+        match self {
+            Self::Transport(s) => s.raw_fd_if_plain(),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub(crate) fn try_write_plain(&self, buf: &[u8]) -> Option<std::io::Result<usize>> {
+        match self {
+            Self::Transport(s) => s.try_write_plain(buf),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub(crate) fn try_read_buf_plain(&self, buf: &mut BytesMut) -> Option<std::io::Result<usize>> {
+        match self {
+            Self::Transport(s) => s.try_read_buf_plain(buf),
+            Self::Custom(_) => None,
+        }
+    }
 }
 
 impl tokio::io::AsyncRead for ConnectionStream {
@@ -2113,25 +2172,21 @@ impl PostgresConnection {
             &self.type_catalog,
             &mut self.write_buf,
         )?;
-        frontend::describe(b'P', "", &mut self.write_buf)
-            .map_err(|e| PostgresError::Protocol(format!("failed to encode Describe(P): {e}")))?;
         frontend::execute("", 0, &mut self.write_buf)
             .map_err(|e| PostgresError::Protocol(format!("failed to encode Execute frame: {e}")))?;
-        frontend::close(b'P', "", &mut self.write_buf)
-            .map_err(|e| PostgresError::Protocol(format!("failed to encode Close(P): {e}")))?;
         frontend::sync(&mut self.write_buf);
 
         self.set_exchange_state(ExchangeState::InExtendedExchange);
         self.write_command_buf("cached extended query", false)
             .await?;
 
-        let mut collector = crate::extended::ExtendedQueryCollector::new(
+        let known_columns = description.portal_columns(&result_formats);
+        let mut collector = crate::extended::ExtendedQueryCollector::with_known_columns(
             resolved.parameters.len(),
             result_formats,
-            false,
-            true,
+            known_columns,
         );
-        let mut row_ctx = ctx;
+        let mut pending_closes = evicted.len();
 
         loop {
             let msg = self.read_command_frame().await?;
@@ -2143,27 +2198,9 @@ impl PostgresConnection {
                         return Err(err);
                     }
                 }
-                Message::RowDescription(body) => {
-                    if !collector.has_error() {
-                        row_ctx = crate::codecs::CodecContext::from_parameters(&self.parameters);
-                        if let Err(err) = collector.handle_row_description(&body) {
-                            self.mark_closed();
-                            return Err(err);
-                        }
-                    }
-                }
-                Message::NoData => {
-                    if !collector.has_error()
-                        && let Err(err) = collector.handle_no_data()
-                    {
-                        self.mark_closed();
-                        return Err(err);
-                    }
-                }
                 Message::DataRow(body) => {
                     if !collector.has_error()
-                        && let Err(err) =
-                            collector.handle_data_row(&body, &row_ctx, &self.type_catalog)
+                        && let Err(err) = collector.handle_data_row(&body, &ctx, &self.type_catalog)
                     {
                         self.mark_closed();
                         return Err(err);
@@ -2195,7 +2232,9 @@ impl PostgresConnection {
                         return Err(err);
                     }
                 }
-                Message::CloseComplete => {}
+                Message::CloseComplete if pending_closes > 0 => {
+                    pending_closes -= 1;
+                }
                 Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
                     Ok(server_err) => {
                         if statements::is_statement_invalidation_sqlstate(&server_err.sqlstate) {
@@ -2245,6 +2284,363 @@ impl PostgresConnection {
                         "unexpected backend message frame during cached extended query".to_string(),
                     ));
                 }
+            }
+        }
+    }
+
+    /// Prepare a cached named-statement exchange for loop-driven non-blocking I/O on a plain socket.
+    ///
+    /// Leaves the connection completely untouched when returning [`LoopPrepareOutcome::Fallback`].
+    #[cfg(unix)]
+    pub(crate) fn prepare_loop_cached_query(
+        &mut self,
+        sql: &str,
+        parameters: &[crate::extended::Parameter],
+    ) -> Result<LoopPrepareOutcome, PostgresError> {
+        if self.closed
+            || self.exchange_state != ExchangeState::Idle
+            || self.transaction_status != TransactionStatus::Idle
+            || !self.open_portals.is_empty()
+            || !self.read_buf.is_empty()
+            || !self.write_buf.is_empty()
+            || self.statement_cache.capacity() == 0
+            || !self.statement_cache.evicted_names().is_empty()
+        {
+            return Ok(LoopPrepareOutcome::Fallback);
+        }
+        let Some(fd) = self.stream.raw_fd_if_plain() else {
+            return Ok(LoopPrepareOutcome::Fallback);
+        };
+        if sql.as_bytes().contains(&0) {
+            return Err(PostgresError::Data(
+                "SQL query string cannot contain embedded NUL byte".to_string(),
+            ));
+        }
+        let Some(resolved) =
+            crate::metadata::try_resolve_parameter_metadata_sync(&self.type_catalog, parameters)?
+        else {
+            return Ok(LoopPrepareOutcome::Fallback);
+        };
+        let stmt_key = StatementKey::new(
+            sql.to_owned(),
+            resolved.parameter_oids.clone(),
+            self.statement_cache.schema_generation(),
+        );
+        let Some(cached) = self.statement_cache.get_by_key(&stmt_key) else {
+            return Ok(LoopPrepareOutcome::Fallback);
+        };
+        let description = &cached.description;
+        let effective_param_oids: Vec<u32> = resolved
+            .parameter_oids
+            .iter()
+            .enumerate()
+            .map(|(i, &oid)| {
+                if oid != 0 {
+                    oid
+                } else {
+                    description.parameter_oids.get(i).copied().unwrap_or(0)
+                }
+            })
+            .collect();
+        let param_formats: Vec<crate::result::Format> = effective_param_oids
+            .iter()
+            .map(|&oid| {
+                if oid != 0 {
+                    crate::codecs::format_for_oid_with_catalog(oid, &self.type_catalog)
+                } else {
+                    crate::result::Format::Text
+                }
+            })
+            .collect();
+        let result_formats: Vec<crate::result::Format> = description
+            .result_columns
+            .iter()
+            .map(|col| crate::codecs::format_for_oid_with_catalog(col.type_oid, &self.type_catalog))
+            .collect();
+
+        let ctx = crate::codecs::CodecContext::from_parameters(&self.parameters);
+        self.write_buf.clear();
+        if let Err(err) = crate::extended::encode_bind(
+            "",
+            &cached.name,
+            &resolved.parameters,
+            &effective_param_oids,
+            &param_formats,
+            &result_formats,
+            &ctx,
+            &self.type_catalog,
+            &mut self.write_buf,
+        ) {
+            self.write_buf.clear();
+            return Err(err);
+        }
+        if let Err(e) = frontend::execute("", 0, &mut self.write_buf) {
+            self.write_buf.clear();
+            return Err(PostgresError::Protocol(format!(
+                "failed to encode Execute frame: {e}"
+            )));
+        }
+        frontend::sync(&mut self.write_buf);
+
+        let known_columns = description.portal_columns(&result_formats);
+        let collector = crate::extended::ExtendedQueryCollector::with_known_columns(
+            resolved.parameters.len(),
+            result_formats,
+            known_columns,
+        );
+        Ok(LoopPrepareOutcome::Ready {
+            fd,
+            exchange: Box::new(LoopCachedExchange {
+                sql: sql.to_owned(),
+                collector: Some(collector),
+                ctx,
+                saw_session_change: false,
+            }),
+        })
+    }
+
+    /// Perform a non-blocking write of the buffer encoded by [`Self::prepare_loop_cached_query`].
+    #[cfg(unix)]
+    pub(crate) fn try_write_prepared_loop_query(&mut self) -> LoopWriteOutcome {
+        loop {
+            match self.stream.try_write_plain(&self.write_buf) {
+                Some(Ok(n)) if n == self.write_buf.len() => {
+                    self.write_buf.clear();
+                    self.set_exchange_state(ExchangeState::InExtendedExchange);
+                    return LoopWriteOutcome::SentAll;
+                }
+                Some(Ok(0)) => {
+                    self.write_buf.clear();
+                    self.mark_closed();
+                    return LoopWriteOutcome::IoError(PostgresError::Transport(
+                        "cached extended query write closed by peer".to_string(),
+                    ));
+                }
+                Some(Ok(n)) => {
+                    bytes::Buf::advance(&mut self.write_buf, n);
+                    self.set_exchange_state(ExchangeState::InExtendedExchange);
+                    return LoopWriteOutcome::PartialWrite;
+                }
+                Some(Err(err)) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.write_buf.clear();
+                    return LoopWriteOutcome::WouldBlock;
+                }
+                Some(Err(err)) => {
+                    self.write_buf.clear();
+                    self.mark_closed();
+                    return LoopWriteOutcome::IoError(PostgresError::Transport(format!(
+                        "cached extended query write failed: {err}"
+                    )));
+                }
+                None => {
+                    self.write_buf.clear();
+                    return LoopWriteOutcome::WouldBlock;
+                }
+            }
+        }
+    }
+
+    /// Apply one decoded backend frame to an in-flight [`LoopCachedExchange`].
+    #[cfg(unix)]
+    fn apply_loop_cached_message(
+        &mut self,
+        msg: Message,
+        exchange: &mut LoopCachedExchange,
+    ) -> Option<Result<crate::result::QueryResult, PostgresError>> {
+        match msg {
+            Message::BindComplete => {
+                if let Some(collector) = exchange.collector.as_mut()
+                    && let Err(err) = collector.handle_bind_complete()
+                {
+                    self.mark_closed();
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::DataRow(body) => {
+                if let Some(collector) = exchange.collector.as_mut()
+                    && !collector.has_error()
+                    && let Err(err) =
+                        collector.handle_data_row(&body, &exchange.ctx, &self.type_catalog)
+                {
+                    self.mark_closed();
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::CommandComplete(body) => {
+                let tag = match body.tag() {
+                    Ok(tag) => tag,
+                    Err(e) => {
+                        self.mark_closed();
+                        return Some(Err(PostgresError::Protocol(format!(
+                            "invalid CommandComplete tag UTF-8: {e}"
+                        ))));
+                    }
+                };
+                if tag.starts_with("ALTER ")
+                    || tag.starts_with("DROP ")
+                    || tag.starts_with("CREATE ")
+                    || tag.eq_ignore_ascii_case("DISCARD ALL")
+                    || tag.eq_ignore_ascii_case("RESET ALL")
+                    || tag.starts_with("DEALLOCATE")
+                {
+                    self.statement_descriptions.clear();
+                    self.statement_cache.invalidate_all();
+                }
+                if let Some(collector) = exchange.collector.as_mut()
+                    && let Err(err) = collector.handle_command_complete(tag)
+                {
+                    self.mark_closed();
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::EmptyQueryResponse => {
+                if let Some(collector) = exchange.collector.as_mut()
+                    && let Err(err) = collector.handle_empty_query()
+                {
+                    self.mark_closed();
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::ErrorResponse(body) => match crate::query::parse_error_response(&body) {
+                Ok(server_err) => {
+                    if statements::is_statement_invalidation_sqlstate(&server_err.sqlstate) {
+                        self.statement_cache.invalidate_all();
+                        self.statement_descriptions.clear();
+                    }
+                    if let Some(collector) = exchange.collector.as_mut() {
+                        collector.handle_error_response(server_err);
+                    }
+                    None
+                }
+                Err(err) => {
+                    self.mark_closed();
+                    Some(Err(err))
+                }
+            },
+            Message::NoticeResponse(_) => None,
+            Message::ParameterStatus(body) => {
+                exchange.saw_session_change = true;
+                if let Err(err) = self.handle_parameter_status_frame(&body) {
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::NotificationResponse(body) => {
+                exchange.saw_session_change = true;
+                if let Err(err) = self.handle_notification_frame(&body) {
+                    return Some(Err(err));
+                }
+                None
+            }
+            Message::ReadyForQuery(body) => {
+                self.set_exchange_state(ExchangeState::Idle);
+                let status = match TransactionStatus::from_wire_tag(body.status()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        self.mark_closed();
+                        return Some(Err(err));
+                    }
+                };
+                self.set_transaction_status_from_wire(status);
+                let Some(collector) = exchange.collector.take() else {
+                    self.mark_closed();
+                    return Some(Err(PostgresError::Protocol(
+                        "cached extended query collector already consumed".to_string(),
+                    )));
+                };
+                match collector.finish(status) {
+                    Ok(res) => Some(Ok(res)),
+                    Err(err) => {
+                        if matches!(
+                            err,
+                            PostgresError::Protocol(_) | PostgresError::Transport(_)
+                        ) {
+                            self.mark_closed();
+                        }
+                        Some(Err(err))
+                    }
+                }
+            }
+            _ => {
+                self.mark_closed();
+                Some(Err(PostgresError::Protocol(
+                    "unexpected backend message frame during cached extended query".to_string(),
+                )))
+            }
+        }
+    }
+
+    /// Drain readable socket bytes and advance an in-flight [`LoopCachedExchange`] without blocking.
+    #[cfg(unix)]
+    pub(crate) fn drive_loop_cached_read(
+        &mut self,
+        exchange: &mut LoopCachedExchange,
+    ) -> LoopReadStep {
+        loop {
+            loop {
+                match crate::query::parse_buffered_message(&mut self.read_buf) {
+                    Ok(Some(msg)) => {
+                        if let Some(done) = self.apply_loop_cached_message(msg, exchange) {
+                            return LoopReadStep::Done(done);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        self.mark_closed();
+                        return LoopReadStep::Done(Err(err));
+                    }
+                }
+            }
+
+            if self.read_buf.capacity().saturating_sub(self.read_buf.len()) < 1024 {
+                self.read_buf.reserve(4096);
+            }
+
+            match self.stream.try_read_buf_plain(&mut self.read_buf) {
+                Some(Ok(0)) => {
+                    self.mark_closed();
+                    return LoopReadStep::Done(Err(PostgresError::Transport(
+                        "unexpected EOF from PostgreSQL backend".to_string(),
+                    )));
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(err)) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    return LoopReadStep::Pending;
+                }
+                Some(Err(err)) => {
+                    self.mark_closed();
+                    return LoopReadStep::Done(Err(PostgresError::Transport(format!(
+                        "socket read error: {err}"
+                    ))));
+                }
+                None => {
+                    self.mark_closed();
+                    return LoopReadStep::Done(Err(PostgresError::Transport(
+                        "plain socket unavailable during loop-driven read".to_string(),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Finish flushing and reading an in-flight cached exchange on Tokio after a partial write.
+    #[cfg(unix)]
+    pub(crate) async fn finish_partial_loop_cached_query(
+        &mut self,
+        mut exchange: LoopCachedExchange,
+    ) -> Result<(crate::result::QueryResult, bool), PostgresError> {
+        self.write_command_buf("cached extended query", false)
+            .await?;
+        loop {
+            let msg = self.read_command_frame().await?;
+            if let Some(done) = self.apply_loop_cached_message(msg, &mut exchange) {
+                return done.map(|res| (res, exchange.saw_session_change));
             }
         }
     }

@@ -57,10 +57,8 @@ def _select_pid_response(pid: int, tx_status: bytes, *, warm: bool) -> bytes:
         return b"".join(
             (
                 _frame(b"2", b""),
-                _frame(b"T", col),
                 _frame(b"D", row),
                 _frame(b"C", b"SELECT 1\x00"),
-                _frame(b"3", b""),
                 _frame(b"Z", tx_status),
             )
         )

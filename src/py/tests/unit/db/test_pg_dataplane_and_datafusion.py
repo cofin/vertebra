@@ -42,7 +42,6 @@ from vertebra.db.adapters.postgres.notify import (
     AsyncPostgresNotificationSource,
     PostgresNotifyConfig,
 )
-from vertebra.db.adapters.postgres.types import PostgresColumn, PostgresQueryResult
 from vertebra.db.driver import AsyncNotificationSource, DataError, NotSupportedError
 from vertebra.extensions.sqlspec.adapters.postgres import PostgresSyncDriver
 from vertebra.server.platform import SHMAllocationPolicy
@@ -636,46 +635,116 @@ class _DeterministicSessionContext:
         raise RuntimeError(msg)
 
 
-class _NativeEmbeddingQueryPort:
-    """Native pool port returning structured PostgresQueryResult rows for embedding pushdown tests."""
+class _NativeEmbeddingQueryCursor:
+    """Pool cursor double that records one statement on its owning pool double."""
 
-    __slots__ = ("_columns", "_rows", "calls")
+    description: tuple[tuple[Any, ...], ...] | None
+    rowcount: int
+    lastrowid: Any | None
+    arraysize: int
 
-    def __init__(self, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
-        self._columns = tuple(
-            PostgresColumn(
-                name=col,
-                type_oid=25,
-                format=0,
-                type_modifier=-1,
-                table_oid=0,
-                attribute_number=idx + 1,
-            )
-            for idx, col in enumerate(columns)
-        )
-        self._rows = tuple(tuple(r) for r in rows)
-        self.calls: list[tuple[str, Any]] = []
+    def __init__(self, port: _NativeEmbeddingQueryPort) -> None:
+        self._port = port
+        self.description = None
+        self.rowcount = -1
+        self.lastrowid = None
+        self.arraysize = 1
+        self._rows: list[tuple[Any, ...]] = []
 
-    def acquire(self) -> _NativeEmbeddingQueryPort:
-        return self
-
-    def query(
+    def execute(
         self,
         sql: str,
-        parameters: Any = None,
+        params: Any = (),
         *,
         parameter_oids: Any = None,
         timeout: float | None = None,
-    ) -> Any:
+    ) -> _NativeEmbeddingQueryCursor:
+        """Record the statement on the owning pool double and buffer its rows."""
         _ = (parameter_oids, timeout)
-        self.calls.append((sql, tuple(parameters) if parameters is not None else ()))
-        return PostgresQueryResult(
-            columns=self._columns,
-            rows=self._rows,
-            affected_rows=len(self._rows),
-            command_tag=f"SELECT {len(self._rows)}",
-            transaction_status="I",
-        )
+        self._port.calls.append((sql, tuple(params) if params is not None else ()))
+        self.description = tuple((name, 25, None, None, None, None, None) for name in self._port.columns)
+        self._rows = list(self._port.rows)
+        self.rowcount = len(self._rows)
+        return self
+
+    def executemany(self, sql: str, seq_of_params: Any) -> _NativeEmbeddingQueryCursor:
+        """Record each parameter set and clear buffered result state."""
+        for params in seq_of_params:
+            self.execute(sql, params)
+        self.description = None
+        self._rows.clear()
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return and remove the first buffered row or ``None``."""
+        if not self._rows:
+            return None
+        return self._rows.pop(0)
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return and remove up to ``size`` rows, or ``arraysize`` when ``size`` is ``None``."""
+        count = self.arraysize if size is None else size
+        if count <= 0:
+            return []
+        batch = self._rows[:count]
+        del self._rows[:count]
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return and clear all remaining buffered rows."""
+        rows = list(self._rows)
+        self._rows.clear()
+        return rows
+
+    def close(self) -> None:
+        """Clear any remaining buffered rows."""
+        self._rows.clear()
+
+
+class _NativeEmbeddingQueryPort:
+    """Native pool port handing out a recording pool cursor for embedding pushdown tests."""
+
+    __slots__ = ("calls", "columns", "rows")
+
+    def __init__(self, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+        self.columns = columns
+        self.rows = tuple(tuple(r) for r in rows)
+        self.calls: list[tuple[str, Any]] = []
+
+    def acquire(self) -> _NativeEmbeddingQueryPort:
+        """Return the pool port itself to satisfy injected pool validation."""
+        return self
+
+    def cursor(self, *, lazy_begin: bool = False) -> _NativeEmbeddingQueryCursor:
+        """Return a recording pool cursor bound to this pool double."""
+        _ = lazy_begin
+        return _NativeEmbeddingQueryCursor(self)
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        parameter_oids: Any = None,
+        timeout: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Record the query and return configured rows as dictionaries."""
+        _ = (parameter_oids, timeout)
+        self.calls.append((sql, params))
+        return [dict(zip(self.columns, row, strict=True)) for row in self.rows]
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Any = None,
+        *,
+        parameter_oids: Any = None,
+        timeout: Any = None,
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Record the query and return configured rows and column names."""
+        _ = (parameter_oids, timeout)
+        self.calls.append((sql, params))
+        return list(self.rows), self.columns
 
     def close(self) -> None:
         """Keep the externally owned connection port available for assertions."""

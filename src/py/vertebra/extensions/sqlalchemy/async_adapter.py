@@ -17,7 +17,7 @@ from sqlalchemy.connectors.asyncio import (
 from sqlalchemy.util.concurrency import await_
 
 import vertebra.db.dbapi._sync as dbapi_sync
-from vertebra.db.dbapi._async import AsyncDBAPICursor, AsyncDBAPIModule
+from vertebra.db.dbapi._async import AsyncDBAPIModule
 from vertebra.db.dbapi._sync import (
     BFILE,
     BINARY,
@@ -58,11 +58,15 @@ __all__ = (
 
 
 class AsyncAdapt_vertebra_cursor(AsyncAdapt_dbapi_cursor):
-    """SQLAlchemy asyncio cursor adapting ``AsyncDBAPICursor`` with synchronous ``setinputsizes``."""
+    """SQLAlchemy asyncio cursor adapting native async cursors with synchronous ``setinputsizes``."""
 
     __slots__ = ()
 
     _awaitable_cursor_close: bool = True
+
+    def _aenter_cursor(self, cursor: Any) -> Any:
+        """Return the cursor unchanged; Vertebra cursors need no asynchronous entry."""
+        return cursor
 
     def setinputsizes(self, *inputsizes: Any, **kwargs: Any) -> None:
         """Forward PEP 249 input size hints synchronously without awaiting."""
@@ -72,8 +76,6 @@ class AsyncAdapt_vertebra_cursor(AsyncAdapt_dbapi_cursor):
                 raw_cursor.setinputsizes(*inputsizes, **kwargs)
             elif len(inputsizes) == 1:
                 raw_cursor.setinputsizes(inputsizes[0])
-            elif isinstance(raw_cursor, AsyncDBAPICursor):
-                raw_cursor.setinputsizes(inputsizes)
             else:
                 raw_cursor.setinputsizes(*inputsizes)
         except Exception as error:
@@ -113,7 +115,7 @@ class AsyncAdapt_vertebra_cursor(AsyncAdapt_dbapi_cursor):
             else:
                 result = await self._cursor.execute(operation, parameters)
             if not self.server_side:
-                if self._cursor.description:
+                if self._cursor.description is not None:
                     self._rows = collections.deque(await self._cursor.fetchall())
                 else:
                     self._rows.clear()
@@ -127,7 +129,7 @@ class AsyncAdapt_vertebra_cursor(AsyncAdapt_dbapi_cursor):
         async with self._adapt_connection._execute_mutex:
             result = await self._cursor.executemany(operation, seq_of_parameters)
             if not self.server_side:
-                if self._cursor.description:
+                if self._cursor.description is not None:
                     self._rows = collections.deque(await self._cursor.fetchall())
                 else:
                     self._rows.clear()
@@ -135,7 +137,7 @@ class AsyncAdapt_vertebra_cursor(AsyncAdapt_dbapi_cursor):
 
 
 class AsyncAdapt_vertebra_ss_cursor(AsyncAdapt_dbapi_ss_cursor, AsyncAdapt_vertebra_cursor):
-    """Server-side streaming cursor adapter backed by ``AsyncDBAPICursor``."""
+    """Server-side streaming cursor adapter backed by a native async cursor."""
 
     __slots__ = ()
 

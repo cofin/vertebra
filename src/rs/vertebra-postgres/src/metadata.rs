@@ -439,6 +439,37 @@ pub(crate) fn resolve_parameter_metadata_from_catalog<P: AsParameterInput>(
     })
 }
 
+/// Synchronously resolve parameter OIDs when every parameter type is already known in `catalog`.
+///
+/// Returns `Ok(None)` if any parameter requires a pre-`Parse` catalog discovery round trip.
+pub(crate) fn try_resolve_parameter_metadata_sync(
+    catalog: &TypeCatalog,
+    params: &[Parameter],
+) -> Result<Option<ResolvedParameters>, PostgresError> {
+    if params.is_empty() {
+        return Ok(Some(ResolvedParameters {
+            parameters: Vec::new(),
+            parameter_oids: Vec::new(),
+            all_formats_known: true,
+        }));
+    }
+    let mut missing_oids: Vec<u32> = Vec::new();
+    let mut missing_exts: Vec<&'static str> = Vec::new();
+    for param in params {
+        collect_missing_value_metadata(
+            &param.value,
+            param.type_oid,
+            catalog,
+            &mut missing_oids,
+            &mut missing_exts,
+        )?;
+    }
+    if !missing_oids.is_empty() || !missing_exts.is_empty() {
+        return Ok(None);
+    }
+    resolve_parameter_metadata_from_catalog(catalog, params, None).map(Some)
+}
+
 /// Resolve parameter OIDs and discover any required custom parameter metadata before `Parse` is emitted.
 pub async fn resolve_parameter_metadata<P: AsParameterInput>(
     conn: &mut PostgresConnection,

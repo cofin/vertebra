@@ -1,9 +1,13 @@
 //! SQLite parameter binding and result value conversions.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyMapping, PySequence, PyString};
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PySequence, PyString,
+    PyTuple,
+};
 use rusqlite::ToSql;
 use rusqlite::types::{ToSqlOutput, ValueRef};
 
@@ -65,6 +69,20 @@ impl SqliteValue {
         if obj.is_none() {
             return Ok(Self::Null);
         }
+        if let Ok(s) = obj.cast_exact::<PyString>() {
+            return Ok(Self::Text(s.to_string()));
+        }
+        if let Ok(i) = obj.cast_exact::<PyInt>()
+            && let Ok(val) = i.extract::<i64>()
+        {
+            return Ok(Self::Integer(val));
+        }
+        if let Ok(f) = obj.cast_exact::<PyFloat>() {
+            return Ok(Self::Real(f.value()));
+        }
+        if let Ok(b) = obj.cast_exact::<PyBytes>() {
+            return Ok(Self::Blob(b.as_bytes().to_vec()));
+        }
         if let Ok(b) = obj.cast::<PyBool>() {
             return Ok(Self::Integer(if b.is_true() { 1 } else { 0 }));
         }
@@ -94,11 +112,16 @@ impl SqliteValue {
             .get_type()
             .name()
             .map_or_else(|_| "unknown".to_string(), |n| n.to_string());
+        if type_name == "TypedParameter"
+            && let Ok(inner) = obj.getattr("value")
+        {
+            return Self::from_py(&inner);
+        }
         if type_name == "Decimal" || type_name == "UUID" {
             return Ok(Self::Text(obj.to_string()));
         }
         // If a dict or list is passed for JSON/JSONB binding, serialize it
-        if obj.is_instance_of::<PyDict>() || obj.is_instance_of::<pyo3::types::PyList>() {
+        if obj.is_instance_of::<PyDict>() || obj.is_instance_of::<PyList>() {
             let json_mod = obj.py().import("json").map_err(|e| {
                 SqliteClientError::InvalidInput(format!("failed to import json: {e}"))
             })?;
@@ -156,6 +179,66 @@ impl BoundParams {
         };
         if param_obj.is_none() {
             return Ok(Self::Empty);
+        }
+
+        if let Ok(tuple) = param_obj.cast_exact::<PyTuple>() {
+            let len = tuple.len();
+            if len == 0 {
+                return Ok(Self::Empty);
+            }
+            let mut positional = Vec::with_capacity(len);
+            for item in tuple.iter() {
+                positional.push(SqliteValue::from_py(&item)?);
+            }
+            return Ok(Self::Positional(positional));
+        }
+
+        if let Ok(list) = param_obj.cast_exact::<PyList>() {
+            let len = list.len();
+            if len == 0 {
+                return Ok(Self::Empty);
+            }
+            let mut positional = Vec::with_capacity(len);
+            for item in list.iter() {
+                positional.push(SqliteValue::from_py(&item)?);
+            }
+            return Ok(Self::Positional(positional));
+        }
+
+        if let Ok(dict) = param_obj.cast_exact::<PyDict>() {
+            let len = dict.len();
+            if len == 0 {
+                return Ok(Self::Empty);
+            }
+            let named = RefCell::new(HashMap::with_capacity(len));
+            let first_err = RefCell::new(None);
+            if let Err(py_err) = dict.locked_for_each(|key_obj, val_obj| {
+                let key: String = match key_obj.extract() {
+                    Ok(key) => key,
+                    Err(e) => {
+                        *first_err.borrow_mut() = Some(SqliteClientError::InvalidInput(format!(
+                            "parameter key must be str: {e}"
+                        )));
+                        return Err(e);
+                    }
+                };
+                match SqliteValue::from_py(&val_obj) {
+                    Ok(val) => {
+                        named.borrow_mut().insert(key, val);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        *first_err.borrow_mut() = Some(err);
+                        Err(pyo3::exceptions::PyValueError::new_err(msg))
+                    }
+                }
+            }) {
+                return Err(first_err.into_inner().unwrap_or_else(|| {
+                    SqliteClientError::InvalidInput(format!("failed to iterate dict: {py_err}"))
+                }));
+            }
+            return Ok(Self::Named(named.into_inner()));
         }
 
         // Check if Mapping / Dict
@@ -249,6 +332,19 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     /// Rows aligned with `columns`.
     pub rows: Vec<Vec<SqliteValue>>,
+}
+
+/// Outcome of one statement reported by the engine.
+#[derive(Clone, Debug, Default)]
+pub struct StatementOutcome {
+    /// Ordered column names, or `None` when the statement produces no result set.
+    pub columns: Option<Vec<String>>,
+    /// Rows aligned with `columns`; empty when the statement produces no result set.
+    pub rows: Vec<Vec<SqliteValue>>,
+    /// Changed-row count, `0` when nothing changed, or `-1` for a read-only statement.
+    pub rowcount: i64,
+    /// Rowid of the row inserted by this statement, when it is an insert that changed rows.
+    pub lastrowid: Option<i64>,
 }
 
 impl QueryResult {

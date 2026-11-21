@@ -14,12 +14,18 @@ tags:
 generated:
   by: flow/0.30.1
   at: "2026-11-17T06:55:00Z"
-last_reviewed_commit: 7ae5ae50
+last_reviewed_commit: 06e99fbf
 verified:
+  - by: agent:bb-executor
+    at: "2026-11-21T01:17:00Z"
+    commit: 06e99fbf
   - by: agent:flow-executor
     at: "2026-11-18T14:25:00Z"
     commit: 7ae5ae50
 sources:
+  - id: src-sqlspec-driver
+    resource: src/py/vertebra/extensions/sqlspec/_driver.py
+    title: BaseSyncDriver and BaseAsyncDriver native cursor dispatch and statement config pass-through
   - id: src-pyproject
     resource: pyproject.toml
     title: SQLSpec >=0.72.2 PyPI dependency floor without upstream git pins
@@ -73,6 +79,7 @@ sources:
 # SQLSpec Adapter, Proxy & Store Limitations
 
 <!-- truth: start -->
+- `BaseSyncDriver.with_cursor` and `BaseAsyncDriver.with_cursor` yield the engine's native cursor, so a SQLSpec cache hit performs one native `execute`; adapters pass SQL and parameters through unchanged, and any value conversion SQLSpec does not cover lives in a type converter on the statement config [^src-sqlspec-driver].
 - `pyproject.toml` declares `"sqlspec>=0.72.2"` from PyPI with zero `[tool.uv.sources]` upstream git pins; driver-level `to_schema` and tabular row hydrators default to `normalize_nested=True` for SQL projections, while standalone `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False` [^src-pyproject].
 - In `sqlspec>=0.72.2`, `sqlspec.data_dictionary.dialects.<dialect>.dictionary` exists only for MySQL; `MySQLSyncDataDictionary` and `MySQLAsyncDataDictionary` subclass it, while the PostgreSQL, Oracle, SQLite, MSSQL, DuckDB, BigQuery, and Spanner dictionaries subclass `SyncDataDictionaryBase` and `AsyncDataDictionaryBase` directly [^src-sqlspec-mysql-dict] [^src-sqlspec-pg-dict].
 - Native pure-Rust `vertebra._oracle` does not expose FFI `begin_sessionless_transaction`, `resume_sessionless_transaction`, or `suspend_sessionless_transaction` hooks (nor `suspend_on_success` execution), so `OracleSyncDriver`, `OracleAsyncDriver`, and the Oracle sessionless context managers raise `DialectNotSupportedError` against `vertebra._oracle` until native FFI support lands [^src-sqlspec-oracle-driver].
@@ -85,6 +92,8 @@ sources:
 
 ## Operational Boundaries
 
+- **Native Cursor Seam & Statement Config Pass-Through**: [`BaseSyncDriver`](../../../../../src/py/vertebra/extensions/sqlspec/_driver.py)[^src-sqlspec-driver] and `BaseAsyncDriver` yield the engine's native cursor from `with_cursor`, so a SQLSpec cache hit performs one native `execute` and reuses one deferred exception handler per driver instance. Adapters pass SQL and parameters through unchanged and return tuple rows directly from the cursor; value conversion SQLSpec does not cover lives in a type converter on the statement config.
+- **Sync & Async Cache-Hit Executor Registration & Reconnect Caveat**: [`BaseSyncDriver`](../../../../../src/py/vertebra/extensions/sqlspec/_driver.py)[^src-sqlspec-driver] and `BaseAsyncDriver` register `_run_cached_statement` at construction for SQLite, DuckDB, PostgreSQL, MySQL, and SQL Server (leaving Oracle, Spanner, and BigQuery on the cursor path until their adapters opt in). `SQLiteSyncDriver`, `SQLiteAsyncDriver`, `DuckDBSyncDriver`, and `DuckDBAsyncDriver` bind the native driver's `_fetch_rows` and `_run_dml` callables once at construction, so closing and reconnecting a native driver under an already-constructed adapter leaves cached statements bound to the closed client until a new session adapter is created. Cached `INSERT` statements on the executor populate `last_inserted_id` when rows are affected, whereas the upstream cursor cache-hit path leaves `last_inserted_id=None`. In `BaseAsyncDriver._run_cached_statement`, `asyncio.CancelledError` (a `BaseException`) propagates unmapped out of the `except Exception` clause. Additionally, `SpannerSyncDriver.dispatch_execute` and `SpannerAsyncDriver.dispatch_execute` ([`spanner/driver.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py)[^src-sqlspec-spanner-driver]) call `compile_spanner_statement` directly instead of `self._compiled_sql` / `self._cache_statement`, and `BigQuerySyncDriver.dispatch_execute` and `BigQueryAsyncDriver.dispatch_execute` ([`bigquery/driver.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py)[^src-sqlspec-bigquery-driver]) call `compile_bigquery_statement` directly instead of `self._compiled_sql` / `self._cache_statement`, so SQLSpec's per-adapter `_stmt_cache` is never populated on Spanner or BigQuery sessions until `dispatch_execute` populates it.
 - **Driver vs. Standalone Nested `msgspec.Struct` Normalization (`sqlspec>=0.72.2`)**: [`pyproject.toml`](../../../../../pyproject.toml)[^src-pyproject] declares `"sqlspec>=0.72.2"` from PyPI without upstream git pins. Driver-level `CommonDriverAttributesMixin.to_schema`, `RoutingSession.to_schema`, and Vertebra's tabular row hydrators (`_hydrate_rows_with_schema`, `BigQueryCore.hydrate_query_rows`, `SpannerCore.hydrate_query_rows`) default to `normalize_nested=True` (with `normalize_nested=False` opt-out), whereas standalone `sqlspec.utils.schema.to_schema` and `vertebra.utils.schema.to_schema` default to `normalize_nested=False`.
 - **Data Dictionary Upstream Base Coverage**: Upstream `sqlspec.data_dictionary.dialects` ships a shared `dictionary` base class only for MySQL ([`mysql/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py)[^src-sqlspec-mysql-dict]). PostgreSQL ([`postgres/data_dictionary.py`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py)[^src-sqlspec-pg-dict]), Oracle, SQLite, MSSQL, DuckDB, BigQuery, and Spanner implement their dialect queries directly on `SyncDataDictionaryBase` and `AsyncDataDictionaryBase` without cross-importing `sqlspec.adapters.*`.
 - **Oracle 26ai Sessionless Transaction FFI Gap**: [`OracleSyncDriver`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/oracle/driver.py)[^src-sqlspec-oracle-driver] and `OracleAsyncDriver` implement `begin_sessionless_transaction`, `resume_sessionless_transaction`, `suspend_sessionless_transaction`, `sessionless_transaction(...)`, and `execute(..., suspend_on_success=True)`. Because pure-Rust `vertebra._oracle` does not expose native sessionless FFI hooks yet, calls against `vertebra._oracle` connections fail loudly with `DialectNotSupportedError`, while external or test connections that expose those hooks run them directly.
@@ -98,6 +107,7 @@ sources:
 - **Oracle TxEventQ Acknowledgment & Cloud Tenant Guards**: [`OracleSyncEventsBackend`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/oracle/events.py)[^src-sqlspec-oracle-events] and `OracleAsyncEventsBackend` commit `DBMS_AQ.DEQUEUE` messages upon dequeue and re-publish on `nack()`. [`BigQuery`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/bigquery/driver.py)[^src-sqlspec-bigquery-driver] and [`Spanner`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/spanner/driver.py)[^src-sqlspec-spanner-driver] configs and drivers reject `tenant_predicate` and `tenant_id` with `NotSupportedError` before base initialization or native calls.
 - **Cloud IAM `token_provider` & Root CA Replica Inheritance**: [`PostgresSyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/postgres/config.py)[^src-sqlspec-postgres-config] / `PostgresAsyncConfig` and [`MySQLSyncConfig`](../../../../../src/py/vertebra/extensions/sqlspec/adapters/mysql/config.py)[^src-sqlspec-mysql-config] / `MySQLAsyncConfig` carry `driver_config.token_provider` and Root CA bundles (`ca_pem` for PostgreSQL, `ssl_ca` for MySQL unless overridden explicitly or via replica URL `?ssl_ca=`) across `derive_pool` and `replicas` definitions. Because `AwsRdsIamTokenProvider` and `AwsAuroraDsqlIamTokenProvider` bind SigV4 presigned URLs to a single `endpoint_host:port`, replicas on separate AWS endpoints must pass an explicit replica `token_provider` override, whereas `AzureEntraTokenProvider` tokens are resource-scoped (`AZURE_POSTGRES_SCOPE` / `AZURE_MYSQL_SCOPE`) and share the cached provider instance across primary and replica pools.
 
+[^src-sqlspec-driver]: `src/py/vertebra/extensions/sqlspec/_driver.py` — `BaseSyncDriver` and `BaseAsyncDriver` native cursor dispatch and statement config pass-through.
 [^src-pyproject]: `pyproject.toml` — SQLSpec `>=0.72.2` PyPI dependency floor without upstream git pins.
 [^src-sqlspec-mysql-dict]: `src/py/vertebra/extensions/sqlspec/adapters/mysql/data_dictionary.py` — MySQL data dictionary subclassing `sqlspec.data_dictionary.dialects.mysql.dictionary`.
 [^src-sqlspec-pg-dict]: `src/py/vertebra/extensions/sqlspec/adapters/postgres/data_dictionary.py` — Direct `SyncDataDictionaryBase` / `AsyncDataDictionaryBase` subclassing without an upstream dialect dictionary.

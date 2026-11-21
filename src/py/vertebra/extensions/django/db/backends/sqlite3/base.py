@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from vertebra.db.adapters.sqlite import SQLiteConfig
 from vertebra.db.dbapi import SyncDBAPIConnection, SyncDBAPIModule
@@ -15,8 +15,6 @@ if TYPE_CHECKING:
     from django.db.backends.sqlite3.base import (
         DatabaseWrapper as DjangoSQLiteDatabaseWrapper,
     )
-
-    from vertebra.db.dbapi import SyncDBAPICursor
 else:
     DjangoSQLiteDatabaseWrapper = ensure_module(
         "django.db.backends.sqlite3.base", package="django", extra="django"
@@ -72,10 +70,10 @@ class DatabaseWrapper(DatabaseWrapperMixin, DjangoSQLiteDatabaseWrapper):
                 conn.execute(cmd)
         return conn
 
-    def create_cursor(self, name: str | None = None) -> SyncDBAPICursor:
+    def create_cursor(self, name: str | None = None) -> Any:
         """Create and return a DBAPI cursor from the active connection."""
         _ = name
-        return cast("SyncDBAPICursor", self.connection.cursor())
+        return self.connection.cursor()
 
     def _set_autocommit(self, autocommit: bool) -> None:
         """Set autocommit on the underlying connection."""

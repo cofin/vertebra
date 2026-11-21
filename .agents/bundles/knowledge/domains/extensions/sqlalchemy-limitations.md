@@ -13,8 +13,11 @@ tags:
 generated:
   by: flow/0.30.1
   at: "2026-11-17T05:55:00Z"
-last_reviewed_commit: 5a833832
+last_reviewed_commit: 06e99fbf
 verified:
+  - by: agent:bb-executor
+    at: "2026-11-21T01:17:00Z"
+    commit: 06e99fbf
   - by: agent:flow-executor
     at: "2026-11-17T05:55:00Z"
     commit: 5a833832
@@ -54,15 +57,17 @@ sources:
     title: Alembic DefaultImpl subclasses and Spanner online DDL batching
   - id: src-db-dbapi-sync
     resource: src/py/vertebra/db/dbapi/_sync.py
-    title: Synchronous PEP 249 module with connect_args validation and autocommit checks
+    title: Synchronous PEP 249 module, native cursor handoff, transaction state, and native exception re-exports
   - id: src-db-dbapi-async
     resource: src/py/vertebra/db/dbapi/_async.py
-    title: Asynchronous PEP 249 module and cursor out-bind / nextset support
+    title: Asynchronous PEP 249 module, native cursor handoff, and transaction control
 ---
 
 # SQLAlchemy Dialects, DB-API & Alembic Limitations
 
 <!-- truth: start -->
+- `SyncDBAPIModule` and `AsyncDBAPIModule` supply module globals, type objects, constructors, `connect`, and transaction control, while `connection.cursor()` returns the native cursor; autocommit follows the connection's transaction state and no Python code scans SQL text [^src-db-dbapi-sync] [^src-db-dbapi-async].
+- DB-API exception names are the `vertebra._vertebra` classes and the extension raises them with no translation; this deviates from PEP 249 because `InterfaceError` is a subclass of `DatabaseError` and `Error` is `DatabaseError` [^src-db-dbapi-sync].
 - `SyncEngineAdapter` and `attach_serverless_disconnect_guard` were removed because SQLAlchemy 2.1 provides no greenlet-free async engine seam; async engines require `AsyncAdapt_vertebra_connection` inside greenlets, and disconnect recovery uses `is_disconnect()` plus `pool_pre_ping` [^src-extensions-sqlalchemy-async-adapter] [^src-extensions-sqlalchemy-dialects-base].
 - `BigQuery`, `Spanner`, and `Spangres` use statement autocommit and reject `autocommit=False` with PEP 249 `NotSupportedError`, while `Spangres` dialects also disable two-phase commit (`supports_twophase = False`) [^src-db-dbapi-sync] [^src-extensions-sqlalchemy-spanner].
 - DuckDB, BigQuery, and Spanner dialects require `vertebra-core[sqlalchemy-duckdb]` or `vertebra-core[sqlalchemy-gcp]` via `ensure_module` and fail loudly with `MissingDependencyError` when absent, with zero `DefaultDialect` fallbacks [^src-extensions-sqlalchemy-duckdb] [^src-extensions-sqlalchemy-bigquery] [^src-extensions-sqlalchemy-spanner].
@@ -74,6 +79,7 @@ sources:
 
 ## Operational Boundaries
 
+- **DB-API Native Cursor Seam, Autocommit & Exception Hierarchy**: [`SyncDBAPIModule`](../../../../../src/py/vertebra/db/dbapi/_sync.py)[^src-db-dbapi-sync] and [`AsyncDBAPIModule`](../../../../../src/py/vertebra/db/dbapi/_async.py)[^src-db-dbapi-async] supply module globals, type objects, constructors, `connect`, and transaction control, while `connection.cursor()` returns the native cursor directly. Autocommit follows the connection's transaction state and no Python code scans SQL text. DB-API exception names are the `vertebra._vertebra` classes, which the extension raises with no translation; this deviates from PEP 249 because `InterfaceError` is a subclass of `DatabaseError` and `Error` is `DatabaseError`.
 - **Greenlet Requirement and Disconnect Recovery**: SQLAlchemy 2.1 async execution always enters through `AsyncAdapt_vertebra_connection` (`AsyncAdapt_terminate`) and SQLAlchemy's greenlet bridge (`in_greenlet()`). `SyncEngineAdapter` and `attach_serverless_disconnect_guard` (`engine.py`) were deleted; configure `pool_pre_ping=True` on engines so `is_disconnect()` checks SQLSTATE (`08*`, `57P01`–`57P03`, MSSQL `08S01`/`HYT00`/`HY010`) and vendor error codes (`1927`, `2006`, `2013`, `ORA-03113`, `ORA-03114`, `ORA-01012`, gRPC `UNAVAILABLE`) before message text [^src-extensions-sqlalchemy-async-adapter] [^src-extensions-sqlalchemy-dialects-base].
 - **Statement-Autocommit Backends and Spangres Two-Phase Commit**: `BigQuery`, `Spanner`, and `Spangres` connections in [`vertebra.db.dbapi`](../../../../../src/py/vertebra/db/dbapi/_sync.py)[^src-db-dbapi-sync] commit per statement or RPC and raise `NotSupportedError` when `autocommit=False` is requested [^src-db-dbapi-async]. [`SyncSpangresDialect`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py)[^src-extensions-sqlalchemy-spanner] and `AsyncSpangresDialect` set `supports_twophase = False` and raise `sqlalchemy.exc.NotSupportedError` on `do_begin_twophase`, `do_prepare_twophase`, `do_commit_twophase`, `do_rollback_twophase`, and `do_recover_twophase`.
 - **Mandatory Dialect Extras**: [`duckdb.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/duckdb.py)[^src-extensions-sqlalchemy-duckdb] requires `duckdb_engine` (`vertebra-core[sqlalchemy-duckdb]`), while [`bigquery.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/bigquery.py)[^src-extensions-sqlalchemy-bigquery] and [`spanner.py`](../../../../../src/py/vertebra/extensions/sqlalchemy/dialects/spanner.py)[^src-extensions-sqlalchemy-spanner] require `sqlalchemy_bigquery` and `google.cloud.sqlalchemy_spanner` (`vertebra-core[sqlalchemy-gcp]`). Absent packages raise `MissingDependencyError` rather than falling back to `DefaultDialect`.
@@ -92,5 +98,5 @@ sources:
 [^src-extensions-sqlalchemy-sqlite]: `src/py/vertebra/extensions/sqlalchemy/dialects/sqlite.py` — SQLite `StaticPool` selection and transaction-free `do_ping`.
 [^src-extensions-sqlalchemy-postgresql]: `src/py/vertebra/extensions/sqlalchemy/dialects/postgresql.py` — PostgreSQL dialect cast colspecs and base `insert_executemany_returning`.
 [^src-extensions-sqlalchemy-alembic-impl]: `src/py/vertebra/extensions/sqlalchemy/alembic/impl.py` — Alembic `DefaultImpl` subclasses and Spanner online DDL batching.
-[^src-db-dbapi-sync]: `src/py/vertebra/db/dbapi/_sync.py` — Synchronous PEP 249 module with `connect_args` validation and autocommit checks.
-[^src-db-dbapi-async]: `src/py/vertebra/db/dbapi/_async.py` — Asynchronous PEP 249 module and cursor out-bind / `nextset` support.
+[^src-db-dbapi-sync]: `src/py/vertebra/db/dbapi/_sync.py` — Synchronous PEP 249 module, native cursor handoff, transaction state, and native exception re-exports.
+[^src-db-dbapi-async]: `src/py/vertebra/db/dbapi/_async.py` — Asynchronous PEP 249 module, native cursor handoff, and transaction control.

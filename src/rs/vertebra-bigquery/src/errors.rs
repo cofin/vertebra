@@ -16,6 +16,8 @@ pub struct BigQueryExceptionTypes {
     pub auth: Py<PyType>,
     pub bigquery: Py<PyType>,
     pub bigquery_row: Py<PyType>,
+    pub interface: Py<PyType>,
+    pub programming: Py<PyType>,
 }
 
 static BIGQUERY_EXCEPTION_TYPES: PyOnceLock<BigQueryExceptionTypes> = PyOnceLock::new();
@@ -63,14 +65,19 @@ fn stand_in_exception_types(py: Python<'_>) -> PyResult<BigQueryExceptionTypes> 
         "BigQueryRowError",
         &PyTuple::new(py, [bigquery.bind(py), data.bind(py)])?,
     )?;
+    let interface = new_stand_in_class(py, "InterfaceError", &PyTuple::new(py, [&root])?)?;
+    let programming =
+        new_stand_in_class(py, "ProgrammingError", &PyTuple::new(py, [db.bind(py)])?)?;
     Ok(BigQueryExceptionTypes {
         auth,
         bigquery,
         bigquery_row,
+        interface,
+        programming,
     })
 }
 
-fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static BigQueryExceptionTypes> {
+pub(crate) fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static BigQueryExceptionTypes> {
     BIGQUERY_EXCEPTION_TYPES.get_or_try_init(py, || match py.import("vertebra._vertebra") {
         Ok(core_mod) => {
             let auth = core_mod
@@ -85,10 +92,20 @@ fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static BigQueryExceptio
                 .getattr("BigQueryRowError")?
                 .cast_into::<PyType>()?
                 .unbind();
+            let interface = core_mod
+                .getattr("InterfaceError")?
+                .cast_into::<PyType>()?
+                .unbind();
+            let programming = core_mod
+                .getattr("ProgrammingError")?
+                .cast_into::<PyType>()?
+                .unbind();
             Ok(BigQueryExceptionTypes {
                 auth,
                 bigquery,
                 bigquery_row,
+                interface,
+                programming,
             })
         }
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {

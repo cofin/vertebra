@@ -1,8 +1,104 @@
 //! MySQL and MariaDB error classification and Python `vertebra.db.exceptions` mapping.
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyException, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyTuple, PyType};
 use thiserror::Error;
+
+/// Cached Python exception types resolved from `vertebra.db.driver` / `vertebra._vertebra`.
+pub(crate) struct MySQLExceptionTypes {
+    pub(crate) improper_configuration: Py<PyType>,
+    pub(crate) connection_failure: Py<PyType>,
+    pub(crate) integrity: Py<PyType>,
+    pub(crate) serialization_failure: Py<PyType>,
+    pub(crate) query_cancelled: Py<PyType>,
+    pub(crate) data: Py<PyType>,
+    pub(crate) programming: Py<PyType>,
+    pub(crate) operational: Py<PyType>,
+    pub(crate) not_found: Py<PyType>,
+    pub(crate) interface: Py<PyType>,
+}
+
+static MYSQL_EXCEPTION_TYPES: PyOnceLock<MySQLExceptionTypes> = PyOnceLock::new();
+
+fn load_exc_type(py: Python<'_>, primary_mod: &str, exc_name: &str) -> PyResult<Py<PyType>> {
+    py.import(primary_mod)
+        .and_then(|m| m.getattr(exc_name))
+        .or_else(|_| {
+            py.import("vertebra._vertebra")
+                .and_then(|m| m.getattr(exc_name))
+        })
+        .and_then(|cls| cls.cast_into::<PyType>().map_err(Into::into))
+        .map(Bound::unbind)
+}
+
+fn new_stand_in_class<'py>(
+    py: Python<'py>,
+    name: &str,
+    bases: &Bound<'py, PyTuple>,
+) -> PyResult<Py<PyType>> {
+    let dict = PyDict::new(py);
+    dict.set_item("__module__", "vertebra.db.driver")?;
+    let ty = py
+        .get_type::<PyType>()
+        .call1((name, bases, dict))?
+        .cast_into::<PyType>()?;
+    Ok(ty.unbind())
+}
+
+fn build_stand_in_exception_types(py: Python<'_>) -> PyResult<MySQLExceptionTypes> {
+    let root = py.get_type::<PyException>();
+    let root_bases = PyTuple::new(py, [&root])?;
+    let improper_configuration = new_stand_in_class(py, "ImproperConfigurationError", &root_bases)?;
+    let database = new_stand_in_class(py, "DatabaseError", &root_bases)?;
+    let db_bases = PyTuple::new(py, [database.bind(py)])?;
+    let interface = new_stand_in_class(py, "InterfaceError", &db_bases)?;
+    let operational = new_stand_in_class(py, "OperationalError", &db_bases)?;
+    let op_bases = PyTuple::new(py, [operational.bind(py)])?;
+    let connection_failure = new_stand_in_class(py, "ConnectionFailure", &op_bases)?;
+    let serialization_failure = new_stand_in_class(py, "SerializationFailure", &op_bases)?;
+    let query_cancelled = new_stand_in_class(py, "QueryCancelledError", &op_bases)?;
+    let integrity = new_stand_in_class(py, "IntegrityError", &db_bases)?;
+    let programming = new_stand_in_class(py, "ProgrammingError", &db_bases)?;
+    let data = new_stand_in_class(py, "DataError", &db_bases)?;
+    let data_bases = PyTuple::new(py, [data.bind(py)])?;
+    let not_found = new_stand_in_class(py, "NotFoundError", &data_bases)?;
+    Ok(MySQLExceptionTypes {
+        improper_configuration,
+        connection_failure,
+        integrity,
+        serialization_failure,
+        query_cancelled,
+        data,
+        programming,
+        operational,
+        not_found,
+        interface,
+    })
+}
+
+fn load_exception_types(py: Python<'_>) -> PyResult<MySQLExceptionTypes> {
+    Ok(MySQLExceptionTypes {
+        improper_configuration: load_exc_type(py, "vertebra.typing", "ImproperConfigurationError")?,
+        connection_failure: load_exc_type(py, "vertebra.db.driver", "ConnectionFailure")?,
+        integrity: load_exc_type(py, "vertebra.db.driver", "IntegrityError")?,
+        serialization_failure: load_exc_type(py, "vertebra.db.driver", "SerializationFailure")?,
+        query_cancelled: load_exc_type(py, "vertebra.db.driver", "QueryCancelledError")?,
+        data: load_exc_type(py, "vertebra.db.driver", "DataError")?,
+        programming: load_exc_type(py, "vertebra.db.driver", "ProgrammingError")?,
+        operational: load_exc_type(py, "vertebra.db.driver", "OperationalError")?,
+        not_found: load_exc_type(py, "vertebra.db.driver", "NotFoundError")?,
+        interface: load_exc_type(py, "vertebra.db.driver", "InterfaceError")?,
+    })
+}
+
+pub(crate) fn resolve_exception_types(py: Python<'_>) -> PyResult<&'static MySQLExceptionTypes> {
+    MYSQL_EXCEPTION_TYPES.get_or_try_init(py, || match load_exception_types(py) {
+        Ok(types) => Ok(types),
+        Err(_) => build_stand_in_exception_types(py),
+    })
+}
 
 /// Canonical Vertebra database exception category for a MySQL or MariaDB failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,19 +278,17 @@ impl MySQLError {
 
     /// Converts this [`MySQLError`] into a Python `vertebra.db.driver` / `vertebra.typing` exception instance.
     pub fn to_py_err(&self, py: Python<'_>) -> PyErr {
-        let exc_name = self.kind.python_exception_name();
-        let target_mod = if self.kind == MySQLErrorKind::ImproperConfiguration {
-            "vertebra.typing"
-        } else {
-            "vertebra.db.driver"
-        };
-        let cls_res = py
-            .import(target_mod)
-            .and_then(|m| m.getattr(exc_name))
-            .or_else(|_| {
-                py.import("vertebra._vertebra")
-                    .and_then(|m| m.getattr(exc_name))
-            });
+        let cls_res = resolve_exception_types(py).map(|types| match self.kind {
+            MySQLErrorKind::ImproperConfiguration => types.improper_configuration.bind(py),
+            MySQLErrorKind::ConnectionFailure => types.connection_failure.bind(py),
+            MySQLErrorKind::IntegrityError => types.integrity.bind(py),
+            MySQLErrorKind::SerializationFailure => types.serialization_failure.bind(py),
+            MySQLErrorKind::QueryCancelled => types.query_cancelled.bind(py),
+            MySQLErrorKind::DataError => types.data.bind(py),
+            MySQLErrorKind::ProgrammingError => types.programming.bind(py),
+            MySQLErrorKind::OperationalError => types.operational.bind(py),
+            MySQLErrorKind::NotFound => types.not_found.bind(py),
+        });
         match cls_res.and_then(|cls| cls.call1((self.message.as_str(),))) {
             Ok(instance) => {
                 if let Some(ref state) = self.sqlstate {

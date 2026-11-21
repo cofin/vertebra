@@ -16,8 +16,6 @@ from vertebra.extensions.sqlspec.adapters.postgres.core import (
     build_postgres_statement_config,
     compile_postgres_numeric_transport,
     map_postgres_exception,
-    normalize_pg_many_parameters,
-    normalize_pg_parameters,
 )
 from vertebra.extensions.sqlspec.adapters.postgres.data_dictionary import (
     PostgresAsyncDataDictionary,
@@ -69,10 +67,6 @@ class PostgresSyncDriver(BaseSyncDriver):
 
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_postgres_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_pg_parameters(params)
 
     def compile_numeric_transport(
         self,
@@ -177,21 +171,17 @@ class PostgresSyncDriver(BaseSyncDriver):
         self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
     def dispatch_execute_many(self, cursor: Any, statement: SQL) -> Any:
-        """Execute batched `$1..$N` statements across unwrapped parameter tuples."""
+        """Execute batched `$1..$N` statements directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_pg_many_parameters(prepared)
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            rows_affected = exec_many_fn(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        return super().dispatch_execute_many(cursor, statement)
+        cursor.executemany(sql, prepared)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Bind PostgreSQL session tenant GUC via `set_config($1, $2, $3)` and return predicate SQL."""
@@ -242,10 +232,6 @@ class PostgresAsyncDriver(BaseAsyncDriver):
 
     def _map_exception(self, exc: BaseException) -> Exception | None:
         return map_postgres_exception(exc)
-
-    def _prepare_native_parameters(self, sql: str, params: Any, statement: SQL) -> tuple[str, Any]:
-        _ = statement
-        return sql, normalize_pg_parameters(params)
 
     def compile_numeric_transport(
         self,
@@ -350,21 +336,17 @@ class PostgresAsyncDriver(BaseAsyncDriver):
         await self.connection.execute(f"ROLLBACK TO SAVEPOINT {valid}")
 
     async def dispatch_execute_many(self, cursor: Any, statement: SQL) -> Any:
-        """Asynchronously execute batched `$1..$N` statements across unwrapped parameter tuples."""
+        """Asynchronously execute batched `$1..$N` statements directly on the native cursor."""
         effective_config = getattr(statement, "statement_config", None) or self.statement_config
         sql, prepared = self._compiled_sql(statement, effective_config)
-        param_sets = normalize_pg_many_parameters(prepared)
-        if not param_sets:
+        if not prepared:
             return self.create_execution_result(cursor, rowcount_override=0, is_many_result=True)
-        exec_many_fn = getattr(cursor, "execute_many", getattr(cursor, "executemany", None))
-        if callable(exec_many_fn):
-            rows_affected = await cast("Any", exec_many_fn)(sql, param_sets)
-            return self.create_execution_result(
-                cursor,
-                rowcount_override=int(rows_affected) if isinstance(rows_affected, int) else len(param_sets),
-                is_many_result=True,
-            )
-        return await super().dispatch_execute_many(cursor, statement)
+        await cursor.executemany(sql, prepared)
+        return self.create_execution_result(
+            cursor,
+            rowcount_override=max(cursor.rowcount, 0),
+            is_many_result=True,
+        )
 
     async def apply_tenant_predicate(self, predicate: TenantPredicate) -> str:
         """Asynchronously bind PostgreSQL session tenant GUC via `set_config` and return predicate SQL."""

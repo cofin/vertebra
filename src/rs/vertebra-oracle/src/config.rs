@@ -263,6 +263,7 @@ pub struct NativeOracleConfig {
     pub call_timeout_ms: Option<u64>,
     pub connect_timeout: Duration,
     pub enable_lowercase_column_names: bool,
+    pub enable_reset_relay: bool,
     pub client_identifier: Option<String>,
     pub module: Option<String>,
     pub action: Option<String>,
@@ -466,6 +467,7 @@ impl NativeOracleConfig {
             call_timeout_ms,
             connect_timeout,
             enable_lowercase_column_names: raw.enable_lowercase_column_names,
+            enable_reset_relay: true,
             client_identifier: raw.client_identifier,
             module: raw.module,
             action: raw.action,
@@ -523,6 +525,7 @@ impl fmt::Debug for NativeOracleConfig {
                 "enable_lowercase_column_names",
                 &self.enable_lowercase_column_names,
             )
+            .field("enable_reset_relay", &self.enable_reset_relay)
             .field("client_identifier", &self.client_identifier)
             .field("module", &self.module)
             .field("action", &self.action)
@@ -696,5 +699,18 @@ mod tests {
         assert!(!rendered.contains("w4ll3t-p4ss"));
         assert!(!rendered.contains("tok-123"));
         assert!(!rendered.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn enable_reset_relay_defaults_to_true_and_prints_in_debug() {
+        let cfg = NativeOracleConfig::validate(RawOracleOptions::default()).expect("default valid");
+        assert!(cfg.enable_reset_relay);
+
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("enable_reset_relay: true"));
+
+        let mut disabled = cfg;
+        disabled.enable_reset_relay = false;
+        assert!(format!("{disabled:?}").contains("enable_reset_relay: false"));
     }
 }

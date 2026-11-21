@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from anyio import CancelScope
 
@@ -84,6 +84,36 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         rows, _ = await self.execute_with_description(sql, parameters, **kwargs)
         return len(rows)
 
+    if TYPE_CHECKING:
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            """Return a native async cursor on this driver."""
+
+    async def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, Any]:
+        """Run a statement without reading rows and return `(rowcount, lastrowid)`.
+
+        Args:
+            sql: Statement text in the engine's parameter style.
+            parameters: Positional or named parameters.
+            **kwargs: Ignored by the base implementation.
+
+        Returns:
+            The affected row count, `0` when the engine reports none, and the cursor's `lastrowid`.
+        """
+        _ = kwargs
+        cur = self.cursor()
+        try:
+            await cur.execute(sql, parameters or ())
+            rowcount = cur.rowcount
+            return (rowcount if rowcount > 0 else 0), cur.lastrowid
+        finally:
+            await cur.close()
+
     async def execute_many(
         self,
         sql: str,
@@ -126,17 +156,6 @@ class AsyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT
         """Execute a `SELECT` query and hydrate rows into dictionaries or `schema_type` instances."""
         rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
         return self.hydrate_rows(rows, cols, schema_type)
-
-    async def query_with_columns(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute a row-returning query and return hydrated row dicts alongside ordered column names."""
-        rows, cols = await self.execute_with_description(sql, parameters, **kwargs)
-        column_names = [str(col) for col in cols]
-        return self.hydrate_rows(rows, column_names, None), column_names
 
     async def select_one(
         self,
@@ -300,6 +319,15 @@ class ThreadOffloadAsyncDatabaseDriver[
         """Execute a statement via the paired synchronous driver."""
         return await asyncio.to_thread(self._sync.execute, sql, parameters, **kwargs)
 
+    async def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, Any]:
+        """Run a statement via the paired synchronous driver and return `(rowcount, lastrowid)`."""
+        return await asyncio.to_thread(self._sync.execute_dml, sql, parameters, **kwargs)
+
     async def execute_many(
         self,
         sql: str,
@@ -326,15 +354,6 @@ class ThreadOffloadAsyncDatabaseDriver[
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         """Execute a query with column descriptions via the paired synchronous driver."""
         return await asyncio.to_thread(self._sync.execute_with_description, sql, parameters, **kwargs)
-
-    async def query_with_columns(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute a row-returning query with column names via the paired synchronous driver."""
-        return await asyncio.to_thread(self._sync.query_with_columns, sql, parameters, **kwargs)
 
     async def select(
         self,

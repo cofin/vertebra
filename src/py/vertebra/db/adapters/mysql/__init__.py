@@ -16,8 +16,6 @@ if TYPE_CHECKING:
         MYSQL_TRANSIENT_ERRNOS,
         MySQLCore,
         build_mysql_connect_kwargs,
-        coerce_mysql_param,
-        compile_mysql_statement,
         map_mysql_exception,
         normalize_mysql_rows,
     )
@@ -37,8 +35,6 @@ __all__ = (
     "SyncMySQLDriver",
     "SyncMySQLPipeline",
     "build_mysql_connect_kwargs",
-    "coerce_mysql_param",
-    "compile_mysql_statement",
     "map_mysql_exception",
     "normalize_mysql_rows",
 )
@@ -63,8 +59,6 @@ _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "SyncMySQLDriver": ("vertebra.db.adapters.mysql.driver", "SyncMySQLDriver"),
     "SyncMySQLPipeline": ("vertebra.db.adapters.mysql.pipeline", "SyncMySQLPipeline"),
     "build_mysql_connect_kwargs": ("vertebra.db.adapters.mysql.core", "build_mysql_connect_kwargs"),
-    "coerce_mysql_param": ("vertebra.db.adapters.mysql.core", "coerce_mysql_param"),
-    "compile_mysql_statement": ("vertebra.db.adapters.mysql.core", "compile_mysql_statement"),
     "map_mysql_exception": ("vertebra.db.adapters.mysql.core", "map_mysql_exception"),
     "normalize_mysql_rows": ("vertebra.db.adapters.mysql.core", "normalize_mysql_rows"),
 }

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gc
 import importlib
 import sys
 import time
 import uuid
+from collections.abc import Awaitable, Generator, Mapping, Sequence
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pytest
@@ -23,8 +26,10 @@ from tests.unit.db.oracle_test_doubles import (
     _EmployeeRow,
     _reserve_closed_local_port,
     _StubAsyncOracleClient,
+    _StubAsyncOracleCursor,
     _StubAsyncOraclePool,
     _StubSyncOracleClient,
+    _StubSyncOracleCursor,
     _StubSyncOraclePool,
 )
 from vertebra._vertebra import VectorView
@@ -52,6 +57,8 @@ from vertebra.db.driver import (
     DataError,
     IntegrityError,
     InterfaceError,
+    NotFoundError,
+    NotSupportedError,
     OperationalError,
     PoolExhaustedError,
     ProgrammingError,
@@ -568,9 +575,11 @@ async def test_oracle_positional_and_named_bind_lowering(
     assert isinstance(row["emb"], VectorView)
     assert row["emb"].to_list() == [1.0, 2.0]
 
-    method, payload = sync_stub.calls[0]
-    assert method == "query"
-    coerced = payload["params"]
+    assert sync_stub.calls[0][0] == "fetch_dicts"
+    assert sync_stub.cursor_calls == []
+    query_calls = [payload for method, payload in sync_stub.calls if method == "query"]
+    assert len(query_calls) == 1
+    coerced = query_calls[0]["params"]
     if is_mapping:
         assert set(coerced.keys()) == {"id", "name", "uid_raw", "doc", "emb"}
         assert coerced["uid_raw"] == expected_uuid.bytes
@@ -612,7 +621,8 @@ async def test_oracle_dml_returning_into_single_round_trip() -> None:
     assert first == {"id": 101, "name": "widget"}
     tuples = sync_driver.execute_tuples(dml_sql, {"name": "gadget"})
     assert tuples == [(102, "gadget")]
-    assert [c[0] for c in sync_stub.calls] == ["execute", "execute"]
+    assert [c[0] for c in sync_stub.calls] == ["fetch_dicts", "execute", "fetch_rows", "execute"]
+    assert sync_stub.cursor_calls == []
     sync_driver.close()
 
     async_stub = _StubAsyncOracleClient()
@@ -625,7 +635,8 @@ async def test_oracle_dml_returning_into_single_round_trip() -> None:
     async_driver = AsyncOracleDriver(client=async_stub)
     assert await async_driver.select_one(dml_sql, {"name": "widget"}) == {"id": 101, "name": "widget"}
     assert await async_driver.exec_returning_async(dml_sql, {"name": "gadget"}) == [{"id": 102, "name": "gadget"}]
-    assert [c[0] for c in async_stub.calls] == ["execute", "execute"]
+    assert [c[0] for c in async_stub.calls] == ["fetch_dicts", "execute", "fetch_dicts", "execute"]
+    assert async_stub.cursor_calls == []
     await async_driver.close()
 
 
@@ -1493,3 +1504,2399 @@ def test_oracle_driver_defers_native_extension_import() -> None:
         assert isinstance(flag, bool)
     finally:
         sys.modules.update(saved)
+
+
+@pytest.mark.parametrize(
+    ("cls", "is_async"),
+    [
+        (_oracle.SyncOracleClient, False),
+        (_oracle.AsyncOracleClient, True),
+        (_oracle.SyncOraclePool, False),
+        (_oracle.AsyncOraclePool, True),
+    ],
+)
+def test_relay_constructor_accepts_flag(cls: type[Any], is_async: bool) -> None:
+    """Verify each native Oracle constructor accepts enable_reset_relay=False without connecting."""
+    instance = cls(
+        host="nonexistent.invalid",
+        port=1521,
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        enable_reset_relay=False,
+    )
+    assert instance.closed is False
+    if is_async:
+
+        async def _close() -> None:
+            await instance.close()
+
+        asyncio.run(_close())
+    else:
+        instance.close()
+    assert instance.closed is True
+
+
+@pytest.mark.parametrize(
+    ("cls", "is_async"),
+    [
+        (_oracle.SyncOracleClient, False),
+        (_oracle.AsyncOracleClient, True),
+        (_oracle.SyncOraclePool, False),
+        (_oracle.AsyncOraclePool, True),
+    ],
+)
+def test_relay_constructor_default(cls: type[Any], is_async: bool) -> None:
+    """Verify each native Oracle constructor succeeds when enable_reset_relay is omitted."""
+    instance = cls(
+        host="nonexistent.invalid",
+        port=1521,
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+    )
+    assert instance.closed is False
+    if is_async:
+
+        async def _close() -> None:
+            await instance.close()
+
+        asyncio.run(_close())
+    else:
+        instance.close()
+    assert instance.closed is True
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        _oracle.SyncOracleClient,
+        _oracle.AsyncOracleClient,
+        _oracle.SyncOraclePool,
+        _oracle.AsyncOraclePool,
+    ],
+)
+def test_relay_constructor_wrong_type(cls: type[Any]) -> None:
+    """Verify passing a non-bool enable_reset_relay raises TypeError."""
+    with pytest.raises(TypeError):
+        cls(
+            host="nonexistent.invalid",
+            port=1521,
+            service_name="FREEPDB1",
+            user="hr",
+            password="test-token-placeholder",
+            enable_reset_relay="no",
+        )
+
+
+def test_oracle_config_relay_default() -> None:
+    """Verify OracleConfig.enable_reset_relay defaults to True and propagates to kwargs."""
+    cfg = OracleConfig()
+    assert cfg.enable_reset_relay is True
+    assert cfg.to_client_kwargs()["enable_reset_relay"] is True
+    resolved_cfg, pool_kw = OracleConfig.resolve_pool_kwargs(cfg, {})
+    assert resolved_cfg.enable_reset_relay is True
+    assert pool_kw["enable_reset_relay"] is True
+
+
+@pytest.mark.parametrize("enable_reset_relay", [True, False])
+def test_oracle_config_relay_client_kwargs(enable_reset_relay: bool) -> None:
+    """Verify OracleConfig.to_client_kwargs emits enable_reset_relay and keeps pool_key unchanged."""
+    cfg = OracleConfig(enable_reset_relay=enable_reset_relay)
+    assert cfg.enable_reset_relay is enable_reset_relay
+    assert cfg.to_client_kwargs()["enable_reset_relay"] is enable_reset_relay
+    assert cfg.pool_key() == OracleConfig(enable_reset_relay=not enable_reset_relay).pool_key()
+
+
+@pytest.mark.parametrize("enable_reset_relay", [True, False])
+def test_oracle_config_relay_pool_kwargs(enable_reset_relay: bool) -> None:
+    """Verify resolve_pool_kwargs preserves enable_reset_relay from config and overrides."""
+    resolved_from_cfg, kw_from_cfg = OracleConfig.resolve_pool_kwargs(
+        OracleConfig(enable_reset_relay=enable_reset_relay),
+        {},
+    )
+    assert resolved_from_cfg.enable_reset_relay is enable_reset_relay
+    assert kw_from_cfg["enable_reset_relay"] is enable_reset_relay
+
+    resolved_from_override, kw_from_override = OracleConfig.resolve_pool_kwargs(
+        None,
+        {"enable_reset_relay": enable_reset_relay},
+    )
+    assert resolved_from_override.enable_reset_relay is enable_reset_relay
+    assert kw_from_override["enable_reset_relay"] is enable_reset_relay
+
+
+@pytest.mark.parametrize("enable_reset_relay", [True, False])
+def test_oracle_config_relay_native_construct(enable_reset_relay: bool) -> None:
+    """Verify native Oracle clients and pools construct from OracleConfig kwargs for both relay states."""
+    cfg = OracleConfig(
+        host="nonexistent.invalid",
+        port=1521,
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        enable_reset_relay=enable_reset_relay,
+    )
+    client_kw = cfg.to_client_kwargs()
+    sync_client = _oracle.SyncOracleClient(**client_kw)
+    assert sync_client.closed is False
+    sync_client.close()
+    assert sync_client.closed is True
+
+    async_client = _oracle.AsyncOracleClient(**client_kw)
+    assert async_client.closed is False
+
+    async def _close_async(obj: Any) -> None:
+        await obj.close()
+
+    asyncio.run(_close_async(async_client))
+    assert async_client.closed is True
+
+    _, pool_kw = OracleConfig.resolve_pool_kwargs(cfg, {})
+    sync_pool = _oracle.SyncOraclePool(**pool_kw)
+    assert sync_pool.closed is False
+    sync_pool.close()
+    assert sync_pool.closed is True
+
+    async_pool = _oracle.AsyncOraclePool(**pool_kw)
+    assert async_pool.closed is False
+    asyncio.run(_close_async(async_pool))
+    assert async_pool.closed is True
+
+
+@pytest.mark.parametrize("enable_reset_relay", [True, False])
+def test_oracle_config_relay_from_url(enable_reset_relay: bool) -> None:
+    """Verify OracleConfig.from_url accepts enable_reset_relay keyword override and defaults to True."""
+    default_cfg = OracleConfig.from_url("oracle://u:test-token-placeholder@h:1521/svc")
+    assert default_cfg.enable_reset_relay is True
+
+    overridden_cfg = OracleConfig.from_url(
+        "oracle://u:test-token-placeholder@h:1521/svc",
+        enable_reset_relay=enable_reset_relay,
+    )
+    assert overridden_cfg.enable_reset_relay is enable_reset_relay
+    assert overridden_cfg.to_client_kwargs()["enable_reset_relay"] is enable_reset_relay
+
+
+@pytest.mark.parametrize("vector_return_format", ["list", "vector_view", "bytes"])
+def test_sync_cursor_creation_options_and_validation(vector_return_format: str) -> None:
+    """Verify SyncOracleClient.cursor() zero-I/O creation, options, fetch controls, and context manager."""
+    client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        with pytest.raises(InterfaceError, match="vector_return_format"):
+            client.cursor(vector_return_format="x")
+
+        cur = client.cursor(
+            enable_uuid_binary=True,
+            fetch_decimals=True,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=False,
+            lazy_begin=False,
+        )
+        assert isinstance(cur, _oracle.SyncOracleCursor)
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.arraysize == 1
+        assert cur.touches_session_context is False
+
+        cur.arraysize = 16
+        assert cur.arraysize == 16
+        for bad_size in (0, -1, -100):
+            with pytest.raises(ProgrammingError, match="arraysize"):
+                cur.arraysize = bad_size
+
+        assert cur.fetchone() is None
+        assert cur.fetchmany(0) == []
+        assert cur.fetchmany() == []
+        assert cur.fetchall() == []
+        with pytest.raises(ProgrammingError, match="non-negative"):
+            cur.fetchmany(-1)
+
+        with cur as entered:
+            assert entered is cur
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.fetchone()
+    finally:
+        client.close()
+
+
+def test_sync_cursor_closed_bind_validation_and_session_flag() -> None:
+    """Verify SyncOracleCursor closed errors, bind InterfaceError mapping, and session flag tracking."""
+    client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        cur = client.cursor()
+        assert cur.executemany("BEGIN DBMS_SESSION.SET_IDENTIFIER(:1); END;", []) is cur
+        assert cur.rowcount == 0
+        assert cur.description is None
+        assert cur.touches_session_context is True
+
+        assert cur.executemany("INSERT INTO t (id) VALUES (:1)", []) is cur
+        assert cur.rowcount == 0
+        assert cur.touches_session_context is False
+
+        invalid_params: list[Any] = ["not-a-seq", b"bytes", 42, {123: "v"}]
+        for bad_params in invalid_params:
+            with pytest.raises(InterfaceError):
+                cur.execute("SELECT :1 FROM dual", bad_params)
+            assert cur.description is None
+            assert cur.rowcount == -1
+            assert cur.lastrowid is None
+            assert cur.touches_session_context is False
+
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            cur.execute("SELECT 1 AS a, 'x' AS b FROM dual")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.touches_session_context is False
+
+        cur.close()
+        cur.close()
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.execute("SELECT 1 FROM dual")
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.executemany("INSERT INTO t VALUES (:1)", [(1,)])
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.fetchone()
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.fetchmany(1)
+        with pytest.raises(InterfaceError, match="closed"):
+            cur.fetchall()
+    finally:
+        client.close()
+
+
+def test_sync_cursor_lazy_begin_and_lease_lifecycle() -> None:
+    """Verify SyncOracleClient lazy_begin transaction opening and LeaseGuard attach/release/drop."""
+    client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        default_cur = client.cursor()
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            default_cur.execute("INSERT INTO t VALUES (1)")
+        assert client.in_transaction is False
+
+        tx_cur = client.cursor(lazy_begin=True)
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            tx_cur.execute("INSERT INTO t VALUES (1)")
+        assert client.in_transaction is True
+
+        client.commit()
+        assert client.in_transaction is False
+
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            tx_cur.execute("INSERT INTO t VALUES (2)")
+        assert client.in_transaction is True
+        client.rollback()
+        assert client.in_transaction is False
+
+        calls: list[str] = []
+        client.attach_lease(lambda: calls.append("first"))
+        client.release_lease()
+        client.release_lease()
+        assert calls == ["first"]
+
+        client.attach_lease(lambda: calls.append("second"))
+        client.attach_lease(lambda: calls.append("third"))
+        assert calls == ["first", "second"]
+
+        client.close()
+        assert calls == ["first", "second", "third"]
+
+        with pytest.raises(InterfaceError, match="closed"):
+            tx_cur.execute("INSERT INTO t VALUES (3)")
+        assert tx_cur.description is None
+        assert tx_cur.rowcount == -1
+    finally:
+        client.close()
+
+    drop_calls: list[int] = []
+    ephemeral = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+    )
+    ephemeral.attach_lease(lambda: drop_calls.append(1))
+    del ephemeral
+    gc.collect()
+    assert drop_calls == [1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("vector_return_format", ["list", "vector_view", "bytes"])
+async def test_async_cursor_creation_options_and_validation(vector_return_format: str) -> None:
+    """Verify AsyncOracleClient.cursor() zero-I/O creation, options, and fetch controls."""
+    client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        with pytest.raises(InterfaceError, match="vector_return_format"):
+            client.cursor(vector_return_format="x")
+
+        cur = client.cursor(
+            enable_uuid_binary=True,
+            fetch_decimals=True,
+            vector_return_format=vector_return_format,
+            enable_lowercase_column_names=False,
+            lazy_begin=False,
+        )
+        assert isinstance(cur, _oracle.AsyncOracleCursor)
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.arraysize == 1
+        assert cur.touches_session_context is False
+
+        cur.arraysize = 8
+        assert cur.arraysize == 8
+        for bad_size in (0, -2):
+            with pytest.raises(ProgrammingError, match="arraysize"):
+                cur.arraysize = bad_size
+
+        assert await cur.fetchone() is None
+        assert await cur.fetchmany(0) == []
+        assert await cur.fetchmany() == []
+        assert await cur.fetchall() == []
+        with pytest.raises(ProgrammingError, match="non-negative"):
+            await cur.fetchmany(-1)
+
+        await cur.close()
+        await cur.close()
+        with pytest.raises(InterfaceError, match="closed"):
+            await cur.fetchone()
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_closed_bind_validation_and_session_flag() -> None:
+    """Verify AsyncOracleCursor closed checks, bind InterfaceError mapping, and session flag."""
+    client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        cur = client.cursor()
+        assert await cur.executemany("BEGIN DBMS_SESSION.SET_IDENTIFIER(:1); END;", []) is cur
+        assert cur.rowcount == 0
+        assert cur.description is None
+        assert cur.touches_session_context is True
+
+        assert await cur.executemany("INSERT INTO t (id) VALUES (:1)", []) is cur
+        assert cur.rowcount == 0
+        assert cur.touches_session_context is False
+
+        invalid_params: list[Any] = ["not-a-seq", b"bytes", 42, {123: "v"}]
+        for bad_params in invalid_params:
+            with pytest.raises(InterfaceError):
+                await cur.execute("SELECT :1 FROM dual", bad_params)
+            assert cur.description is None
+            assert cur.rowcount == -1
+            assert cur.lastrowid is None
+            assert cur.touches_session_context is False
+
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            await cur.execute("SELECT 1 AS a, 'x' AS b FROM dual")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.touches_session_context is False
+
+        await cur.close()
+        with pytest.raises(InterfaceError, match="closed"):
+            await cur.execute("SELECT 1 FROM dual")
+        with pytest.raises(InterfaceError, match="closed"):
+            await cur.executemany("INSERT INTO t VALUES (:1)", [(1,)])
+        with pytest.raises(InterfaceError, match="closed"):
+            await cur.fetchmany(1)
+        with pytest.raises(InterfaceError, match="closed"):
+            await cur.fetchall()
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_async_cursor_lazy_begin_and_lease_lifecycle() -> None:
+    """Verify AsyncOracleClient lazy_begin transaction opening and LeaseGuard attach/release/drop."""
+    client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        default_cur = client.cursor()
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            await default_cur.execute("INSERT INTO t VALUES (1)")
+        assert client.in_transaction is False
+
+        tx_cur = client.cursor(lazy_begin=True)
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            await tx_cur.execute("INSERT INTO t VALUES (1)")
+        assert client.in_transaction is True
+
+        await client.commit()
+        assert client.in_transaction is False
+
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            await tx_cur.execute("INSERT INTO t VALUES (2)")
+        assert client.in_transaction is True
+        await client.rollback()
+        assert client.in_transaction is False
+
+        calls: list[str] = []
+        client.attach_lease(lambda: calls.append("first"))
+        client.release_lease()
+        client.release_lease()
+        assert calls == ["first"]
+
+        client.attach_lease(lambda: calls.append("second"))
+        client.attach_lease(lambda: calls.append("third"))
+        assert calls == ["first", "second"]
+
+        await client.close()
+        assert calls == ["first", "second", "third"]
+
+        with pytest.raises(InterfaceError, match="closed"):
+            await tx_cur.execute("INSERT INTO t VALUES (3)")
+        assert tx_cur.description is None
+        assert tx_cur.rowcount == -1
+    finally:
+        await client.close()
+
+    drop_calls: list[int] = []
+    ephemeral = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+    )
+    ephemeral.attach_lease(lambda: drop_calls.append(1))
+    del ephemeral
+    gc.collect()
+    assert drop_calls == [1]
+
+
+def test_cursor_out_bind_var_and_surface() -> None:
+    """Verify OracleOutBindVar constructor, attributes, getvalue/setvalue, and converter behavior."""
+    var = _oracle.OracleOutBindVar("NUMBER", arraysize=0, outconverter=str)
+    assert type(var).__module__ == "vertebra._oracle"
+    assert var.type_code == "NUMBER"
+    assert var.size == 0
+    assert var.arraysize == 1
+    assert var.outconverter is str
+    assert var.values == [None]
+    assert var.getvalue(0) is None
+
+    same_list = var.values
+    var.setvalue(2, 5)
+    assert var.values is same_list
+    assert var.values == [None, None, 5]
+    assert var.getvalue(2) == "5"
+    assert var.getvalue(0) is None
+    with pytest.raises(IndexError):
+        var.getvalue(9)
+
+    var.type_code = "VARCHAR2"
+    var.size = 64
+    var.arraysize = 3
+    var.outconverter = None
+    var.values = ["a", "b", "c"]
+    assert var.type_code == "VARCHAR2"
+    assert var.size == 64
+    assert var.arraysize == 3
+    assert var.outconverter is None
+    assert var.getvalue(1) == "b"
+
+
+@pytest.mark.anyio
+async def test_cursor_out_bind_cursor_var_and_size_noops() -> None:
+    """Verify SyncOracleCursor and AsyncOracleCursor var(), setinputsizes(), setoutputsize(), and out_binds."""
+    sync_client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    async_client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        sync_cur = sync_client.cursor()
+        assert sync_cur.out_binds is None
+        sync_cur_any: Any = sync_cur
+        with pytest.raises(AttributeError):
+            sync_cur_any.out_binds = {}
+        sync_var = sync_cur.var(int)
+        assert isinstance(sync_var, _oracle.OracleOutBindVar)
+        assert sync_var.values == [None]
+        assert sync_var.arraysize == 1
+        assert sync_var.size == 0
+        sync_cur.setinputsizes(10, 20)
+        sync_cur.setoutputsize(100)
+        sync_cur.setoutputsize(100, 1)
+
+        sync_cur.close()
+        with pytest.raises(InterfaceError, match="closed"):
+            sync_cur.var(int)
+
+        async_cur = async_client.cursor()
+        assert async_cur.out_binds is None
+        async_var = async_cur.var(int, size=8, arraysize=2, outconverter=str)
+        assert isinstance(async_var, _oracle.OracleOutBindVar)
+        assert async_var.size == 8
+        assert async_var.arraysize == 2
+        assert async_var.values == [None, None]
+        async_cur.setinputsizes(10)
+        async_cur.setoutputsize(200, 2)
+
+        await async_cur.close()
+        with pytest.raises(InterfaceError, match="closed"):
+            async_cur.var(int)
+    finally:
+        sync_client.close()
+        await async_client.close()
+
+
+@pytest.mark.parametrize("param_shape", ["named", "positional", "duck_typed"])
+@pytest.mark.anyio
+async def test_cursor_out_bind_executemany_rejected(param_shape: str) -> None:
+    """Verify executemany rejects out-bind variables with NotSupportedError on sync and async cursors."""
+
+    class _DuckOutVar:
+        def __init__(self) -> None:
+            self.type_code = "NUMBER"
+
+        def setvalue(self, pos: int, value: Any) -> None:
+            self._last = (pos, value)
+
+    sync_client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    async_client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        sync_cur = sync_client.cursor()
+        async_cur = async_client.cursor()
+        var_obj: Any = _DuckOutVar() if param_shape == "duck_typed" else sync_cur.var("NUMBER")
+        batch: list[Any] = [{"out": var_obj}] if param_shape == "named" else [(1, var_obj)]
+
+        with pytest.raises(NotSupportedError):
+            sync_cur.executemany("INSERT INTO t (a) VALUES (:1)", batch)
+        with pytest.raises(NotSupportedError):
+            await async_cur.executemany("INSERT INTO t (a) VALUES (:1)", batch)
+    finally:
+        sync_client.close()
+        await async_client.close()
+
+
+@pytest.mark.parametrize(
+    ("sql", "params_factory", "out_binds"),
+    [
+        (
+            "BEGIN :out := :a + 1; END;",
+            lambda cur: {"a": 41, "out": cur.var("NUMBER")},
+            None,
+        ),
+        (
+            "BEGIN :2 := :1 + 1; END;",
+            lambda cur: [41, cur.var("NUMBER")],
+            None,
+        ),
+        (
+            "INSERT INTO t (name) VALUES (:name) RETURNING id INTO :id",
+            lambda cur: {"name": "x", "id": cur.var("NUMBER")},
+            None,
+        ),
+        (
+            "BEGIN :out := 1; END;",
+            lambda cur: {"out": cur.var("STRING")},
+            {"out": "NUMBER"},
+        ),
+        (
+            "BEGIN :out := 1; END;",
+            lambda cur: {"OUT": cur.var("NUMBER")},
+            None,
+        ),
+        (
+            "SELECT 1 FROM dual",
+            lambda _cur: (),
+            None,
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_cursor_out_bind_execute_accepts_vars_and_keyword_hints(
+    sql: str,
+    params_factory: Any,
+    out_binds: dict[str, str] | list[str] | None,
+) -> None:
+    """Verify SyncOracleCursor and AsyncOracleCursor execute accept out-bind vars and keyword-only out_binds."""
+    sync_client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    async_client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        sync_cur = sync_client.cursor()
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            sync_cur.execute(sql, params_factory(sync_cur), out_binds=out_binds)
+        assert sync_cur.out_binds is None
+
+        async_cur = async_client.cursor()
+        with pytest.raises((ConnectionFailure, OperationalError)):
+            await async_cur.execute(sql, params_factory(async_cur), out_binds=out_binds)
+        assert async_cur.out_binds is None
+    finally:
+        sync_client.close()
+        await async_client.close()
+
+
+@pytest.mark.anyio
+async def test_cursor_out_bind_execute_keyword_only_and_validation() -> None:
+    """Verify execute rejects positional out_binds with TypeError and string out_binds with InterfaceError."""
+    sync_client = _oracle.SyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    async_client = _oracle.AsyncOracleClient(
+        host="127.0.0.1",
+        port=_reserve_closed_local_port(),
+        service_name="FREEPDB1",
+        user="hr",
+        password="test-token-placeholder",
+        connect_timeout=0.5,
+    )
+    try:
+        sync_cur = sync_client.cursor()
+        sync_exec: Any = sync_cur.execute
+        with pytest.raises(TypeError):
+            sync_exec("SELECT 1 FROM dual", (), ["NUMBER"])
+        with pytest.raises(InterfaceError, match="out_binds"):
+            sync_cur.execute("SELECT 1 FROM dual", (), out_binds="NUMBER")
+
+        async_cur = async_client.cursor()
+        async_exec: Any = async_cur.execute
+        with pytest.raises(TypeError):
+            await async_exec("SELECT 1 FROM dual", (), ["NUMBER"])
+        with pytest.raises(InterfaceError, match="out_binds"):
+            await async_cur.execute("SELECT 1 FROM dual", (), out_binds="NUMBER")
+    finally:
+        sync_client.close()
+        await async_client.close()
+
+
+def test_cursor_out_bind_no_dbapi_import_in_crate() -> None:
+    """Verify the Oracle Rust crate holds no reference to vertebra.db.dbapi or dbapi."""
+    crate_src = Path(__file__).resolve().parents[4] / "rs" / "vertebra-oracle" / "src"
+    assert crate_src.is_dir()
+    matches: list[str] = []
+    for rs_file in sorted(crate_src.rglob("*.rs")):
+        text = rs_file.read_text(encoding="utf-8")
+        if "dbapi" in text or "vertebra.db.dbapi" in text:
+            matches.append(str(rs_file))
+    assert matches == []
+
+
+class _RecordingLeaseGrant:
+    """Lease grant double with slot_index and generation attributes."""
+
+    def __init__(self, slot_index: int, generation: int = 1) -> None:
+        self.slot_index = slot_index
+        self.generation = generation
+
+
+class _RecordingLeaseBroker:
+    """Recording broker double asserting checkout-level lease acquire and release counts."""
+
+    def __init__(self, *, fail_acquire: BaseException | None = None) -> None:
+        self.acquire_calls: list[tuple[int, int, int]] = []
+        self.release_calls: list[tuple[int, int]] = []
+        self._fail_acquire = fail_acquire
+        self._next_slot = 0
+
+    def acquire(
+        self,
+        owner_pid: int,
+        timeout_ms: int = 5000,
+        bind_key_hash: int = 0,
+    ) -> _RecordingLeaseGrant:
+        """Record an acquire attempt and return a grant or raise configured failure."""
+        self.acquire_calls.append((owner_pid, timeout_ms, bind_key_hash))
+        if self._fail_acquire is not None:
+            raise self._fail_acquire
+        self._next_slot += 1
+        return _RecordingLeaseGrant(self._next_slot)
+
+    def release(self, slot_index: int, generation: int) -> None:
+        """Record a release call for the given slot and generation."""
+        self.release_calls.append((slot_index, generation))
+
+
+@pytest.mark.parametrize(
+    ("lowercase", "expected_rows"),
+    [
+        (True, [{"a": 1}]),
+        (False, [{"A": 1}]),
+    ],
+)
+def test_sync_oracle_driver_cursor_select_and_casing(
+    lowercase: bool,
+    expected_rows: list[dict[str, Any]],
+) -> None:
+    """Verify SyncOracleDriver.select routes through cursor with cached _cursor_options."""
+    stub = _StubSyncOracleClient()
+    stub.queued_results.append(_oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1))
+    cfg = OracleConfig(
+        driver_features=OracleDriverFeatures(
+            enable_lowercase_column_names=lowercase,
+            enable_uuid_binary=False,
+            fetch_decimals=True,
+            vector_return_format="array",
+        )
+    )
+    driver = SyncOracleDriver(cfg, client=stub)
+    opts = driver._cursor_options()
+    assert driver._cursor_options() is opts
+    assert opts == {
+        "enable_uuid_binary": False,
+        "fetch_decimals": True,
+        "vector_return_format": "array",
+        "enable_lowercase_column_names": lowercase,
+    }
+    assert driver.select("SELECT 1 AS a FROM dual") == expected_rows
+    assert stub.cursor_calls == []
+    fetch_calls = [payload for kind, payload in stub.calls if kind == "fetch_dicts"]
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["enable_lowercase_column_names"] is lowercase
+    assert fetch_calls[0]["fetch_decimals"] is True
+    driver.close()
+
+
+def test_sync_oracle_driver_execute_dml_ddl_tuples_out_bind_and_errors() -> None:
+    """Verify DML rowcount, DDL empty description, tuples, out-bind population, and ORA-00001 IntegrityError."""
+    stub = _StubSyncOracleClient()
+    stub.queued_results.extend(
+        [
+            _oracle.OracleQueryResult(
+                [_oracle.OracleColumn("A", "NUMBER"), _oracle.OracleColumn("B", "NUMBER")],
+                [(1, 2)],
+                rowcount=1,
+            ),
+            _oracle.OracleQueryResult([], [], rowcount=2),
+            _oracle.OracleQueryResult([], [], rowcount=0),
+            _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+        ]
+    )
+    dup_err = IntegrityError("ORA-00001: unique constraint violated")
+    dup_err.vendor_code = 1
+    stub.queued_results.append(dup_err)
+
+    driver = SyncOracleDriver(client=stub)
+    rows, names = driver.execute_with_description("SELECT 1 AS a, 2 AS b FROM dual")
+    assert rows == [(1, 2)]
+    assert names == ("a", "b")
+
+    assert driver.execute("UPDATE items SET name = :1 WHERE id IN (1, 2)", ("updated",)) == 2
+    assert driver.execute_with_description("CREATE TABLE temp_items (id NUMBER)") == ([], ())
+
+    out_var = _oracle.OracleOutBindVar("NUMBER")
+    assert driver.execute("BEGIN :out := 99; END;", {"out": out_var}) == 1
+    assert out_var.getvalue() == 99
+    assert driver._last_out_binds == {"out": 99}
+    assert driver.out_binds == {"out": 99}
+
+    with pytest.raises(IntegrityError, match="ORA-00001"):
+        driver.execute("INSERT INTO items (id) VALUES (1)")
+    driver.close()
+
+
+@pytest.mark.parametrize("lazy_begin", [False, True])
+def test_sync_oracle_driver_cursor_and_checkout_cursor_contracts(lazy_begin: bool) -> None:
+    """Verify cursor() on pooled/unpooled/tx drivers and checkout_cursor() lifecycle."""
+    single_stub = _StubSyncOracleClient()
+    single_driver = SyncOracleDriver(client=single_stub)
+    single_cur = single_driver.cursor(lazy_begin=lazy_begin)
+    assert single_stub.cursor_calls[-1]["lazy_begin"] is lazy_begin
+    single_cur.close()
+    single_driver.close()
+
+    pool = SyncOraclePool(native_pool=_StubSyncOraclePool(min_size=0, max_size=2))
+    pooled_driver = SyncOracleDriver(pool=pool)
+    with pytest.raises(
+        InterfaceError,
+        match=r"cursor\(\) needs an open transaction on a pooled Oracle driver; use checkout_cursor\(\)",
+    ):
+        pooled_driver.cursor(lazy_begin=lazy_begin)
+
+    with pooled_driver.checkout_cursor(lazy_begin=lazy_begin) as cur:
+        stub_cur = cast("_StubSyncOracleCursor", cur)
+        stub_cur._client.queued_results.append(
+            _oracle.OracleQueryResult([_oracle.OracleColumn("VAL", "NUMBER")], [(1,)], rowcount=1)
+        )
+        cur.execute("SELECT 1 FROM dual")
+        assert cur.fetchall() == [(1,)]
+        assert stub_cur.lazy_begin is lazy_begin
+        assert pool.borrowed_size == 1
+    assert stub_cur.closed is True
+    assert pool.borrowed_size == 0
+    assert pool.idle_size == 1
+
+    pooled_driver.begin()
+    try:
+        tx_cur = cast("_StubSyncOracleCursor", pooled_driver.cursor(lazy_begin=lazy_begin))
+        assert tx_cur._client is pooled_driver.client
+        assert tx_cur.lazy_begin is lazy_begin
+        tx_cur.close()
+    finally:
+        pooled_driver.rollback()
+    assert pool.borrowed_size == 0
+    pooled_driver.close()
+    pool.close()
+
+
+def test_sync_oracle_driver_session_context_only_tracked_when_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify track_session_context_sql runs only when cursor.touches_session_context is true."""
+    stub = _StubSyncOracleClient()
+    stub.queued_results.extend(
+        [
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+            _oracle.OracleQueryResult([], [], rowcount=2),
+            _oracle.OracleQueryResult([], [], rowcount=0),
+        ]
+    )
+    tracked_calls: list[tuple[str, Any]] = []
+    original_track = OracleCore.track_session_context_sql
+
+    def _spy_track(
+        session_context: dict[tuple[str, str], str],
+        sql: str,
+        parameters: Any,
+    ) -> None:
+        tracked_calls.append((sql, parameters))
+        original_track(session_context, sql, parameters)
+
+    monkeypatch.setattr(OracleCore, "track_session_context_sql", staticmethod(_spy_track))
+
+    driver = SyncOracleDriver(client=stub)
+    assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert driver.execute("UPDATE items SET n = 1") == 2
+    assert tracked_calls == []
+
+    driver.execute("BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;", {"value": "tenant-42"})
+    assert len(tracked_calls) == 1
+    assert driver._session_context[("USERENV", "CLIENT_IDENTIFIER")] == "tenant-42"
+    driver.close()
+
+
+def test_sync_oracle_driver_lease_no_broker_runs_no_lease_calls() -> None:
+    """Verify ten statements with broker=None never invoke lease attachment or release."""
+    stub = _StubSyncOracleClient()
+    driver = SyncOracleDriver(client=stub, broker=None)
+    assert driver._lease_at_checkout is False
+    driver.connect()
+    for _ in range(10):
+        stub.queued_results.append(_oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1))
+        assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    driver.close()
+    assert stub.attach_lease_calls == 0
+    assert stub.release_lease_calls == 1
+
+
+def test_sync_oracle_driver_lease_pooled_transaction_and_error_discard() -> None:
+    """Verify pooled checkout acquires one lease per checkout and releases on commit or fatal error."""
+    broker = _RecordingLeaseBroker()
+    raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+    pool = SyncOraclePool(native_pool=raw_pool)
+    driver = SyncOracleDriver(pool=pool, broker=broker)
+    assert driver._lease_at_checkout is True
+
+    driver.begin()
+    for _ in range(5):
+        driver.execute("UPDATE items SET n = n + 1")
+    driver.commit()
+    assert len(broker.acquire_calls) == 1
+    assert len(broker.release_calls) == 1
+    assert pool.borrowed_size == 0
+    assert pool.idle_size == 1
+
+    fatal_err = OperationalError("ORA-03113: end-of-file on communication channel")
+    fatal_err.vendor_code = 3113
+    fatal_err.is_transient = True
+    raw_pool._idle[0].queued_results.append(fatal_err)
+    with pytest.raises(OperationalError, match="ORA-03113"):
+        driver.execute("SELECT 1 FROM dual")
+    assert len(broker.acquire_calls) == 2
+    assert len(broker.release_calls) == 2
+    assert pool.borrowed_size == 0
+    assert pool.idle_size == 0
+
+    driver.close()
+    pool.close()
+
+
+def test_sync_oracle_driver_lease_pool_attach_failure_releases_client() -> None:
+    """Verify a raising lease attach returns the pooled client before propagating."""
+    raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+    pool = SyncOraclePool(native_pool=raw_pool)
+
+    class _AsyncBroker:
+        async def acquire(self, owner_pid: int, timeout_ms: int = 5000) -> Any:
+            return (owner_pid, timeout_ms)
+
+    driver = SyncOracleDriver(pool=pool, broker=_AsyncBroker())
+    with pytest.raises(InterfaceError, match="Async broker transport"):
+        driver.execute("SELECT 1 FROM dual")
+    assert pool.borrowed_size == 0
+    assert pool.idle_size == 1
+    driver.close()
+    pool.close()
+
+
+def test_sync_oracle_driver_lease_unpooled_lifecycle_refusal_and_gc() -> None:
+    """Verify single-client lease connect/close, refused acquire, and GC drop release."""
+    broker = _RecordingLeaseBroker()
+    stub = _StubSyncOracleClient()
+    driver = SyncOracleDriver(client=stub, broker=broker)
+    driver.connect()
+    assert len(broker.acquire_calls) == 1
+    assert len(broker.release_calls) == 0
+    for _ in range(10):
+        stub.queued_results.append(_oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1))
+        assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert len(broker.acquire_calls) == 1
+    assert len(broker.release_calls) == 0
+    driver.close()
+    assert len(broker.acquire_calls) == 1
+    assert len(broker.release_calls) == 1
+
+    refusing_broker = _RecordingLeaseBroker(fail_acquire=RuntimeError("broker full"))
+    refused_stub = _StubSyncOracleClient()
+    refused_driver = SyncOracleDriver(client=refused_stub, broker=refusing_broker)
+    refused_driver.connect()
+    refused_stub.queued_results.append(
+        _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+    )
+    assert refused_driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert refused_stub.attach_lease_calls == 0
+    refused_driver.close()
+    assert len(refusing_broker.release_calls) == 0
+
+    gc_broker = _RecordingLeaseBroker()
+    gc_driver = SyncOracleDriver(client=_StubSyncOracleClient(), broker=gc_broker)
+    gc_driver.connect()
+    gc_driver.execute("UPDATE items SET n = 1")
+    assert len(gc_broker.acquire_calls) == 1
+    assert len(gc_broker.release_calls) == 0
+    del gc_driver
+    gc.collect()
+    assert len(gc_broker.release_calls) == 1
+
+
+class _AsyncRecordingLeaseBroker:
+    """Async broker double whose `acquire` is a coroutine and `release` is synchronous."""
+
+    def __init__(self, *, fail_acquire: BaseException | None = None) -> None:
+        self._fail_acquire = fail_acquire
+        self._next_slot = 0
+        self.acquire_calls: list[tuple[int, int, int]] = []
+        self.release_calls: list[tuple[int, int]] = []
+
+    async def acquire(
+        self,
+        owner_pid: int,
+        timeout_ms: int = 5000,
+        bind_key_hash: int = 0,
+    ) -> _RecordingLeaseGrant:
+        """Record an async acquire attempt and return a grant or raise configured failure."""
+        await asyncio.sleep(0)
+        self.acquire_calls.append((owner_pid, timeout_ms, bind_key_hash))
+        if self._fail_acquire is not None:
+            raise self._fail_acquire
+        self._next_slot += 1
+        return _RecordingLeaseGrant(self._next_slot)
+
+    def release(self, slot_index: int, generation: int) -> None:
+        """Record a release call for the given slot and generation."""
+        self.release_calls.append((slot_index, generation))
+
+
+@pytest.mark.parametrize(
+    ("lowercase", "expected_rows"),
+    [
+        (True, [{"a": 1}]),
+        (False, [{"A": 1}]),
+    ],
+)
+def test_async_oracle_driver_cursor_select_and_casing(
+    lowercase: bool,
+    expected_rows: list[dict[str, Any]],
+) -> None:
+    """Verify AsyncOracleDriver.select routes through cursor with cached _cursor_options."""
+
+    async def _run() -> None:
+        stub = _StubAsyncOracleClient()
+        stub.queued_results.append(_oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1))
+        cfg = OracleConfig(
+            driver_features=OracleDriverFeatures(
+                enable_lowercase_column_names=lowercase,
+                enable_uuid_binary=False,
+                fetch_decimals=True,
+                vector_return_format="array",
+            )
+        )
+        driver = AsyncOracleDriver(cfg, client=stub)
+        opts = driver._cursor_options()
+        assert driver._cursor_options() is opts
+        assert opts == {
+            "enable_uuid_binary": False,
+            "fetch_decimals": True,
+            "vector_return_format": "array",
+            "enable_lowercase_column_names": lowercase,
+        }
+        assert await driver.select("SELECT 1 AS a FROM dual") == expected_rows
+        assert stub.cursor_calls == []
+        fetch_calls = [payload for kind, payload in stub.calls if kind == "fetch_dicts"]
+        assert len(fetch_calls) == 1
+        assert fetch_calls[0]["enable_lowercase_column_names"] is lowercase
+        assert fetch_calls[0]["fetch_decimals"] is True
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_execute_dml_many_out_bind_and_errors() -> None:
+    """Verify async DML rowcount, execute_many, out-bind population, and ORA-00001 IntegrityError."""
+
+    async def _run() -> None:
+        stub = _StubAsyncOracleClient()
+        stub.queued_results.extend(
+            [
+                _oracle.OracleQueryResult(
+                    [_oracle.OracleColumn("A", "NUMBER"), _oracle.OracleColumn("B", "NUMBER")],
+                    [(1, 2)],
+                    rowcount=1,
+                ),
+                _oracle.OracleQueryResult([], [], rowcount=2),
+                _oracle.OracleQueryResult([], [], rowcount=0),
+                _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+            ]
+        )
+        dup_err = IntegrityError("ORA-00001: unique constraint violated")
+        dup_err.vendor_code = 1
+        stub.queued_results.append(dup_err)
+
+        driver = AsyncOracleDriver(client=stub)
+        rows, names = await driver.execute_with_description("SELECT 1 AS a, 2 AS b FROM dual")
+        assert rows == [(1, 2)]
+        assert names == ("a", "b")
+
+        assert await driver.execute("UPDATE items SET name = :1 WHERE id IN (1, 2)", ("updated",)) == 2
+        assert await driver.execute_with_description("CREATE TABLE temp_items (id NUMBER)") == ([], ())
+
+        out_var = _oracle.OracleOutBindVar("NUMBER")
+        assert await driver.execute("BEGIN :out := 99; END;", {"out": out_var}) == 1
+        assert out_var.getvalue() == 99
+        assert driver.out_binds == {"out": 99}
+
+        assert await driver.execute_many("INSERT INTO items (id) VALUES (:1)", [(1,), (2,), (3,)]) == 3
+
+        with pytest.raises(IntegrityError, match="ORA-00001"):
+            await driver.execute("INSERT INTO items (id) VALUES (1)")
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("lazy_begin", [False, True])
+def test_async_oracle_driver_cursor_and_checkout_cursor_contracts(lazy_begin: bool) -> None:
+    """Verify async cursor() on pooled/unpooled/tx drivers and checkout_cursor() lifecycle."""
+
+    async def _run() -> None:
+        single_stub = _StubAsyncOracleClient()
+        single_driver = AsyncOracleDriver(client=single_stub)
+        single_cur = single_driver.cursor(lazy_begin=lazy_begin)
+        assert single_stub.cursor_calls[-1]["lazy_begin"] is lazy_begin
+        await single_cur.close()
+        await single_driver.close()
+
+        pool = AsyncOraclePool(native_pool=_StubAsyncOraclePool(min_size=0, max_size=2))
+        pooled_driver = AsyncOracleDriver(pool=pool)
+        with pytest.raises(
+            InterfaceError,
+            match=r"cursor\(\) needs an open transaction on a pooled Oracle driver; use checkout_cursor\(\)",
+        ):
+            pooled_driver.cursor(lazy_begin=lazy_begin)
+
+        async with pooled_driver.checkout_cursor(lazy_begin=lazy_begin) as cur:
+            stub_cur = cast("_StubAsyncOracleCursor", cur)
+            stub_cur._sync._client.queued_results.append(
+                _oracle.OracleQueryResult([_oracle.OracleColumn("VAL", "NUMBER")], [(1,)], rowcount=1)
+            )
+            await cur.execute("SELECT 1 FROM dual")
+            assert await cur.fetchall() == [(1,)]
+            assert stub_cur.lazy_begin is lazy_begin
+            assert pool.borrowed_size == 1
+        assert stub_cur.closed is True
+        assert pool.borrowed_size == 0
+        assert pool.idle_size == 1
+
+        await pooled_driver.begin()
+        try:
+            tx_cur = cast("_StubAsyncOracleCursor", pooled_driver.cursor(lazy_begin=lazy_begin))
+            assert tx_cur._sync._client is pooled_driver.client._sync
+            assert tx_cur.lazy_begin is lazy_begin
+            await tx_cur.close()
+        finally:
+            await pooled_driver.rollback()
+        assert pool.borrowed_size == 0
+        await pooled_driver.close()
+        await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_lease_no_broker_runs_no_lease_calls() -> None:
+    """Verify ten statements with broker=None never invoke lease attachment or release."""
+
+    async def _run() -> None:
+        stub = _StubAsyncOracleClient()
+        driver = AsyncOracleDriver(client=stub, broker=None)
+        assert driver._lease_at_checkout is False
+        await driver.connect()
+        for _ in range(10):
+            stub.queued_results.append(
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+            )
+            assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        await driver.close()
+        assert stub.attach_lease_calls == 0
+        assert stub.release_lease_calls == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "broker_factory",
+    [
+        _RecordingLeaseBroker,
+        _AsyncRecordingLeaseBroker,
+    ],
+)
+def test_async_oracle_driver_lease_pooled_transaction_and_cancel(
+    broker_factory: type[Any],
+) -> None:
+    """Verify pooled async checkout acquires one lease per checkout and releases on commit or cancel."""
+
+    async def _run() -> None:
+        broker = broker_factory()
+        raw_pool = _StubAsyncOraclePool(min_size=0, max_size=2)
+        pool = AsyncOraclePool(native_pool=raw_pool)
+        driver = AsyncOracleDriver(pool=pool, broker=broker)
+        assert driver._lease_at_checkout is True
+
+        await driver.begin()
+        for _ in range(5):
+            await driver.execute("UPDATE items SET n = n + 1")
+        await driver.commit()
+        assert len(broker.acquire_calls) == 1
+        assert len(broker.release_calls) == 1
+        assert pool.borrowed_size == 0
+        assert pool.idle_size == 1
+
+        entered = asyncio.Event()
+
+        async def _cancellable_checkout() -> None:
+            async with driver.checkout_cursor():
+                entered.set()
+                await asyncio.sleep(60)
+
+        task = asyncio.create_task(_cancellable_checkout())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(broker.acquire_calls) == 2
+        assert len(broker.release_calls) == 2
+        assert pool.borrowed_size == 0
+        assert pool.idle_size == 1
+
+        await driver.close()
+        await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_lease_unpooled_lifecycle_refusal_and_gc() -> None:
+    """Verify async single-client lease connect/close, refused acquire, and GC drop release."""
+
+    async def _run() -> None:
+        broker = _AsyncRecordingLeaseBroker()
+        stub = _StubAsyncOracleClient()
+        driver = AsyncOracleDriver(client=stub, broker=broker)
+        await driver.connect()
+        assert len(broker.acquire_calls) == 1
+        assert len(broker.release_calls) == 0
+        for _ in range(10):
+            stub.queued_results.append(
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+            )
+            assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert len(broker.acquire_calls) == 1
+        assert len(broker.release_calls) == 0
+        await driver.close()
+        assert len(broker.acquire_calls) == 1
+        assert len(broker.release_calls) == 1
+
+        refusing_broker = _AsyncRecordingLeaseBroker(fail_acquire=RuntimeError("broker full"))
+        refused_stub = _StubAsyncOracleClient()
+        refused_driver = AsyncOracleDriver(client=refused_stub, broker=refusing_broker)
+        await refused_driver.connect()
+        refused_stub.queued_results.append(
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+        )
+        assert await refused_driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert refused_stub.attach_lease_calls == 0
+        await refused_driver.close()
+        assert len(refusing_broker.release_calls) == 0
+
+        gc_broker = _AsyncRecordingLeaseBroker()
+        gc_driver = AsyncOracleDriver(client=_StubAsyncOracleClient(), broker=gc_broker)
+        await gc_driver.connect()
+        await gc_driver.execute("UPDATE items SET n = 1")
+        assert len(gc_broker.acquire_calls) == 1
+        assert len(gc_broker.release_calls) == 0
+        del gc_driver
+        gc.collect()
+        assert len(gc_broker.release_calls) == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("is", "dml", "or", "plsql"),
+        ("split", "out", "bind", "parameters"),
+        ("populate", "out", "bind", "vars"),
+        ("", "is", "out", "bind", "var"),
+        ("", "out", "bind", "type", "hint"),
+        ("normalize", "sql"),
+    ],
+)
+def test_oracle_core_removed_cursor_helpers_raise_attribute_error(parts: tuple[str, ...]) -> None:
+    """Verify helpers superseded by the native Oracle cursor are removed from OracleCore."""
+    helper_name = "_".join(parts)
+    with pytest.raises(AttributeError):
+        getattr(OracleCore, helper_name)
+
+
+_SINGLE_CALL_NATIVE_METHODS: frozenset[str] = frozenset({"fetch_rows", "fetch_dicts", "fetch_value", "execute_dml"})
+_SYNC_SINGLE_CALL_CASES: list[tuple[str, str, str, Any]] = [
+    ("select", "SELECT 1 AS a FROM dual", "fetch_dicts", [{"a": 1}]),
+    ("select_one", "SELECT 1 AS a FROM dual", "fetch_dicts", {"a": 1}),
+    ("select_one_or_none", "SELECT 1 AS a FROM dual", "fetch_dicts", {"a": 1}),
+    ("select_value", "SELECT 1 AS a FROM dual", "fetch_value", 1),
+    ("execute_with_description", "SELECT 1 AS a FROM dual", "fetch_rows", ([(1,)], ("a",))),
+    ("execute_tuples", "SELECT 1 AS a FROM dual", "fetch_rows", [(1,)]),
+    ("execute", "UPDATE items SET n = 1", "execute_dml", 2),
+    ("execute_dml", "UPDATE items SET n = 1", "execute_dml", (2, None)),
+]
+
+
+def _make_single_call_result(method_name: str) -> _oracle.OracleQueryResult:
+    if method_name in {"execute", "execute_dml"}:
+        return _oracle.OracleQueryResult([], [], rowcount=2)
+    return _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+
+
+@pytest.mark.parametrize(("method_name", "sql", "expected_native", "expected_result"), _SYNC_SINGLE_CALL_CASES)
+def test_sync_oracle_driver_single_call_single_client(
+    method_name: str,
+    sql: str,
+    expected_native: str,
+    expected_result: Any,
+) -> None:
+    """Verify each SyncOracleDriver query method makes one native single-call without cursor()."""
+    stub = _StubSyncOracleClient()
+    stub.queued_results.append(_make_single_call_result(method_name))
+    driver = SyncOracleDriver(client=stub)
+
+    result = getattr(driver, method_name)(sql)
+
+    assert result == expected_result
+    single_entries = [kind for kind, _ in stub.calls if kind in _SINGLE_CALL_NATIVE_METHODS]
+    assert single_entries == [expected_native]
+    assert stub.cursor_calls == []
+    driver.close()
+
+
+@pytest.mark.parametrize(("method_name", "sql", "expected_native", "expected_result"), _SYNC_SINGLE_CALL_CASES)
+def test_sync_oracle_driver_single_call_pooled_direct_route(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    sql: str,
+    expected_native: str,
+    expected_result: Any,
+) -> None:
+    """Verify pooled SyncOracleDriver without a broker dispatches directly to native pool single-call methods."""
+    raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+    raw_pool.single_call_results.append(_make_single_call_result(method_name))
+    pool = SyncOraclePool(native_pool=raw_pool)
+    driver = SyncOracleDriver(pool=pool)
+
+    python_acquires: list[str] = []
+
+    def _forbid_acquire(*args: Any, **kwargs: Any) -> Any:
+        python_acquires.append("acquire")
+        raise AssertionError("direct pool route must not acquire from Python")
+
+    monkeypatch.setattr(pool, "acquire", _forbid_acquire)
+    monkeypatch.setattr(pool, "acquire_from_pool", _forbid_acquire)
+    monkeypatch.setattr(driver, "_acquire_pool_client", _forbid_acquire)
+
+    result = getattr(driver, method_name)(sql)
+
+    assert result == expected_result
+    assert [entry[0] for entry in raw_pool.single_calls] == [expected_native]
+    assert python_acquires == []
+    assert pool.borrowed_size == 0
+    driver.close()
+    pool.close()
+
+
+def test_sync_oracle_driver_single_call_pinned_transaction_route() -> None:
+    """Verify statements inside begin()/rollback() run on the pinned client without pool single-calls."""
+    raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+    pool = SyncOraclePool(native_pool=raw_pool)
+    driver = SyncOracleDriver(pool=pool)
+
+    driver.begin()
+    pinned = cast("_StubSyncOracleClient", driver.client)
+    pinned.queued_results.extend(
+        [
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+            _oracle.OracleQueryResult([], [], rowcount=2),
+            _oracle.OracleQueryResult([], [], rowcount=3, lastrowid="AAARowId"),
+        ]
+    )
+
+    assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert driver.execute("UPDATE items SET n = 1") == 2
+    assert driver.execute_dml("UPDATE items SET n = 2") == (3, "AAARowId")
+    driver.rollback()
+
+    single_entries = [kind for kind, _ in pinned.calls if kind in _SINGLE_CALL_NATIVE_METHODS]
+    assert single_entries == ["fetch_dicts", "execute_dml", "execute_dml"]
+    assert pinned.cursor_calls == []
+    assert raw_pool.single_calls == []
+    assert pool.borrowed_size == 0
+    driver.close()
+    pool.close()
+
+
+@pytest.mark.parametrize("mode", ["single", "pooled", "pinned"])
+def test_sync_oracle_driver_query_methods_skip_checkout_generators(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Verify none of the eight query methods enter checkout_cursor or _checkout_client."""
+    raw_pool: _StubSyncOraclePool | None = None
+    pool: SyncOraclePool | None = None
+    stub: _StubSyncOracleClient | None = None
+    if mode == "single":
+        stub = _StubSyncOracleClient()
+        driver = SyncOracleDriver(client=stub)
+    else:
+        raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+        pool = SyncOraclePool(native_pool=raw_pool)
+        driver = SyncOracleDriver(pool=pool)
+        if mode == "pinned":
+            driver.begin()
+
+    generator_calls: list[str] = []
+
+    def _spy_checkout_cursor(*args: Any, **kwargs: Any) -> Any:
+        generator_calls.append("checkout_cursor")
+        raise AssertionError("checkout_cursor must not be entered by query methods")
+
+    def _spy_checkout_client(*args: Any, **kwargs: Any) -> Any:
+        generator_calls.append("_checkout_client")
+        raise AssertionError("_checkout_client must not be entered by query methods")
+
+    monkeypatch.setattr(driver, "checkout_cursor", _spy_checkout_cursor)
+    monkeypatch.setattr(driver, "_checkout_client", _spy_checkout_client)
+
+    target_queue = (
+        stub.queued_results
+        if stub is not None
+        else (
+            cast("_StubSyncOracleClient", driver.client).queued_results
+            if mode == "pinned"
+            else cast("_StubSyncOraclePool", raw_pool).single_call_results
+        )
+    )
+    for method_name, sql, _, expected_result in _SYNC_SINGLE_CALL_CASES:
+        target_queue.append(_make_single_call_result(method_name))
+        assert getattr(driver, method_name)(sql) == expected_result
+
+    assert generator_calls == []
+    if mode == "pinned":
+        driver.rollback()
+    driver.close()
+    if pool is not None:
+        pool.close()
+
+
+def test_sync_oracle_driver_typed_select_value_type_dml_and_out_binds_reset() -> None:
+    """Verify schema_type hydration via fetch_rows, value_type coercion, NotFoundError, and out_binds reset."""
+    stub = _StubSyncOracleClient()
+    stub.queued_results.extend(
+        [
+            _oracle.OracleQueryResult(
+                [_oracle.OracleColumn("EMPLOYEE_ID", "NUMBER"), _oracle.OracleColumn("FIRST_NAME", "VARCHAR2")],
+                [(1, "Ada")],
+                rowcount=1,
+            ),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("V", "VARCHAR2")], [("42",)], rowcount=1),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("V", "NUMBER")], [], rowcount=0),
+            _oracle.OracleQueryResult([], [], rowcount=2),
+            _oracle.OracleQueryResult([], [], rowcount=1, lastrowid="AAARowId"),
+            _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+            _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 77}),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(7,)], rowcount=1),
+            _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 55}),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(8,)], rowcount=1),
+            _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 33}),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(9,)], rowcount=1),
+        ]
+    )
+    driver = SyncOracleDriver(client=stub)
+
+    hydrated = driver.select("SELECT employee_id, first_name FROM employees", schema_type=_EmployeeRow)
+    assert hydrated == [_EmployeeRow(employee_id=1, first_name="Ada")]
+    assert [k for k, _ in stub.calls if k in _SINGLE_CALL_NATIVE_METHODS] == ["fetch_rows"]
+    assert stub.cursor_calls == []
+
+    assert driver.select_value("SELECT '42' AS v FROM dual", value_type=int) == 42
+    with pytest.raises(NotFoundError):
+        driver.select_value("SELECT 1 AS v FROM dual WHERE 1 = 0")
+
+    assert driver.execute_dml("UPDATE items SET n = 1") == (2, None)
+    assert driver.execute_dml("INSERT INTO items (n) VALUES (1)") == (1, "AAARowId")
+
+    out_var = _oracle.OracleOutBindVar("NUMBER")
+    assert driver.execute("BEGIN :out := 99; END;", {"out": out_var}) == 1
+    assert out_var.getvalue() == 99
+    assert driver.out_binds == {"out": 99}
+
+    assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert driver.out_binds is None
+
+    assert driver.execute("BEGIN :out := 77; END;", {"out": out_var}) == 1
+    assert driver.out_binds == {"out": 77}
+    assert driver.select_value("SELECT 7 AS a FROM dual") == 7
+    assert driver.out_binds is None
+
+    assert driver.execute("BEGIN :out := 55; END;", {"out": out_var}) == 1
+    assert driver.out_binds == {"out": 55}
+    assert driver.execute_tuples("SELECT 8 AS a FROM dual") == [(8,)]
+    assert driver.out_binds is None
+
+    assert driver.execute("BEGIN :out := 33; END;", {"out": out_var}) == 1
+    assert driver.out_binds == {"out": 33}
+    assert driver.execute_with_description("SELECT 9 AS a FROM dual") == ([(9,)], ("a",))
+    assert driver.out_binds is None
+    driver.close()
+
+
+@pytest.mark.parametrize("use_pool", [False, True])
+def test_sync_oracle_driver_pending_session_attrs_then_direct_route(
+    monkeypatch: pytest.MonkeyPatch,
+    use_pool: bool,
+) -> None:
+    """Verify pending session attributes apply once on first statement, then later statements take the direct route."""
+    cfg = OracleConfig(client_identifier="user-7")
+    if use_pool:
+        raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+        pool = SyncOraclePool(cfg, native_pool=raw_pool)
+        driver = SyncOracleDriver(cfg, pool=pool)
+        assert driver._pending_session_attrs is not None
+
+        assert driver.execute("UPDATE items SET n = 1") == 1
+        assert driver._pending_session_attrs is None
+        assert driver.last_piggyback_frame is not None
+        assert raw_pool.single_calls == []
+        assert len(raw_pool.created_clients) == 1
+        assert raw_pool.created_clients[0].active_session_attrs["client_identifier"] == "user-7"
+
+        raw_pool.single_call_results.append(
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+        )
+        assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert [entry[0] for entry in raw_pool.single_calls] == ["fetch_dicts"]
+        driver.close()
+        pool.close()
+        return
+
+    stub = _StubSyncOracleClient()
+    stub.queued_results.extend(
+        [
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(2,)], rowcount=1),
+        ]
+    )
+    driver = SyncOracleDriver(cfg, client=stub)
+    assert driver._pending_session_attrs is not None
+
+    assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    assert driver._pending_session_attrs is None
+    assert stub.active_session_attrs["client_identifier"] == "user-7"
+    assert driver.last_piggyback_frame is not None
+
+    apply_calls: list[Any] = []
+    monkeypatch.setattr(driver, "_apply_pending_session_attrs", apply_calls.append)
+    assert driver.select("SELECT 2 AS a FROM dual") == [{"a": 2}]
+    assert apply_calls == []
+    assert stub.cursor_calls == []
+    driver.close()
+
+
+def test_sync_oracle_driver_pooled_broker_autocommit_leases_and_fatal_discard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pooled driver with broker acquires one lease per autocommit statement and discards on ORA-03113."""
+    broker = _RecordingLeaseBroker()
+    raw_pool = _StubSyncOraclePool(min_size=0, max_size=2)
+    pool = SyncOraclePool(native_pool=raw_pool)
+    driver = SyncOracleDriver(pool=pool, broker=broker)
+
+    release_discards: list[bool] = []
+    original_release = pool.release_to_pool
+
+    def _spy_release(client: Any, **kwargs: Any) -> None:
+        release_discards.append(bool(kwargs.get("discard", False)))
+        original_release(client, **kwargs)
+
+    monkeypatch.setattr(pool, "release_to_pool", _spy_release)
+
+    assert driver.execute("UPDATE items SET n = 1") == 1
+    raw_pool._idle[0].queued_results.append(
+        _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+    )
+    assert driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+    raw_pool._idle[0].queued_results.append(
+        _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(9,)], rowcount=1)
+    )
+    assert driver.select_value("SELECT 9 AS a FROM dual") == 9
+
+    assert len(broker.acquire_calls) == 3
+    assert len(broker.release_calls) == 3
+    assert raw_pool.single_calls == []
+    assert release_discards == [False, False, False]
+
+    fatal_err = OperationalError("ORA-03113: end-of-file on communication channel")
+    fatal_err.vendor_code = 3113
+    fatal_err.is_transient = True
+    raw_pool._idle[0].queued_results.append(fatal_err)
+    with pytest.raises(OperationalError, match="ORA-03113"):
+        driver.execute("SELECT 1 FROM dual")
+
+    assert len(broker.acquire_calls) == 4
+    assert len(broker.release_calls) == 4
+    assert release_discards == [False, False, False, True]
+    assert pool.idle_size == 0
+    assert pool.borrowed_size == 0
+    driver.close()
+    pool.close()
+
+
+class _CountingAwaitable:
+    """Awaitable wrapper that increments a shared counter each time it is awaited."""
+
+    def __init__(self, inner: Awaitable[Any], counter: list[int]) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    def __await__(self) -> Generator[Any, None, Any]:
+        self._counter[0] += 1
+        return self._inner.__await__()
+
+
+class _CountingAsyncOracleClient(_StubAsyncOracleClient):
+    """Async client double returning `_CountingAwaitable` from plain `def` single-call methods."""
+
+    def __init__(self, *, counter: list[int] | None = None) -> None:
+        super().__init__()
+        self.await_counter: list[int] = counter if counter is not None else [0]
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOracleClient.fetch_rows`."""
+        return _CountingAwaitable(
+            super().fetch_rows(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOracleClient.fetch_dicts`."""
+        return _CountingAwaitable(
+            super().fetch_dicts(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOracleClient.fetch_value`."""
+        return _CountingAwaitable(
+            super().fetch_value(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOracleClient.execute_dml`."""
+        return _CountingAwaitable(
+            super().execute_dml(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+
+class _CountingAsyncOraclePool(_StubAsyncOraclePool):
+    """Async pool double returning `_CountingAwaitable` from plain `def` single-call methods."""
+
+    def __init__(self, *, min_size: int = 0, max_size: int = 2) -> None:
+        super().__init__(min_size=min_size, max_size=max_size)
+        self.await_counter: list[int] = [0]
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOraclePool.fetch_rows`."""
+        return _CountingAwaitable(
+            super().fetch_rows(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOraclePool.fetch_dicts`."""
+        return _CountingAwaitable(
+            super().fetch_dicts(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOraclePool.fetch_value`."""
+        return _CountingAwaitable(
+            super().fetch_value(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+        *,
+        out_binds: Mapping[str, str] | Sequence[str] | None = None,
+        enable_uuid_binary: bool = True,
+        fetch_decimals: bool = False,
+        vector_return_format: str = "list",
+        enable_lowercase_column_names: bool = True,
+    ) -> Any:
+        """Return a counted awaitable delegating to `_StubAsyncOraclePool.execute_dml`."""
+        return _CountingAwaitable(
+            super().execute_dml(
+                sql,
+                params,
+                out_binds=out_binds,
+                enable_uuid_binary=enable_uuid_binary,
+                fetch_decimals=fetch_decimals,
+                vector_return_format=vector_return_format,
+                enable_lowercase_column_names=enable_lowercase_column_names,
+            ),
+            self.await_counter,
+        )
+
+
+@pytest.mark.parametrize(("method_name", "sql", "expected_native", "expected_result"), _SYNC_SINGLE_CALL_CASES)
+def test_async_oracle_driver_single_call_single_client(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    sql: str,
+    expected_native: str,
+    expected_result: Any,
+) -> None:
+    """Verify each AsyncOracleDriver query method awaits one native single-call on a single client."""
+
+    async def _run() -> None:
+        stub = _CountingAsyncOracleClient()
+        stub.queued_results.append(_make_single_call_result(method_name))
+        driver = AsyncOracleDriver(client=stub)
+
+        checked_calls: list[str] = []
+
+        async def _spy_checked(*args: Any, **kwargs: Any) -> Any:
+            checked_calls.append("checked")
+            raise AssertionError("direct single-client route must not enter _single_call_checked")
+
+        monkeypatch.setattr(driver, "_single_call_checked", _spy_checked)
+
+        result = await getattr(driver, method_name)(sql)
+
+        assert result == expected_result
+        single_entries = [kind for kind, _ in stub.calls if kind in _SINGLE_CALL_NATIVE_METHODS]
+        assert single_entries == [expected_native]
+        assert stub.cursor_calls == []
+        assert stub.await_counter == [1]
+        assert checked_calls == []
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(("method_name", "sql", "expected_native", "expected_result"), _SYNC_SINGLE_CALL_CASES)
+def test_async_oracle_driver_single_call_pooled_direct_route(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    sql: str,
+    expected_native: str,
+    expected_result: Any,
+) -> None:
+    """Verify pooled AsyncOracleDriver without a broker awaits one native pool single-call with no helper coroutine."""
+
+    async def _run() -> None:
+        raw_pool = _CountingAsyncOraclePool(min_size=0, max_size=2)
+        raw_pool.single_call_results.append(_make_single_call_result(method_name))
+        pool = AsyncOraclePool(native_pool=raw_pool)
+        driver = AsyncOracleDriver(pool=pool)
+
+        python_acquires: list[str] = []
+        checked_calls: list[str] = []
+
+        async def _forbid_acquire(*args: Any, **kwargs: Any) -> Any:
+            python_acquires.append("acquire")
+            raise AssertionError("direct pool route must not acquire from Python")
+
+        async def _spy_checked(*args: Any, **kwargs: Any) -> Any:
+            checked_calls.append("checked")
+            raise AssertionError("direct pool route must not enter _single_call_checked")
+
+        monkeypatch.setattr(pool, "acquire", _forbid_acquire)
+        monkeypatch.setattr(pool, "acquire_from_pool", _forbid_acquire)
+        monkeypatch.setattr(driver, "_acquire_pool_client", _forbid_acquire)
+        monkeypatch.setattr(driver, "_single_call_checked", _spy_checked)
+
+        result = await getattr(driver, method_name)(sql)
+
+        assert result == expected_result
+        assert [entry[0] for entry in raw_pool.single_calls] == [expected_native]
+        assert raw_pool.await_counter == [1]
+        assert python_acquires == []
+        assert checked_calls == []
+        assert pool.borrowed_size == 0
+        await driver.close()
+        await pool.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(("method_name", "sql", "expected_native", "expected_result"), _SYNC_SINGLE_CALL_CASES)
+def test_async_oracle_driver_single_call_pinned_each_method(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    sql: str,
+    expected_native: str,
+    expected_result: Any,
+) -> None:
+    """Verify each AsyncOracleDriver query method awaits one native single-call on a pinned transaction client."""
+
+    async def _run() -> None:
+        raw_pool = _CountingAsyncOraclePool(min_size=0, max_size=2)
+        counting_client = _CountingAsyncOracleClient()
+        raw_pool._idle.append(counting_client)
+        pool = AsyncOraclePool(native_pool=raw_pool)
+        driver = AsyncOracleDriver(pool=pool)
+
+        await driver.begin()
+        assert driver.client is counting_client
+        counting_client.queued_results.append(_make_single_call_result(method_name))
+
+        checked_calls: list[str] = []
+
+        async def _spy_checked(*args: Any, **kwargs: Any) -> Any:
+            checked_calls.append("checked")
+            raise AssertionError("pinned direct route must not enter _single_call_checked")
+
+        monkeypatch.setattr(driver, "_single_call_checked", _spy_checked)
+
+        result = await getattr(driver, method_name)(sql)
+        await driver.rollback()
+
+        assert result == expected_result
+        single_entries = [kind for kind, _ in counting_client.calls if kind in _SINGLE_CALL_NATIVE_METHODS]
+        assert single_entries == [expected_native]
+        assert counting_client.cursor_calls == []
+        assert counting_client.await_counter == [1]
+        assert raw_pool.single_calls == []
+        assert raw_pool.await_counter == [0]
+        assert checked_calls == []
+        assert pool.borrowed_size == 0
+        await driver.close()
+        await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_single_call_pinned_transaction_route() -> None:
+    """Verify statements inside begin()/rollback() run on the pinned client without pool single-calls."""
+
+    async def _run() -> None:
+        raw_pool = _CountingAsyncOraclePool(min_size=0, max_size=2)
+        counting_client = _CountingAsyncOracleClient()
+        raw_pool._idle.append(counting_client)
+        pool = AsyncOraclePool(native_pool=raw_pool)
+        driver = AsyncOracleDriver(pool=pool)
+
+        await driver.begin()
+        pinned = cast("_CountingAsyncOracleClient", driver.client)
+        pinned.queued_results.extend(
+            [
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+                _oracle.OracleQueryResult([], [], rowcount=2),
+                _oracle.OracleQueryResult([], [], rowcount=3, lastrowid="AAARowId"),
+            ]
+        )
+
+        assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert await driver.execute("UPDATE items SET n = 1") == 2
+        assert await driver.execute_dml("UPDATE items SET n = 2") == (3, "AAARowId")
+        await driver.rollback()
+
+        single_entries = [kind for kind, _ in pinned.calls if kind in _SINGLE_CALL_NATIVE_METHODS]
+        assert single_entries == ["fetch_dicts", "execute_dml", "execute_dml"]
+        assert pinned.cursor_calls == []
+        assert pinned.await_counter == [3]
+        assert raw_pool.single_calls == []
+        assert pool.borrowed_size == 0
+        await driver.close()
+        await pool.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("mode", ["single", "pooled", "pinned"])
+def test_async_oracle_driver_query_methods_skip_checkout_generators(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Verify none of the eight async query methods enter checkout_cursor or _checkout_client."""
+
+    async def _run() -> None:
+        raw_pool: _StubAsyncOraclePool | None = None
+        pool: AsyncOraclePool | None = None
+        stub: _StubAsyncOracleClient | None = None
+        if mode == "single":
+            stub = _StubAsyncOracleClient()
+            driver = AsyncOracleDriver(client=stub)
+        else:
+            raw_pool = _StubAsyncOraclePool(min_size=0, max_size=2)
+            pool = AsyncOraclePool(native_pool=raw_pool)
+            driver = AsyncOracleDriver(pool=pool)
+            if mode == "pinned":
+                await driver.begin()
+
+        generator_calls: list[str] = []
+
+        def _spy_checkout_cursor(*args: Any, **kwargs: Any) -> Any:
+            generator_calls.append("checkout_cursor")
+            raise AssertionError("checkout_cursor must not be entered by query methods")
+
+        def _spy_checkout_client(*args: Any, **kwargs: Any) -> Any:
+            generator_calls.append("_checkout_client")
+            raise AssertionError("_checkout_client must not be entered by query methods")
+
+        monkeypatch.setattr(driver, "checkout_cursor", _spy_checkout_cursor)
+        monkeypatch.setattr(driver, "_checkout_client", _spy_checkout_client)
+
+        target_queue = (
+            stub.queued_results
+            if stub is not None
+            else (
+                cast("_StubAsyncOracleClient", driver.client).queued_results
+                if mode == "pinned"
+                else cast("_StubAsyncOraclePool", raw_pool).single_call_results
+            )
+        )
+        for method_name, sql, _, expected_result in _SYNC_SINGLE_CALL_CASES:
+            target_queue.append(_make_single_call_result(method_name))
+            assert await getattr(driver, method_name)(sql) == expected_result
+
+        assert generator_calls == []
+        if mode == "pinned":
+            await driver.rollback()
+        await driver.close()
+        if pool is not None:
+            await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_typed_select_value_type_returning_and_out_binds_reset() -> None:
+    """Verify async schema_type hydration, value_type, NotFoundError, exec_returning_async, and out_binds reset."""
+
+    async def _run() -> None:
+        stub = _StubAsyncOracleClient()
+        stub.queued_results.extend(
+            [
+                _oracle.OracleQueryResult(
+                    [_oracle.OracleColumn("EMPLOYEE_ID", "NUMBER"), _oracle.OracleColumn("FIRST_NAME", "VARCHAR2")],
+                    [(1, "Ada")],
+                    rowcount=1,
+                ),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("V", "VARCHAR2")], [("42",)], rowcount=1),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("V", "NUMBER")], [], rowcount=0),
+                _oracle.OracleQueryResult([], [], rowcount=2),
+                _oracle.OracleQueryResult([], [], rowcount=1, lastrowid="AAARowId"),
+                _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 99}),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+                _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 77}),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(7,)], rowcount=1),
+                _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 55}),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(8,)], rowcount=1),
+                _oracle.OracleQueryResult([], [], rowcount=1, out_binds={"out": 33}),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(9,)], rowcount=1),
+                _oracle.OracleQueryResult(
+                    [_oracle.OracleColumn("EMPLOYEE_ID", "NUMBER"), _oracle.OracleColumn("FIRST_NAME", "VARCHAR2")],
+                    [],
+                    rowcount=1,
+                    out_binds={"employee_id": 7, "first_name": "Grace"},
+                ),
+                _oracle.OracleQueryResult(
+                    [_oracle.OracleColumn("EMPLOYEE_ID", "NUMBER"), _oracle.OracleColumn("FIRST_NAME", "VARCHAR2")],
+                    [],
+                    rowcount=1,
+                    out_binds={"employee_id": 8, "first_name": "Linus"},
+                ),
+            ]
+        )
+        driver = AsyncOracleDriver(client=stub)
+
+        hydrated = await driver.select("SELECT employee_id, first_name FROM employees", schema_type=_EmployeeRow)
+        assert hydrated == [_EmployeeRow(employee_id=1, first_name="Ada")]
+        assert [k for k, _ in stub.calls if k in _SINGLE_CALL_NATIVE_METHODS] == ["fetch_rows"]
+        assert stub.cursor_calls == []
+
+        assert await driver.select_value("SELECT '42' AS v FROM dual", value_type=int) == 42
+        with pytest.raises(NotFoundError):
+            await driver.select_value("SELECT 1 AS v FROM dual WHERE 1 = 0")
+
+        assert await driver.execute_dml("UPDATE items SET n = 1") == (2, None)
+        assert await driver.execute_dml("INSERT INTO items (n) VALUES (1)") == (1, "AAARowId")
+
+        out_var = _oracle.OracleOutBindVar("NUMBER")
+        assert await driver.execute("BEGIN :out := 99; END;", {"out": out_var}) == 1
+        assert out_var.getvalue() == 99
+        assert driver.out_binds == {"out": 99}
+
+        assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert driver.out_binds is None
+
+        assert await driver.execute("BEGIN :out := 77; END;", {"out": out_var}) == 1
+        assert driver.out_binds == {"out": 77}
+        assert await driver.select_value("SELECT 7 AS a FROM dual") == 7
+        assert driver.out_binds is None
+
+        assert await driver.execute("BEGIN :out := 55; END;", {"out": out_var}) == 1
+        assert driver.out_binds == {"out": 55}
+        assert await driver.execute_tuples("SELECT 8 AS a FROM dual") == [(8,)]
+        assert driver.out_binds is None
+
+        assert await driver.execute("BEGIN :out := 33; END;", {"out": out_var}) == 1
+        assert driver.out_binds == {"out": 33}
+        assert await driver.execute_with_description("SELECT 9 AS a FROM dual") == ([(9,)], ("a",))
+        assert driver.out_binds is None
+
+        returning_sql = (
+            "INSERT INTO employees (first_name) VALUES (:first_name) "
+            "RETURNING employee_id, first_name INTO :employee_id, :first_name"
+        )
+        assert await driver.exec_returning_async(returning_sql, {"first_name": "Grace"}) == [
+            {"employee_id": 7, "first_name": "Grace"}
+        ]
+        assert await driver.exec_returning_async(
+            returning_sql,
+            {"first_name": "Linus"},
+            schema_type=_EmployeeRow,
+        ) == [_EmployeeRow(employee_id=8, first_name="Linus")]
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_session_context_tracking_and_plain_dml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify async execute tracks DBMS_SESSION.SET_IDENTIFIER and skips tracking on plain DML."""
+
+    async def _run() -> None:
+        stub = _StubAsyncOracleClient()
+        driver = AsyncOracleDriver(client=stub)
+
+        await driver.execute(
+            "BEGIN DBMS_SESSION.SET_IDENTIFIER(:value); END;",
+            {"value": "tenant-42"},
+        )
+        assert driver._session_context[("USERENV", "CLIENT_IDENTIFIER")] == "tenant-42"
+
+        track_calls: list[str] = []
+        original_track = OracleCore.track_session_context_sql
+
+        def _spy_track(session_context: dict[tuple[str, str], str], sql: str, params: Any) -> None:
+            track_calls.append(sql)
+            original_track(session_context, sql, params)
+
+        monkeypatch.setattr(OracleCore, "track_session_context_sql", staticmethod(_spy_track))
+        assert await driver.execute("UPDATE items SET n = 1") == 1
+        assert track_calls == []
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("use_pool", [False, True])
+def test_async_oracle_driver_pending_session_attrs_then_direct_route(
+    monkeypatch: pytest.MonkeyPatch,
+    use_pool: bool,
+) -> None:
+    """Verify async pending session attributes apply once, then later statements take the direct route."""
+
+    async def _run() -> None:
+        cfg = OracleConfig(client_identifier="user-7")
+        if use_pool:
+            raw_pool = _CountingAsyncOraclePool(min_size=0, max_size=2)
+            pool = AsyncOraclePool(cfg, native_pool=raw_pool)
+            driver = AsyncOracleDriver(cfg, pool=pool)
+            assert driver._pending_session_attrs is not None
+
+            assert await driver.execute("UPDATE items SET n = 1") == 1
+            assert driver._pending_session_attrs is None
+            assert driver.last_piggyback_frame is not None
+            assert raw_pool.single_calls == []
+            assert len(raw_pool.created_clients) == 1
+            assert raw_pool.created_clients[0].active_session_attrs["client_identifier"] == "user-7"
+
+            checked_calls: list[str] = []
+
+            async def _spy_checked(*args: Any, **kwargs: Any) -> Any:
+                checked_calls.append("checked")
+                raise AssertionError("subsequent pooled statements must take the direct route")
+
+            monkeypatch.setattr(driver, "_single_call_checked", _spy_checked)
+            raw_pool.single_call_results.append(
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+            )
+            assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+            assert [entry[0] for entry in raw_pool.single_calls] == ["fetch_dicts"]
+            assert raw_pool.await_counter == [1]
+            assert checked_calls == []
+            await driver.close()
+            await pool.close()
+            return
+
+        stub = _CountingAsyncOracleClient()
+        stub.queued_results.extend(
+            [
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1),
+                _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(2,)], rowcount=1),
+            ]
+        )
+        driver = AsyncOracleDriver(cfg, client=stub)
+        assert driver._pending_session_attrs is not None
+
+        assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        assert driver._pending_session_attrs is None
+        assert stub.active_session_attrs["client_identifier"] == "user-7"
+        assert driver.last_piggyback_frame is not None
+
+        apply_calls: list[Any] = []
+        checked_calls = []
+
+        async def _spy_checked_single(*args: Any, **kwargs: Any) -> Any:
+            checked_calls.append("checked")
+            raise AssertionError("subsequent single-client statements must take the direct route")
+
+        monkeypatch.setattr(driver, "_apply_pending_session_attrs", apply_calls.append)
+        monkeypatch.setattr(driver, "_single_call_checked", _spy_checked_single)
+        assert await driver.select("SELECT 2 AS a FROM dual") == [{"a": 2}]
+        assert apply_calls == []
+        assert checked_calls == []
+        assert stub.cursor_calls == []
+        assert stub.await_counter == [2]
+        await driver.close()
+
+    asyncio.run(_run())
+
+
+def test_async_oracle_driver_pooled_broker_autocommit_cancel_and_fatal_discard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pooled async broker leases per autocommit statement, cancel cleanup, and ORA-03113 discard."""
+
+    async def _run() -> None:
+        broker = _AsyncRecordingLeaseBroker()
+        raw_pool = _StubAsyncOraclePool(min_size=0, max_size=2)
+        pool = AsyncOraclePool(native_pool=raw_pool)
+        driver = AsyncOracleDriver(pool=pool, broker=broker)
+
+        release_discards: list[bool] = []
+        original_release = pool.release_to_pool
+
+        async def _spy_release(client: Any, **kwargs: Any) -> None:
+            release_discards.append(bool(kwargs.get("discard", False)))
+            await original_release(client, **kwargs)
+
+        monkeypatch.setattr(pool, "release_to_pool", _spy_release)
+
+        assert await driver.execute("UPDATE items SET n = 1") == 1
+        raw_pool._idle[0].queued_results.append(
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(1,)], rowcount=1)
+        )
+        assert await driver.select("SELECT 1 AS a FROM dual") == [{"a": 1}]
+        raw_pool._idle[0].queued_results.append(
+            _oracle.OracleQueryResult([_oracle.OracleColumn("A", "NUMBER")], [(9,)], rowcount=1)
+        )
+        assert await driver.select_value("SELECT 9 AS a FROM dual") == 9
+
+        assert len(broker.acquire_calls) == 3
+        assert len(broker.release_calls) == 3
+        assert raw_pool.single_calls == []
+        assert release_discards == [False, False, False]
+
+        entered = asyncio.Event()
+        idle_client = raw_pool._idle[0]
+        original_fetch_value = idle_client.fetch_value
+
+        async def _blocking_fetch_value(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            await asyncio.sleep(60)
+            return await original_fetch_value(*args, **kwargs)
+
+        monkeypatch.setattr(idle_client, "fetch_value", _blocking_fetch_value)
+        task = asyncio.create_task(driver.select_value("SELECT 1 FROM dual"))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        monkeypatch.setattr(idle_client, "fetch_value", original_fetch_value)
+
+        assert len(broker.acquire_calls) == 4
+        assert len(broker.release_calls) == 4
+        assert pool.borrowed_size == 0
+        assert pool.idle_size == 1
+
+        fatal_err = OperationalError("ORA-03113: end-of-file on communication channel")
+        fatal_err.vendor_code = 3113
+        fatal_err.is_transient = True
+        raw_pool._idle[0].queued_results.append(fatal_err)
+        with pytest.raises(OperationalError, match="ORA-03113"):
+            await driver.execute("SELECT 1 FROM dual")
+
+        assert len(broker.acquire_calls) == 5
+        assert len(broker.release_calls) == 5
+        assert release_discards == [False, False, False, False, True]
+        assert pool.idle_size == 0
+        assert pool.borrowed_size == 0
+        await driver.close()
+        await pool.close()
+
+    asyncio.run(_run())

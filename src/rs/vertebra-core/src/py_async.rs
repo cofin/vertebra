@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -393,6 +393,60 @@ impl Drop for RustTaskAwaitable {
     }
 }
 
+enum ReadyOutcome {
+    Value(Py<PyAny>),
+    Error(PyErr),
+}
+
+/// Awaitable that is already complete with a value or an error.
+#[pyclass(
+    name = "ReadyAwaitable",
+    module = "vertebra._vertebra",
+    frozen,
+    immutable_type
+)]
+pub struct ReadyAwaitable {
+    outcome: ReadyOutcome,
+}
+
+#[pymethods]
+impl ReadyAwaitable {
+    fn __await__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    fn __iter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.outcome {
+            ReadyOutcome::Value(value) => Err(PyStopIteration::new_err((value.clone_ref(py),))),
+            ReadyOutcome::Error(err) => Err(err.clone_ref(py)),
+        }
+    }
+}
+
+/// Return an awaitable that completes with `value`.
+pub fn ready_ok(py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<ReadyAwaitable>> {
+    Py::new(
+        py,
+        ReadyAwaitable {
+            outcome: ReadyOutcome::Value(value),
+        },
+    )
+}
+
+/// Return an awaitable that raises `err` when awaited.
+pub fn ready_err(py: Python<'_>, err: PyErr) -> PyResult<Py<ReadyAwaitable>> {
+    Py::new(
+        py,
+        ReadyAwaitable {
+            outcome: ReadyOutcome::Error(err),
+        },
+    )
+}
+
 /// Spawn a background Tokio task and resolve its Python `asyncio.Future` via an `attr_name`-keyed
 /// [`AsyncCompletionQueue`] drainer attached to the running event loop, passing the original Python
 /// `Future` to `map_ok` so mappers can gate side effects on owning-loop cancellation.
@@ -578,7 +632,7 @@ mod tests {
     use pyo3::types::{PyCFunction, PyDict, PyModule, PyTuple};
 
     use super::{
-        block_on_runtime, ensure_completion_ring, spawn_rust_task_with_attr,
+        block_on_runtime, ensure_completion_ring, ready_err, ready_ok, spawn_rust_task_with_attr,
         spawn_rust_task_with_attr_and_cancel, spawn_rust_task_with_attr_and_future,
     };
 
@@ -1229,5 +1283,213 @@ mod tests {
         assert!(observed_future_match.load(Ordering::SeqCst));
         assert!(dropped_after_cancel.load(Ordering::SeqCst));
         assert!(!observed_cancelled_in_mapper.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ready_ok_returns_value_without_loop_iteration() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_ok =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    let py = args.py();
+                    ready_ok(py, 123_i64.into_pyobject(py)?.into_any().unbind())
+                })
+                .expect("make_ok");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_ok", make_ok).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    loop = asyncio.get_running_loop()\n",
+                "    ran = []\n",
+                "    loop.call_soon(ran.append, 1)\n",
+                "    val = await make_ok()\n",
+                "    after_await = list(ran)\n",
+                "    await asyncio.sleep(0)\n",
+                "    after_sleep = list(ran)\n",
+                "    return (val, after_await, after_sleep)\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: (i64, Vec<i64>, Vec<i64>) = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, (123, vec![], vec![1]));
+        });
+    }
+
+    #[test]
+    fn ready_err_raises_stored_error_without_loop_iteration() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_err =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    ready_err(args.py(), pyo3::exceptions::PyValueError::new_err("boom"))
+                })
+                .expect("make_err");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_err", make_err).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    loop = asyncio.get_running_loop()\n",
+                "    ran = []\n",
+                "    loop.call_soon(ran.append, 1)\n",
+                "    err_msg = None\n",
+                "    try:\n",
+                "        await make_err()\n",
+                "    except ValueError as exc:\n",
+                "        err_msg = str(exc)\n",
+                "    after_await = list(ran)\n",
+                "    await asyncio.sleep(0)\n",
+                "    after_sleep = list(ran)\n",
+                "    return (err_msg, after_await, after_sleep)\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: (String, Vec<i64>, Vec<i64>) = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, ("boom".to_string(), vec![], vec![1]));
+        });
+    }
+
+    #[test]
+    fn ready_ok_keeps_tuple_value_intact() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_tuple =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    let py = args.py();
+                    ready_ok(py, (1_i64, 2_i64).into_pyobject(py)?.into_any().unbind())
+                })
+                .expect("make_tuple");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_tuple", make_tuple).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    val = await make_tuple()\n",
+                "    return (val, type(val) is tuple)\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: ((i64, i64), bool) = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, ((1, 2), true));
+        });
+    }
+
+    #[test]
+    fn ready_awaitable_can_be_awaited_twice() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_ok =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    let py = args.py();
+                    ready_ok(py, 123_i64.into_pyobject(py)?.into_any().unbind())
+                })
+                .expect("make_ok");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_ok", make_ok).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    obj = make_ok()\n",
+                "    a = await obj\n",
+                "    b = await obj\n",
+                "    return (a, b)\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: (i64, i64) = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, (123, 123));
+        });
+    }
+
+    #[test]
+    fn ready_ok_needs_no_running_loop() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_ok =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    let py = args.py();
+                    ready_ok(py, 123_i64.into_pyobject(py)?.into_any().unbind())
+                })
+                .expect("make_ok");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_ok", make_ok).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "obj = make_ok()\n",
+                "async def main():\n",
+                "    return await obj\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: i64 = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, 123);
+        });
+    }
+
+    #[test]
+    fn ready_awaitable_works_with_wait_for() {
+        Python::initialize();
+        Python::attach(|py| {
+            let make_ok =
+                PyCFunction::new_closure(py, None, None, |args: &Bound<'_, PyTuple>, _| {
+                    let py = args.py();
+                    ready_ok(py, 123_i64.into_pyobject(py)?.into_any().unbind())
+                })
+                .expect("make_ok");
+
+            let globals = PyDict::new(py);
+            globals.set_item("make_ok", make_ok).unwrap();
+            let script = CString::new(concat!(
+                "import asyncio\n",
+                "async def main():\n",
+                "    return await asyncio.wait_for(make_ok(), 1)\n",
+                "result = asyncio.run(main())\n",
+            ))
+            .unwrap();
+            py.run(&script, Some(&globals), None).unwrap();
+            let res: i64 = globals
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(res, 123);
+        });
     }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import inspect
 import os
 from collections.abc import Sequence
@@ -19,8 +20,6 @@ from vertebra.utils.module_loader import ensure_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from vertebra._vertebra import StatementCache, StatementPlan
 
 __all__ = (
     "BIGQUERY_DIALECT_TAG",
@@ -110,7 +109,10 @@ class BaseDatabaseConfig(FrozenBaseStruct, frozen=True, gc=False):
 
 
 class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
-    """Shared attributes, SHM lease management, SQL trace annotation, and row hydration for drivers."""
+    """Shared attributes, SHM lease helpers, SQL trace annotation, and row hydration for drivers.
+
+    Broker leases are taken at connection checkout and released when the connection or client closes.
+    """
 
     dialect_tag: ClassVar[int] = 0
 
@@ -177,26 +179,13 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
                 return lease_table.acquire(os.getpid())
         return None
 
-    def _release_broker_lease(self, lease: Any) -> None:
-        """Release a previously acquired connection lease back to the `LeaseBroker`."""
-        broker = self._broker
-        if broker is None or lease is None:
-            return
-        plan = self._lease_plan()
-        if plan.lease_releases_itself(lease):
-            with contextlib.suppress(RuntimeError):
-                lease.release()
-            return
-        if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
-            return
-        if plan.has_sync_release:
-            with contextlib.suppress(RuntimeError):
-                broker.release(lease.slot_index, lease.generation)
-            return
-        lease_table = getattr(broker, "lease_table", None)
-        if lease_table is not None:
-            with contextlib.suppress(RuntimeError):
-                lease_table.release(lease.slot_index, lease.generation)
+    def _attach_checkout_lease(self, client: Any, timeout_ms: int = 5000) -> bool:
+        """Acquire a checkout lease and attach its releaser to `client.attach_lease`."""
+        lease = self._acquire_broker_lease(timeout_ms)
+        if lease is None:
+            return False
+        client.attach_lease(_lease_releaser(self._broker, self._lease_plan(), lease))
+        return True
 
     def _acquire_pid_lease(self) -> Any:
         """Acquire a PID-bound lease from the shared-memory `LeaseBroker` when configured."""
@@ -228,31 +217,6 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
             with contextlib.suppress(Exception):
                 broker.release(lease.slot_index, lease.generation)
 
-    def _lookup_or_cache_statement(
-        self,
-        sql: str,
-        *,
-        param_count: int = 0,
-        compiled_sql: bytes | None = None,
-        param_plan: bytes = b"",
-    ) -> StatementPlan | None:
-        """Lookup or register a UTF-8 SQL statement plan in the broker `StatementCache`."""
-        if self._broker is None:
-            return None
-        sc_attr: StatementCache | Callable[[], StatementCache | None] | None = getattr(
-            self._broker, "statement_cache", None
-        )
-        sc: StatementCache | None = sc_attr() if callable(sc_attr) else sc_attr
-        if sc is None:
-            return None
-        raw_bytes = sql.encode("utf-8")
-        tag = int(self.dialect_tag)
-        cached: StatementPlan | None = sc.lookup(tag, raw_bytes)
-        if cached is not None:
-            return cached
-        sc.insert(tag, raw_bytes, param_count, compiled_sql or raw_bytes, param_plan)
-        return None
-
     @staticmethod
     def _annotate_sql(sql: str, *, propagate_trace: bool = True) -> str:
         """Append an OpenTelemetry `traceparent` SQL comment when trace propagation is enabled."""
@@ -262,13 +226,6 @@ class CommonDriverMixin[ConfigT: BaseDatabaseConfig]:
         if ctx is not None:
             return f"{sql} /*traceparent='{ctx.format()}'*/"
         return sql
-
-    @staticmethod
-    def _extract_column_names(description: Any) -> tuple[str, ...]:
-        """Normalize a DB-API cursor `description` or string sequence into `tuple[str, ...]`."""
-        if not description:
-            return ()
-        return tuple(col[0] if isinstance(col, tuple) else str(col) for col in description)
 
 
 class _BrokerLeasePlan:
@@ -280,6 +237,7 @@ class _BrokerLeasePlan:
         "accepts_timeout_ms",
         "acquire_is_coroutine",
         "broker",
+        "default_acquire_kwargs",
         "has_acquire",
         "has_sync_release",
     )
@@ -302,6 +260,7 @@ class _BrokerLeasePlan:
         release_fn = getattr(broker, "release", None)
         self.has_sync_release: bool = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
         self._self_releasing_lease_types: dict[type, bool] = {}
+        self.default_acquire_kwargs: dict[str, Any] = self.acquire_kwargs(5000, 0)
 
     def acquire_kwargs(self, timeout_ms: int, bind_key_hash: int) -> dict[str, Any]:
         """Return the keyword arguments the broker's `acquire` accepts."""
@@ -321,3 +280,28 @@ class _BrokerLeasePlan:
             known = callable(release_fn) and not inspect.iscoroutinefunction(release_fn)
             self._self_releasing_lease_types[lease_type] = known
         return known
+
+
+def _release_lease(broker: Any, plan: _BrokerLeasePlan, lease: Any) -> None:
+    """Return a lease to its broker using the release shape the plan recorded."""
+    if broker is None or lease is None:
+        return
+    if plan.lease_releases_itself(lease):
+        with contextlib.suppress(RuntimeError):
+            lease.release()
+        return
+    if not (hasattr(lease, "slot_index") and hasattr(lease, "generation")):
+        return
+    if plan.has_sync_release:
+        with contextlib.suppress(RuntimeError):
+            broker.release(lease.slot_index, lease.generation)
+        return
+    lease_table = getattr(broker, "lease_table", None)
+    if lease_table is not None:
+        with contextlib.suppress(RuntimeError):
+            lease_table.release(lease.slot_index, lease.generation)
+
+
+def _lease_releaser(broker: Any, plan: _BrokerLeasePlan, lease: Any) -> Callable[[], None]:
+    """Return a zero-argument callable that releases the lease and holds no driver reference."""
+    return functools.partial(_release_lease, broker, plan, lease)

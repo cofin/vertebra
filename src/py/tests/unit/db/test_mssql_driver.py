@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import importlib
 import socket
 import struct
@@ -22,6 +23,7 @@ from vertebra._vertebra import (
     IntegrityError,
     InterfaceError,
     NotFoundError,
+    OperationalError,
     ProgrammingError,
     QueryCancelledError,
     SerializationFailure,
@@ -192,6 +194,85 @@ class _TdsWireBuilder:
         )
         return cls.build_packet(0x04, 0x01, tokens)
 
+    @classmethod
+    def select_int_nvarchar_response(cls, col1: str, col2: str, rows: list[tuple[int, str]]) -> bytes:
+        """Build a two-column `(col1: Int4, col2: NVarchar)` result set packet."""
+        colmeta = (
+            bytes([0x81])
+            + struct.pack("<H", 2)
+            + struct.pack("<IHB", 0, 0x08, 0x38)
+            + cls._utf16_b_varchar(col1)
+            + struct.pack("<IHBH", 0, 0x08, 0xE7, 256)
+            + bytes([0x09, 0x04, 0xD0, 0x00, 0x34])
+            + cls._utf16_b_varchar(col2)
+        )
+        row_tokens = bytearray()
+        for int_val, str_val in rows:
+            utf16 = str_val.encode("utf-16-le")
+            row_tokens.append(0xD1)
+            row_tokens.extend(struct.pack("<i", int_val))
+            row_tokens.extend(struct.pack("<H", len(utf16)))
+            row_tokens.extend(utf16)
+        tokens = (
+            colmeta + bytes(row_tokens) + cls.doneinproc_token(0x0010, 0xC1, len(rows)) + cls.doneproc_token(0, 0, 0)
+        )
+        return cls.build_packet(0x04, 0x01, tokens)
+
+    @classmethod
+    def select_str_response(cls, col_name: str, value: str) -> bytes:
+        """Build a single-column `NVarchar` result set packet."""
+        colmeta = (
+            bytes([0x81])
+            + struct.pack("<H", 1)
+            + struct.pack("<IHBH", 0, 0x08, 0xE7, 256)
+            + bytes([0x09, 0x04, 0xD0, 0x00, 0x34])
+            + cls._utf16_b_varchar(col_name)
+        )
+        utf16 = value.encode("utf-16-le")
+        row_token = bytes([0xD1]) + struct.pack("<H", len(utf16)) + utf16
+        tokens = colmeta + row_token + cls.doneinproc_token(0x0010, 0xC1, 1) + cls.doneproc_token(0, 0, 0)
+        return cls.build_packet(0x04, 0x01, tokens)
+
+    @classmethod
+    def select_int_rows_response(cls, col_name: str, values: list[int]) -> bytes:
+        """Build a single-column `Int4` result set packet with zero or more rows."""
+        colmeta = (
+            bytes([0x81]) + struct.pack("<H", 1) + struct.pack("<IHB", 0, 0x08, 0x38) + cls._utf16_b_varchar(col_name)
+        )
+        row_tokens = bytearray()
+        for val in values:
+            row_tokens.append(0xD1)
+            row_tokens.extend(struct.pack("<i", val))
+        tokens = (
+            colmeta + bytes(row_tokens) + cls.doneinproc_token(0x0010, 0xC1, len(values)) + cls.doneproc_token(0, 0, 0)
+        )
+        return cls.build_packet(0x04, 0x01, tokens)
+
+    @classmethod
+    def multi_result_response(cls) -> bytes:
+        """Build a packet containing two result sets to verify only the first is stored."""
+        first_meta = (
+            bytes([0x81]) + struct.pack("<H", 1) + struct.pack("<IHB", 0, 0x08, 0x38) + cls._utf16_b_varchar("first_id")
+        )
+        first_rows = bytes([0xD1]) + struct.pack("<i", 10) + bytes([0xD1]) + struct.pack("<i", 20)
+        second_meta = (
+            bytes([0x81])
+            + struct.pack("<H", 1)
+            + struct.pack("<IHB", 0, 0x08, 0x38)
+            + cls._utf16_b_varchar("second_id")
+        )
+        second_rows = bytes([0xD1]) + struct.pack("<i", 99)
+        tokens = (
+            first_meta
+            + first_rows
+            + cls.doneinproc_token(0x0011, 0xC1, 2)
+            + second_meta
+            + second_rows
+            + cls.doneinproc_token(0x0010, 0xC1, 1)
+            + cls.doneproc_token(0, 0, 0)
+        )
+        return cls.build_packet(0x04, 0x01, tokens)
+
 
 class _LoopbackTdsServer:
     """In-process TCP TDS 7.4 loopback server for exercising `SyncMSSQLDriver` and `AsyncMSSQLDriver`."""
@@ -201,6 +282,7 @@ class _LoopbackTdsServer:
         *,
         reject_login_predicate: Any = None,
         close_after_query: bool = False,
+        fail_begin: bool = False,
     ) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -210,6 +292,10 @@ class _LoopbackTdsServer:
         self._stop = threading.Event()
         self._reject_login_predicate = reject_login_predicate
         self._close_after_query = close_after_query
+        self.fail_begin = fail_begin
+        self.release_slow = threading.Event()
+        self.slow_started = threading.Event()
+        self.committed_rows: list[int] = []
         self.received_logins: list[bytes] = []
         self.received_packet_types: list[int] = []
         self.received_payloads: list[tuple[int, bytes]] = []
@@ -291,6 +377,9 @@ class _LoopbackTdsServer:
                 return
             conn.sendall(_TdsWireBuilder.login_success_packet())
 
+            in_tx = False
+            pending_rows: list[int] = []
+
             while not self._stop.is_set():
                 msg = self._read_message(conn)
                 if msg is None:
@@ -323,15 +412,26 @@ class _LoopbackTdsServer:
                 if pkt_type == 0x0E:
                     req_type = struct.unpack("<H", payload[22:24])[0] if len(payload) >= 24 else 0
                     self.received_tx_requests.append(req_type)
+                    if req_type == 5 and self.fail_begin:
+                        err = _TdsWireBuilder.error_token(3902, 1, 16, "BEGIN TRANSACTION failed")
+                        done = _TdsWireBuilder.done_token(0x0002, 0, 0)
+                        conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, err + done))
+                        continue
                     resp = bytearray()
                     if req_type == 5:
+                        in_tx = True
                         resp.extend([0xE3, 11, 0, 8, 8])
                         resp.extend(struct.pack("<Q", 0x1122334455667788))
                         resp.append(0)
                     elif req_type == 7:
+                        self.committed_rows.extend(pending_rows)
+                        pending_rows.clear()
+                        in_tx = False
                         resp.extend([0xE3, 11, 0, 9, 0, 8])
                         resp.extend(struct.pack("<Q", 0x1122334455667788))
                     elif req_type == 8:
+                        pending_rows.clear()
+                        in_tx = False
                         resp.extend([0xE3, 11, 0, 10, 0, 8])
                         resp.extend(struct.pack("<Q", 0x1122334455667788))
                     resp.extend(_TdsWireBuilder.done_token(0x0000, 0, 0))
@@ -350,6 +450,65 @@ class _LoopbackTdsServer:
                         + _TdsWireBuilder.done_token(0x0000, 0, 0)
                     )
                     conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, colmeta))
+                elif "SELECT 1 AS a, N'x' AS b" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_nvarchar_response("a", "b", [(1, "x")]))
+                elif "SELECT 1 AS a, 2 AS b" in utf16_text:
+                    colmeta = (
+                        bytes([0x81])
+                        + struct.pack("<H", 2)
+                        + struct.pack("<IHB", 0, 0x08, 0x38)
+                        + _TdsWireBuilder._utf16_b_varchar("a")
+                        + struct.pack("<IHB", 0, 0x08, 0x38)
+                        + _TdsWireBuilder._utf16_b_varchar("b")
+                    )
+                    row_token = bytes([0xD1]) + struct.pack("<ii", 1, 2)
+                    tokens = (
+                        colmeta
+                        + row_token
+                        + _TdsWireBuilder.doneinproc_token(0x0010, 0xC1, 1)
+                        + _TdsWireBuilder.doneproc_token(0, 0, 0)
+                    )
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, tokens))
+                elif "SELECT 1 AS a" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_response("a", 1))
+                elif "SELECT @P1 AS a" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_response("a", 5))
+                elif "UPDATE two_rows" in utf16_text:
+                    tokens = _TdsWireBuilder.doneinproc_token(0x0010, 0xC1, 2) + _TdsWireBuilder.doneproc_token(0, 0, 0)
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, tokens))
+                elif "SELECT 1 WHERE 1 = 0" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_rows_response("c", []))
+                elif "SELECT 'output' AS output" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_str_response("output", "output"))
+                elif "SELECT @P1 + @P2" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_response("sum", 3))
+                elif "CREATE TABLE #t" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, _TdsWireBuilder.done_token(0x0000, 0, 0)))
+                elif "INSERT INTO #three" in utf16_text:
+                    tokens = _TdsWireBuilder.doneinproc_token(0x0010, 0xC1, 3) + _TdsWireBuilder.doneproc_token(0, 0, 0)
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, tokens))
+                elif "OUTPUT inserted.id" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.select_int_rows_response("id", [101, 102]))
+                elif "SELECT_MULTI" in utf16_text:
+                    conn.sendall(_TdsWireBuilder.multi_result_response())
+                elif "SELEC 1" in utf16_text:
+                    err = _TdsWireBuilder.error_token(102, 1, 15, "Incorrect syntax near 'SELEC'")
+                    done = _TdsWireBuilder.done_token(0x0002, 0xC1, 0)
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, err + done))
+                elif "INSERT INTO #lazy_t" in utf16_text:
+                    if in_tx:
+                        pending_rows.append(1)
+                    else:
+                        self.committed_rows.append(1)
+                    tokens = _TdsWireBuilder.doneinproc_token(0x0010, 0xC1, 1) + _TdsWireBuilder.doneproc_token(0, 0, 0)
+                    conn.sendall(_TdsWireBuilder.build_packet(0x04, 0x01, tokens))
+                elif "SELECT COUNT(*) AS cnt FROM #lazy_t" in utf16_text:
+                    total = len(self.committed_rows) + len(pending_rows)
+                    conn.sendall(_TdsWireBuilder.select_int_response("cnt", total))
+                elif "SLOW_CURSOR_HOLD" in utf16_text:
+                    self.slow_started.set()
+                    self.release_slow.wait(timeout=5.0)
+                    conn.sendall(_TdsWireBuilder.select_int_response("slow", 1))
                 elif "SELECT 1" in utf16_text:
                     conn.sendall(_TdsWireBuilder.select_int_response("probe", 1))
                     if self._close_after_query:
@@ -477,7 +636,6 @@ def test_sync_mssql_driver_loopback_execution_arrow_and_transactions() -> None:
 
         rows = driver.select("SELECT_ITEMS WHERE id = ?", (1,))
         assert rows == [{"id": 1, "label": "alpha"}, {"id": 2, "label": "beta"}]
-        assert driver.last_rewritten_sql == "SELECT_ITEMS WHERE id = @P1"
 
         typed_rows = driver.select("SELECT_ITEMS", schema_type=_MssqlItemRow)
         assert typed_rows == [_MssqlItemRow(id=1, label="alpha"), _MssqlItemRow(id=2, label="beta")]
@@ -1216,3 +1374,683 @@ def test_mssql_transport_security_unchanged_for_loopback_or_password_auth(
     )
     assert cfg.encryption == encryption
     assert cfg.trust_server_certificate is trust_server_certificate
+
+
+class TypedParameter:
+    """Minimal TypedParameter stand-in for testing Rust slow-path `.value` unwrapping."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+def test_sync_cursor_matrix_and_fetch_semantics() -> None:
+    """Verify `SyncMSSQLCursor` across select, command, DML, OUTPUT, empty, positional, executemany, multi-set, and errors."""
+    server = _LoopbackTdsServer()
+    client = mssql_native.SyncMSSQLClient(server.dsn)
+    try:
+        cur = client.cursor()
+        assert isinstance(cur, mssql_native.SyncMSSQLCursor)
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+        assert cur.arraysize == 1
+        assert cur.fetchone() is None
+        assert cur.fetchmany() == []
+        assert cur.fetchall() == []
+
+        assert cur.execute("SELECT 1 AS a, N'x' AS b") is cur
+        assert cur.description == (
+            ("a", "int", None, None, None, None, None),
+            ("b", "nvarchar", None, None, None, None, None),
+        )
+        assert cur.rowcount == 1
+        assert cur.fetchall() == [(1, "x")]
+        assert cur.fetchone() is None
+
+        cur.execute("CREATE TABLE #t (id INT)")
+        assert cur.description is None
+        assert cur.fetchone() is None
+        assert cur.fetchall() == []
+
+        cur.execute("INSERT INTO #three (v) VALUES (1), (2), (3)")
+        assert cur.description is None
+        assert cur.rowcount == 3
+
+        cur.execute("INSERT INTO #t (id) OUTPUT inserted.id VALUES (101), (102)")
+        assert cur.description == (("id", "int", None, None, None, None, None),)
+        assert cur.rowcount == 2
+        assert cur.fetchall() == [(101,), (102,)]
+
+        cur.execute("SELECT 'output' AS output")
+        assert cur.description == (("output", "nvarchar", None, None, None, None, None),)
+        assert cur.fetchall() == [("output",)]
+
+        cur.execute("SELECT 1 WHERE 1 = 0")
+        assert cur.description is not None
+        assert cur.rowcount == 0
+        assert cur.fetchall() == []
+
+        cur.execute("SELECT ? + ?", (1, 2))
+        assert server.has_wire_text("SELECT @P1 + @P2")
+        assert cur.fetchall() == [(3,)]
+
+        cur.execute("SELECT ? + ?", (TypedParameter(1), TypedParameter(2)))
+        assert cur.fetchall() == [(3,)]
+
+        cur.execute("SELECT @a + @b", {"a": 1, "b": 2})
+        assert cur.fetchall() == [(3,)]
+
+        cur.execute("SELECT_MULTI")
+        assert cur.description == (("first_id", "int", None, None, None, None, None),)
+        assert cur.rowcount == 2
+        cur.arraysize = 1
+        assert cur.fetchmany(0) == []
+        assert cur.fetchmany() == [(10,)]
+        assert cur.fetchall() == [(20,)]
+
+        with pytest.raises(ProgrammingError):
+            cur.arraysize = 0
+        with pytest.raises(ProgrammingError):
+            cur.fetchmany(-1)
+
+        assert cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(1,), (2,), (TypedParameter(3),)]) is cur
+        assert cur.description is None
+        assert cur.rowcount == 3
+
+        cur.execute("SELECT 1 AS a, N'x' AS b")
+        assert cur.description is not None
+        with pytest.raises(IntegrityError):
+            cur.execute("RAISE_DUP")
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert cur.lastrowid is None
+
+        cur.execute("SELECT 1 AS a, N'x' AS b")
+        with pytest.raises(ProgrammingError):
+            cur.execute("SELEC 1")
+        assert cur.description is None
+        assert cur.rowcount == -1
+
+        cur.close()
+        cur.close()
+        with pytest.raises(InterfaceError):
+            cur.execute("SELECT 1")
+        with pytest.raises(InterfaceError):
+            cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(1,)])
+        with pytest.raises(InterfaceError):
+            cur.fetchone()
+        with pytest.raises(InterfaceError):
+            cur.fetchmany()
+        with pytest.raises(InterfaceError):
+            cur.fetchall()
+
+        with client.cursor() as ctx_cur:
+            assert ctx_cur.execute("SELECT 1 AS a, N'x' AS b").fetchall() == [(1, "x")]
+        with pytest.raises(InterfaceError):
+            ctx_cur.fetchone()
+    finally:
+        client.close()
+        server.close()
+
+
+def test_sync_cursor_lazy_begin_and_rollback_commit() -> None:
+    """Verify `lazy_begin=True` opens transactions on demand, rolls back rows, re-opens after commit, and clears on begin failure."""
+    server = _LoopbackTdsServer()
+    client = mssql_native.SyncMSSQLClient(server.dsn)
+    try:
+        default_cur = client.cursor()
+        default_cur.execute("INSERT INTO #lazy_t VALUES (1)")
+        assert client.in_transaction is False
+        assert server.received_tx_requests == []
+        default_cur.close()
+
+        lazy_cur = client.cursor(lazy_begin=True)
+        lazy_cur.execute("INSERT INTO #lazy_t VALUES (2)")
+        assert client.in_transaction is True
+        assert server.received_tx_requests == [5]
+        assert lazy_cur.execute("SELECT COUNT(*) AS cnt FROM #lazy_t").fetchone() == (2,)
+        client.rollback()
+        assert client.in_transaction is False
+        assert client.cursor().execute("SELECT COUNT(*) AS cnt FROM #lazy_t").fetchone() == (1,)
+
+        lazy_cur.execute("INSERT INTO #lazy_t VALUES (3)")
+        assert client.in_transaction is True
+        client.commit()
+        assert client.in_transaction is False
+
+        lazy_cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(4,), (5,)])
+        assert client.in_transaction is True
+        client.commit()
+        assert client.in_transaction is False
+        assert server.received_tx_requests.count(5) == 3
+
+        lazy_cur.execute("SELECT 1 AS a, N'x' AS b")
+        assert lazy_cur.description is not None
+        client.commit()
+        server.fail_begin = True
+        with pytest.raises(DatabaseError):
+            lazy_cur.execute("INSERT INTO #lazy_t VALUES (6)")
+        assert lazy_cur.description is None
+        assert lazy_cur.rowcount == -1
+        lazy_cur.close()
+    finally:
+        client.close()
+        server.close()
+
+
+def test_sync_cursor_client_lease_lifecycle() -> None:
+    """Verify `SyncMSSQLClient` lease attach, idempotent release, replacement, close, and GC drop."""
+    server = _LoopbackTdsServer()
+    try:
+        calls: list[str] = []
+        client = mssql_native.SyncMSSQLClient(server.dsn)
+        client.attach_lease(lambda: calls.append("first"))
+        client.release_lease()
+        client.release_lease()
+        assert calls == ["first"]
+
+        client.attach_lease(lambda: calls.append("second"))
+        client.attach_lease(lambda: calls.append("third"))
+        assert calls == ["first", "second"]
+        client.close()
+        assert calls == ["first", "second", "third"]
+
+        gc_calls: list[int] = []
+        gc_client: Any = mssql_native.SyncMSSQLClient(server.dsn)
+        gc_client.attach_lease(lambda: gc_calls.append(1))
+        del gc_client
+        gc.collect()
+        assert gc_calls == [1]
+    finally:
+        server.close()
+
+
+def test_async_cursor_matrix_and_concurrent_guard() -> None:
+    """Verify `AsyncMSSQLCursor` across the full matrix, pagination, errors, closed checks, and in-flight guard."""
+
+    async def _run() -> None:
+        server = _LoopbackTdsServer()
+        client = mssql_native.AsyncMSSQLClient(server.dsn)
+        try:
+            cur = client.cursor()
+            assert isinstance(cur, mssql_native.AsyncMSSQLCursor)
+            assert cur.description is None
+            assert cur.rowcount == -1
+            assert cur.lastrowid is None
+            assert cur.arraysize == 1
+            assert await cur.fetchone() is None
+            assert await cur.fetchmany() == []
+            assert await cur.fetchall() == []
+
+            assert await cur.execute("SELECT 1 AS a, N'x' AS b") is cur
+            assert cur.description == (
+                ("a", "int", None, None, None, None, None),
+                ("b", "nvarchar", None, None, None, None, None),
+            )
+            assert cur.rowcount == 1
+            assert await cur.fetchall() == [(1, "x")]
+            assert await cur.fetchone() is None
+
+            await cur.execute("CREATE TABLE #t (id INT)")
+            assert cur.description is None
+
+            await cur.execute("INSERT INTO #three (v) VALUES (1), (2), (3)")
+            assert cur.description is None
+            assert cur.rowcount == 3
+
+            await cur.execute("INSERT INTO #t (id) OUTPUT inserted.id VALUES (101), (102)")
+            assert cur.description == (("id", "int", None, None, None, None, None),)
+            assert cur.rowcount == 2
+            assert await cur.fetchall() == [(101,), (102,)]
+
+            await cur.execute("SELECT 'output' AS output")
+            assert cur.description == (("output", "nvarchar", None, None, None, None, None),)
+            assert await cur.fetchall() == [("output",)]
+
+            await cur.execute("SELECT 1 WHERE 1 = 0")
+            assert cur.description is not None
+            assert cur.rowcount == 0
+            assert await cur.fetchall() == []
+
+            await cur.execute("SELECT ? + ?", (TypedParameter(1), TypedParameter(2)))
+            assert await cur.fetchall() == [(3,)]
+
+            await cur.execute("SELECT @a + @b", {"a": 1, "b": 2})
+            assert await cur.fetchall() == [(3,)]
+
+            await cur.execute("SELECT_MULTI")
+            assert cur.description == (("first_id", "int", None, None, None, None, None),)
+            assert cur.rowcount == 2
+            assert await cur.fetchmany(0) == []
+            assert await cur.fetchmany(1) == [(10,)]
+            assert await cur.fetchall() == [(20,)]
+
+            with pytest.raises(ProgrammingError):
+                cur.arraysize = 0
+            with pytest.raises(ProgrammingError):
+                await cur.fetchmany(-1)
+
+            assert await cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(1,), (2,), (3,)]) is cur
+            assert cur.description is None
+            assert cur.rowcount == 3
+
+            await cur.execute("SELECT 1 AS a, N'x' AS b")
+            with pytest.raises(IntegrityError):
+                await cur.execute("RAISE_DUP")
+            assert cur.description is None
+            assert cur.rowcount == -1
+
+            await cur.execute("SELECT 1 AS a, N'x' AS b")
+            with pytest.raises(ProgrammingError):
+                await cur.execute("SELEC 1")
+            assert cur.description is None
+            assert cur.rowcount == -1
+
+            inflight_task = cur.execute("SLOW_CURSOR_HOLD")
+            while not server.slow_started.is_set():
+                await asyncio.sleep(0.005)
+            with pytest.raises(InterfaceError, match="cursor is already executing"):
+                await cur.execute("SELECT 1")
+            with pytest.raises(InterfaceError, match="cursor is already executing"):
+                await cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(1,)])
+            server.release_slow.set()
+            await inflight_task
+            assert await cur.fetchall() == [(1,)]
+
+            await cur.close()
+            await cur.close()
+            with pytest.raises(InterfaceError):
+                await cur.execute("SELECT 1")
+            with pytest.raises(InterfaceError):
+                await cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(1,)])
+            with pytest.raises(InterfaceError):
+                await cur.fetchone()
+            with pytest.raises(InterfaceError):
+                await cur.fetchmany()
+            with pytest.raises(InterfaceError):
+                await cur.fetchall()
+        finally:
+            server.release_slow.set()
+            await client.close()
+            server.close()
+
+    asyncio.run(_run())
+
+
+def test_async_cursor_fetch_returns_completed_awaitable() -> None:
+    """Verify `AsyncMSSQLCursor.fetchall` returns a completed awaitable without yielding."""
+
+    async def _run() -> None:
+        server = _LoopbackTdsServer()
+        client = mssql_native.AsyncMSSQLClient(server.dsn)
+        try:
+            cur = client.cursor()
+            await cur.execute("SELECT 1 AS a, N'x' AS b")
+            step = cur.fetchall().__await__()
+            with pytest.raises(StopIteration) as exc_info:
+                next(step)
+            assert exc_info.value.value == [(1, "x")]
+        finally:
+            await client.close()
+            server.close()
+
+    asyncio.run(_run())
+
+
+def test_async_cursor_close_takes_effect_at_call() -> None:
+    """Verify `AsyncMSSQLCursor.close` closes state at call time and `fetchone` raises on await."""
+
+    async def _run() -> None:
+        server = _LoopbackTdsServer()
+        client = mssql_native.AsyncMSSQLClient(server.dsn)
+        try:
+            cur = client.cursor()
+            cur.close()
+            pending = cur.fetchone()
+            with pytest.raises(InterfaceError):
+                await pending
+        finally:
+            await client.close()
+            server.close()
+
+    asyncio.run(_run())
+
+
+def test_async_cursor_fetchmany_errors_raise_at_call() -> None:
+    """Verify `AsyncMSSQLCursor.fetchmany` raises negative-size and closed-cursor errors at call time."""
+
+    async def _run() -> None:
+        server = _LoopbackTdsServer()
+        client = mssql_native.AsyncMSSQLClient(server.dsn)
+        try:
+            cur = client.cursor()
+            with pytest.raises(ProgrammingError):
+                cur.fetchmany(-1)
+            cur.close()
+            with pytest.raises(InterfaceError):
+                cur.fetchmany()
+        finally:
+            await client.close()
+            server.close()
+
+    asyncio.run(_run())
+
+
+def test_async_cursor_lazy_begin_and_lease_lifecycle() -> None:
+    """Verify `AsyncMSSQLCursor` `lazy_begin` transitions and `AsyncMSSQLClient` lease release semantics."""
+
+    async def _run() -> None:
+        server = _LoopbackTdsServer()
+        client = mssql_native.AsyncMSSQLClient(server.dsn)
+        try:
+            default_cur = client.cursor()
+            await default_cur.execute("INSERT INTO #lazy_t VALUES (1)")
+            assert client.in_transaction is False
+            await default_cur.close()
+
+            lazy_cur = client.cursor(lazy_begin=True)
+            await lazy_cur.execute("INSERT INTO #lazy_t VALUES (2)")
+            assert client.in_transaction is True
+            await client.rollback()
+            assert client.in_transaction is False
+            check_cur = client.cursor()
+            await check_cur.execute("SELECT COUNT(*) AS cnt FROM #lazy_t")
+            assert await check_cur.fetchone() == (1,)
+            await check_cur.close()
+
+            await lazy_cur.execute("INSERT INTO #lazy_t VALUES (3)")
+            assert client.in_transaction is True
+            await client.commit()
+            assert client.in_transaction is False
+
+            await lazy_cur.executemany("INSERT INTO #lazy_t VALUES (?)", [(4,), (5,)])
+            assert client.in_transaction is True
+            await client.commit()
+            assert client.in_transaction is False
+
+            await lazy_cur.execute("SELECT 1 AS a, N'x' AS b")
+            await client.commit()
+            server.fail_begin = True
+            with pytest.raises(DatabaseError):
+                await lazy_cur.execute("INSERT INTO #lazy_t VALUES (6)")
+            assert lazy_cur.description is None
+            assert lazy_cur.rowcount == -1
+            await lazy_cur.close()
+
+            calls: list[str] = []
+            client.attach_lease(lambda: calls.append("a"))
+            client.release_lease()
+            client.release_lease()
+            assert calls == ["a"]
+            client.attach_lease(lambda: calls.append("b"))
+            client.attach_lease(lambda: calls.append("c"))
+            assert calls == ["a", "b"]
+            await client.close()
+            assert calls == ["a", "b", "c"]
+
+            gc_calls: list[int] = []
+            gc_client: Any = mssql_native.AsyncMSSQLClient(server.dsn)
+            gc_client.attach_lease(lambda: gc_calls.append(1))
+            del gc_client
+            gc.collect()
+            assert gc_calls == [1]
+        finally:
+            server.close()
+
+    asyncio.run(_run())
+
+
+class _RecordingLeaseGrant:
+    """Minimal lease grant returned by `_RecordingBroker`."""
+
+    def __init__(self, slot_index: int, generation: int) -> None:
+        self.slot_index = slot_index
+        self.generation = generation
+
+
+class _RecordingBroker:
+    """Recording broker double asserting exact acquire and release counts."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.refuse = refuse
+        self.acquire_calls: int = 0
+        self.release_calls: int = 0
+        self._generation: int = 0
+
+    def acquire(self, pid: int, *, timeout_ms: int = 5000, bind_key_hash: int = 0) -> _RecordingLeaseGrant:
+        """Record an acquire attempt and either raise `RuntimeError` or return a grant."""
+        _ = (pid, timeout_ms, bind_key_hash)
+        self.acquire_calls += 1
+        if self.refuse:
+            msg = "broker slot pool exhausted"
+            raise RuntimeError(msg)
+        self._generation += 1
+        return _RecordingLeaseGrant(slot_index=0, generation=self._generation)
+
+    def release(self, slot_index: int, generation: int) -> None:
+        """Record a release call."""
+        _ = (slot_index, generation)
+        self.release_calls += 1
+
+
+class _AsyncRecordingBroker:
+    """Async recording broker double whose `acquire` is a coroutine."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        """Initialize the inner recording broker."""
+        self._inner = _RecordingBroker(refuse=refuse)
+
+    @property
+    def acquire_calls(self) -> int:
+        """Return the number of recorded acquire attempts."""
+        return self._inner.acquire_calls
+
+    @property
+    def release_calls(self) -> int:
+        """Return the number of recorded release calls."""
+        return self._inner.release_calls
+
+    async def acquire(self, pid: int, *, timeout_ms: int = 5000, bind_key_hash: int = 0) -> _RecordingLeaseGrant:
+        """Record an async acquire attempt and either raise `RuntimeError` or return a grant."""
+        await asyncio.sleep(0)
+        return self._inner.acquire(pid, timeout_ms=timeout_ms, bind_key_hash=bind_key_hash)
+
+    def release(self, slot_index: int, generation: int) -> None:
+        """Record a release call."""
+        self._inner.release(slot_index, generation)
+
+
+def test_sync_mssql_driver_native_cursor_query_matrix() -> None:
+    """Verify `SyncMSSQLDriver` query methods, `cursor()`, `lazy_begin`, and closed checks run on the native cursor."""
+    server = _LoopbackTdsServer()
+    driver = SyncMSSQLDriver(server.dsn)
+    try:
+        driver.connect()
+        assert not hasattr(driver, "last_rewritten_sql")
+
+        cur = driver.cursor()
+        assert isinstance(cur, mssql_native.SyncMSSQLCursor)
+        cur.close()
+
+        lazy_cur = driver.cursor(lazy_begin=True)
+        lazy_cur.execute("INSERT INTO #lazy_t VALUES (1)")
+        assert driver.in_transaction is True
+        driver.rollback()
+        assert driver.in_transaction is False
+        lazy_cur.close()
+
+        assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+        assert driver.execute_with_description("SELECT 1 AS a, 2 AS b") == ([(1, 2)], ("a", "b"))
+        assert driver.execute_tuples("SELECT 1 AS a, 2 AS b") == [(1, 2)]
+        assert driver.execute("UPDATE two_rows SET v = 1") == 2
+        assert driver.select("SELECT ? AS a", (5,)) == [{"a": 5}]
+        assert driver.execute_many("INSERT INTO #lazy_t VALUES (?)", [(1,), (2,), (3,)]) == 3
+
+        assert driver.select_one("SELECT 1 AS a") == {"a": 1}
+        assert driver.select_one_or_none("SELECT_EMPTY") is None
+        assert driver.select_value("SELECT 1 AS a", value_type=int) == 1
+        assert driver.select_with_total("SELECT 1 AS a") == ([{"a": 1}], 1)
+
+        with pytest.raises(NotFoundError):
+            driver.select_value("SELECT_EMPTY")
+        with pytest.raises(IntegrityError):
+            driver.execute("RAISE_DUP")
+
+        driver.close()
+        with pytest.raises(OperationalError, match="closed"):
+            driver.cursor()
+        with pytest.raises(OperationalError, match="closed"):
+            driver.execute("SELECT 1")
+    finally:
+        if not driver.closed:
+            driver.close()
+        server.close()
+
+
+@pytest.mark.anyio
+async def test_async_mssql_driver_native_cursor_query_matrix() -> None:
+    """Verify `AsyncMSSQLDriver` query methods, `cursor()`, `lazy_begin`, and closed checks run on the native cursor."""
+    server = _LoopbackTdsServer()
+    driver = AsyncMSSQLDriver(server.dsn)
+    try:
+        await driver.connect()
+        assert not hasattr(driver, "last_rewritten_sql")
+
+        cur = driver.cursor()
+        assert isinstance(cur, mssql_native.AsyncMSSQLCursor)
+        await cur.close()
+
+        lazy_cur = driver.cursor(lazy_begin=True)
+        await lazy_cur.execute("INSERT INTO #lazy_t VALUES (1)")
+        assert driver.in_transaction is True
+        await driver.rollback()
+        assert driver.in_transaction is False
+        await lazy_cur.close()
+
+        assert await driver.select("SELECT 1 AS a") == [{"a": 1}]
+        assert await driver.execute_with_description("SELECT 1 AS a, 2 AS b") == ([(1, 2)], ("a", "b"))
+        assert await driver.execute_tuples("SELECT 1 AS a, 2 AS b") == [(1, 2)]
+        assert await driver.execute("UPDATE two_rows SET v = 1") == 2
+        assert await driver.select("SELECT ? AS a", (5,)) == [{"a": 5}]
+        assert await driver.execute_many("INSERT INTO #lazy_t VALUES (?)", [(1,), (2,), (3,)]) == 3
+
+        assert await driver.select_one("SELECT 1 AS a") == {"a": 1}
+        assert await driver.select_one_or_none("SELECT_EMPTY") is None
+        assert await driver.select_value("SELECT 1 AS a", value_type=int) == 1
+        assert await driver.select_with_total("SELECT 1 AS a") == ([{"a": 1}], 1)
+
+        with pytest.raises(NotFoundError):
+            await driver.select_value("SELECT_EMPTY")
+        with pytest.raises(IntegrityError):
+            await driver.execute("RAISE_DUP")
+
+        await driver.close()
+        with pytest.raises(OperationalError, match="closed"):
+            driver.cursor()
+        with pytest.raises(OperationalError, match="closed"):
+            await driver.execute("SELECT 1")
+    finally:
+        if not driver.closed:
+            await driver.close()
+        server.close()
+
+
+@pytest.mark.parametrize("scenario", ["no_broker", "one_lease", "refused", "dropped"])
+def test_sync_mssql_driver_checkout_lease_lifecycle(scenario: str) -> None:
+    """Verify `SyncMSSQLDriver` acquires one broker lease at connect and releases at close or GC drop."""
+    server = _LoopbackTdsServer()
+    try:
+        if scenario == "no_broker":
+            unused_broker = _RecordingBroker()
+            driver = SyncMSSQLDriver(server.dsn, broker=None)
+            driver.connect()
+            for _ in range(10):
+                assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+            driver.close()
+            assert unused_broker.acquire_calls == 0
+            assert unused_broker.release_calls == 0
+        elif scenario == "one_lease":
+            broker = _RecordingBroker()
+            driver = SyncMSSQLDriver(server.dsn, broker=broker)
+            driver.connect()
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 0
+            for _ in range(10):
+                assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 0
+            driver.close()
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 1
+        elif scenario == "refused":
+            broker = _RecordingBroker(refuse=True)
+            driver = SyncMSSQLDriver(server.dsn, broker=broker)
+            driver.connect()
+            assert broker.acquire_calls == 1
+            assert driver.select("SELECT 1 AS a") == [{"a": 1}]
+            driver.close()
+            assert broker.release_calls == 0
+        else:
+            broker = _RecordingBroker()
+            dropped_driver: Any = SyncMSSQLDriver(server.dsn, broker=broker)
+            dropped_driver.connect()
+            assert broker.acquire_calls == 1
+            assert dropped_driver.select("SELECT 1 AS a") == [{"a": 1}]
+            del dropped_driver
+            gc.collect()
+            assert broker.release_calls == 1
+    finally:
+        server.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scenario", ["no_broker", "one_lease", "refused", "dropped"])
+@pytest.mark.parametrize("broker_cls", [_RecordingBroker, _AsyncRecordingBroker])
+async def test_async_mssql_driver_checkout_lease_lifecycle(
+    scenario: str,
+    broker_cls: type[_RecordingBroker] | type[_AsyncRecordingBroker],
+) -> None:
+    """Verify `AsyncMSSQLDriver` acquires one broker lease at connect and releases at close or GC drop."""
+    server = _LoopbackTdsServer()
+    try:
+        if scenario == "no_broker":
+            unused_broker = broker_cls()
+            driver = AsyncMSSQLDriver(server.dsn, broker=None)
+            await driver.connect()
+            for _ in range(10):
+                assert await driver.select("SELECT 1 AS a") == [{"a": 1}]
+            await driver.close()
+            assert unused_broker.acquire_calls == 0
+            assert unused_broker.release_calls == 0
+        elif scenario == "one_lease":
+            broker = broker_cls()
+            driver = AsyncMSSQLDriver(server.dsn, broker=broker)
+            await driver.connect()
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 0
+            for _ in range(10):
+                assert await driver.select("SELECT 1 AS a") == [{"a": 1}]
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 0
+            await driver.close()
+            assert broker.acquire_calls == 1
+            assert broker.release_calls == 1
+        elif scenario == "refused":
+            broker = broker_cls(refuse=True)
+            driver = AsyncMSSQLDriver(server.dsn, broker=broker)
+            await driver.connect()
+            assert broker.acquire_calls == 1
+            assert await driver.select("SELECT 1 AS a") == [{"a": 1}]
+            await driver.close()
+            assert broker.release_calls == 0
+        else:
+            broker = broker_cls()
+            dropped_driver: Any = AsyncMSSQLDriver(server.dsn, broker=broker)
+            await dropped_driver.connect()
+            assert broker.acquire_calls == 1
+            assert await dropped_driver.select("SELECT 1 AS a") == [{"a": 1}]
+            del dropped_driver
+            gc.collect()
+            assert broker.release_calls == 1
+    finally:
+        server.close()

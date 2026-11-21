@@ -11,9 +11,11 @@ GIL_USED: bool
 
 __all__ = [
     "AsyncSQLiteClient",
+    "AsyncSQLiteCursor",
     "FREE_THREADED",
     "GIL_USED",
     "SyncSQLiteClient",
+    "SyncSQLiteCursor",
     "__version__",
     "broker_engine_capsule",
 ]
@@ -61,6 +63,11 @@ class SyncSQLiteClient:
         """Return the rowid of the most recent successful INSERT on the writer connection."""
         ...
 
+    @property
+    def last_statement_rowid(self) -> int | None:
+        """Return the rowid of the last statement executed through a single-call method, or `None`."""
+        ...
+
     def execute(
         self,
         sql: str,
@@ -88,14 +95,6 @@ class SyncSQLiteClient:
         use_savepoint: bool = False,
     ) -> list[Any]:
         """Execute a sequence of operations atomically within a batch transaction."""
-        ...
-
-    def fetch_all(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> tuple[list[str], list[tuple[Any, ...]]]:
-        """Execute a query and return (columns, rows)."""
         ...
 
     def select_to_arrow(
@@ -156,6 +155,87 @@ class SyncSQLiteClient:
         """Return an asynchronous SQLite client sharing the underlying worker pool."""
         ...
 
+    def cursor(self, *, lazy_begin: bool = False) -> SyncSQLiteCursor:
+        """Return a PEP 249 cursor sharing the underlying worker pool."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
+        """Execute a statement and return rows as tuples paired with column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> list[dict[str, Any]]:
+        """Execute a statement and return rows as dictionaries keyed by column name."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Any:
+        """Execute a statement and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> tuple[int, int | None]:
+        """Execute a statement and return affected row count and inserted rowid."""
+        ...
+
+@final
+class SyncSQLiteCursor:
+    """Synchronous PEP 249 cursor over a native SQLite worker pool."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, None, None, None, None, None, None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the changed-row count of the last statement, or `-1`."""
+        ...
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the rowid inserted by the last statement, or `None`."""
+        ...
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = ()) -> SyncSQLiteCursor:
+        """Run one statement and buffer its result on this cursor."""
+        ...
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]]) -> SyncSQLiteCursor:
+        """Run one statement once per parameter set."""
+        ...
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row, or `None` when the result set is exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return every remaining buffered row."""
+        ...
+
+    def close(self) -> None:
+        """Close the cursor and drop its buffered rows."""
+        ...
+
 @final
 class AsyncSQLiteClient:
     """Asynchronous native SQLite 3.45+ client bridged via Tokio and completion drainer."""
@@ -195,6 +275,11 @@ class AsyncSQLiteClient:
         """Return the rowid of the most recent successful INSERT on the writer connection."""
         ...
 
+    @property
+    def last_statement_rowid(self) -> int | None:
+        """Return the rowid of the last statement executed through a single-call method, or `None`."""
+        ...
+
     def execute(
         self,
         sql: str,
@@ -222,14 +307,6 @@ class AsyncSQLiteClient:
         use_savepoint: bool = False,
     ) -> Awaitable[list[Any]]:
         """Execute a sequence of operations atomically within a batch transaction asynchronously."""
-        ...
-
-    def fetch_all(
-        self,
-        sql: str,
-        params: Sequence[Any] | Mapping[str, Any] | None = None,
-    ) -> Awaitable[tuple[list[str], list[tuple[Any, ...]]]]:
-        """Execute a query asynchronously and return (columns, rows)."""
         ...
 
     def select_to_arrow(
@@ -288,4 +365,87 @@ class AsyncSQLiteClient:
 
     def to_sync(self) -> SyncSQLiteClient:
         """Return a synchronous SQLite client sharing the underlying worker pool."""
+        ...
+
+    def cursor(self, *, lazy_begin: bool = False) -> AsyncSQLiteCursor:
+        """Return an awaitable cursor sharing the underlying worker pool."""
+        ...
+
+    def fetch_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[tuple[list[tuple[Any, ...]], tuple[str, ...]]]:
+        """Execute a statement asynchronously and return rows as tuples paired with column names."""
+        ...
+
+    def fetch_dicts(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[list[dict[str, Any]]]:
+        """Execute a statement asynchronously and return rows as dictionaries keyed by column name."""
+        ...
+
+    def fetch_value(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[Any]:
+        """Execute a statement asynchronously and return the first column of the first row."""
+        ...
+
+    def execute_dml(
+        self,
+        sql: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[tuple[int, int | None]]:
+        """Execute a statement asynchronously and return affected row count and inserted rowid."""
+        ...
+
+@final
+class AsyncSQLiteCursor:
+    """Awaitable PEP 249-shaped cursor over a native SQLite worker pool."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, None, None, None, None, None, None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+
+    @property
+    def rowcount(self) -> int:
+        """Return the changed-row count of the last statement, or `-1`."""
+        ...
+
+    @property
+    def lastrowid(self) -> int | None:
+        """Return the rowid inserted by the last statement, or `None`."""
+        ...
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = ()) -> Awaitable[AsyncSQLiteCursor]:
+        """Run one statement and buffer its result on this cursor."""
+        ...
+
+    def executemany(
+        self, sql: str, seq_of_params: Sequence[Sequence[Any] | Mapping[str, Any]]
+    ) -> Awaitable[AsyncSQLiteCursor]:
+        """Run one statement once per parameter set."""
+        ...
+
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row, or `None` when the result set is exhausted."""
+        ...
+
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return every remaining buffered row."""
+        ...
+
+    def close(self) -> Awaitable[None]:
+        """Close the cursor and drop its buffered rows."""
         ...

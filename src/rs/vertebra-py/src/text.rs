@@ -182,13 +182,7 @@ pub fn nanoid_generate(size: usize) -> PyResult<String> {
     id::nanoid(size).map_err(PyValueError::new_err)
 }
 
-#[pyfunction]
-pub fn classify_sql_statement(operation: &str) -> (bool, bool, bool) {
-    text::classify_sql_statement(operation)
-}
-
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(classify_sql_statement, m)?)?;
     m.add_function(wrap_pyfunction!(snake_case, m)?)?;
     m.add_function(wrap_pyfunction!(camelize, m)?)?;
     m.add_function(wrap_pyfunction!(pascalize, m)?)?;

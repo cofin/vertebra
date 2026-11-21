@@ -3,7 +3,8 @@
 //! Re-exports the canonical [`vertebra_core::py_async`] completion bridge primitives so each
 //! database extension wheel (`vertebra._vertebra`, `vertebra._bigquery`, `vertebra._spanner`, and
 //! peer drivers) attaches its own extension-specific `attr_name` drainer to the Python `asyncio`
-//! event loop without `PyTypeObject` cast collisions.
+//! event loop without `PyTypeObject` cast collisions. Extension crates import the completed
+//! awaitable from here.
 
 use std::ffi::{CStr, c_void};
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 pub use vertebra_core::py_async::{
     CompletedTask as CompletedDbTask, CompletionDrainer as DbCompletionDrainer,
-    OutcomeProducer as DbOutcomeProducer, RustTaskAwaitable as RustDbTaskAwaitable,
-    block_on_runtime as block_on_db, runtime_handle as db_runtime_handle,
+    OutcomeProducer as DbOutcomeProducer, ReadyAwaitable, RustTaskAwaitable as RustDbTaskAwaitable,
+    block_on_runtime as block_on_db, ready_err, ready_ok, runtime_handle as db_runtime_handle,
     spawn_rust_task_with_attr as spawn_rust_db_task_with_attr,
     spawn_rust_task_with_attr_and_cancel as spawn_rust_db_task_with_attr_and_cancel,
     spawn_rust_task_with_attr_and_future as spawn_rust_db_task_with_attr_and_future,

@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Self
 
 import msgspec
-from sqlspec.core import ParameterStyle, ParameterStyleConfig, StatementConfig, TypedParameter
+from sqlspec.core import SQL, ParameterStyle, ParameterStyleConfig, StatementConfig, TypedParameter
 from sqlspec.core.cache import get_cache_config
 from sqlspec.exceptions import (
     CheckViolationError,
@@ -59,6 +59,7 @@ from vertebra.db.adapters.spanner import (
     SyncSpannerDriver,
     SyncSpannerSnapshot,
 )
+from vertebra.db.adapters.spanner.core import SpannerCore
 from vertebra.extensions.sqlspec.storage import ObjectStoreBackend
 from vertebra.storage import ArtifactReference
 from vertebra.typing import ImproperConfigurationError
@@ -68,6 +69,7 @@ __all__ = (
     "DEFAULT_SPANNER_SCOPES",
     "SpannerConnectionBatch",
     "SpannerConnectionShim",
+    "compile_spanner_statement",
     "default_statement_config",
     "encode_spanner_batch_parameters",
     "encode_spanner_parameters",
@@ -280,6 +282,18 @@ def encode_spanner_batch_parameters(
     for item in parameter_sets:
         encoded.append(encode_spanner_parameters(item, dialect=dialect))
     return encoded
+
+
+def compile_spanner_statement(statement: SQL, *, dialect: str) -> tuple[str, str | None]:
+    """Compile a SQLSpec ``SQL`` statement once and encode its Spanner parameter JSON."""
+    sql, prepared = statement.compile()
+    if prepared is None:
+        return sql, None
+    norm_dialect = normalize_spanner_dialect(dialect)
+    encoded = encode_spanner_parameters(prepared, dialect=norm_dialect)
+    if encoded is None:
+        return sql, None
+    return sql, SpannerCore.encode_parameters_json(encoded, dialect=norm_dialect)
 
 
 def _is_google_api_exception(exc: BaseException) -> bool:

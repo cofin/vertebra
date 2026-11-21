@@ -265,10 +265,10 @@ async fn cold_ddl_and_warm_batches_emit_single_sync_and_single_flush_without_cat
         resp2.extend_from_slice(&frame(b'Z', b"I"));
         srv.write_all(&resp2).await.unwrap();
 
-        // Batch 3 (2 warm cached invocations of SELECT $1::int4 -> Bind + DescribeP + Execute x 2 + Sync!)
+        // Batch 3 (2 warm cached invocations of SELECT $1::int4 -> Bind + Execute x 2 + Sync!)
         let f3 = read_frontend_until_sync(&mut srv).await;
         let tags3: Vec<u8> = f3.iter().map(|(t, _)| *t).collect();
-        assert_eq!(tags3, vec![b'B', b'D', b'E', b'B', b'D', b'E', b'S']);
+        assert_eq!(tags3, vec![b'B', b'E', b'B', b'E', b'S']);
         // Inspect first Bind body to confirm binary format (1) for param & result!
         let bind_body = &f3[0].1;
         // portal "" (1 byte \0) + stmt "vtb_ps_..."\0 -> find format codes
@@ -282,7 +282,6 @@ async fn cold_ddl_and_warm_batches_emit_single_sync_and_single_flush_without_cat
         let mut resp3 = Vec::new();
         for val in [21_i32, 22_i32] {
             resp3.extend_from_slice(&frame(b'2', b""));
-            resp3.extend_from_slice(&row_desc(&[("v", INT4_OID, 1)]));
             resp3.extend_from_slice(&data_row_single(&val.to_be_bytes()));
             resp3.extend_from_slice(&cmd_complete("SELECT 1"));
         }
@@ -331,7 +330,7 @@ async fn cold_ddl_and_warm_batches_emit_single_sync_and_single_flush_without_cat
     assert_eq!(stats.poll_flush_completions.load(Ordering::SeqCst), 1);
     assert_eq!(
         stats.parsed_frontend_tags(),
-        vec![b'B', b'D', b'E', b'B', b'D', b'E', b'S']
+        vec![b'B', b'E', b'B', b'E', b'S']
     );
     assert!(matches!(
         &out3[0],

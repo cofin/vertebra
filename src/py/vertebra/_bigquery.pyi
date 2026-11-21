@@ -1,7 +1,7 @@
 """Type stubs for the vertebra._bigquery native extension module."""
 
-from collections.abc import Awaitable, Sequence
-from typing import Any, NotRequired, TypedDict, final, type_check_only
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, NotRequired, Self, TypedDict, final, type_check_only
 
 from vertebra._vertebra import ArrowCursor
 
@@ -77,7 +77,9 @@ __all__ = [
     "FREE_THREADED",
     "GIL_USED",
     "AsyncBigQueryClient",
+    "AsyncBigQueryCursor",
     "SyncBigQueryClient",
+    "SyncBigQueryCursor",
     "__version__",
 ]
 
@@ -187,6 +189,81 @@ class SyncBigQueryClient:
     def close(self) -> None:
         """Close the client handle."""
         ...
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Callable[[str, Any], tuple[str, str | None]] | None = None,
+        lazy_begin: bool = False,
+    ) -> SyncBigQueryCursor:
+        """Create a synchronous PEP 249 cursor backed by this BigQuery client."""
+        ...
+
+@final
+class SyncBigQueryCursor:
+    """Synchronous PEP 249-shaped cursor over a native BigQuery client."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, bool | None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+    @property
+    def rowcount(self) -> int:
+        """Return the row or DML count of the last statement, or `-1`."""
+        ...
+    @property
+    def lastrowid(self) -> int | None:
+        """Return `None` (BigQuery does not report last insert rowids)."""
+        ...
+    @property
+    def query_metadata(self) -> dict[str, Any] | None:
+        """Return job metadata for the last executed query, or `None` before any."""
+        ...
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Self:
+        """Run one query job and buffer its rows, description, and metadata."""
+        ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> Self:
+        """Run one query job per parameter set in order and sum DML row counts."""
+        ...
+    def fetchone(self) -> tuple[Any, ...] | None:
+        """Return the next buffered row, or `None` when exhausted."""
+        ...
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Return every remaining buffered row."""
+        ...
+    def close(self) -> None:
+        """Close the cursor and drop its buffered rows."""
+        ...
+    def __enter__(self) -> Self:
+        """Enter a context manager block returning this cursor."""
+        ...
+    def __exit__(
+        self,
+        exc_type: object = None,
+        exc_value: object = None,
+        traceback: object = None,
+    ) -> bool:
+        """Close the cursor on context manager exit."""
+        ...
 
 @final
 class AsyncBigQueryClient:
@@ -293,4 +370,68 @@ class AsyncBigQueryClient:
         ...
     def close(self) -> None:
         """Close the client handle."""
+        ...
+    def cursor(
+        self,
+        *,
+        session_id: str | None = None,
+        destination_table: str | None = None,
+        write_disposition: str | None = None,
+        maximum_bytes_billed: int | None = None,
+        job_timeout_ms: int | None = None,
+        priority: str | None = None,
+        labels: Mapping[str, str] | None = None,
+        param_encoder: Callable[[str, Any], tuple[str, str | None]] | None = None,
+        lazy_begin: bool = False,
+    ) -> AsyncBigQueryCursor:
+        """Create an asynchronous PEP 249 cursor backed by this BigQuery client."""
+        ...
+
+@final
+class AsyncBigQueryCursor:
+    """Asynchronous PEP 249-shaped cursor over a native BigQuery client."""
+
+    arraysize: int
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, bool | None], ...] | None:
+        """Return the column descriptions of the current result set, or `None`."""
+        ...
+    @property
+    def rowcount(self) -> int:
+        """Return the row or DML count of the last statement, or `-1`."""
+        ...
+    @property
+    def lastrowid(self) -> int | None:
+        """Return `None` (BigQuery does not report last insert rowids)."""
+        ...
+    @property
+    def query_metadata(self) -> dict[str, Any] | None:
+        """Return job metadata for the last executed query, or `None` before any."""
+        ...
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] | None = (),
+    ) -> Awaitable[Self]:
+        """Run one query job asynchronously and buffer its rows, description, and metadata."""
+        ...
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> Awaitable[Self]:
+        """Run one query job per parameter set in order asynchronously and sum DML row counts."""
+        ...
+    def fetchone(self) -> Awaitable[tuple[Any, ...] | None]:
+        """Return the next buffered row, or `None` when exhausted."""
+        ...
+    def fetchmany(self, size: int | None = None) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return up to `size` buffered rows, defaulting to `arraysize`."""
+        ...
+    def fetchall(self) -> Awaitable[list[tuple[Any, ...]]]:
+        """Return every remaining buffered row."""
+        ...
+    def close(self) -> Awaitable[None]:
+        """Close the cursor and drop its buffered rows."""
         ...

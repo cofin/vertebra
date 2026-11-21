@@ -60,8 +60,6 @@ __all__ = (
     "map_native_database_exception",
     "map_postgres_exception",
     "native_statement_config",
-    "normalize_pg_many_parameters",
-    "normalize_pg_parameters",
     "pg_ensure_utc",
     "pg_identifier",
     "pg_index_name",
@@ -71,7 +69,6 @@ __all__ = (
     "pg_table_ref",
     "pg_vector_literal",
     "postgres_storage_params_sql",
-    "unwrap_typed_parameters",
     "validate_pg_table_name",
 )
 
@@ -126,26 +123,12 @@ def escape_pg_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def unwrap_typed_parameters(bound: Any) -> Any:
-    """Unwrap `TypedParameter` wrappers recursively across dicts, sequences, and scalars."""
-    if isinstance(bound, dict):
-        return {key: unwrap_typed_parameters(value) for key, value in bound.items()}
-    if isinstance(bound, tuple):
-        return tuple(unwrap_typed_parameters(value) for value in bound)
-    if isinstance(bound, list):
-        return [unwrap_typed_parameters(value) for value in bound]
-    if isinstance(bound, TypedParameter):
-        return unwrap_typed_parameters(bound.value)
-    return bound
-
-
-def _normalize_bound_params(params: Any) -> Any:
-    """Normalize empty bound containers to `None` while keeping populated payloads intact."""
-    if params is None:
-        return None
-    if isinstance(params, (dict, list, tuple)) and len(params) == 0:
-        return None
-    return params
+def _unwrap_typed_parameter(value: TypedParameter) -> Any:
+    """Unwrap nested `TypedParameter` wrappers during SQLSpec parameter coercion."""
+    unwrapped: Any = value
+    while isinstance(unwrapped, TypedParameter):
+        unwrapped = unwrapped.value
+    return unwrapped
 
 
 def native_statement_config(
@@ -282,58 +265,19 @@ def build_postgres_statement_config(statement_config: StatementConfig | None = N
         preserve_parameter_format=False,
     )
     param_cfg: ParameterStyleConfig = config.parameter_config
+    type_coercion_map = dict(param_cfg.type_coercion_map or {})
+    type_coercion_map[TypedParameter] = _unwrap_typed_parameter
     return config.replace(
         parameter_config=ParameterStyleConfig(
             default_parameter_style=param_cfg.default_parameter_style,
             supported_parameter_styles=param_cfg.supported_parameter_styles,
             default_execution_parameter_style=ParameterStyle.NUMERIC,
             supported_execution_parameter_styles={ParameterStyle.NUMERIC},
-            type_coercion_map=param_cfg.type_coercion_map,
+            type_coercion_map=type_coercion_map,
             preserve_parameter_format=False,
             allow_mixed_parameter_styles=True,
         )
     )
-
-
-def _unwrap_scalar(value: Any) -> Any:
-    """Unwrap a single `TypedParameter` wrapper when encountered."""
-    if isinstance(value, TypedParameter):
-        return value.value
-    return value
-
-
-def normalize_pg_parameters(params: Any) -> Any:
-    """Normalize PostgreSQL parameters into a tuple, mapping, or `None` with unwrapped `TypedParameter`s."""
-    if params is None:
-        return None
-    unwrapped = unwrap_typed_parameters(params)
-    if unwrapped is None:
-        return None
-    if isinstance(unwrapped, list):
-        return tuple(_unwrap_scalar(item) for item in unwrapped)
-    if isinstance(unwrapped, tuple):
-        return tuple(_unwrap_scalar(item) for item in unwrapped)
-    if isinstance(unwrapped, Mapping):
-        return {key: _unwrap_scalar(val) for key, val in unwrapped.items()}
-    return (_unwrap_scalar(unwrapped),)
-
-
-def normalize_pg_many_parameters(params: Any) -> list[Any]:
-    """Normalize batch parameter sequences for `execute_many` over PostgreSQL `$1..$N` binds."""
-    if params is None:
-        return []
-    if isinstance(params, Sequence) and not isinstance(params, (str, bytes, bytearray)):
-        normalized: list[Any] = []
-        for entry in params:
-            unwrapped = unwrap_typed_parameters(entry)
-            if isinstance(unwrapped, list):
-                normalized.append(tuple(unwrapped))
-            elif isinstance(unwrapped, (tuple, Mapping)):
-                normalized.append(unwrapped)
-            else:
-                normalized.append((unwrapped,))
-        return normalized
-    return []
 
 
 def compile_postgres_numeric_transport(
@@ -352,8 +296,7 @@ def compile_postgres_numeric_transport(
         kwargs=kwargs,
     )
     compiled_sql, bound = prepared.compile()
-    normalized = normalize_pg_parameters(_normalize_bound_params(bound))
-    return prepared, compiled_sql, normalized
+    return prepared, compiled_sql, bound
 
 
 def map_postgres_exception(exc: BaseException) -> Exception | None:

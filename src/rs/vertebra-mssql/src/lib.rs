@@ -12,12 +12,13 @@ pub mod bulk_load;
 pub mod client;
 pub mod codecs;
 pub mod config;
+pub mod cursor;
 pub mod errors;
 pub mod params;
 pub mod transport;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pyo3::prelude::*;
@@ -27,16 +28,13 @@ use vertebra_db::py_async::{
     RustDbTaskAwaitable, construct_py_arrow_cursor, db_runtime_handle, spawn_rust_db_task_with_attr,
 };
 use vertebra_db::{
-    AuthType, CloudSqlInstanceUri, IpType, new_broker_engine_pycapsule, rewrite_mssql_placeholders,
+    AuthType, CloudSqlInstanceUri, IpType, LeaseGuard, new_broker_engine_pycapsule,
+    rewrite_mssql_placeholders,
 };
 
 use crate::broker::MssqlBrokerBackend;
 
 use crate::client::MssqlClient;
-use crate::codecs::{
-    cell_to_py, first_row_to_py_dict, query_result_to_py_envelope,
-    query_result_to_py_rows_and_cols, rows_to_py_dicts,
-};
 use crate::config::{MssqlClientConfig, MssqlCloudSqlConfig, MssqlEncryptionMode};
 use crate::errors::{MssqlError, mssql_error_to_py};
 use crate::params::{prepare_many_sql_and_params, prepare_sql_and_params};
@@ -53,7 +51,7 @@ pub const FREE_THREADED: bool = false;
 
 /// Drive a Rust future synchronously while releasing the Python GIL and signaling completion
 /// through a [`SyncCompletionQueue`].
-fn run_sync_with_completion_queue<F, T>(py: Python<'_>, fut: F) -> T
+pub(crate) fn run_sync_with_completion_queue<F, T>(py: Python<'_>, fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
@@ -255,6 +253,7 @@ fn stmt_cache_stats_to_py(py: Python<'_>, client: &MssqlClient) -> PyResult<Py<P
 )]
 pub struct PySyncMSSQLClient {
     inner: Arc<MssqlClient>,
+    lease: Arc<Mutex<Option<LeaseGuard>>>,
 }
 
 impl PySyncMSSQLClient {
@@ -352,6 +351,7 @@ impl PySyncMSSQLClient {
         let client = MssqlClient::new(cfg).map_err(|e| mssql_error_to_py(py, e))?;
         Ok(Self {
             inner: Arc::new(client),
+            lease: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -478,8 +478,41 @@ impl PySyncMSSQLClient {
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let client = Arc::clone(&self.inner);
-        run_sync_with_completion_queue(py, async move { client.close().await })
-            .map_err(|e| mssql_error_to_py(py, e))
+        let res = run_sync_with_completion_queue(py, async move { client.close().await })
+            .map_err(|e| mssql_error_to_py(py, e));
+        self.release_lease(py);
+        res
+    }
+
+    fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.replace(LeaseGuard::new(release))
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
+    }
+
+    fn release_lease(&self, py: Python<'_>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
+    }
+
+    #[pyo3(signature = (*, lazy_begin = false))]
+    fn cursor(&self, lazy_begin: bool) -> cursor::PySyncMSSQLCursor {
+        cursor::PySyncMSSQLCursor::new(Arc::clone(&self.inner), lazy_begin)
     }
 
     fn cancel(&self, py: Python<'_>) -> PyResult<()> {
@@ -513,116 +546,6 @@ impl PySyncMSSQLClient {
         let client = Arc::clone(&self.inner);
         run_sync_with_completion_queue(py, async move { client.execute_many(batches).await })
             .map_err(|e| mssql_error_to_py(py, e))
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn execute_with_description(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let res =
-            run_sync_with_completion_queue(
-                py,
-                async move { client.query(rewritten, params).await },
-            )
-            .map_err(|e| mssql_error_to_py(py, e))?;
-        query_result_to_py_rows_and_cols(py, res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn query(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let res =
-            run_sync_with_completion_queue(
-                py,
-                async move { client.query(rewritten, params).await },
-            )
-            .map_err(|e| mssql_error_to_py(py, e))?;
-        query_result_to_py_envelope(py, res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_all(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let res =
-            run_sync_with_completion_queue(
-                py,
-                async move { client.query(rewritten, params).await },
-            )
-            .map_err(|e| mssql_error_to_py(py, e))?;
-        rows_to_py_dicts(py, &res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_one(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let res =
-            run_sync_with_completion_queue(
-                py,
-                async move { client.fetch_one(rewritten, params).await },
-            )
-            .map_err(|e| mssql_error_to_py(py, e))?;
-        first_row_to_py_dict(py, &res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_optional(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let res = run_sync_with_completion_queue(py, async move {
-            client.fetch_optional(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
-        first_row_to_py_dict(py, &res)
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn select_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        let cell = run_sync_with_completion_queue(py, async move {
-            client.select_value(rewritten, params).await
-        })
-        .map_err(|e| mssql_error_to_py(py, e))?;
-        cell_to_py(py, &cell)
     }
 
     #[pyo3(signature = (isolation_level=None))]
@@ -750,6 +673,7 @@ impl PySyncMSSQLClient {
 )]
 pub struct PyAsyncMSSQLClient {
     inner: Arc<MssqlClient>,
+    lease: Arc<Mutex<Option<LeaseGuard>>>,
 }
 
 impl PyAsyncMSSQLClient {
@@ -847,6 +771,7 @@ impl PyAsyncMSSQLClient {
         let client = MssqlClient::new(cfg).map_err(|e| mssql_error_to_py(py, e))?;
         Ok(Self {
             inner: Arc::new(client),
+            lease: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -983,13 +908,53 @@ impl PyAsyncMSSQLClient {
 
     fn close(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
         let client = Arc::clone(&self.inner);
+        let lease = Arc::clone(&self.lease);
         spawn_rust_db_task_with_attr(
             py,
-            async move { client.close().await },
+            async move {
+                let res = client.close().await;
+                let guard = lease
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                drop(guard);
+                res
+            },
             |py, ()| Ok(py.None()),
             mssql_error_to_py,
             MSSQL_COMPLETION_DRAINER_ATTR,
         )
+    }
+
+    fn attach_lease(&self, py: Python<'_>, release: Py<PyAny>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.replace(LeaseGuard::new(release))
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
+    }
+
+    fn release_lease(&self, py: Python<'_>) {
+        let prev = {
+            let mut guard = self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        if let Some(mut old) = prev {
+            old.release(py);
+        }
+    }
+
+    #[pyo3(signature = (*, lazy_begin = false))]
+    fn cursor(&self, lazy_begin: bool) -> cursor::PyAsyncMSSQLCursor {
+        cursor::PyAsyncMSSQLCursor::new(Arc::clone(&self.inner), lazy_begin)
     }
 
     fn cancel(&self, py: Python<'_>) -> PyResult<RustDbTaskAwaitable> {
@@ -1035,120 +1000,6 @@ impl PyAsyncMSSQLClient {
             py,
             async move { client.execute_many(batches).await },
             |py, count| Ok(count.into_pyobject(py)?.into_any().unbind()),
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn execute_with_description(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.query(rewritten, params).await },
-            query_result_to_py_rows_and_cols,
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn query(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.query(rewritten, params).await },
-            query_result_to_py_envelope,
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_all(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.query(rewritten, params).await },
-            |py, res| rows_to_py_dicts(py, &res),
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_one(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.fetch_one(rewritten, params).await },
-            |py, res| first_row_to_py_dict(py, &res),
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn fetch_optional(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.fetch_optional(rewritten, params).await },
-            |py, res| first_row_to_py_dict(py, &res),
-            mssql_error_to_py,
-            MSSQL_COMPLETION_DRAINER_ATTR,
-        )
-    }
-
-    #[pyo3(signature = (sql, parameters=None))]
-    fn select_value(
-        &self,
-        py: Python<'_>,
-        sql: &str,
-        parameters: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<RustDbTaskAwaitable> {
-        let (rewritten, params) =
-            prepare_sql_and_params(sql, parameters).map_err(|e| mssql_error_to_py(py, e))?;
-        let client = Arc::clone(&self.inner);
-        spawn_rust_db_task_with_attr(
-            py,
-            async move { client.select_value(rewritten, params).await },
-            |py, cell| cell_to_py(py, &cell),
             mssql_error_to_py,
             MSSQL_COMPLETION_DRAINER_ATTR,
         )
@@ -1336,5 +1187,6 @@ pub fn _mssql(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_mssql_placeholders, m)?)?;
     m.add_class::<PySyncMSSQLClient>()?;
     m.add_class::<PyAsyncMSSQLClient>()?;
+    cursor::register(m)?;
     Ok(())
 }

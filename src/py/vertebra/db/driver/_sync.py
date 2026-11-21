@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from vertebra._vertebra import NotFoundError
 from vertebra.db.arrow import (
@@ -76,6 +76,36 @@ class SyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]
         rows, _ = self.execute_with_description(sql, parameters, **kwargs)
         return len(rows)
 
+    if TYPE_CHECKING:
+
+        def cursor(self, *, lazy_begin: bool = False) -> Any:
+            """Return a native cursor on this driver."""
+
+    def execute_dml(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[int, Any]:
+        """Run a statement without reading rows and return `(rowcount, lastrowid)`.
+
+        Args:
+            sql: Statement text in the engine's parameter style.
+            parameters: Positional or named parameters.
+            **kwargs: Ignored by the base implementation.
+
+        Returns:
+            The affected row count, `0` when the engine reports none, and the cursor's `lastrowid`.
+        """
+        _ = kwargs
+        cur = self.cursor()
+        try:
+            cur.execute(sql, parameters or ())
+            rowcount = cur.rowcount
+            return (rowcount if rowcount > 0 else 0), cur.lastrowid
+        finally:
+            cur.close()
+
     def execute_many(
         self,
         sql: str,
@@ -118,17 +148,6 @@ class SyncDatabaseDriver[ConfigT: BaseDatabaseConfig](CommonDriverMixin[ConfigT]
         """Execute a `SELECT` query and hydrate rows into dictionaries or `schema_type` instances."""
         rows, cols = self.execute_with_description(sql, parameters, **kwargs)
         return self.hydrate_rows(rows, cols, schema_type)
-
-    def query_with_columns(
-        self,
-        sql: str,
-        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Execute a row-returning query and return hydrated row dicts alongside ordered column names."""
-        rows, cols = self.execute_with_description(sql, parameters, **kwargs)
-        column_names = [str(col) for col in cols]
-        return self.hydrate_rows(rows, column_names, None), column_names
 
     def select_one(
         self,

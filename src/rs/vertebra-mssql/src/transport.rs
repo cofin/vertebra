@@ -1,6 +1,7 @@
 //! TDS 7.3+ transport session, `PRELOGIN` / TLS negotiation, `ENVCHANGE` routing redirects,
 //! and out-of-band `ATTENTION` (`0x06`) cancellation for `vertebra-mssql`.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +10,7 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TiberiusError;
-use tiberius::{Client as TiberiusClient, QueryItem, ToSql};
+use tiberius::{Client as TiberiusClient, Command, CommandItem, ToSql};
 use tokio::sync::Notify;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use vertebra_db::{
@@ -294,7 +295,8 @@ impl MssqlSession {
         .await
     }
 
-    /// Execute a query (`SELECT` or `OUTPUT`) and decode all rows and column metadata.
+    /// Execute a query (`SELECT`, DML, DDL, or `OUTPUT`) via `sp_executesql` [`Command`],
+    /// preserving `DONE` row counts and keeping only the first result set that has column metadata.
     pub async fn execute_query(
         &mut self,
         sql: &str,
@@ -304,29 +306,60 @@ impl MssqlSession {
         let params_owned = params.to_vec();
         self.run_cancellable(|client| {
             Box::pin(async move {
-                let refs: Vec<&dyn ToSql> =
-                    params_owned.iter().map(MssqlParam::as_to_sql).collect();
-                let mut stream = client.query(sql_owned, &refs).await?;
-                let mut columns = Vec::new();
-                let mut rows = Vec::new();
-
-                while let Some(item) = stream.try_next().await? {
-                    match item {
-                        QueryItem::Metadata(meta) => {
-                            if columns.is_empty() {
-                                columns = MssqlQueryResult::extract_columns(meta.columns());
-                            }
+                let mut cmd = Command::new("sp_executesql");
+                cmd.bind_param("@stmt", sql_owned.as_str());
+                if !params_owned.is_empty() {
+                    let mut param_defs = String::new();
+                    for (idx, param) in params_owned.iter().enumerate() {
+                        if idx > 0 {
+                            param_defs.push(',');
                         }
-                        QueryItem::Row(row) => {
-                            if columns.is_empty() {
-                                columns = MssqlQueryResult::extract_columns(row.columns());
-                            }
-                            rows.push(MssqlQueryResult::decode_row(&row)?);
-                        }
+                        let _ = write!(param_defs, "@P{} {}", idx + 1, param.tds_type_name());
+                    }
+                    cmd.bind_param("@params", param_defs);
+                    for (idx, param) in params_owned.iter().enumerate() {
+                        cmd.bind_param(format!("@P{}", idx + 1), param.as_to_sql().to_sql());
                     }
                 }
 
-                let rows_affected = rows.len() as u64;
+                let mut stream = cmd.exec(client).await?;
+                let mut stored_result_index: Option<usize> = None;
+                let mut columns = Vec::new();
+                let mut rows = Vec::new();
+                let mut dml_rows_affected = 0_u64;
+
+                while let Some(item) = stream.try_next().await? {
+                    match item {
+                        CommandItem::Metadata(meta) => {
+                            if stored_result_index.is_none() && !meta.columns().is_empty() {
+                                stored_result_index = Some(meta.result_index());
+                                columns = MssqlQueryResult::extract_columns(meta.columns());
+                            }
+                        }
+                        CommandItem::Row(row) => {
+                            let row_idx = row.result_index();
+                            if stored_result_index.is_none() && !row.columns().is_empty() {
+                                stored_result_index = Some(row_idx);
+                                columns = MssqlQueryResult::extract_columns(row.columns());
+                            }
+                            if stored_result_index == Some(row_idx) {
+                                rows.push(MssqlQueryResult::decode_row(&row)?);
+                            }
+                        }
+                        CommandItem::RowsAffected(count) => {
+                            if stored_result_index.is_none() {
+                                dml_rows_affected = dml_rows_affected.saturating_add(count);
+                            }
+                        }
+                        CommandItem::ReturnStatus(_) | CommandItem::ReturnValue(_) => {}
+                    }
+                }
+
+                let rows_affected = if stored_result_index.is_some() {
+                    rows.len() as u64
+                } else {
+                    dml_rows_affected
+                };
                 Ok(MssqlQueryResult {
                     columns,
                     rows,

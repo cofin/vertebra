@@ -7,7 +7,9 @@ pub mod py_client;
 pub mod value;
 pub mod worker;
 
-use py_client::{AsyncSQLiteClient, SyncSQLiteClient, broker_engine_capsule};
+use py_client::{
+    AsyncSQLiteClient, AsyncSQLiteCursor, SyncSQLiteClient, SyncSQLiteCursor, broker_engine_capsule,
+};
 use pyo3::prelude::*;
 
 /// Whether this build targets free-threaded Python (3.14t+).
@@ -25,13 +27,17 @@ fn _sqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broker_engine_capsule, m)?)?;
     m.add_class::<SyncSQLiteClient>()?;
     m.add_class::<AsyncSQLiteClient>()?;
+    m.add_class::<SyncSQLiteCursor>()?;
+    m.add_class::<AsyncSQLiteCursor>()?;
     m.add(
         "__all__",
         vec![
             "AsyncSQLiteClient",
+            "AsyncSQLiteCursor",
             "FREE_THREADED",
             "GIL_USED",
             "SyncSQLiteClient",
+            "SyncSQLiteCursor",
             "__version__",
             "broker_engine_capsule",
         ],

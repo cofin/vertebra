@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from django.db.backends.base.schema import BaseDatabaseSchemaEditor
     from django.db.backends.base.validation import BaseDatabaseValidation
     from django.db.backends.postgresql.client import DatabaseClient as PostgreSQLDatabaseClient
-
-    from vertebra.db.dbapi import SyncDBAPICursor
 else:
     BaseDatabaseWrapper = ensure_module(
         "django.db.backends.base.base", package="django", extra="django"
@@ -287,10 +285,10 @@ class DatabaseWrapper(DatabaseWrapperMixin, BaseDatabaseWrapper):
         conn.autocommit = True
         return conn
 
-    def create_cursor(self, name: str | None = None) -> SyncDBAPICursor:
+    def create_cursor(self, name: str | None = None) -> Any:
         """Create and return a DBAPI cursor from the active connection."""
         _ = name
-        return cast("SyncDBAPICursor", self.connection.cursor())
+        return self.connection.cursor()
 
     def _set_autocommit(self, autocommit: bool) -> None:
         """Set autocommit on the underlying connection."""

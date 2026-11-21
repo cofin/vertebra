@@ -7,19 +7,20 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 import pytest
 
 from tests.unit.db.test_spanner import FakeSpannerClient
-from vertebra._vertebra import SpannerAbortedError
+from vertebra._vertebra import NotSupportedError, SpannerAbortedError
 from vertebra.db import cdc
 from vertebra.db.adapters import spanner
 from vertebra.db.adapters.spanner import (
     AsyncSpannerDriver,
     AsyncSpannerQueueStore,
     SpannerConfig,
+    SpannerCore,
     SyncSpannerDriver,
     SyncSpannerQueueStore,
 )
@@ -895,6 +896,184 @@ class _QueueRwTxHandle:
             self._backend.rollbacks.append(self._tx_id)
             self._closed = True
 
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> _QueueSyncCursor:
+        return _QueueSyncCursor(
+            tx=self,
+            request_tag=request_tag,
+            param_encoder=param_encoder,
+        )
+
+
+class _QueueSyncCursor:
+    """Synchronous PEP 249 cursor double for _InMemorySpannerQueueWire."""
+
+    def __init__(
+        self,
+        *,
+        client: Any = None,
+        tx: _QueueRwTxHandle | None = None,
+        staleness_mode: str = "strong",
+        staleness_value: int = 0,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> None:
+        self._client = client
+        self._tx = tx
+        self._staleness_mode = staleness_mode
+        self._staleness_value = staleness_value
+        self._request_tag = request_tag
+        self._param_encoder = param_encoder
+        self._description: tuple[tuple[str, str, None, None, None, None, None], ...] | None = None
+        self._rows: list[tuple[Any, ...]] = []
+        self._index = 0
+        self._rowcount = -1
+        self._arraysize = 1
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        return self._description
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return None
+
+    @property
+    def arraysize(self) -> int:
+        return self._arraysize
+
+    def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> _QueueSyncCursor:
+        self._description = None
+        self._rows = []
+        self._index = 0
+        self._rowcount = -1
+        if SpannerCore.is_ddl_statement(sql):
+            if self._tx is not None:
+                msg = "DDL statements cannot be executed inside a Spanner ReadWrite transaction"
+                raise NotSupportedError(msg)
+            self._client.update_ddl([sql])
+            return self
+        if params is None or params == () or params == [] or params == {}:
+            params_json = None
+        elif isinstance(params, str):
+            params_json = params
+        elif self._param_encoder is not None:
+            params_json = self._param_encoder(params)
+        else:
+            params_json = None
+        if self._tx is not None:
+            res = self._tx.query(sql, params_json, self._request_tag)
+        else:
+            res = self._client.query(sql, params_json, self._staleness_mode, self._staleness_value)
+        cols = res.get("columns", ())
+        if cols:
+            self._description = tuple((str(c), "UNKNOWN", None, None, None, None, None) for c in cols)
+            self._rows = [tuple(r) for r in res.get("rows", ())]
+            self._rowcount = len(self._rows)
+        else:
+            self._rowcount = int(res.get("row_count_exact", 0))
+        return self
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> _QueueSyncCursor:
+        total = 0
+        for p in seq_of_params:
+            self.execute(sql, p)
+            total += max(self._rowcount, 0)
+        self._rowcount = total
+        return self
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        count = self._arraysize if size is None else size
+        if count <= 0:
+            return []
+        end = min(len(self._rows), self._index + count)
+        batch = self._rows[self._index : end]
+        self._index = end
+        return batch
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rest = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rest
+
+    def close(self) -> None:
+        self._rows.clear()
+        self._description = None
+
+
+class _QueueAsyncCursor:
+    """Asynchronous PEP 249 cursor double wrapping _QueueSyncCursor."""
+
+    def __init__(self, sync_cursor: _QueueSyncCursor) -> None:
+        self._sync = sync_cursor
+
+    @property
+    def description(self) -> tuple[tuple[str, str, None, None, None, None, None], ...] | None:
+        return self._sync.description
+
+    @property
+    def rowcount(self) -> int:
+        return self._sync.rowcount
+
+    @property
+    def lastrowid(self) -> Any | None:
+        return self._sync.lastrowid
+
+    @property
+    def arraysize(self) -> int:
+        return self._sync.arraysize
+
+    async def execute(
+        self,
+        sql: str,
+        params: str | Sequence[Any] | Mapping[str, Any] = (),
+    ) -> _QueueAsyncCursor:
+        self._sync.execute(sql, params)
+        return self
+
+    async def executemany(
+        self,
+        sql: str,
+        seq_of_params: Sequence[str | Sequence[Any] | Mapping[str, Any]],
+    ) -> _QueueAsyncCursor:
+        self._sync.executemany(sql, seq_of_params)
+        return self
+
+    async def fetchone(self) -> tuple[Any, ...] | None:
+        return self._sync.fetchone()
+
+    async def fetchmany(self, size: int | None = None) -> list[tuple[Any, ...]]:
+        return self._sync.fetchmany(size)
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._sync.fetchall()
+
+    async def close(self) -> None:
+        self._sync.close()
+
 
 class _AsyncQueueRwTxHandle:
     """Async wrapper around _QueueRwTxHandle matching AsyncSpannerReadWriteTransaction."""
@@ -934,6 +1113,19 @@ class _AsyncQueueRwTxHandle:
 
     async def rollback(self) -> None:
         self._sync.rollback()
+
+    def cursor(
+        self,
+        *,
+        request_tag: str | None = None,
+        param_encoder: Callable[[Any], str | None] | None = None,
+    ) -> _QueueAsyncCursor:
+        return _QueueAsyncCursor(
+            self._sync.cursor(
+                request_tag=request_tag,
+                param_encoder=param_encoder,
+            )
+        )
 
 
 class _InMemorySpannerQueueWire:
@@ -1034,6 +1226,28 @@ class _InMemorySpannerQueueWire:
                 wire.ddl_statements.extend(statements)
                 return "op-ddl"
 
+            def cursor(
+                self,
+                *,
+                staleness_mode: str = "strong",
+                staleness_value: int = 0,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+                param_encoder: Callable[[Any], str | None] | None = None,
+                lazy_begin: bool = False,
+            ) -> _QueueSyncCursor:
+                _ = transaction_tag
+                if lazy_begin:
+                    msg = "Spanner cursors do not support lazy_begin"
+                    raise NotSupportedError(msg)
+                return _QueueSyncCursor(
+                    client=self,
+                    staleness_mode=staleness_mode,
+                    staleness_value=staleness_value,
+                    request_tag=request_tag,
+                    param_encoder=param_encoder,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -1092,6 +1306,27 @@ class _InMemorySpannerQueueWire:
                 timeout_seconds: float | None = None,
             ) -> str:
                 return str(sync_c.update_ddl(statements, operation_id, timeout_seconds))
+
+            def cursor(
+                self,
+                *,
+                staleness_mode: str = "strong",
+                staleness_value: int = 0,
+                request_tag: str | None = None,
+                transaction_tag: str | None = None,
+                param_encoder: Callable[[Any], str | None] | None = None,
+                lazy_begin: bool = False,
+            ) -> _QueueAsyncCursor:
+                return _QueueAsyncCursor(
+                    sync_c.cursor(
+                        staleness_mode=staleness_mode,
+                        staleness_value=staleness_value,
+                        request_tag=request_tag,
+                        transaction_tag=transaction_tag,
+                        param_encoder=param_encoder,
+                        lazy_begin=lazy_begin,
+                    )
+                )
 
             async def close(self) -> None:
                 sync_c.close()
